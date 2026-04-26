@@ -28,6 +28,10 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_NONE,
     MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .desktop import Desktop
 from .geometry import Point, Rect
+from .menu import Menu, MenuBar, MenuItem, MenuResult
+from .status import StatusBar, StatusItem
 from .terminal import Terminal
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
+from .window import Window, WindowManager

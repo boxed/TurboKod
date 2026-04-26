@@ -68,8 +68,12 @@ struct Canvas(Copyable, Movable):
                 self.cells[self._index(x, y)] = cell
                 x += w
 
-    fn put_text(mut self, p: Point, text: String, attr: Attr) -> Int:
+    fn put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
         """Paint ``text`` starting at ``p`` (no wrapping). Returns columns advanced.
+
+        If ``max_x`` is non-negative, painting stops at column ``max_x`` (exclusive)
+        — letting callers like ``Window`` clip text to their own bounds without
+        building a temporary truncated string.
 
         ASCII-only at present. Multi-byte UTF-8 glyphs in ``text`` will paint as
         replacement characters; properly handling them requires a real
@@ -82,6 +86,9 @@ struct Canvas(Copyable, Movable):
         var advanced = 0
         if y < 0 or y >= self.height:
             return 0
+        var limit = self.width
+        if max_x >= 0 and max_x < limit:
+            limit = max_x
         var bytes = text.as_bytes()
         var i = 0
         while i < len(bytes):
@@ -99,7 +106,7 @@ struct Canvas(Copyable, Movable):
                 elif (b & 0xE0) == 0xC0:
                     i += 1
             i += 1
-            if x >= self.width:
+            if x >= limit:
                 break
             if x >= 0:
                 self.cells[self._index(x, y)] = Cell(glyph, attr, 1)

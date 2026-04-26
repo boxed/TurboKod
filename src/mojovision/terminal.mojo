@@ -1,22 +1,15 @@
 """Terminal driver: raw mode, ANSI output, escape-sequence input parsing.
 
-We deliberately use Python interop for the syscall-touching bits (termios,
-select, os.read/write, struct ioctl). It's cleaner than writing FFI shims for
-each platform, and Mojo encourages "use Python where it's already great."
+Pure Mojo: no Python interop, no ncurses. The OS-level work (termios, ioctl,
+poll, read) is delegated to ``posix.mojo`` which wraps libc through
+``external_call``. Stdout writes go through ``std.io.file_descriptor``.
 
-Pure Mojo, no Python:
-- Cell diffing and ANSI sequence assembly (`render_diff`).
-- Escape-sequence → Event parsing (`parse_input`).
-
-Python interop:
-- Termios raw-mode setup/restore.
-- Reading from stdin with timeout (select).
-- Writing to stdout (sys.stdout.write + flush).
-- Querying terminal size (os.get_terminal_size).
+Cell diffing and the escape-sequence → Event parser are pure Mojo and don't
+touch the OS at all, so they're easy to unit-test (see ``tests/test_basic.mojo``).
 """
 
-from std.collections import List, Optional
-from std.python import Python, PythonObject
+from std.collections.list import List
+from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .cell import Cell, blank_cell
@@ -33,6 +26,12 @@ from .events import (
     MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .geometry import Point
+from .posix import (
+    STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
+    alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
+    poll_stdin, query_size_via_cursor, read_into, tcgetattr, tcsetattr,
+    write_buffer, write_string,
+)
 
 
 # --- ANSI sequences ---------------------------------------------------------
@@ -68,88 +67,107 @@ struct Terminal:
     enough that an explicit start/stop pair is the most portable shape.
     """
 
-    var _orig_termios: PythonObject
+    var _orig_termios: List[UInt8]
     var _started: Bool
-    var _stdin_fd: Int
-    var _stdout: PythonObject
-    var _select: PythonObject
-    var _os: PythonObject
-    var _builtins: PythonObject
-    var _empty_list: PythonObject
-    var _front: Canvas  # what we believe is on screen now
-    var _queue: List[Event]  # events parsed but not yet returned
+    var _front: Canvas
+    var _queue: List[Event]
+    var _resize_poll_counter: Int
     var width: Int
     var height: Int
 
     fn __init__(out self) raises:
-        var sys = Python.import_module("sys")
-        var os = Python.import_module("os")
-        var builtins = Python.import_module("builtins")
-        self._select = Python.import_module("select")
-        self._os = os
-        self._builtins = builtins
-        self._stdout = sys.stdout
-        self._stdin_fd = Int(py=sys.stdin.fileno())
-        self._orig_termios = builtins.None
+        self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
         self._started = False
-        self._empty_list = builtins.list()
         self._queue = List[Event]()
-        var size = os.get_terminal_size()
-        self.width = Int(py=size.columns)
-        self.height = Int(py=size.lines)
+        self._resize_poll_counter = 0
+        var size = get_window_size()
+        self.width = size[0]
+        self.height = size[1]
         self._front = Canvas(self.width, self.height)
 
     fn start(mut self) raises:
         if self._started:
             return
-        var termios_mod = Python.import_module("termios")
-        var tty = Python.import_module("tty")
-        self._orig_termios = termios_mod.tcgetattr(self._stdin_fd)
-        tty.setraw(self._stdin_fd)
-        self._write_raw(SEQ_ALT_SCREEN_ON)
-        self._write_raw(SEQ_CURSOR_HIDE)
-        self._write_raw(SEQ_MOUSE_ON)
-        self._write_raw(SEQ_CLEAR_SCREEN)
-        self._write_raw(SEQ_CURSOR_HOME)
-        self._flush()
+        # Save current termios so stop() can restore it, then enter raw mode.
+        if tcgetattr(STDIN_FD, self._orig_termios) != 0:
+            raise Error("tcgetattr failed — stdin is not a TTY")
+        var raw = alloc_zero_buffer(TERMIOS_SIZE)
+        for i in range(TERMIOS_SIZE):
+            raw[i] = self._orig_termios[i]
+        cfmakeraw(raw)
+        if tcsetattr(STDIN_FD, TCSANOW, raw) != 0:
+            raise Error("tcsetattr failed")
+        write_string(STDOUT_FD, SEQ_ALT_SCREEN_ON)
+        write_string(STDOUT_FD, SEQ_CURSOR_HIDE)
+        # Ask the terminal directly for its size *before* turning on mouse
+        # reporting — the response (CSI <row>;<col> R) is easier to parse
+        # when no other input can interleave.
+        var measured = self._query_size_via_cursor()
+        if measured[0] > 0 and measured[1] > 0:
+            self.width = measured[0]
+            self.height = measured[1]
+            self._front.resize(self.width, self.height)
+        write_string(STDOUT_FD, SEQ_MOUSE_ON)
+        write_string(STDOUT_FD, SEQ_CLEAR_SCREEN)
+        write_string(STDOUT_FD, SEQ_CURSOR_HOME)
         self._started = True
+
+    fn _query_size_via_cursor(mut self) -> Tuple[Int, Int]:
+        return query_size_via_cursor(STDIN_FD, STDOUT_FD)
 
     fn stop(mut self) raises:
         if not self._started:
             return
-        self._write_raw(SEQ_MOUSE_OFF)
-        self._write_raw(SEQ_RESET)
-        self._write_raw(SEQ_CURSOR_SHOW)
-        self._write_raw(SEQ_ALT_SCREEN_OFF)
-        self._flush()
-        var termios_mod = Python.import_module("termios")
-        termios_mod.tcsetattr(self._stdin_fd, termios_mod.TCSADRAIN, self._orig_termios)
+        write_string(STDOUT_FD, SEQ_MOUSE_OFF)
+        write_string(STDOUT_FD, SEQ_RESET)
+        write_string(STDOUT_FD, SEQ_CURSOR_SHOW)
+        write_string(STDOUT_FD, SEQ_ALT_SCREEN_OFF)
+        _ = tcsetattr(STDIN_FD, TCSANOW, self._orig_termios)
         self._started = False
 
-    fn _write_raw(mut self, s: String) raises:
-        _ = self._stdout.write(PythonObject(s))
-
-    fn _flush(mut self) raises:
-        _ = self._stdout.flush()
-
     fn refresh_size(mut self) raises -> Bool:
-        """Re-query terminal dimensions; resize front buffer if changed."""
-        var size = self._os.get_terminal_size()
-        var w = Int(py=size.columns)
-        var h = Int(py=size.lines)
-        if w != self.width or h != self.height:
-            self.width = w
-            self.height = h
-            self._front.resize(w, h)
+        """Re-query terminal dimensions; return True if they changed.
+
+        ``ioctl(TIOCGWINSZ)`` doesn't work via Mojo's ``external_call`` on
+        macOS arm64 (variadic ABI mismatch), so we fall back to the cursor
+        position query. To avoid racing with user input we:
+
+        - throttle to ~1 Hz (every 20 calls at the default 50 ms cadence);
+        - skip when the event queue still has buffered input;
+        - skip when stdin already has bytes ready to read.
+
+        Stray bytes that nevertheless mix in with the cursor response are
+        discarded inside ``query_size_via_cursor`` — losing a key here is
+        much better than the heap corruption an earlier requeue path caused.
+        """
+        self._resize_poll_counter += 1
+        if self._resize_poll_counter < 20:
+            return False
+        if len(self._queue) > 0:
+            return False
+        if poll_stdin(STDIN_FD, Int32(0)):
+            return False
+        self._resize_poll_counter = 0
+        var size = query_size_via_cursor(STDIN_FD, STDOUT_FD, Int32(50))
+        if size[0] > 0 and (size[0] != self.width or size[1] != self.height):
+            self.width = size[0]
+            self.height = size[1]
             return True
         return False
 
     fn present(mut self, back: Canvas) raises:
-        """Diff the back canvas against our front, write only what changed."""
+        """Diff the back canvas against our front, write only what changed.
+
+        Output is accumulated into a ``List[UInt8]`` and flushed in a single
+        ``write()`` syscall. Building one big ``String`` via ``+=`` would be
+        catastrophic on a full-screen canvas (12000+ cells of incremental
+        concatenation), and on real terminals dragged to ~200×60 it crashed
+        the allocator within seconds.
+        """
         if back.width != self._front.width or back.height != self._front.height:
             self._front.resize(back.width, back.height)
-            self._write_raw(SEQ_CLEAR_SCREEN)
-        var out = String("")
+            write_string(STDOUT_FD, SEQ_CLEAR_SCREEN)
+        var buf = List[UInt8]()
         var last_attr = default_attr()
         var last_attr_valid = False
         var cursor_known_x = -1
@@ -161,18 +179,18 @@ struct Terminal:
                 if nc == oc:
                     continue
                 if cursor_known_x != x or cursor_known_y != y:
-                    out += move_cursor(x, y)
+                    append_string_bytes(buf, move_cursor(x, y))
                 if (not last_attr_valid) or last_attr != nc.attr:
-                    out += CSI + attr_to_sgr(nc.attr) + String("m")
+                    append_string_bytes(buf, CSI)
+                    append_string_bytes(buf, attr_to_sgr(nc.attr))
+                    buf.append(0x6D)  # 'm'
                     last_attr = nc.attr
                     last_attr_valid = True
-                out += nc.glyph
+                append_string_bytes(buf, nc.glyph)
                 cursor_known_x = x + 1
                 cursor_known_y = y
                 self._front.set(x, y, nc)
-        if len(out) > 0:
-            self._write_raw(out)
-            self._flush()
+        write_buffer(STDOUT_FD, buf)
 
     fn poll_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
         """Return the next buffered event, or block up to ``timeout_ms`` reading more.
@@ -183,17 +201,15 @@ struct Terminal:
         """
         if len(self._queue) > 0:
             return self._queue.pop(0)
-        var lst = self._builtins.list()
-        _ = lst.append(self._stdin_fd)
-        var timeout = Float64(timeout_ms) / 1000.0
-        var ready = self._select.select(lst, self._empty_list, self._empty_list, PythonObject(timeout))
-        if Int(py=self._builtins.len(ready[0])) == 0:
+        if not poll_stdin(STDIN_FD, Int32(timeout_ms)):
             return None
-        var raw = self._os.read(self._stdin_fd, 1024)
-        var data = String(raw.decode("utf-8", "replace"))
-        var bytes = data.as_bytes()
+        var buf = alloc_zero_buffer(1024)
+        var n = read_into(STDIN_FD, buf, 1024)
+        if n <= 0:
+            return None
+        var bytes = StringSlice(ptr=buf.unsafe_ptr(), length=n).as_bytes()
         var pos = 0
-        while pos < len(bytes):
+        while pos < n:
             var slice = String(StringSlice(unsafe_from_utf8=bytes[pos:]))
             var parsed = parse_input(slice)
             self._queue.append(parsed[0])

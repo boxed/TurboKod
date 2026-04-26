@@ -42,6 +42,10 @@ struct Application:
 
     fn start(mut self) raises:
         self.terminal.start()
+        # Terminal.start() may discover a more accurate size via the cursor
+        # query that runs after raw mode is on. Sync the back canvas.
+        if self.back.width != self.terminal.width or self.back.height != self.terminal.height:
+            self.back.resize(self.terminal.width, self.terminal.height)
 
     fn stop(mut self) raises:
         self.terminal.stop()

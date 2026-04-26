@@ -29,12 +29,13 @@ fn main() raises:
         var drag_dy = 0
         var bg = Fill(String("·"), Attr(CYAN, BLACK))
         var box = Frame(String("drag me"), Attr(YELLOW, MAGENTA), False)
-        var hint = Label(String("drag with mouse • arrows move • q quits"), Attr(WHITE, BLACK))
 
         while app.running:
             app.clear()
             bg.paint(app.back, app.screen())
             var screen = app.screen()
+            var hint_text = String("size ") + String(screen.b.x) + String("×") + String(screen.b.y) + String(" • drag with mouse • arrows move • q quits")
+            var hint = Label(hint_text, Attr(WHITE, BLACK))
             hint.paint(app.back, Rect(0, screen.b.y - 1, screen.b.x, screen.b.y))
             var rect = Rect(pos.x, pos.y, pos.x + w, pos.y + h)
             box.paint(app.back, rect)
