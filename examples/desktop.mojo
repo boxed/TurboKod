@@ -31,7 +31,8 @@ from std.sys import argv
 
 from mojovision import (
     APP_QUIT_ACTION, Application, Desktop, FileDialog, Menu, MenuItem, Rect,
-    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
+    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL, EDITOR_QUICK_OPEN,
+    EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
 )
@@ -74,6 +75,7 @@ fn main() raises:
             (String("Find in project..."), PROJECT_FIND),
             (String("Replace in project..."), PROJECT_REPLACE),
             (String("Go to Line..."), EDITOR_GOTO),
+            (String("Go to Symbol..."), EDITOR_GOTO_SYMBOL),
             (String("Toggle Comment"), EDITOR_TOGGLE_COMMENT),
             (String("Toggle Case"), EDITOR_TOGGLE_CASE),
         ))

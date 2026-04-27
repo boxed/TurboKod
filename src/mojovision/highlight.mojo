@@ -16,7 +16,7 @@ producer in Phase 3 won't churn any consumers.
 from std.collections.list import List
 
 from .colors import (
-    Attr, BLUE, DARK_GRAY, LIGHT_CYAN, LIGHT_GREEN, LIGHT_MAGENTA, WHITE,
+    Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, RED, WHITE,
     STYLE_NONE,
 )
 
@@ -36,11 +36,12 @@ struct Highlight(ImplicitlyCopyable, Movable):
 
 
 # Public colors. They render against the editor's standard blue background.
-fn highlight_keyword_attr() -> Attr:  return Attr(WHITE,         BLUE, STYLE_NONE)
-fn highlight_string_attr()  -> Attr:  return Attr(LIGHT_GREEN,   BLUE, STYLE_NONE)
-fn highlight_comment_attr() -> Attr:  return Attr(DARK_GRAY,     BLUE, STYLE_NONE)
-fn highlight_number_attr()  -> Attr:  return Attr(LIGHT_MAGENTA, BLUE, STYLE_NONE)
-fn highlight_decorator_attr() -> Attr: return Attr(LIGHT_CYAN,   BLUE, STYLE_NONE)
+fn highlight_keyword_attr() -> Attr:    return Attr(WHITE,       BLUE, STYLE_NONE)
+fn highlight_string_attr()  -> Attr:    return Attr(RED,         BLUE, STYLE_NONE)
+fn highlight_comment_attr() -> Attr:    return Attr(CYAN,        BLUE, STYLE_NONE)
+fn highlight_number_attr()  -> Attr:    return Attr(LIGHT_GRAY,  BLUE, STYLE_NONE)
+fn highlight_ident_attr()   -> Attr:    return Attr(LIGHT_GREEN, BLUE, STYLE_NONE)
+fn highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,  BLUE, STYLE_NONE)
 
 
 # Line-state passed between line tokenization calls so triple-quoted strings
@@ -159,6 +160,8 @@ fn _highlight_line(
             var word = String(StringSlice(unsafe_from_utf8=b[start:i]))
             if _is_mojo_python_keyword(word):
                 out.append(Highlight(row, start, i, highlight_keyword_attr()))
+            else:
+                out.append(Highlight(row, start, i, highlight_ident_attr()))
             continue
         # Number (decimal int or float — keeps it minimal).
         if _is_digit(c):

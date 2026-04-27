@@ -72,6 +72,21 @@ comptime TERMIOS_SIZE: Int = 128
 # `struct winsize` = { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } = 8B.
 comptime WINSIZE_SIZE: Int = 8
 
+# ``struct timespec { time_t tv_sec; long tv_nsec; }`` — 16 bytes on every
+# 64-bit platform we target.
+comptime TIMESPEC_SIZE: Int = 16
+
+
+fn clock_monotonic_id() -> Int32:
+    """``CLOCK_MONOTONIC`` differs across platforms — Linux defines it
+    as 1, Darwin as 6. Hardcoding the Linux value made every call to
+    ``clock_gettime`` fail on macOS (returning 0 here, which broke
+    every UI debounce that depended on the clock)."""
+    comptime if CompilationTarget.is_macos():
+        return 6
+    else:
+        return 1
+
 # `struct pollfd` = { int fd; short events; short revents; } = 8B.
 comptime POLLFD_SIZE: Int = 8
 comptime POLLIN: Int16 = 0x0001
@@ -116,6 +131,29 @@ fn tcflush(fd: Int32, queue_selector: Int32) -> Int32:
     they get echoed verbatim by the line discipline as ``^[[<…M``.
     """
     return external_call["tcflush", Int32](fd, queue_selector)
+
+
+# --- Monotonic clock --------------------------------------------------------
+
+
+fn monotonic_ms() -> Int:
+    """Milliseconds from a monotonic source (``CLOCK_MONOTONIC``).
+
+    The absolute value is unspecified — it's only meaningful as a
+    difference between two readings — but the reading never goes
+    backwards, which is what UI debouncing relies on. Returns ``0`` if
+    the syscall fails (a clean fallback: callers comparing two readings
+    just see "no time has passed" and behave as if firing immediately).
+    """
+    var ts = alloc_zero_buffer(TIMESPEC_SIZE)
+    var rc = external_call["clock_gettime", Int32](
+        clock_monotonic_id(), ts.unsafe_ptr(),
+    )
+    if Int(rc) != 0:
+        return 0
+    var sec = Int(ts.unsafe_ptr().bitcast[Int64]()[0])
+    var nsec = Int(ts.unsafe_ptr().bitcast[Int64]()[1])
+    return sec * 1000 + nsec // 1_000_000
 
 
 # --- I/O multiplexing -------------------------------------------------------

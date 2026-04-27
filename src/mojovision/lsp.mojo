@@ -104,6 +104,113 @@ fn _build_argv_buffer(args: List[String]) -> ArgvBuffer:
     return ArgvBuffer(blob^, pointers^)
 
 
+# --- capture_command ------------------------------------------------------
+
+
+@fieldwise_init
+struct CaptureResult(Movable):
+    """Output of a synchronous child run. ``status`` is the raw waitpid
+    value; the exit code is ``(status >> 8) & 0xFF`` on POSIX."""
+    var stdout: String
+    var status: Int32
+
+
+fn capture_command(
+    argv: List[String], stdin_text: String = String(""),
+) raises -> CaptureResult:
+    """Run ``argv`` to completion, return ``(stdout, exit_status)``.
+
+    Stderr is read but discarded. The child inherits an allowlisted
+    parent environment (see ``_build_envp_from_parent``). Reads are
+    blocking and the call returns only after the child exits, so this
+    is unsuitable for long-running servers — use ``LspProcess`` for
+    those — but ideal for one-shot tools like ``rg`` or ``git``.
+
+    Raises if argv is empty or posix_spawnp fails. A non-zero
+    exit_status is **not** an error: command-line tools commonly use
+    exit 1 to mean "no results" (e.g., grep / rg with no matches), and
+    callers want to distinguish that from a spawn failure.
+    """
+    if len(argv) == 0:
+        raise Error("argv must not be empty")
+    var stdin_pair = pipe_pair()
+    var stdin_r = stdin_pair[0]
+    var stdin_w = stdin_pair[1]
+    var stdout_pair = pipe_pair()
+    var stdout_r = stdout_pair[0]
+    var stdout_w = stdout_pair[1]
+    var stderr_pair = pipe_pair()
+    var stderr_r = stderr_pair[0]
+    var stderr_w = stderr_pair[1]
+
+    var fa = alloc_zero_buffer(POSIX_SPAWN_FILE_ACTIONS_SIZE)
+    var rc_init = posix_spawn_file_actions_init(fa)
+    if Int(rc_init) != 0:
+        _ = close_fd(stdin_r); _ = close_fd(stdin_w)
+        _ = close_fd(stdout_r); _ = close_fd(stdout_w)
+        _ = close_fd(stderr_r); _ = close_fd(stderr_w)
+        raise Error("posix_spawn_file_actions_init failed")
+    _ = posix_spawn_file_actions_adddup2(fa, stdin_r,  Int32(0))
+    _ = posix_spawn_file_actions_adddup2(fa, stdout_w, Int32(1))
+    _ = posix_spawn_file_actions_adddup2(fa, stderr_w, Int32(2))
+    _ = posix_spawn_file_actions_addclose(fa, stdin_w)
+    _ = posix_spawn_file_actions_addclose(fa, stdout_r)
+    _ = posix_spawn_file_actions_addclose(fa, stderr_r)
+    _ = posix_spawn_file_actions_addclose(fa, stdin_r)
+    _ = posix_spawn_file_actions_addclose(fa, stdout_w)
+    _ = posix_spawn_file_actions_addclose(fa, stderr_w)
+
+    var argv_buf = _build_argv_buffer(argv)
+    var envp_buf = _build_envp_from_parent()
+    var pid: Int32
+    try:
+        pid = posix_spawnp_call(
+            argv_buf.pointers, envp_buf.pointers, fa, argv[0],
+        )
+    except:
+        _ = posix_spawn_file_actions_destroy(fa)
+        _ = close_fd(stdin_r); _ = close_fd(stdin_w)
+        _ = close_fd(stdout_r); _ = close_fd(stdout_w)
+        _ = close_fd(stderr_r); _ = close_fd(stderr_w)
+        raise Error("posix_spawnp failed")
+    _ = posix_spawn_file_actions_destroy(fa)
+    _ = close_fd(stdin_r)
+    _ = close_fd(stdout_w)
+    _ = close_fd(stderr_w)
+
+    # Send stdin (if any), then close to signal EOF — without this many
+    # tools that read stdin (e.g. ``rg`` reading from stdin) would hang.
+    if len(stdin_text.as_bytes()) > 0:
+        var sb = List[UInt8]()
+        append_string_bytes(sb, stdin_text)
+        write_buffer(stdin_w, sb)
+    _ = close_fd(stdin_w)
+
+    # Drain stdout to EOF (blocking reads). We also drain stderr so the
+    # child doesn't block on a full pipe; the captured stderr is
+    # discarded since callers seldom want it for grep-style tools.
+    var out = _drain_to_eof(stdout_r)
+    _ = _drain_to_eof(stderr_r)
+    _ = close_fd(stdout_r)
+    _ = close_fd(stderr_r)
+
+    var status = waitpid_blocking(pid)
+    return CaptureResult(out^, status)
+
+
+fn _drain_to_eof(fd: Int32) -> String:
+    var out = String("")
+    var scratch = alloc_zero_buffer(8192)
+    while True:
+        var n = read_into(fd, scratch, 8192)
+        if n <= 0:
+            break
+        out = out + String(StringSlice(
+            ptr=scratch.unsafe_ptr(), length=n,
+        ))
+    return out^
+
+
 # --- LspProcess -----------------------------------------------------------
 
 

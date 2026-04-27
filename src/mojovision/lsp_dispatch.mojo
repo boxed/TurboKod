@@ -48,6 +48,24 @@ struct DefinitionResolved(ImplicitlyCopyable, Movable):
     var character: Int   # 0-based byte offset on that line
 
 
+@fieldwise_init
+struct SymbolItem(ImplicitlyCopyable, Movable):
+    """One entry in a ``textDocument/documentSymbol`` response.
+
+    ``kind`` is the raw LSP ``SymbolKind`` integer (1=File, 5=Class,
+    6=Method, 12=Function, 13=Variable, 14=Constant, 23=Struct, …);
+    consumers can map it to a short label or icon. ``container`` is
+    populated when the server returns hierarchical ``DocumentSymbol``
+    results — parent names joined with ``" > "`` so the user can tell
+    nested methods apart.
+    """
+    var name: String
+    var kind: Int
+    var container: String
+    var line: Int
+    var character: Int
+
+
 struct LspManager(Movable):
     """One LSP server's worth of state plus the transport (``LspClient``).
 
@@ -65,6 +83,10 @@ struct LspManager(Movable):
     var _inflight_def_id: Int
     var _inflight_word: String       # surfaced via status_summary() while pending
     var _last_empty: Bool            # latched when a response had no location
+    var _inflight_symbol_id: Int
+    var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
+    var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
+    var _symbols_empty: Bool                 # latched when the last response was empty
     var _root_uri: String
     var _language_id: String
 
@@ -84,6 +106,10 @@ struct LspManager(Movable):
         self._inflight_def_id = 0
         self._inflight_word = String("")
         self._last_empty = False
+        self._inflight_symbol_id = 0
+        self._resolved_symbols = List[SymbolItem]()
+        self._has_resolved_symbols = False
+        self._symbols_empty = False
         self._root_uri = String("")
         self._language_id = String("")
         self._doc_paths = List[String]()
@@ -112,6 +138,12 @@ struct LspManager(Movable):
 
     fn last_empty(self) -> Bool:
         return self._last_empty
+
+    fn inflight_symbols(self) -> Bool:
+        return self._inflight_symbol_id != 0
+
+    fn symbols_empty(self) -> Bool:
+        return self._symbols_empty
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -214,6 +246,52 @@ struct LspManager(Movable):
         self._last_empty = False
         return True
 
+    fn request_document_symbols(
+        mut self, path: String, var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/documentSymbol`` on ``path``.
+
+        Like ``request_definition``, this pre-flights with a didOpen/didChange
+        so the server's view matches the buffer. Returns False if the server
+        isn't ready (or a send fails); the caller can retry once the LSP is
+        in the READY state. A fresh request shadows any earlier in-flight
+        symbol id — there's no concurrent symbol lookup model here.
+        """
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        var doc = json_object()
+        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        params.put(String("textDocument"), doc)
+        try:
+            self._inflight_symbol_id = self.client.send_request(
+                String("textDocument/documentSymbol"), params,
+            )
+        except:
+            self._inflight_symbol_id = 0
+            return False
+        self._has_resolved_symbols = False
+        self._resolved_symbols = List[SymbolItem]()
+        self._symbols_empty = False
+        return True
+
+    fn has_pending_symbols(self) -> Bool:
+        """True iff a parsed symbol response is parked, ready for ``take``."""
+        return self._has_resolved_symbols
+
+    fn take_symbols(mut self) -> List[SymbolItem]:
+        """Move the parked symbol list out of the manager.
+
+        Pair with ``has_pending_symbols()`` — calling this when nothing is
+        parked just hands back an empty list. The flag is cleared either
+        way so a subsequent call returns empty.
+        """
+        var out = self._resolved_symbols^
+        self._resolved_symbols = List[SymbolItem]()
+        self._has_resolved_symbols = False
+        return out^
+
     # --- frame-tick driver -------------------------------------------------
 
     fn tick(mut self) -> Optional[DefinitionResolved]:
@@ -261,6 +339,15 @@ struct LspManager(Movable):
                     self._last_empty = True
                 self._inflight_def_id = 0
                 self._inflight_word = String("")
+                continue
+            if id == self._inflight_symbol_id:
+                var items = List[SymbolItem]()
+                if msg.result:
+                    items = _parse_symbols_result(msg.result.value())
+                self._resolved_symbols = items^
+                self._has_resolved_symbols = True
+                self._symbols_empty = (len(self._resolved_symbols) == 0)
+                self._inflight_symbol_id = 0
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -387,6 +474,111 @@ fn _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
     return Optional[DefinitionResolved](DefinitionResolved(
         path, line_opt.value().as_int(), char_opt.value().as_int(),
     ))
+
+
+# --- symbol parsing --------------------------------------------------------
+
+
+fn _parse_symbols_result(v: JsonValue) -> List[SymbolItem]:
+    """``textDocument/documentSymbol`` returns ``DocumentSymbol[]`` (the
+    hierarchical form, with ``range`` / ``selectionRange`` / ``children``)
+    or the legacy flat ``SymbolInformation[]`` (with ``location`` and
+    ``containerName``). Accept either, flatten any hierarchy with parent
+    names joined by ``" > "``.
+    """
+    var out = List[SymbolItem]()
+    if not v.is_array():
+        return out^
+    if v.array_len() == 0:
+        return out^
+    var first = v.array_at(0)
+    if first.is_object() and first.object_has(String("location")):
+        # Flat SymbolInformation[].
+        for i in range(v.array_len()):
+            _parse_symbol_information(v.array_at(i), out)
+    else:
+        # Hierarchical DocumentSymbol[].
+        for i in range(v.array_len()):
+            _parse_document_symbol(v.array_at(i), String(""), out)
+    return out^
+
+
+fn _parse_document_symbol(
+    v: JsonValue, container: String, mut out: List[SymbolItem],
+):
+    if not v.is_object():
+        return
+    var name_opt = v.object_get(String("name"))
+    var kind_opt = v.object_get(String("kind"))
+    var sel_opt = v.object_get(String("selectionRange"))
+    if not sel_opt:
+        sel_opt = v.object_get(String("range"))
+    if not name_opt or not sel_opt:
+        return
+    if not name_opt.value().is_string():
+        return
+    var name = name_opt.value().as_str()
+    var kind = 0
+    if kind_opt and kind_opt.value().is_int():
+        kind = kind_opt.value().as_int()
+    var pos = _start_pos_of(sel_opt.value())
+    if pos[0] >= 0:
+        out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+    var children_opt = v.object_get(String("children"))
+    if children_opt and children_opt.value().is_array():
+        var sub_container: String
+        if len(container.as_bytes()) == 0:
+            sub_container = name
+        else:
+            sub_container = container + String(" > ") + name
+        var children = children_opt.value()
+        for i in range(children.array_len()):
+            _parse_document_symbol(children.array_at(i), sub_container, out)
+
+
+fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
+    if not v.is_object():
+        return
+    var name_opt = v.object_get(String("name"))
+    var kind_opt = v.object_get(String("kind"))
+    var loc_opt = v.object_get(String("location"))
+    var cont_opt = v.object_get(String("containerName"))
+    if not name_opt or not loc_opt:
+        return
+    if not name_opt.value().is_string():
+        return
+    var name = name_opt.value().as_str()
+    var kind = 0
+    if kind_opt and kind_opt.value().is_int():
+        kind = kind_opt.value().as_int()
+    var container = String("")
+    if cont_opt and cont_opt.value().is_string():
+        container = cont_opt.value().as_str()
+    var range_opt = loc_opt.value().object_get(String("range"))
+    if not range_opt:
+        return
+    var pos = _start_pos_of(range_opt.value())
+    if pos[0] < 0:
+        return
+    out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+
+
+fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
+    """Extract ``(line, character)`` from a Range's ``start``. Returns
+    ``(-1, -1)`` when the shape doesn't match — caller filters those out."""
+    if not rng.is_object():
+        return (-1, -1)
+    var start_opt = rng.object_get(String("start"))
+    if not start_opt:
+        return (-1, -1)
+    var start = start_opt.value()
+    var line_opt = start.object_get(String("line"))
+    var char_opt = start.object_get(String("character"))
+    if not line_opt or not char_opt:
+        return (-1, -1)
+    if not line_opt.value().is_int() or not char_opt.value().is_int():
+        return (-1, -1)
+    return (line_opt.value().as_int(), char_opt.value().as_int())
 
 
 # --- URI <-> path ----------------------------------------------------------

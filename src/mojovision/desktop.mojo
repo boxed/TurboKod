@@ -47,10 +47,13 @@ from .geometry import Rect
 from .highlight import extension_of
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .menu import Menu, MenuBar, MenuItem
-from .project import ProjectMatch, find_in_project, replace_in_project
+from .posix import monotonic_ms
+from .project import replace_in_project
+from .project_find import ProjectFind
 from .prompt import Prompt
 from .quick_open import QuickOpen
 from .status import StatusBar
+from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 
 
@@ -64,6 +67,7 @@ comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
 comptime EDITOR_FIND          = String("edit:find")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
+comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime PROJECT_FIND         = String("edit:project_find")
@@ -186,6 +190,8 @@ struct Desktop(Movable):
     var file_tree: FileTree
     var prompt: Prompt
     var quick_open: QuickOpen
+    var symbol_pick: SymbolPick
+    var project_find: ProjectFind
     var bg_pattern: String
     var bg_attr: Attr
     var project: Optional[String]
@@ -205,6 +211,8 @@ struct Desktop(Movable):
         self.file_tree = FileTree()
         self.prompt = Prompt()
         self.quick_open = QuickOpen()
+        self.symbol_pick = SymbolPick()
+        self.project_find = ProjectFind()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
         self.project = Optional[String]()
@@ -234,6 +242,7 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
         self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, EDITOR_REPLACE))
         self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_GOTO))
+        self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
         self._hotkeys.append(Hotkey(
             UInt32(ord("f")), MOD_CTRL | MOD_SHIFT, PROJECT_FIND,
         ))
@@ -263,6 +272,9 @@ struct Desktop(Movable):
         return Rect(0, 1, right, screen.b.y - 1)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
+        # Drive any per-frame timers before drawing — the project-find
+        # widget runs its 200 ms debounce off this clock.
+        self.project_find.tick(monotonic_ms())
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
@@ -283,6 +295,8 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
+        self.symbol_pick.paint(canvas, screen)
+        self.project_find.paint(canvas, screen)
 
     fn _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -485,6 +499,35 @@ struct Desktop(Movable):
                 except:
                     pass
             return Optional[String]()
+        if self.symbol_pick.active:
+            if event.kind == EVENT_KEY:
+                _ = self.symbol_pick.handle_key(event)
+            else:
+                _ = self.symbol_pick.handle_mouse(event, screen)
+            if self.symbol_pick.submitted:
+                var line = self.symbol_pick.selected_line
+                var character = self.symbol_pick.selected_character
+                var path = self.symbol_pick.path
+                self.symbol_pick.close()
+                self._jump_to(
+                    DefinitionResolved(path, line, character), screen,
+                )
+            return Optional[String]()
+        if self.project_find.active:
+            if event.kind == EVENT_KEY:
+                _ = self.project_find.handle_key(event, monotonic_ms())
+            else:
+                _ = self.project_find.handle_mouse(event, screen)
+            if self.project_find.submitted:
+                var path = self.project_find.selected_path
+                var line_no = self.project_find.selected_line
+                self.project_find.close()
+                # Open (or focus) the file, then move the cursor to the
+                # 1-based line number reported by ``find_in_project``.
+                self._jump_to(
+                    DefinitionResolved(path, line_no - 1, 0), screen,
+                )
+            return Optional[String]()
         if event.kind == EVENT_KEY:
             return self._handle_key(event, screen)
         # Mouse events (and everything else): route through menu → tree → windows.
@@ -630,6 +673,9 @@ struct Desktop(Movable):
             self._pending_action = EDITOR_GOTO
             self.prompt.open(String("Go to line: "))
             return Optional[String]()
+        if action == EDITOR_GOTO_SYMBOL:
+            self._open_symbol_pick()
+            return Optional[String]()
         if action == EDITOR_TOGGLE_COMMENT:
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
@@ -642,8 +688,7 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_FIND:
             if self.project:
-                self._pending_action = PROJECT_FIND
-                self.prompt.open(String("Find in project: "))
+                self.project_find.open(self.project.value())
             return Optional[String]()
         if action == PROJECT_REPLACE:
             if self.project:
@@ -710,6 +755,9 @@ struct Desktop(Movable):
         var resolved = self.lsp.tick()
         if resolved:
             self._jump_to(resolved.value(), screen)
+        if self.symbol_pick.active and self.symbol_pick.loading \
+                and self.lsp.has_pending_symbols():
+            self.symbol_pick.set_entries(self.lsp.take_symbols())
         self._refresh_lsp_status()
 
     fn _refresh_lsp_status(mut self):
@@ -810,6 +858,40 @@ struct Desktop(Movable):
         # No backing file — escalate to Save As.
         self._open_save_as_prompt()
 
+    fn _open_symbol_pick(mut self):
+        """Open the Go-to-Symbol picker for the focused editor and kick off
+        the LSP request. The picker shows a "Loading…" placeholder until
+        the response arrives via ``lsp_tick``."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("LSP: file has no path"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        if self.lsp.is_failed():
+            return
+        if not self.lsp.is_active():
+            self.status_bar.set_message(
+                String("LSP: not started for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        if not self.lsp.is_ready():
+            self.status_bar.set_message(
+                String("LSP: still starting up — try again"),
+                Attr(YELLOW, LIGHT_GRAY),
+            )
+            return
+        var text = self.windows.windows[idx].editor.text_snapshot()
+        var ok = self.lsp.request_document_symbols(path, text^)
+        if not ok:
+            return
+        self.symbol_pick.open(path)
+
     fn _open_save_as_prompt(mut self):
         var idx = self._focused_editor_idx()
         var prefill = String("")
@@ -858,16 +940,6 @@ struct Desktop(Movable):
             var idx = self._focused_editor_idx()
             if idx >= 0:
                 _ = self.windows.windows[idx].editor.replace_all(find, text)
-            return Optional[String]()
-        if pa == PROJECT_FIND:
-            if self.project:
-                try:
-                    var matches = find_in_project(self.project.value(), text)
-                    self.windows.add(_results_window(
-                        String("Find: ") + text, matches,
-                    ))
-                except:
-                    pass
             return Optional[String]()
         if pa == _PA_PROJECT_REPLACE_FIND:
             self._pending_arg = text
@@ -943,21 +1015,6 @@ fn _mojo_include_dirs(root: String) -> List[String]:
 
 
 # --- Result / summary windows for project search ----------------------------
-
-
-fn _results_window(
-    var title: String, matches: List[ProjectMatch],
-) -> Window:
-    var content = List[String]()
-    if len(matches) == 0:
-        content.append(String("(no matches)"))
-    else:
-        for i in range(len(matches)):
-            content.append(
-                matches[i].rel + String(":") + String(matches[i].line_no)
-                + String(": ") + matches[i].line_text,
-            )
-    return Window(title^, Rect(8, 5, 76, 22), content^)
 
 
 fn _summary_window(

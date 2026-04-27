@@ -32,7 +32,8 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .desktop import (
     APP_QUIT_ACTION,
     Desktop,
-    EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL, EDITOR_QUICK_OPEN,
+    EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE,
     PROJECT_TREE_ACTION,
@@ -54,7 +55,7 @@ from .lsp import (
     LspClient, LspIncoming, LspProcess, classify_message,
     lsp_initialize_params,
 )
-from .lsp_dispatch import DefinitionResolved, LspManager
+from .lsp_dispatch import DefinitionResolved, LspManager, SymbolItem
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
@@ -65,7 +66,9 @@ from .project import (
     GitignoreMatcher, GitignorePattern, ProjectMatch,
     find_in_project, replace_in_project, walk_project_files,
 )
+from .project_find import ProjectFind
 from .quick_open import QuickOpen
+from .symbol_pick import SymbolPick, symbol_kind_label
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .prompt import Prompt
