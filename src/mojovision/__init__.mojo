@@ -54,6 +54,7 @@ from .lsp import (
     LspClient, LspIncoming, LspProcess, classify_message,
     lsp_initialize_params,
 )
+from .lsp_dispatch import DefinitionResolved, LspManager
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,

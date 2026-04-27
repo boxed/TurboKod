@@ -70,21 +70,23 @@ struct Window(ImplicitlyCopyable, Movable):
         self.is_maximized = copy.is_maximized
         self._restore_rect = copy._restore_rect
 
-    fn _interior(self) -> Rect:
-        # Region inside the border where content / editor paints.
+    fn interior(self) -> Rect:
+        """Region inside the border where content / editor paints. Public
+        so hosts can compute view-relative things — e.g. ``reveal_cursor``
+        after a goto-definition jump."""
         return Rect(self.rect.a.x + 1, self.rect.a.y + 1,
                     self.rect.b.x - 1, self.rect.b.y - 1)
 
     fn handle_key(mut self, event: Event) -> Bool:
         if not self.is_editor:
             return False
-        return self.editor.handle_key(event, self._interior())
+        return self.editor.handle_key(event, self.interior())
 
     fn handle_mouse_in_body(mut self, event: Event) -> Bool:
         """Editor mouse handling for clicks/drags inside the window body."""
         if not self.is_editor:
             return False
-        return self.editor.handle_mouse(event, self._interior())
+        return self.editor.handle_mouse(event, self.interior())
 
     fn toggle_maximize(mut self, workspace: Rect):
         if self.is_maximized:
@@ -148,7 +150,7 @@ struct Window(ImplicitlyCopyable, Movable):
                 border,
             )
         if self.is_editor:
-            self.editor.paint(canvas, self._interior(), focused)
+            self.editor.paint(canvas, self.interior(), focused)
         else:
             # Content, left-aligned. Clipped to the interior on both axes:
             # the loop bound clips vertically; the ``max_x`` arg clips horizontally
@@ -365,7 +367,7 @@ struct Window(ImplicitlyCopyable, Movable):
         """Scroll the editor vertically by ``lines`` (negative = up). Cursor
         does not move; same convention as wheel scrolling."""
         if not self.is_editor: return
-        var view = self._interior()
+        var view = self.interior()
         var max_y = self.editor.buffer.line_count() - view.height()
         if max_y < 0: max_y = 0
         var ny = self.editor.scroll_y + lines
@@ -375,7 +377,7 @@ struct Window(ImplicitlyCopyable, Movable):
 
     fn h_scroll_by(mut self, cols: Int):
         if not self.is_editor: return
-        var view = self._interior()
+        var view = self.interior()
         var max_x = self.editor.longest_line_width() - view.width()
         if max_x < 0: max_x = 0
         var nx = self.editor.scroll_x + cols
@@ -687,10 +689,10 @@ struct WindowManager(Movable):
                 elif vh[0] == 5:
                     self.windows[self.focused].v_scroll_by(1)
                 elif vh[0] == 2:
-                    var page = self.windows[self.focused]._interior().height()
+                    var page = self.windows[self.focused].interior().height()
                     self.windows[self.focused].v_scroll_by(-page)
                 elif vh[0] == 4:
-                    var page = self.windows[self.focused]._interior().height()
+                    var page = self.windows[self.focused].interior().height()
                     self.windows[self.focused].v_scroll_by(page)
                 else:  # 3 — on thumb
                     self._v_scrolling = self.focused
@@ -703,10 +705,10 @@ struct WindowManager(Movable):
                 elif hh[0] == 5:
                     self.windows[self.focused].h_scroll_by(1)
                 elif hh[0] == 2:
-                    var page = self.windows[self.focused]._interior().width()
+                    var page = self.windows[self.focused].interior().width()
                     self.windows[self.focused].h_scroll_by(-page)
                 elif hh[0] == 4:
-                    var page = self.windows[self.focused]._interior().width()
+                    var page = self.windows[self.focused].interior().width()
                     self.windows[self.focused].h_scroll_by(page)
                 else:
                     self._h_scrolling = self.focused

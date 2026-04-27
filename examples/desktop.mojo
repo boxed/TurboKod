@@ -7,6 +7,7 @@ Mouse:
   * click [■] in the title bar to close the focused window
   * drag any edge / bottom corner to resize
   * click in an editor window to place the cursor; drag to select
+  * cmd+click an identifier in a Mojo file to jump to its definition (LSP)
 Keyboard:
   * arrows navigate; shift+arrow extends selection; ctrl+arrow moves by word;
     shift+ctrl+arrow extends by word
@@ -191,6 +192,13 @@ fn main() raises:
                     file_dialog.open(String("."))
                 elif action == String("focus:About"):
                     desktop.windows.focus_by_title(String("About"))
+            # Drive any in-flight LSP work — forwards Cmd+click definition
+            # requests and routes responses back into window focus + cursor.
+            desktop.lsp_tick(app.screen())
+        # Reap the LSP child before we leave the try block — ``desktop`` isn't
+        # in scope from the outer ``finally``, and we'd rather not orphan the
+        # subprocess if the loop exits cleanly via Ctrl+Q.
+        desktop.lsp.shutdown()
     finally:
         app.stop()
         for i in range(len(error_log)):

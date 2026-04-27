@@ -22,8 +22,8 @@ from .json import (
 )
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
-    alloc_zero_buffer, append_string_bytes, close_fd, kill_pid,
-    pipe_pair, poll_stdin, posix_spawn_file_actions_addclose,
+    alloc_zero_buffer, append_string_bytes, close_fd, getenv_value,
+    kill_pid, pipe_pair, poll_stdin, posix_spawn_file_actions_addclose,
     posix_spawn_file_actions_adddup2, posix_spawn_file_actions_destroy,
     posix_spawn_file_actions_init, posix_spawnp_call, read_into,
     set_nonblocking, waitpid_blocking, waitpid_nohang, write_buffer,
@@ -40,6 +40,47 @@ struct ArgvBuffer(Movable):
     the lifetime of the spawn call by holding them on this struct."""
     var blob: List[UInt8]
     var pointers: List[UInt8]
+
+
+fn _build_envp_from_parent() -> ArgvBuffer:
+    """Build an envp by reading specific variables from the parent.
+
+    These are the ones ``mojo-lsp-server`` cares about (some directly —
+    ``MODULAR_HOME`` to locate ``std`` — others as collateral so paths,
+    locale, and home cache directories work). We don't forward *every*
+    parent var because a NULL-terminated envp inherited via posix_spawn
+    requires a real pointer (Mojo's ``external_call`` doesn't model that
+    cleanly), so an explicit allowlist is the simpler reliable path.
+    """
+    var names = List[String]()
+    names.append(String("PATH"))
+    names.append(String("HOME"))
+    names.append(String("USER"))
+    names.append(String("SHELL"))
+    names.append(String("TMPDIR"))
+    names.append(String("LANG"))
+    names.append(String("LC_ALL"))
+    names.append(String("LC_CTYPE"))
+    names.append(String("TERM"))
+    names.append(String("MODULAR_HOME"))
+    names.append(String("MAX_PATH"))
+    names.append(String("MOJO_PYTHON"))
+    names.append(String("CONDA_PREFIX"))
+    names.append(String("CONDA_DEFAULT_ENV"))
+    names.append(String("CONDA_PYTHON_EXE"))
+    names.append(String("VIRTUAL_ENV"))
+    names.append(String("PIXI_PROJECT_ROOT"))
+    names.append(String("PIXI_PROJECT_NAME"))
+    names.append(String("PIXI_PROJECT_MANIFEST"))
+    names.append(String("LD_LIBRARY_PATH"))
+    names.append(String("DYLD_LIBRARY_PATH"))
+    names.append(String("DYLD_FALLBACK_LIBRARY_PATH"))
+    var pairs = List[String]()
+    for i in range(len(names)):
+        var v = getenv_value(names[i])
+        if len(v.as_bytes()) > 0:
+            pairs.append(names[i] + String("=") + v)
+    return _build_argv_buffer(pairs^)
 
 
 fn _build_argv_buffer(args: List[String]) -> ArgvBuffer:
@@ -61,16 +102,6 @@ fn _build_argv_buffer(args: List[String]) -> ArgvBuffer:
         pp[i] = Int(blob.unsafe_ptr()) + offsets[i]
     pp[len(args)] = 0
     return ArgvBuffer(blob^, pointers^)
-
-
-fn _empty_envp() -> ArgvBuffer:
-    """``envp = {NULL}`` — child inherits nothing explicit. ``posix_spawnp``
-    treats a non-NULL empty envp as 'no env vars' which suits our use:
-    the child uses whatever the parent's environment provides via its own
-    inheritance rules. (Passing NULL here would require a different
-    code path; an 8-byte NULL-only blob is simpler.)"""
-    var pointers = alloc_zero_buffer(8)
-    return ArgvBuffer(List[UInt8](), pointers^)
 
 
 # --- LspProcess -----------------------------------------------------------
@@ -142,7 +173,12 @@ struct LspProcess(Movable):
         _ = posix_spawn_file_actions_addclose(fa, stderr_w)
 
         var argv_buf = _build_argv_buffer(argv)
-        var envp_buf = _empty_envp()
+        # Forward the parent's environ. Critical for ``mojo-lsp-server``,
+        # which uses ``MODULAR_HOME`` (and friends) to locate its own
+        # ``std`` package; with an empty env it falls back to ``/opt/modular``,
+        # fails to read it, and rejects every document with "unable to
+        # locate module 'std'" — turning every definition request into ``[]``.
+        var envp_buf = _build_envp_from_parent()
         var pid: Int32
         try:
             pid = posix_spawnp_call(

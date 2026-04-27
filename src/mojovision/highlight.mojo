@@ -277,9 +277,10 @@ fn word_at(line: String, col: Int) -> String:
 
 @fieldwise_init
 struct DefinitionRequest(ImplicitlyCopyable, Movable):
-    """Payload emitted by the editor when the user Ctrl+clicks an
-    identifier. Hosts can poll ``Editor.consume_definition_request()`` and
-    forward the request to whichever LSP client they end up wiring in."""
+    """Payload emitted by the editor when the user Cmd+clicks an
+    identifier (delivered by iTerm2 as Left+Alt). Hosts can poll
+    ``Editor.consume_definition_request()`` and forward the request to
+    whichever LSP client they end up wiring in."""
     var row: Int
     var col: Int
     var word: String

@@ -179,9 +179,10 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``_refresh_highlights`` after edits / file loads.
     var highlights: List[Highlight]
     var _highlights_dirty: Bool
-    # ``pending_definition`` is set when the user Ctrl+left-clicks an
-    # identifier — the host polls ``consume_definition_request`` and
-    # forwards to whichever LSP client is active.
+    # ``pending_definition`` is set when the user Cmd+left-clicks an
+    # identifier (delivered as Left+Alt by iTerm2) — the host polls
+    # ``consume_definition_request`` and forwards to whichever LSP client
+    # is active.
     var pending_definition: Optional[DefinitionRequest]
 
     fn __init__(out self):
@@ -298,10 +299,12 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     # --- saving ------------------------------------------------------------
 
-    fn _serialize(self) -> String:
+    fn text_snapshot(self) -> String:
         """Concatenate buffer lines with ``\\n`` separators (no trailing
         newline appended — a file that originally ended in ``\\n`` produces
-        a trailing empty line in the buffer, which round-trips correctly)."""
+        a trailing empty line in the buffer, which round-trips correctly).
+        Used by ``save`` and by the LSP layer for didOpen/didChange payloads.
+        """
         var out = String("")
         var n = self.buffer.line_count()
         for i in range(n):
@@ -317,7 +320,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         """
         if len(self.file_path.as_bytes()) == 0:
             return False
-        if not write_file(self.file_path, self._serialize()):
+        if not write_file(self.file_path, self.text_snapshot()):
             return False
         # Refresh stat info so check_for_external_change doesn't pick up our
         # own write as an external change.
@@ -330,7 +333,7 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn save_as(mut self, var path: String) raises -> Bool:
         """Write the buffer to ``path`` and adopt it as the new backing file."""
-        if not write_file(path, self._serialize()):
+        if not write_file(path, self.text_snapshot()):
             return False
         self.file_path = path^
         var info = stat_file(self.file_path)
@@ -862,11 +865,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         if col < 0: col = 0
         var n = self.buffer.line_length(row)
         if col > n: col = n
-        # Ctrl+click: capture a go-to-definition request without moving the
-        # cursor. The host polls ``consume_definition_request`` and forwards
-        # to whichever LSP client is wired up. (No effect during drag-extend
-        # — that's still a selection gesture.)
-        if (event.mods & MOD_CTRL) != 0 and not event.motion:
+        # Cmd+click (delivered by iTerm2 as Left+Alt): capture a go-to-
+        # definition request without moving the cursor. The host polls
+        # ``consume_definition_request`` and forwards to whichever LSP
+        # client is wired up. (No effect during drag-extend — that's still
+        # a selection gesture.)
+        if (event.mods & MOD_ALT) != 0 and not event.motion:
             var word = word_at(self.buffer.line(row), col)
             if len(word.as_bytes()) > 0:
                 self.pending_definition = Optional[DefinitionRequest](
@@ -978,6 +982,32 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.scroll_y = self.cursor_row
         elif self.cursor_row >= self.scroll_y + h:
             self.scroll_y = self.cursor_row - h + 1
+        if self.cursor_col < self.scroll_x:
+            self.scroll_x = self.cursor_col
+        elif self.cursor_col >= self.scroll_x + w:
+            self.scroll_x = self.cursor_col - w + 1
+
+    fn reveal_cursor(mut self, view: Rect, margin_below: Int = 5):
+        """Scroll so the cursor is visible with at least ``margin_below``
+        rows of context underneath it (clamped to file end).
+
+        Used after non-incremental jumps (e.g. goto-definition): plain
+        ``_scroll_to_cursor`` brings the cursor *just* into view, which
+        leaves it stuck at the bottom edge with no surrounding code
+        visible — fine for typing, jarring for landings.
+        """
+        var h = view.height()
+        var w = view.width()
+        var max_row = self.buffer.line_count() - 1
+        var bottom = self.cursor_row + margin_below
+        if bottom > max_row:
+            bottom = max_row
+        if self.cursor_row < self.scroll_y:
+            self.scroll_y = self.cursor_row
+        elif bottom >= self.scroll_y + h:
+            self.scroll_y = bottom - h + 1
+        if self.scroll_y < 0:
+            self.scroll_y = 0
         if self.cursor_col < self.scroll_x:
             self.scroll_x = self.cursor_col
         elif self.cursor_col >= self.scroll_x + w:

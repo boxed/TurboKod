@@ -356,6 +356,26 @@ fn posix_spawnp_call(
     return pid_buf.unsafe_ptr().bitcast[Int32]()[0]
 
 
+fn getenv_value(name: String) -> String:
+    """Read ``name`` from the parent's environment, or "" when unset.
+
+    Mojo's ``external_call`` can't easily return a typed C pointer, so we
+    receive ``getenv`` 's char* as a raw address (``Int``), measure its
+    length with ``strlen``, and copy the bytes through ``memcpy`` into a
+    Mojo-owned buffer.
+    """
+    var c_name = name + String("\0")
+    var addr = external_call["getenv", Int](c_name.unsafe_ptr())
+    if addr == 0:
+        return String("")
+    var n = external_call["strlen", Int](addr)
+    if n <= 0:
+        return String("")
+    var out = alloc_zero_buffer(n)
+    _ = external_call["memcpy", Int](out.unsafe_ptr(), addr, n)
+    return String(StringSlice(ptr=out.unsafe_ptr(), length=n))
+
+
 fn realpath(path: String) -> String:
     """Return the canonical absolute form of ``path``, or empty on error.
 

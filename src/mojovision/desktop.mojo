@@ -28,7 +28,9 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
-from .colors import Attr, BLUE, LIGHT_GRAY
+from .colors import (
+    Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
@@ -38,9 +40,12 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .file_io import basename, find_git_project
+from .file_io import basename, find_git_project, join_path, stat_file
+from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Rect
+from .highlight import extension_of
+from .lsp_dispatch import DefinitionResolved, LspManager
 from .menu import Menu, MenuBar, MenuItem
 from .project import ProjectMatch, find_in_project, replace_in_project
 from .prompt import Prompt
@@ -191,6 +196,7 @@ struct Desktop(Movable):
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
     var _esc_armed: Bool             # next keystroke is Alt+<letter> (mnemonic)
+    var lsp: LspManager              # one server (mojo-lsp-server today)
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -209,6 +215,7 @@ struct Desktop(Movable):
         self._open_count = 0
         self._hotkeys = List[Hotkey]()
         self._esc_armed = False
+        self.lsp = LspManager()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -311,6 +318,10 @@ struct Desktop(Movable):
         is the 80% rect, so toggling maximize off lands on the cascade slot.
         Project: ``detect_project_from(path)`` runs first so the project
         menu reflects the new file's repo on the same frame.
+
+        If the file is a Mojo source file, the LSP server is spawned (once)
+        and notified about the new document so cmd+click goto-definition
+        works without any extra wiring on the host side.
         """
         self.detect_project_from(path)
         var workspace = self.workspace_rect(screen)
@@ -322,6 +333,28 @@ struct Desktop(Movable):
         if was_max:
             var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
+        self._maybe_lsp_open(len(self.windows.windows) - 1)
+
+    fn _maybe_lsp_open(mut self, idx: Int):
+        """If the window at ``idx`` is an editor for a Mojo source file,
+        ensure the LSP server is started and inform it of this document."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[idx].is_editor:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var ext = extension_of(path)
+        if ext != String("mojo") and ext != String("🔥"):
+            return
+        var root = String("")
+        if self.project:
+            root = self.project.value()
+        self.lsp.start_mojo(root, _mojo_include_dirs(root))
+        self.lsp.notify_opened(
+            path, self.windows.windows[idx].editor.text_snapshot(),
+        )
 
     fn _default_window_rect(self, workspace: Rect) -> Rect:
         var w80 = (workspace.width() * 80) // 100
@@ -632,6 +665,128 @@ struct Desktop(Movable):
             return Optional[String]()
         return Optional[String](action)
 
+    # --- LSP tick ---------------------------------------------------------
+
+    fn lsp_tick(mut self, screen: Rect):
+        """Drain editor → LSP → editor for the focused frame.
+
+        Step 1: if the focused editor has a pending Cmd+click definition
+                request, forward it to the LSP server (with the latest
+                buffer text so the server's view is up to date).
+        Step 2: poll the server for any responses; if one resolves to a
+                concrete location, focus that file (opening it if it
+                isn't already a window) and move the cursor there.
+        Step 3: refresh the right-aligned LSP indicator on the status bar.
+        """
+        var idx = self._focused_editor_idx()
+        if idx >= 0:
+            var req_opt = self.windows.windows[idx].editor.consume_definition_request()
+            if req_opt:
+                var req = req_opt.value()
+                var path = self.windows.windows[idx].editor.file_path
+                if len(path.as_bytes()) == 0:
+                    self.status_bar.set_message(
+                        String("LSP: file has no path"),
+                        Attr(LIGHT_RED, LIGHT_GRAY),
+                    )
+                elif self.lsp.is_failed():
+                    pass  # leave the existing failure message visible
+                elif not self.lsp.is_active():
+                    self.status_bar.set_message(
+                        String("LSP: not started for this file type"),
+                        Attr(RED, LIGHT_GRAY),
+                    )
+                else:
+                    var text = self.windows.windows[idx].editor.text_snapshot()
+                    var word = req.word
+                    var ok = self.lsp.request_definition(
+                        path, req.row, req.col, word^, text^,
+                    )
+                    if not ok:
+                        self.status_bar.set_message(
+                            String("LSP: still starting up — try again"),
+                            Attr(YELLOW, LIGHT_GRAY),
+                        )
+        var resolved = self.lsp.tick()
+        if resolved:
+            self._jump_to(resolved.value(), screen)
+        self._refresh_lsp_status()
+
+    fn _refresh_lsp_status(mut self):
+        """Translate LspManager state into a status bar message.
+
+        Hidden when there's no LSP work in progress and nothing to report.
+        """
+        if self.lsp.is_failed():
+            self.status_bar.set_message(
+                String("LSP: ") + self.lsp.failure_reason,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        if self.lsp.is_initializing():
+            self.status_bar.set_message(
+                String("LSP: starting..."),
+                Attr(YELLOW, LIGHT_GRAY),
+            )
+            return
+        if self.lsp.is_ready():
+            var word = self.lsp.inflight_word()
+            if len(word.as_bytes()) > 0:
+                self.status_bar.set_message(
+                    String("LSP: looking up ") + word + String("..."),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+                return
+            if self.lsp.last_empty():
+                self.status_bar.set_message(
+                    String("LSP: no definition found"),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+                return
+            self.status_bar.set_message(
+                String("LSP: ready"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        # NotStarted: leave any existing message alone.
+
+    fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
+        """Focus the window for ``target.path`` (opening it if needed) and
+        move the cursor to ``(line, character)``."""
+        var existing = self._find_window_for_path(target.path)
+        if existing < 0:
+            try:
+                self.open_file(target.path, screen)
+            except:
+                return
+            existing = len(self.windows.windows) - 1
+        else:
+            self.windows.focus_by_index(existing)
+        if existing < 0 or existing >= len(self.windows.windows):
+            return
+        if not self.windows.windows[existing].is_editor:
+            return
+        self.windows.windows[existing].editor.move_to(
+            target.line, target.character, False, True,
+        )
+        self.windows.windows[existing].editor.reveal_cursor(
+            self.windows.windows[existing].interior(),
+        )
+
+    fn _find_window_for_path(self, path: String) -> Int:
+        """Return the index of an existing editor window whose file_path
+        matches ``path`` (raw or canonicalized), or -1."""
+        var canon = realpath(path)
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var fp = self.windows.windows[i].editor.file_path
+            if fp == path:
+                return i
+            if len(canon.as_bytes()) > 0 and realpath(fp) == canon:
+                return i
+        return -1
+
     # --- editor-action helpers --------------------------------------------
 
     fn _focused_editor_idx(self) -> Int:
@@ -763,6 +918,28 @@ fn _parse_int(s: String, start: Int) -> Int:
     if not any:
         return -1
     return n
+
+
+fn _mojo_include_dirs(root: String) -> List[String]:
+    """``-I`` paths for ``mojo-lsp-server``: the project root, plus
+    ``<root>/src`` if it exists.
+
+    Without these the server can resolve ``from sys import ...`` but not
+    ``from <project> import ...`` — every Cmd+click on a project symbol
+    comes back empty. The ``src/`` subdirectory is a near-universal Mojo
+    project convention (matches ``mojo run -I src ...`` in this repo's
+    own ``run.sh``); covering it plus the root keeps both flat and
+    src-style layouts working without any per-project configuration.
+    """
+    var dirs = List[String]()
+    if len(root.as_bytes()) == 0:
+        return dirs^
+    dirs.append(root)
+    var src = join_path(root, String("src"))
+    var info = stat_file(src)
+    if info.ok and info.is_dir():
+        dirs.append(src)
+    return dirs^
 
 
 # --- Result / summary windows for project search ----------------------------

@@ -1701,11 +1701,13 @@ fn test_editor_paint_overlays_highlight_attr() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_ctrl_click_emits_definition_request() raises:
+fn test_editor_alt_click_emits_definition_request() raises:
+    # Cmd+click in iTerm2 is delivered to the app as Left+Alt — the editor
+    # treats Alt+left-click as the goto-definition trigger.
     var ed = Editor(String("foo bar baz"))
     var ev = Event.mouse_event(
         Point(4, 0), MOUSE_BUTTON_LEFT,
-        pressed=True, motion=False, mods=MOD_CTRL,
+        pressed=True, motion=False, mods=MOD_ALT,
     )
     _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
     var req = ed.consume_definition_request()
@@ -1714,19 +1716,19 @@ fn test_editor_ctrl_click_emits_definition_request() raises:
     assert_equal(dr.row, 0)
     assert_equal(dr.col, 4)
     assert_equal(dr.word, String("bar"))
-    # The cursor must NOT have moved (Ctrl+click is non-mutating).
+    # The cursor must NOT have moved (Alt+click is non-mutating).
     assert_equal(ed.cursor_col, 0)
     # And the slot is consumed: a second poll returns empty.
     var req2 = ed.consume_definition_request()
     assert_false(Bool(req2))
 
 
-fn test_editor_ctrl_click_outside_identifier_is_silent() raises:
+fn test_editor_alt_click_outside_identifier_is_silent() raises:
     var ed = Editor(String("foo  bar"))
     # Click on the space between words.
     var ev = Event.mouse_event(
         Point(3, 0), MOUSE_BUTTON_LEFT,
-        pressed=True, motion=False, mods=MOD_CTRL,
+        pressed=True, motion=False, mods=MOD_ALT,
     )
     _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
     var req = ed.consume_definition_request()
@@ -2475,8 +2477,8 @@ fn main() raises:
     test_highlight_unknown_extension_returns_empty()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
-    test_editor_ctrl_click_emits_definition_request()
-    test_editor_ctrl_click_outside_identifier_is_silent()
+    test_editor_alt_click_emits_definition_request()
+    test_editor_alt_click_outside_identifier_is_silent()
     test_quick_open_match_rules()
     test_quick_open_match_word_boundary_kinds()
     test_quick_open_filters_as_you_type()
