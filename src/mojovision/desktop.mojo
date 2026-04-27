@@ -1,17 +1,21 @@
-"""Desktop: combines menu bar, window manager, status bar, and a hatched background.
+"""Desktop: combines menu bar, window manager, status bar, hatched background,
+modal prompt, and a project file tree — wired together so the host app only
+has to deal with app-policy actions (quit / open file / focus a window).
 
-The high-level entry point most apps will use. Construct one ``Desktop``, add
-menus / windows / status items, then in the loop:
+Idiomatic usage::
 
-    desktop.paint(app.back, app.screen())
-    var ev = app.next_event(50)
-    if ev:
-        var action = desktop.handle_event(ev.value(), app.screen())
-        if action:
-            ... dispatch action ...
+    while app.running:
+        desktop.paint(app.back, app.screen())
+        var ev = app.next_event(50)
+        if ev:
+            var action = desktop.handle_event(ev.value(), app.screen())
+            if action:
+                ... dispatch app-specific actions (quit, file:open, ...)
 
-The Desktop owns event routing: menu bar gets first dibs (clicks on the top row
-or in an open dropdown), and otherwise the event flows to the window manager.
+The Desktop intercepts the standard editor / project actions itself — see the
+``EDITOR_*`` / ``PROJECT_*`` action constants below. The app menu just lists
+items with those action strings and the dispatch is automatic. Anything the
+Desktop doesn't recognize is returned for the caller to handle.
 
 Project state (the directory containing the most recently opened file's
 nearest ``.git`` ancestor) lives here too. The first call to
@@ -25,19 +29,46 @@ from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .colors import Attr, BLUE, LIGHT_GRAY
-from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
+from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ESC, MOUSE_BUTTON_LEFT
 from .file_io import basename, find_git_project
 from .file_tree import FileTree
 from .geometry import Rect
 from .menu import Menu, MenuBar, MenuItem
+from .project import ProjectMatch, find_in_project, replace_in_project
+from .prompt import Prompt
 from .status import StatusBar
-from .window import WindowManager
+from .window import Window, WindowManager
 
 
+# --- Public action strings --------------------------------------------------
+# The Desktop intercepts these; menu items wired to them work without any
+# additional code on the application side.
+
+comptime EDITOR_SAVE          = String("file:save")
+comptime EDITOR_SAVE_AS       = String("file:save_as")
+comptime EDITOR_FIND          = String("edit:find")
+comptime EDITOR_REPLACE       = String("edit:replace")
+comptime EDITOR_GOTO          = String("edit:goto")
+comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
+comptime EDITOR_TOGGLE_CASE   = String("edit:case")
+comptime PROJECT_FIND         = String("edit:project_find")
+comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
+
+# When ESC fires at the top level (no menu open, no prompt active), the
+# Desktop returns this so the app can decide whether to quit, ignore, etc.
+comptime APP_QUIT_ACTION      = String("quit")
+
 comptime _SHOW_TREE_LABEL = String("Show file tree")
 comptime _HIDE_TREE_LABEL = String("Hide file tree")
+
+# Internal pending-action values for two-step prompts (find → replace).
+comptime _PA_REPLACE_FIND        = String("__pa_replace_find")
+comptime _PA_REPLACE_DO          = String("__pa_replace_do")
+comptime _PA_PROJECT_REPLACE_FIND = String("__pa_project_replace_find")
+comptime _PA_PROJECT_REPLACE_DO  = String("__pa_project_replace_do")
+comptime _PA_SAVE_AS             = String("__pa_save_as")
 
 
 struct Desktop(Movable):
@@ -45,20 +76,26 @@ struct Desktop(Movable):
     var windows: WindowManager
     var status_bar: StatusBar
     var file_tree: FileTree
+    var prompt: Prompt
     var bg_pattern: String
     var bg_attr: Attr
     var project: Optional[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
+    var _pending_action: String      # what to do on next prompt submit
+    var _pending_arg: String         # accumulator for two-step prompts
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
         self.windows = WindowManager()
         self.status_bar = StatusBar()
         self.file_tree = FileTree()
+        self.prompt = Prompt()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
         self.project = Optional[String]()
         self._project_menu_idx = -1
+        self._pending_action = String("")
+        self._pending_arg = String("")
 
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
@@ -80,6 +117,8 @@ struct Desktop(Movable):
         self.file_tree.paint(canvas, screen)
         self.menu_bar.paint(canvas, screen)
         self.status_bar.paint(canvas, screen)
+        # Modal prompt floats above everything else.
+        self.prompt.paint(canvas, screen)
 
     # --- project state -----------------------------------------------------
 
@@ -133,26 +172,226 @@ struct Desktop(Movable):
     # --- events ------------------------------------------------------------
 
     fn handle_event(mut self, event: Event, screen: Rect) -> Optional[String]:
-        """Returns the action string of any clicked menu item.
+        """Single entry point for every event the app receives.
 
-        ``project:close`` and ``project:tree:toggle`` are intercepted here —
-        the desktop owns project + tree state, so the app loop doesn't need
-        to dispatch them.
+        The Desktop handles the prompt-modal lifecycle, mouse routing, and
+        all editor / project actions internally. ESC at the top level (no
+        menu / no prompt) returns ``APP_QUIT_ACTION`` so the app can choose
+        whether to actually quit. Anything else the Desktop doesn't claim
+        is returned verbatim for the caller to dispatch.
         """
+        if self.prompt.active:
+            if event.kind == EVENT_KEY:
+                _ = self.prompt.handle_key(event)
+                if self.prompt.submitted:
+                    return self._on_prompt_submit()
+            return Optional[String]()
+        if event.kind == EVENT_KEY:
+            return self._handle_key(event)
+        # Mouse events (and everything else): route through menu → tree → windows.
         var result = self.menu_bar.handle_event(event, screen.b.x)
         if result.action:
-            var action = result.action.value()
-            if action == PROJECT_CLOSE_ACTION:
-                self.close_project()
-                return Optional[String]()
-            if action == PROJECT_TREE_ACTION:
-                self._toggle_file_tree()
-                return Optional[String]()
-            return result.action
+            return self.dispatch_action(result.action.value())
         if result.consumed:
             return Optional[String]()
-        # File tree gets first dibs on clicks in the docked area.
         if self.file_tree.handle_mouse(event, screen):
             return Optional[String]()
         _ = self.windows.handle_mouse(event, self.workspace_rect(screen))
         return Optional[String]()
+
+    fn _handle_key(mut self, event: Event) -> Optional[String]:
+        if event.key == KEY_ESC:
+            if self.menu_bar.is_open():
+                self.menu_bar.close()
+                return Optional[String]()
+            return Optional[String](APP_QUIT_ACTION)
+        _ = self.windows.handle_key(event)
+        return Optional[String]()
+
+    fn dispatch_action(mut self, action: String) -> Optional[String]:
+        """Execute a framework-recognized action; pass anything else back.
+
+        Apps can call this to bind keyboard shortcuts to action strings
+        without going through the menu bar.
+        """
+        if action == PROJECT_CLOSE_ACTION:
+            self.close_project()
+            return Optional[String]()
+        if action == PROJECT_TREE_ACTION:
+            self._toggle_file_tree()
+            return Optional[String]()
+        if action == EDITOR_SAVE:
+            self._do_save()
+            return Optional[String]()
+        if action == EDITOR_SAVE_AS:
+            self._open_save_as_prompt()
+            return Optional[String]()
+        if action == EDITOR_FIND:
+            self._pending_action = EDITOR_FIND
+            self.prompt.open(String("Find: "))
+            return Optional[String]()
+        if action == EDITOR_REPLACE:
+            self._pending_action = _PA_REPLACE_FIND
+            self.prompt.open(String("Replace — find: "))
+            return Optional[String]()
+        if action == EDITOR_GOTO:
+            self._pending_action = EDITOR_GOTO
+            self.prompt.open(String("Go to line: "))
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_COMMENT:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                self.windows.windows[self.windows.focused].editor.toggle_comment()
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_CASE:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                self.windows.windows[self.windows.focused].editor.toggle_case()
+            return Optional[String]()
+        if action == PROJECT_FIND:
+            if self.project:
+                self._pending_action = PROJECT_FIND
+                self.prompt.open(String("Find in project: "))
+            return Optional[String]()
+        if action == PROJECT_REPLACE:
+            if self.project:
+                self._pending_action = _PA_PROJECT_REPLACE_FIND
+                self.prompt.open(String("Replace in project — find: "))
+            return Optional[String]()
+        return Optional[String](action)
+
+    # --- editor-action helpers --------------------------------------------
+
+    fn _focused_editor_idx(self) -> Int:
+        if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
+            return -1
+        if not self.windows.windows[self.windows.focused].is_editor:
+            return -1
+        return self.windows.focused
+
+    fn _do_save(mut self):
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var has_path = len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0
+        if has_path:
+            try:
+                _ = self.windows.windows[idx].editor.save()
+            except:
+                pass
+            return
+        # No backing file — escalate to Save As.
+        self._open_save_as_prompt()
+
+    fn _open_save_as_prompt(mut self):
+        var idx = self._focused_editor_idx()
+        var prefill = String("")
+        if idx >= 0:
+            prefill = self.windows.windows[idx].editor.file_path
+        self._pending_action = _PA_SAVE_AS
+        self.prompt.open(String("Save as: "), prefill)
+
+    fn _on_prompt_submit(mut self) -> Optional[String]:
+        var text = self.prompt.input
+        self.prompt.close()
+        var pa = self._pending_action
+        self._pending_action = String("")
+        if pa == EDITOR_FIND:
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                _ = self.windows.windows[idx].editor.find_next(text)
+            return Optional[String]()
+        if pa == EDITOR_GOTO:
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                var n = 0
+                if len(text.as_bytes()) > 0:
+                    try:
+                        n = Int(atol(text))
+                    except:
+                        n = 0
+                self.windows.windows[idx].editor.goto_line(n)
+            return Optional[String]()
+        if pa == _PA_SAVE_AS:
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                try:
+                    _ = self.windows.windows[idx].editor.save_as(text)
+                except:
+                    pass
+            return Optional[String]()
+        if pa == _PA_REPLACE_FIND:
+            self._pending_arg = text
+            self._pending_action = _PA_REPLACE_DO
+            self.prompt.open(String("Replace with: "))
+            return Optional[String]()
+        if pa == _PA_REPLACE_DO:
+            var find = self._pending_arg
+            self._pending_arg = String("")
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                _ = self.windows.windows[idx].editor.replace_all(find, text)
+            return Optional[String]()
+        if pa == PROJECT_FIND:
+            if self.project:
+                try:
+                    var matches = find_in_project(self.project.value(), text)
+                    self.windows.add(_results_window(
+                        String("Find: ") + text, matches,
+                    ))
+                except:
+                    pass
+            return Optional[String]()
+        if pa == _PA_PROJECT_REPLACE_FIND:
+            self._pending_arg = text
+            self._pending_action = _PA_PROJECT_REPLACE_DO
+            self.prompt.open(String("Replace in project with: "))
+            return Optional[String]()
+        if pa == _PA_PROJECT_REPLACE_DO:
+            var find = self._pending_arg
+            self._pending_arg = String("")
+            if self.project:
+                try:
+                    var summary = replace_in_project(
+                        self.project.value(), find, text,
+                    )
+                    self.windows.add(_summary_window(
+                        find, text, summary[0], summary[1],
+                    ))
+                except:
+                    pass
+            return Optional[String]()
+        return Optional[String]()
+
+
+# --- Result / summary windows for project search ----------------------------
+
+
+fn _results_window(
+    var title: String, matches: List[ProjectMatch],
+) -> Window:
+    var content = List[String]()
+    if len(matches) == 0:
+        content.append(String("(no matches)"))
+    else:
+        for i in range(len(matches)):
+            content.append(
+                matches[i].rel + String(":") + String(matches[i].line_no)
+                + String(": ") + matches[i].line_text,
+            )
+    return Window(title^, Rect(8, 5, 76, 22), content^)
+
+
+fn _summary_window(
+    find: String, replace: String, files_changed: Int, total: Int,
+) -> Window:
+    var content = List[String]()
+    content.append(String("Find:    ") + find)
+    content.append(String("Replace: ") + replace)
+    content.append(String(""))
+    content.append(
+        String("Replaced ") + String(total)
+        + String(" occurrence(s) in ")
+        + String(files_changed) + String(" file(s)."),
+    )
+    return Window(String("Replace in project"), Rect(10, 6, 64, 14), content^)

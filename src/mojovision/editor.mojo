@@ -22,7 +22,7 @@ from .events import (
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .file_io import FileInfo, read_file, stat_file
+from .file_io import FileInfo, read_file, stat_file, write_file
 from .geometry import Point, Rect
 
 
@@ -254,6 +254,106 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.anchor_row = self.cursor_row
         self.anchor_col = self.cursor_col
         return True
+
+    # --- saving ------------------------------------------------------------
+
+    fn _serialize(self) -> String:
+        """Concatenate buffer lines with ``\\n`` separators (no trailing
+        newline appended — a file that originally ended in ``\\n`` produces
+        a trailing empty line in the buffer, which round-trips correctly)."""
+        var out = String("")
+        var n = self.buffer.line_count()
+        for i in range(n):
+            if i > 0:
+                out = out + String("\n")
+            out = out + self.buffer.line(i)
+        return out
+
+    fn save(mut self) raises -> Bool:
+        """Write the buffer back to ``file_path``. Returns False if the
+        editor has no backing path (caller should trigger Save As) or the
+        write fails.
+        """
+        if len(self.file_path.as_bytes()) == 0:
+            return False
+        if not write_file(self.file_path, self._serialize()):
+            return False
+        # Refresh stat info so check_for_external_change doesn't pick up our
+        # own write as an external change.
+        var info = stat_file(self.file_path)
+        if info.ok:
+            self.file_size = info.size
+            self.file_mtime = info.mtime_sec
+        self.dirty = False
+        return True
+
+    fn save_as(mut self, var path: String) raises -> Bool:
+        """Write the buffer to ``path`` and adopt it as the new backing file."""
+        if not write_file(path, self._serialize()):
+            return False
+        self.file_path = path^
+        var info = stat_file(self.file_path)
+        if info.ok:
+            self.file_size = info.size
+            self.file_mtime = info.mtime_sec
+        self.dirty = False
+        return True
+
+    fn replace_all(mut self, find: String, replacement: String) -> Int:
+        """Replace every occurrence of ``find`` with ``replacement`` in the
+        buffer. Returns the number of replacements; sets ``dirty`` if > 0.
+        Does not move the cursor (caller may want to clamp it)."""
+        var fb = find.as_bytes()
+        var rb_len = len(replacement.as_bytes())
+        var n = len(fb)
+        if n == 0:
+            return 0
+        var count = 0
+        for row in range(self.buffer.line_count()):
+            var line = self.buffer.line(row)
+            var lb = line.as_bytes()
+            var h = len(lb)
+            if h < n:
+                continue
+            var rebuilt = String("")
+            var i = 0
+            var seg_start = 0
+            var line_changed = False
+            while i + n <= h:
+                var hit = True
+                for k in range(n):
+                    if lb[i + k] != fb[k]:
+                        hit = False
+                        break
+                if hit:
+                    if i > seg_start:
+                        rebuilt = rebuilt + String(StringSlice(
+                            unsafe_from_utf8=lb[seg_start:i]
+                        ))
+                    rebuilt = rebuilt + replacement
+                    i += n
+                    seg_start = i
+                    count += 1
+                    line_changed = True
+                else:
+                    i += 1
+            if line_changed:
+                if seg_start < h:
+                    rebuilt = rebuilt + String(StringSlice(
+                        unsafe_from_utf8=lb[seg_start:h]
+                    ))
+                self.buffer.lines[row] = rebuilt
+        if count > 0:
+            self.dirty = True
+            # Clamp the cursor (line lengths may have changed under it).
+            var max_row = self.buffer.line_count() - 1
+            if self.cursor_row > max_row: self.cursor_row = max_row
+            var nlen = self.buffer.line_length(self.cursor_row)
+            if self.cursor_col > nlen: self.cursor_col = nlen
+            self.anchor_row = self.cursor_row
+            self.anchor_col = self.cursor_col
+            _ = rb_len   # silence unused warning if compiler reports it
+        return count
 
     # --- selection state ---------------------------------------------------
 

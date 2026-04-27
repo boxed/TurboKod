@@ -29,14 +29,23 @@ from .events import (
     MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .clipboard import clipboard_copy, clipboard_paste
-from .desktop import Desktop
+from .desktop import (
+    APP_QUIT_ACTION,
+    Desktop,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
+    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+)
 from .editor import Editor, TextBuffer
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
-    parent_path, read_file, stat_file,
+    parent_path, read_file, stat_file, write_file,
 )
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
+from .project import (
+    ProjectMatch, find_in_project, replace_in_project, walk_project_files,
+)
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .prompt import Prompt

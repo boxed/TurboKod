@@ -6,6 +6,7 @@ Run with::
     mojo run -I src tests/test_basic.mojo
 """
 
+from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
 from mojovision.canvas import Canvas
@@ -14,14 +15,21 @@ from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
 from mojovision.editor import Editor, TextBuffer
 from mojovision.file_dialog import FileDialog
 from mojovision.desktop import (
-    Desktop, PROJECT_CLOSE_ACTION, PROJECT_TREE_ACTION,
+    APP_QUIT_ACTION,
+    Desktop,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
+    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
 )
 from mojovision.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
-    read_file, stat_file,
+    read_file, stat_file, write_file,
 )
 from mojovision.file_tree import FILE_TREE_WIDTH, FileTree
 from mojovision.menu import Menu, MenuBar, MenuItem
+from mojovision.project import (
+    find_in_project, replace_in_project, walk_project_files,
+)
 from mojovision.window import WindowManager
 from mojovision.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
@@ -687,6 +695,228 @@ fn test_window_manager_fit_into_moves_then_resizes() raises:
     assert_equal(wm.windows[1].rect.width(), 80)
 
 
+fn _temp_path(suffix: String) -> String:
+    """Cheap unique path under /tmp; pid+suffix is enough for our serial test
+    suite (no parallelism)."""
+    var pid = external_call["getpid", Int32]()
+    return String("/tmp/mojovision_test_") + String(Int(pid)) + suffix
+
+
+fn test_write_file_round_trip() raises:
+    var path = _temp_path(String("_rt.txt"))
+    var payload = String("line one\nline two\nno-trailing-newline")
+    assert_true(write_file(path, payload))
+    var got = read_file(path)
+    assert_equal(got, payload)
+    # Write a different payload — confirm it replaces, not appends.
+    var smaller = String("x")
+    assert_true(write_file(path, smaller))
+    assert_equal(read_file(path), smaller)
+    # Empty payload writes a zero-byte file.
+    assert_true(write_file(path, String("")))
+    assert_equal(read_file(path), String(""))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_save_clears_dirty() raises:
+    var path = _temp_path(String("_save.txt"))
+    assert_true(write_file(path, String("hello\nworld\n")))
+    var ed = Editor.from_file(path)
+    assert_false(ed.dirty)
+    _ = ed.handle_key(Event.key_event(KEY_END), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("!"))), _VIEW)
+    assert_true(ed.dirty)
+    assert_true(ed.save())
+    assert_false(ed.dirty)
+    var contents = read_file(path)
+    # First line was "hello"; cursor moved to its end before typing '!'.
+    var first_line = String(StringSlice(
+        unsafe_from_utf8=contents.as_bytes()[:6],
+    ))
+    assert_equal(first_line, String("hello!"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_save_as_adopts_path() raises:
+    var path = _temp_path(String("_saveas.txt"))
+    var ed = Editor(String("alpha\nbeta\n"))
+    assert_equal(ed.file_path, String(""))
+    assert_true(ed.save_as(path))
+    assert_equal(ed.file_path, path)
+    assert_false(ed.dirty)
+    assert_equal(read_file(path), String("alpha\nbeta\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_replace_all() raises:
+    var ed = Editor(String("foo bar foo\nfoo\nbaz\n"))
+    var n = ed.replace_all(String("foo"), String("XX"))
+    assert_equal(n, 3)
+    assert_true(ed.dirty)
+    assert_equal(ed.buffer.line(0), String("XX bar XX"))
+    assert_equal(ed.buffer.line(1), String("XX"))
+    assert_equal(ed.buffer.line(2), String("baz"))
+    # Replacing something absent reports zero.
+    var ed2 = Editor(String("nothing to do"))
+    assert_equal(ed2.replace_all(String("xxx"), String("yyy")), 0)
+    assert_false(ed2.dirty)
+    # Empty needle is a no-op (avoids infinite-loop semantics).
+    assert_equal(ed.replace_all(String(""), String("Q")), 0)
+
+
+fn test_walk_project_files_finds_known_files() raises:
+    """The repo root has examples/, src/, tests/ — all should be reachable."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var paths = walk_project_files(root.value())
+    assert_true(len(paths) > 5)
+    var saw_hello = False
+    var saw_test = False
+    var saw_dotfile = False
+    for i in range(len(paths)):
+        if _ends_with(paths[i], String("examples/hello.mojo")):
+            saw_hello = True
+        if _ends_with(paths[i], String("tests/test_basic.mojo")):
+            saw_test = True
+        # Anything under ``.git`` or ``.pixi`` would be a leak.
+        if _contains(paths[i], String("/.git/")) \
+                or _contains(paths[i], String("/.pixi/")):
+            saw_dotfile = True
+    assert_true(saw_hello)
+    assert_true(saw_test)
+    assert_false(saw_dotfile)
+
+
+fn _ends_with(s: String, suffix: String) -> Bool:
+    var sb = s.as_bytes()
+    var fb = suffix.as_bytes()
+    if len(fb) > len(sb):
+        return False
+    for i in range(len(fb)):
+        if sb[len(sb) - len(fb) + i] != fb[i]:
+            return False
+    return True
+
+
+fn _contains(s: String, sub: String) -> Bool:
+    var sb = s.as_bytes()
+    var nb = sub.as_bytes()
+    var n = len(nb)
+    var h = len(sb)
+    if n == 0:
+        return True
+    if n > h:
+        return False
+    for i in range(h - n + 1):
+        var hit = True
+        for k in range(n):
+            if sb[i + k] != nb[k]:
+                hit = False
+                break
+        if hit:
+            return True
+    return False
+
+
+fn test_find_in_project_locates_string() raises:
+    """Search the repo for a string that's known to live in exactly one place."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var matches = find_in_project(root.value(), String("Mojovision: a Mojo-idiomatic port"))
+    assert_true(len(matches) >= 1)
+    var found_in_init = False
+    for i in range(len(matches)):
+        if matches[i].rel == String("src/mojovision/__init__.mojo"):
+            found_in_init = True
+            assert_true(matches[i].line_no >= 1)
+    assert_true(found_in_init)
+
+
+fn test_desktop_dispatch_editor_save_passes_through_when_no_editor() raises:
+    """Save with no editor focused should be a no-op intercepted by Desktop —
+    the action does not bubble back to the caller."""
+    var d = Desktop()
+    var maybe = d.dispatch_action(EDITOR_SAVE)
+    assert_false(Bool(maybe))
+
+
+fn test_desktop_dispatch_passes_through_unknown_actions() raises:
+    var d = Desktop()
+    var maybe = d.dispatch_action(String("focus:About"))
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), String("focus:About"))
+
+
+fn test_desktop_dispatch_editor_save_writes_focused_editor() raises:
+    var path = _temp_path(String("_dsave.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("dsave.txt"), Rect(0, 1, 40, 12), path))
+    # Mark dirty by appending a char.
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    assert_true(d.windows.windows[0].editor.dirty)
+    var maybe = d.dispatch_action(EDITOR_SAVE)
+    assert_false(Bool(maybe))
+    assert_false(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path), String("hello!\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_desktop_replace_chains_two_prompts() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
+    ))
+    # Click "Replace..." → first prompt opens for "find".
+    _ = d.dispatch_action(EDITOR_REPLACE)
+    assert_true(d.prompt.active)
+    # Submit "foo" — Desktop should immediately re-open the prompt for "replace".
+    d.prompt.input = String("foo")
+    d.prompt.submitted = True
+    _ = d._on_prompt_submit()
+    assert_true(d.prompt.active)   # second prompt is open
+    # Submit "BAR" — the replacement actually happens now.
+    d.prompt.input = String("BAR")
+    d.prompt.submitted = True
+    _ = d._on_prompt_submit()
+    assert_false(d.prompt.active)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar BAR"))
+
+
+fn test_desktop_project_find_requires_active_project() raises:
+    var d = Desktop()
+    # No project: dispatch is a no-op (prompt never opens).
+    _ = d.dispatch_action(PROJECT_FIND)
+    assert_false(d.prompt.active)
+    # With a project: prompt opens.
+    d.detect_project_from(String("examples/hello.mojo"))
+    _ = d.dispatch_action(PROJECT_FIND)
+    assert_true(d.prompt.active)
+
+
+fn test_replace_in_project_round_trip() raises:
+    """Set up a tiny scratch tree, replace across it, verify writes."""
+    var root = _temp_path(String("_proj"))
+    _ = external_call["mkdir", Int32]((root + String("\0")).unsafe_ptr(), Int32(0o755))
+    var a = join_path(root, String("a.txt"))
+    var b = join_path(root, String("b.txt"))
+    assert_true(write_file(a, String("alpha foo gamma\n")))
+    assert_true(write_file(b, String("foo foo\nno match\n")))
+    var summary = replace_in_project(root, String("foo"), String("BAR"))
+    assert_equal(summary[0], 2)   # both files changed
+    assert_equal(summary[1], 3)   # 1 + 2 replacements
+    assert_equal(read_file(a), String("alpha BAR gamma\n"))
+    assert_equal(read_file(b), String("BAR BAR\nno match\n"))
+    _ = external_call["unlink", Int32]((a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((b + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
 fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
     var wm = WindowManager()
     var w = Window(String("M"), Rect(0, 1, 100, 25), List[String]())
@@ -1069,6 +1299,18 @@ fn main() raises:
     test_desktop_workspace_shrinks_with_file_tree()
     test_window_manager_fit_into_moves_then_resizes()
     test_window_manager_fit_into_keeps_maximized_pinned()
+    test_write_file_round_trip()
+    test_editor_save_clears_dirty()
+    test_editor_save_as_adopts_path()
+    test_editor_replace_all()
+    test_walk_project_files_finds_known_files()
+    test_find_in_project_locates_string()
+    test_desktop_dispatch_editor_save_passes_through_when_no_editor()
+    test_desktop_dispatch_passes_through_unknown_actions()
+    test_desktop_dispatch_editor_save_writes_focused_editor()
+    test_desktop_replace_chains_two_prompts()
+    test_desktop_project_find_requires_active_project()
+    test_replace_in_project_round_trip()
     test_file_dialog_lists_and_navigates()
     test_partial_sgr_mouse_does_not_emit_esc()
     test_sgr_mouse_wheel_up()

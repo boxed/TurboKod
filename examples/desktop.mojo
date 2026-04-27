@@ -12,21 +12,27 @@ Keyboard:
     shift+ctrl+arrow extends by word
   * Ctrl+C / Ctrl+X / Ctrl+V copy / cut / paste via the system clipboard
   * Edit menu (visible only when an editor window is focused): Find,
-    Go to Line, Toggle Comment, Toggle Case
+    Replace, Find/Replace in project, Go to Line, Toggle Comment, Toggle Case
   * ESC quits (and closes any open menu / dialog first)
 
 Run with::
 
     pixi run desktop                                  # demo windows
     ./run.sh examples/desktop.mojo path/to/file.txt   # open file(s)
+
+The Desktop owns all the standard editor / project actions (save, find,
+replace, project search, etc.). The demo only handles app-policy actions:
+opening a file dialog, focusing demo windows, quitting.
 """
 
 from std.collections.list import List
 from std.sys import argv
 
 from mojovision import (
-    Application, Desktop, FileDialog, Menu, MenuItem, Prompt, Rect,
-    StatusItem, Window, EVENT_KEY, KEY_ESC,
+    APP_QUIT_ACTION, Application, Desktop, FileDialog, Menu, MenuItem, Rect,
+    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE,
 )
 
 
@@ -60,20 +66,23 @@ fn main() raises:
     app.start()
     try:
         var desktop = Desktop()
-        var prompt = Prompt()
         var file_dialog = FileDialog()
-        var pending_action = String("")   # remembers Find vs Goto when prompt closes
 
         desktop.menu_bar.add(_mk_menu(String("File"),
             (String("New"), String("noop")),
             (String("Open..."), String("file:open")),
-            (String("Quit"), String("quit")),
+            (String("Save"), EDITOR_SAVE),
+            (String("Save as..."), EDITOR_SAVE_AS),
+            (String("Quit"), APP_QUIT_ACTION),
         ))
         desktop.menu_bar.add(_mk_menu(String("Edit"),
-            (String("Find..."), String("edit:find")),
-            (String("Go to Line..."), String("edit:goto")),
-            (String("Toggle Comment"), String("edit:comment")),
-            (String("Toggle Case"), String("edit:case")),
+            (String("Find..."), EDITOR_FIND),
+            (String("Replace..."), EDITOR_REPLACE),
+            (String("Find in project..."), PROJECT_FIND),
+            (String("Replace in project..."), PROJECT_REPLACE),
+            (String("Go to Line..."), EDITOR_GOTO),
+            (String("Toggle Comment"), EDITOR_TOGGLE_COMMENT),
+            (String("Toggle Case"), EDITOR_TOGGLE_CASE),
         ))
         desktop.menu_bar.add(_mk_menu(String("Window"),
             (String("Editor"), String("focus:editor.txt")),
@@ -161,7 +170,6 @@ fn main() raises:
 
             app.clear()
             desktop.paint(app.back, app.screen())
-            prompt.paint(app.back, app.screen())
             file_dialog.paint(app.back, app.screen())
             try:
                 app.present()
@@ -192,39 +200,10 @@ fn main() raises:
                         pass
                 continue
 
-            # Modal: prompt eats every key while open.
-            if prompt.active:
-                if ev.kind == EVENT_KEY:
-                    _ = prompt.handle_key(ev)
-                    if prompt.submitted:
-                        var text = prompt.input
-                        prompt.close()
-                        if pending_action == String("edit:find"):
-                            if desktop.windows.focused >= 0:
-                                _ = desktop.windows.windows[desktop.windows.focused] \
-                                    .editor.find_next(text)
-                        elif pending_action == String("edit:goto"):
-                            var n = atol(text) if len(text.as_bytes()) > 0 else 0
-                            if desktop.windows.focused >= 0:
-                                desktop.windows.windows[desktop.windows.focused] \
-                                    .editor.goto_line(Int(n))
-                        pending_action = String("")
-                continue
-
-            if ev.kind == EVENT_KEY:
-                if ev.key == KEY_ESC:
-                    if desktop.menu_bar.is_open():
-                        desktop.menu_bar.close()
-                    else:
-                        app.quit()
-                else:
-                    _ = desktop.windows.handle_key(ev)
-                continue
-
             var maybe_action = desktop.handle_event(ev, app.screen())
             if maybe_action:
                 var action = maybe_action.value()
-                if action == String("quit"):
+                if action == APP_QUIT_ACTION:
                     app.quit()
                 elif action == String("file:open"):
                     file_dialog.open(String("."))
@@ -234,20 +213,6 @@ fn main() raises:
                     desktop.windows.focus_by_title(String("Mouse"))
                 elif action == String("focus:About"):
                     desktop.windows.focus_by_title(String("About"))
-                elif action == String("edit:find"):
-                    pending_action = String("edit:find")
-                    prompt.open(String("Find: "))
-                elif action == String("edit:goto"):
-                    pending_action = String("edit:goto")
-                    prompt.open(String("Go to line: "))
-                elif action == String("edit:comment"):
-                    if desktop.windows.focused >= 0:
-                        desktop.windows.windows[desktop.windows.focused] \
-                            .editor.toggle_comment()
-                elif action == String("edit:case"):
-                    if desktop.windows.focused >= 0:
-                        desktop.windows.windows[desktop.windows.focused] \
-                            .editor.toggle_case()
     finally:
         app.stop()
         for i in range(len(error_log)):

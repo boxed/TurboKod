@@ -12,6 +12,8 @@ target platform — the offsets *will* differ.
 from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
+from std.io.file_descriptor import FileDescriptor
+from std.memory.span import Span
 from std.os import listdir
 from std.sys.info import CompilationTarget
 
@@ -97,10 +99,25 @@ fn read_file(path: String) raises -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=got))
 
 
-# Note: writing files (and therefore Save) needs ``open`` with ``O_CREAT``,
-# which uses ``open``'s variadic third argument. Mojo's ``external_call``
-# doesn't model variadic ABI, so a clean ``write_file`` is on hold until we
-# either ship a tiny C shim or Mojo learns to call variadic functions.
+fn write_file(path: String, content: String) -> Bool:
+    """Write ``content`` to ``path``, replacing any existing file. Returns
+    True on success.
+
+    Uses ``creat(2)`` — equivalent to ``open(O_WRONLY|O_CREAT|O_TRUNC, 0644)``
+    but non-variadic, so it works through Mojo's ``external_call``. We then
+    write via ``FileDescriptor.write_bytes`` because ``external_call["write"]``
+    collides with a stdlib registration of the same symbol.
+    """
+    var c_path = path + String("\0")
+    var fd = external_call["creat", Int32](c_path.unsafe_ptr(), Int32(0o644))
+    if fd < 0:
+        return False
+    var bytes = content.as_bytes()
+    if len(bytes) > 0:
+        var f = FileDescriptor(Int(fd))
+        f.write_bytes(bytes)
+    _ = external_call["close", Int32](fd)
+    return True
 
 
 # --- Directory listing -----------------------------------------------------
