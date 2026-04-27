@@ -341,6 +341,31 @@ struct ProjectFind(Movable):
             var b = Int(bytes[i])
             var ch = chr(b) if b < 0x80 else String("?")
             canvas.set(line_x + (i - start), y, Cell(ch, row_attr, 1))
+        # Syntax-highlight overlay (attr-only). Skipped on the selected
+        # row because the solid yellow selection background clashes with
+        # the highlighter's blue-background palette — keeping the
+        # selection a clean color block reads better than mixing the two.
+        # We tokenize just this one line, so a token that opened on a
+        # prior line (e.g. a triple-quoted string) won't be recognized;
+        # acceptable for a one-line preview.
+        if not is_sel:
+            var one_line = List[String]()
+            one_line.append(line_stripped)
+            var hls = highlight_for_extension(
+                extension_of(m.path), one_line,
+            )
+            for h in range(len(hls)):
+                var hl = hls[h]
+                if hl.row != 0:
+                    continue
+                var hs = hl.col_start
+                var he = hl.col_end
+                if hs < start: hs = start
+                if he > end:   he = end
+                for i in range(hs, he):
+                    var b = Int(bytes[i])
+                    var ch = chr(b) if b < 0x80 else String("?")
+                    canvas.set(line_x + (i - start), y, Cell(ch, hl.attr, 1))
         # Highlight overlay for the hit.
         if hit >= 0 and len(self.query.as_bytes()) > 0:
             var hl_start = hit

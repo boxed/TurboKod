@@ -29,7 +29,7 @@ from .lsp import (
     LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
 )
-from .posix import realpath
+from .posix import realpath, which
 
 
 # --- State -----------------------------------------------------------------
@@ -145,29 +145,27 @@ struct LspManager(Movable):
     fn symbols_empty(self) -> Bool:
         return self._symbols_empty
 
+    fn language_id(self) -> String:
+        return self._language_id
+
     # --- lifecycle ---------------------------------------------------------
 
-    fn start_mojo(mut self, root_path: String, include_dirs: List[String]):
-        """Spawn ``mojo-lsp-server`` and send the ``initialize`` request.
+    fn start_with(
+        mut self, language_id: String, argv: List[String], root_path: String,
+    ):
+        """Generic spawn: ``argv`` is the server command, ``language_id``
+        is what we tag every ``didOpen``'d document with.
 
-        ``include_dirs`` are passed through as ``-I <dir>`` CLI flags — the
-        same flags ``mojo run`` accepts. Without these the server can't
-        resolve any ``from <project> import ...`` and every Cmd+click on
-        a project symbol comes back empty.
-
-        Idempotent: a second call after a successful start is a no-op.
-        Failures (server binary missing, spawn fails) latch to FAILED so
-        we don't keep retrying every frame.
+        Idempotent on a second call after a successful start. On failure
+        latches to FAILED so we don't keep retrying every frame. Callers
+        that want a multi-binary fallback (e.g. ``start_python``) should
+        check ``which()`` themselves before calling and only invoke this
+        once they've picked an actually-installed binary.
         """
         if self.state != _STATE_NOT_STARTED:
             return
-        self._language_id = String("mojo")
+        self._language_id = language_id
         self._root_uri = _path_to_uri(root_path) if len(root_path.as_bytes()) > 0 else String("")
-        var argv = List[String]()
-        argv.append(String("mojo-lsp-server"))
-        for i in range(len(include_dirs)):
-            argv.append(String("-I"))
-            argv.append(include_dirs[i])
         try:
             self.client = LspClient.spawn(argv)
         except e:
@@ -183,6 +181,54 @@ struct LspManager(Movable):
             self.failure_reason = String("initialize failed: ") + String(e)
             return
         self.state = _STATE_INITIALIZING
+
+    fn start_mojo(mut self, root_path: String, include_dirs: List[String]):
+        """Spawn ``mojo-lsp-server``. ``include_dirs`` map to ``-I <dir>``
+        CLI flags — without these the server can't resolve project
+        imports and every Cmd+click comes back empty."""
+        var argv = List[String]()
+        argv.append(String("mojo-lsp-server"))
+        for i in range(len(include_dirs)):
+            argv.append(String("-I"))
+            argv.append(include_dirs[i])
+        self.start_with(String("mojo"), argv, root_path)
+
+    fn start_python(mut self, root_path: String) -> Bool:
+        """Try the available Python LSP servers in priority order.
+
+        Returns True if a candidate was found and a spawn was attempted
+        (success vs. FAILED is then exposed via ``is_ready``/``is_failed``
+        like any other server). Returns False when no candidate is on
+        ``$PATH`` so callers can keep the manager NOT_STARTED and skip
+        the LSP-related status messages — there's no point spamming
+        "still starting up" if the user never installed a server.
+
+        Order: ``pyright-langserver --stdio`` → ``basedpyright-langserver
+        --stdio`` → ``pylsp``. Pyright is the de-facto modern default;
+        basedpyright is the community fork; pylsp covers older setups.
+        """
+        if self.state != _STATE_NOT_STARTED:
+            return True
+        # ``pyright-langserver --stdio`` is what the official VS Code /
+        # Neovim integrations use; mirror that wire-up.
+        if len(which(String("pyright-langserver")).as_bytes()) > 0:
+            var argv = List[String]()
+            argv.append(String("pyright-langserver"))
+            argv.append(String("--stdio"))
+            self.start_with(String("python"), argv, root_path)
+            return True
+        if len(which(String("basedpyright-langserver")).as_bytes()) > 0:
+            var argv = List[String]()
+            argv.append(String("basedpyright-langserver"))
+            argv.append(String("--stdio"))
+            self.start_with(String("python"), argv, root_path)
+            return True
+        if len(which(String("pylsp")).as_bytes()) > 0:
+            var argv = List[String]()
+            argv.append(String("pylsp"))
+            self.start_with(String("python"), argv, root_path)
+            return True
+        return False
 
     fn shutdown(mut self):
         """Best-effort: terminate the child if alive. Idempotent."""

@@ -414,6 +414,44 @@ fn getenv_value(name: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=n))
 
 
+fn which(name: String) -> String:
+    """Locate ``name`` on ``$PATH`` and return its absolute path, or "".
+
+    Walks ``PATH`` left-to-right, joins each entry with ``name``, and
+    checks for an executable file via ``access(F_OK)`` + ``stat``. We
+    don't shell out to ``which``: that would be a circular dependency
+    when we're trying to discover whether a binary exists at all.
+    """
+    if len(name.as_bytes()) == 0:
+        return String("")
+    # If the name already contains a slash, it's a path — accept verbatim.
+    var nb = name.as_bytes()
+    for i in range(len(nb)):
+        if nb[i] == 0x2F:
+            return name
+    var path_var = getenv_value(String("PATH"))
+    var pb = path_var.as_bytes()
+    var start = 0
+    var i = 0
+    while i <= len(pb):
+        if i == len(pb) or pb[i] == 0x3A:
+            if i > start:
+                var entry = String(StringSlice(unsafe_from_utf8=pb[start:i]))
+                var candidate = entry + String("/") + name
+                var c_path = candidate + String("\0")
+                # F_OK = 0 — just check existence; let posix_spawnp fail
+                # later if it's not actually executable. Most binaries
+                # users care about (rg, pyright, pylsp) are flagged +x.
+                var rc = external_call["access", Int32](
+                    c_path.unsafe_ptr(), Int32(0),
+                )
+                if Int(rc) == 0:
+                    return candidate
+            start = i + 1
+        i += 1
+    return String("")
+
+
 fn realpath(path: String) -> String:
     """Return the canonical absolute form of ``path``, or empty on error.
 

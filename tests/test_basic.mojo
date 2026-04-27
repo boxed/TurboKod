@@ -1070,13 +1070,13 @@ fn test_desktop_maximize_all_and_restore_all() raises:
 
 fn test_desktop_project_find_requires_active_project() raises:
     var d = Desktop()
-    # No project: dispatch is a no-op (prompt never opens).
+    # No project: dispatch is a no-op (the modal stays closed).
     _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
-    assert_false(d.prompt.active)
-    # With a project: prompt opens.
+    assert_false(d.project_find.active)
+    # With a project: the fullscreen find UI opens.
     d.detect_project_from(String("examples/hello.mojo"))
     _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
-    assert_true(d.prompt.active)
+    assert_true(d.project_find.active)
 
 
 fn test_window_manager_close_focused() raises:

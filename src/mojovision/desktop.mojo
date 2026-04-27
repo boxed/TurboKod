@@ -44,7 +44,7 @@ from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Rect
-from .highlight import extension_of
+from .highlight import DefinitionRequest, extension_of
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms
@@ -202,7 +202,14 @@ struct Desktop(Movable):
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
     var _esc_armed: Bool             # next keystroke is Alt+<letter> (mnemonic)
-    var lsp: LspManager              # one server (mojo-lsp-server today)
+    # One ``LspManager`` per language id. Spawned lazily by
+    # ``_ensure_lsp_for_extension`` when a file of that type is first
+    # opened — there's no LSP cost for users who never touch one.
+    # Separate fields rather than ``List[LspManager]`` because Mojo's
+    # ``List`` requires ``Copyable`` and managers own non-copyable
+    # process / pipe state.
+    var lsp_mojo: LspManager
+    var lsp_python: LspManager
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -223,7 +230,8 @@ struct Desktop(Movable):
         self._open_count = 0
         self._hotkeys = List[Hotkey]()
         self._esc_armed = False
-        self.lsp = LspManager()
+        self.lsp_mojo = LspManager()
+        self.lsp_python = LspManager()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -350,8 +358,11 @@ struct Desktop(Movable):
         self._maybe_lsp_open(len(self.windows.windows) - 1)
 
     fn _maybe_lsp_open(mut self, idx: Int):
-        """If the window at ``idx`` is an editor for a Mojo source file,
-        ensure the LSP server is started and inform it of this document."""
+        """If the window at ``idx`` is an editor for a recognized source
+        file type, ensure the matching LSP server is started and inform
+        it of this document. Languages without an installed server are
+        a silent no-op (e.g. ``.py`` files when the user has neither
+        pyright nor pylsp on PATH)."""
         if idx < 0 or idx >= len(self.windows.windows):
             return
         if not self.windows.windows[idx].is_editor:
@@ -359,16 +370,61 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var ext = extension_of(path)
-        if ext != String("mojo") and ext != String("🔥"):
+        var lang = self._ensure_lsp_for_extension(extension_of(path))
+        if lang == String(""):
             return
+        var text = self.windows.windows[idx].editor.text_snapshot()
+        if lang == String("mojo"):
+            self.lsp_mojo.notify_opened(path, text^)
+        elif lang == String("python"):
+            self.lsp_python.notify_opened(path, text^)
+
+    fn _lang_for_extension(self, ext: String) -> String:
+        """Map a file extension to the language id its LSP manager (if
+        any) registers under. Returns "" for languages we don't support."""
+        if ext == String("mojo") or ext == String("🔥"):
+            return String("mojo")
+        if ext == String("py") or ext == String("pyi"):
+            return String("python")
+        return String("")
+
+    fn _ensure_lsp_for_extension(mut self, ext: String) -> String:
+        """Spawn the matching server on first use and return its language
+        id. Returns "" for unsupported file types or when no server
+        binary is installed (so the caller can quietly skip LSP wiring
+        for that file). Idempotent — re-calling for an already-spawned
+        language is a no-op.
+        """
+        var lang = self._lang_for_extension(ext)
+        if lang == String(""):
+            return String("")
         var root = String("")
         if self.project:
             root = self.project.value()
-        self.lsp.start_mojo(root, _mojo_include_dirs(root))
-        self.lsp.notify_opened(
-            path, self.windows.windows[idx].editor.text_snapshot(),
-        )
+        if lang == String("mojo"):
+            if self.lsp_mojo.is_not_started():
+                self.lsp_mojo.start_mojo(root, _mojo_include_dirs(root))
+            return lang
+        if lang == String("python"):
+            if self.lsp_python.is_not_started():
+                if not self.lsp_python.start_python(root):
+                    # No Python LSP on PATH; report that to the caller
+                    # as "not supported" so we don't fake a starting state.
+                    return String("")
+            return lang
+        return String("")
+
+    fn _lsp_lang_for_path(self, path: String) -> String:
+        """Language id of the spawned server handling ``path``, or "" if
+        no server has been spawned for that file's extension."""
+        if len(path.as_bytes()) == 0:
+            return String("")
+        var lang = self._lang_for_extension(extension_of(path))
+        if lang == String("mojo") and not self.lsp_mojo.is_not_started():
+            return lang
+        if lang == String("python") and not self.lsp_python.is_not_started():
+            return lang
+        return String("")
 
     fn _default_window_rect(self, workspace: Rect) -> Rect:
         var w80 = (workspace.width() * 80) // 100
@@ -716,87 +772,116 @@ struct Desktop(Movable):
         """Drain editor → LSP → editor for the focused frame.
 
         Step 1: if the focused editor has a pending Cmd+click definition
-                request, forward it to the LSP server (with the latest
-                buffer text so the server's view is up to date).
-        Step 2: poll the server for any responses; if one resolves to a
-                concrete location, focus that file (opening it if it
-                isn't already a window) and move the cursor there.
+                request, forward it to the LSP server matching that
+                file's language (with the latest buffer text so the
+                server's view is up to date).
+        Step 2: tick every spawned server so responses keep flowing,
+                and jump on any that comes back with a concrete location.
         Step 3: refresh the right-aligned LSP indicator on the status bar.
         """
         var idx = self._focused_editor_idx()
         if idx >= 0:
             var req_opt = self.windows.windows[idx].editor.consume_definition_request()
             if req_opt:
-                var req = req_opt.value()
-                var path = self.windows.windows[idx].editor.file_path
-                if len(path.as_bytes()) == 0:
-                    self.status_bar.set_message(
-                        String("LSP: file has no path"),
-                        Attr(LIGHT_RED, LIGHT_GRAY),
-                    )
-                elif self.lsp.is_failed():
-                    pass  # leave the existing failure message visible
-                elif not self.lsp.is_active():
-                    self.status_bar.set_message(
-                        String("LSP: not started for this file type"),
-                        Attr(RED, LIGHT_GRAY),
-                    )
-                else:
-                    var text = self.windows.windows[idx].editor.text_snapshot()
-                    var word = req.word
-                    var ok = self.lsp.request_definition(
-                        path, req.row, req.col, word^, text^,
-                    )
-                    if not ok:
-                        self.status_bar.set_message(
-                            String("LSP: still starting up — try again"),
-                            Attr(YELLOW, LIGHT_GRAY),
-                        )
-        var resolved = self.lsp.tick()
-        if resolved:
-            self._jump_to(resolved.value(), screen)
-        if self.symbol_pick.active and self.symbol_pick.loading \
-                and self.lsp.has_pending_symbols():
-            self.symbol_pick.set_entries(self.lsp.take_symbols())
+                self._dispatch_definition_request(idx, req_opt.value())
+        # Drain every spawned manager every frame so responses on any
+        # language server make progress regardless of which file is
+        # focused. Each branch is independent — Mojo's auto-destructor
+        # handles the partial-move pattern around ``take_symbols``.
+        if not self.lsp_mojo.is_not_started():
+            var resolved = self.lsp_mojo.tick()
+            if resolved:
+                self._jump_to(resolved.value(), screen)
+            if self.symbol_pick.active and self.symbol_pick.loading \
+                    and self.lsp_mojo.has_pending_symbols():
+                self.symbol_pick.set_entries(self.lsp_mojo.take_symbols())
+        if not self.lsp_python.is_not_started():
+            var resolved = self.lsp_python.tick()
+            if resolved:
+                self._jump_to(resolved.value(), screen)
+            if self.symbol_pick.active and self.symbol_pick.loading \
+                    and self.lsp_python.has_pending_symbols():
+                self.symbol_pick.set_entries(self.lsp_python.take_symbols())
         self._refresh_lsp_status()
 
-    fn _refresh_lsp_status(mut self):
-        """Translate LspManager state into a status bar message.
-
-        Hidden when there's no LSP work in progress and nothing to report.
-        """
-        if self.lsp.is_failed():
+    fn _dispatch_definition_request(
+        mut self, win_idx: Int, var req: DefinitionRequest,
+    ):
+        """Forward a Cmd+click definition request to the right server,
+        with status-bar messaging for the common failure modes."""
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
             self.status_bar.set_message(
-                String("LSP: ") + self.lsp.failure_reason,
+                String("LSP: file has no path"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        if self.lsp.is_initializing():
+        var lang = self._lsp_lang_for_path(path)
+        if lang == String(""):
             self.status_bar.set_message(
-                String("LSP: starting..."),
+                String("LSP: not started for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        # Read primitive fields first; ``word`` is moved last so it's
+        # the only ownership transfer out of ``req``. Reseat afterwards
+        # so Mojo's auto-destructor sees a valid String.
+        var row = req.row
+        var col = req.col
+        var word = req.word^
+        req.word = String("")
+        var ok = False
+        if lang == String("mojo"):
+            if self.lsp_mojo.is_failed():
+                return
+            if not self.lsp_mojo.is_active():
+                self.status_bar.set_message(
+                    String("LSP: not started for this file type"),
+                    Attr(RED, LIGHT_GRAY),
+                )
+                return
+            ok = self.lsp_mojo.request_definition(
+                path, row, col, word^, text^,
+            )
+        elif lang == String("python"):
+            if self.lsp_python.is_failed():
+                return
+            if not self.lsp_python.is_active():
+                self.status_bar.set_message(
+                    String("LSP: not started for this file type"),
+                    Attr(RED, LIGHT_GRAY),
+                )
+                return
+            ok = self.lsp_python.request_definition(
+                path, row, col, word^, text^,
+            )
+        if not ok:
+            self.status_bar.set_message(
+                String("LSP: still starting up — try again"),
                 Attr(YELLOW, LIGHT_GRAY),
             )
+
+    fn _refresh_lsp_status(mut self):
+        """Show the focused editor's language-server state on the right
+        side of the status bar. The prefix carries the language id so
+        the user can tell whether a slow response is from mojo-lsp or
+        pyright; flipping focus between a ``.mojo`` and a ``.py`` window
+        flips the indicator. Files with no associated server (or no
+        server installed) leave the existing message alone.
+        """
+        var idx = self._focused_editor_idx()
+        if idx < 0:
             return
-        if self.lsp.is_ready():
-            var word = self.lsp.inflight_word()
-            if len(word.as_bytes()) > 0:
-                self.status_bar.set_message(
-                    String("LSP: looking up ") + word + String("..."),
-                    Attr(BLACK, LIGHT_GRAY),
-                )
-                return
-            if self.lsp.last_empty():
-                self.status_bar.set_message(
-                    String("LSP: no definition found"),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
-                )
-                return
-            self.status_bar.set_message(
-                String("LSP: ready"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+        var path = self.windows.windows[idx].editor.file_path
+        var lang = self._lsp_lang_for_path(path)
+        if lang == String(""):
             return
-        # NotStarted: leave any existing message alone.
+        var prefix = String("LSP[") + lang + String("]: ")
+        if lang == String("mojo"):
+            _refresh_status_for(self.status_bar, prefix, self.lsp_mojo)
+        elif lang == String("python"):
+            _refresh_status_for(self.status_bar, prefix, self.lsp_python)
 
     fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
         """Focus the window for ``target.path`` (opening it if needed) and
@@ -859,9 +944,9 @@ struct Desktop(Movable):
         self._open_save_as_prompt()
 
     fn _open_symbol_pick(mut self):
-        """Open the Go-to-Symbol picker for the focused editor and kick off
-        the LSP request. The picker shows a "Loading…" placeholder until
-        the response arrives via ``lsp_tick``."""
+        """Open the Go-to-Symbol picker for the focused editor and kick
+        off a ``textDocument/documentSymbol`` request to its language
+        server. Picker shows "Loading…" until the response lands."""
         var idx = self._focused_editor_idx()
         if idx < 0:
             return
@@ -872,25 +957,37 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        if self.lsp.is_failed():
-            return
-        if not self.lsp.is_active():
+        var lang = self._lsp_lang_for_path(path)
+        if lang == String(""):
             self.status_bar.set_message(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
             return
-        if not self.lsp.is_ready():
-            self.status_bar.set_message(
-                String("LSP: still starting up — try again"),
-                Attr(YELLOW, LIGHT_GRAY),
-            )
-            return
         var text = self.windows.windows[idx].editor.text_snapshot()
-        var ok = self.lsp.request_document_symbols(path, text^)
-        if not ok:
-            return
-        self.symbol_pick.open(path)
+        var ok = False
+        if lang == String("mojo"):
+            if self.lsp_mojo.is_failed():
+                return
+            if not self.lsp_mojo.is_ready():
+                self.status_bar.set_message(
+                    String("LSP: still starting up — try again"),
+                    Attr(YELLOW, LIGHT_GRAY),
+                )
+                return
+            ok = self.lsp_mojo.request_document_symbols(path, text^)
+        elif lang == String("python"):
+            if self.lsp_python.is_failed():
+                return
+            if not self.lsp_python.is_ready():
+                self.status_bar.set_message(
+                    String("LSP: still starting up — try again"),
+                    Attr(YELLOW, LIGHT_GRAY),
+                )
+                return
+            ok = self.lsp_python.request_document_symbols(path, text^)
+        if ok:
+            self.symbol_pick.open(path)
 
     fn _open_save_as_prompt(mut self):
         var idx = self._focused_editor_idx()
@@ -1015,6 +1112,45 @@ fn _mojo_include_dirs(root: String) -> List[String]:
 
 
 # --- Result / summary windows for project search ----------------------------
+
+
+fn _refresh_status_for(
+    mut sb: StatusBar, prefix: String, m: LspManager,
+):
+    """Free function so the caller can pass ``self.status_bar`` and one
+    of ``self.lsp_*`` without tripping Mojo's exclusivity check (a
+    method receiver implicitly aliases the whole struct, which conflicts
+    with passing one of its fields as a separate argument)."""
+    if m.is_failed():
+        sb.set_message(
+            prefix + m.failure_reason,
+            Attr(LIGHT_RED, LIGHT_GRAY),
+        )
+        return
+    if m.is_initializing():
+        sb.set_message(
+            prefix + String("starting..."),
+            Attr(YELLOW, LIGHT_GRAY),
+        )
+        return
+    if m.is_ready():
+        var word = m.inflight_word()
+        if len(word.as_bytes()) > 0:
+            sb.set_message(
+                prefix + String("looking up ") + word + String("..."),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        if m.last_empty():
+            sb.set_message(
+                prefix + String("no definition found"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        sb.set_message(
+            prefix + String("ready"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
 
 
 fn _summary_window(

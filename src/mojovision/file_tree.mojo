@@ -89,8 +89,14 @@ struct FileTree(Movable):
     # --- tree mechanics ---------------------------------------------------
 
     fn _list_dir(self, path: String, depth: Int) -> List[FileTreeEntry]:
-        """Return the immediate children of ``path``, dirs first then files.
-        Hidden entries (dotfiles) are filtered out."""
+        """Return the immediate children of ``path``, dirs first then files,
+        each group sorted case-insensitively by name. Hidden entries
+        (dotfiles) are filtered out.
+
+        ``readdir`` order is filesystem-defined (often inode order on
+        ext4, alphabetical on APFS) — sorting here gives the user the
+        same stable presentation across systems.
+        """
         var raw = list_directory(path)
         var dirs = List[FileTreeEntry]()
         var files = List[FileTreeEntry]()
@@ -109,6 +115,8 @@ struct FileTree(Movable):
                 dirs.append(entry)
             else:
                 files.append(entry)
+        _sort_entries_ci(dirs)
+        _sort_entries_ci(files)
         var out = List[FileTreeEntry]()
         for i in range(len(dirs)):
             out.append(dirs[i])
@@ -258,3 +266,40 @@ struct FileTree(Movable):
             return True
         self.selected = idx
         return True
+
+
+# --- helpers ---------------------------------------------------------------
+
+
+fn _sort_entries_ci(mut entries: List[FileTreeEntry]):
+    """In-place insertion sort by ``name``, case-insensitive. Insertion
+    sort is fine here — directory child counts in real projects are
+    small (tens to hundreds), and this only runs on expand/refresh."""
+    var n = len(entries)
+    for i in range(1, n):
+        var j = i
+        while j > 0 and _ci_less(entries[j].name, entries[j - 1].name):
+            var tmp = entries[j]
+            entries[j] = entries[j - 1]
+            entries[j - 1] = tmp
+            j -= 1
+
+
+fn _ci_less(a: String, b: String) -> Bool:
+    """``True`` iff ``a < b`` lexicographically, ignoring ASCII case.
+
+    Non-ASCII bytes compare via raw byte value (no Unicode case
+    folding) — fine for the typical mix of English filenames; if the
+    user has Cyrillic / CJK names they'll cluster but stay grouped.
+    """
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    var n = len(ab) if len(ab) < len(bb) else len(bb)
+    for i in range(n):
+        var ca = Int(ab[i])
+        var cb = Int(bb[i])
+        if 0x41 <= ca and ca <= 0x5A: ca += 0x20
+        if 0x41 <= cb and cb <= 0x5A: cb += 0x20
+        if ca != cb:
+            return ca < cb
+    return len(ab) < len(bb)
