@@ -31,6 +31,17 @@ comptime TCSADRAIN: Int32 = 1
 
 comptime O_RDWR: Int32 = 2
 
+
+fn tciflush_value() -> Int32:
+    """Platform-specific value for ``TCIFLUSH`` (discard input queue).
+
+    Linux defines TCIFLUSH=0; the BSDs (incl. Darwin) define TCIFLUSH=1.
+    """
+    comptime if CompilationTarget.is_macos():
+        return 1
+    else:
+        return 0
+
 # `struct termios` is at most ~72 bytes on the platforms we target; round up.
 comptime TERMIOS_SIZE: Int = 128
 
@@ -70,6 +81,17 @@ fn tcsetattr(fd: Int32, action: Int32, mut termios_buf: List[UInt8]) -> Int32:
 
 fn cfmakeraw(mut termios_buf: List[UInt8]):
     _ = external_call["cfmakeraw", Int32](termios_buf.unsafe_ptr())
+
+
+fn tcflush(fd: Int32, queue_selector: Int32) -> Int32:
+    """Discard the queued input/output bytes on ``fd``.
+
+    Use ``tciflush_value()`` for input-queue flush. Used at shutdown to
+    drop in-flight mouse reports that arrived after we disabled mouse
+    tracking but before we restore canonical mode + ECHO — without this
+    they get echoed verbatim by the line discipline as ``^[[<…M``.
+    """
+    return external_call["tcflush", Int32](fd, queue_selector)
 
 
 # --- I/O multiplexing -------------------------------------------------------
@@ -172,6 +194,32 @@ fn write_string(fd: Int32, s: String):
     """Write ``s`` to ``fd`` via ``FileDescriptor.write_string``."""
     var f = FileDescriptor(Int(fd))
     f.write_string(StringSlice(s))
+
+
+# --- Path resolution --------------------------------------------------------
+
+
+fn realpath(path: String) -> String:
+    """Return the canonical absolute form of ``path``, or empty on error.
+
+    Uses ``realpath(3)`` with a 4096-byte resolved-path buffer (PATH_MAX is
+    1024 on Darwin and 4096 on Linux; we pick the larger to be safe). The
+    libc function returns NULL when the path doesn't exist or can't be
+    resolved; we return ``""`` so the caller can fall back to the input.
+    """
+    var c_path = path + String("\0")
+    var resolved = alloc_zero_buffer(4096)
+    # Return type as Int: 0 means NULL, anything else means the buffer was
+    # filled with a NUL-terminated absolute path.
+    var rc = external_call["realpath", Int](
+        c_path.unsafe_ptr(), resolved.unsafe_ptr()
+    )
+    if rc == 0:
+        return String("")
+    var n = 0
+    while n < 4096 and resolved[n] != 0:
+        n += 1
+    return String(StringSlice(ptr=resolved.unsafe_ptr(), length=n))
 
 
 # --- Cursor-position size query ---------------------------------------------

@@ -25,14 +25,25 @@ struct MenuItem(ImplicitlyCopyable, Movable):
 struct Menu(ImplicitlyCopyable, Movable):
     var label: String
     var items: List[MenuItem]
+    var visible: Bool
+    var right_aligned: Bool
 
-    fn __init__(out self, var label: String, var items: List[MenuItem]):
+    fn __init__(
+        out self,
+        var label: String,
+        var items: List[MenuItem],
+        right_aligned: Bool = False,
+    ):
         self.label = label^
         self.items = items^
+        self.visible = True
+        self.right_aligned = right_aligned
 
     fn __copyinit__(out self, copy: Self):
         self.label = copy.label
         self.items = copy.items.copy()
+        self.visible = copy.visible
+        self.right_aligned = copy.right_aligned
 
 
 @fieldwise_init
@@ -54,6 +65,14 @@ struct MenuBar(Movable):
     fn add(mut self, var menu: Menu):
         self.menus.append(menu^)
 
+    fn set_visible_by_label(mut self, label: String, visible: Bool):
+        for i in range(len(self.menus)):
+            if self.menus[i].label == label:
+                self.menus[i].visible = visible
+                if not visible and self.open_idx == i:
+                    self.open_idx = -1
+                return
+
     fn is_open(self) -> Bool:
         return self.open_idx >= 0
 
@@ -62,19 +81,36 @@ struct MenuBar(Movable):
 
     # --- layout ------------------------------------------------------------
 
-    fn _layout(self) -> List[Rect]:
+    fn _layout(self, screen_width: Int) -> List[Rect]:
+        """Per-menu hit-test rects. Hidden menus get an empty rect at (0,0).
+
+        Left-aligned menus pack from x=3 rightward; right-aligned menus pack
+        from x=screen_width leftward. The two groups don't overlap-check;
+        on a very narrow screen they may collide visually.
+        """
         var rects = List[Rect]()
+        for _ in range(len(self.menus)):
+            rects.append(Rect(0, 0, 0, 0))
         var x = 3                                   # past `≡ `
         for i in range(len(self.menus)):
+            if not self.menus[i].visible or self.menus[i].right_aligned:
+                continue
             var w = len(self.menus[i].label.as_bytes()) + 2
-            rects.append(Rect(x, 0, x + w, 1))
+            rects[i] = Rect(x, 0, x + w, 1)
             x += w + 1
+        var rx = screen_width
+        for i in range(len(self.menus)):
+            if not self.menus[i].visible or not self.menus[i].right_aligned:
+                continue
+            var w = len(self.menus[i].label.as_bytes()) + 2
+            rects[i] = Rect(rx - w, 0, rx, 1)
+            rx -= w + 1
         return rects^
 
-    fn _dropdown_rect(self) -> Rect:
+    fn _dropdown_rect(self, screen_width: Int) -> Rect:
         if self.open_idx < 0:
             return Rect(0, 0, 0, 0)
-        var anchor = self._layout()[self.open_idx]
+        var anchor = self._layout(screen_width)[self.open_idx]
         var menu = self.menus[self.open_idx]
         var width = 8
         for i in range(len(menu.items)):
@@ -82,6 +118,10 @@ struct MenuBar(Movable):
             if w > width:
                 width = w
         var height = len(menu.items) + 2
+        if menu.right_aligned:
+            # Anchor the dropdown's right edge to the label's right edge so
+            # it never spills off-screen.
+            return Rect(anchor.b.x - width, 1, anchor.b.x, 1 + height)
         return Rect(anchor.a.x, 1, anchor.a.x + width, 1 + height)
 
     # --- paint -------------------------------------------------------------
@@ -93,8 +133,10 @@ struct MenuBar(Movable):
         var open_key = Attr(WHITE, GREEN)
         canvas.fill(Rect(0, 0, screen.b.x, 1), String(" "), bar)
         canvas.set(1, 0, Cell(String("≡"), bar, 1))
-        var rects = self._layout()
+        var rects = self._layout(screen.b.x)
         for i in range(len(self.menus)):
+            if not self.menus[i].visible:
+                continue
             var bg: Attr
             var key: Attr
             if i == self.open_idx:
@@ -110,10 +152,10 @@ struct MenuBar(Movable):
                 canvas.set(r.a.x + 1 + j, 0, Cell(ch, attr, 1))
             canvas.set(r.b.x - 1, 0, Cell(String(" "), bg, 1))
         if self.open_idx >= 0:
-            self._paint_dropdown(canvas)
+            self._paint_dropdown(canvas, screen.b.x)
 
-    fn _paint_dropdown(self, mut canvas: Canvas):
-        var rect = self._dropdown_rect()
+    fn _paint_dropdown(self, mut canvas: Canvas, screen_width: Int):
+        var rect = self._dropdown_rect(screen_width)
         var attr     = Attr(BLACK, LIGHT_GRAY)
         var attr_key = Attr(RED,   LIGHT_GRAY)
         canvas.fill(rect, String(" "), attr)
@@ -129,15 +171,17 @@ struct MenuBar(Movable):
 
     # --- events ------------------------------------------------------------
 
-    fn handle_event(mut self, event: Event) -> MenuResult:
+    fn handle_event(mut self, event: Event, screen_width: Int) -> MenuResult:
         if event.kind != EVENT_MOUSE or event.button != MOUSE_BUTTON_LEFT:
             return MenuResult(Optional[String](), False)
         if not (event.pressed and not event.motion):
             return MenuResult(Optional[String](), False)
         # Click on the menu-bar row toggles a menu open/closed.
         if event.pos.y == 0:
-            var rects = self._layout()
+            var rects = self._layout(screen_width)
             for i in range(len(rects)):
+                if not self.menus[i].visible:
+                    continue
                 if rects[i].contains(event.pos):
                     if i == self.open_idx:
                         self.open_idx = -1
@@ -148,7 +192,7 @@ struct MenuBar(Movable):
             return MenuResult(Optional[String](), True)
         # Click anywhere while a menu is open: dropdown item, or close.
         if self.open_idx >= 0:
-            var dr = self._dropdown_rect()
+            var dr = self._dropdown_rect(screen_width)
             if dr.contains(event.pos):
                 var item_idx = event.pos.y - dr.a.y - 1
                 if 0 <= item_idx and item_idx < len(self.menus[self.open_idx].items):

@@ -11,12 +11,25 @@ from std.testing import assert_equal, assert_false, assert_true
 from mojovision.canvas import Canvas
 from mojovision.cell import Cell, blank_cell
 from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
+from mojovision.editor import Editor, TextBuffer
+from mojovision.file_dialog import FileDialog
+from mojovision.desktop import Desktop, PROJECT_CLOSE_ACTION
+from mojovision.file_io import (
+    basename, find_git_project, join_path, list_directory, parent_path,
+    read_file, stat_file,
+)
+from mojovision.menu import Menu, MenuBar, MenuItem
 from mojovision.events import (
-    Event, EVENT_KEY, EVENT_QUIT, EVENT_RESIZE, KEY_ENTER, KEY_ESC, MOD_NONE,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_UP,
+    MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT,
+    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from mojovision.geometry import Point, Rect
 from mojovision.terminal import parse_input
 from mojovision.view import Fill, Frame, Label, centered
+from mojovision.window import Window
 
 
 fn test_point_arithmetic() raises:
@@ -105,9 +118,12 @@ fn test_event_factories() raises:
 
 
 fn test_parse_input_keys() raises:
+    # Lone ESC could be a real keypress or the start of a partial sequence
+    # whose tail hasn't arrived yet — the parser defers the decision via
+    # (EVENT_NONE, 0). Terminal.poll_event disambiguates with a timeout.
     var esc = parse_input(String("\x1b"))
-    assert_true(esc[0].is_key(KEY_ESC))
-    assert_equal(esc[1], 1)
+    assert_true(esc[0].kind == EVENT_NONE)
+    assert_equal(esc[1], 0)
 
     var arrow_up = parse_input(String("\x1b[A"))
     assert_true(arrow_up[0].kind == EVENT_KEY)
@@ -152,6 +168,760 @@ fn test_centered() raises:
     assert_true(inner == Rect(30, 9, 50, 15))
 
 
+# ----- Editor tests ---------------------------------------------------------
+
+
+comptime _VIEW = Rect(0, 0, 80, 24)
+
+
+fn _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
+    return Event.key_event(k, mods)
+
+
+fn test_text_buffer_split_and_join() raises:
+    var b = TextBuffer(String("ab\ncd"))
+    assert_equal(b.line_count(), 2)
+    assert_equal(b.line(0), String("ab"))
+    assert_equal(b.line(1), String("cd"))
+    var p = b.split(0, 1)                 # "ab" → "a" / "b"
+    assert_equal(p[0], 1); assert_equal(p[1], 0)
+    assert_equal(b.line_count(), 3)
+    assert_equal(b.line(0), String("a"))
+    assert_equal(b.line(1), String("b"))
+    assert_equal(b.line(2), String("cd"))
+    # Backspace at start of line 1 joins it onto line 0.
+    var q = b.delete_before(1, 0)
+    assert_equal(q[0], 0); assert_equal(q[1], 1)
+    assert_equal(b.line_count(), 2)
+    assert_equal(b.line(0), String("ab"))
+
+
+fn test_editor_typing_and_arrows() raises:
+    var ed = Editor(String("hello"))
+    assert_equal(ed.cursor_col, 0)
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.cursor_col, 5)
+    _ = ed.handle_key(_key(UInt32(ord("!"))), _VIEW)
+    assert_equal(ed.buffer.line(0), String("hello!"))
+    assert_equal(ed.cursor_col, 6)
+    _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
+    assert_equal(ed.cursor_col, 5)
+    _ = ed.handle_key(_key(KEY_HOME), _VIEW)
+    assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_word_movement() raises:
+    var ed = Editor(String("hello world foo"))
+    # Ctrl+Right from start: lands at start of "world" (col 6).
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 6)
+    # Again: start of "foo" (col 12).
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 12)
+    # Again: end of buffer (col 15) — no further word.
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 15)
+    # Ctrl+Left walks back to start of each word.
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 12)
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 6)
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_word_movement_across_lines() raises:
+    var ed = Editor(String("abc\ndef"))
+    # Ctrl+Right from start: end of "abc" on line 0.
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 3)
+    # Again: jumps to start of next line.
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 0)
+    # Ctrl+Left from (1,0): end of previous line.
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_shift_arrow_extends_selection() raises:
+    var ed = Editor(String("hello"))
+    assert_false(ed.has_selection())
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    assert_true(ed.has_selection())
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 1)
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 2)
+    # Plain arrow collapses selection.
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    assert_false(ed.has_selection())
+    assert_equal(ed.cursor_col, 3); assert_equal(ed.anchor_col, 3)
+
+
+fn test_editor_shift_ctrl_arrow_composes() raises:
+    """Selection and word movement compose: Shift+Ctrl+Right keeps the anchor
+    while jumping by a whole word."""
+    var ed = Editor(String("hello world foo"))
+    var both: UInt8 = MOD_SHIFT | MOD_CTRL
+    _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
+    assert_true(ed.has_selection())
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
+    _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 12)
+    # Now Shift+Ctrl+Left walks the cursor back through words; anchor stays.
+    _ = ed.handle_key(_key(KEY_LEFT, both), _VIEW)
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
+
+
+fn test_editor_typing_replaces_selection() raises:
+    var ed = Editor(String("hello"))
+    # Select first 4 chars
+    for _ in range(4):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    assert_equal(ed.cursor_col, 4)
+    _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
+    assert_equal(ed.buffer.line(0), String("Xo"))
+    assert_false(ed.has_selection())
+    assert_equal(ed.cursor_col, 1)
+
+
+fn test_editor_backspace_deletes_selection() raises:
+    var ed = Editor(String("hello"))
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)         # cursor at 1
+    for _ in range(3):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    # selection covers "ell"
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line(0), String("ho"))
+    assert_false(ed.has_selection())
+
+
+fn test_editor_mouse_click_sets_cursor() raises:
+    var ed = Editor(String("hello"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(3, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    assert_equal(ed.cursor_col, 3)
+    assert_false(ed.has_selection())
+
+
+fn test_editor_mouse_drag_extends_selection() raises:
+    var ed = Editor(String("hello world"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(1, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    assert_equal(ed.cursor_col, 1)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(7, 0), MOUSE_BUTTON_LEFT, True, True),
+        _VIEW,
+    )
+    assert_true(ed.has_selection())
+    assert_equal(ed.anchor_col, 1); assert_equal(ed.cursor_col, 7)
+
+
+fn test_editor_mouse_click_clamps_to_line() raises:
+    var ed = Editor(String("hi"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(50, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    # Past EOL → clamped to line length.
+    assert_equal(ed.cursor_col, 2)
+
+
+fn test_terminal_parses_modified_arrows() raises:
+    """The CSI ``ESC[1;<mod><letter>`` form gives us shift/ctrl on arrows."""
+    var shift_right = parse_input(String("\x1b[1;2C"))
+    assert_true(shift_right[0].kind == EVENT_KEY)
+    assert_true(shift_right[0].key == KEY_RIGHT)
+    assert_true((shift_right[0].mods & MOD_SHIFT) != 0)
+    assert_equal(shift_right[1], 6)
+
+    var ctrl_left = parse_input(String("\x1b[1;5D"))
+    assert_true(ctrl_left[0].key == KEY_LEFT)
+    assert_true((ctrl_left[0].mods & MOD_CTRL) != 0)
+
+    var shift_up = parse_input(String("\x1b[1;2A"))
+    assert_true(shift_up[0].key == KEY_UP)
+    assert_true((shift_up[0].mods & MOD_SHIFT) != 0)
+
+    var shift_down = parse_input(String("\x1b[1;2B"))
+    assert_true(shift_down[0].key == KEY_DOWN)
+    assert_true((shift_down[0].mods & MOD_SHIFT) != 0)
+
+    var both_up = parse_input(String("\x1b[1;6A"))
+    assert_true(both_up[0].key == KEY_UP)
+    assert_true((both_up[0].mods & MOD_SHIFT) != 0)
+    assert_true((both_up[0].mods & MOD_CTRL) != 0)
+
+    var both_right = parse_input(String("\x1b[1;6C"))
+    assert_true(both_right[0].key == KEY_RIGHT)
+    assert_true((both_right[0].mods & MOD_SHIFT) != 0)
+    assert_true((both_right[0].mods & MOD_CTRL) != 0)
+
+
+fn test_editor_selection_text() raises:
+    var ed = Editor(String("hello world"))
+    # Select "hello "
+    for _ in range(6):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    assert_equal(ed.selection_text(), String("hello "))
+
+
+fn test_editor_cut_selection() raises:
+    var ed = Editor(String("hello world"))
+    for _ in range(5):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    var cut = ed.cut_selection()
+    assert_equal(cut, String("hello"))
+    assert_equal(ed.buffer.line(0), String(" world"))
+    assert_false(ed.has_selection())
+
+
+fn test_editor_paste_text_single_line() raises:
+    var ed = Editor(String("hello"))
+    ed.move_to(0, 5, False)
+    ed.paste_text(String(" world"))
+    assert_equal(ed.buffer.line(0), String("hello world"))
+    assert_equal(ed.cursor_col, 11)
+
+
+fn test_editor_paste_text_multiline() raises:
+    var ed = Editor(String("hello"))
+    ed.move_to(0, 5, False)
+    ed.paste_text(String("\nworld\nfoo"))
+    assert_equal(ed.buffer.line_count(), 3)
+    assert_equal(ed.buffer.line(0), String("hello"))
+    assert_equal(ed.buffer.line(1), String("world"))
+    assert_equal(ed.buffer.line(2), String("foo"))
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_paste_replaces_selection() raises:
+    var ed = Editor(String("hello world"))
+    for _ in range(5):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
+    ed.paste_text(String("HEY"))
+    assert_equal(ed.buffer.line(0), String("HEY world"))
+    assert_false(ed.has_selection())
+
+
+fn test_editor_selection_text_multiline() raises:
+    var ed = Editor(String("ab\ncd\nef"))
+    # Select from (0,1) to (2,1) — i.e., "b\ncd\ne"
+    ed.move_to(0, 1, False)
+    ed.move_to(2, 1, True)
+    assert_equal(ed.selection_text(), String("b\ncd\ne"))
+
+
+fn test_editor_goto_line() raises:
+    var ed = Editor(String("a\nb\nc\nd\ne"))
+    ed.goto_line(3)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 0)
+    # Out-of-range clamps.
+    ed.goto_line(99)
+    assert_equal(ed.cursor_row, 4)
+    ed.goto_line(0)
+    assert_equal(ed.cursor_row, 0)
+
+
+fn test_editor_find_next() raises:
+    var ed = Editor(String("foo bar foo baz"))
+    var hit1 = ed.find_next(String("foo"))
+    assert_true(hit1)
+    # First hit at col 0 — but find_next searches *after* the cursor; with
+    # cursor initially at (0,0) the implementation skips one column. So the
+    # first hit is at col 8 ("foo baz").
+    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 11)
+    assert_true(ed.has_selection())
+    assert_equal(ed.selection_text(), String("foo"))
+    # Wrap to the earlier match.
+    var hit2 = ed.find_next(String("foo"))
+    assert_true(hit2)
+    assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_toggle_comment_single_line() raises:
+    var ed = Editor(String("hello"))
+    ed.toggle_comment()
+    assert_equal(ed.buffer.line(0), String("// hello"))
+    ed.toggle_comment()
+    assert_equal(ed.buffer.line(0), String("hello"))
+
+
+fn test_editor_toggle_comment_selection() raises:
+    var ed = Editor(String("a\nb\nc"))
+    ed.move_to(0, 0, False)
+    ed.move_to(2, 1, True)
+    ed.toggle_comment()
+    assert_equal(ed.buffer.line(0), String("// a"))
+    assert_equal(ed.buffer.line(1), String("// b"))
+    assert_equal(ed.buffer.line(2), String("// c"))
+    ed.toggle_comment()
+    assert_equal(ed.buffer.line(0), String("a"))
+    assert_equal(ed.buffer.line(2), String("c"))
+
+
+fn test_editor_toggle_case() raises:
+    var ed = Editor(String("Hello World"))
+    ed.move_to(0, 0, False)
+    ed.move_to(0, 5, True)         # select "Hello"
+    ed.toggle_case()
+    assert_equal(ed.buffer.line(0), String("hELLO World"))
+
+
+fn test_editor_dirty_flag() raises:
+    var ed = Editor(String("hello"))
+    assert_false(ed.dirty)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)        # navigation, not dirty
+    assert_false(ed.dirty)
+    _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)  # insert, dirty
+    assert_true(ed.dirty)
+
+
+fn test_file_io_read_and_stat() raises:
+    """Check we can read & stat a file we know exists in the repo."""
+    var path = String("examples/hello.mojo")
+    var info = stat_file(path)
+    assert_true(info.ok)
+    assert_true(Int(info.size) > 0)
+    var text = read_file(path)
+    assert_equal(Int(info.size), len(text.as_bytes()))
+
+
+fn test_editor_from_file() raises:
+    var ed = Editor.from_file(String("examples/hello.mojo"))
+    assert_true(ed.buffer.line_count() > 5)
+    assert_false(ed.dirty)
+    assert_true(Int(ed.file_size) > 0)
+    # Initial check: nothing changed since open, so reload returns False.
+    assert_false(ed.check_for_external_change())
+
+
+fn test_terminal_parses_macos_alt_arrow() raises:
+    """``ESC f`` / ``ESC b`` are the readline forward/back-word sequences
+    that iTerm2 and Terminal.app send for Option+Right/Left by default."""
+    var alt_right = parse_input(String("\x1bf"))
+    assert_true(alt_right[0].kind == EVENT_KEY)
+    assert_true(alt_right[0].key == KEY_RIGHT)
+    assert_true((alt_right[0].mods & MOD_ALT) != 0)
+    assert_equal(alt_right[1], 2)
+
+    var alt_left = parse_input(String("\x1bb"))
+    assert_true(alt_left[0].key == KEY_LEFT)
+    assert_true((alt_left[0].mods & MOD_ALT) != 0)
+
+
+fn test_editor_alt_arrow_word_jump() raises:
+    """MOD_ALT triggers word movement (macOS convention)."""
+    var ed = Editor(String("hello world foo"))
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
+    assert_equal(ed.cursor_col, 6)
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
+    assert_equal(ed.cursor_col, 12)
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
+    assert_equal(ed.cursor_col, 6)
+
+
+fn test_path_helpers() raises:
+    assert_equal(join_path(String("a"), String("b")), String("a/b"))
+    assert_equal(join_path(String("a/"), String("b")), String("a/b"))
+    assert_equal(join_path(String(""), String("b")), String("b"))
+    assert_equal(parent_path(String("/foo/bar")), String("/foo"))
+    assert_equal(parent_path(String("/")), String("/"))
+    assert_equal(parent_path(String("foo")), String("."))
+
+
+fn test_basename() raises:
+    assert_equal(basename(String("/foo/bar")), String("bar"))
+    assert_equal(basename(String("/foo/bar/")), String("bar"))
+    assert_equal(basename(String("foo")), String("foo"))
+    assert_equal(basename(String("/")), String("/"))
+
+
+fn test_find_git_project() raises:
+    """Tests run from the repo root, which has a .git folder, so opening
+    a file inside the repo should locate the project root."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    # The project root contains examples/, src/, and .git.
+    var info = stat_file(join_path(root.value(), String(".git")))
+    assert_true(info.ok)
+    var examples = stat_file(join_path(root.value(), String("examples")))
+    assert_true(examples.ok)
+
+
+fn test_right_aligned_menu_layout() raises:
+    """A right-aligned menu sits flush with the screen's right edge, with
+    its hit-test rect ending at exactly screen_width."""
+    var bar = MenuBar()
+    var left_items = List[MenuItem]()
+    left_items.append(MenuItem(String("New"), String("noop")))
+    bar.add(Menu(String("File"), left_items^))
+    var right_items = List[MenuItem]()
+    right_items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
+    bar.add(Menu(String("mojovision"), right_items^, right_aligned=True))
+    var rects = bar._layout(80)
+    # Left menu starts at x=3 and gets " File "  (label + 2 padding).
+    assert_equal(rects[0].a.x, 3)
+    assert_equal(rects[0].b.x, 3 + len(String("File").as_bytes()) + 2)
+    # Right-aligned menu's right edge is the screen width; width = label+2.
+    assert_equal(rects[1].b.x, 80)
+    var right_w = len(String("mojovision").as_bytes()) + 2
+    assert_equal(rects[1].a.x, 80 - right_w)
+
+
+fn test_desktop_project_lifecycle() raises:
+    var d = Desktop()
+    assert_false(d.project)
+    d.detect_project_from(String("examples/hello.mojo"))
+    assert_true(d.project)
+    # Project menu is now in menu_bar.menus, right-aligned and visible.
+    var idx = d._project_menu_idx
+    assert_true(idx >= 0)
+    assert_true(d.menu_bar.menus[idx].visible)
+    assert_true(d.menu_bar.menus[idx].right_aligned)
+    # Label is the project root's basename — for this repo, "mojovision".
+    assert_equal(d.menu_bar.menus[idx].label, String("mojovision"))
+    # Detection is sticky: a second call doesn't reset the project.
+    var first = d.project.value()
+    d.detect_project_from(String("src/mojovision/desktop.mojo"))
+    assert_equal(d.project.value(), first)
+    # close_project clears state and hides the menu.
+    d.close_project()
+    assert_false(d.project)
+    assert_false(d.menu_bar.menus[idx].visible)
+    # After closing, detection works again.
+    d.detect_project_from(String("examples/hello.mojo"))
+    assert_true(d.project)
+    assert_true(d.menu_bar.menus[idx].visible)
+
+
+fn test_file_dialog_lists_and_navigates() raises:
+    var dlg = FileDialog()
+    dlg.open(String("examples"))
+    assert_true(dlg.active)
+    # Should have at least ".." and a few example files.
+    assert_true(len(dlg.entries) >= 2)
+    assert_equal(dlg.entries[0], String(".."))
+    # Navigate to second entry; arrow event-driven.
+    _ = dlg.handle_key(Event.key_event(KEY_DOWN))
+    assert_equal(dlg.selected, 1)
+    _ = dlg.handle_key(Event.key_event(KEY_UP))
+    assert_equal(dlg.selected, 0)
+
+
+fn test_partial_sgr_mouse_does_not_emit_esc() raises:
+    """A scroll-wheel event split across two reads must NOT emit KEY_ESC —
+    that would make every quit-on-Esc app exit at random when scrolling.
+
+    Partial sequences return ``(EVENT_NONE, 0)`` so Terminal.poll_event saves
+    the tail as pending bytes and prepends them to the next read.
+    """
+    var partial = parse_input(String("\x1b[<64;15;5"))   # missing terminator
+    assert_true(partial[0].kind == EVENT_NONE)
+    assert_equal(partial[1], 0)
+
+    # Partial CSI prefix — same convention.
+    var just_csi = parse_input(String("\x1b["))
+    assert_true(just_csi[0].kind == EVENT_NONE)
+    assert_equal(just_csi[1], 0)
+
+    # Partial SS3 prefix (some terminals emit ESC O <P|Q|R|S> for F1..F4).
+    var just_ss3 = parse_input(String("\x1bO"))
+    assert_true(just_ss3[0].kind == EVENT_NONE)
+    assert_equal(just_ss3[1], 0)
+
+    # Partial CSI mid digit-run (ESC[5 with no terminator yet).
+    var partial_tilde = parse_input(String("\x1b[5"))
+    assert_true(partial_tilde[0].kind == EVENT_NONE)
+    assert_equal(partial_tilde[1], 0)
+
+    # Partial CSI mid modified-key sequence.
+    var partial_mod = parse_input(String("\x1b[1;5"))
+    assert_true(partial_mod[0].kind == EVENT_NONE)
+    assert_equal(partial_mod[1], 0)
+
+
+fn test_sgr_mouse_wheel_up() raises:
+    var ev = parse_input(String("\x1b[<64;15;5M"))
+    assert_true(ev[0].kind == EVENT_MOUSE)
+    assert_true(ev[0].button == MOUSE_WHEEL_UP)
+
+
+fn test_file_dialog_selects_a_file() raises:
+    var dlg = FileDialog()
+    dlg.open(String("examples"))
+    # Find hello.mojo in the listing and step to it.
+    var target = -1
+    for i in range(len(dlg.entries)):
+        if dlg.entries[i] == String("hello.mojo"):
+            target = i
+            break
+    assert_true(target > 0)
+    while dlg.selected < target:
+        _ = dlg.handle_key(Event.key_event(KEY_DOWN))
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(dlg.submitted)
+    assert_equal(dlg.selected_path, String("examples/hello.mojo"))
+
+
+fn test_file_dialog_mouse_click_selects() raises:
+    var dlg = FileDialog()
+    dlg.open(String("examples"))
+    var screen = Rect(0, 0, 80, 24)
+    # Geometry: width=60, height=18, x=10, y=3 → list_top=6.
+    # Clicking row 7 (in-screen) maps to entry index = 0 + (7 - 6) = 1.
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(20, 7), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_equal(dlg.selected, 1)
+    assert_false(dlg.submitted)
+
+
+fn test_file_dialog_double_click_opens() raises:
+    var dlg = FileDialog()
+    dlg.open(String("examples"))
+    # Find hello.mojo, then click it twice.
+    var target = -1
+    for i in range(len(dlg.entries)):
+        if dlg.entries[i] == String("hello.mojo"):
+            target = i
+            break
+    assert_true(target > 0)
+    var screen = Rect(0, 0, 80, 24)
+    var list_top = 6
+    var visible_y = list_top + (target - dlg.scroll)
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(20, visible_y), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_equal(dlg.selected, target)
+    assert_false(dlg.submitted)
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(20, visible_y), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_true(dlg.submitted)
+    assert_equal(dlg.selected_path, String("examples/hello.mojo"))
+
+
+fn test_file_dialog_wheel_scrolls() raises:
+    var dlg = FileDialog()
+    dlg.open(String("examples"))
+    var screen = Rect(0, 0, 80, 24)
+    var initial = dlg.scroll
+    # Wheel down a few times.
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(20, 10), MOUSE_WHEEL_DOWN, True, False),
+        screen,
+    )
+    # If there are more entries than the visible window, scroll moves; else stays.
+    if len(dlg.entries) > 13:
+        assert_true(dlg.scroll > initial)
+    # Wheel up resets toward 0.
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(20, 10), MOUSE_WHEEL_UP, True, False),
+        screen,
+    )
+    assert_true(dlg.scroll <= initial + 3)
+
+
+fn test_editor_sticky_col_down_through_short_line() raises:
+    """Down-arrowing from a wide line through a short one and back to a wider
+    one returns the cursor to the original column."""
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 11)
+    assert_equal(ed.desired_col, 11)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    # Line 1 ("ab") is 2 chars: cursor clamps but desired_col is preserved.
+    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.desired_col, 11)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    # Line 2 is 10 chars: cursor lands at min(11, 10) = 10. Desired untouched.
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 11)
+
+
+fn test_editor_sticky_col_up_through_short_line() raises:
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 10)
+    _ = ed.handle_key(_key(KEY_UP), _VIEW)
+    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.desired_col, 10)
+    _ = ed.handle_key(_key(KEY_UP), _VIEW)
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 10)
+
+
+fn test_editor_sticky_col_reset_by_left_arrow() raises:
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    assert_equal(ed.desired_col, 11)
+    _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
+    # Horizontal move resets the remembered column to wherever we end up.
+    assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.desired_col, 1)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 1)
+
+
+fn test_editor_sticky_col_reset_by_right_arrow() raises:
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    # cursor (1, 2), desired 11. Right at end of line moves to start of next.
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.desired_col, 0)
+
+
+fn test_editor_sticky_col_reset_by_typing() raises:
+    var ed = Editor(String("hello world\nab"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    assert_equal(ed.desired_col, 11)
+    _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
+    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.desired_col, 3)
+
+
+fn test_editor_sticky_col_reset_by_click() raises:
+    var ed = Editor(String("hello world\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.desired_col, 11)
+    var view = Rect(0, 0, 40, 10)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(3, 0), MOUSE_BUTTON_LEFT, True, False),
+        view,
+    )
+    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.desired_col, 3)
+
+
+fn test_editor_sticky_col_reset_by_home_end() raises:
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)        # desired=11
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)       # row 1, col 2, desired 11
+    _ = ed.handle_key(_key(KEY_HOME), _VIEW)
+    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.desired_col, 0)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_sticky_col_pageup_pagedown() raises:
+    var ed = Editor(
+        String("0123456789\n0123456789\nab\n0123456789\n0123456789\n0123456789")
+    )
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.cursor_col, 10)
+    var small_view = Rect(0, 0, 80, 3)
+    _ = ed.handle_key(_key(KEY_PAGEDOWN), small_view)
+    # PageDown jumps view-height (3) rows; the destination line is 10 chars long.
+    assert_equal(ed.cursor_row, 3)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 10)
+    # Step back through the short line; sticky column survives.
+    _ = ed.handle_key(_key(KEY_UP), small_view)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.desired_col, 10)
+    _ = ed.handle_key(_key(KEY_PAGEUP), small_view)
+    # PageUp from row 2 jumps to row 0 (clamped at 0).
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 10)
+
+
+fn test_editor_sticky_col_shift_down_keeps_anchor() raises:
+    """Shift+Down should extend selection and use the sticky column too."""
+    var ed = Editor(String("hello world\nab\nabcdefghij"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN, MOD_SHIFT), _VIEW)
+    assert_true(ed.has_selection())
+    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.anchor_row, 0)
+    assert_equal(ed.anchor_col, 11)
+    assert_equal(ed.desired_col, 11)
+    _ = ed.handle_key(_key(KEY_DOWN, MOD_SHIFT), _VIEW)
+    assert_equal(ed.cursor_row, 2)
+    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.desired_col, 11)
+
+
+fn test_window_v_scrollbar_hit_arrows_and_thumb() raises:
+    var lines = String("")
+    for i in range(50):
+        lines = lines + String("line ") + String(i) + String("\n")
+    var w = Window.editor_window(String("ed"), Rect(0, 0, 30, 10), lines)
+    # Geometry: width 30, height 10. Scroll bar is at x = 29.
+    # Up arrow at y=1 (border row a.y is 0, so a.y+1=1).
+    var hit_up = w.v_scrollbar_hit(Point(29, 1))
+    assert_equal(hit_up[0], 1)
+    var hit_down = w.v_scrollbar_hit(Point(29, 8))
+    assert_equal(hit_down[0], 5)
+    # Scroll to the top — thumb sits at the top of the track.
+    w.editor.scroll_y = 0
+    var hit_thumb_top = w.v_scrollbar_hit(Point(29, 2))
+    assert_equal(hit_thumb_top[0], 3)
+    # Anything off the v-scrollbar column returns 0.
+    var miss = w.v_scrollbar_hit(Point(15, 4))
+    assert_equal(miss[0], 0)
+
+
+fn test_window_v_scroll_by_clamps() raises:
+    var lines = String("")
+    for i in range(50):
+        lines = lines + String("L") + String(i) + String("\n")
+    var w = Window.editor_window(String("ed"), Rect(0, 0, 30, 10), lines)
+    w.editor.scroll_y = 5
+    w.v_scroll_by(-1)
+    assert_equal(w.editor.scroll_y, 4)
+    w.v_scroll_by(100)
+    # Buffer = 50 lines + trailing empty = 51; view height = 8; max = 43.
+    var view_h = 10 - 2
+    var max_y = w.editor.buffer.line_count() - view_h
+    assert_equal(w.editor.scroll_y, max_y)
+    w.v_scroll_by(-1000)
+    assert_equal(w.editor.scroll_y, 0)
+
+
+fn test_window_v_scroll_drag_to_end() raises:
+    var lines = String("")
+    for i in range(50):
+        lines = lines + String("L") + String(i) + String("\n")
+    var w = Window.editor_window(String("ed"), Rect(0, 0, 30, 10), lines)
+    # Drag the thumb to the very bottom of the track.
+    w.v_drag_thumb_to(8, 0)
+    var view_h = 10 - 2
+    var max_y = w.editor.buffer.line_count() - view_h
+    assert_equal(w.editor.scroll_y, max_y)
+    # Drag to the top.
+    w.v_drag_thumb_to(2, 0)
+    assert_equal(w.editor.scroll_y, 0)
+
+
 fn main() raises:
     test_point_arithmetic()
     test_rect_basics()
@@ -164,4 +934,56 @@ fn main() raises:
     test_parse_input_keys()
     test_parse_input_sgr_mouse()
     test_centered()
+    test_text_buffer_split_and_join()
+    test_editor_typing_and_arrows()
+    test_editor_word_movement()
+    test_editor_word_movement_across_lines()
+    test_editor_shift_arrow_extends_selection()
+    test_editor_shift_ctrl_arrow_composes()
+    test_editor_typing_replaces_selection()
+    test_editor_backspace_deletes_selection()
+    test_editor_mouse_click_sets_cursor()
+    test_editor_mouse_drag_extends_selection()
+    test_editor_mouse_click_clamps_to_line()
+    test_terminal_parses_modified_arrows()
+    test_editor_selection_text()
+    test_editor_cut_selection()
+    test_editor_paste_text_single_line()
+    test_editor_paste_text_multiline()
+    test_editor_paste_replaces_selection()
+    test_editor_selection_text_multiline()
+    test_editor_goto_line()
+    test_editor_find_next()
+    test_editor_toggle_comment_single_line()
+    test_editor_toggle_comment_selection()
+    test_editor_toggle_case()
+    test_editor_dirty_flag()
+    test_file_io_read_and_stat()
+    test_editor_from_file()
+    test_terminal_parses_macos_alt_arrow()
+    test_editor_alt_arrow_word_jump()
+    test_path_helpers()
+    test_basename()
+    test_find_git_project()
+    test_right_aligned_menu_layout()
+    test_desktop_project_lifecycle()
+    test_file_dialog_lists_and_navigates()
+    test_partial_sgr_mouse_does_not_emit_esc()
+    test_sgr_mouse_wheel_up()
+    test_file_dialog_selects_a_file()
+    test_file_dialog_mouse_click_selects()
+    test_file_dialog_double_click_opens()
+    test_file_dialog_wheel_scrolls()
+    test_editor_sticky_col_down_through_short_line()
+    test_editor_sticky_col_up_through_short_line()
+    test_editor_sticky_col_reset_by_left_arrow()
+    test_editor_sticky_col_reset_by_right_arrow()
+    test_editor_sticky_col_reset_by_typing()
+    test_editor_sticky_col_reset_by_click()
+    test_editor_sticky_col_reset_by_home_end()
+    test_editor_sticky_col_pageup_pagedown()
+    test_editor_sticky_col_shift_down_keeps_anchor()
+    test_window_v_scrollbar_hit_arrows_and_thumb()
+    test_window_v_scroll_by_clamps()
+    test_window_v_scroll_drag_to_end()
     print("all tests passed")

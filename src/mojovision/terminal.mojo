@@ -15,7 +15,7 @@ from .canvas import Canvas
 from .cell import Cell, blank_cell
 from .colors import Attr, attr_to_sgr, default_attr
 from .events import (
-    Event, EVENT_KEY, EVENT_RESIZE, EVENT_QUIT,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_RESIZE, EVENT_QUIT,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
     KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
@@ -29,8 +29,8 @@ from .geometry import Point
 from .posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
-    poll_stdin, query_size_via_cursor, read_into, tcgetattr, tcsetattr,
-    write_buffer, write_string,
+    poll_stdin, query_size_via_cursor, read_into, tcflush, tcgetattr,
+    tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
 
@@ -49,6 +49,11 @@ comptime SEQ_CURSOR_HOME    = String("\x1b[H")
 # Mouse: 1002 = button-event tracking (motion only when held); 1006 = SGR encoding.
 comptime SEQ_MOUSE_ON  = String("\x1b[?1002h\x1b[?1006h")
 comptime SEQ_MOUSE_OFF = String("\x1b[?1006l\x1b[?1002l")
+# Force xterm-style modifier reporting on cursor & function keys, so shift /
+# ctrl with the arrows arrive as `ESC[1;<mod><letter>` even in terminals
+# (iTerm2!) that otherwise strip the modifiers.
+comptime SEQ_MODIFY_KEYS_ON  = String("\x1b[>1;2m\x1b[>2;2m\x1b[>4;2m")
+comptime SEQ_MODIFY_KEYS_OFF = String("\x1b[>1m\x1b[>2m\x1b[>4m")
 
 
 fn move_cursor(x: Int, y: Int) -> String:
@@ -71,7 +76,9 @@ struct Terminal:
     var _started: Bool
     var _front: Canvas
     var _queue: List[Event]
+    var _queue_head: Int            # avoid List.pop(0)'s O(n) shift + churn
     var _resize_poll_counter: Int
+    var _pending: List[UInt8]       # trailing bytes of a partial escape sequence
     var width: Int
     var height: Int
 
@@ -79,7 +86,9 @@ struct Terminal:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
         self._started = False
         self._queue = List[Event]()
+        self._queue_head = 0
         self._resize_poll_counter = 0
+        self._pending = List[UInt8]()
         var size = get_window_size()
         self.width = size[0]
         self.height = size[1]
@@ -108,6 +117,7 @@ struct Terminal:
             self.height = measured[1]
             self._front.resize(self.width, self.height)
         write_string(STDOUT_FD, SEQ_MOUSE_ON)
+        write_string(STDOUT_FD, SEQ_MODIFY_KEYS_ON)
         write_string(STDOUT_FD, SEQ_CLEAR_SCREEN)
         write_string(STDOUT_FD, SEQ_CURSOR_HOME)
         self._started = True
@@ -118,10 +128,23 @@ struct Terminal:
     fn stop(mut self) raises:
         if not self._started:
             return
+        write_string(STDOUT_FD, SEQ_MODIFY_KEYS_OFF)
         write_string(STDOUT_FD, SEQ_MOUSE_OFF)
         write_string(STDOUT_FD, SEQ_RESET)
         write_string(STDOUT_FD, SEQ_CURSOR_SHOW)
         write_string(STDOUT_FD, SEQ_ALT_SCREEN_OFF)
+        # Drain any in-flight bytes the terminal emitted while it was still
+        # processing SEQ_MOUSE_OFF — without this, fast scroll-wheel events
+        # mid-shutdown get echoed verbatim once tcsetattr re-enables ECHO.
+        # Cap iterations so a user holding the mouse wheel can't stall exit.
+        var scratch = alloc_zero_buffer(256)
+        var iterations = 0
+        while iterations < 50 and poll_stdin(STDIN_FD, Int32(10)):
+            var n = read_into(STDIN_FD, scratch, 256)
+            if n <= 0:
+                break
+            iterations += 1
+        _ = tcflush(STDIN_FD, tciflush_value())
         _ = tcsetattr(STDIN_FD, TCSANOW, self._orig_termios)
         self._started = False
 
@@ -198,28 +221,85 @@ struct Terminal:
         Each ``read()`` burst (e.g. several SGR mouse reports during a drag) is
         parsed into individual events and queued; subsequent calls drain the
         queue without blocking.
+
+        Partial escape sequences split across reads are saved in ``_pending``
+        and prepended to the next read, so a wheel-event burst chopped at a
+        read boundary doesn't get misread as a KEY_ESC keypress. If pending
+        bytes survive a follow-up read with no progress (the user actually
+        pressed Escape), the leading ESC is flushed as KEY_ESC.
         """
-        if len(self._queue) > 0:
-            return self._queue.pop(0)
+        if self._queue_head < len(self._queue):
+            return self._pop_queue()
         if not poll_stdin(STDIN_FD, Int32(timeout_ms)):
+            # No new input. If we held a partial sequence, the user almost
+            # certainly pressed real ESC — flush it now so quit-on-Esc apps
+            # remain responsive.
+            if len(self._pending) > 0:
+                self._flush_pending_as_esc()
+                if self._queue_head < len(self._queue):
+                    return self._pop_queue()
             return None
         var buf = alloc_zero_buffer(1024)
         var n = read_into(STDIN_FD, buf, 1024)
         if n <= 0:
+            if len(self._pending) > 0:
+                self._flush_pending_as_esc()
+                if self._queue_head < len(self._queue):
+                    return self._pop_queue()
             return None
-        var bytes = StringSlice(ptr=buf.unsafe_ptr(), length=n).as_bytes()
+        # Build pending + new into a fresh buffer so parse_input sees a
+        # contiguous view spanning the split.
+        var combined = List[UInt8]()
+        for i in range(len(self._pending)):
+            combined.append(self._pending[i])
+        for i in range(n):
+            combined.append(buf[i])
+        self._pending = List[UInt8]()
+        var total = len(combined)
+        var bytes = StringSlice(
+            ptr=combined.unsafe_ptr(), length=total
+        ).as_bytes()
         var pos = 0
-        while pos < n:
+        while pos < total:
             var slice = String(StringSlice(unsafe_from_utf8=bytes[pos:]))
             var parsed = parse_input(slice)
-            self._queue.append(parsed[0])
             var consumed = parsed[1]
             if consumed <= 0:
+                # Partial — save the tail as pending and stop parsing.
+                for i in range(pos, total):
+                    self._pending.append(combined[i])
                 break
+            if parsed[0].kind != EVENT_NONE:
+                self._queue.append(parsed[0])
             pos += consumed
-        if len(self._queue) == 0:
+        # Cap the pending buffer so a stream of malformed partials can't grow
+        # it without bound. A real escape sequence is well under this.
+        if len(self._pending) > 64:
+            self._pending = List[UInt8]()
+        if self._queue_head >= len(self._queue):
             return None
-        return self._queue.pop(0)
+        return self._pop_queue()
+
+    fn _pop_queue(mut self) -> Event:
+        var ev = self._queue[self._queue_head]
+        self._queue_head += 1
+        if self._queue_head >= len(self._queue):
+            # Drained — reset rather than letting the list grow forever.
+            self._queue = List[Event]()
+            self._queue_head = 0
+        return ev
+
+    fn _flush_pending_as_esc(mut self):
+        """Emit a KEY_ESC for the pending leading byte (must be ESC) and clear.
+
+        Pending only ever holds the start of a partial escape sequence, which
+        always begins with 0x1B. After the follow-up read times out, that ESC
+        is the user's real Escape keypress; any trailing bytes are discarded
+        (in practice there are none — real ESC keypresses are a single byte).
+        """
+        if len(self._pending) > 0 and self._pending[0] == 0x1B:
+            self._queue.append(Event.key_event(KEY_ESC))
+        self._pending = List[UInt8]()
 
 
 # --- Input parser -----------------------------------------------------------
@@ -231,6 +311,14 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     Returns ``(event, bytes_consumed)``. When multiple events are buffered in a
     single read (common during drag, where SGR mouse reports arrive in bursts),
     the caller advances ``data`` by ``bytes_consumed`` and parses again.
+
+    Partial-sequence convention: returning ``(EVENT_NONE, 0)`` signals the
+    caller that the buffer ends mid-sequence and the trailing bytes should
+    be saved and prepended to the next read. This is what keeps a scroll-
+    wheel burst that gets split at a read boundary from being misread as a
+    KEY_ESC keypress (and quitting any quit-on-Esc app). Real ESC keypress
+    detection is a Terminal.poll_event responsibility — it disambiguates
+    via a short follow-up timeout.
     """
     if len(data) == 0:
         return (Event(), 0)
@@ -240,19 +328,32 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     # Bare ESC, or ESC + something — could be Alt-modified key or a CSI/SS3.
     if b0 == 0x1B:
         if len(data) == 1:
-            return (Event.key_event(KEY_ESC), 1)
+            # Could be a real ESC keypress, or the first byte of an escape
+            # sequence whose tail hasn't arrived yet. Defer to caller.
+            return (Event(), 0)
         var b1 = bytes[1]
         if b1 == 0x5B:  # '['
             return _parse_csi(data)
         if b1 == 0x4F:  # 'O' — SS3, used by some terminals for F1..F4
-            if len(data) >= 3:
-                var b2 = bytes[2]
-                if b2 == 0x50: return (Event.key_event(KEY_F1), 3)
-                if b2 == 0x51: return (Event.key_event(KEY_F2), 3)
-                if b2 == 0x52: return (Event.key_event(KEY_F3), 3)
-                if b2 == 0x53: return (Event.key_event(KEY_F4), 3)
-            return (Event.key_event(KEY_ESC), 2)
-        # ESC + printable → Alt-modified
+            if len(data) < 3:
+                # Partial SS3: tail not yet read.
+                return (Event(), 0)
+            var b2 = bytes[2]
+            if b2 == 0x50: return (Event.key_event(KEY_F1), 3)
+            if b2 == 0x51: return (Event.key_event(KEY_F2), 3)
+            if b2 == 0x52: return (Event.key_event(KEY_F3), 3)
+            if b2 == 0x53: return (Event.key_event(KEY_F4), 3)
+            # Unknown SS3 final byte — drop the prefix without emitting ESC.
+            return (Event(), 3)
+        # macOS-style Alt+arrow word jump: iTerm2/Terminal.app default for
+        # Alt+Right is ``ESC f`` (readline forward-word) and Alt+Left is
+        # ``ESC b``. Translate them into KEY_RIGHT/LEFT + MOD_ALT so the
+        # editor's word-jump path fires without requiring iTerm2 config.
+        if b1 == 0x66:  # 'f'
+            return (Event.key_event(KEY_RIGHT, MOD_ALT), 2)
+        if b1 == 0x62:  # 'b'
+            return (Event.key_event(KEY_LEFT, MOD_ALT), 2)
+        # ESC + printable → Alt-modified literal key.
         return (Event.key_event(UInt32(Int(b1)), MOD_ALT), 2)
 
     if b0 == 0x0D or b0 == 0x0A:
@@ -273,7 +374,8 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
     """Handle the small CSI vocabulary we recognize."""
     var bytes = data.as_bytes()
     if len(bytes) < 3:
-        return (Event.key_event(KEY_ESC), 1)
+        # Just ``ESC [`` so far — tail not yet read. Defer to caller.
+        return (Event(), 0)
 
     # SGR mouse: CSI < B ; X ; Y M|m  — emitted by xterm-style 1006 mode.
     if bytes[2] == 0x3C:  # '<'
@@ -286,38 +388,79 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
     if b2 == 0x44: return (Event.key_event(KEY_LEFT), 3)
     if b2 == 0x48: return (Event.key_event(KEY_HOME), 3)
     if b2 == 0x46: return (Event.key_event(KEY_END), 3)
-    # CSI <number>~ forms: ESC[5~ ESC[6~ ESC[2~ ESC[3~ ESC[15~ ...
+    # CSI <number>~ forms (ESC[5~ etc.) and CSI 1;<mod><letter> (ESC[1;5C etc.).
     if b2 >= 0x30 and b2 <= 0x39:
         var i = 2
-        var num = 0
+        var num1 = 0
         while i < len(bytes) and bytes[i] >= 0x30 and bytes[i] <= 0x39:
-            num = num * 10 + Int(bytes[i]) - 0x30
+            num1 = num1 * 10 + Int(bytes[i]) - 0x30
             i += 1
-        if i < len(bytes) and bytes[i] == 0x7E:  # '~'
+        if i >= len(bytes):
+            # Ran off the end while reading digits — buffer truncated.
+            return (Event(), 0)
+        if bytes[i] == 0x7E:  # '~'
             var consumed = i + 1
-            if num == 1: return (Event.key_event(KEY_HOME), consumed)
-            if num == 2: return (Event.key_event(KEY_INSERT), consumed)
-            if num == 3: return (Event.key_event(KEY_DELETE), consumed)
-            if num == 4: return (Event.key_event(KEY_END), consumed)
-            if num == 5: return (Event.key_event(KEY_PAGEUP), consumed)
-            if num == 6: return (Event.key_event(KEY_PAGEDOWN), consumed)
-            if num == 11: return (Event.key_event(KEY_F1), consumed)
-            if num == 12: return (Event.key_event(KEY_F2), consumed)
-            if num == 13: return (Event.key_event(KEY_F3), consumed)
-            if num == 14: return (Event.key_event(KEY_F4), consumed)
-            if num == 15: return (Event.key_event(KEY_F5), consumed)
-            if num == 17: return (Event.key_event(KEY_F6), consumed)
-            if num == 18: return (Event.key_event(KEY_F7), consumed)
-            if num == 19: return (Event.key_event(KEY_F8), consumed)
-            if num == 20: return (Event.key_event(KEY_F9), consumed)
-            if num == 21: return (Event.key_event(KEY_F10), consumed)
-            if num == 23: return (Event.key_event(KEY_F11), consumed)
-            if num == 24: return (Event.key_event(KEY_F12), consumed)
-    return (Event.key_event(KEY_ESC), 3)
+            if num1 == 1: return (Event.key_event(KEY_HOME), consumed)
+            if num1 == 2: return (Event.key_event(KEY_INSERT), consumed)
+            if num1 == 3: return (Event.key_event(KEY_DELETE), consumed)
+            if num1 == 4: return (Event.key_event(KEY_END), consumed)
+            if num1 == 5: return (Event.key_event(KEY_PAGEUP), consumed)
+            if num1 == 6: return (Event.key_event(KEY_PAGEDOWN), consumed)
+            if num1 == 11: return (Event.key_event(KEY_F1), consumed)
+            if num1 == 12: return (Event.key_event(KEY_F2), consumed)
+            if num1 == 13: return (Event.key_event(KEY_F3), consumed)
+            if num1 == 14: return (Event.key_event(KEY_F4), consumed)
+            if num1 == 15: return (Event.key_event(KEY_F5), consumed)
+            if num1 == 17: return (Event.key_event(KEY_F6), consumed)
+            if num1 == 18: return (Event.key_event(KEY_F7), consumed)
+            if num1 == 19: return (Event.key_event(KEY_F8), consumed)
+            if num1 == 20: return (Event.key_event(KEY_F9), consumed)
+            if num1 == 21: return (Event.key_event(KEY_F10), consumed)
+            if num1 == 23: return (Event.key_event(KEY_F11), consumed)
+            if num1 == 24: return (Event.key_event(KEY_F12), consumed)
+            # Unrecognized CSI~ — drop without emitting ESC.
+            return (Event(), consumed)
+        # CSI <num1> ; <mod> <letter>  — modified arrow / nav key.
+        # The ``mod`` value is 1 + (shift|alt<<1|ctrl<<2).
+        if bytes[i] == 0x3B:  # ';'
+            i += 1
+            var mod_num = 0
+            while i < len(bytes) and bytes[i] >= 0x30 and bytes[i] <= 0x39:
+                mod_num = mod_num * 10 + Int(bytes[i]) - 0x30
+                i += 1
+            if i >= len(bytes):
+                # Buffer truncated mid mod-letter sequence.
+                return (Event(), 0)
+            var letter = bytes[i]
+            var consumed = i + 1
+            var raw_mod = mod_num - 1
+            if raw_mod < 0: raw_mod = 0
+            var mods: UInt8 = MOD_NONE
+            if (raw_mod & 1) != 0: mods = mods | MOD_SHIFT
+            if (raw_mod & 2) != 0: mods = mods | MOD_ALT
+            if (raw_mod & 4) != 0: mods = mods | MOD_CTRL
+            if letter == 0x41: return (Event.key_event(KEY_UP, mods), consumed)
+            if letter == 0x42: return (Event.key_event(KEY_DOWN, mods), consumed)
+            if letter == 0x43: return (Event.key_event(KEY_RIGHT, mods), consumed)
+            if letter == 0x44: return (Event.key_event(KEY_LEFT, mods), consumed)
+            if letter == 0x48: return (Event.key_event(KEY_HOME, mods), consumed)
+            if letter == 0x46: return (Event.key_event(KEY_END, mods), consumed)
+            # Unrecognized modified-key letter — drop without emitting ESC.
+            return (Event(), consumed)
+        # Unrecognized byte after CSI digits — drop, don't emit ESC.
+        return (Event(), i + 1)
+    # Unrecognized CSI final byte — drop, don't emit ESC.
+    return (Event(), 3)
 
 
 fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
-    """Parse `CSI < B ; X ; Y (M|m)`. Press/drag = M, release = m."""
+    """Parse `CSI < B ; X ; Y (M|m)`. Press/drag = M, release = m.
+
+    If the buffer ends mid-sequence (read split a mouse report in two) we
+    return ``(EVENT_NONE, 0)`` so the caller saves the trailing bytes as
+    pending and prepends them to the next read. Returning KEY_ESC instead
+    would make every quit-on-Esc app randomly exit during fast scrolling.
+    """
     var bytes = data.as_bytes()
     var i = 3  # past `ESC [ <`
     var nums = List[Int]()
@@ -338,7 +481,8 @@ fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
             if has_digit:
                 nums.append(cur)
             if len(nums) < 3:
-                return (Event.key_event(KEY_ESC), i + 1)
+                # Malformed (terminator before three numbers) — drop silently.
+                return (Event(), i + 1)
             var raw = nums[0]
             var x = nums[1] - 1
             var y = nums[2] - 1
@@ -364,10 +508,10 @@ fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
                 i + 1,
             )
         else:
-            # Unrecognized byte — abort.
-            return (Event.key_event(KEY_ESC), i + 1)
-    # Ran off the end — incomplete sequence; consume what we have.
-    return (Event.key_event(KEY_ESC), len(bytes))
+            # Unrecognized byte mid-sequence — drop silently.
+            return (Event(), i + 1)
+    # Ran off the end — partial sequence (split read). Defer to caller.
+    return (Event(), 0)
 
 
 fn _utf8_seq_len(b: UInt8) -> Int:

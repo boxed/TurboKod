@@ -28,9 +28,17 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_NONE,
     MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .clipboard import clipboard_copy, clipboard_paste
 from .desktop import Desktop
+from .editor import Editor, TextBuffer
+from .file_dialog import FileDialog
+from .file_io import (
+    FileInfo, basename, find_git_project, join_path, list_directory,
+    parent_path, read_file, stat_file,
+)
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
+from .prompt import Prompt
 from .status import StatusBar, StatusItem
 from .terminal import Terminal
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
