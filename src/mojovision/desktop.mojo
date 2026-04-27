@@ -45,9 +45,12 @@ from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Rect
 from .highlight import DefinitionRequest, extension_of
+from .language_config import (
+    LanguageSpec, built_in_servers, find_language_for_extension,
+)
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .menu import Menu, MenuBar, MenuItem
-from .posix import monotonic_ms
+from .posix import monotonic_ms, which
 from .project import replace_in_project
 from .project_find import ProjectFind
 from .prompt import Prompt
@@ -202,14 +205,17 @@ struct Desktop(Movable):
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
     var _esc_armed: Bool             # next keystroke is Alt+<letter> (mnemonic)
-    # One ``LspManager`` per language id. Spawned lazily by
-    # ``_ensure_lsp_for_extension`` when a file of that type is first
-    # opened — there's no LSP cost for users who never touch one.
-    # Separate fields rather than ``List[LspManager]`` because Mojo's
-    # ``List`` requires ``Copyable`` and managers own non-copyable
-    # process / pipe state.
-    var lsp_mojo: LspManager
-    var lsp_python: LspManager
+    # Spawned LSP managers, one per language id, kept in parallel
+    # arrays so we can index either by language id or insertion order.
+    # Populated lazily by ``_ensure_lsp_for_extension`` — no LSP cost
+    # for languages the user never touches. ``lsp_specs`` is the
+    # registry the host can extend (today: built-in catalog only); the
+    # mapping from extension → spec is independent of which binary we
+    # actually end up spawning, so adding a new IDE-bundled server is
+    # just a registry edit.
+    var lsp_specs: List[LanguageSpec]
+    var lsp_managers: List[LspManager]
+    var lsp_languages: List[String]
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -230,8 +236,9 @@ struct Desktop(Movable):
         self._open_count = 0
         self._hotkeys = List[Hotkey]()
         self._esc_armed = False
-        self.lsp_mojo = LspManager()
-        self.lsp_python = LspManager()
+        self.lsp_specs = built_in_servers()
+        self.lsp_managers = List[LspManager]()
+        self.lsp_languages = List[String]()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -371,8 +378,7 @@ struct Desktop(Movable):
         """If the window at ``idx`` is an editor for a recognized source
         file type, ensure the matching LSP server is started and inform
         it of this document. Languages without an installed server are
-        a silent no-op (e.g. ``.py`` files when the user has neither
-        pyright nor pylsp on PATH)."""
+        a silent no-op."""
         if idx < 0 or idx >= len(self.windows.windows):
             return
         if not self.windows.windows[idx].is_editor:
@@ -380,61 +386,80 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var lang = self._ensure_lsp_for_extension(extension_of(path))
-        if lang == String(""):
+        var lsp_idx = self._ensure_lsp_for_extension(extension_of(path))
+        if lsp_idx < 0:
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
-        if lang == String("mojo"):
-            self.lsp_mojo.notify_opened(path, text^)
-        elif lang == String("python"):
-            self.lsp_python.notify_opened(path, text^)
+        self.lsp_managers[lsp_idx].notify_opened(path, text^)
 
-    fn _lang_for_extension(self, ext: String) -> String:
-        """Map a file extension to the language id its LSP manager (if
-        any) registers under. Returns "" for languages we don't support."""
-        if ext == String("mojo") or ext == String("🔥"):
-            return String("mojo")
-        if ext == String("py") or ext == String("pyi"):
-            return String("python")
-        return String("")
+    fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
+        """Spawn (or look up) an LSP manager for files with extension
+        ``ext``. Returns the index into ``lsp_managers`` of the manager,
+        or ``-1`` for unsupported file types or when no candidate
+        binary is installed. Idempotent — re-calling for an already-
+        spawned language returns the existing index.
 
-    fn _ensure_lsp_for_extension(mut self, ext: String) -> String:
-        """Spawn the matching server on first use and return its language
-        id. Returns "" for unsupported file types or when no server
-        binary is installed (so the caller can quietly skip LSP wiring
-        for that file). Idempotent — re-calling for an already-spawned
-        language is a no-op.
+        ``ext`` is matched against the registry's ``file_types``; the
+        matching ``LanguageSpec`` then drives binary selection. The
+        first candidate in ``spec.candidates`` whose binary exists on
+        ``$PATH`` (per ``which()``) wins. Mojo gets special-cased to
+        thread ``-I`` include flags through the LSP argv.
         """
-        var lang = self._lang_for_extension(ext)
-        if lang == String(""):
-            return String("")
+        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        if spec_idx < 0:
+            return -1
+        var lang = self.lsp_specs[spec_idx].language_id
+        for i in range(len(self.lsp_languages)):
+            if self.lsp_languages[i] == lang:
+                return i
+        # Pick the first installed candidate.
+        var argv = List[String]()
+        var argv_found = False
+        var spec = self.lsp_specs[spec_idx]
+        for c in range(len(spec.candidates)):
+            var cand = spec.candidates[c]
+            if len(cand.argv) == 0:
+                continue
+            if len(which(cand.argv[0]).as_bytes()) > 0:
+                for k in range(len(cand.argv)):
+                    argv.append(cand.argv[k])
+                argv_found = True
+                break
+        if not argv_found:
+            return -1
         var root = String("")
         if self.project:
             root = self.project.value()
+        # Mojo wants ``-I <root> -I <root>/src`` injected so the server
+        # can resolve project imports. Other languages take their argv
+        # straight from the registry.
         if lang == String("mojo"):
-            if self.lsp_mojo.is_not_started():
-                self.lsp_mojo.start_mojo(root, _mojo_include_dirs(root))
-            return lang
-        if lang == String("python"):
-            if self.lsp_python.is_not_started():
-                if not self.lsp_python.start_python(root):
-                    # No Python LSP on PATH; report that to the caller
-                    # as "not supported" so we don't fake a starting state.
-                    return String("")
-            return lang
-        return String("")
+            var includes = _mojo_include_dirs(root)
+            for i in range(len(includes)):
+                argv.append(String("-I"))
+                argv.append(includes[i])
+        var manager = LspManager()
+        manager.start_with(lang, argv, root)
+        self.lsp_managers.append(manager^)
+        self.lsp_languages.append(lang)
+        return len(self.lsp_managers) - 1
 
-    fn _lsp_lang_for_path(self, path: String) -> String:
-        """Language id of the spawned server handling ``path``, or "" if
-        no server has been spawned for that file's extension."""
+    fn _lsp_for_path(self, path: String) -> Int:
+        """Index into ``lsp_managers`` of the (already-spawned) server
+        handling ``path``, or ``-1`` if none has been spawned for that
+        file's extension yet."""
         if len(path.as_bytes()) == 0:
-            return String("")
-        var lang = self._lang_for_extension(extension_of(path))
-        if lang == String("mojo") and not self.lsp_mojo.is_not_started():
-            return lang
-        if lang == String("python") and not self.lsp_python.is_not_started():
-            return lang
-        return String("")
+            return -1
+        var spec_idx = find_language_for_extension(
+            self.lsp_specs, extension_of(path),
+        )
+        if spec_idx < 0:
+            return -1
+        var lang = self.lsp_specs[spec_idx].language_id
+        for i in range(len(self.lsp_languages)):
+            if self.lsp_languages[i] == lang:
+                return i
+        return -1
 
     fn _default_window_rect(self, workspace: Rect) -> Rect:
         var w80 = (workspace.width() * 80) // 100
@@ -796,22 +821,16 @@ struct Desktop(Movable):
                 self._dispatch_definition_request(idx, req_opt.value())
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
-        # focused. Each branch is independent — Mojo's auto-destructor
-        # handles the partial-move pattern around ``take_symbols``.
-        if not self.lsp_mojo.is_not_started():
-            var resolved = self.lsp_mojo.tick()
+        # focused.
+        for i in range(len(self.lsp_managers)):
+            var resolved = self.lsp_managers[i].tick()
             if resolved:
                 self._jump_to(resolved.value(), screen)
             if self.symbol_pick.active and self.symbol_pick.loading \
-                    and self.lsp_mojo.has_pending_symbols():
-                self.symbol_pick.set_entries(self.lsp_mojo.take_symbols())
-        if not self.lsp_python.is_not_started():
-            var resolved = self.lsp_python.tick()
-            if resolved:
-                self._jump_to(resolved.value(), screen)
-            if self.symbol_pick.active and self.symbol_pick.loading \
-                    and self.lsp_python.has_pending_symbols():
-                self.symbol_pick.set_entries(self.lsp_python.take_symbols())
+                    and self.lsp_managers[i].has_pending_symbols():
+                self.symbol_pick.set_entries(
+                    self.lsp_managers[i].take_symbols(),
+                )
         self._refresh_lsp_status()
 
     fn _dispatch_definition_request(
@@ -826,8 +845,16 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var lang = self._lsp_lang_for_path(path)
-        if lang == String(""):
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
+            self.status_bar.set_message(
+                String("LSP: not started for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        if self.lsp_managers[lsp_idx].is_failed():
+            return
+        if not self.lsp_managers[lsp_idx].is_active():
             self.status_bar.set_message(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
@@ -841,31 +868,9 @@ struct Desktop(Movable):
         var col = req.col
         var word = req.word^
         req.word = String("")
-        var ok = False
-        if lang == String("mojo"):
-            if self.lsp_mojo.is_failed():
-                return
-            if not self.lsp_mojo.is_active():
-                self.status_bar.set_message(
-                    String("LSP: not started for this file type"),
-                    Attr(RED, LIGHT_GRAY),
-                )
-                return
-            ok = self.lsp_mojo.request_definition(
-                path, row, col, word^, text^,
-            )
-        elif lang == String("python"):
-            if self.lsp_python.is_failed():
-                return
-            if not self.lsp_python.is_active():
-                self.status_bar.set_message(
-                    String("LSP: not started for this file type"),
-                    Attr(RED, LIGHT_GRAY),
-                )
-                return
-            ok = self.lsp_python.request_definition(
-                path, row, col, word^, text^,
-            )
+        var ok = self.lsp_managers[lsp_idx].request_definition(
+            path, row, col, word^, text^,
+        )
         if not ok:
             self.status_bar.set_message(
                 String("LSP: still starting up — try again"),
@@ -884,14 +889,14 @@ struct Desktop(Movable):
         if idx < 0:
             return
         var path = self.windows.windows[idx].editor.file_path
-        var lang = self._lsp_lang_for_path(path)
-        if lang == String(""):
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
             return
-        var prefix = String("LSP[") + lang + String("]: ")
-        if lang == String("mojo"):
-            _refresh_status_for(self.status_bar, prefix, self.lsp_mojo)
-        elif lang == String("python"):
-            _refresh_status_for(self.status_bar, prefix, self.lsp_python)
+        var prefix = String("LSP[") + self.lsp_languages[lsp_idx] \
+            + String("]: ")
+        _refresh_status_for(
+            self.status_bar, prefix, self.lsp_managers[lsp_idx],
+        )
 
     fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
         """Focus the window for ``target.path`` (opening it if needed) and
@@ -967,35 +972,25 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var lang = self._lsp_lang_for_path(path)
-        if lang == String(""):
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
             self.status_bar.set_message(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
             return
+        if self.lsp_managers[lsp_idx].is_failed():
+            return
+        if not self.lsp_managers[lsp_idx].is_ready():
+            self.status_bar.set_message(
+                String("LSP: still starting up — try again"),
+                Attr(YELLOW, LIGHT_GRAY),
+            )
+            return
         var text = self.windows.windows[idx].editor.text_snapshot()
-        var ok = False
-        if lang == String("mojo"):
-            if self.lsp_mojo.is_failed():
-                return
-            if not self.lsp_mojo.is_ready():
-                self.status_bar.set_message(
-                    String("LSP: still starting up — try again"),
-                    Attr(YELLOW, LIGHT_GRAY),
-                )
-                return
-            ok = self.lsp_mojo.request_document_symbols(path, text^)
-        elif lang == String("python"):
-            if self.lsp_python.is_failed():
-                return
-            if not self.lsp_python.is_ready():
-                self.status_bar.set_message(
-                    String("LSP: still starting up — try again"),
-                    Attr(YELLOW, LIGHT_GRAY),
-                )
-                return
-            ok = self.lsp_python.request_document_symbols(path, text^)
+        var ok = self.lsp_managers[lsp_idx].request_document_symbols(
+            path, text^,
+        )
         if ok:
             self.symbol_pick.open(path)
 

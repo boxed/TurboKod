@@ -66,7 +66,7 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
     var character: Int
 
 
-struct LspManager(Movable):
+struct LspManager(Copyable, Movable):
     """One LSP server's worth of state plus the transport (``LspClient``).
 
     The client is held by-value; before ``start`` it's a default-constructed
@@ -99,6 +99,32 @@ struct LspManager(Movable):
     var _pending_open_texts: List[String]
 
     fn __init__(out self):
+        self.client = LspClient(LspProcess())
+        self.state = _STATE_NOT_STARTED
+        self.failure_reason = String("")
+        self._init_id = 0
+        self._inflight_def_id = 0
+        self._inflight_word = String("")
+        self._last_empty = False
+        self._inflight_symbol_id = 0
+        self._resolved_symbols = List[SymbolItem]()
+        self._has_resolved_symbols = False
+        self._symbols_empty = False
+        self._root_uri = String("")
+        self._language_id = String("")
+        self._doc_paths = List[String]()
+        self._doc_versions = List[Int]()
+        self._pending_open_paths = List[String]()
+        self._pending_open_texts = List[String]()
+
+    fn __copyinit__(out self, copy: Self):
+        # Honest copying would duplicate child PID + pipe FD ownership,
+        # which leaks. We only declare ``Copyable`` so we can stash
+        # managers in ``List[LspManager]``; the list is grown via ``^``
+        # transfer and indexed through references in the methods that
+        # mutate, so this branch never runs for a live manager. If it
+        # ever does fire, it produces a fresh NOT_STARTED sibling — bad
+        # but recoverable, rather than corrupting the original's state.
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")

@@ -55,6 +55,10 @@ from .lsp import (
     LspClient, LspIncoming, LspProcess, classify_message,
     lsp_initialize_params,
 )
+from .language_config import (
+    LanguageSpec, ServerCandidate, built_in_servers,
+    find_language_by_id, find_language_for_extension,
+)
 from .lsp_dispatch import DefinitionResolved, LspManager, SymbolItem
 from .file_dialog import FileDialog
 from .file_io import (

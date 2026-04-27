@@ -200,8 +200,8 @@ fn main() raises:
         # Reap the LSP child before we leave the try block — ``desktop`` isn't
         # in scope from the outer ``finally``, and we'd rather not orphan the
         # subprocess if the loop exits cleanly via Ctrl+Q.
-        desktop.lsp_mojo.shutdown()
-        desktop.lsp_python.shutdown()
+        for i in range(len(desktop.lsp_managers)):
+            desktop.lsp_managers[i].shutdown()
     finally:
         app.stop()
         for i in range(len(error_log)):
