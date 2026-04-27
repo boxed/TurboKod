@@ -40,6 +40,11 @@ from .desktop import (
     ctrl_key, format_hotkey,
 )
 from .editor import Editor, TextBuffer
+from .highlight import (
+    DefinitionRequest, Highlight, extension_of, highlight_for_extension,
+    highlight_comment_attr, highlight_decorator_attr, highlight_keyword_attr,
+    highlight_number_attr, highlight_string_attr, word_at,
+)
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,

@@ -482,6 +482,21 @@ struct Desktop(Movable):
             else:
                 self._esc_armed = True
             return Optional[String]()
+        # When a menu is open, it captures keyboard focus: arrow keys
+        # navigate, Enter activates. Mnemonic switching (Alt+<letter>)
+        # still works as a fall-through if the menu doesn't consume.
+        if self.menu_bar.is_open():
+            var mr = self.menu_bar.handle_key(event)
+            if mr.action:
+                var action = mr.action.value()
+                return self.dispatch_action(action, screen)
+            if mr.consumed:
+                return Optional[String]()
+            if event.mods == MOD_ALT and self._open_menu_by_mnemonic(event.key):
+                return Optional[String]()
+            # Anything else is swallowed — typing into windows while a menu
+            # is open would be surprising.
+            return Optional[String]()
         # ESC-prefix menu mnemonic: if the previous keystroke armed us and
         # this one is a letter, treat as Alt+<letter>.
         if was_armed and event.mods == MOD_NONE \
@@ -525,7 +540,7 @@ struct Desktop(Movable):
             if 0x41 <= first and first <= 0x5A:
                 first = first + 0x20
             if first == k:
-                self.menu_bar.open_idx = mi
+                self.menu_bar.open_menu(mi)
                 return True
         return False
 

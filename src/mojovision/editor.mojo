@@ -23,6 +23,11 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .file_io import FileInfo, read_file, stat_file, write_file
+from .highlight import (
+    DefinitionRequest, Highlight, extension_of, highlight_for_extension,
+    word_at,
+)
+from std.collections.optional import Optional
 from .geometry import Point, Rect
 
 
@@ -170,6 +175,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     var file_size: Int64
     var file_mtime: Int64
     var dirty: Bool
+    # Syntax highlighting overlay. ``_highlights_dirty`` triggers
+    # ``_refresh_highlights`` after edits / file loads.
+    var highlights: List[Highlight]
+    var _highlights_dirty: Bool
+    # ``pending_definition`` is set when the user Ctrl+left-clicks an
+    # identifier — the host polls ``consume_definition_request`` and
+    # forwards to whichever LSP client is active.
+    var pending_definition: Optional[DefinitionRequest]
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -184,6 +197,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.highlights = List[Highlight]()
+        self._highlights_dirty = True
+        self.pending_definition = Optional[DefinitionRequest]()
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -198,6 +214,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.highlights = List[Highlight]()
+        self._highlights_dirty = True
+        self.pending_definition = Optional[DefinitionRequest]()
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -208,6 +227,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
         ed.dirty = False
+        ed._refresh_highlights()
         return ed^
 
     fn __copyinit__(out self, copy: Self):
@@ -223,6 +243,26 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
         self.dirty = copy.dirty
+        self.highlights = copy.highlights.copy()
+        self._highlights_dirty = copy._highlights_dirty
+        self.pending_definition = copy.pending_definition
+
+    fn _refresh_highlights(mut self):
+        var ext = extension_of(self.file_path)
+        self.highlights = highlight_for_extension(ext, self.buffer.lines)
+        self._highlights_dirty = False
+
+    fn refresh_highlights(mut self):
+        """Re-tokenize and replace ``highlights`` immediately. Call this when
+        the host knows the buffer changed in a way that bypassed
+        ``handle_key`` (e.g., setting ``file_path`` directly)."""
+        self._refresh_highlights()
+
+    fn consume_definition_request(mut self) -> Optional[DefinitionRequest]:
+        """Return any pending ``DefinitionRequest`` and clear the slot."""
+        var req = self.pending_definition
+        self.pending_definition = Optional[DefinitionRequest]()
+        return req
 
     fn check_for_external_change(mut self) raises -> Bool:
         """Re-stat the backing file; if it changed and we have no unsaved
@@ -245,6 +285,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.buffer = TextBuffer(text)
         self.file_size = info.size
         self.file_mtime = info.mtime_sec
+        self._refresh_highlights()
         # Clamp cursor to the new buffer.
         var max_row = self.buffer.line_count() - 1
         if self.cursor_row > max_row: self.cursor_row = max_row
@@ -297,6 +338,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
         self.dirty = False
+        # Extension may have changed (e.g., ``.txt`` → ``.mojo``); re-tokenize.
+        self._refresh_highlights()
         return True
 
     fn replace_all(mut self, find: String, replacement: String) -> Int:
@@ -345,6 +388,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self.buffer.lines[row] = rebuilt
         if count > 0:
             self.dirty = True
+            self._highlights_dirty = True
             # Clamp the cursor (line lengths may have changed under it).
             var max_row = self.buffer.line_count() - 1
             if self.cursor_row > max_row: self.cursor_row = max_row
@@ -353,6 +397,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.anchor_row = self.cursor_row
             self.anchor_col = self.cursor_col
             _ = rb_len   # silence unused warning if compiler reports it
+            self._refresh_highlights()
         return count
 
     # --- selection state ---------------------------------------------------
@@ -396,6 +441,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         var attr = Attr(YELLOW, BLUE)
         var sel_attr = Attr(YELLOW, CYAN)
         canvas.fill(view, String(" "), attr)
+        # Apply syntax highlights AFTER the plain-text fill so they overlay
+        # the default attr; we paint them as an attr-only overlay below
+        # (after the text pass) so glyphs aren't disturbed.
         # The editor uses the entire view; the surrounding ``Window`` overlays
         # scroll bars on its border, not inside our content area.
         var content_right = view.b.x
@@ -424,6 +472,31 @@ struct Editor(ImplicitlyCopyable, Movable):
                 attr,
                 content_right,
             )
+            # Syntax-highlight overlay: change the attr on cells covered by
+            # any highlight that targets this buffer row. Glyphs come from
+            # the line so we don't disturb the text already painted above.
+            var line_bytes = line.as_bytes()
+            var sy_hl = view.a.y + screen_row
+            for h in range(len(self.highlights)):
+                var hl = self.highlights[h]
+                if hl.row != buf_row:
+                    continue
+                var hl_start = hl.col_start - self.scroll_x
+                var hl_end = hl.col_end - self.scroll_x
+                if hl_start < 0:
+                    hl_start = 0
+                if hl_end > view.width():
+                    hl_end = view.width()
+                for c in range(hl_start, hl_end):
+                    var sx_hl = view.a.x + c
+                    if sx_hl >= content_right:
+                        break
+                    var col_in_line = self.scroll_x + c
+                    if col_in_line >= n:
+                        break
+                    var b = Int(line_bytes[col_in_line])
+                    var ch_hl = chr(b) if b < 0x80 else String("?")
+                    canvas.set(sx_hl, sy_hl, Cell(ch_hl, hl.attr, 1))
             # Overlay selection highlight on this row, if any.
             if sel_active and sel_sr <= buf_row and buf_row <= sel_er:
                 var row_start = 0 if buf_row > sel_sr else sel_sc
@@ -526,24 +599,28 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var p = self.buffer.delete_before(self.cursor_row, self.cursor_col)
                 self.move_to(p[0], p[1], False)
             self.dirty = True
+            self._highlights_dirty = True
         elif k == KEY_DELETE:
             if self.has_selection():
                 self._delete_selection()
             else:
                 self.buffer.delete_at(self.cursor_row, self.cursor_col)
             self.dirty = True
+            self._highlights_dirty = True
         elif k == KEY_ENTER:
             if self.has_selection():
                 self._delete_selection()
             var p = self.buffer.split(self.cursor_row, self.cursor_col)
             self.move_to(p[0], p[1], False)
             self.dirty = True
+            self._highlights_dirty = True
         elif k == KEY_TAB:
             if self.has_selection():
                 self._delete_selection()
             self.buffer.insert(self.cursor_row, self.cursor_col, String("    "))
             self.move_to(self.cursor_row, self.cursor_col + 4, False)
             self.dirty = True
+            self._highlights_dirty = True
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
             if self.has_selection():
                 clipboard_copy(self.selection_text())
@@ -552,11 +629,13 @@ struct Editor(ImplicitlyCopyable, Movable):
                 clipboard_copy(self.selection_text())
                 self._delete_selection()
                 self.dirty = True
+            self._highlights_dirty = True
         elif k == UInt32(0x16):    # Ctrl+V
             var text = clipboard_paste()
             if len(text.as_bytes()) > 0 or self.has_selection():
                 self.paste_text(text)
                 self.dirty = True
+            self._highlights_dirty = True
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
             # Modified letters are commands, not text — defer to whatever
             # the caller wants to do with them (e.g., a hotkey table).
@@ -570,9 +649,16 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.buffer.insert(self.cursor_row, self.cursor_col, chr(Int(k)))
             self.move_to(self.cursor_row, self.cursor_col + 1, False)
             self.dirty = True
+            self._highlights_dirty = True
         else:
             return False
         self._scroll_to_cursor(view)
+        # Re-tokenize only when this keystroke actually mutated the buffer.
+        # Mutating branches set ``_highlights_dirty`` next to their existing
+        # ``self.dirty = True`` write, so cursor moves don't trigger a
+        # rebuild every press.
+        if self._highlights_dirty:
+            self._refresh_highlights()
         return True
 
     # --- clipboard / programmatic edit API --------------------------------
@@ -599,6 +685,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         if self.has_selection():
             self._delete_selection()
             self.dirty = True
+            self._highlights_dirty = True
         return text
 
     fn paste_text(mut self, text: String):
@@ -680,6 +767,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             else:
                 self.buffer.lines[r] = prefix + line
         self.dirty = True
+        self._highlights_dirty = True
+        self._refresh_highlights()
 
     fn toggle_case(mut self):
         """Invert ASCII case across the current selection (no-op if empty)."""
@@ -709,6 +798,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                 ptr=new_bytes.unsafe_ptr(), length=len(new_bytes),
             ))
         self.dirty = True
+        self._highlights_dirty = True
+        self._refresh_highlights()
 
     fn _insert_text(mut self, text: String):
         var bytes = text.as_bytes()
@@ -771,6 +862,17 @@ struct Editor(ImplicitlyCopyable, Movable):
         if col < 0: col = 0
         var n = self.buffer.line_length(row)
         if col > n: col = n
+        # Ctrl+click: capture a go-to-definition request without moving the
+        # cursor. The host polls ``consume_definition_request`` and forwards
+        # to whichever LSP client is wired up. (No effect during drag-extend
+        # — that's still a selection gesture.)
+        if (event.mods & MOD_CTRL) != 0 and not event.motion:
+            var word = word_at(self.buffer.line(row), col)
+            if len(word.as_bytes()) > 0:
+                self.pending_definition = Optional[DefinitionRequest](
+                    DefinitionRequest(row, col, word),
+                )
+            return True
         # Press collapses; drag-motion extends.
         self.move_to(row, col, event.motion)
         self._scroll_to_cursor(view)

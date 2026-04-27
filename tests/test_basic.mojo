@@ -34,6 +34,11 @@ from mojovision.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
 from mojovision.quick_open import QuickOpen, quick_open_match
+from mojovision.highlight import (
+    DefinitionRequest, Highlight, extension_of, highlight_for_extension,
+    highlight_comment_attr, highlight_keyword_attr, highlight_number_attr,
+    highlight_string_attr, word_at,
+)
 from mojovision.window import WindowManager
 from mojovision.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
@@ -1303,6 +1308,53 @@ fn test_ctrl_key_helper() raises:
     assert_equal(Int(ctrl_key(String("f"))), 0x06)
 
 
+fn test_menu_keyboard_nav_arrows_and_enter() raises:
+    """Up/Down step the dropdown selection (skipping separators), Left/Right
+    rotate to the next visible menu, Enter triggers the selected item's
+    action."""
+    var d = Desktop()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("New"),  String("noop")))
+    file_items.append(MenuItem.separator())
+    file_items.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
+    d.menu_bar.add(Menu(String("File"), file_items^))
+    var edit_items = List[MenuItem]()
+    edit_items.append(MenuItem(String("Find..."), EDITOR_FIND))
+    d.menu_bar.add(Menu(String("Edit"), edit_items^))
+    # Open File via mnemonic; selection lands on the first non-separator.
+    _ = d.handle_event(Event.key_event(UInt32(ord("f")), MOD_ALT), _SCREEN)
+    var file_idx = -1
+    var edit_idx = -1
+    for i in range(len(d.menu_bar.menus)):
+        if d.menu_bar.menus[i].label == String("File"):
+            file_idx = i
+        elif d.menu_bar.menus[i].label == String("Edit"):
+            edit_idx = i
+    assert_equal(d.menu_bar.open_idx, file_idx)
+    assert_equal(d.menu_bar.selected_item, 0)   # New
+    # Down skips the separator at index 1 → lands on Quit (index 2).
+    _ = d.handle_event(Event.key_event(KEY_DOWN), _SCREEN)
+    assert_equal(d.menu_bar.selected_item, 2)
+    # Down wraps back to New (skipping the separator the long way).
+    _ = d.handle_event(Event.key_event(KEY_DOWN), _SCREEN)
+    assert_equal(d.menu_bar.selected_item, 0)
+    # Right rotates to the Edit menu; selection resets.
+    _ = d.handle_event(Event.key_event(KEY_RIGHT), _SCREEN)
+    assert_equal(d.menu_bar.open_idx, edit_idx)
+    assert_equal(d.menu_bar.selected_item, 0)
+    # Left rotates back.
+    _ = d.handle_event(Event.key_event(KEY_LEFT), _SCREEN)
+    assert_equal(d.menu_bar.open_idx, file_idx)
+    # Down to Quit, then Enter — the framework dispatches APP_QUIT_ACTION
+    # back to the caller.
+    _ = d.handle_event(Event.key_event(KEY_DOWN), _SCREEN)
+    var maybe = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), APP_QUIT_ACTION)
+    # Activating an item closes the menu.
+    assert_false(d.menu_bar.is_open())
+
+
 fn test_alt_letter_opens_menu_by_mnemonic() raises:
     """Alt+<letter> opens the first visible menu whose label starts with
     that letter (case-insensitive). The leading letter is what the menu
@@ -1504,6 +1556,173 @@ fn test_walk_project_files_respects_gitignore() raises:
             any_tvision = True
             break
     assert_true(any_tvision)
+
+
+fn _hl_lines(*texts: String) -> List[String]:
+    var out = List[String]()
+    for t in texts:
+        out.append(String(t))
+    return out^
+
+
+fn test_extension_of_helper() raises:
+    assert_equal(extension_of(String("foo.mojo")), String("mojo"))
+    assert_equal(extension_of(String("a/b/foo.MOJO")), String("mojo"))
+    assert_equal(extension_of(String("Makefile")), String(""))
+    assert_equal(extension_of(String("a.b/c")), String(""))   # dot before /
+    assert_equal(extension_of(String("")), String(""))
+
+
+fn test_word_at_helper() raises:
+    assert_equal(word_at(String("foo bar"), 0), String("foo"))
+    assert_equal(word_at(String("foo bar"), 2), String("foo"))
+    assert_equal(word_at(String("foo bar"), 4), String("bar"))
+    assert_equal(word_at(String("foo bar"), 3), String(""))   # space, not ident
+    assert_equal(word_at(String("snake_case"), 5), String("snake_case"))
+
+
+fn test_highlight_for_extension_recognizes_mojo() raises:
+    """``fn``/``var`` are keywords, ``"hello"`` is a string, ``# note`` is a
+    comment, ``42`` is a number — each gets its own attr."""
+    var lines = _hl_lines(
+        String("fn main() raises:"),
+        String("    var s = \"hello\"  # note"),
+        String("    var n = 42"),
+    )
+    var hls = highlight_for_extension(String("mojo"), lines)
+    var saw_keyword_fn = False
+    var saw_keyword_var = False
+    var saw_keyword_raises = False
+    var saw_string = False
+    var saw_comment = False
+    var saw_number = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        var kind_attr = h.attr
+        if h.row == 0 and h.col_start == 0 and h.col_end == 2 \
+                and kind_attr == highlight_keyword_attr():
+            saw_keyword_fn = True
+        if h.row == 0 and kind_attr == highlight_keyword_attr() \
+                and h.col_start == 10 and h.col_end == 16:
+            saw_keyword_raises = True
+        if h.row == 1 and h.col_start == 4 and h.col_end == 7 \
+                and kind_attr == highlight_keyword_attr():
+            saw_keyword_var = True
+        if h.row == 1 and kind_attr == highlight_string_attr():
+            saw_string = True
+        if h.row == 1 and kind_attr == highlight_comment_attr():
+            saw_comment = True
+        if h.row == 2 and kind_attr == highlight_number_attr():
+            saw_number = True
+    assert_true(saw_keyword_fn)
+    assert_true(saw_keyword_var)
+    assert_true(saw_keyword_raises)
+    assert_true(saw_string)
+    assert_true(saw_comment)
+    assert_true(saw_number)
+
+
+fn test_highlight_triple_quoted_string_spans_lines() raises:
+    """Multi-line triple-quoted strings keep highlight state across rows."""
+    var lines = _hl_lines(
+        String("\"\"\"docstring start"),
+        String("middle line"),
+        String("end of docstring\"\"\""),
+        String("var x = 1"),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    var have_row_0 = False
+    var have_row_1 = False
+    var have_row_2 = False
+    for i in range(len(hls)):
+        if hls[i].attr == highlight_string_attr():
+            if hls[i].row == 0: have_row_0 = True
+            if hls[i].row == 1: have_row_1 = True
+            if hls[i].row == 2: have_row_2 = True
+    assert_true(have_row_0)
+    assert_true(have_row_1)
+    assert_true(have_row_2)
+    # Row 3 (``var x = 1``) must come back to plain code: ``var`` keyword,
+    # ``1`` number — not all-string.
+    var saw_kw = False
+    for i in range(len(hls)):
+        if hls[i].row == 3 and hls[i].attr == highlight_keyword_attr():
+            saw_kw = True
+    assert_true(saw_kw)
+
+
+fn test_highlight_unknown_extension_returns_empty() raises:
+    var lines = _hl_lines(String("fn main():"), String("  pass"))
+    var hls = highlight_for_extension(String("txt"), lines)
+    assert_equal(len(hls), 0)
+
+
+fn test_editor_refreshes_highlights_after_edits() raises:
+    """Newly typed text gets re-tokenized: typing ``fn`` produces a keyword
+    highlight that wasn't there a moment ago."""
+    var path = _temp_path(String("_hl.mojo"))
+    assert_true(write_file(path, String("\n")))
+    var ed = Editor.from_file(path)
+    assert_true(len(ed.highlights) == 0)
+    _ = ed.handle_key(_key(UInt32(ord("f"))), _VIEW)
+    _ = ed.handle_key(_key(UInt32(ord("n"))), _VIEW)
+    var saw_fn_keyword = False
+    for i in range(len(ed.highlights)):
+        var h = ed.highlights[i]
+        if h.row == 0 and h.col_start == 0 and h.col_end == 2 \
+                and h.attr == highlight_keyword_attr():
+            saw_fn_keyword = True
+    assert_true(saw_fn_keyword)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_paint_overlays_highlight_attr() raises:
+    """The highlight attr lands on the right cells in the canvas after
+    ``editor.paint``."""
+    var path = _temp_path(String("_hlpaint.mojo"))
+    assert_true(write_file(path, String("fn main():\n")))
+    var ed = Editor.from_file(path)
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    ed.paint(canvas, Rect(0, 0, 40, 5), False)
+    # ``fn`` lives at columns 0–1 with the keyword attr.
+    assert_true(canvas.get(0, 0).attr == highlight_keyword_attr())
+    assert_true(canvas.get(1, 0).attr == highlight_keyword_attr())
+    # The space and the ``main`` identifier aren't keywords.
+    assert_false(canvas.get(2, 0).attr == highlight_keyword_attr())
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_ctrl_click_emits_definition_request() raises:
+    var ed = Editor(String("foo bar baz"))
+    var ev = Event.mouse_event(
+        Point(4, 0), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=MOD_CTRL,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_definition_request()
+    assert_true(Bool(req))
+    var dr = req.value()
+    assert_equal(dr.row, 0)
+    assert_equal(dr.col, 4)
+    assert_equal(dr.word, String("bar"))
+    # The cursor must NOT have moved (Ctrl+click is non-mutating).
+    assert_equal(ed.cursor_col, 0)
+    # And the slot is consumed: a second poll returns empty.
+    var req2 = ed.consume_definition_request()
+    assert_false(Bool(req2))
+
+
+fn test_editor_ctrl_click_outside_identifier_is_silent() raises:
+    var ed = Editor(String("foo  bar"))
+    # Click on the space between words.
+    var ev = Event.mouse_event(
+        Point(3, 0), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=MOD_CTRL,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_definition_request()
+    assert_false(Bool(req))
 
 
 fn test_quick_open_match_rules() raises:
@@ -2006,6 +2225,15 @@ fn main() raises:
     test_gitignore_matches_directory_pattern()
     test_gitignore_matches_glob_and_negate()
     test_walk_project_files_respects_gitignore()
+    test_extension_of_helper()
+    test_word_at_helper()
+    test_highlight_for_extension_recognizes_mojo()
+    test_highlight_triple_quoted_string_spans_lines()
+    test_highlight_unknown_extension_returns_empty()
+    test_editor_refreshes_highlights_after_edits()
+    test_editor_paint_overlays_highlight_attr()
+    test_editor_ctrl_click_emits_definition_request()
+    test_editor_ctrl_click_outside_identifier_is_silent()
     test_quick_open_match_rules()
     test_quick_open_match_word_boundary_kinds()
     test_quick_open_filters_as_you_type()
@@ -2037,6 +2265,7 @@ fn main() raises:
     test_editor_rejects_modified_letter_typing()
     test_ctrl_q_modifyOtherKeys_triggers_quit_action()
     test_ctrl_key_helper()
+    test_menu_keyboard_nav_arrows_and_enter()
     test_alt_letter_opens_menu_by_mnemonic()
     test_esc_prefix_opens_menu_by_mnemonic()
     test_esc_prefix_disarms_after_one_keystroke()

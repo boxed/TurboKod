@@ -12,7 +12,10 @@ from std.collections.optional import Optional
 from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE
-from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
+from .events import (
+    Event, EVENT_KEY, EVENT_MOUSE,
+    KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, MOUSE_BUTTON_LEFT,
+)
 from .geometry import Point, Rect
 
 
@@ -95,10 +98,12 @@ fn _menu_rank(label: String) -> Int:
 struct MenuBar(Movable):
     var menus: List[Menu]
     var open_idx: Int
+    var selected_item: Int   # row index inside the open dropdown (kbd nav)
 
     fn __init__(out self):
         self.menus = List[Menu]()
         self.open_idx = -1
+        self.selected_item = 0
 
     fn add(mut self, var menu: Menu):
         self.menus.append(menu^)
@@ -108,14 +113,33 @@ struct MenuBar(Movable):
             if self.menus[i].label == label:
                 self.menus[i].visible = visible
                 if not visible and self.open_idx == i:
-                    self.open_idx = -1
+                    self.open_menu(-1)
                 return
 
     fn is_open(self) -> Bool:
         return self.open_idx >= 0
 
     fn close(mut self):
-        self.open_idx = -1
+        self.open_menu(-1)
+
+    fn open_menu(mut self, idx: Int):
+        """Open menu ``idx`` (or close, if -1) and seat the keyboard
+        selection on the first non-separator item. Use this rather than
+        writing to ``open_idx`` directly so the highlight stays in sync."""
+        self.open_idx = idx
+        if idx >= 0:
+            self.selected_item = self._first_non_separator(idx)
+        else:
+            self.selected_item = 0
+
+    fn _first_non_separator(self, menu_idx: Int) -> Int:
+        if menu_idx < 0 or menu_idx >= len(self.menus):
+            return 0
+        var menu = self.menus[menu_idx]
+        for i in range(len(menu.items)):
+            if not menu.items[i].is_separator:
+                return i
+        return 0
 
     # --- layout ------------------------------------------------------------
 
@@ -224,6 +248,8 @@ struct MenuBar(Movable):
         var rect = self._dropdown_rect(screen_width)
         var attr     = Attr(BLACK, LIGHT_GRAY)
         var attr_key = Attr(RED,   LIGHT_GRAY)
+        var sel_attr = Attr(BLACK, GREEN)
+        var sel_key  = Attr(WHITE, GREEN)
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
         var menu = self.menus[self.open_idx]
@@ -234,10 +260,19 @@ struct MenuBar(Movable):
                 for x in range(rect.a.x + 1, rect.b.x - 1):
                     canvas.set(x, y, Cell(String("─"), attr, 1))
                 continue
+            var is_sel = (i == self.selected_item)
+            var row_attr = sel_attr if is_sel else attr
+            var row_key = sel_key if is_sel else attr_key
+            if is_sel:
+                # Fill the row so the green background spans label → shortcut.
+                canvas.fill(
+                    Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
+                    String(" "), row_attr,
+                )
             var label_bytes = menu.items[i].label.as_bytes()
             for j in range(len(label_bytes)):
                 var ch = String(chr(Int(label_bytes[j])))
-                var a = attr_key if j == 0 else attr
+                var a = row_key if j == 0 else row_attr
                 canvas.set(rect.a.x + 2 + j, y, Cell(ch, a, 1))
             # Right-aligned shortcut text — last cell sits at rect.b.x - 2
             # (one in from the right border), so the start x is computed
@@ -247,7 +282,109 @@ struct MenuBar(Movable):
             var sc_w = len(sc.as_bytes())
             if sc_w > 0:
                 var sx = rect.b.x - 1 - sc_w
-                _ = canvas.put_text(Point(sx, y), sc, attr, rect.b.x - 1)
+                _ = canvas.put_text(Point(sx, y), sc, row_attr, rect.b.x - 1)
+
+    # --- keyboard navigation ----------------------------------------------
+
+    fn _display_order_indices(self) -> List[Int]:
+        """Indices of visible menus in painted left-to-right order: rank-
+        sorted left-aligned menus first, then right-aligned menus reversed
+        so the leftmost-visible (last-inserted) right menu comes first."""
+        var left = List[Int]()
+        var right = List[Int]()
+        for i in range(len(self.menus)):
+            if not self.menus[i].visible:
+                continue
+            if self.menus[i].right_aligned:
+                right.append(i)
+            else:
+                left.append(i)
+        for i in range(1, len(left)):
+            var j = i
+            while j > 0:
+                var ra = _menu_rank(self.menus[left[j]].label)
+                var rb = _menu_rank(self.menus[left[j - 1]].label)
+                if ra >= rb:
+                    break
+                var tmp = left[j]
+                left[j] = left[j - 1]
+                left[j - 1] = tmp
+                j -= 1
+        var k = len(right) - 1
+        while k >= 0:
+            left.append(right[k])
+            k -= 1
+        return left^
+
+    fn _step_item(mut self, delta: Int):
+        if self.open_idx < 0:
+            return
+        var n = len(self.menus[self.open_idx].items)
+        if n == 0:
+            return
+        var i = self.selected_item
+        for _ in range(n):
+            i = (i + delta + n) % n
+            if not self.menus[self.open_idx].items[i].is_separator:
+                self.selected_item = i
+                return
+
+    fn _step_menu(mut self, delta: Int):
+        var order = self._display_order_indices()
+        if len(order) == 0:
+            return
+        var pos = -1
+        for i in range(len(order)):
+            if order[i] == self.open_idx:
+                pos = i
+                break
+        if pos < 0:
+            self.open_menu(order[0])
+            return
+        var new_pos = pos + delta
+        if new_pos < 0:
+            new_pos = len(order) - 1
+        elif new_pos >= len(order):
+            new_pos = 0
+        self.open_menu(order[new_pos])
+
+    fn _activate_selected(mut self) -> MenuResult:
+        if self.open_idx < 0:
+            return MenuResult(Optional[String](), False)
+        var menu = self.menus[self.open_idx]
+        if self.selected_item < 0 or self.selected_item >= len(menu.items):
+            return MenuResult(Optional[String](), True)
+        var item = menu.items[self.selected_item]
+        if item.is_separator:
+            return MenuResult(Optional[String](), True)
+        var action = item.action
+        self.open_menu(-1)
+        return MenuResult(Optional[String](action), True)
+
+    fn handle_key(mut self, event: Event) -> MenuResult:
+        """Keyboard navigation while a menu is open. ESC is handled by the
+        owning Desktop (so it can also clear ESC-prefix state, etc.); we
+        only handle Up/Down/Left/Right/Enter here."""
+        if not self.is_open():
+            return MenuResult(Optional[String](), False)
+        if event.kind != EVENT_KEY:
+            return MenuResult(Optional[String](), False)
+        var k = event.key
+        if k == KEY_UP:
+            self._step_item(-1)
+            return MenuResult(Optional[String](), True)
+        if k == KEY_DOWN:
+            self._step_item(1)
+            return MenuResult(Optional[String](), True)
+        if k == KEY_LEFT:
+            self._step_menu(-1)
+            return MenuResult(Optional[String](), True)
+        if k == KEY_RIGHT:
+            self._step_menu(1)
+            return MenuResult(Optional[String](), True)
+        if k == KEY_ENTER:
+            return self._activate_selected()
+        return MenuResult(Optional[String](), False)
 
     # --- events ------------------------------------------------------------
 
@@ -264,9 +401,9 @@ struct MenuBar(Movable):
                     continue
                 if rects[i].contains(event.pos):
                     if i == self.open_idx:
-                        self.open_idx = -1
+                        self.open_menu(-1)
                     else:
-                        self.open_idx = i
+                        self.open_menu(i)
                     return MenuResult(Optional[String](), True)
             # Click on the bar but not on a menu name still belongs to us.
             return MenuResult(Optional[String](), True)
@@ -281,9 +418,9 @@ struct MenuBar(Movable):
                         # Click on a divider: eat the event, leave menu open.
                         return MenuResult(Optional[String](), True)
                     var action = item.action
-                    self.open_idx = -1
+                    self.open_menu(-1)
                     return MenuResult(Optional[String](action), True)
                 return MenuResult(Optional[String](), True)
-            self.open_idx = -1
+            self.open_menu(-1)
             return MenuResult(Optional[String](), True)
         return MenuResult(Optional[String](), False)
