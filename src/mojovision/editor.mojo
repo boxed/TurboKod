@@ -558,6 +558,13 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self.paste_text(text)
                 self.dirty = True
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
+            # Modified letters are commands, not text — defer to whatever
+            # the caller wants to do with them (e.g., a hotkey table).
+            # MOD_SHIFT is fine: capitals already arrive with a different
+            # codepoint, so a leftover SHIFT bit just means a shifted
+            # printable that the terminal pre-folded.
+            if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
+                return False
             if self.has_selection():
                 self._delete_selection()
             self.buffer.insert(self.cursor_row, self.cursor_col, chr(Int(k)))

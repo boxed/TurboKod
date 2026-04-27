@@ -450,9 +450,21 @@ struct Window(ImplicitlyCopyable, Movable):
 
 
 struct WindowManager(Movable):
-    """Owns a z-ordered stack of Windows and handles their interaction state."""
+    """Owns the open windows and their interaction state.
+
+    ``windows`` is the **stable** list — its order is insertion order and
+    never changes when focus shifts, so menu items / Ctrl+N bindings keyed
+    on the index stay aligned across focus changes.
+
+    ``z_order`` carries the actual painting / hit-test order: it's a list
+    of indices into ``windows`` with the topmost window last. Focusing a
+    window moves its index to the end of ``z_order`` only — ``windows``
+    is untouched. The invariant ``z_order[-1] == focused`` holds whenever
+    there is at least one window.
+    """
     var windows: List[Window]
     var focused: Int
+    var z_order: List[Int]
     var _dragging: Int
     var _resizing: Int
     var _editor_dragging: Int   # window index for in-body editor select-drag
@@ -469,6 +481,7 @@ struct WindowManager(Movable):
     fn __init__(out self):
         self.windows = List[Window]()
         self.focused = -1
+        self.z_order = List[Int]()
         self._dragging = -1
         self._resizing = -1
         self._editor_dragging = -1
@@ -484,7 +497,9 @@ struct WindowManager(Movable):
 
     fn add(mut self, var window: Window):
         self.windows.append(window^)
-        self.focused = len(self.windows) - 1
+        var idx = len(self.windows) - 1
+        self.z_order.append(idx)
+        self.focused = idx
 
     fn fit_into(mut self, workspace: Rect):
         """Move (and resize when necessary) every window to fit ``workspace``.
@@ -516,8 +531,62 @@ struct WindowManager(Movable):
     fn focus_by_title(mut self, title: String):
         for i in range(len(self.windows)):
             if self.windows[i].title == title:
-                self.focused = self._bring_to_front(i)
+                self.focused = i
+                self._raise_in_z(i)
                 return
+
+    fn focus_by_index(mut self, idx: Int):
+        """Focus window ``idx`` and raise it to the top of the z-order.
+
+        Out-of-range indices are silently ignored — useful for stale menu
+        clicks where the window has just been closed. ``windows`` itself
+        is *not* reordered (so keyboard shortcuts and menu indices stay
+        stable across focus changes); only ``z_order`` updates.
+        """
+        if idx < 0 or idx >= len(self.windows):
+            return
+        self.focused = idx
+        self._raise_in_z(idx)
+
+    fn close_focused(mut self) -> Bool:
+        """Close the focused window. Focus moves to whichever window was
+        next-most-recently focused (the new top of ``z_order``); ``-1`` when
+        the last window is closed. Returns True if a window was closed.
+        """
+        if self.focused < 0 or self.focused >= len(self.windows):
+            return False
+        var idx = self.focused
+        _ = self.windows.pop(idx)
+        # Drop ``idx`` from z_order and shift any index above it down by one
+        # to keep the indices in sync with the now-shorter ``windows`` list.
+        var new_z = List[Int]()
+        for k in range(len(self.z_order)):
+            var v = self.z_order[k]
+            if v == idx:
+                continue
+            if v > idx:
+                v = v - 1
+            new_z.append(v)
+        self.z_order = new_z^
+        if len(self.z_order) > 0:
+            self.focused = self.z_order[len(self.z_order) - 1]
+        else:
+            self.focused = -1
+        return True
+
+    fn maximize_all(mut self, workspace: Rect):
+        """Maximize every window into ``workspace``. Each window's pre-max
+        rect is preserved in ``_restore_rect`` so ``restore_all`` can undo."""
+        for i in range(len(self.windows)):
+            if not self.windows[i].is_maximized:
+                self.windows[i].toggle_maximize(workspace)
+
+    fn restore_all(mut self):
+        """Drop every window out of maximized mode, back to its pre-max rect."""
+        for i in range(len(self.windows)):
+            if self.windows[i].is_maximized:
+                self.windows[i].rect = self.windows[i]._restore_rect
+                self.windows[i].is_maximized = False
 
     fn focused_is_editor(self) -> Bool:
         if self.focused < 0 or self.focused >= len(self.windows):
@@ -534,19 +603,22 @@ struct WindowManager(Movable):
                     reloaded += 1
         return reloaded
 
-    fn _bring_to_front(mut self, idx: Int) -> Int:
-        if idx < 0 or idx >= len(self.windows):
-            return -1
-        var w = self.windows.pop(idx)
-        self.windows.append(w^)
-        return len(self.windows) - 1
+    fn _raise_in_z(mut self, idx: Int):
+        """Move ``idx`` to the end of ``z_order`` (making it the topmost
+        window in the paint stack)."""
+        var new_z = List[Int]()
+        for k in range(len(self.z_order)):
+            if self.z_order[k] != idx:
+                new_z.append(self.z_order[k])
+        new_z.append(idx)
+        self.z_order = new_z^
 
     fn paint(self, mut canvas: Canvas):
-        for i in range(len(self.windows)):
-            if i != self.focused:
-                self.windows[i].paint(canvas, False, i + 1)
-        if 0 <= self.focused and self.focused < len(self.windows):
-            self.windows[self.focused].paint(canvas, True, self.focused + 1)
+        # Iterate z-order back-to-front so the focused window (which is
+        # always at the end of z_order, by invariant) lands on top.
+        for k in range(len(self.z_order)):
+            var i = self.z_order[k]
+            self.windows[i].paint(canvas, i == self.focused, i + 1)
 
     fn handle_key(mut self, event: Event) -> Bool:
         """Forward a key event to the focused window's editor (if it has one)."""
@@ -561,11 +633,12 @@ struct WindowManager(Movable):
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
             if not event.pressed:
                 return True
-            var i = len(self.windows) - 1
-            while i >= 0:
+            var k = len(self.z_order) - 1
+            while k >= 0:
+                var i = self.z_order[k]
                 if self.windows[i].rect.contains(event.pos):
                     return self.windows[i].handle_mouse_in_body(event)
-                i -= 1
+                k -= 1
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False
@@ -585,19 +658,21 @@ struct WindowManager(Movable):
             return True
 
     fn _handle_press(mut self, event: Event, workspace: Rect) -> Bool:
+        # Hit-test top-down using ``z_order`` (last entry = topmost window).
         var clicked = -1
-        var i = len(self.windows) - 1
-        while i >= 0:
+        var k = len(self.z_order) - 1
+        while k >= 0:
+            var i = self.z_order[k]
             if self.windows[i].rect.contains(event.pos):
                 clicked = i
                 break
-            i -= 1
+            k -= 1
         if clicked < 0:
             return False
-        self.focused = self._bring_to_front(clicked)
+        self.focused = clicked
+        self._raise_in_z(clicked)
         if self.windows[self.focused].close_button_hit(event.pos):
-            _ = self.windows.pop(self.focused)
-            self.focused = len(self.windows) - 1
+            _ = self.close_focused()
             return True
         if self.windows[self.focused].maximize_button_hit(event.pos):
             self.windows[self.focused].toggle_maximize(workspace)

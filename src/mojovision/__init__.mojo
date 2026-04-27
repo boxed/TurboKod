@@ -32,9 +32,12 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .desktop import (
     APP_QUIT_ACTION,
     Desktop,
-    EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
-    PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    Hotkey, PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE,
+    PROJECT_TREE_ACTION,
+    WINDOW_CLOSE, WINDOW_FOCUS_PREFIX, WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
+    ctrl_key, format_hotkey,
 )
 from .editor import Editor, TextBuffer
 from .file_dialog import FileDialog
@@ -44,8 +47,10 @@ from .file_io import (
 )
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from .project import (
-    ProjectMatch, find_in_project, replace_in_project, walk_project_files,
+    GitignoreMatcher, GitignorePattern, ProjectMatch,
+    find_in_project, replace_in_project, walk_project_files,
 )
+from .quick_open import QuickOpen
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .prompt import Prompt

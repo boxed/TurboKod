@@ -17,9 +17,12 @@ from mojovision.file_dialog import FileDialog
 from mojovision.desktop import (
     APP_QUIT_ACTION,
     Desktop,
-    EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    Hotkey,
     PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    WINDOW_CLOSE,
+    ctrl_key, format_hotkey,
 )
 from mojovision.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
@@ -28,12 +31,14 @@ from mojovision.file_io import (
 from mojovision.file_tree import FILE_TREE_WIDTH, FileTree
 from mojovision.menu import Menu, MenuBar, MenuItem
 from mojovision.project import (
-    find_in_project, replace_in_project, walk_project_files,
+    GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
+from mojovision.quick_open import QuickOpen, quick_open_match
 from mojovision.window import WindowManager
 from mojovision.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
-    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
+    KEY_F5, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
@@ -184,6 +189,7 @@ fn test_centered() raises:
 
 
 comptime _VIEW = Rect(0, 0, 80, 24)
+comptime _SCREEN = Rect(0, 0, 100, 30)
 
 
 fn _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
@@ -513,18 +519,20 @@ fn test_editor_from_file() raises:
     assert_false(ed.check_for_external_change())
 
 
-fn test_terminal_parses_macos_alt_arrow() raises:
-    """``ESC f`` / ``ESC b`` are the readline forward/back-word sequences
-    that iTerm2 and Terminal.app send for Option+Right/Left by default."""
-    var alt_right = parse_input(String("\x1bf"))
-    assert_true(alt_right[0].kind == EVENT_KEY)
-    assert_true(alt_right[0].key == KEY_RIGHT)
-    assert_true((alt_right[0].mods & MOD_ALT) != 0)
-    assert_equal(alt_right[1], 2)
+fn test_terminal_parses_alt_letter_as_letter() raises:
+    """``ESC <letter>`` parses as the letter with MOD_ALT — including 'f'
+    and 'b'. The framework now uses these for menu mnemonics
+    (Alt+F → File menu); word-jump still works via Ctrl+arrow and via
+    Alt+arrow on terminals that report modifiers for arrows."""
+    var alt_f = parse_input(String("\x1bf"))
+    assert_true(alt_f[0].kind == EVENT_KEY)
+    assert_equal(Int(alt_f[0].key), Int(ord("f")))
+    assert_true((alt_f[0].mods & MOD_ALT) != 0)
+    assert_equal(alt_f[1], 2)
 
-    var alt_left = parse_input(String("\x1bb"))
-    assert_true(alt_left[0].key == KEY_LEFT)
-    assert_true((alt_left[0].mods & MOD_ALT) != 0)
+    var alt_b = parse_input(String("\x1bb"))
+    assert_equal(Int(alt_b[0].key), Int(ord("b")))
+    assert_true((alt_b[0].mods & MOD_ALT) != 0)
 
 
 fn test_editor_alt_arrow_word_jump() raises:
@@ -564,6 +572,53 @@ fn test_find_git_project() raises:
     assert_true(info.ok)
     var examples = stat_file(join_path(root.value(), String("examples")))
     assert_true(examples.ok)
+
+
+fn _empty_menu(label: String) -> Menu:
+    return Menu(label, List[MenuItem]())
+
+
+fn test_menu_layout_pins_file_edit_window_help() raises:
+    """Display order must always be File, Edit, [middle], Window, Help —
+    regardless of insertion order. ``self.menus`` retains insertion order
+    (so cached indices stay valid); only the layout rects reorder."""
+    var bar = MenuBar()
+    # Insert in deliberately scrambled order.
+    bar.add(_empty_menu(String("Help")))
+    bar.add(_empty_menu(String("Window")))
+    bar.add(_empty_menu(String("Tools")))
+    bar.add(_empty_menu(String("File")))
+    bar.add(_empty_menu(String("Build")))
+    bar.add(_empty_menu(String("Edit")))
+    var rects = bar._layout(80)
+    # Walk rects by display x; collect labels in order.
+    var n = len(bar.menus)
+    var sorted_labels = List[String]()
+    var used = List[Bool]()
+    for _ in range(n):
+        used.append(False)
+    for _ in range(n):
+        var best = -1
+        var best_x = 1_000_000
+        for i in range(n):
+            if used[i]: continue
+            if rects[i].a.x < best_x and rects[i].b.x > rects[i].a.x:
+                best_x = rects[i].a.x
+                best = i
+        if best < 0: break
+        used[best] = True
+        sorted_labels.append(bar.menus[best].label)
+    assert_equal(len(sorted_labels), 6)
+    assert_equal(sorted_labels[0], String("File"))
+    assert_equal(sorted_labels[1], String("Edit"))
+    # Middle two are Tools and Build in insertion order.
+    assert_equal(sorted_labels[2], String("Tools"))
+    assert_equal(sorted_labels[3], String("Build"))
+    assert_equal(sorted_labels[4], String("Window"))
+    assert_equal(sorted_labels[5], String("Help"))
+    # The menus list itself must NOT be reordered (cached indices rely on it).
+    assert_equal(bar.menus[0].label, String("Help"))
+    assert_equal(bar.menus[5].label, String("Edit"))
 
 
 fn test_right_aligned_menu_layout() raises:
@@ -836,13 +891,13 @@ fn test_desktop_dispatch_editor_save_passes_through_when_no_editor() raises:
     """Save with no editor focused should be a no-op intercepted by Desktop —
     the action does not bubble back to the caller."""
     var d = Desktop()
-    var maybe = d.dispatch_action(EDITOR_SAVE)
+    var maybe = d.dispatch_action(EDITOR_SAVE, _SCREEN)
     assert_false(Bool(maybe))
 
 
 fn test_desktop_dispatch_passes_through_unknown_actions() raises:
     var d = Desktop()
-    var maybe = d.dispatch_action(String("focus:About"))
+    var maybe = d.dispatch_action(String("focus:About"), _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), String("focus:About"))
 
@@ -860,7 +915,7 @@ fn test_desktop_dispatch_editor_save_writes_focused_editor() raises:
         Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
     )
     assert_true(d.windows.windows[0].editor.dirty)
-    var maybe = d.dispatch_action(EDITOR_SAVE)
+    var maybe = d.dispatch_action(EDITOR_SAVE, _SCREEN)
     assert_false(Bool(maybe))
     assert_false(d.windows.windows[0].editor.dirty)
     assert_equal(read_file(path), String("hello!\n"))
@@ -873,7 +928,7 @@ fn test_desktop_replace_chains_two_prompts() raises:
         String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
     ))
     # Click "Replace..." → first prompt opens for "find".
-    _ = d.dispatch_action(EDITOR_REPLACE)
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
     assert_true(d.prompt.active)
     # Submit "foo" — Desktop should immediately re-open the prompt for "replace".
     d.prompt.input = String("foo")
@@ -888,15 +943,657 @@ fn test_desktop_replace_chains_two_prompts() raises:
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar BAR"))
 
 
+fn test_desktop_open_file_uses_80_percent_size() raises:
+    var path = _temp_path(String("_open80.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    var ws = d.workspace_rect(_SCREEN)
+    assert_equal(d.windows.windows[0].rect.width(), (ws.width() * 80) // 100)
+    assert_equal(d.windows.windows[0].rect.height(), (ws.height() * 80) // 100)
+    # First open lands at the workspace origin (no cascade yet).
+    assert_equal(d.windows.windows[0].rect.a.x, ws.a.x)
+    assert_equal(d.windows.windows[0].rect.a.y, ws.a.y)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_desktop_open_file_cascades_by_one() raises:
+    var path = _temp_path(String("_cascade.txt"))
+    assert_true(write_file(path, String("c\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    d.open_file(path, _SCREEN)
+    d.open_file(path, _SCREEN)
+    var ws = d.workspace_rect(_SCREEN)
+    assert_equal(d.windows.windows[0].rect.a.x, ws.a.x + 0)
+    assert_equal(d.windows.windows[0].rect.a.y, ws.a.y + 0)
+    assert_equal(d.windows.windows[1].rect.a.x, ws.a.x + 1)
+    assert_equal(d.windows.windows[1].rect.a.y, ws.a.y + 1)
+    assert_equal(d.windows.windows[2].rect.a.x, ws.a.x + 2)
+    assert_equal(d.windows.windows[2].rect.a.y, ws.a.y + 2)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_desktop_open_file_inherits_maximize_state() raises:
+    var path = _temp_path(String("_maxinh.txt"))
+    assert_true(write_file(path, String("m\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    # Maximize the first window, then open a second.
+    d.windows.windows[0].toggle_maximize(d.workspace_rect(_SCREEN))
+    assert_true(d.windows.windows[0].is_maximized)
+    d.open_file(path, _SCREEN)
+    # The new window inherits maximized mode but its restore rect is the
+    # 80% cascade slot (so toggling brings it back to the right size).
+    assert_true(d.windows.windows[1].is_maximized)
+    var ws = d.workspace_rect(_SCREEN)
+    assert_true(d.windows.windows[1].rect == ws)
+    assert_equal(
+        d.windows.windows[1]._restore_rect.width(), (ws.width() * 80) // 100,
+    )
+    assert_equal(d.windows.windows[1]._restore_rect.a.x, ws.a.x + 1)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_desktop_window_menu_lists_open_windows() raises:
+    var d = Desktop()
+    d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("beta"),  Rect(0, 1, 20, 5), List[String]()))
+    d._rebuild_window_menu()
+    var menu = d.menu_bar.menus[d._window_menu_idx]
+    # 2 window items + separator + Maximize all + Restore all = 5 items.
+    assert_equal(len(menu.items), 5)
+    assert_equal(menu.items[0].label, String("alpha"))
+    assert_equal(menu.items[0].action, String("window:focus:0"))
+    assert_equal(menu.items[1].label, String("beta"))
+    assert_equal(menu.items[1].action, String("window:focus:1"))
+    assert_true(menu.items[2].is_separator)
+    assert_equal(menu.items[3].label, String("Maximize all"))
+    assert_equal(menu.items[4].label, String("Restore all"))
+
+
+fn test_desktop_window_menu_when_empty() raises:
+    var d = Desktop()
+    d._rebuild_window_menu()
+    var menu = d.menu_bar.menus[d._window_menu_idx]
+    # No windows: skip the separator, just show the bulk actions.
+    assert_equal(len(menu.items), 2)
+    assert_equal(menu.items[0].label, String("Maximize all"))
+    assert_equal(menu.items[1].label, String("Restore all"))
+
+
+fn test_desktop_window_focus_action_focuses_window() raises:
+    var d = Desktop()
+    d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("c"), Rect(0, 1, 20, 5), List[String]()))
+    # Focus the first window via the dynamic action string. The windows list
+    # itself stays in insertion order (so menu bindings remain stable); only
+    # ``focused`` and the z-order change.
+    _ = d.dispatch_action(String("window:focus:0"), _SCREEN)
+    assert_equal(d.windows.focused, 0)
+    assert_equal(d.windows.windows[0].title, String("a"))
+    assert_equal(d.windows.windows[1].title, String("b"))
+    assert_equal(d.windows.windows[2].title, String("c"))
+    # Focused window is at the top of z-order.
+    assert_equal(d.windows.z_order[len(d.windows.z_order) - 1], 0)
+
+
+fn test_desktop_maximize_all_and_restore_all() raises:
+    var d = Desktop()
+    d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("b"), Rect(5, 6, 30, 12), List[String]()))
+    var ws = d.workspace_rect(_SCREEN)
+    _ = d.dispatch_action(String("window:maximize_all"), _SCREEN)
+    for i in range(len(d.windows.windows)):
+        assert_true(d.windows.windows[i].is_maximized)
+        assert_true(d.windows.windows[i].rect == ws)
+    _ = d.dispatch_action(String("window:restore_all"), _SCREEN)
+    assert_false(d.windows.windows[0].is_maximized)
+    assert_false(d.windows.windows[1].is_maximized)
+    assert_true(d.windows.windows[0].rect == Rect(0, 1, 20, 5))
+    assert_true(d.windows.windows[1].rect == Rect(5, 6, 30, 12))
+
+
 fn test_desktop_project_find_requires_active_project() raises:
     var d = Desktop()
     # No project: dispatch is a no-op (prompt never opens).
-    _ = d.dispatch_action(PROJECT_FIND)
+    _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
     assert_false(d.prompt.active)
     # With a project: prompt opens.
     d.detect_project_from(String("examples/hello.mojo"))
-    _ = d.dispatch_action(PROJECT_FIND)
+    _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
     assert_true(d.prompt.active)
+
+
+fn test_window_manager_close_focused() raises:
+    var wm = WindowManager()
+    wm.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("c"), Rect(0, 1, 20, 5), List[String]()))
+    assert_equal(wm.focused, 2)
+    assert_true(wm.close_focused())
+    assert_equal(len(wm.windows), 2)
+    assert_equal(wm.focused, 1)
+    # Close the remaining two; once empty, focused becomes -1 and the call
+    # is a no-op on subsequent invocations.
+    assert_true(wm.close_focused())
+    assert_true(wm.close_focused())
+    assert_false(wm.close_focused())
+    assert_equal(wm.focused, -1)
+
+
+fn test_ctrl_n_focuses_window_by_number() raises:
+    """Ctrl+1..Ctrl+9 focus the corresponding window. The event has to
+    arrive in the modifyOtherKeys form (mods=MOD_CTRL on a digit) since
+    bare Ctrl+digit isn't representable as a control byte — but the
+    parser already produces this form, and the hotkey table maps it to
+    ``window:focus:N``. Crucially, ``windows`` itself stays in insertion
+    order across focus changes so the bindings remain stable."""
+    var d = Desktop()
+    d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("c"), Rect(0, 1, 20, 5), List[String]()))
+    assert_equal(d.windows.windows[d.windows.focused].title, String("c"))
+    _ = d.handle_event(Event.key_event(UInt32(ord("1")), MOD_CTRL), _SCREEN)
+    assert_equal(d.windows.focused, 0)
+    assert_equal(d.windows.windows[0].title, String("a"))
+    # The list order MUST NOT change just because focus changed.
+    assert_equal(d.windows.windows[1].title, String("b"))
+    assert_equal(d.windows.windows[2].title, String("c"))
+    # Ctrl+2 focuses index 1 (still "b" thanks to stable list order).
+    _ = d.handle_event(Event.key_event(UInt32(ord("2")), MOD_CTRL), _SCREEN)
+    assert_equal(d.windows.focused, 1)
+    assert_equal(d.windows.windows[d.windows.focused].title, String("b"))
+
+
+fn test_focus_changes_keep_window_list_order_stable() raises:
+    """Repeated focus changes must not reshuffle ``windows``; only ``z_order``
+    moves. This is what keeps Ctrl+N bindings (and the Window menu items)
+    pointing at the same windows across rapid focus changes."""
+    var wm = WindowManager()
+    wm.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("c"), Rect(0, 1, 20, 5), List[String]()))
+    wm.focus_by_index(0)
+    wm.focus_by_index(2)
+    wm.focus_by_index(1)
+    wm.focus_by_index(0)
+    assert_equal(wm.windows[0].title, String("a"))
+    assert_equal(wm.windows[1].title, String("b"))
+    assert_equal(wm.windows[2].title, String("c"))
+    # z-order tail is the most recently focused window.
+    assert_equal(wm.z_order[len(wm.z_order) - 1], 0)
+
+
+fn test_window_menu_items_show_ctrl_n_shortcut() raises:
+    """The Window menu items (rebuilt every paint) carry the matching
+    Ctrl+N shortcut for the first nine windows."""
+    var d = Desktop()
+    d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    d._rebuild_window_menu()
+    d._refresh_shortcuts()
+    var menu = d.menu_bar.menus[d._window_menu_idx]
+    assert_equal(menu.items[0].label, String("a"))
+    assert_equal(menu.items[0].shortcut, String("Ctrl+1"))
+    assert_equal(menu.items[1].label, String("b"))
+    assert_equal(menu.items[1].shortcut, String("Ctrl+2"))
+
+
+fn test_ctrl_w_closes_focused_window() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("first"), Rect(0, 1, 40, 12), String("hello\n"),
+    ))
+    d.windows.add(Window.editor_window(
+        String("second"), Rect(0, 1, 40, 12), String("world\n"),
+    ))
+    assert_equal(len(d.windows.windows), 2)
+    var ev = Event.key_event(ctrl_key(String("w")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_false(Bool(maybe))
+    assert_equal(len(d.windows.windows), 1)
+    assert_equal(d.windows.windows[0].title, String("first"))
+
+
+fn test_format_hotkey_renders_combinations() raises:
+    # Control-character form for plain Ctrl+letter.
+    assert_equal(format_hotkey(ctrl_key(String("q")), MOD_NONE), String("Ctrl+Q"))
+    assert_equal(format_hotkey(ctrl_key(String("s")), MOD_NONE), String("Ctrl+S"))
+    # Modified-letter form for Ctrl+Shift combos.
+    assert_equal(
+        format_hotkey(UInt32(ord("f")), MOD_CTRL | MOD_SHIFT),
+        String("Ctrl+Shift+F"),
+    )
+    # Special keys.
+    assert_equal(format_hotkey(KEY_F5, MOD_NONE), String("F5"))
+    assert_equal(format_hotkey(KEY_UP, MOD_SHIFT), String("Shift+Up"))
+
+
+fn test_menu_items_get_shortcut_text_after_refresh() raises:
+    """Once Desktop's _refresh_shortcuts runs, every menu item that maps to
+    a registered hotkey has the matching shortcut string stamped onto it."""
+    var d = Desktop()
+    var items = List[MenuItem]()
+    items.append(MenuItem(String("Save"),  EDITOR_SAVE))
+    items.append(MenuItem(String("Quit"),  APP_QUIT_ACTION))
+    items.append(MenuItem(String("Close"), WINDOW_CLOSE))
+    items.append(MenuItem(String("New"),   String("noop")))
+    d.menu_bar.add(Menu(String("File"), items^))
+    d._refresh_shortcuts()
+    var file_idx = -1
+    for i in range(len(d.menu_bar.menus)):
+        if d.menu_bar.menus[i].label == String("File"):
+            file_idx = i
+            break
+    assert_true(file_idx >= 0)
+    var fm = d.menu_bar.menus[file_idx]
+    assert_equal(fm.items[0].shortcut, String("Ctrl+S"))
+    assert_equal(fm.items[1].shortcut, String("Ctrl+Q"))
+    assert_equal(fm.items[2].shortcut, String("Ctrl+W"))
+    # Item with no registered hotkey: empty.
+    assert_equal(fm.items[3].shortcut, String(""))
+
+
+fn test_dropdown_widens_to_fit_shortcut() raises:
+    """The dropdown rect must accommodate label + gap + shortcut; without
+    the widening, ``Ctrl+Shift+F`` would overlap the menu item label."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    var save = MenuItem(String("Save"), EDITOR_SAVE)
+    save.shortcut = String("Ctrl+S")
+    items.append(save)
+    var pf = MenuItem(String("Find in project..."), PROJECT_FIND)
+    pf.shortcut = String("Ctrl+Shift+F")
+    items.append(pf)
+    bar.add(Menu(String("Edit"), items^))
+    bar.open_idx = 0
+    var dr = bar._dropdown_rect(80)
+    var widest_label = len(String("Find in project...").as_bytes())
+    var widest_sc = len(String("Ctrl+Shift+F").as_bytes())
+    # 2 (left pad) + label + 2 (gap) + shortcut + 2 (right pad)
+    var expected_min_w = widest_label + widest_sc + 6
+    assert_true(dr.b.x - dr.a.x >= expected_min_w)
+
+
+fn test_parse_csi_modify_other_keys_normalizes_ctrl_q() raises:
+    """``ESC[27;5;113~`` (xterm modifyOtherKeys=2 form for Ctrl+Q) parses
+    to ``(0x11, MOD_NONE)`` — the same form we get on terminals that send
+    Ctrl+Q as a bare control byte. Without this fix the parser dropped
+    only ``ESC[27;5;`` and the trailing ``113~`` leaked into the editor."""
+    var ev = parse_input(String("\x1b[27;5;113~"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), 0x11)
+    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+    assert_equal(ev[1], len(String("\x1b[27;5;113~").as_bytes()))
+
+
+fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
+    """``ESC[27;6;102~`` is Ctrl+Shift+F. Shift is preserved (so the
+    project-find hotkey can match it); only plain Ctrl+letter is normalized."""
+    var ev = parse_input(String("\x1b[27;6;102~"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), Int(ord("f")))
+    assert_true((ev[0].mods & MOD_CTRL) != 0)
+    assert_true((ev[0].mods & MOD_SHIFT) != 0)
+
+
+fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
+    """Any unrecognized CSI sequence must be eaten in one bite — without
+    that, trailing bytes (digits, ``~``) get re-parsed as printable keys
+    and end up in the focused editor."""
+    # Made-up sequence the parser doesn't recognize. ``end + 1`` must be
+    # consumed regardless.
+    var s = String("\x1b[99;42q")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_NONE)
+    assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_csi_kitty_u_ctrl_letter() raises:
+    """Kitty kbd protocol: ``CSI <cp> ; <mod> u``. ``ESC[113;5u`` (Ctrl+Q)
+    parses with the same control-char normalization."""
+    var ev = parse_input(String("\x1b[113;5u"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), 0x11)
+    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+
+
+fn test_editor_rejects_modified_letter_typing() raises:
+    """Alt+Q and Ctrl+Q (when delivered as printable letter + mod) must
+    not be inserted into the buffer — they're commands, not text."""
+    var ed = Editor(String("hello"))
+    _ = ed.handle_key(Event.key_event(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(UInt32(ord("q")), MOD_ALT), _VIEW)
+    assert_equal(ed.buffer.line(0), String("hello"))
+    _ = ed.handle_key(_key(UInt32(ord("q")), MOD_CTRL), _VIEW)
+    assert_equal(ed.buffer.line(0), String("hello"))
+    # Plain shifted letters still work (they arrive pre-folded as 'Q').
+    _ = ed.handle_key(_key(UInt32(ord("Q")), MOD_SHIFT), _VIEW)
+    assert_equal(ed.buffer.line(0), String("helloQ"))
+
+
+fn test_ctrl_q_modifyOtherKeys_triggers_quit_action() raises:
+    """End-to-end: a Ctrl+Q event delivered as the modifyOtherKeys form
+    is normalized by the parser and matched by the default Ctrl+Q hotkey.
+    The Desktop returns APP_QUIT_ACTION; nothing is inserted into the
+    focused editor."""
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("hello\n"),
+    ))
+    # Synthesize what parse_input would produce for ESC[27;5;113~.
+    var parsed = parse_input(String("\x1b[27;5;113~"))
+    assert_true(parsed[0].kind == EVENT_KEY)
+    var maybe = d.handle_event(parsed[0], _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), APP_QUIT_ACTION)
+    # And the buffer is untouched — none of the trailing bytes leaked.
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("hello"))
+
+
+fn test_ctrl_key_helper() raises:
+    """``Ctrl+letter`` arrives as a control character on most terminals;
+    ``ctrl_key`` produces the matching codepoint."""
+    assert_equal(Int(ctrl_key(String("q"))), 0x11)
+    assert_equal(Int(ctrl_key(String("Q"))), 0x11)
+    assert_equal(Int(ctrl_key(String("a"))), 0x01)
+    assert_equal(Int(ctrl_key(String("z"))), 0x1A)
+    assert_equal(Int(ctrl_key(String("f"))), 0x06)
+
+
+fn test_alt_letter_opens_menu_by_mnemonic() raises:
+    """Alt+<letter> opens the first visible menu whose label starts with
+    that letter (case-insensitive). The leading letter is what the menu
+    bar paints in red as the mnemonic hint."""
+    var d = Desktop()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("New"), String("noop")))
+    d.menu_bar.add(Menu(String("File"), file_items^))
+    var edit_items = List[MenuItem]()
+    edit_items.append(MenuItem(String("Find..."), EDITOR_FIND))
+    d.menu_bar.add(Menu(String("Edit"), edit_items^))
+    # Alt+F opens File.
+    _ = d.handle_event(Event.key_event(UInt32(ord("f")), MOD_ALT), _SCREEN)
+    var file_idx = -1
+    var edit_idx = -1
+    for i in range(len(d.menu_bar.menus)):
+        if d.menu_bar.menus[i].label == String("File"):
+            file_idx = i
+        elif d.menu_bar.menus[i].label == String("Edit"):
+            edit_idx = i
+    assert_equal(d.menu_bar.open_idx, file_idx)
+    # Alt+E switches to Edit.
+    _ = d.handle_event(Event.key_event(UInt32(ord("e")), MOD_ALT), _SCREEN)
+    assert_equal(d.menu_bar.open_idx, edit_idx)
+    # Uppercase works too.
+    d.menu_bar.close()
+    _ = d.handle_event(Event.key_event(UInt32(ord("F")), MOD_ALT), _SCREEN)
+    assert_equal(d.menu_bar.open_idx, file_idx)
+    # No matching letter → no-op (menu stays closed).
+    d.menu_bar.close()
+    _ = d.handle_event(Event.key_event(UInt32(ord("z")), MOD_ALT), _SCREEN)
+    assert_false(d.menu_bar.is_open())
+
+
+fn test_esc_prefix_opens_menu_by_mnemonic() raises:
+    """Classic TV / DOS-style two-key sequence: ESC, then a letter, opens
+    the matching menu. Lets users on macOS terminals (where Option+F is
+    intercepted by the OS) still reach the mnemonic without reconfiguring
+    their terminal."""
+    var d = Desktop()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("New"), String("noop")))
+    d.menu_bar.add(Menu(String("File"), file_items^))
+    # First press: ESC alone. No menu opens; no action bubbles up.
+    var maybe1 = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(Bool(maybe1))
+    assert_false(d.menu_bar.is_open())
+    # Second press: F. The framework picks it up as a mnemonic.
+    var maybe2 = d.handle_event(
+        Event.key_event(UInt32(ord("f"))), _SCREEN,
+    )
+    assert_false(Bool(maybe2))
+    assert_true(d.menu_bar.is_open())
+    var file_idx = -1
+    for i in range(len(d.menu_bar.menus)):
+        if d.menu_bar.menus[i].label == String("File"):
+            file_idx = i
+    assert_equal(d.menu_bar.open_idx, file_idx)
+
+
+fn test_esc_prefix_disarms_after_one_keystroke() raises:
+    """A non-letter (or unmatched letter) following ESC must disarm the
+    prefix; the third keystroke is plain again."""
+    var d = Desktop()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("New"), String("noop")))
+    d.menu_bar.add(Menu(String("File"), file_items^))
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String(""),
+    ))
+    _ = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    # No menu starts with 'z' — the keystroke disarms but doesn't open.
+    _ = d.handle_event(Event.key_event(UInt32(ord("z"))), _SCREEN)
+    assert_false(d.menu_bar.is_open())
+    # Now type 'f' — it should reach the editor as plain typing, not the
+    # mnemonic, because the previous keystroke disarmed the prefix.
+    _ = d.handle_event(Event.key_event(UInt32(ord("f"))), _SCREEN)
+    assert_false(d.menu_bar.is_open())
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("zf"))
+
+
+fn test_top_level_esc_does_not_quit() raises:
+    """Top-level ESC must not bubble up an action — quit is reserved for
+    explicit bindings (Ctrl+Q etc.). It still closes a modal layer when
+    one is open."""
+    var d = Desktop()
+    var maybe = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(Bool(maybe))
+    # ESC closes an open menu but still doesn't bubble.
+    d.menu_bar.add(Menu(String("File"), List[MenuItem]()))
+    d.menu_bar.open_idx = 0
+    assert_true(d.menu_bar.is_open())
+    var maybe2 = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(Bool(maybe2))
+    assert_false(d.menu_bar.is_open())
+
+
+fn test_default_hotkey_ctrl_q_returns_quit() raises:
+    var d = Desktop()
+    var ev = Event.key_event(ctrl_key(String("q")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), APP_QUIT_ACTION)
+
+
+fn test_default_hotkey_ctrl_f_opens_find_prompt() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("hello\n"),
+    ))
+    assert_false(d.prompt.active)
+    var ev = Event.key_event(ctrl_key(String("f")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    # Framework intercepted the hotkey; nothing for the caller to dispatch.
+    assert_false(Bool(maybe))
+    assert_true(d.prompt.active)
+
+
+fn test_default_hotkey_ctrl_s_saves_focused_editor() raises:
+    var path = _temp_path(String("_hkeys.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("hk"), Rect(0, 1, 40, 12), path))
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    assert_true(d.windows.windows[0].editor.dirty)
+    var ev = Event.key_event(ctrl_key(String("s")))
+    _ = d.handle_event(ev, _SCREEN)
+    assert_false(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path), String("hello!\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_hotkey_overrides_default_when_registered_later() raises:
+    """Registrations are scanned newest-first, so a later-registered binding
+    for the same key/mods pair wins."""
+    var d = Desktop()
+    # Bind Ctrl+Q to a custom app action; the default (APP_QUIT_ACTION)
+    # should no longer fire.
+    d.register_hotkey(ctrl_key(String("q")), MOD_NONE, String("custom:thing"))
+    var ev = Event.key_event(ctrl_key(String("q")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), String("custom:thing"))
+
+
+fn test_hotkey_does_not_fire_while_prompt_active() raises:
+    """Prompt modal keys must reach the prompt, not the hotkey table."""
+    var d = Desktop()
+    d.prompt.open(String("Find: "))
+    # Without the modal-prompt guard, Ctrl+Q here would return APP_QUIT.
+    var ev = Event.key_event(ctrl_key(String("q")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_false(Bool(maybe))
+    assert_true(d.prompt.active)
+
+
+fn test_gitignore_matches_directory_pattern() raises:
+    var m = GitignoreMatcher.from_text(String("tvision/\n"))
+    assert_true(m.ignored(String("tvision"), True))
+    assert_false(m.ignored(String("tvision"), False))   # dir-only pattern
+    assert_true(m.ignored(String("nested/tvision"), True))
+    assert_false(m.ignored(String("examples"), True))
+
+
+fn test_gitignore_matches_glob_and_negate() raises:
+    var m = GitignoreMatcher.from_text(
+        String("# build artefacts\n*.o\n!keep.o\nbuild/\n")
+    )
+    assert_true(m.ignored(String("foo.o"), False))
+    assert_true(m.ignored(String("a/b/c.o"), False))
+    # The negation must override the earlier pattern.
+    assert_false(m.ignored(String("keep.o"), False))
+    assert_true(m.ignored(String("build"), True))
+    assert_false(m.ignored(String("hello.mojo"), False))
+
+
+fn test_walk_project_files_respects_gitignore() raises:
+    """The repo's .gitignore lists ``tvision/`` — that subtree must be
+    excluded from the default walk, but visible when explicitly opted out."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var paths = walk_project_files(root.value())
+    var saw_tvision = False
+    for i in range(len(paths)):
+        if _contains(paths[i], String("/tvision/")):
+            saw_tvision = True
+            break
+    assert_false(saw_tvision)
+    # Without gitignore respect, the walk reaches into tvision/.
+    var all_paths = walk_project_files(root.value(), respect_gitignore=False)
+    var any_tvision = False
+    for i in range(len(all_paths)):
+        if _contains(all_paths[i], String("/tvision/")):
+            any_tvision = True
+            break
+    assert_true(any_tvision)
+
+
+fn test_quick_open_match_rules() raises:
+    """Locked-in spec: each token is a case-insensitive subsequence;
+    first token matches anywhere, later tokens require a word boundary.
+    Word boundaries: start, after non-alnum, lowercase→uppercase split."""
+    var path = String("src/mojovision/cell.mojo")
+    # Single token with a literal slash — subsequence match.
+    assert_true(quick_open_match(path, String("j/c")))
+    # Two tokens — j anywhere, c at a word boundary.
+    assert_true(quick_open_match(path, String("j c")))
+    # Subsequence within a token: j (in mojovision) → / → m (in .mojo).
+    assert_true(quick_open_match(path, String("j/m")))
+    # No / after the m in .mojo, so this can't match.
+    assert_false(quick_open_match(path, String("jm/")))
+
+    # Multi-token across other shapes:
+    assert_true(quick_open_match(String("job_call"),  String("j c")))
+    assert_true(quick_open_match(String("jobCall"),   String("j c")))
+    # The c in "jack" isn't preceded by a word boundary.
+    assert_false(quick_open_match(String("jack"),     String("j c")))
+
+    # Empty query matches everything; tokens must keep their order.
+    assert_true(quick_open_match(path, String("")))
+    assert_false(quick_open_match(String("cell mojo"), String("mojo cell")))
+
+
+fn test_quick_open_match_word_boundary_kinds() raises:
+    # camelCase split — uppercase after lowercase counts as a boundary.
+    assert_true(quick_open_match(String("HelloWorld"), String("h w")))
+    # Leading uppercase counts as start-of-string boundary.
+    assert_true(quick_open_match(String("Helloworld"), String("h")))
+    # Embedded non-alnum — boundary right after.
+    assert_true(quick_open_match(String("foo-bar.baz"), String("f b b")))
+    # Path-segment boundaries via slashes.
+    assert_true(quick_open_match(String("a/b/c"), String("a b c")))
+
+
+fn test_quick_open_filters_as_you_type() raises:
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var qo = QuickOpen()
+    qo.open(root.value())
+    assert_true(qo.active)
+    var initial_count = len(qo.matched)
+    assert_true(initial_count > 5)
+    # Typing narrows the match list.
+    qo.query = String("editor")
+    qo._refilter()
+    assert_true(len(qo.matched) > 0)
+    assert_true(len(qo.matched) < initial_count)
+    var found_editor_module = False
+    for i in range(len(qo.matched)):
+        if qo.entries[qo.matched[i]] == String("src/mojovision/editor.mojo"):
+            found_editor_module = True
+            break
+    assert_true(found_editor_module)
+    # Submission produces an absolute path joined with root.
+    qo.selected_path = join_path(qo.root, qo.entries[qo.matched[0]])
+    qo.submitted = True
+    assert_true(_starts_with(qo.selected_path, root.value()))
+
+
+fn _starts_with(s: String, prefix: String) -> Bool:
+    var sb = s.as_bytes()
+    var pb = prefix.as_bytes()
+    if len(pb) > len(sb):
+        return False
+    for i in range(len(pb)):
+        if sb[i] != pb[i]:
+            return False
+    return True
+
+
+fn test_ctrl_o_opens_quick_open_when_project_active() raises:
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    var ev = Event.key_event(ctrl_key(String("o")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_false(Bool(maybe))
+    assert_true(d.quick_open.active)
+
+
+fn test_ctrl_o_bubbles_when_no_project() raises:
+    var d = Desktop()
+    var ev = Event.key_event(ctrl_key(String("o")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), EDITOR_QUICK_OPEN)
+    assert_false(d.quick_open.active)
 
 
 fn test_replace_in_project_round_trip() raises:
@@ -1287,11 +1984,12 @@ fn main() raises:
     test_editor_dirty_flag()
     test_file_io_read_and_stat()
     test_editor_from_file()
-    test_terminal_parses_macos_alt_arrow()
+    test_terminal_parses_alt_letter_as_letter()
     test_editor_alt_arrow_word_jump()
     test_path_helpers()
     test_basename()
     test_find_git_project()
+    test_menu_layout_pins_file_edit_window_help()
     test_right_aligned_menu_layout()
     test_desktop_project_lifecycle()
     test_file_tree_expand_collapse()
@@ -1305,10 +2003,49 @@ fn main() raises:
     test_editor_replace_all()
     test_walk_project_files_finds_known_files()
     test_find_in_project_locates_string()
+    test_gitignore_matches_directory_pattern()
+    test_gitignore_matches_glob_and_negate()
+    test_walk_project_files_respects_gitignore()
+    test_quick_open_match_rules()
+    test_quick_open_match_word_boundary_kinds()
+    test_quick_open_filters_as_you_type()
+    test_ctrl_o_opens_quick_open_when_project_active()
+    test_ctrl_o_bubbles_when_no_project()
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
     test_desktop_replace_chains_two_prompts()
+    test_desktop_open_file_uses_80_percent_size()
+    test_desktop_open_file_cascades_by_one()
+    test_desktop_open_file_inherits_maximize_state()
+    test_desktop_window_menu_lists_open_windows()
+    test_desktop_window_menu_when_empty()
+    test_desktop_window_focus_action_focuses_window()
+    test_desktop_maximize_all_and_restore_all()
+    test_window_manager_close_focused()
+    test_ctrl_n_focuses_window_by_number()
+    test_focus_changes_keep_window_list_order_stable()
+    test_window_menu_items_show_ctrl_n_shortcut()
+    test_ctrl_w_closes_focused_window()
+    test_format_hotkey_renders_combinations()
+    test_menu_items_get_shortcut_text_after_refresh()
+    test_dropdown_widens_to_fit_shortcut()
+    test_parse_csi_modify_other_keys_normalizes_ctrl_q()
+    test_parse_csi_modify_other_keys_ctrl_shift_f()
+    test_parse_csi_unknown_sequence_is_consumed_whole()
+    test_parse_csi_kitty_u_ctrl_letter()
+    test_editor_rejects_modified_letter_typing()
+    test_ctrl_q_modifyOtherKeys_triggers_quit_action()
+    test_ctrl_key_helper()
+    test_alt_letter_opens_menu_by_mnemonic()
+    test_esc_prefix_opens_menu_by_mnemonic()
+    test_esc_prefix_disarms_after_one_keystroke()
+    test_top_level_esc_does_not_quit()
+    test_default_hotkey_ctrl_q_returns_quit()
+    test_default_hotkey_ctrl_f_opens_find_prompt()
+    test_default_hotkey_ctrl_s_saves_focused_editor()
+    test_hotkey_overrides_default_when_registered_later()
+    test_hotkey_does_not_fire_while_prompt_active()
     test_desktop_project_find_requires_active_project()
     test_replace_in_project_round_trip()
     test_file_dialog_lists_and_navigates()

@@ -345,15 +345,13 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
             if b2 == 0x53: return (Event.key_event(KEY_F4), 3)
             # Unknown SS3 final byte — drop the prefix without emitting ESC.
             return (Event(), 3)
-        # macOS-style Alt+arrow word jump: iTerm2/Terminal.app default for
-        # Alt+Right is ``ESC f`` (readline forward-word) and Alt+Left is
-        # ``ESC b``. Translate them into KEY_RIGHT/LEFT + MOD_ALT so the
-        # editor's word-jump path fires without requiring iTerm2 config.
-        if b1 == 0x66:  # 'f'
-            return (Event.key_event(KEY_RIGHT, MOD_ALT), 2)
-        if b1 == 0x62:  # 'b'
-            return (Event.key_event(KEY_LEFT, MOD_ALT), 2)
-        # ESC + printable → Alt-modified literal key.
+        # ESC + printable → Alt-modified literal key. Macros that the
+        # readline conventions (``ESC f`` forward-word, ``ESC b``
+        # backward-word) used to consume here are now passed through as
+        # plain ``Alt+f`` / ``Alt+b`` events so the menu-bar mnemonic
+        # routing in Desktop can see them. Word-jump still works via
+        # ``Ctrl+arrow`` and (on terminals that report modifiers for
+        # arrows) ``Alt+arrow``.
         return (Event.key_event(UInt32(Int(b1)), MOD_ALT), 2)
 
     if b0 == 0x0D or b0 == 0x0A:
@@ -370,42 +368,128 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     return (Event.key_event(_decode_first_codepoint(data)), cp_len)
 
 
+fn _csi_mods_from(mod_num: Int) -> UInt8:
+    """Decode the xterm modifier-parameter (1 + shift|alt<<1|ctrl<<2)."""
+    var raw = mod_num - 1
+    if raw < 0:
+        raw = 0
+    var mods: UInt8 = MOD_NONE
+    if (raw & 1) != 0: mods = mods | MOD_SHIFT
+    if (raw & 2) != 0: mods = mods | MOD_ALT
+    if (raw & 4) != 0: mods = mods | MOD_CTRL
+    return mods
+
+
+fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
+    """Fold ``Ctrl+letter`` (no shift) onto its control-character form.
+
+    Terminals supporting modifyOtherKeys=2 deliver ``Ctrl+Q`` as
+    ``(key=ord('q'), mods=MOD_CTRL)``, while terminals without that mode
+    send the bare control byte ``(0x11, MOD_NONE)``. Downstream code
+    (hotkeys, the editor's clipboard handlers) standardizes on the bare
+    control-byte form, so we collapse the modified form into it. The
+    ``Ctrl+Shift+letter`` case is left intact so it remains distinguishable.
+    """
+    if mods != MOD_CTRL:
+        return (UInt32(cp), mods)
+    if cp < 0x40 or cp > 0x7E:
+        return (UInt32(cp), mods)
+    var letter = cp
+    if letter >= 0x60:
+        letter = letter - 0x20  # to upper
+    if letter < 0x40 or letter > 0x5F:
+        return (UInt32(cp), mods)
+    return (UInt32(letter - 0x40), MOD_NONE)
+
+
 fn _parse_csi(data: String) -> Tuple[Event, Int]:
-    """Handle the small CSI vocabulary we recognize."""
+    """Parse a complete CSI sequence and return whatever event it represents.
+
+    The parser scans to the CSI **final byte** (any byte in ``0x40..0x7E``)
+    before deciding what the sequence means, then consumes the entire span
+    from ``ESC`` to the final byte. This is what keeps unrecognized
+    sequences from leaking trailing bytes into the focused editor — even
+    sequences we don't care about are fully eaten.
+
+    Recognized forms:
+
+    * ``CSI A/B/C/D/H/F``                   — bare arrow / Home / End
+    * ``CSI <num>~``                        — F-keys, PageUp/Down, Insert/Delete
+    * ``CSI <num> ; <mod> <letter>``        — arrows / nav with modifiers
+    * ``CSI 27 ; <mod> ; <cp> ~``           — xterm modifyOtherKeys=2
+    * ``CSI <cp> ; <mod> u``                — kitty kbd protocol
+
+    For the last two, ``Ctrl+letter (no shift)`` is normalized onto the
+    control-character form so existing consumers (hotkey table, editor
+    clipboard handlers) keep working unchanged.
+    """
     var bytes = data.as_bytes()
     if len(bytes) < 3:
         # Just ``ESC [`` so far — tail not yet read. Defer to caller.
         return (Event(), 0)
 
-    # SGR mouse: CSI < B ; X ; Y M|m  — emitted by xterm-style 1006 mode.
+    # SGR mouse: CSI < B ; X ; Y M|m — keep the dedicated parser; its tight
+    # buffering rules are exactly what high-rate scroll bursts need.
     if bytes[2] == 0x3C:  # '<'
         return _parse_sgr_mouse(data)
 
-    var b2 = bytes[2]
-    if b2 == 0x41: return (Event.key_event(KEY_UP), 3)
-    if b2 == 0x42: return (Event.key_event(KEY_DOWN), 3)
-    if b2 == 0x43: return (Event.key_event(KEY_RIGHT), 3)
-    if b2 == 0x44: return (Event.key_event(KEY_LEFT), 3)
-    if b2 == 0x48: return (Event.key_event(KEY_HOME), 3)
-    if b2 == 0x46: return (Event.key_event(KEY_END), 3)
-    # CSI <number>~ forms (ESC[5~ etc.) and CSI 1;<mod><letter> (ESC[1;5C etc.).
-    if b2 >= 0x30 and b2 <= 0x39:
-        var i = 2
-        var num1 = 0
-        while i < len(bytes) and bytes[i] >= 0x30 and bytes[i] <= 0x39:
-            num1 = num1 * 10 + Int(bytes[i]) - 0x30
-            i += 1
-        if i >= len(bytes):
-            # Ran off the end while reading digits — buffer truncated.
-            return (Event(), 0)
-        if bytes[i] == 0x7E:  # '~'
-            var consumed = i + 1
-            if num1 == 1: return (Event.key_event(KEY_HOME), consumed)
-            if num1 == 2: return (Event.key_event(KEY_INSERT), consumed)
-            if num1 == 3: return (Event.key_event(KEY_DELETE), consumed)
-            if num1 == 4: return (Event.key_event(KEY_END), consumed)
-            if num1 == 5: return (Event.key_event(KEY_PAGEUP), consumed)
-            if num1 == 6: return (Event.key_event(KEY_PAGEDOWN), consumed)
+    # Find the final byte. ECMA-48 says it's a single byte in 0x40..0x7E
+    # following any number of parameter (0x30..0x3F) and intermediate
+    # (0x20..0x2F) bytes.
+    var end = 2
+    while end < len(bytes):
+        var b = bytes[end]
+        if b >= 0x40 and b <= 0x7E:
+            break
+        end += 1
+    if end >= len(bytes):
+        # Final byte hasn't arrived yet — partial read. Defer.
+        return (Event(), 0)
+
+    var final = bytes[end]
+    var consumed = end + 1
+
+    # No-parameter finals: bare cursor / nav keys.
+    if end == 2:
+        if final == 0x41: return (Event.key_event(KEY_UP), consumed)
+        if final == 0x42: return (Event.key_event(KEY_DOWN), consumed)
+        if final == 0x43: return (Event.key_event(KEY_RIGHT), consumed)
+        if final == 0x44: return (Event.key_event(KEY_LEFT), consumed)
+        if final == 0x48: return (Event.key_event(KEY_HOME), consumed)
+        if final == 0x46: return (Event.key_event(KEY_END), consumed)
+        return (Event(), consumed)
+
+    # Parse parameters as ``;``-separated decimal numbers. Anything else in
+    # the parameter span (intermediates, private markers we don't speak)
+    # means we drop the sequence — but we drop it whole, never piecemeal.
+    var params = List[Int]()
+    var i = 2
+    var cur = 0
+    var has_digit = False
+    while i < end:
+        var b = bytes[i]
+        if b >= 0x30 and b <= 0x39:
+            cur = cur * 10 + Int(b) - 0x30
+            has_digit = True
+        elif b == 0x3B:  # ';'
+            params.append(cur)
+            cur = 0
+            has_digit = False
+        else:
+            return (Event(), consumed)
+        i += 1
+    if has_digit:
+        params.append(cur)
+
+    if final == 0x7E:
+        if len(params) == 1:
+            var num1 = params[0]
+            if num1 == 1:  return (Event.key_event(KEY_HOME), consumed)
+            if num1 == 2:  return (Event.key_event(KEY_INSERT), consumed)
+            if num1 == 3:  return (Event.key_event(KEY_DELETE), consumed)
+            if num1 == 4:  return (Event.key_event(KEY_END), consumed)
+            if num1 == 5:  return (Event.key_event(KEY_PAGEUP), consumed)
+            if num1 == 6:  return (Event.key_event(KEY_PAGEDOWN), consumed)
             if num1 == 11: return (Event.key_event(KEY_F1), consumed)
             if num1 == 12: return (Event.key_event(KEY_F2), consumed)
             if num1 == 13: return (Event.key_event(KEY_F3), consumed)
@@ -418,39 +502,34 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
             if num1 == 21: return (Event.key_event(KEY_F10), consumed)
             if num1 == 23: return (Event.key_event(KEY_F11), consumed)
             if num1 == 24: return (Event.key_event(KEY_F12), consumed)
-            # Unrecognized CSI~ — drop without emitting ESC.
             return (Event(), consumed)
-        # CSI <num1> ; <mod> <letter>  — modified arrow / nav key.
-        # The ``mod`` value is 1 + (shift|alt<<1|ctrl<<2).
-        if bytes[i] == 0x3B:  # ';'
-            i += 1
-            var mod_num = 0
-            while i < len(bytes) and bytes[i] >= 0x30 and bytes[i] <= 0x39:
-                mod_num = mod_num * 10 + Int(bytes[i]) - 0x30
-                i += 1
-            if i >= len(bytes):
-                # Buffer truncated mid mod-letter sequence.
-                return (Event(), 0)
-            var letter = bytes[i]
-            var consumed = i + 1
-            var raw_mod = mod_num - 1
-            if raw_mod < 0: raw_mod = 0
-            var mods: UInt8 = MOD_NONE
-            if (raw_mod & 1) != 0: mods = mods | MOD_SHIFT
-            if (raw_mod & 2) != 0: mods = mods | MOD_ALT
-            if (raw_mod & 4) != 0: mods = mods | MOD_CTRL
-            if letter == 0x41: return (Event.key_event(KEY_UP, mods), consumed)
-            if letter == 0x42: return (Event.key_event(KEY_DOWN, mods), consumed)
-            if letter == 0x43: return (Event.key_event(KEY_RIGHT, mods), consumed)
-            if letter == 0x44: return (Event.key_event(KEY_LEFT, mods), consumed)
-            if letter == 0x48: return (Event.key_event(KEY_HOME, mods), consumed)
-            if letter == 0x46: return (Event.key_event(KEY_END, mods), consumed)
-            # Unrecognized modified-key letter — drop without emitting ESC.
-            return (Event(), consumed)
-        # Unrecognized byte after CSI digits — drop, don't emit ESC.
-        return (Event(), i + 1)
-    # Unrecognized CSI final byte — drop, don't emit ESC.
-    return (Event(), 3)
+        if len(params) == 3 and params[0] == 27:
+            # modifyOtherKeys=2: CSI 27 ; <mod> ; <codepoint> ~
+            var mods = _csi_mods_from(params[1])
+            var nk = _normalize_ctrl_letter(params[2], mods)
+            return (Event.key_event(nk[0], nk[1]), consumed)
+        return (Event(), consumed)
+
+    if len(params) == 2:
+        var num1 = params[0]
+        var mods = _csi_mods_from(params[1])
+        if final == 0x41: return (Event.key_event(KEY_UP, mods), consumed)
+        if final == 0x42: return (Event.key_event(KEY_DOWN, mods), consumed)
+        if final == 0x43: return (Event.key_event(KEY_RIGHT, mods), consumed)
+        if final == 0x44: return (Event.key_event(KEY_LEFT, mods), consumed)
+        if final == 0x48: return (Event.key_event(KEY_HOME, mods), consumed)
+        if final == 0x46: return (Event.key_event(KEY_END, mods), consumed)
+        if final == 0x75:  # 'u' — kitty kbd protocol
+            var nk = _normalize_ctrl_letter(num1, mods)
+            return (Event.key_event(nk[0], nk[1]), consumed)
+        return (Event(), consumed)
+
+    if len(params) == 1 and final == 0x75:
+        # Kitty kbd protocol with no explicit modifier (single param).
+        var nk = _normalize_ctrl_letter(params[0], MOD_NONE)
+        return (Event.key_event(nk[0], nk[1]), consumed)
+
+    return (Event(), consumed)
 
 
 fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:

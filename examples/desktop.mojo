@@ -13,7 +13,7 @@ Keyboard:
   * Ctrl+C / Ctrl+X / Ctrl+V copy / cut / paste via the system clipboard
   * Edit menu (visible only when an editor window is focused): Find,
     Replace, Find/Replace in project, Go to Line, Toggle Comment, Toggle Case
-  * ESC quits (and closes any open menu / dialog first)
+  * ESC closes any open menu / dialog. Ctrl+Q quits.
 
 Run with::
 
@@ -30,20 +30,10 @@ from std.sys import argv
 
 from mojovision import (
     APP_QUIT_ACTION, Application, Desktop, FileDialog, Menu, MenuItem, Rect,
-    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, EDITOR_SAVE,
-    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
-    EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE,
+    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
+    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
 )
-
-
-fn _basename(path: String) -> String:
-    var bytes = path.as_bytes()
-    var i = len(bytes) - 1
-    while i >= 0 and bytes[i] != 0x2F:
-        i -= 1
-    if i < 0:
-        return path
-    return String(StringSlice(unsafe_from_utf8=bytes[i + 1:]))
 
 
 fn _lines(*texts: String) -> List[String]:
@@ -71,6 +61,8 @@ fn main() raises:
         desktop.menu_bar.add(_mk_menu(String("File"),
             (String("New"), String("noop")),
             (String("Open..."), String("file:open")),
+            (String("Quick open..."), EDITOR_QUICK_OPEN),
+            (String("Close"), WINDOW_CLOSE),
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),
             (String("Quit"), APP_QUIT_ACTION),
@@ -84,11 +76,8 @@ fn main() raises:
             (String("Toggle Comment"), EDITOR_TOGGLE_COMMENT),
             (String("Toggle Case"), EDITOR_TOGGLE_CASE),
         ))
-        desktop.menu_bar.add(_mk_menu(String("Window"),
-            (String("Editor"), String("focus:editor.txt")),
-            (String("Mouse"), String("focus:Mouse")),
-            (String("About"), String("focus:About")),
-        ))
+        # The "Window" menu is owned by Desktop and rebuilt every frame from
+        # the actual window list — host doesn't add one.
         desktop.menu_bar.add(_mk_menu(String("Help"),
             (String("About"), String("focus:About")),
         ))
@@ -98,21 +87,14 @@ fn main() raises:
         var args = argv()
         var has_files = len(args) > 1
         if has_files:
-            var ox = 4
-            var oy = 3
             for i in range(1, len(args)):
                 var path = String(args[i])
-                desktop.detect_project_from(path)
                 try:
-                    desktop.windows.add(Window.from_file(
-                        _basename(path), Rect(ox, oy, ox + 56, oy + 16), path,
-                    ))
+                    desktop.open_file(path, app.screen())
                 except e:
                     error_log.append(
                         String("open ") + path + String(": ") + String(e),
                     )
-                ox += 3
-                oy += 2
         else:
             desktop.windows.add(Window.editor_window(
                 String("editor.txt"),
@@ -144,7 +126,7 @@ fn main() raises:
         desktop.status_bar.add(String("F3"),  String("Open"))
         desktop.status_bar.add(String("F9"),  String("Make"))
         desktop.status_bar.add(String("F10"), String("Menu"))
-        desktop.status_bar.add(String("ESC"), String("Quit"))
+        desktop.status_bar.add(String("Ctrl+Q"), String("Quit"))
 
         while app.running:
             try:
@@ -162,9 +144,7 @@ fn main() raises:
             if tree_open:
                 var p = tree_open.value()
                 try:
-                    desktop.windows.add(Window.from_file(
-                        _basename(p), Rect(6, 4, 60, 20), p,
-                    ))
+                    desktop.open_file(p, app.screen())
                 except e:
                     error_log.append(String("open ") + p + String(": ") + String(e))
 
@@ -191,11 +171,8 @@ fn main() raises:
                 if file_dialog.submitted:
                     var path = file_dialog.selected_path
                     file_dialog.close()
-                    desktop.detect_project_from(path)
                     try:
-                        desktop.windows.add(Window.from_file(
-                            _basename(path), Rect(6, 4, 60, 20), path,
-                        ))
+                        desktop.open_file(path, app.screen())
                     except:
                         pass
                 continue
@@ -207,10 +184,11 @@ fn main() raises:
                     app.quit()
                 elif action == String("file:open"):
                     file_dialog.open(String("."))
-                elif action == String("focus:editor.txt"):
-                    desktop.windows.focus_by_title(String("editor.txt"))
-                elif action == String("focus:Mouse"):
-                    desktop.windows.focus_by_title(String("Mouse"))
+                elif action == EDITOR_QUICK_OPEN:
+                    # Desktop only intercepts the quick-open action when a
+                    # project is active; otherwise it bubbles up here so we
+                    # can fall back to the regular file dialog.
+                    file_dialog.open(String("."))
                 elif action == String("focus:About"):
                     desktop.windows.focus_by_title(String("About"))
     finally:

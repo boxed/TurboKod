@@ -16,10 +16,33 @@ from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
 
 
-@fieldwise_init
 struct MenuItem(ImplicitlyCopyable, Movable):
     var label: String
     var action: String
+    var is_separator: Bool
+    var shortcut: String     # rendered right-aligned in the dropdown
+
+    fn __init__(
+        out self,
+        var label: String,
+        var action: String,
+        is_separator: Bool = False,
+    ):
+        self.label = label^
+        self.action = action^
+        self.is_separator = is_separator
+        self.shortcut = String("")
+
+    @staticmethod
+    fn separator() -> Self:
+        """Build a non-interactive divider for grouping items in a dropdown."""
+        return MenuItem(String(""), String(""), True)
+
+    fn __copyinit__(out self, copy: Self):
+        self.label = copy.label
+        self.action = copy.action
+        self.is_separator = copy.is_separator
+        self.shortcut = copy.shortcut
 
 
 struct Menu(ImplicitlyCopyable, Movable):
@@ -54,6 +77,21 @@ struct MenuResult(Movable):
     var consumed: Bool
 
 
+fn _menu_rank(label: String) -> Int:
+    """Display order rank for a left-aligned menu.
+
+    Smaller rank → further left. Pinned slots are spread far apart so future
+    custom rules can slot between them without colliding with each other.
+    The framework treats all four labels case-sensitively; menus with any
+    other label fall into the middle slot in insertion order.
+    """
+    if label == String("File"):    return 0
+    if label == String("Edit"):    return 10
+    if label == String("Window"):  return 90
+    if label == String("Help"):    return 100
+    return 50
+
+
 struct MenuBar(Movable):
     var menus: List[Menu]
     var open_idx: Int
@@ -85,16 +123,35 @@ struct MenuBar(Movable):
         """Per-menu hit-test rects. Hidden menus get an empty rect at (0,0).
 
         Left-aligned menus pack from x=3 rightward; right-aligned menus pack
-        from x=screen_width leftward. The two groups don't overlap-check;
-        on a very narrow screen they may collide visually.
+        from x=screen_width leftward. Left-aligned menus are sorted by rank
+        (File → Edit → other → Window → Help) at layout time so insertion
+        order doesn't matter; rank ties preserve insertion order. The
+        ``self.menus`` list is *not* reshuffled, so any external indices
+        (e.g., a Desktop's cached project / window menu index) stay valid.
+        On a very narrow screen the two groups may visually overlap.
         """
         var rects = List[Rect]()
         for _ in range(len(self.menus)):
             rects.append(Rect(0, 0, 0, 0))
-        var x = 3                                   # past `≡ `
+        # Collect left-aligned visible indices and insertion-sort by rank.
+        var left = List[Int]()
         for i in range(len(self.menus)):
-            if not self.menus[i].visible or self.menus[i].right_aligned:
-                continue
+            if self.menus[i].visible and not self.menus[i].right_aligned:
+                left.append(i)
+        for i in range(1, len(left)):
+            var j = i
+            while j > 0:
+                var ra = _menu_rank(self.menus[left[j]].label)
+                var rb = _menu_rank(self.menus[left[j - 1]].label)
+                if ra >= rb:
+                    break
+                var tmp = left[j]
+                left[j] = left[j - 1]
+                left[j - 1] = tmp
+                j -= 1
+        var x = 3                                   # past `≡ `
+        for k in range(len(left)):
+            var i = left[k]
             var w = len(self.menus[i].label.as_bytes()) + 2
             rects[i] = Rect(x, 0, x + w, 1)
             x += w + 1
@@ -112,9 +169,18 @@ struct MenuBar(Movable):
             return Rect(0, 0, 0, 0)
         var anchor = self._layout(screen_width)[self.open_idx]
         var menu = self.menus[self.open_idx]
+        # Width = max(2 + label + 2, 2 + label + gap + shortcut + 2). The +4
+        # constant covers left padding, right padding; the +6 form adds the
+        # 2-cell gap that separates the label from the shortcut.
         var width = 8
         for i in range(len(menu.items)):
-            var w = len(menu.items[i].label.as_bytes()) + 4
+            if menu.items[i].is_separator:
+                continue
+            var label_w = len(menu.items[i].label.as_bytes())
+            var sc_w = len(menu.items[i].shortcut.as_bytes())
+            var w = label_w + 4
+            if sc_w > 0:
+                w = label_w + sc_w + 6
             if w > width:
                 width = w
         var height = len(menu.items) + 2
@@ -162,12 +228,26 @@ struct MenuBar(Movable):
         canvas.draw_box(rect, attr, False)
         var menu = self.menus[self.open_idx]
         for i in range(len(menu.items)):
-            var label_bytes = menu.items[i].label.as_bytes()
             var y = rect.a.y + 1 + i
+            if menu.items[i].is_separator:
+                # Horizontal divider across the dropdown's interior.
+                for x in range(rect.a.x + 1, rect.b.x - 1):
+                    canvas.set(x, y, Cell(String("─"), attr, 1))
+                continue
+            var label_bytes = menu.items[i].label.as_bytes()
             for j in range(len(label_bytes)):
                 var ch = String(chr(Int(label_bytes[j])))
                 var a = attr_key if j == 0 else attr
                 canvas.set(rect.a.x + 2 + j, y, Cell(ch, a, 1))
+            # Right-aligned shortcut text — last cell sits at rect.b.x - 2
+            # (one in from the right border), so the start x is computed
+            # backwards from there. ``_dropdown_rect`` already widened the
+            # rect to guarantee no overlap with the label.
+            var sc = menu.items[i].shortcut
+            var sc_w = len(sc.as_bytes())
+            if sc_w > 0:
+                var sx = rect.b.x - 1 - sc_w
+                _ = canvas.put_text(Point(sx, y), sc, attr, rect.b.x - 1)
 
     # --- events ------------------------------------------------------------
 
@@ -196,7 +276,11 @@ struct MenuBar(Movable):
             if dr.contains(event.pos):
                 var item_idx = event.pos.y - dr.a.y - 1
                 if 0 <= item_idx and item_idx < len(self.menus[self.open_idx].items):
-                    var action = self.menus[self.open_idx].items[item_idx].action
+                    var item = self.menus[self.open_idx].items[item_idx]
+                    if item.is_separator:
+                        # Click on a divider: eat the event, leave menu open.
+                        return MenuResult(Optional[String](), True)
+                    var action = item.action
                     self.open_idx = -1
                     return MenuResult(Optional[String](action), True)
                 return MenuResult(Optional[String](), True)

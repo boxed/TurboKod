@@ -21,14 +21,221 @@ struct ProjectMatch(ImplicitlyCopyable, Movable):
     var line_text: String
 
 
-fn walk_project_files(root: String) -> List[String]:
-    """Iterative DFS — return absolute paths of every regular file under
-    ``root``. Skips dotfile entries and unreadable nodes."""
+# --- .gitignore matching ---------------------------------------------------
+
+
+@fieldwise_init
+struct GitignorePattern(ImplicitlyCopyable, Movable):
+    """A single gitignore line broken into its semantic parts.
+
+    ``glob`` carries the body of the pattern minus any leading ``!`` (kept as
+    ``negate``), leading ``/`` (kept as ``anchored``), and trailing ``/``
+    (kept as ``dir_only``). Glob characters supported: ``*`` (any non-slash
+    run, including empty) and ``?`` (any single non-slash byte). Character
+    classes (``[abc]``) and ``**`` aren't recognized — that's a deliberate
+    practical subset, not the full git semantics.
+    """
+    var glob: String
+    var dir_only: Bool
+    var anchored: Bool
+    var negate: Bool
+
+
+struct GitignoreMatcher(ImplicitlyCopyable, Movable):
+    """Compiled set of gitignore patterns from a single ``.gitignore`` file.
+
+    Match order follows git: later patterns override earlier ones, and a
+    leading ``!`` re-includes a path that an earlier pattern excluded.
+    """
+    var patterns: List[GitignorePattern]
+
+    fn __init__(out self):
+        self.patterns = List[GitignorePattern]()
+
+    fn __copyinit__(out self, copy: Self):
+        self.patterns = copy.patterns.copy()
+
+    @staticmethod
+    fn from_text(text: String) -> Self:
+        var m = GitignoreMatcher()
+        var lines = _split_lines(text)
+        for li in range(len(lines)):
+            var line = _strip(lines[li])
+            var lb = line.as_bytes()
+            if len(lb) == 0:
+                continue
+            if lb[0] == 0x23:  # '#'
+                continue
+            var negate = False
+            var start = 0
+            if lb[0] == 0x21:  # '!'
+                negate = True
+                start = 1
+            var anchored = False
+            if start < len(lb) and lb[start] == 0x2F:  # '/'
+                anchored = True
+                start += 1
+            var end = len(lb)
+            var dir_only = False
+            if end > start and lb[end - 1] == 0x2F:
+                dir_only = True
+                end -= 1
+            if end <= start:
+                continue
+            var glob = String(StringSlice(unsafe_from_utf8=lb[start:end]))
+            m.patterns.append(GitignorePattern(glob, dir_only, anchored, negate))
+        return m^
+
+    fn ignored(self, rel_path: String, is_dir: Bool) -> Bool:
+        """Is ``rel_path`` (relative to the gitignore's directory) ignored?
+
+        ``rel_path`` should use ``/`` separators and not start with ``/``.
+        """
+        var result = False
+        for i in range(len(self.patterns)):
+            var p = self.patterns[i]
+            if p.dir_only and not is_dir:
+                continue
+            if _gitignore_path_match(p, rel_path):
+                result = not p.negate
+        return result
+
+
+fn _strip(s: String) -> String:
+    var b = s.as_bytes()
+    var n = len(b)
+    var i = 0
+    while i < n and (b[i] == 0x20 or b[i] == 0x09 or b[i] == 0x0D):
+        i += 1
+    var j = n
+    while j > i and (b[j - 1] == 0x20 or b[j - 1] == 0x09 or b[j - 1] == 0x0D):
+        j -= 1
+    if i == 0 and j == n:
+        return s
+    return String(StringSlice(unsafe_from_utf8=b[i:j]))
+
+
+fn _split_path_components(path: String) -> List[String]:
     var out = List[String]()
-    var dirs = List[String]()
-    dirs.append(root)
-    while len(dirs) > 0:
-        var dir = dirs.pop()
+    var b = path.as_bytes()
+    var start = 0
+    var i = 0
+    while i < len(b):
+        if b[i] == 0x2F:
+            if i > start:
+                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            start = i + 1
+        i += 1
+    if start < len(b):
+        out.append(String(StringSlice(unsafe_from_utf8=b[start:])))
+    return out^
+
+
+fn _glob_match(pattern: String, text: String) -> Bool:
+    return _glob_match_at(pattern, 0, text, 0)
+
+
+fn _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
+    var pb = pattern.as_bytes()
+    var tb = text.as_bytes()
+    var p = pi
+    var t = ti
+    while p < len(pb):
+        var c = pb[p]
+        if c == 0x2A:  # '*' — any (possibly empty) run of non-slash bytes.
+            while p < len(pb) and pb[p] == 0x2A:
+                p += 1
+            if p >= len(pb):
+                while t < len(tb):
+                    if tb[t] == 0x2F:
+                        return False
+                    t += 1
+                return True
+            while t <= len(tb):
+                if _glob_match_at(pattern, p, text, t):
+                    return True
+                if t == len(tb):
+                    return False
+                if tb[t] == 0x2F:
+                    return False
+                t += 1
+            return False
+        if c == 0x3F:  # '?'
+            if t >= len(tb) or tb[t] == 0x2F:
+                return False
+            p += 1
+            t += 1
+            continue
+        if t >= len(tb) or tb[t] != c:
+            return False
+        p += 1
+        t += 1
+    return t == len(tb)
+
+
+fn _has_byte(s: String, b: UInt8) -> Bool:
+    var bs = s.as_bytes()
+    for i in range(len(bs)):
+        if bs[i] == b:
+            return True
+    return False
+
+
+fn _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
+    if p.anchored:
+        return _glob_match(p.glob, rel)
+    var glob_has_slash = _has_byte(p.glob, 0x2F)
+    if not glob_has_slash:
+        # Match any single path component.
+        var comps = _split_path_components(rel)
+        for i in range(len(comps)):
+            if _glob_match(p.glob, comps[i]):
+                return True
+        return False
+    # Pattern with internal slash, not anchored: match any suffix that
+    # starts at a path-component boundary.
+    var comps2 = _split_path_components(rel)
+    for s in range(len(comps2)):
+        var suffix = comps2[s]
+        for j in range(s + 1, len(comps2)):
+            suffix = suffix + String("/") + comps2[j]
+        if _glob_match(p.glob, suffix):
+            return True
+    return False
+
+
+fn _maybe_load_gitignore(root: String) -> GitignoreMatcher:
+    var path = join_path(root, String(".gitignore"))
+    var info = stat_file(path)
+    if not info.ok:
+        return GitignoreMatcher()
+    var text: String
+    try:
+        text = read_file(path)
+    except:
+        return GitignoreMatcher()
+    return GitignoreMatcher.from_text(text)
+
+
+fn walk_project_files(
+    root: String, respect_gitignore: Bool = True,
+) -> List[String]:
+    """Iterative DFS — absolute paths of every regular file under ``root``.
+
+    Always skips dotfile entries (so ``.git``, ``.pixi``, ``.gitignore``
+    itself, etc. never enter the result). With ``respect_gitignore=True``
+    (the default) the project's ``.gitignore`` is parsed and any path that
+    matches is excluded; an ignored *directory* skips its entire subtree.
+    """
+    var matcher = _maybe_load_gitignore(root) if respect_gitignore \
+        else GitignoreMatcher()
+    var out = List[String]()
+    var rel_dirs = List[String]()
+    rel_dirs.append(String(""))
+    while len(rel_dirs) > 0:
+        var rel_dir = rel_dirs.pop()
+        var dir = root if len(rel_dir.as_bytes()) == 0 \
+            else join_path(root, rel_dir)
         var raw = list_directory(dir)
         for i in range(len(raw)):
             var name = raw[i]
@@ -37,12 +244,16 @@ fn walk_project_files(root: String) -> List[String]:
             var nbytes = name.as_bytes()
             if len(nbytes) > 0 and nbytes[0] == 0x2E:
                 continue
-            var full = join_path(dir, name)
+            var rel = name if len(rel_dir.as_bytes()) == 0 \
+                else join_path(rel_dir, name)
+            var full = join_path(root, rel)
             var info = stat_file(full)
             if not info.ok:
                 continue
+            if matcher.ignored(rel, info.is_dir()):
+                continue
             if info.is_dir():
-                dirs.append(full)
+                rel_dirs.append(rel)
             else:
                 out.append(full)
     return out^
