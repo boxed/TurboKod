@@ -971,12 +971,16 @@ fn test_desktop_open_file_uses_80_percent_size() raises:
 
 
 fn test_desktop_open_file_cascades_by_one() raises:
-    var path = _temp_path(String("_cascade.txt"))
-    assert_true(write_file(path, String("c\n")))
+    var path_a = _temp_path(String("_cascade_a.txt"))
+    var path_b = _temp_path(String("_cascade_b.txt"))
+    var path_c = _temp_path(String("_cascade_c.txt"))
+    assert_true(write_file(path_a, String("a\n")))
+    assert_true(write_file(path_b, String("b\n")))
+    assert_true(write_file(path_c, String("c\n")))
     var d = Desktop()
-    d.open_file(path, _SCREEN)
-    d.open_file(path, _SCREEN)
-    d.open_file(path, _SCREEN)
+    d.open_file(path_a, _SCREEN)
+    d.open_file(path_b, _SCREEN)
+    d.open_file(path_c, _SCREEN)
     var ws = d.workspace_rect(_SCREEN)
     assert_equal(d.windows.windows[0].rect.a.x, ws.a.x + 0)
     assert_equal(d.windows.windows[0].rect.a.y, ws.a.y + 0)
@@ -984,18 +988,42 @@ fn test_desktop_open_file_cascades_by_one() raises:
     assert_equal(d.windows.windows[1].rect.a.y, ws.a.y + 1)
     assert_equal(d.windows.windows[2].rect.a.x, ws.a.x + 2)
     assert_equal(d.windows.windows[2].rect.a.y, ws.a.y + 2)
-    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_c + String("\0")).unsafe_ptr())
+
+
+fn test_desktop_open_file_focuses_existing() raises:
+    """Re-opening an already-open path focuses that window instead of
+    creating a duplicate."""
+    var path_a = _temp_path(String("_dedup_a.txt"))
+    var path_b = _temp_path(String("_dedup_b.txt"))
+    assert_true(write_file(path_a, String("a\n")))
+    assert_true(write_file(path_b, String("b\n")))
+    var d = Desktop()
+    d.open_file(path_a, _SCREEN)
+    d.open_file(path_b, _SCREEN)
+    assert_equal(len(d.windows.windows), 2)
+    assert_equal(d.windows.focused, 1)
+    # Re-opening A should focus the existing window, not add a third.
+    d.open_file(path_a, _SCREEN)
+    assert_equal(len(d.windows.windows), 2)
+    assert_equal(d.windows.focused, 0)
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
 fn test_desktop_open_file_inherits_maximize_state() raises:
-    var path = _temp_path(String("_maxinh.txt"))
-    assert_true(write_file(path, String("m\n")))
+    var path_a = _temp_path(String("_maxinh_a.txt"))
+    var path_b = _temp_path(String("_maxinh_b.txt"))
+    assert_true(write_file(path_a, String("m\n")))
+    assert_true(write_file(path_b, String("n\n")))
     var d = Desktop()
-    d.open_file(path, _SCREEN)
-    # Maximize the first window, then open a second.
+    d.open_file(path_a, _SCREEN)
+    # Maximize the first window, then open a second (different) file.
     d.windows.windows[0].toggle_maximize(d.workspace_rect(_SCREEN))
     assert_true(d.windows.windows[0].is_maximized)
-    d.open_file(path, _SCREEN)
+    d.open_file(path_b, _SCREEN)
     # The new window inherits maximized mode but its restore rect is the
     # 80% cascade slot (so toggling brings it back to the right size).
     assert_true(d.windows.windows[1].is_maximized)
@@ -1005,7 +1033,8 @@ fn test_desktop_open_file_inherits_maximize_state() raises:
         d.windows.windows[1]._restore_rect.width(), (ws.width() * 80) // 100,
     )
     assert_equal(d.windows.windows[1]._restore_rect.a.x, ws.a.x + 1)
-    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
 fn test_desktop_window_menu_lists_open_windows() raises:
@@ -2490,6 +2519,7 @@ fn main() raises:
     test_desktop_replace_chains_two_prompts()
     test_desktop_open_file_uses_80_percent_size()
     test_desktop_open_file_cascades_by_one()
+    test_desktop_open_file_focuses_existing()
     test_desktop_open_file_inherits_maximize_state()
     test_desktop_window_menu_lists_open_windows()
     test_desktop_window_menu_when_empty()

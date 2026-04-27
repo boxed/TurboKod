@@ -344,7 +344,17 @@ struct Desktop(Movable):
         If the file is a Mojo source file, the LSP server is spawned (once)
         and notified about the new document so cmd+click goto-definition
         works without any extra wiring on the host side.
+
+        If a window for the same file is already open, focus is moved
+        to that window and a second copy is **not** created — re-opening
+        is a no-op rather than a way to multiply windows on the same
+        path. Path comparison uses ``realpath`` so symlink + canonical
+        spellings are treated as the same file.
         """
+        var existing = self._find_window_for_path(path)
+        if existing >= 0:
+            self.windows.focus_by_index(existing)
+            return
         self.detect_project_from(path)
         var workspace = self.workspace_rect(screen)
         var rect = self._default_window_rect(workspace)
