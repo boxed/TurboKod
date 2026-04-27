@@ -13,12 +13,16 @@ from mojovision.cell import Cell, blank_cell
 from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
 from mojovision.editor import Editor, TextBuffer
 from mojovision.file_dialog import FileDialog
-from mojovision.desktop import Desktop, PROJECT_CLOSE_ACTION
+from mojovision.desktop import (
+    Desktop, PROJECT_CLOSE_ACTION, PROJECT_TREE_ACTION,
+)
 from mojovision.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
     read_file, stat_file,
 )
+from mojovision.file_tree import FILE_TREE_WIDTH, FileTree
 from mojovision.menu import Menu, MenuBar, MenuItem
+from mojovision.window import WindowManager
 from mojovision.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -586,6 +590,10 @@ fn test_desktop_project_lifecycle() raises:
     assert_true(d.menu_bar.menus[idx].right_aligned)
     # Label is the project root's basename — for this repo, "mojovision".
     assert_equal(d.menu_bar.menus[idx].label, String("mojovision"))
+    # The project menu starts with two items: tree-toggle and close.
+    assert_equal(len(d.menu_bar.menus[idx].items), 2)
+    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
+    assert_equal(d.menu_bar.menus[idx].items[1].action, PROJECT_CLOSE_ACTION)
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
     d.detect_project_from(String("src/mojovision/desktop.mojo"))
@@ -598,6 +606,95 @@ fn test_desktop_project_lifecycle() raises:
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
+
+
+fn test_file_tree_expand_collapse() raises:
+    var t = FileTree()
+    t.open(String("."))   # repo root, contains examples/, src/, tests/, ...
+    var initial_count = len(t.entries)
+    assert_true(initial_count > 0)
+    # Find a known directory ("examples") and expand it.
+    var examples_idx = -1
+    for i in range(len(t.entries)):
+        if t.entries[i].name == String("examples") and t.entries[i].is_dir:
+            examples_idx = i
+            break
+    assert_true(examples_idx >= 0)
+    assert_false(t.entries[examples_idx].is_expanded)
+    t._toggle_expand(examples_idx)
+    assert_true(t.entries[examples_idx].is_expanded)
+    assert_true(len(t.entries) > initial_count)
+    # Children of examples/ have depth=1 and live right after the entry.
+    assert_equal(t.entries[examples_idx + 1].depth, 1)
+    # Collapse: list shrinks back to the initial count.
+    t._toggle_expand(examples_idx)
+    assert_false(t.entries[examples_idx].is_expanded)
+    assert_equal(len(t.entries), initial_count)
+
+
+fn test_file_tree_filters_dotfiles() raises:
+    var t = FileTree()
+    t.open(String("."))
+    # Repo root contains a .git directory; it must not appear in entries.
+    for i in range(len(t.entries)):
+        var nbytes = t.entries[i].name.as_bytes()
+        if len(nbytes) > 0:
+            assert_true(Int(nbytes[0]) != 0x2E)
+
+
+fn test_desktop_workspace_shrinks_with_file_tree() raises:
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 30)
+    var ws_no_tree = d.workspace_rect(screen)
+    assert_equal(ws_no_tree.b.x, 100)
+    # Detect project, then toggle the tree on via the menu action handler.
+    d.detect_project_from(String("examples/hello.mojo"))
+    d._toggle_file_tree()
+    assert_true(d.file_tree.visible)
+    var ws_tree = d.workspace_rect(screen)
+    assert_equal(ws_tree.b.x, 100 - FILE_TREE_WIDTH)
+    # Tree-toggle item label should now read "Hide file tree".
+    assert_equal(
+        d.menu_bar.menus[d._project_menu_idx].items[0].label,
+        String("Hide file tree"),
+    )
+    # Toggling again hides the tree and restores workspace + label.
+    d._toggle_file_tree()
+    assert_false(d.file_tree.visible)
+    assert_equal(d.workspace_rect(screen).b.x, 100)
+    assert_equal(
+        d.menu_bar.menus[d._project_menu_idx].items[0].label,
+        String("Show file tree"),
+    )
+
+
+fn test_window_manager_fit_into_moves_then_resizes() raises:
+    """``fit_into`` prefers moving over resizing; resizes only when the window
+    is wider/taller than the new workspace."""
+    var wm = WindowManager()
+    # Window that fits but is past the new right edge — should move left.
+    wm.add(Window(String("A"), Rect(70, 5, 90, 15), List[String]()))
+    # Window that's wider than the new workspace — should be resized.
+    wm.add(Window(String("B"), Rect(5, 5, 95, 15), List[String]()))
+    var smaller = Rect(0, 1, 80, 25)
+    wm.fit_into(smaller)
+    # A: 20 wide, fits in 80; expected to be slid left to (60, 80).
+    assert_equal(wm.windows[0].rect.b.x, 80)
+    assert_equal(wm.windows[0].rect.width(), 20)
+    # B: was 90 wide; gets clipped to workspace width 80.
+    assert_equal(wm.windows[1].rect.a.x, 0)
+    assert_equal(wm.windows[1].rect.b.x, 80)
+    assert_equal(wm.windows[1].rect.width(), 80)
+
+
+fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
+    var wm = WindowManager()
+    var w = Window(String("M"), Rect(0, 1, 100, 25), List[String]())
+    w.is_maximized = True
+    wm.add(w^)
+    var smaller = Rect(0, 1, 60, 20)
+    wm.fit_into(smaller)
+    assert_true(wm.windows[0].rect == smaller)
 
 
 fn test_file_dialog_lists_and_navigates() raises:
@@ -967,6 +1064,11 @@ fn main() raises:
     test_find_git_project()
     test_right_aligned_menu_layout()
     test_desktop_project_lifecycle()
+    test_file_tree_expand_collapse()
+    test_file_tree_filters_dotfiles()
+    test_desktop_workspace_shrinks_with_file_tree()
+    test_window_manager_fit_into_moves_then_resizes()
+    test_window_manager_fit_into_keeps_maximized_pinned()
     test_file_dialog_lists_and_navigates()
     test_partial_sgr_mouse_does_not_emit_esc()
     test_sgr_mouse_wheel_up()

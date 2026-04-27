@@ -486,6 +486,33 @@ struct WindowManager(Movable):
         self.windows.append(window^)
         self.focused = len(self.windows) - 1
 
+    fn fit_into(mut self, workspace: Rect):
+        """Move (and resize when necessary) every window to fit ``workspace``.
+
+        Used when the workspace shrinks — file tree shown, terminal resized,
+        any other change that narrows the floating-window area. Movement is
+        preferred; a window is only resized when it's larger than the
+        workspace along that axis. Maximized windows are pinned to the new
+        workspace so they keep covering it.
+        """
+        for i in range(len(self.windows)):
+            if self.windows[i].is_maximized:
+                self.windows[i].rect = workspace
+                continue
+            var w = self.windows[i].rect.width()
+            var h = self.windows[i].rect.height()
+            var ws_w = workspace.width()
+            var ws_h = workspace.height()
+            if w > ws_w: w = ws_w
+            if h > ws_h: h = ws_h
+            var ax = self.windows[i].rect.a.x
+            var ay = self.windows[i].rect.a.y
+            if ax < workspace.a.x: ax = workspace.a.x
+            if ay < workspace.a.y: ay = workspace.a.y
+            if ax + w > workspace.b.x: ax = workspace.b.x - w
+            if ay + h > workspace.b.y: ay = workspace.b.y - h
+            self.windows[i].rect = Rect(ax, ay, ax + w, ay + h)
+
     fn focus_by_title(mut self, title: String):
         for i in range(len(self.windows)):
             if self.windows[i].title == title:

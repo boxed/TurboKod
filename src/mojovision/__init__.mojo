@@ -36,6 +36,7 @@ from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
     parent_path, read_file, stat_file,
 )
+from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .prompt import Prompt

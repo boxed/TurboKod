@@ -148,6 +148,16 @@ fn main() raises:
             desktop.menu_bar.set_visible_by_label(
                 String("Edit"), desktop.windows.focused_is_editor(),
             )
+            # If the user clicked a file in the project tree last frame, open it.
+            var tree_open = desktop.file_tree.consume_open()
+            if tree_open:
+                var p = tree_open.value()
+                try:
+                    desktop.windows.add(Window.from_file(
+                        _basename(p), Rect(6, 4, 60, 20), p,
+                    ))
+                except e:
+                    error_log.append(String("open ") + p + String(": ") + String(e))
 
             app.clear()
             desktop.paint(app.back, app.screen())
