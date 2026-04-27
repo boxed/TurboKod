@@ -31,6 +31,30 @@ comptime TCSADRAIN: Int32 = 1
 
 comptime O_RDWR: Int32 = 2
 
+# Signals — POSIX defines SIGTERM=15 and SIGKILL=9 across platforms.
+comptime SIGTERM: Int32 = 15
+comptime SIGKILL: Int32 = 9
+# ``waitpid`` flag: don't block.
+comptime WNOHANG: Int32 = 1
+
+# Sizes for opaque ``posix_spawn`` data — Darwin uses ~72B, Linux glibc
+# slightly more. 256B is a comfortable upper bound for both.
+comptime POSIX_SPAWN_FILE_ACTIONS_SIZE: Int = 256
+comptime POSIX_SPAWN_ATTR_SIZE: Int = 256
+
+
+fn o_nonblock_value() -> Int32:
+    """``O_NONBLOCK`` differs by platform: Darwin 0x0004, Linux 0x800."""
+    comptime if CompilationTarget.is_macos():
+        return 0x0004
+    else:
+        return 0x800
+
+
+fn fcntl_setfl_value() -> Int32:
+    """``F_SETFL`` is 4 everywhere we target."""
+    return 4
+
 
 fn tciflush_value() -> Int32:
     """Platform-specific value for ``TCIFLUSH`` (discard input queue).
@@ -197,6 +221,139 @@ fn write_string(fd: Int32, s: String):
 
 
 # --- Path resolution --------------------------------------------------------
+
+
+# --- Subprocess plumbing ---------------------------------------------------
+# Used by ``lsp.mojo`` to spawn an LSP server with three pipes hooked onto
+# its stdin/stdout/stderr. Everything here is non-variadic and reachable
+# through ``external_call``; we deliberately avoid ``fork()`` because Mojo
+# runtime state in the child between fork and execve is undefined.
+
+
+fn pipe_pair() raises -> Tuple[Int32, Int32]:
+    """``pipe(int[2])`` → ``(read_fd, write_fd)``. Raises on failure."""
+    var fds = alloc_zero_buffer(8)   # int[2] = 8 bytes
+    var rc = external_call["pipe", Int32](fds.unsafe_ptr())
+    if Int(rc) != 0:
+        raise Error("pipe() failed")
+    var p = fds.unsafe_ptr().bitcast[Int32]()
+    return (p[0], p[1])
+
+
+fn close_fd(fd: Int32) -> Int32:
+    """Wrap ``close(2)`` so callers don't have to write external_call inline."""
+    return external_call["close", Int32](fd)
+
+
+fn set_nonblocking(fd: Int32) -> Bool:
+    """Make ``fd`` non-blocking via ``fcntl(F_SETFL, O_NONBLOCK)``.
+
+    The third arg of ``fcntl`` is technically variadic in C, but the
+    register-passing convention for a single scalar is identical to a
+    fixed-arity declaration on x86_64 SysV / ARM64 AAPCS. Returns True
+    on success.
+    """
+    var rc = external_call["fcntl", Int32](
+        fd, fcntl_setfl_value(), o_nonblock_value(),
+    )
+    return Int(rc) == 0
+
+
+fn waitpid_blocking(pid: Int32) -> Int32:
+    """Wait for ``pid`` and return the raw status int. Blocks. Use
+    ``waitpid_nohang`` for a non-blocking poll."""
+    var status = alloc_zero_buffer(4)
+    _ = external_call["waitpid", Int32](pid, status.unsafe_ptr(), Int32(0))
+    return status.unsafe_ptr().bitcast[Int32]()[0]
+
+
+fn waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
+    """``waitpid(pid, &status, WNOHANG)``. Returns ``(rc, status)`` —
+    rc is 0 if the child hasn't exited, ``pid`` if it has, ``-1`` on error.
+    """
+    var status = alloc_zero_buffer(4)
+    var rc = external_call["waitpid", Int32](pid, status.unsafe_ptr(), WNOHANG)
+    return (rc, status.unsafe_ptr().bitcast[Int32]()[0])
+
+
+fn kill_pid(pid: Int32, sig: Int32) -> Int32:
+    """``kill(pid, sig)`` — signal-delivery only, doesn't reap. Caller is
+    responsible for the subsequent ``waitpid``."""
+    return external_call["kill", Int32](pid, sig)
+
+
+# ``posix_spawn`` family. The opaque ``file_actions`` and ``attr`` buffers
+# are sized via the ``*_SIZE`` constants above; the actual struct layouts
+# are platform-private. We never inspect them — only pass pointers to the
+# libc helpers.
+
+
+fn posix_spawn_file_actions_init(mut buf: List[UInt8]) -> Int32:
+    return external_call["posix_spawn_file_actions_init", Int32](
+        buf.unsafe_ptr(),
+    )
+
+
+fn posix_spawn_file_actions_destroy(mut buf: List[UInt8]) -> Int32:
+    return external_call["posix_spawn_file_actions_destroy", Int32](
+        buf.unsafe_ptr(),
+    )
+
+
+fn posix_spawn_file_actions_addclose(mut buf: List[UInt8], fd: Int32) -> Int32:
+    return external_call["posix_spawn_file_actions_addclose", Int32](
+        buf.unsafe_ptr(), fd,
+    )
+
+
+fn posix_spawn_file_actions_adddup2(
+    mut buf: List[UInt8], old_fd: Int32, new_fd: Int32,
+) -> Int32:
+    return external_call["posix_spawn_file_actions_adddup2", Int32](
+        buf.unsafe_ptr(), old_fd, new_fd,
+    )
+
+
+fn posix_spawnattr_init(mut buf: List[UInt8]) -> Int32:
+    return external_call["posix_spawnattr_init", Int32](buf.unsafe_ptr())
+
+
+fn posix_spawnattr_destroy(mut buf: List[UInt8]) -> Int32:
+    return external_call["posix_spawnattr_destroy", Int32](buf.unsafe_ptr())
+
+
+fn posix_spawnp_call(
+    mut argv_buf: List[UInt8],
+    mut envp_buf: List[UInt8],
+    mut file_actions: List[UInt8],
+    program: String,
+) raises -> Int32:
+    """Wraps ``posix_spawnp(&pid, file, file_actions, &attr, argv, envp)``.
+
+    ``argv_buf`` / ``envp_buf`` already hold the contiguous NULL-terminated
+    pointer arrays. We always pass a properly-initialized (default) attr
+    buffer rather than NULL — Mojo's external_call doesn't have a clean
+    way to pass NULL for the 4th argument, and a default-init attr has
+    the same effect on every platform we target.
+    Returns the child PID. Raises on spawn failure.
+    """
+    var pid_buf = alloc_zero_buffer(4)
+    var c_program = program + String("\0")
+    var attr = alloc_zero_buffer(POSIX_SPAWN_ATTR_SIZE)
+    if Int(posix_spawnattr_init(attr)) != 0:
+        raise Error("posix_spawnattr_init failed")
+    var rc = external_call["posix_spawnp", Int32](
+        pid_buf.unsafe_ptr(),
+        c_program.unsafe_ptr(),
+        file_actions.unsafe_ptr(),
+        attr.unsafe_ptr(),
+        argv_buf.unsafe_ptr(),
+        envp_buf.unsafe_ptr(),
+    )
+    _ = posix_spawnattr_destroy(attr)
+    if Int(rc) != 0:
+        raise Error("posix_spawnp failed")
+    return pid_buf.unsafe_ptr().bitcast[Int32]()[0]
 
 
 fn realpath(path: String) -> String:

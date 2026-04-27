@@ -34,6 +34,14 @@ from mojovision.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
 from mojovision.quick_open import QuickOpen, quick_open_match
+from mojovision.json import (
+    JsonValue, encode_json, json_array, json_bool, json_int, json_null,
+    json_object, json_str, parse_json,
+)
+from mojovision.lsp import (
+    LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
+    _drop_prefix, _find_double_crlf, _parse_content_length, classify_message,
+)
 from mojovision.highlight import (
     DefinitionRequest, Highlight, extension_of, highlight_for_extension,
     highlight_comment_attr, highlight_keyword_attr, highlight_number_attr,
@@ -2165,6 +2173,241 @@ fn test_window_v_scroll_drag_to_end() raises:
     assert_equal(w.editor.scroll_y, 0)
 
 
+# --- Phase-2 LSP plumbing tests --------------------------------------------
+
+
+fn _bytes_of(s: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    var b = s.as_bytes()
+    for i in range(len(b)):
+        out.append(b[i])
+    return out^
+
+
+fn test_json_round_trip_lsp_envelope() raises:
+    """A representative JSON-RPC request envelope round-trips."""
+    var params = json_object()
+    params.put(String("processId"), json_int(0))
+    params.put(String("rootUri"), json_null())
+    params.put(String("capabilities"), json_object())
+    var req = json_object()
+    req.put(String("jsonrpc"), json_str(String("2.0")))
+    req.put(String("id"), json_int(1))
+    req.put(String("method"), json_str(String("initialize")))
+    req.put(String("params"), params^)
+    var encoded = encode_json(req)
+    assert_equal(
+        encoded,
+        String("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+              + "\"params\":{\"processId\":0,\"rootUri\":null,"
+              + "\"capabilities\":{}}}"),
+    )
+    var reparsed = parse_json(encoded)
+    assert_true(reparsed.is_object())
+    assert_equal(reparsed.object_get(String("id")).value().as_int(), 1)
+    var p = reparsed.object_get(String("params")).value()
+    assert_true(p.object_get(String("rootUri")).value().is_null())
+    assert_true(p.object_get(String("capabilities")).value().is_object())
+
+
+fn test_json_string_escapes() raises:
+    # Includes a literal 0x01 byte to exercise the \uXXXX path.
+    var raw = String("a\"b\\c\nd\te") + chr(1) + String("f")
+    var enc = encode_json(json_str(raw))
+    assert_equal(enc, String("\"a\\\"b\\\\c\\nd\\te\\u0001f\""))
+    var dec = parse_json(enc)
+    assert_true(dec.is_string())
+    assert_equal(dec.as_str(), raw)
+
+
+fn test_json_parse_errors_raise() raises:
+    var ok = True
+    try:
+        _ = parse_json(String("{"))
+        ok = False
+    except:
+        pass
+    assert_true(ok)
+    try:
+        _ = parse_json(String("{\"a\":1"))
+        ok = False
+    except:
+        pass
+    assert_true(ok)
+    try:
+        _ = parse_json(String("\"unterminated"))
+        ok = False
+    except:
+        pass
+    assert_true(ok)
+
+
+fn test_json_floats_round_trip_as_text() raises:
+    var v = parse_json(String("3.14"))
+    assert_true(v.is_float())
+    assert_equal(encode_json(v), String("3.14"))
+
+
+fn test_lsp_framer_finds_double_crlf() raises:
+    var buf = _bytes_of(String("Content-Length: 5\r\n\r\nhello"))
+    var idx = _find_double_crlf(buf)
+    assert_equal(idx, 17)
+    var none_buf = _bytes_of(String("no header here"))
+    assert_equal(_find_double_crlf(none_buf), -1)
+
+
+fn test_lsp_framer_parses_content_length() raises:
+    var buf = _bytes_of(String("Content-Length: 42\r\n\r\n"))
+    var hdr_end = _find_double_crlf(buf)
+    assert_equal(_parse_content_length(buf, hdr_end), 42)
+    var buf2 = _bytes_of(String("content-length: 7\r\n\r\n"))
+    assert_equal(_parse_content_length(buf2, _find_double_crlf(buf2)), 7)
+    var buf3 = _bytes_of(String(
+        "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+        + "Content-Length: 11\r\n\r\n"
+    ))
+    assert_equal(_parse_content_length(buf3, _find_double_crlf(buf3)), 11)
+
+
+fn test_lsp_framer_extract_one_message() raises:
+    var p = LspProcess()
+    var hello = String("Content-Length: 5\r\n\r\nhello")
+    var hb = hello.as_bytes()
+    for i in range(len(hb)):
+        p._read_buffer.append(hb[i])
+    var got1 = p._extract_one_message()
+    assert_true(Bool(got1))
+    assert_equal(got1.value(), String("hello"))
+    assert_equal(len(p._read_buffer), 0)
+    var two = String("Content-Length: 3\r\n\r\nfooContent-Length: 3\r\n\r\nbar")
+    var tb = two.as_bytes()
+    for i in range(len(tb)):
+        p._read_buffer.append(tb[i])
+    var first = p._extract_one_message()
+    assert_true(Bool(first))
+    assert_equal(first.value(), String("foo"))
+    var second = p._extract_one_message()
+    assert_true(Bool(second))
+    assert_equal(second.value(), String("bar"))
+    assert_equal(len(p._read_buffer), 0)
+    var part = String("Content-Length: 4\r\n\r\nab")
+    var pb = part.as_bytes()
+    for i in range(len(pb)):
+        p._read_buffer.append(pb[i])
+    var none1 = p._extract_one_message()
+    assert_false(Bool(none1))
+    p._read_buffer.append(0x63)
+    p._read_buffer.append(0x64)
+    var done = p._extract_one_message()
+    assert_true(Bool(done))
+    assert_equal(done.value(), String("abcd"))
+
+
+fn test_lsp_drop_prefix_helper() raises:
+    var b = _bytes_of(String("hello world"))
+    var rest = _drop_prefix(b^, 6)
+    assert_equal(len(rest), 5)
+    var s = String(StringSlice(ptr=rest.unsafe_ptr(), length=len(rest)))
+    assert_equal(s, String("world"))
+
+
+fn test_lsp_classify_message() raises:
+    var resp = parse_json(String(
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}"
+    ))
+    var c = classify_message(resp)
+    assert_equal(Int(c.kind), Int(LSP_RESPONSE))
+    assert_true(Bool(c.id))
+    assert_equal(c.id.value(), 7)
+    assert_true(Bool(c.result))
+    var note = parse_json(String(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\","
+        + "\"params\":{\"type\":3,\"message\":\"hi\"}}"
+    ))
+    var cn = classify_message(note)
+    assert_equal(Int(cn.kind), Int(LSP_NOTIFICATION))
+    assert_equal(cn.method.value(), String("window/logMessage"))
+
+
+fn test_lsp_subprocess_round_trip_via_cat() raises:
+    """End-to-end pipe + framer test using ``/bin/cat``."""
+    var cat_info = stat_file(String("/bin/cat"))
+    if not cat_info.ok:
+        assert_true(True)
+        return
+    var argv = List[String]()
+    argv.append(String("/bin/cat"))
+    var p = LspProcess.spawn(argv)
+    p.write_message(String("ping"))
+    p.write_message(String("pong"))
+    var got1: Optional[String] = Optional[String]()
+    for _ in range(200):
+        var maybe = p.poll_message(Int32(50))
+        if maybe:
+            got1 = maybe
+            break
+    assert_true(Bool(got1))
+    assert_equal(got1.value(), String("ping"))
+    var got2: Optional[String] = Optional[String]()
+    for _ in range(200):
+        var maybe = p.poll_message(Int32(50))
+        if maybe:
+            got2 = maybe
+            break
+    assert_true(Bool(got2))
+    assert_equal(got2.value(), String("pong"))
+    p.terminate()
+
+
+fn test_lsp_initialize_against_mojo_lsp_server() raises:
+    """Spawn ``mojo-lsp-server`` and round-trip an ``initialize`` request.
+    Skipped silently if the binary isn't installed."""
+    var server = String(".pixi/envs/default/bin/mojo-lsp-server")
+    var info = stat_file(server)
+    if not info.ok:
+        assert_true(True)
+        return
+    var argv = List[String]()
+    argv.append(server)
+    var client = LspClient.spawn(argv)
+    var params = json_object()
+    params.put(String("processId"), json_int(0))
+    params.put(String("rootUri"), json_null())
+    params.put(String("capabilities"), json_object())
+    var req_id = client.send_request(String("initialize"), params^)
+    var got: Optional[LspIncoming] = Optional[LspIncoming]()
+    for _ in range(100):
+        var maybe = client.poll(Int32(50))
+        if maybe:
+            got = maybe
+            break
+    if not got:
+        var err = client.process.drain_stderr()
+        client.terminate()
+        raise Error(String("no LSP response; stderr=") + err)
+    var msg = got.value()
+    assert_equal(Int(msg.kind), Int(LSP_RESPONSE))
+    assert_equal(msg.id.value(), req_id)
+    assert_true(Bool(msg.result))
+    assert_true(msg.result.value().is_object())
+    assert_true(msg.result.value().object_has(String("capabilities")))
+    client.send_notification(String("initialized"), json_object())
+    var shutdown_id = client.send_request(String("shutdown"), json_null())
+    for _ in range(100):
+        var maybe2 = client.poll(Int32(50))
+        if maybe2 and Bool(maybe2.value().id) \
+                and maybe2.value().id.value() == shutdown_id:
+            break
+    client.send_notification(String("exit"), json_null())
+    var exited = False
+    for _ in range(20):
+        if client.process.try_reap():
+            exited = True
+            break
+    if not exited:
+        client.terminate()
+
+
 fn main() raises:
     test_point_arithmetic()
     test_rect_basics()
@@ -2296,4 +2539,15 @@ fn main() raises:
     test_window_v_scrollbar_hit_arrows_and_thumb()
     test_window_v_scroll_by_clamps()
     test_window_v_scroll_drag_to_end()
+    test_json_round_trip_lsp_envelope()
+    test_json_string_escapes()
+    test_json_parse_errors_raise()
+    test_json_floats_round_trip_as_text()
+    test_lsp_framer_finds_double_crlf()
+    test_lsp_framer_parses_content_length()
+    test_lsp_framer_extract_one_message()
+    test_lsp_drop_prefix_helper()
+    test_lsp_classify_message()
+    test_lsp_subprocess_round_trip_via_cat()
+    test_lsp_initialize_against_mojo_lsp_server()
     print("all tests passed")

@@ -45,6 +45,15 @@ from .highlight import (
     highlight_comment_attr, highlight_decorator_attr, highlight_keyword_attr,
     highlight_number_attr, highlight_string_attr, word_at,
 )
+from .json import (
+    JsonValue, encode_json, json_array, json_bool, json_int, json_null,
+    json_object, json_str, parse_json,
+)
+from .lsp import (
+    LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE,
+    LspClient, LspIncoming, LspProcess, classify_message,
+    lsp_initialize_params,
+)
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
