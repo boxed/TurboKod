@@ -372,6 +372,34 @@ fn posix_spawnattr_destroy(mut buf: List[UInt8]) -> Int32:
     return external_call["posix_spawnattr_destroy", Int32](buf.unsafe_ptr())
 
 
+fn posix_spawnattr_setflags(mut buf: List[UInt8], flags: Int16) -> Int32:
+    """``int posix_spawnattr_setflags(posix_spawnattr_t *, short)``.
+
+    The flags argument is a ``short`` in the C ABI, so we pass it as
+    Int16; the calling convention promotes it to register width.
+    """
+    return external_call["posix_spawnattr_setflags", Int32](
+        buf.unsafe_ptr(), flags,
+    )
+
+
+fn posix_spawn_setsid_flag() -> Int16:
+    """``POSIX_SPAWN_SETSID`` value: macOS = 0x0400, Linux glibc = 0x80.
+
+    When this flag is set in the spawn attributes, the new process
+    starts in its own session (equivalent to ``setsid()`` between
+    fork and exec). It loses the parent's controlling terminal,
+    so it cannot call ``tcsetpgrp()`` on ``/dev/tty`` to steal
+    foreground status — which would cause the parent to receive
+    SIGTTIN on the next read of stdin and silently suspend.
+    Required on macOS 12+ / glibc 2.26+.
+    """
+    comptime if CompilationTarget.is_macos():
+        return 0x0400
+    else:
+        return 0x80
+
+
 fn posix_spawnp_call(
     mut argv_buf: List[UInt8],
     mut envp_buf: List[UInt8],
@@ -392,6 +420,13 @@ fn posix_spawnp_call(
     var attr = alloc_zero_buffer(POSIX_SPAWN_ATTR_SIZE)
     if Int(posix_spawnattr_init(attr)) != 0:
         raise Error("posix_spawnattr_init failed")
+    # Run the child in its own session so it can't manipulate the
+    # parent's controlling TTY. Without this, debugpy (or the
+    # Python program it's debugging) can call ``tcsetpgrp()`` on
+    # ``/dev/tty``, claim foreground status, and trigger SIGTTIN
+    # on the parent's next stdin read — which appears to the user
+    # as a silent crash on the first keypress after a breakpoint.
+    _ = posix_spawnattr_setflags(attr, posix_spawn_setsid_flag())
     var rc = external_call["posix_spawnp", Int32](
         pid_buf.unsafe_ptr(),
         c_program.unsafe_ptr(),

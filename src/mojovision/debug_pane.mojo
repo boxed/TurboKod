@@ -4,26 +4,25 @@ Layout (when active, at the bottom of the workspace, above the status bar)::
 
     ─ Debug ────────────────────────────────────────────────
     DAP[debugpy]: stopped (breakpoint)
-    Stack:
-      ▶ main          foo.py:42
-        handler       foo.py:17
-    Locals:
-      x = 42 (int)
-    ▼ obj = <Foo>
-        name = "alice" (str)
-        age = 30 (int)
-    Watches:
-      len(items) = 4 (int)
+    Stack:              │ Locals:
+      ▶ main  foo.py:42 │   x = 42 (int)
+        handler foo.py:17│ ▼ obj = <Foo>
+                        │     name = "alice" (str)
+                        │     age = 30 (int)
+                        │ Watches:
+                        │   len(items) = 4 (int)
     ─ Output ────────────────────────────────────────────────
     starting up...
     request 1 received
     response 200
 
-The pane is split horizontally: the top portion is the "inspect" view
-(stack + locals + watches), and the bottom portion is the output log.
-Both are scrollable independently — arrow keys / wheel when the pane
-is focused (focus is on click). Output autoscrolls to the end whenever
-new lines arrive *unless* the user has scrolled up manually.
+The pane is split horizontally: the top portion is the "inspect" view,
+which is itself split vertically — Stack on the left, Locals + Watches
+on the right. The bottom portion is the output log.
+The two inspect columns and the output log scroll independently —
+arrow keys / wheel when the pane is focused (focus is on click).
+Output autoscrolls to the end whenever new lines arrive *unless* the
+user has scrolled up manually.
 
 State model: one flat ``rows`` list for inspect content, with a kind
 tag per row (``PANE_ROW_*``) so paint and click-handling can dispatch
@@ -137,9 +136,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var output_lines: List[String]
     var output_categories: List[UInt8]   # parallel to output_lines
 
-    var inspect_scroll: Int
-    """First inspect row to paint (within the inspect rect). Bumped by
-    arrow keys / wheel."""
+    var stack_scroll: Int
+    """First left-column (Stack) row to paint. Bumped by wheel over
+    the stack column or by arrow keys when no right-column rows
+    exist."""
+    var right_scroll: Int
+    """First right-column (Locals/Watches) row to paint. Bumped by
+    arrow keys / wheel over the right column."""
     var output_scroll: Int
     """First output line to paint (autoscrolled to keep the *last*
     line visible unless the user scrolled up manually)."""
@@ -158,8 +161,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var pending_collapse_row: Int       # row index for a collapse (no DAP traffic needed)
 
     # --- mouse-mapping bookkeeping ------------------------------------
-    var _last_inspect_y0: Int   # screen y of inspect_rows[inspect_scroll]
+    var _last_inspect_y0: Int   # screen y of the first inspect row
     var _last_output_y0: Int
+    var _last_divider_x: Int    # screen x of the column divider
+    var _left_indices: List[Int]
+    """Absolute ``rows`` indices that belong to the left (Stack)
+    column, in paint order. Populated by ``paint`` and read by
+    ``handle_mouse``."""
+    var _right_indices: List[Int]
+    """Absolute ``rows`` indices that belong to the right
+    (Locals / Watches) column, in paint order."""
 
     fn __init__(out self):
         self.visible = False
@@ -169,7 +180,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.current_frame_index = 0
         self.output_lines = List[String]()
         self.output_categories = List[UInt8]()
-        self.inspect_scroll = 0
+        self.stack_scroll = 0
+        self.right_scroll = 0
         self.output_scroll = 0
         self.output_autoscroll = True
         self.focused = False
@@ -181,6 +193,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_collapse_row = -1
         self._last_inspect_y0 = 0
         self._last_output_y0 = 0
+        self._last_divider_x = 0
+        self._left_indices = List[Int]()
+        self._right_indices = List[Int]()
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
@@ -190,7 +205,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.current_frame_index = copy.current_frame_index
         self.output_lines = copy.output_lines.copy()
         self.output_categories = copy.output_categories.copy()
-        self.inspect_scroll = copy.inspect_scroll
+        self.stack_scroll = copy.stack_scroll
+        self.right_scroll = copy.right_scroll
         self.output_scroll = copy.output_scroll
         self.output_autoscroll = copy.output_autoscroll
         self.focused = copy.focused
@@ -202,6 +218,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_collapse_row = copy.pending_collapse_row
         self._last_inspect_y0 = copy._last_inspect_y0
         self._last_output_y0 = copy._last_output_y0
+        self._last_divider_x = copy._last_divider_x
+        self._left_indices = copy._left_indices.copy()
+        self._right_indices = copy._right_indices.copy()
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -261,7 +280,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 ))
         self.rows = out^
         self.current_frame_index = current_frame_index
-        self.inspect_scroll = 0
+        self.stack_scroll = 0
+        self.right_scroll = 0
 
     fn splice_children_at(
         mut self, parent_row: Int, child_depth: Int,
@@ -378,7 +398,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.status_text = String("")
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
-        self.inspect_scroll = 0
+        self.stack_scroll = 0
+        self.right_scroll = 0
+        self._left_indices = List[Int]()
+        self._right_indices = List[Int]()
 
     # --- pending-intent accessors ----------------------------------------
 
@@ -454,21 +477,47 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         if output_h < 0:
             output_h = 0
         var inspect_h = content_h - output_h
-        # Inspect rows.
+        # Recompute the column membership from the row list each
+        # paint — ``rows`` is rebuilt wholesale on stop, but expand /
+        # collapse splices in place, so we can't rely on a stale
+        # cache. Walks once, O(n).
+        self._compute_columns()
+        # Vertical divider — split panel width in two. Stack frames
+        # tend to be shorter than locals, so 40/60 leaves more room
+        # for variable trees.
+        var pane_w = panel.b.x - panel.a.x
+        var left_w = pane_w * 4 // 10
+        if left_w < 14:
+            left_w = 14 if pane_w >= 28 else pane_w // 2
+        if left_w >= pane_w - 2:
+            left_w = pane_w - 2
+        if left_w < 0:
+            left_w = 0
+        var div_x = panel.a.x + left_w
+        self._last_divider_x = div_x
         self._last_inspect_y0 = content_top
-        var max_visible = inspect_h
-        if max_visible > len(self.rows) - self.inspect_scroll:
-            max_visible = len(self.rows) - self.inspect_scroll
-        if max_visible < 0:
-            max_visible = 0
-        for k in range(max_visible):
-            var idx = self.inspect_scroll + k
-            var r = self.rows[idx]
+        # Vertical divider glyph for the inspect rows only (output
+        # uses the full width).
+        for y in range(content_top, content_top + inspect_h):
+            if y < panel.b.y:
+                canvas.set(div_x, y, Cell(String("│"), border, 1))
+        var left_x_max = div_x
+        var right_x0 = div_x + 1
+        var right_x_max = panel.b.x
+        # Left column (Stack).
+        var left_visible = inspect_h
+        if left_visible > len(self._left_indices) - self.stack_scroll:
+            left_visible = len(self._left_indices) - self.stack_scroll
+        if left_visible < 0:
+            left_visible = 0
+        for k in range(left_visible):
+            var ridx = self._left_indices[self.stack_scroll + k]
+            var r = self.rows[ridx]
             var y = content_top + k
             if r.kind == PANE_ROW_HEADER:
                 _ = canvas.put_text(
                     Point(panel.a.x + 2, y), r.text + String(":"),
-                    section, panel.b.x - 1,
+                    section, left_x_max,
                 )
             elif r.kind == PANE_ROW_FRAME:
                 var marker = String(" ")
@@ -479,25 +528,40 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 _ = canvas.put_text(
                     Point(panel.a.x + 2, y),
                     String("  ") + marker + String(" ") + r.text,
-                    attr, panel.b.x - 1,
+                    attr, left_x_max,
+                )
+        # Right column (Locals + Watches).
+        var right_visible = inspect_h
+        if right_visible > len(self._right_indices) - self.right_scroll:
+            right_visible = len(self._right_indices) - self.right_scroll
+        if right_visible < 0:
+            right_visible = 0
+        for k in range(right_visible):
+            var ridx = self._right_indices[self.right_scroll + k]
+            var r = self.rows[ridx]
+            var y = content_top + k
+            if r.kind == PANE_ROW_HEADER:
+                _ = canvas.put_text(
+                    Point(right_x0 + 1, y), r.text + String(":"),
+                    section, right_x_max,
                 )
             elif r.kind == PANE_ROW_VARIABLE:
-                var indent = String("  ")
+                var indent = String("")
                 for _ in range(r.depth):
                     indent = indent + String("  ")
                 var chev = String("  ")
                 if r.ref_id != 0:
                     chev = String("▼ ") if r.expanded else String("▶ ")
                 _ = canvas.put_text(
-                    Point(panel.a.x + 2, y),
+                    Point(right_x0 + 1, y),
                     indent + chev + r.text,
-                    bg, panel.b.x - 1,
+                    bg, right_x_max,
                 )
             elif r.kind == PANE_ROW_WATCH:
                 _ = canvas.put_text(
-                    Point(panel.a.x + 2, y),
+                    Point(right_x0 + 1, y),
                     String("  ") + r.text,
-                    bg, panel.b.x - 1,
+                    bg, right_x_max,
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
@@ -549,25 +613,34 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             self.focused = False
             return False
         # Wheel routes to the section under the cursor — independent
-        # scroll for inspect vs output is what users expect.
+        # scroll for the two inspect columns and the output is what
+        # users expect.
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
             if event.pressed:
                 var delta = -3 if event.button == MOUSE_WHEEL_UP else 3
                 if event.pos.y >= self._last_output_y0:
                     self._scroll_output(delta)
+                elif event.pos.x <= self._last_divider_x:
+                    self._scroll_stack(delta)
                 else:
-                    self._scroll_inspect(delta)
+                    self._scroll_right(delta)
             return True
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed:
             return True
         self.focused = True
-        # Inspect-area click: map back to a row.
+        # Inspect-area click: map back to a row in the column the
+        # click landed in.
         if event.pos.y >= self._last_inspect_y0 \
                 and event.pos.y < self._last_output_y0 - 1:
-            var row_idx = self.inspect_scroll \
-                + (event.pos.y - self._last_inspect_y0)
-            if row_idx >= 0 and row_idx < len(self.rows):
-                self._on_row_click(row_idx)
+            var col_offset = event.pos.y - self._last_inspect_y0
+            if event.pos.x <= self._last_divider_x:
+                var i = self.stack_scroll + col_offset
+                if i >= 0 and i < len(self._left_indices):
+                    self._on_row_click(self._left_indices[i])
+            else:
+                var i = self.right_scroll + col_offset
+                if i >= 0 and i < len(self._right_indices):
+                    self._on_row_click(self._right_indices[i])
         # Output-area click: stop autoscroll so the user can read
         # without lines sliding out from under them. Click again at
         # the bottom row to re-engage autoscroll.
@@ -589,20 +662,25 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             return False
         if event.kind != EVENT_KEY:
             return False
+        # Arrow keys drive the right column (locals + watches) since
+        # that's where the deep / scrollable content lives. The stack
+        # column rarely needs scrolling and reaches the user via
+        # mouse wheel when it does.
         if event.key == KEY_UP:
-            self._scroll_inspect(-1)
+            self._scroll_right(-1)
             return True
         if event.key == KEY_DOWN:
-            self._scroll_inspect(1)
+            self._scroll_right(1)
             return True
         if event.key == KEY_PAGEUP:
-            self._scroll_inspect(-8)
+            self._scroll_right(-8)
             return True
         if event.key == KEY_PAGEDOWN:
-            self._scroll_inspect(8)
+            self._scroll_right(8)
             return True
         if event.key == KEY_HOME:
-            self.inspect_scroll = 0
+            self.stack_scroll = 0
+            self.right_scroll = 0
             return True
         if event.key == KEY_END:
             self.output_autoscroll = True
@@ -623,16 +701,62 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 self.pending_expand_row = row_idx
                 self.pending_expand_depth = r.depth + 1
 
-    fn _scroll_inspect(mut self, delta: Int):
-        var ns = self.inspect_scroll + delta
+    fn _scroll_stack(mut self, delta: Int):
+        var ns = self.stack_scroll + delta
         if ns < 0:
             ns = 0
-        var max_s = len(self.rows) - 1
+        var max_s = len(self._left_indices) - 1
         if max_s < 0:
             max_s = 0
         if ns > max_s:
             ns = max_s
-        self.inspect_scroll = ns
+        self.stack_scroll = ns
+
+    fn _scroll_right(mut self, delta: Int):
+        var ns = self.right_scroll + delta
+        if ns < 0:
+            ns = 0
+        var max_s = len(self._right_indices) - 1
+        if max_s < 0:
+            max_s = 0
+        if ns > max_s:
+            ns = max_s
+        self.right_scroll = ns
+
+    fn _compute_columns(mut self):
+        """Partition ``rows`` into left (Stack) and right
+        (Locals / Watches) absolute-index lists. The first HEADER row
+        plus its trailing FRAME rows go left; everything else goes
+        right. BLANK rows are skipped — column separation already
+        delineates sections visually.
+        """
+        var left = List[Int]()
+        var right = List[Int]()
+        var seen_first_header = False
+        var stack_section = True
+        for i in range(len(self.rows)):
+            var r = self.rows[i]
+            if r.kind == PANE_ROW_BLANK:
+                # Blanks separate sections in the linear layout; in
+                # the column layout they're noise.
+                continue
+            if r.kind == PANE_ROW_HEADER:
+                if not seen_first_header:
+                    seen_first_header = True
+                    left.append(i)
+                else:
+                    stack_section = False
+                    right.append(i)
+            elif r.kind == PANE_ROW_FRAME:
+                if stack_section:
+                    left.append(i)
+                else:
+                    right.append(i)
+            else:
+                stack_section = False
+                right.append(i)
+        self._left_indices = left^
+        self._right_indices = right^
 
     fn _scroll_output(mut self, delta: Int):
         var ns = self.output_scroll + delta

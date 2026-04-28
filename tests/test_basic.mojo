@@ -42,6 +42,18 @@ from mojovision.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     _drop_prefix, _find_double_crlf, _parse_content_length, classify_message,
 )
+from mojovision.dap import (
+    DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
+    DapClient, DapIncoming, classify_dap_message, dap_initialize_arguments,
+)
+from mojovision.dap_dispatch import (
+    DapManager, DapStackFrame, DapScope, DapVariable, DapThread,
+    _parse_scopes, _parse_stack_trace, _parse_threads, _parse_variables,
+)
+from mojovision.debugger_config import (
+    DAP_REQUEST_LAUNCH, DebuggerSpec,
+    built_in_debuggers, find_debugger_for_language, launch_arguments_for,
+)
 from mojovision.highlight import (
     DefinitionRequest, Highlight, extension_of, highlight_for_extension,
     highlight_comment_attr, highlight_keyword_attr, highlight_number_attr,
@@ -2439,6 +2451,211 @@ fn test_lsp_initialize_against_mojo_lsp_server() raises:
         client.terminate()
 
 
+fn test_dap_classify_response() raises:
+    var resp = parse_json(String(
+        "{\"seq\":3,\"type\":\"response\",\"request_seq\":1,"
+        + "\"success\":true,\"command\":\"initialize\","
+        + "\"body\":{\"supportsConfigurationDoneRequest\":true}}"
+    ))
+    var c = classify_dap_message(resp)
+    assert_equal(Int(c.kind), Int(DAP_RESPONSE))
+    assert_equal(c.seq, 3)
+    assert_true(Bool(c.request_seq))
+    assert_equal(c.request_seq.value(), 1)
+    assert_true(Bool(c.success))
+    assert_true(c.success.value())
+    assert_equal(c.command.value(), String("initialize"))
+    assert_true(Bool(c.body))
+
+
+fn test_dap_classify_event() raises:
+    var ev = parse_json(String(
+        "{\"seq\":4,\"type\":\"event\",\"event\":\"stopped\","
+        + "\"body\":{\"reason\":\"breakpoint\",\"threadId\":1,"
+        + "\"allThreadsStopped\":true}}"
+    ))
+    var c = classify_dap_message(ev)
+    assert_equal(Int(c.kind), Int(DAP_EVENT))
+    assert_equal(c.seq, 4)
+    assert_equal(c.event.value(), String("stopped"))
+    assert_true(Bool(c.body))
+
+
+fn test_dap_classify_reverse_request() raises:
+    var rq = parse_json(String(
+        "{\"seq\":5,\"type\":\"request\",\"command\":\"runInTerminal\","
+        + "\"arguments\":{\"args\":[\"/usr/bin/echo\"]}}"
+    ))
+    var c = classify_dap_message(rq)
+    assert_equal(Int(c.kind), Int(DAP_REQUEST))
+    assert_equal(c.command.value(), String("runInTerminal"))
+    assert_true(Bool(c.arguments))
+
+
+fn test_dap_classify_response_with_failure() raises:
+    var resp = parse_json(String(
+        "{\"seq\":7,\"type\":\"response\",\"request_seq\":2,"
+        + "\"success\":false,\"command\":\"launch\","
+        + "\"message\":\"file not found\"}"
+    ))
+    var c = classify_dap_message(resp)
+    assert_equal(Int(c.kind), Int(DAP_RESPONSE))
+    assert_true(Bool(c.success))
+    assert_false(c.success.value())
+    assert_true(Bool(c.message))
+    assert_equal(c.message.value(), String("file not found"))
+
+
+fn test_dap_initialize_arguments_shape() raises:
+    var args = dap_initialize_arguments(
+        String("mojovision"), String("debugpy"),
+    )
+    assert_true(args.is_object())
+    assert_true(args.object_has(String("clientID")))
+    assert_true(args.object_has(String("adapterID")))
+    var aid = args.object_get(String("adapterID"))
+    assert_equal(aid.value().as_str(), String("debugpy"))
+    var lstart = args.object_get(String("linesStartAt1"))
+    assert_true(lstart.value().is_bool())
+    assert_false(lstart.value().as_bool())
+
+
+fn test_dap_seq_autoincrement_via_cat() raises:
+    """End-to-end: sequence numbers increment monotonically across
+    requests. ``/bin/cat`` is the cheapest pipe-back fixture available."""
+    var cat_info = stat_file(String("/bin/cat"))
+    if not cat_info.ok:
+        assert_true(True)
+        return
+    var argv = List[String]()
+    argv.append(String("/bin/cat"))
+    var client = DapClient.spawn(argv)
+    var seq1 = client.send_request(String("initialize"), json_object())
+    var seq2 = client.send_request(String("threads"), json_object())
+    assert_equal(seq1, 1)
+    assert_equal(seq2, 2)
+    client.terminate()
+
+
+fn test_dap_parse_threads() raises:
+    var body = parse_json(String(
+        "{\"threads\":[{\"id\":1,\"name\":\"main\"},"
+        + "{\"id\":2,\"name\":\"worker\"}]}"
+    ))
+    var threads = _parse_threads(Optional[JsonValue](body))
+    assert_equal(len(threads), 2)
+    assert_equal(threads[0].id, 1)
+    assert_equal(threads[0].name, String("main"))
+    assert_equal(threads[1].id, 2)
+    assert_equal(threads[1].name, String("worker"))
+
+
+fn test_dap_parse_stack_trace_zero_based() raises:
+    """Adapters return 1-based lines (debugpy + delve always; lldb-dap
+    honors our linesStartAt1=false flag). The parser normalizes to
+    0-based to match Editor's row index."""
+    var body = parse_json(String(
+        "{\"stackFrames\":[{\"id\":42,\"name\":\"main\","
+        + "\"line\":10,\"column\":1,"
+        + "\"source\":{\"path\":\"/tmp/foo.py\"}}]}"
+    ))
+    var frames = _parse_stack_trace(Optional[JsonValue](body))
+    assert_equal(len(frames), 1)
+    assert_equal(frames[0].id, 42)
+    assert_equal(frames[0].name, String("main"))
+    assert_equal(frames[0].path, String("/tmp/foo.py"))
+    assert_equal(frames[0].line, 9)
+    assert_equal(frames[0].column, 0)
+
+
+fn test_dap_parse_scopes_and_variables() raises:
+    var scopes_body = parse_json(String(
+        "{\"scopes\":[{\"name\":\"Locals\",\"variablesReference\":7,"
+        + "\"expensive\":false}]}"
+    ))
+    var scopes = _parse_scopes(Optional[JsonValue](scopes_body))
+    assert_equal(len(scopes), 1)
+    assert_equal(scopes[0].name, String("Locals"))
+    assert_equal(scopes[0].variables_reference, 7)
+    assert_false(scopes[0].expensive)
+    var vars_body = parse_json(String(
+        "{\"variables\":[{\"name\":\"x\",\"value\":\"42\","
+        + "\"type\":\"int\",\"variablesReference\":0},"
+        + "{\"name\":\"obj\",\"value\":\"<Foo>\",\"type\":\"Foo\","
+        + "\"variablesReference\":11}]}"
+    ))
+    var variables = _parse_variables(Optional[JsonValue](vars_body))
+    assert_equal(len(variables), 2)
+    assert_equal(variables[0].name, String("x"))
+    assert_equal(variables[0].value, String("42"))
+    assert_equal(variables[0].type_name, String("int"))
+    assert_equal(variables[0].variables_reference, 0)
+    assert_equal(variables[1].variables_reference, 11)
+
+
+fn test_dap_registry_lookup() raises:
+    var debs = built_in_debuggers()
+    assert_true(len(debs) >= 3)
+    var py = find_debugger_for_language(debs, String("python"))
+    assert_true(py >= 0)
+    assert_equal(debs[py].name, String("debugpy"))
+    var unknown = find_debugger_for_language(debs, String("ada"))
+    assert_equal(unknown, -1)
+
+
+fn test_dap_launch_arguments_for_debugpy() raises:
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("--verbose"))
+    var body = launch_arguments_for(
+        debs[idx], String("/tmp/main.py"), String("/tmp"), args^, False,
+    )
+    assert_true(body.is_object())
+    assert_equal(
+        body.object_get(String("program")).value().as_str(),
+        String("/tmp/main.py"),
+    )
+    assert_equal(
+        body.object_get(String("console")).value().as_str(),
+        String("internalConsole"),
+    )
+    var arr = body.object_get(String("args"))
+    assert_true(arr.value().is_array())
+    assert_equal(arr.value().array_len(), 1)
+    assert_equal(arr.value().array_at(0).as_str(), String("--verbose"))
+
+
+fn test_dap_launch_arguments_for_delve() raises:
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("go"))
+    assert_true(idx >= 0)
+    var body = launch_arguments_for(
+        debs[idx], String("/tmp/cmd"), String("/tmp"), List[String](), False,
+    )
+    assert_equal(
+        body.object_get(String("mode")).value().as_str(),
+        String("debug"),
+    )
+
+
+fn test_dap_manager_breakpoint_toggle() raises:
+    """Local breakpoint state mutates correctly even with no adapter
+    spawned. Toggle semantics: add → remove → add."""
+    var mgr = DapManager()
+    assert_false(mgr.has_breakpoint(String("/tmp/x.py"), 5))
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 5)
+    assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 5))
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 12)
+    assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 12))
+    var lines = mgr.breakpoints_for(String("/tmp/x.py"))
+    assert_equal(len(lines), 2)
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 5)
+    assert_false(mgr.has_breakpoint(String("/tmp/x.py"), 5))
+    assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 12))
+
+
 fn main() raises:
     test_point_arithmetic()
     test_rect_basics()
@@ -2582,4 +2799,17 @@ fn main() raises:
     test_lsp_classify_message()
     test_lsp_subprocess_round_trip_via_cat()
     test_lsp_initialize_against_mojo_lsp_server()
+    test_dap_classify_response()
+    test_dap_classify_event()
+    test_dap_classify_reverse_request()
+    test_dap_classify_response_with_failure()
+    test_dap_initialize_arguments_shape()
+    test_dap_seq_autoincrement_via_cat()
+    test_dap_parse_threads()
+    test_dap_parse_stack_trace_zero_based()
+    test_dap_parse_scopes_and_variables()
+    test_dap_registry_lookup()
+    test_dap_launch_arguments_for_debugpy()
+    test_dap_launch_arguments_for_delve()
+    test_dap_manager_breakpoint_toggle()
     print("all tests passed")
