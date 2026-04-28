@@ -147,6 +147,48 @@ struct TextBuffer(ImplicitlyCopyable, Movable):
         return (row + 1, 0)
 
 
+# --- Undo / redo ------------------------------------------------------------
+
+
+comptime _UNDO_STACK_LIMIT = 500
+"""Cap per-window undo history. Each entry holds a full ``List[String]`` copy
+of the buffer plus four ints, so a few hundred steps is comfortably more than
+any realistic editing session needs."""
+
+
+struct EditorSnapshot(ImplicitlyCopyable, Movable):
+    """One reversible step. Captures everything ``undo`` needs to restore:
+    the buffer contents and the caret/selection. Scroll position is excluded
+    on purpose — undoing shouldn't yank the viewport around if the user has
+    scrolled since the edit."""
+    var lines: List[String]
+    var cursor_row: Int
+    var cursor_col: Int
+    var anchor_row: Int
+    var anchor_col: Int
+
+    fn __init__(
+        out self,
+        var lines: List[String],
+        cursor_row: Int,
+        cursor_col: Int,
+        anchor_row: Int,
+        anchor_col: Int,
+    ):
+        self.lines = lines^
+        self.cursor_row = cursor_row
+        self.cursor_col = cursor_col
+        self.anchor_row = anchor_row
+        self.anchor_col = anchor_col
+
+    fn __copyinit__(out self, copy: Self):
+        self.lines = copy.lines.copy()
+        self.cursor_row = copy.cursor_row
+        self.cursor_col = copy.cursor_col
+        self.anchor_row = copy.anchor_row
+        self.anchor_col = copy.anchor_col
+
+
 # --- Editor widget ----------------------------------------------------------
 
 
@@ -195,6 +237,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     var gutter_width: Int
     var breakpoint_lines: List[Int]
     var exec_line: Int
+    # Per-window undo history. ``_undo_stack`` grows on every mutating
+    # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
+    # subsequent edit (the standard "branching breaks redo" model).
+    var _undo_stack: List[EditorSnapshot]
+    var _redo_stack: List[EditorSnapshot]
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -215,6 +262,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self._undo_stack = List[EditorSnapshot]()
+        self._redo_stack = List[EditorSnapshot]()
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -235,6 +284,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self._undo_stack = List[EditorSnapshot]()
+        self._redo_stack = List[EditorSnapshot]()
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -267,6 +318,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.exec_line = copy.exec_line
+        self._undo_stack = copy._undo_stack.copy()
+        self._redo_stack = copy._redo_stack.copy()
 
     fn _refresh_highlights(mut self):
         var ext = extension_of(self.file_path)
@@ -278,6 +331,70 @@ struct Editor(ImplicitlyCopyable, Movable):
         the host knows the buffer changed in a way that bypassed
         ``handle_key`` (e.g., setting ``file_path`` directly)."""
         self._refresh_highlights()
+
+    # --- undo / redo ------------------------------------------------------
+
+    fn _snapshot(self) -> EditorSnapshot:
+        return EditorSnapshot(
+            self.buffer.lines.copy(),
+            self.cursor_row, self.cursor_col,
+            self.anchor_row, self.anchor_col,
+        )
+
+    fn _push_undo(mut self):
+        """Record the current state on the undo stack and clear redo.
+
+        Call this *before* applying a mutation so ``undo`` rewinds to the
+        pre-edit state. Any new edit invalidates the redo branch — that's
+        the standard linear-history model and matches what users expect
+        from a Turbo-Vision-era editor.
+        """
+        self._undo_stack.append(self._snapshot())
+        # Drop the oldest entries when the cap is exceeded. ``List`` has no
+        # pop_front, so we rebuild a tail slice — only happens at most once
+        # per push, after the stack has filled up.
+        if len(self._undo_stack) > _UNDO_STACK_LIMIT:
+            var trimmed = List[EditorSnapshot]()
+            for i in range(
+                len(self._undo_stack) - _UNDO_STACK_LIMIT,
+                len(self._undo_stack),
+            ):
+                trimmed.append(self._undo_stack[i])
+            self._undo_stack = trimmed^
+        self._redo_stack = List[EditorSnapshot]()
+
+    fn _restore(mut self, snap: EditorSnapshot):
+        self.buffer.lines = snap.lines.copy()
+        self.cursor_row = snap.cursor_row
+        self.cursor_col = snap.cursor_col
+        self.desired_col = snap.cursor_col
+        self.anchor_row = snap.anchor_row
+        self.anchor_col = snap.anchor_col
+        self.dirty = True
+        self._highlights_dirty = True
+        self._refresh_highlights()
+
+    fn undo(mut self) -> Bool:
+        """Roll back the last mutation. Returns False when the stack is empty.
+
+        The caller is responsible for re-scrolling — pass the editor's view
+        rect to ``reveal_cursor`` afterwards if you want the cursor on screen.
+        """
+        if len(self._undo_stack) == 0:
+            return False
+        var snap = self._undo_stack.pop()
+        self._redo_stack.append(self._snapshot())
+        self._restore(snap)
+        return True
+
+    fn redo(mut self) -> Bool:
+        """Replay the most recently undone mutation. False when nothing to redo."""
+        if len(self._redo_stack) == 0:
+            return False
+        var snap = self._redo_stack.pop()
+        self._undo_stack.append(self._snapshot())
+        self._restore(snap)
+        return True
 
     fn consume_definition_request(mut self) -> Optional[DefinitionRequest]:
         """Return any pending ``DefinitionRequest`` and clear the slot."""
@@ -368,12 +485,17 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn replace_all(mut self, find: String, replacement: String) -> Int:
         """Replace every occurrence of ``find`` with ``replacement`` in the
         buffer. Returns the number of replacements; sets ``dirty`` if > 0.
-        Does not move the cursor (caller may want to clamp it)."""
+        Does not move the cursor (caller may want to clamp it).
+
+        An undo step is pushed eagerly and rolled back when no replacements
+        actually fired, so a bulk replace that finds nothing won't blow
+        away redo history."""
         var fb = find.as_bytes()
         var rb_len = len(replacement.as_bytes())
         var n = len(fb)
         if n == 0:
             return 0
+        self._push_undo()
         var count = 0
         for row in range(self.buffer.line_count()):
             var line = self.buffer.line(row)
@@ -421,6 +543,10 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.anchor_col = self.cursor_col
             _ = rb_len   # silence unused warning if compiler reports it
             self._refresh_highlights()
+        else:
+            # Nothing changed — roll back the speculative snapshot so the
+            # undo stack stays in sync and redo isn't clobbered.
+            _ = self._undo_stack.pop()
         return count
 
     # --- selection state ---------------------------------------------------
@@ -650,6 +776,12 @@ struct Editor(ImplicitlyCopyable, Movable):
             if nc > n: nc = n
             self.move_to(nr, nc, extend, False)
         elif k == KEY_BACKSPACE:
+            # Skip the snapshot when the keystroke can't actually change
+            # anything (cursor at (0, 0) with no selection) — otherwise
+            # repeated backspaces at the buffer head would clobber redo.
+            if self.has_selection() \
+                    or self.cursor_col > 0 or self.cursor_row > 0:
+                self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             else:
@@ -658,6 +790,13 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._highlights_dirty = True
         elif k == KEY_DELETE:
+            # Same no-op guard: at end-of-buffer with no selection, Delete
+            # is a no-op and shouldn't burn an undo entry.
+            var at_end = self.cursor_col \
+                    >= self.buffer.line_length(self.cursor_row) \
+                and self.cursor_row + 1 >= self.buffer.line_count()
+            if self.has_selection() or not at_end:
+                self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             else:
@@ -665,6 +804,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._highlights_dirty = True
         elif k == KEY_ENTER:
+            self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             var p = self.buffer.split(self.cursor_row, self.cursor_col)
@@ -672,6 +812,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._highlights_dirty = True
         elif k == KEY_TAB:
+            self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             self.buffer.insert(self.cursor_row, self.cursor_col, String("    "))
@@ -679,19 +820,12 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._highlights_dirty = True
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
-            if self.has_selection():
-                clipboard_copy(self.selection_text())
+            self.copy_to_clipboard()
         elif k == UInt32(0x18):    # Ctrl+X
-            if self.has_selection():
-                clipboard_copy(self.selection_text())
-                self._delete_selection()
-                self.dirty = True
+            self.cut_to_clipboard()
             self._highlights_dirty = True
         elif k == UInt32(0x16):    # Ctrl+V
-            var text = clipboard_paste()
-            if len(text.as_bytes()) > 0 or self.has_selection():
-                self.paste_text(text)
-                self.dirty = True
+            self.paste_from_clipboard()
             self._highlights_dirty = True
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
             # Modified letters are commands, not text — defer to whatever
@@ -701,6 +835,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             # printable that the terminal pre-folded.
             if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
                 return False
+            self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             self.buffer.insert(self.cursor_row, self.cursor_col, chr(Int(k)))
@@ -737,20 +872,53 @@ struct Editor(ImplicitlyCopyable, Movable):
         return result
 
     fn cut_selection(mut self) -> String:
-        """Remove and return the selected text."""
+        """Remove and return the selected text. Pushes an undo step iff a
+        selection actually existed (so calling cut with no selection is a
+        true no-op)."""
         var text = self.selection_text()
         if self.has_selection():
+            self._push_undo()
             self._delete_selection()
             self.dirty = True
             self._highlights_dirty = True
         return text
 
     fn paste_text(mut self, text: String):
-        """Replace any selection then insert ``text`` (newlines split lines)."""
+        """Replace any selection then insert ``text`` (newlines split lines).
+        Pushes an undo step when there's something to do — a paste with
+        empty clipboard and no selection is a no-op and won't disturb the
+        undo history."""
+        if len(text.as_bytes()) == 0 and not self.has_selection():
+            return
+        self._push_undo()
         if self.has_selection():
             self._delete_selection()
         self._insert_text(text)
         self.dirty = True
+
+    fn copy_to_clipboard(self):
+        """Copy the current selection to the system clipboard. No-op when
+        nothing is selected."""
+        if self.has_selection():
+            clipboard_copy(self.selection_text())
+
+    fn cut_to_clipboard(mut self):
+        """Copy the selection to the clipboard, then remove it from the
+        buffer. No-op when nothing is selected — the undo stack is left
+        untouched in that case."""
+        if not self.has_selection():
+            return
+        var text = self.selection_text()
+        clipboard_copy(text)
+        self._push_undo()
+        self._delete_selection()
+        self.dirty = True
+        self._highlights_dirty = True
+
+    fn paste_from_clipboard(mut self):
+        """Replace any selection with the system clipboard's contents."""
+        var text = clipboard_paste()
+        self.paste_text(text)
 
     # --- turbo-style editor commands --------------------------------------
 
@@ -795,6 +963,7 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn toggle_comment(mut self, prefix: String = String("// ")):
         """Toggle a line-comment prefix on every line touched by the selection
         (or the current line if no selection)."""
+        self._push_undo()
         var sel = self.selection()
         var sr = sel[0]
         var er = sel[2]
@@ -831,6 +1000,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Invert ASCII case across the current selection (no-op if empty)."""
         if not self.has_selection():
             return
+        self._push_undo()
         var sel = self.selection()
         var sr = sel[0]; var sc = sel[1]
         var er = sel[2]; var ec = sel[3]

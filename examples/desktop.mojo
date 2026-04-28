@@ -38,9 +38,10 @@ from mojovision import (
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
-    Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL, EDITOR_QUICK_OPEN,
-    EDITOR_REPLACE,
-    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO,
+    EDITOR_GOTO_SYMBOL, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
+    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE,
+    EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
     EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
 )
 
@@ -76,16 +77,24 @@ fn main() raises:
             (String("Save as..."), EDITOR_SAVE_AS),
             (String("Quit"), APP_QUIT_ACTION),
         ))
-        desktop.menu_bar.add(_mk_menu(String("Edit"),
-            (String("Find..."), EDITOR_FIND),
-            (String("Replace..."), EDITOR_REPLACE),
-            (String("Find in project..."), PROJECT_FIND),
-            (String("Replace in project..."), PROJECT_REPLACE),
-            (String("Go to Line..."), EDITOR_GOTO),
-            (String("Go to Symbol..."), EDITOR_GOTO_SYMBOL),
-            (String("Toggle Comment"), EDITOR_TOGGLE_COMMENT),
-            (String("Toggle Case"), EDITOR_TOGGLE_CASE),
-        ))
+        # Edit menu — built by hand so the separators land where they should.
+        var edit_items = List[MenuItem]()
+        edit_items.append(MenuItem(String("Undo"),  EDITOR_UNDO))
+        edit_items.append(MenuItem(String("Redo"),  EDITOR_REDO))
+        edit_items.append(MenuItem.separator())
+        edit_items.append(MenuItem(String("Cut"),   EDITOR_CUT))
+        edit_items.append(MenuItem(String("Copy"),  EDITOR_COPY))
+        edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
+        edit_items.append(MenuItem.separator())
+        edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
+        edit_items.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
+        edit_items.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
+        edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
+        edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
+        edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+        edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
+        edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
+        desktop.menu_bar.add(Menu(String("Edit"), edit_items^))
         desktop.menu_bar.add(_mk_menu(String("Debug"),
             (String("Start / Continue"), DEBUG_START_OR_CONTINUE),
             (String("Stop"), DEBUG_STOP),

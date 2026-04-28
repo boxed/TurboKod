@@ -78,6 +78,11 @@ comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
+comptime EDITOR_CUT           = String("edit:cut")
+comptime EDITOR_COPY          = String("edit:copy")
+comptime EDITOR_PASTE         = String("edit:paste")
+comptime EDITOR_UNDO          = String("edit:undo")
+comptime EDITOR_REDO          = String("edit:redo")
 comptime PROJECT_FIND         = String("edit:project_find")
 comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
@@ -334,6 +339,16 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, EDITOR_REPLACE))
         self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_GOTO))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
+        # Clipboard + undo/redo. Registering Ctrl+X/C/V at the desktop layer
+        # serves two purposes: the menu items get auto-populated shortcut
+        # text via ``_shortcut_for_action``, and the dispatch path is
+        # uniform whether the user clicks a menu or hits the key. Ctrl+Z /
+        # Ctrl+Y use the de-facto-standard binding.
+        self._hotkeys.append(Hotkey(ctrl_key("x"), MOD_NONE, EDITOR_CUT))
+        self._hotkeys.append(Hotkey(ctrl_key("c"), MOD_NONE, EDITOR_COPY))
+        self._hotkeys.append(Hotkey(ctrl_key("v"), MOD_NONE, EDITOR_PASTE))
+        self._hotkeys.append(Hotkey(ctrl_key("z"), MOD_NONE, EDITOR_UNDO))
+        self._hotkeys.append(Hotkey(ctrl_key("y"), MOD_NONE, EDITOR_REDO))
         self._hotkeys.append(Hotkey(
             UInt32(ord("f")), MOD_CTRL | MOD_SHIFT, PROJECT_FIND,
         ))
@@ -918,6 +933,48 @@ struct Desktop(Movable):
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
                 self.windows.windows[self.windows.focused].editor.toggle_case()
+            return Optional[String]()
+        if action == EDITOR_CUT:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                self.windows.windows[self.windows.focused].editor.cut_to_clipboard()
+            return Optional[String]()
+        if action == EDITOR_COPY:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                self.windows.windows[self.windows.focused].editor.copy_to_clipboard()
+            return Optional[String]()
+        if action == EDITOR_PASTE:
+            # Paste, undo, and redo can land the cursor anywhere in the
+            # buffer — ``reveal_cursor`` brings it back into view since
+            # the per-keystroke ``_scroll_to_cursor`` in editor.handle_key
+            # is bypassed when the action arrives via a desktop hotkey or
+            # menu click.
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                var idx = self.windows.focused
+                self.windows.windows[idx].editor.paste_from_clipboard()
+                self.windows.windows[idx].editor.reveal_cursor(
+                    self.windows.windows[idx].interior(),
+                )
+            return Optional[String]()
+        if action == EDITOR_UNDO:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                var idx = self.windows.focused
+                if self.windows.windows[idx].editor.undo():
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                    )
+            return Optional[String]()
+        if action == EDITOR_REDO:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                var idx = self.windows.focused
+                if self.windows.windows[idx].editor.redo():
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                    )
             return Optional[String]()
         if action == PROJECT_FIND:
             if self.project:
