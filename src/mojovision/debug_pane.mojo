@@ -446,16 +446,23 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var dim = Attr(LIGHT_GRAY, BLACK)
         var stderr_attr = Attr(LIGHT_RED, BLACK)
         canvas.fill(panel, String(" "), bg)
-        # Top border with title.
+        # Top border with title. Focus is shown via line weight (single →
+        # double), mirroring how normal windows render their frame.
         var top = panel.a.y
+        var top_glyph = String("═") if self.focused else String("─")
         for x in range(panel.a.x, panel.b.x):
-            canvas.set(x, top, Cell(String("─"), border, 1))
+            canvas.set(x, top, Cell(top_glyph, border, 1))
         var title_text = String(" Debug ")
-        if self.focused:
-            title_text = String(" Debug (focused) ")
         _ = canvas.put_text(
             Point(panel.a.x + 2, top), title_text, title, panel.b.x,
         )
+        # Number indicator at the top-right, paired with ``Ctrl+9``
+        # to focus the pane from anywhere — same convention as the
+        # per-window ``Ctrl+N`` numbers and the file tree's ``0``.
+        if panel.b.x - panel.a.x >= 6:
+            _ = canvas.put_text(
+                Point(panel.b.x - 3, top), String("9"), title,
+            )
         # Status row (one line).
         var row_y = top + 1
         if row_y < panel.b.y and len(self.status_text.as_bytes()) > 0:

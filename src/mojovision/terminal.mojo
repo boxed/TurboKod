@@ -79,7 +79,7 @@ struct Terminal:
     var _front: Canvas
     var _queue: List[Event]
     var _queue_head: Int            # avoid List.pop(0)'s O(n) shift + churn
-    var _resize_poll_counter: Int
+    var _resize_poll_counter: Int   # throttle TIOCGWINSZ to ~1 Hz
     var _pending: List[UInt8]       # trailing bytes of a partial escape sequence
     var _read_buf: List[UInt8]      # persistent read buffer for poll_event
     var width: Int
@@ -171,17 +171,39 @@ struct Terminal:
         self._started = False
 
     fn refresh_size(mut self) raises -> Bool:
-        """Disabled — periodic cursor-position polling races with the
-        host's own writes (present, debug pane gutter repaint) on real
-        terminals and reliably hangs the read/parse path. The original
-        purpose was to detect terminal resizes without ``SIGWINCH`` /
-        a working ``ioctl(TIOCGWINSZ)``; we now eat that limitation
-        and rely on the size captured at ``start()``. If a
-        non-variadic ``ioctl`` path or signal handler ever lands, this
-        method can come back to life. For now: never re-query, always
-        return ``False``.
+        """Re-query terminal dimensions; return True if they changed.
+
+        ``ioctl(TIOCGWINSZ)`` doesn't work reliably via Mojo's
+        ``external_call`` on macOS arm64 (variadic ABI mismatch — the
+        third arg lands in a register but ioctl reads varargs from the
+        stack), so we fall back to the cursor-position query. To avoid
+        racing with user input we:
+
+        - throttle to ~1 Hz (every 20 calls at the default 50 ms cadence);
+        - skip when the event queue still has buffered input;
+        - skip when stdin already has bytes ready to read.
+
+        Stray bytes that nevertheless mix in with the cursor response
+        are discarded inside ``query_size_via_cursor`` — losing a key
+        here is much better than the heap corruption an earlier requeue
+        path caused.
         """
-        return False
+        self._resize_poll_counter += 1
+        if self._resize_poll_counter < 20:
+            return False
+        if self._queue_head < len(self._queue):
+            return False
+        if poll_stdin(STDIN_FD, Int32(0)):
+            return False
+        self._resize_poll_counter = 0
+        var size = query_size_via_cursor(STDIN_FD, STDOUT_FD)
+        if size[0] <= 0 or size[1] <= 0:
+            return False
+        if size[0] == self.width and size[1] == self.height:
+            return False
+        self.width = size[0]
+        self.height = size[1]
+        return True
 
     fn present(mut self, back: Canvas) raises:
         """Diff the back canvas against our front, write only what changed.

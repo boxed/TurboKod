@@ -17,7 +17,9 @@ from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
-    Event, EVENT_MOUSE,
+    Event, EVENT_KEY, EVENT_MOUSE,
+    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .file_io import basename, join_path, list_directory, stat_file
@@ -45,6 +47,11 @@ struct FileTree(Movable):
     var scroll: Int
     var opened_path: String
     var submitted: Bool
+    var focused: Bool
+    """When True, arrow / Enter keystrokes route to this panel
+    (set by the host on Ctrl+0). Mirrors the same field on
+    ``DebugPane`` so the keyboard-focus model is uniform across
+    docked side panels."""
 
     fn __init__(out self):
         self.visible = False
@@ -55,6 +62,7 @@ struct FileTree(Movable):
         self.scroll = 0
         self.opened_path = String("")
         self.submitted = False
+        self.focused = False
 
     fn open(mut self, var root: String):
         self.root = root^
@@ -76,6 +84,7 @@ struct FileTree(Movable):
         self.scroll = 0
         self.opened_path = String("")
         self.submitted = False
+        self.focused = False
 
     fn consume_open(mut self) -> Optional[String]:
         """If a file was just opened, return its path and clear the flag."""
@@ -168,10 +177,20 @@ struct FileTree(Movable):
         var dir_attr    = Attr(BLUE,   LIGHT_GRAY)
         var sel_attr    = Attr(BLACK,  YELLOW)
         var sel_dir_attr = Attr(BLUE,  YELLOW)
-        var title_attr  = Attr(WHITE,  BLUE)
-        # Left separator column lives at area.a.x.
+        # Title row gets the focused tint when keyboard focus lands
+        # here — same convention windows use (their title brightens
+        # with the same color flip).
+        var title_attr: Attr
+        if self.focused:
+            title_attr = Attr(WHITE, BLUE)
+        else:
+            title_attr = Attr(LIGHT_GRAY, BLUE)
+        # Left separator column lives at area.a.x. Focus is shown via line
+        # weight (single → double), mirroring how normal windows render
+        # their frame.
+        var sep_glyph = String("║") if self.focused else String("│")
         for y in range(area.a.y, area.b.y):
-            canvas.set(area.a.x, y, Cell(String("│"), bg, 1))
+            canvas.set(area.a.x, y, Cell(sep_glyph, bg, 1))
         # Title bar fills the rest of the top row of the panel.
         canvas.fill(
             Rect(area.a.x + 1, area.a.y, area.b.x, area.a.y + 1),
@@ -182,6 +201,14 @@ struct FileTree(Movable):
         _ = canvas.put_text(
             Point(area.a.x + 1, area.a.y), title, title_attr, area.b.x,
         )
+        # Number indicator at the top-right, mirroring the per-window
+        # ``Ctrl+N`` shortcut hint. ``0`` is the file tree's slot —
+        # paired with ``Ctrl+0`` to focus it from anywhere.
+        if area.b.x - area.a.x >= 4:
+            _ = canvas.put_text(
+                Point(area.b.x - 2, area.a.y), String("0"),
+                title_attr,
+            )
         # Listing area starts one row below the title.
         var list_top = area.a.y + 1
         var list_h = area.b.y - list_top
@@ -218,6 +245,78 @@ struct FileTree(Movable):
 
     # --- mouse ------------------------------------------------------------
 
+    fn handle_key(mut self, event: Event) -> Bool:
+        """Arrow / Enter / Esc when the panel has keyboard focus.
+        Returns True iff the key was consumed. Esc releases focus
+        without affecting visibility — the panel stays open and the
+        host's window dispatch picks up subsequent keys."""
+        if not self.focused or not self.visible:
+            return False
+        if event.kind != EVENT_KEY:
+            return False
+        if event.key == KEY_ESC:
+            self.focused = False
+            return True
+        if event.key == KEY_UP:
+            if self.selected > 0:
+                self.selected -= 1
+            elif self.selected < 0 and len(self.entries) > 0:
+                self.selected = 0
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_DOWN:
+            if self.selected < 0 and len(self.entries) > 0:
+                self.selected = 0
+            elif self.selected + 1 < len(self.entries):
+                self.selected += 1
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_PAGEUP:
+            self.selected -= 10
+            if self.selected < 0:
+                self.selected = 0
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_PAGEDOWN:
+            self.selected += 10
+            if self.selected >= len(self.entries):
+                self.selected = len(self.entries) - 1
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_HOME:
+            self.selected = 0 if len(self.entries) > 0 else -1
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_END:
+            self.selected = len(self.entries) - 1
+            self._scroll_to_selection()
+            return True
+        if event.key == KEY_ENTER:
+            if self.selected < 0 or self.selected >= len(self.entries):
+                return True
+            if self.entries[self.selected].is_dir:
+                self._toggle_expand(self.selected)
+            else:
+                self.opened_path = self.entries[self.selected].path
+                self.submitted = True
+            return True
+        return False
+
+    fn _scroll_to_selection(mut self):
+        # Visible-window height isn't known without ``screen``, so
+        # use a conservative fixed visible count — the listing is
+        # right-docked at a fixed width and the host gives us at
+        # least 10 rows in practice. Erring small means we may
+        # over-scroll on tiny terminals; that's preferable to
+        # leaving the selection off-screen.
+        var visible = 10
+        if self.selected < 0:
+            return
+        if self.selected < self.scroll:
+            self.scroll = self.selected
+        elif self.selected >= self.scroll + visible:
+            self.scroll = self.selected - visible + 1
+
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         """Returns True iff the event was inside the panel (consumed)."""
         if not self.visible:
@@ -226,6 +325,7 @@ struct FileTree(Movable):
             return False
         var area = self.rect(screen)
         if not area.contains(event.pos):
+            self.focused = False
             return False
         # Wheel anywhere over the panel scrolls the listing.
         if event.pressed and not event.motion:
@@ -249,6 +349,9 @@ struct FileTree(Movable):
             return True
         if not event.pressed or event.motion:
             return True
+        # Any click inside the panel takes keyboard focus, mirroring
+        # the debug pane's click-to-focus behaviour.
+        self.focused = True
         if event.pos.y == area.a.y:
             # Title-bar click: no-op (panel isn't draggable).
             return True

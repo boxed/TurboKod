@@ -19,6 +19,7 @@ from .events import (
 )
 from .file_io import join_path, list_directory, parent_path, stat_file
 from .geometry import Point, Rect
+from .posix import realpath
 
 
 struct FileDialog(Movable):
@@ -48,6 +49,21 @@ struct FileDialog(Movable):
         self.selected = 0
         self.scroll = 0
         self.selected_path = String("")
+        self._refresh()
+
+    fn _ascend(mut self):
+        """Move ``self.dir`` to its parent. Canonicalizes via
+        ``realpath`` first so a relative start dir like ``"."`` —
+        whose parent under POSIX dirname semantics is itself — still
+        ascends. ``find_git_project`` uses the same trick for the
+        same reason. Falls back to plain ``parent_path`` if
+        ``realpath`` can't resolve (e.g. the dir was deleted from
+        under us)."""
+        var resolved = realpath(self.dir)
+        if len(resolved.as_bytes()) > 0:
+            self.dir = parent_path(resolved)
+        else:
+            self.dir = parent_path(self.dir)
         self._refresh()
 
     fn close(mut self):
@@ -160,16 +176,14 @@ struct FileDialog(Movable):
             self._scroll_to_selection()
             return True
         if k == KEY_BACKSPACE:
-            self.dir = parent_path(self.dir)
-            self._refresh()
+            self._ascend()
             return True
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.entries):
                 return True
             var name = self.entries[self.selected]
             if name == String(".."):
-                self.dir = parent_path(self.dir)
-                self._refresh()
+                self._ascend()
                 return True
             var path = join_path(self.dir, name)
             if self.entry_is_dir[self.selected]:
@@ -235,13 +249,16 @@ struct FileDialog(Movable):
         var idx = self.scroll + (event.pos.y - list_top)
         if idx < 0 or idx >= len(self.entries):
             return True
+        # ``..`` has exactly one meaningful action — ascend. Skip the
+        # select-then-second-click dance so a single click on the
+        # parent shortcut just works. (This also makes the
+        # second-click branch below unreachable for ``..``.)
+        if self.entries[idx] == String(".."):
+            self._ascend()
+            return True
         if idx == self.selected:
             # Second click on the same entry: act like Enter.
             var name = self.entries[self.selected]
-            if name == String(".."):
-                self.dir = parent_path(self.dir)
-                self._refresh()
-                return True
             var path = join_path(self.dir, name)
             if self.entry_is_dir[self.selected]:
                 self.dir = path

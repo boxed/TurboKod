@@ -95,6 +95,7 @@ comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
 comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
 comptime DEBUG_DUMP_DIAGNOSTIC   = String("debug:dump_diagnostic")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
+comptime FILE_TREE_FOCUS         = String("file_tree:focus")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
 comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
@@ -350,6 +351,18 @@ struct Desktop(Movable):
                 MOD_CTRL,
                 WINDOW_FOCUS_PREFIX + String(n),
             ))
+        # Side-panel focus: Ctrl+0 → file tree, Ctrl+9 → debug pane.
+        # These match the ``0`` / ``9`` glyphs each panel paints in
+        # its top-right corner. Registered after the Ctrl+1..9 loop
+        # so the Ctrl+9 binding here wins over the (rare) 9th window
+        # — the lookup walks newest-first, and a debug pane is far
+        # more commonly reached than a 9th open window.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("0")), MOD_CTRL, FILE_TREE_FOCUS,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
+        ))
         # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
         # the de facto standard set across VS Code, JetBrains, and most
         # other IDEs. Registered after the Ctrl-letter set so any user
@@ -740,9 +753,12 @@ struct Desktop(Movable):
                 )
             return Optional[String]()
         if event.kind == EVENT_KEY:
-            # Pane absorbs scroll keys when focused; if not absorbed,
-            # fall through to the regular key dispatch.
+            # Side panels absorb arrow / Enter / Esc when focused;
+            # if neither claims the key, fall through to the regular
+            # dispatch (menu mnemonics, hotkeys, focused window).
             if self.debug_pane.handle_key(event):
+                return Optional[String]()
+            if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
         # Mouse events (and everything else): route through menu → pane → tree → windows.
@@ -924,6 +940,11 @@ struct Desktop(Movable):
         if _starts_with(action, WINDOW_FOCUS_PREFIX):
             var idx = _parse_int(action, len(WINDOW_FOCUS_PREFIX.as_bytes()))
             self.windows.focus_by_index(idx)
+            # Switching to a window means leaving the side panels —
+            # otherwise their handle_key keeps swallowing arrows
+            # when the user expects them at the editor cursor.
+            self.debug_pane.focused = False
+            self.file_tree.focused = False
             return Optional[String]()
         if action == DEBUG_TOGGLE_BREAKPOINT:
             self._debug_toggle_breakpoint()
@@ -959,7 +980,17 @@ struct Desktop(Movable):
             self._dump_dap_diagnostic()
             return Optional[String]()
         if action == DEBUG_FOCUS_PANE:
-            self.debug_pane.focused = not self.debug_pane.focused
+            # Ctrl+9 from anywhere should *focus* the pane, not
+            # toggle blindly — toggling-off would land the user
+            # nowhere predictable. Force-on, and steal focus from
+            # the file tree so only one side panel is keyboard-live
+            # at a time.
+            self.debug_pane.focused = True
+            self.file_tree.focused = False
+            return Optional[String]()
+        if action == FILE_TREE_FOCUS:
+            self.file_tree.focused = True
+            self.debug_pane.focused = False
             return Optional[String]()
         return Optional[String](action)
 

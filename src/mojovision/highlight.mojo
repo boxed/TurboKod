@@ -16,8 +16,8 @@ producer in Phase 3 won't churn any consumers.
 from std.collections.list import List
 
 from .colors import (
-    Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, RED, WHITE,
-    STYLE_NONE,
+    Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_YELLOW,
+    RED, WHITE, STYLE_NONE,
 )
 
 
@@ -41,7 +41,8 @@ fn highlight_string_attr()  -> Attr:    return Attr(RED,         BLUE, STYLE_NON
 fn highlight_comment_attr() -> Attr:    return Attr(CYAN,        BLUE, STYLE_NONE)
 fn highlight_number_attr()  -> Attr:    return Attr(LIGHT_GRAY,  BLUE, STYLE_NONE)
 fn highlight_ident_attr()   -> Attr:    return Attr(LIGHT_GREEN, BLUE, STYLE_NONE)
-fn highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,  BLUE, STYLE_NONE)
+fn highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,    BLUE, STYLE_NONE)
+fn highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_NONE)
 
 
 # Line-state passed between line tokenization calls so triple-quoted strings
@@ -170,6 +171,18 @@ fn _highlight_line(
                 i += 1
             out.append(Highlight(row, start, i, highlight_number_attr()))
             continue
+        # Operator run (`+`, `-`, `*`, `/`, `%`, `=`, `<`, `>`, `!`, `&`,
+        # `|`, `^`, `~`, `@`, `(`, `)`, `.`, `:`, `[`, `]`, `{`, `}`).
+        # Consecutive bytes coalesce so `==`, `->`, `**=`, `[]`, etc. render
+        # as a single span. `@` followed by an identifier was already
+        # consumed as a decorator above; `.` inside a numeric literal was
+        # already consumed as part of the number.
+        if _is_operator(c):
+            var start = i
+            while i < n and _is_operator(b[i]):
+                i += 1
+            out.append(Highlight(row, start, i, highlight_operator_attr()))
+            continue
         i += 1
     return state
 
@@ -207,6 +220,16 @@ fn _is_ident_part(c: UInt8) -> Bool:
 fn _is_digit(c: UInt8) -> Bool:
     var v = Int(c)
     return 0x30 <= v and v <= 0x39
+
+
+fn _is_operator(c: UInt8) -> Bool:
+    var v = Int(c)
+    return v == 0x2B or v == 0x2D or v == 0x2A or v == 0x2F \
+        or v == 0x25 or v == 0x3D or v == 0x3C or v == 0x3E \
+        or v == 0x21 or v == 0x26 or v == 0x7C or v == 0x5E \
+        or v == 0x7E or v == 0x40 or v == 0x28 or v == 0x29 \
+        or v == 0x2E or v == 0x3A or v == 0x5B or v == 0x5D \
+        or v == 0x7B or v == 0x7D
 
 
 fn _is_mojo_python_keyword(word: String) -> Bool:
