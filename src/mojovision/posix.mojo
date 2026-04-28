@@ -180,6 +180,18 @@ fn poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
 
 
 fn read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
+    """Read up to ``count`` bytes from ``fd`` into ``buf``. Returns
+    the byte count actually read, or -1 on error / 0 on EOF.
+
+    Direct ``external_call["read", Int]`` — the libc ``read(2)``
+    symbol. Earlier we routed this through ``FileDescriptor.read_bytes``
+    on a hunch that the symbol collided with a Mojo stdlib
+    registration (the way ``write`` does), but ``FileDescriptor.read_bytes``
+    turns out to segfault on raw-mode TTY fds in this Mojo build,
+    so we go straight to the syscall instead. The LSP / DAP message
+    framers have used this path for thousands of pipe reads without
+    issue.
+    """
     return external_call["read", Int](fd, buf.unsafe_ptr(), count)
 
 
@@ -495,7 +507,7 @@ fn query_size_via_cursor(fd_in: Int32, fd_out: Int32, timeout_ms: Int32 = 500) -
         write_string(fd_out, String("\x1b8"))
         return (0, 0)
     var buf = alloc_zero_buffer(64)
-    var n = external_call["read", Int](fd_in, buf.unsafe_ptr(), Int(64))
+    var n = read_into(fd_in, buf, 64)
     write_string(fd_out, String("\x1b8"))
     if n <= 0:
         return (0, 0)

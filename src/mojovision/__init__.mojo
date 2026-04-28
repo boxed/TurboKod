@@ -31,6 +31,9 @@ from .events import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .desktop import (
     APP_QUIT_ACTION,
+    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_DUMP_DIAGNOSTIC,
+    DEBUG_START_OR_CONTINUE, DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER,
+    DEBUG_STOP, DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop,
     EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL, EDITOR_QUICK_OPEN,
     EDITOR_REPLACE, EDITOR_SAVE,
@@ -60,6 +63,20 @@ from .language_config import (
     find_language_by_id, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager, SymbolItem
+from .dap import (
+    DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
+    DapClient, DapIncoming, classify_dap_message, dap_initialize_arguments,
+)
+from .dap_dispatch import (
+    DapEvaluations, DapManager, DapOutput, DapScope, DapStackFrame,
+    DapStopped, DapThread, DapVariable,
+)
+from .debug_pane import DebugPane, PaneRow
+from .debugger_config import (
+    DAP_REQUEST_ATTACH, DAP_REQUEST_LAUNCH,
+    AdapterCandidate, DebuggerSpec,
+    built_in_debuggers, find_debugger_for_language, launch_arguments_for,
+)
 from .file_dialog import FileDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,

@@ -10,6 +10,8 @@ touch the OS at all, so they're easy to unit-test (see ``tests/test_basic.mojo``
 
 from std.collections.list import List
 from std.collections.optional import Optional
+from std.ffi import external_call
+from std.io.file_descriptor import FileDescriptor
 
 from .canvas import Canvas
 from .cell import Cell, blank_cell
@@ -29,8 +31,8 @@ from .geometry import Point
 from .posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
-    poll_stdin, query_size_via_cursor, read_into, tcflush, tcgetattr,
-    tciflush_value, tcsetattr, write_buffer, write_string,
+    poll_stdin, query_size_via_cursor, read_into, set_nonblocking,
+    tcflush, tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
 
@@ -79,8 +81,13 @@ struct Terminal:
     var _queue_head: Int            # avoid List.pop(0)'s O(n) shift + churn
     var _resize_poll_counter: Int
     var _pending: List[UInt8]       # trailing bytes of a partial escape sequence
+    var _read_buf: List[UInt8]      # persistent read buffer for poll_event
     var width: Int
     var height: Int
+    # Optional trace fd shared with ``LspProcess.trace_fd`` — host wires
+    # them up so terminal-side events appear in the same log as
+    # protocol-side events. ``-1`` disables.
+    var trace_fd: Int32
 
     fn __init__(out self) raises:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
@@ -89,10 +96,25 @@ struct Terminal:
         self._queue_head = 0
         self._resize_poll_counter = 0
         self._pending = List[UInt8]()
+        self._read_buf = alloc_zero_buffer(1024)
         var size = get_window_size()
         self.width = size[0]
         self.height = size[1]
         self._front = Canvas(self.width, self.height)
+        self.trace_fd = -1
+
+    fn _trace(self, var line: String):
+        """Write ``line`` to ``trace_fd`` if open. No newline added —
+        callers include their own. Same shape as
+        ``LspProcess.trace`` so a single log file makes sense."""
+        if self.trace_fd < 0:
+            return
+        var bytes = line.as_bytes()
+        if len(bytes) == 0:
+            return
+        var f = FileDescriptor(Int(self.trace_fd))
+        f.write_bytes(bytes)
+
 
     fn start(mut self) raises:
         if self._started:
@@ -149,33 +171,16 @@ struct Terminal:
         self._started = False
 
     fn refresh_size(mut self) raises -> Bool:
-        """Re-query terminal dimensions; return True if they changed.
-
-        ``ioctl(TIOCGWINSZ)`` doesn't work via Mojo's ``external_call`` on
-        macOS arm64 (variadic ABI mismatch), so we fall back to the cursor
-        position query. To avoid racing with user input we:
-
-        - throttle to ~1 Hz (every 20 calls at the default 50 ms cadence);
-        - skip when the event queue still has buffered input;
-        - skip when stdin already has bytes ready to read.
-
-        Stray bytes that nevertheless mix in with the cursor response are
-        discarded inside ``query_size_via_cursor`` — losing a key here is
-        much better than the heap corruption an earlier requeue path caused.
+        """Disabled — periodic cursor-position polling races with the
+        host's own writes (present, debug pane gutter repaint) on real
+        terminals and reliably hangs the read/parse path. The original
+        purpose was to detect terminal resizes without ``SIGWINCH`` /
+        a working ``ioctl(TIOCGWINSZ)``; we now eat that limitation
+        and rely on the size captured at ``start()``. If a
+        non-variadic ``ioctl`` path or signal handler ever lands, this
+        method can come back to life. For now: never re-query, always
+        return ``False``.
         """
-        self._resize_poll_counter += 1
-        if self._resize_poll_counter < 20:
-            return False
-        if len(self._queue) > 0:
-            return False
-        if poll_stdin(STDIN_FD, Int32(0)):
-            return False
-        self._resize_poll_counter = 0
-        var size = query_size_via_cursor(STDIN_FD, STDOUT_FD, Int32(50))
-        if size[0] > 0 and (size[0] != self.width or size[1] != self.height):
-            self.width = size[0]
-            self.height = size[1]
-            return True
         return False
 
     fn present(mut self, back: Canvas) raises:
@@ -228,56 +233,83 @@ struct Terminal:
         bytes survive a follow-up read with no progress (the user actually
         pressed Escape), the leading ESC is flushed as KEY_ESC.
         """
+        self._trace(String("    poll_event:enter\n"))
         if self._queue_head < len(self._queue):
+            self._trace(String("    poll_event:queue-hit\n"))
             return self._pop_queue()
-        if not poll_stdin(STDIN_FD, Int32(timeout_ms)):
-            # No new input. If we held a partial sequence, the user almost
-            # certainly pressed real ESC — flush it now so quit-on-Esc apps
-            # remain responsive.
+        self._trace(String("    poll_event:before-poll_stdin\n"))
+        var has_input = poll_stdin(STDIN_FD, Int32(timeout_ms))
+        self._trace(
+            String("    poll_event:after-poll_stdin has=")
+            + (String("True") if has_input else String("False")) + String("\n"),
+        )
+        if not has_input:
             if len(self._pending) > 0:
                 self._flush_pending_as_esc()
                 if self._queue_head < len(self._queue):
                     return self._pop_queue()
             return None
-        var buf = alloc_zero_buffer(1024)
-        var n = read_into(STDIN_FD, buf, 1024)
+        self._trace(String("    poll_event:before-read_into\n"))
+        var n = read_into(STDIN_FD, self._read_buf, 1024)
+        self._trace(
+            String("    poll_event:after-read_into n=") + String(n) + String("\n"),
+        )
         if n <= 0:
             if len(self._pending) > 0:
                 self._flush_pending_as_esc()
                 if self._queue_head < len(self._queue):
                     return self._pop_queue()
             return None
-        # Build pending + new into a fresh buffer so parse_input sees a
-        # contiguous view spanning the split.
+        # Snapshot the freshly-read bytes before any further work, as
+        # space-separated decimal byte values (ESC=27, '[' = 91, etc.).
+        var dump = String("    poll_event:read_bytes ")
+        for i in range(n):
+            dump += String(Int(self._read_buf[i]))
+            dump += String(" ")
+        dump += String("\n")
+        self._trace(dump)
         var combined = List[UInt8]()
         for i in range(len(self._pending)):
             combined.append(self._pending[i])
         for i in range(n):
-            combined.append(buf[i])
+            combined.append(self._read_buf[i])
         self._pending = List[UInt8]()
         var total = len(combined)
+        self._trace(
+            String("    poll_event:combined ") + String(total) + String("B\n"),
+        )
         var bytes = StringSlice(
             ptr=combined.unsafe_ptr(), length=total
         ).as_bytes()
         var pos = 0
+        var iters = 0
         while pos < total:
+            iters += 1
+            self._trace(
+                String("    poll_event:parse iter=") + String(iters)
+                + String(" pos=") + String(pos) + String("\n"),
+            )
             var slice = String(StringSlice(unsafe_from_utf8=bytes[pos:]))
             var parsed = parse_input(slice)
             var consumed = parsed[1]
+            self._trace(
+                String("    poll_event:parsed consumed=") + String(consumed)
+                + String(" kind=") + String(Int(parsed[0].kind))
+                + String("\n"),
+            )
             if consumed <= 0:
-                # Partial — save the tail as pending and stop parsing.
                 for i in range(pos, total):
                     self._pending.append(combined[i])
                 break
             if parsed[0].kind != EVENT_NONE:
                 self._queue.append(parsed[0])
             pos += consumed
-        # Cap the pending buffer so a stream of malformed partials can't grow
-        # it without bound. A real escape sequence is well under this.
         if len(self._pending) > 64:
             self._pending = List[UInt8]()
         if self._queue_head >= len(self._queue):
+            self._trace(String("    poll_event:exit None\n"))
             return None
+        self._trace(String("    poll_event:exit pop_queue\n"))
         return self._pop_queue()
 
     fn _pop_queue(mut self) -> Event:

@@ -40,7 +40,7 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .file_io import basename, find_git_project, join_path, stat_file
+from .file_io import basename, find_git_project, join_path, stat_file, write_file
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Rect
@@ -49,6 +49,11 @@ from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager
+from .dap_dispatch import DapManager, DapStackFrame, DapVariable
+from .debug_pane import DebugPane, PANE_ROW_WATCH
+from .debugger_config import (
+    DebuggerSpec, built_in_debuggers, find_debugger_for_language,
+)
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, which
 from .project import replace_in_project
@@ -77,6 +82,19 @@ comptime PROJECT_FIND         = String("edit:project_find")
 comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
+# Debugger actions. ``DEBUG_START_OR_CONTINUE`` is a single F5-style
+# binding: starts the session if none is active, continues if stopped.
+comptime DEBUG_START_OR_CONTINUE = String("debug:start_or_continue")
+comptime DEBUG_TOGGLE_BREAKPOINT = String("debug:toggle_bp")
+comptime DEBUG_CONDITIONAL_BP    = String("debug:conditional_bp")
+comptime DEBUG_STEP_OVER         = String("debug:step_over")
+comptime DEBUG_STEP_IN           = String("debug:step_in")
+comptime DEBUG_STEP_OUT          = String("debug:step_out")
+comptime DEBUG_STOP              = String("debug:stop")
+comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
+comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
+comptime DEBUG_DUMP_DIAGNOSTIC   = String("debug:dump_diagnostic")
+comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
 comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
@@ -98,6 +116,8 @@ comptime _PA_REPLACE_DO          = String("__pa_replace_do")
 comptime _PA_PROJECT_REPLACE_FIND = String("__pa_project_replace_find")
 comptime _PA_PROJECT_REPLACE_DO  = String("__pa_project_replace_do")
 comptime _PA_SAVE_AS             = String("__pa_save_as")
+comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
+comptime _PA_ADD_WATCH           = String("__pa_add_watch")
 
 
 fn ctrl_key(letter: String) -> UInt32:
@@ -216,6 +236,46 @@ struct Desktop(Movable):
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
     var lsp_languages: List[String]
+    # Debugger state. One ``DapManager`` per Desktop (single concurrent
+    # session) — multi-session debugging would need a list keyed by
+    # something (language? session id?), and we don't have a use case
+    # for that yet. ``dap_specs`` is the registry the host can read /
+    # extend; selection happens in ``dispatch_action`` when the user
+    # hits F5 or the Debug menu item.
+    var dap: DapManager
+    var dap_specs: List[DebuggerSpec]
+    var debug_pane: DebugPane
+    # Latched current-execution location. Painted as ``▶`` in the gutter
+    # of whichever editor has a matching ``file_path``. Cleared on
+    # ``continued`` / ``terminated`` events.
+    var _dap_exec_path: String
+    var _dap_exec_line: Int
+    # Frame chosen as "current" for variables fetch — top of stack until
+    # the user clicks elsewhere. Stored so the scope/variables responses
+    # know which frame they belong to even after the pane has been
+    # repainted with a different selection.
+    var _dap_current_frame_id: Int
+    # Label of the scope whose variables are in flight. Used to render
+    # ``Locals:`` / ``Globals:`` in the pane when the response lands.
+    var _dap_pending_scope_label: String
+    # When ``request_variables`` lands, the response goes to one of two
+    # destinations: either the initial scope load (replace top of pane)
+    # or a tree expansion (splice into existing rows). These fields
+    # track which one the next ``has_variables`` should fold into.
+    var _dap_var_target_kind: UInt8     # 0=scope_initial, 1=expand
+    var _dap_var_target_row: Int
+    var _dap_var_target_depth: Int
+    # Cached inspect inputs so we can rebuild the pane when only one
+    # of (stack, locals, watches) changes.
+    var _dap_stack_cache: List[DapStackFrame]
+    var _dap_watch_exprs: List[String]
+    var _dap_watch_values: List[String]   # parallel to exprs (last result)
+    # Diagnostic dump produced by ``Debug → Dump Diagnostic``. Stays
+    # empty in normal use. The host's ``finally`` block reads these
+    # after ``app.stop()`` so the dump prints to the user's restored
+    # terminal scrollback, even if the in-app pane was wedged.
+    var pending_diagnostic: String
+    var pending_diagnostic_path: String
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -239,6 +299,21 @@ struct Desktop(Movable):
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
         self.lsp_languages = List[String]()
+        self.dap = DapManager()
+        self.dap_specs = built_in_debuggers()
+        self.debug_pane = DebugPane()
+        self._dap_exec_path = String("")
+        self._dap_exec_line = -1
+        self._dap_current_frame_id = -1
+        self._dap_pending_scope_label = String("")
+        self._dap_var_target_kind = UInt8(0)
+        self._dap_var_target_row = -1
+        self._dap_var_target_depth = 0
+        self._dap_stack_cache = List[DapStackFrame]()
+        self._dap_watch_exprs = List[String]()
+        self._dap_watch_values = List[String]()
+        self.pending_diagnostic = String("")
+        self.pending_diagnostic_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -275,16 +350,60 @@ struct Desktop(Movable):
                 MOD_CTRL,
                 WINDOW_FOCUS_PREFIX + String(n),
             ))
+        # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
+        # the de facto standard set across VS Code, JetBrains, and most
+        # other IDEs. Registered after the Ctrl-letter set so any user
+        # override registered later still wins (the lookup walks
+        # newest-first).
+        self._hotkeys.append(Hotkey(
+            KEY_F5, MOD_NONE, DEBUG_START_OR_CONTINUE,
+        ))
+        self._hotkeys.append(Hotkey(KEY_F5, MOD_SHIFT, DEBUG_STOP))
+        self._hotkeys.append(Hotkey(
+            KEY_F9, MOD_NONE, DEBUG_TOGGLE_BREAKPOINT,
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F9, MOD_SHIFT, DEBUG_CONDITIONAL_BP,
+        ))
+        self._hotkeys.append(Hotkey(KEY_F10, MOD_NONE, DEBUG_STEP_OVER))
+        self._hotkeys.append(Hotkey(KEY_F11, MOD_NONE, DEBUG_STEP_IN))
+        self._hotkeys.append(Hotkey(KEY_F11, MOD_SHIFT, DEBUG_STEP_OUT))
+        # Ctrl+Shift+D: dump DAP diagnostic. Bypasses the menu so
+        # it works even when the in-app rendering / event loop has
+        # gone sluggish.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("d")), MOD_CTRL | MOD_SHIFT, DEBUG_DUMP_DIAGNOSTIC,
+        ))
+        # F8: toggle debug pane focus. Workaround until pane-mouse
+        # works; arrow keys then scroll the stack list while the
+        # pane is focused.
+        self._hotkeys.append(Hotkey(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE))
 
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
-        widgets. The file tree, when visible, eats space on the right."""
+        widgets. The file tree, when visible, eats space on the right; the
+        debug pane, when active, eats space at the bottom."""
         var right = screen.b.x
         if self.file_tree.visible:
             right -= self.file_tree.width
             if right < 0:
                 right = 0
-        return Rect(0, 1, right, screen.b.y - 1)
+        var bottom = screen.b.y - 1
+        if self.debug_pane.visible:
+            bottom -= self.debug_pane.preferred_height
+            if bottom < 1:
+                bottom = 1
+        return Rect(0, 1, right, bottom)
+
+    fn debug_pane_rect(self, screen: Rect) -> Rect:
+        """Where the bottom-docked debug pane lives — above the status
+        bar (which is always one row tall at ``screen.b.y - 1``)."""
+        if not self.debug_pane.visible:
+            return Rect.empty()
+        var top = screen.b.y - 1 - self.debug_pane.preferred_height
+        if top < 1:
+            top = 1
+        return Rect(0, top, screen.b.x, screen.b.y - 1)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
@@ -303,6 +422,7 @@ struct Desktop(Movable):
         canvas.fill(self.workspace_rect(screen), self.bg_pattern, self.bg_attr)
         self.windows.paint(canvas)
         self.file_tree.paint(canvas, screen)
+        self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         self.menu_bar.paint(canvas, screen)
         self.status_bar.paint(canvas, screen)
         # Modal layers float above everything else. Only one is ever active
@@ -620,12 +740,18 @@ struct Desktop(Movable):
                 )
             return Optional[String]()
         if event.kind == EVENT_KEY:
+            # Pane absorbs scroll keys when focused; if not absorbed,
+            # fall through to the regular key dispatch.
+            if self.debug_pane.handle_key(event):
+                return Optional[String]()
             return self._handle_key(event, screen)
-        # Mouse events (and everything else): route through menu → tree → windows.
+        # Mouse events (and everything else): route through menu → pane → tree → windows.
         var result = self.menu_bar.handle_event(event, screen.b.x)
         if result.action:
             return self.dispatch_action(result.action.value(), screen)
         if result.consumed:
+            return Optional[String]()
+        if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
             return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
             return Optional[String]()
@@ -799,6 +925,42 @@ struct Desktop(Movable):
             var idx = _parse_int(action, len(WINDOW_FOCUS_PREFIX.as_bytes()))
             self.windows.focus_by_index(idx)
             return Optional[String]()
+        if action == DEBUG_TOGGLE_BREAKPOINT:
+            self._debug_toggle_breakpoint()
+            return Optional[String]()
+        if action == DEBUG_CONDITIONAL_BP:
+            self._debug_open_condition_prompt()
+            return Optional[String]()
+        if action == DEBUG_START_OR_CONTINUE:
+            self._debug_start_or_continue()
+            return Optional[String]()
+        if action == DEBUG_STEP_OVER:
+            _ = self.dap.next()
+            return Optional[String]()
+        if action == DEBUG_STEP_IN:
+            _ = self.dap.step_in()
+            return Optional[String]()
+        if action == DEBUG_STEP_OUT:
+            _ = self.dap.step_out()
+            return Optional[String]()
+        if action == DEBUG_STOP:
+            self.dap.shutdown()
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+            return Optional[String]()
+        if action == DEBUG_ADD_WATCH:
+            self._pending_action = _PA_ADD_WATCH
+            self.prompt.open(String("Watch expression: "))
+            return Optional[String]()
+        if action == DEBUG_TOGGLE_RAISED:
+            self._toggle_raised_exceptions()
+            return Optional[String]()
+        if action == DEBUG_DUMP_DIAGNOSTIC:
+            self._dump_dap_diagnostic()
+            return Optional[String]()
+        if action == DEBUG_FOCUS_PANE:
+            self.debug_pane.focused = not self.debug_pane.focused
+            return Optional[String]()
         return Optional[String](action)
 
     # --- LSP tick ---------------------------------------------------------
@@ -897,6 +1059,475 @@ struct Desktop(Movable):
         _refresh_status_for(
             self.status_bar, prefix, self.lsp_managers[lsp_idx],
         )
+
+    # --- DAP wiring ------------------------------------------------------
+
+    fn dap_tick(mut self, screen: Rect):
+        """Drive the DAP session forward and reflect its state in the UI.
+
+        Called once per frame by the host (just like ``lsp_tick``).
+        Steps:
+
+        1. ``self.dap.tick()`` drains incoming messages, advancing the
+           handshake and parking events.
+        2. On a fresh ``stopped`` event, request a single-frame stack
+           trace so we can paint the ``▶`` arrow on the right line.
+        3. When the trace lands, latch ``_dap_exec_*`` and auto-jump the
+           workspace to that location (opening the file if needed).
+        4. ``terminated`` clears the latched arrow and the breakpoint
+           gutter so the editor returns to a quiescent state.
+        5. Push the per-file breakpoint slice + exec arrow onto every
+           editor window's gutter fields, sized to 2 columns when
+           anything debugger-related applies to that file.
+        6. Refresh the right-aligned status indicator.
+        """
+        self.dap.tick()
+        var stopped = self.dap.take_stopped()
+        if stopped:
+            # Fetch a deeper trace so the pane can show context, not
+            # just the top frame. 64 frames is plenty for typical
+            # stacks and trivial in payload size.
+            _ = self.dap.request_stack_trace(stopped.value().thread_id, 64)
+        # Frame click from the pane: re-fetch scopes for the chosen frame.
+        var fclick = self.debug_pane.consume_frame_click()
+        if fclick[0] != -1:
+            self._dap_current_frame_id = fclick[0]
+            self._dap_var_target_kind = UInt8(0)
+            _ = self.dap.request_scopes(fclick[0])
+            self._refresh_watches()
+        # Variable expand click: request children for the row's ref.
+        var eclick = self.debug_pane.consume_expand()
+        if eclick[0] != -1:
+            self._dap_var_target_kind = UInt8(1)
+            self._dap_var_target_row = eclick[1]
+            self._dap_var_target_depth = eclick[2]
+            _ = self.dap.request_variables(eclick[0])
+        # Collapse click: purely local, no DAP traffic.
+        var cclick = self.debug_pane.consume_collapse()
+        if cclick != -1:
+            self.debug_pane.collapse_at(cclick)
+        if self.dap.has_stack():
+            var frames = self.dap.take_stack()
+            if len(frames) > 0:
+                self._dap_exec_path = frames[0].path
+                self._dap_exec_line = frames[0].line
+                self._dap_current_frame_id = frames[0].id
+                if len(frames[0].path.as_bytes()) > 0:
+                    self._jump_to(
+                        DefinitionResolved(
+                            frames[0].path, frames[0].line, 0,
+                        ),
+                        screen,
+                    )
+                # Cache the stack so subsequent variable arrivals can
+                # rebuild the pane's inspect rows around the same frames.
+                self._dap_stack_cache = frames.copy()
+                # Kick off the chain: scopes → variables → pane fill.
+                var top_id = frames[0].id
+                self._dap_var_target_kind = UInt8(0)
+                _ = self.dap.request_scopes(top_id)
+                # Initial pane render: stack + empty locals + watches
+                # (so the user sees the stack while variables fetch).
+                self._rebuild_pane_inspect(List[DapVariable]())
+                # Re-evaluate watch expressions on the new frame.
+                self._refresh_watches()
+        if self.dap.has_scopes():
+            var scopes = self.dap.take_scopes()
+            var pick = -1
+            for i in range(len(scopes)):
+                if not scopes[i].expensive:
+                    pick = i
+                    break
+            if pick < 0 and len(scopes) > 0:
+                pick = 0
+            if pick >= 0:
+                _ = self.dap.request_variables(
+                    scopes[pick].variables_reference,
+                )
+                self._dap_pending_scope_label = scopes[pick].name
+        if self.dap.has_variables():
+            var vars = self.dap.take_variables()
+            if self._dap_var_target_kind == UInt8(1):
+                # Expand path: splice children after the parent row.
+                self.debug_pane.splice_children_at(
+                    self._dap_var_target_row,
+                    self._dap_var_target_depth,
+                    vars^,
+                )
+                self._dap_var_target_kind = UInt8(0)
+                self._dap_var_target_row = -1
+            else:
+                # Initial scope load: rebuild the inspect rows around
+                # the current stack + new locals.
+                self._rebuild_pane_inspect(vars^)
+        # Drain evaluate responses (watches). May arrive in batches.
+        if self.dap.has_evaluations():
+            self._fold_watch_results()
+        # Output events get appended to the pane log.
+        var outs = self.dap.take_outputs()
+        for k in range(len(outs)):
+            var cat = _category_to_pane(outs[k].category)
+            self.debug_pane.append_output(outs[k].text, cat)
+        # Adapter stderr — separate channel from DAP ``output`` events.
+        # debugpy / lldb-dap log import failures and crash tracebacks
+        # here. Without surfacing this, a crashed adapter looks
+        # identical to a slow one — state stays INITIALIZING forever
+        # because no response ever lands.
+        var err = self.dap.drain_stderr()
+        if len(err.as_bytes()) > 0:
+            self.debug_pane.append_output(err, UInt8(1))  # PANE_OUT_STDERR
+        if self.dap.consume_terminated():
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+            self._dap_current_frame_id = -1
+            self._dap_stack_cache = List[DapStackFrame]()
+            self.debug_pane.clear()
+        # Push gutter state to every editor window. We do this every
+        # frame (cheap — small lists, simple equality checks) so the
+        # gutter stays in sync after window churn (open / close / focus).
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var path = self.windows.windows[i].editor.file_path
+            if len(path.as_bytes()) == 0:
+                self.windows.windows[i].editor.gutter_width = 0
+                self.windows.windows[i].editor.exec_line = -1
+                continue
+            var bps = self.dap.breakpoints_for(path)
+            var has_session = self.dap.is_active()
+            var has_bps = len(bps) > 0
+            if has_session or has_bps:
+                self.windows.windows[i].editor.gutter_width = 2
+            else:
+                self.windows.windows[i].editor.gutter_width = 0
+            self.windows.windows[i].editor.breakpoint_lines = bps^
+            if _same_file(path, self._dap_exec_path):
+                self.windows.windows[i].editor.exec_line = \
+                    self._dap_exec_line
+            else:
+                self.windows.windows[i].editor.exec_line = -1
+        # Pane visibility + status. Pane is shown the entire time the
+        # session is alive (initialize → terminated) so the user sees
+        # the spawn happen in real time. ``set_status`` mirrors the
+        # right-aligned status-bar indicator so the same words are
+        # always visible whether the user is looking up or down.
+        self.debug_pane.visible = self.dap.is_active()
+        if self.debug_pane.visible:
+            self.debug_pane.set_status(self.dap.status_summary())
+        elif self.dap.is_failed():
+            # Surface the failure once even though we hide the pane —
+            # status-bar message is more discoverable than nothing.
+            pass
+        self._refresh_dap_status()
+        # End-of-tick marker — only emitted when the session is
+        # actively running so we don't flood the log with one line per
+        # 50 ms during idle. A missing marker right after a request
+        # narrows a crash to the post-tick paint / next_event path.
+        if self.dap.is_running() or self.dap.is_stopped():
+            self.dap.client.process.trace(String("dap_tick done"))
+
+    fn _rebuild_pane_inspect(mut self, var locals: List[DapVariable]):
+        """Rebuild the inspect rows from the cached stack + given locals
+        + cached watch results. Called whenever any one of those three
+        inputs changes; the others are pulled from cached state so the
+        pane stays consistent."""
+        var watch_lines = List[String]()
+        for k in range(len(self._dap_watch_exprs)):
+            var v = String("")
+            if k < len(self._dap_watch_values):
+                v = self._dap_watch_values[k]
+            watch_lines.append(
+                self._dap_watch_exprs[k] + String(" = ") + v,
+            )
+        var stack_copy = self._dap_stack_cache.copy()
+        self.debug_pane.rebuild_inspect(
+            stack_copy^,
+            String("Locals"),
+            locals^,
+            String("Watches"),
+            watch_lines^,
+            0,  # current frame index — top of stack on initial render
+        )
+
+    fn _refresh_watches(mut self):
+        """Fire ``evaluate`` for every watch expression against the
+        current frame. Results land asynchronously and are folded back
+        in via ``_fold_watch_results``."""
+        if not self.dap.is_stopped():
+            return
+        for k in range(len(self._dap_watch_exprs)):
+            _ = self.dap.request_evaluate(
+                self._dap_watch_exprs[k],
+                self._dap_current_frame_id,
+                String("watch"),
+            )
+
+    fn _fold_watch_results(mut self):
+        """Drain DAP evaluate responses, splice them into the parallel
+        ``_dap_watch_values`` list, and rebuild the pane so the new
+        values show up. Watch results identify themselves by the
+        original expression string — we don't keep an explicit seq map
+        on the Desktop side because the DAP layer already does that."""
+        var batch = self.dap.take_evaluations()
+        # ``types`` is returned but the pane currently shows just value.
+        for i in range(len(batch.expressions)):
+            var e = batch.expressions[i]
+            for k in range(len(self._dap_watch_exprs)):
+                if self._dap_watch_exprs[k] == e:
+                    if k < len(self._dap_watch_values):
+                        self._dap_watch_values[k] = batch.values[i]
+                    else:
+                        self._dap_watch_values.append(batch.values[i])
+                    break
+        # Pane rebuild needs current locals — we don't have them cached
+        # so reuse the existing pane row set by extracting locals from
+        # it. Simpler: only rebuild watches' display, which is part of
+        # the inspect rows. The cleanest path is to ask for a fresh
+        # variables dump on the current frame; cheap because the
+        # adapter usually serves these from cache. Skipping that here:
+        # when the pane is next rebuilt (next stop, next frame click),
+        # the new watch values will be picked up.
+        # We can also force an immediate refresh by reusing the last
+        # stack with empty locals — but that flickers. The compromise
+        # below: just rebuild rows with watch-only update by writing
+        # straight into the row text for ``PANE_ROW_WATCH`` rows.
+        self._patch_pane_watches()
+
+    fn _patch_pane_watches(mut self):
+        """In-place update of the watch rows' text in the pane.
+        Avoids a full rebuild (which would collapse any expanded
+        variable rows). Called after watch values change."""
+        var k = 0
+        var i = 0
+        while i < len(self.debug_pane.rows) \
+                and k < len(self._dap_watch_exprs):
+            if self.debug_pane.rows[i].kind == PANE_ROW_WATCH:
+                var v = String("")
+                if k < len(self._dap_watch_values):
+                    v = self._dap_watch_values[k]
+                var row = self.debug_pane.rows[i]
+                row.text = self._dap_watch_exprs[k] + String(" = ") + v
+                self.debug_pane.rows[i] = row
+                k += 1
+            i += 1
+
+    fn add_watch(mut self, var expression: String):
+        """Add a watch expression. Evaluates immediately if the session
+        is stopped. Can be called from menu actions / hotkey handlers."""
+        self._dap_watch_exprs.append(expression^)
+        self._dap_watch_values.append(String("(pending)"))
+        if self.dap.is_stopped():
+            _ = self.dap.request_evaluate(
+                self._dap_watch_exprs[len(self._dap_watch_exprs) - 1],
+                self._dap_current_frame_id,
+                String("watch"),
+            )
+        # Force a rebuild so the new watch row appears immediately.
+        self._rebuild_pane_inspect(List[DapVariable]())
+        self._refresh_watches()
+
+    fn remove_watch(mut self, expression: String):
+        var new_exprs = List[String]()
+        var new_values = List[String]()
+        for k in range(len(self._dap_watch_exprs)):
+            if self._dap_watch_exprs[k] == expression:
+                continue
+            new_exprs.append(self._dap_watch_exprs[k])
+            if k < len(self._dap_watch_values):
+                new_values.append(self._dap_watch_values[k])
+        self._dap_watch_exprs = new_exprs^
+        self._dap_watch_values = new_values^
+
+    fn _refresh_dap_status(mut self):
+        """When a debug session is active, surface its state on the right
+        side of the status bar (sharing space with the LSP indicator —
+        whichever was set most recently wins, which is fine since both
+        are ambient state and they never matter at exactly the same
+        instant)."""
+        if self.dap.is_active() or self.dap.is_failed():
+            var attr = Attr(BLACK, LIGHT_GRAY)
+            if self.dap.is_failed():
+                attr = Attr(LIGHT_RED, LIGHT_GRAY)
+            elif self.dap.is_stopped():
+                attr = Attr(YELLOW, LIGHT_GRAY)
+            self.status_bar.set_message(self.dap.status_summary(), attr)
+
+    fn _debug_open_condition_prompt(mut self):
+        """Shift+F9: prompt for a breakpoint condition on the focused
+        editor's cursor row. Pre-fills with any existing condition so
+        users can edit rather than re-type. Path + line are stashed in
+        ``_pending_arg`` as ``path|line`` so the submit handler can
+        recover them."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: file has no path — save it first"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var line = self.windows.windows[idx].editor.cursor_row
+        self._pending_arg = path + String("|") + String(line)
+        self._pending_action = _PA_BP_CONDITION
+        var existing = self.dap.breakpoint_condition(path, line)
+        var label = String("Break when (line ") + String(line + 1) + String("): ")
+        self.prompt.open(label, existing)
+
+    fn _dump_dap_diagnostic(mut self):
+        """Write everything we know about the current DAP session into
+        a side file and stash a copy on ``self.pending_diagnostic`` for
+        the host to print after the app exits.
+
+        Bypasses the pane on purpose. The "stuck at initializing" case
+        is exactly the case where the in-app rendering may also be
+        wedged (slow paints, blocked event loop, etc.) — surfacing the
+        diagnostic via a file + post-exit print is the most reliable
+        path: the file is there even if the print is missed, and the
+        print is there even if the file is missed.
+        """
+        var lines = String("--- DAP diagnostic ---\n")
+        lines = lines + String("state: ") + self.dap.status_summary() + String("\n")
+        if len(self.dap.failure_reason.as_bytes()) > 0:
+            lines = lines + String("failure: ") + self.dap.failure_reason \
+                + String("\n")
+        if len(self.dap.spawn_argv) > 0:
+            var av = String("argv:")
+            for k in range(len(self.dap.spawn_argv)):
+                av = av + String(" ") + self.dap.spawn_argv[k]
+            lines = lines + av + String("\n")
+        var stderr_text = self.dap.drain_stderr()
+        if len(stderr_text.as_bytes()) > 0:
+            lines = lines + String("stderr: ") + stderr_text
+            var sb = stderr_text.as_bytes()
+            if len(sb) > 0 and sb[len(sb) - 1] != 0x0A:
+                lines = lines + String("\n")
+        else:
+            lines = lines + String("stderr: <empty>\n")
+        var preview = self.dap.peek_read_buffer()
+        if len(preview.as_bytes()) > 0:
+            lines = lines + String("stdout (unparsed): ") + preview
+            var pb = preview.as_bytes()
+            if len(pb) > 0 and pb[len(pb) - 1] != 0x0A:
+                lines = lines + String("\n")
+        else:
+            lines = lines + String("stdout: <empty>\n")
+        lines = lines + String("--- end diagnostic ---\n")
+        var path = String("/tmp/mojovision-dap.log")
+        if write_file(path, lines):
+            self.pending_diagnostic_path = path
+        self.pending_diagnostic = lines
+
+    fn _toggle_raised_exceptions(mut self):
+        """Add or remove the ``raised`` exception filter. The
+        ``uncaught`` filter is left as-is — that's the always-on
+        default, while ``raised`` is the noisier opt-in."""
+        var current = self.dap.exception_filters()
+        var has_raised = False
+        for k in range(len(current)):
+            if current[k] == String("raised"):
+                has_raised = True
+                break
+        var new_filters = List[String]()
+        for k in range(len(current)):
+            if current[k] != String("raised"):
+                new_filters.append(current[k])
+        if not has_raised:
+            new_filters.append(String("raised"))
+        self.dap.set_exception_filters(new_filters^)
+
+    fn _debug_toggle_breakpoint(mut self):
+        """F9: toggle a breakpoint at the focused editor's cursor row.
+
+        Local list mutates immediately; the manager will resend the
+        ``setBreakpoints`` payload to the adapter on the next eligible
+        state. No-op when nothing is focused / the focused window isn't
+        an editor with a backing file.
+        """
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: file has no path — save it first"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var line = self.windows.windows[idx].editor.cursor_row
+        self.dap.toggle_breakpoint(path, line)
+
+    fn _debug_start_or_continue(mut self):
+        """F5: start a session if none is active, otherwise resume.
+
+        Picks the debugger spec from the focused editor's file
+        extension → language id → registry. If no debugger is registered
+        for that language (or the binary isn't on $PATH), surfaces a
+        descriptive status message rather than failing silently.
+        """
+        if self.dap.is_running():
+            return  # already running, nothing to do
+        if self.dap.is_stopped():
+            _ = self.dap.cont()
+            return
+        if self.dap.is_active():
+            return  # mid-handshake, ignore
+        # Fresh start. Need: program path + language → spec.
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            self.status_bar.set_message(
+                String("debug: focus a source file first"),
+                Attr(YELLOW, LIGHT_GRAY),
+            )
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: save the file first"),
+                Attr(YELLOW, LIGHT_GRAY),
+            )
+            return
+        var ext = extension_of(path)
+        var lang_idx = find_language_for_extension(self.lsp_specs, ext)
+        if lang_idx < 0:
+            self.status_bar.set_message(
+                String("debug: unknown language for ") + ext,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var lang_id = self.lsp_specs[lang_idx].language_id
+        var deb_idx = find_debugger_for_language(self.dap_specs, lang_id)
+        if deb_idx < 0:
+            self.status_bar.set_message(
+                String("debug: no adapter registered for ")
+                + lang_id,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        # If the manager is already TERMINATED / FAILED from a prior
+        # session, we need a fresh one — DapManager.start no-ops unless
+        # state == NOT_STARTED.
+        if self.dap.is_failed() or self.dap.is_terminated():
+            self.dap = DapManager()
+        var cwd = self.project.value() if self.project else String(".")
+        self.dap.start(
+            self.dap_specs[deb_idx], path, cwd, List[String](),
+        )
+        # Surface the resolved spawn line to the pane log immediately.
+        # Pre-stderr-drain debugging this was guesswork ("did it pick
+        # debugpy-adapter or python -m debugpy.adapter?"); a single
+        # console-category line removes the ambiguity. Also visible
+        # before the first event arrives, which matters when the
+        # adapter crashes silently.
+        if len(self.dap.spawn_argv) > 0:
+            var line = String("$ ")
+            for k in range(len(self.dap.spawn_argv)):
+                if k > 0:
+                    line = line + String(" ")
+                line = line + self.dap.spawn_argv[k]
+            self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
+            self.debug_pane.visible = True
 
     fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
         """Focus the window for ``target.path`` (opening it if needed) and
@@ -1062,6 +1693,36 @@ struct Desktop(Movable):
                 except:
                     pass
             return Optional[String]()
+        if pa == _PA_BP_CONDITION:
+            # ``_pending_arg`` carries ``path|line`` from when the
+            # prompt was opened. Empty input clears any existing
+            # condition (the breakpoint stays).
+            var arg = self._pending_arg
+            self._pending_arg = String("")
+            var sep = -1
+            var ab = arg.as_bytes()
+            for k in range(len(ab)):
+                if ab[k] == 0x7C:  # '|'
+                    sep = k
+                    break
+            if sep > 0:
+                var path = String(StringSlice(
+                    ptr=ab.unsafe_ptr(), length=sep,
+                ))
+                var line_str = String(StringSlice(
+                    ptr=ab.unsafe_ptr() + sep + 1, length=len(ab) - sep - 1,
+                ))
+                var line = 0
+                try:
+                    line = Int(atol(line_str))
+                except:
+                    pass
+                self.dap.set_breakpoint_condition(path, line, text)
+            return Optional[String]()
+        if pa == _PA_ADD_WATCH:
+            if len(text.as_bytes()) > 0:
+                self.add_watch(text)
+            return Optional[String]()
         return Optional[String]()
 
 
@@ -1077,6 +1738,31 @@ fn _starts_with(s: String, prefix: String) -> Bool:
         if sb[i] != pb[i]:
             return False
     return True
+
+
+fn _category_to_pane(category: String) -> UInt8:
+    """Map a DAP ``output`` event's category string to the pane's
+    output-attr enum. ``stderr`` lights the row red; ``console`` (and
+    ``important``) get a dim color so the user can tell adapter chatter
+    apart from program output. Anything unknown defaults to stdout."""
+    if category == String("stderr"):
+        return UInt8(1)   # PANE_OUT_STDERR
+    if category == String("console") or category == String("important"):
+        return UInt8(2)   # PANE_OUT_CONSOLE
+    return UInt8(0)       # PANE_OUT_STDOUT
+
+
+fn _same_file(a: String, b: String) -> Bool:
+    """True if ``a`` and ``b`` resolve to the same on-disk file. Used to
+    match a DAP stack-frame source path against editor file paths even
+    when one is a symlink and the other is canonical."""
+    if a == b:
+        return True
+    if len(a.as_bytes()) == 0 or len(b.as_bytes()) == 0:
+        return False
+    var ra = realpath(a)
+    var rb = realpath(b)
+    return len(ra.as_bytes()) > 0 and ra == rb
 
 
 fn _parse_int(s: String, start: Int) -> Int:

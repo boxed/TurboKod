@@ -14,7 +14,10 @@ from std.collections.list import List
 from .canvas import Canvas
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
-from .colors import Attr, BLUE, CYAN, WHITE, YELLOW
+from .colors import (
+    Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
+    WHITE, YELLOW,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME,
@@ -184,6 +187,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``consume_definition_request`` and forwards to whichever LSP client
     # is active.
     var pending_definition: Optional[DefinitionRequest]
+    # Debugger gutter state. ``gutter_width`` is 0 when no debug session
+    # is associated with this file; when > 0 the leftmost columns are
+    # reserved for breakpoint dots / current-execution arrow. The Desktop
+    # repopulates ``breakpoint_lines`` and ``exec_line`` each frame from
+    # the active ``DapManager`` — the editor itself owns no DAP state.
+    var gutter_width: Int
+    var breakpoint_lines: List[Int]
+    var exec_line: Int
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -201,6 +212,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self.pending_definition = Optional[DefinitionRequest]()
+        self.gutter_width = 0
+        self.breakpoint_lines = List[Int]()
+        self.exec_line = -1
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -218,6 +232,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self.pending_definition = Optional[DefinitionRequest]()
+        self.gutter_width = 0
+        self.breakpoint_lines = List[Int]()
+        self.exec_line = -1
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -247,6 +264,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
         self.pending_definition = copy.pending_definition
+        self.gutter_width = copy.gutter_width
+        self.breakpoint_lines = copy.breakpoint_lines.copy()
+        self.exec_line = copy.exec_line
 
     fn _refresh_highlights(mut self):
         var ext = extension_of(self.file_path)
@@ -444,14 +464,48 @@ struct Editor(ImplicitlyCopyable, Movable):
         var attr = Attr(YELLOW, BLUE)
         var sel_attr = Attr(YELLOW, CYAN)
         canvas.fill(view, String(" "), attr)
-        # Apply syntax highlights AFTER the plain-text fill so they overlay
-        # the default attr; we paint them as an attr-only overlay below
-        # (after the text pass) so glyphs aren't disturbed.
-        # The editor uses the entire view; the surrounding ``Window`` overlays
-        # scroll bars on its border, not inside our content area.
+        # Reserve ``gutter`` columns at the left for the debugger gutter.
+        # Everything in this method's text/cursor/selection passes uses
+        # ``text_x0`` as its origin x — the original code used
+        # ``view.a.x`` directly, and adding the gutter is just a shift.
+        # When ``gutter_width == 0`` this is a no-op and behaves
+        # identically to the pre-DAP editor.
+        var gutter = self.gutter_width
+        var text_x0 = view.a.x + gutter
         var content_right = view.b.x
         var content_bottom = view.b.y
         var content_h = view.height()
+        var text_w = view.width() - gutter
+        if text_w < 0:
+            text_w = 0
+        # Gutter pass — render breakpoint / exec markers per visible row.
+        # Done before text/highlight overlay so the markers aren't
+        # clobbered by anything downstream.
+        if gutter > 0:
+            var gutter_attr = Attr(LIGHT_GRAY, BLUE)
+            var bp_attr = Attr(LIGHT_RED, BLUE)
+            var exec_attr = Attr(LIGHT_YELLOW, BLUE)
+            for screen_row in range(content_h):
+                var buf_row = self.scroll_y + screen_row
+                if buf_row >= self.buffer.line_count():
+                    break
+                var sy_g = view.a.y + screen_row
+                for gx in range(gutter):
+                    canvas.set(
+                        view.a.x + gx, sy_g,
+                        Cell(String(" "), gutter_attr, 1),
+                    )
+                # Breakpoint dot in column 0 of the gutter.
+                for k in range(len(self.breakpoint_lines)):
+                    if self.breakpoint_lines[k] == buf_row:
+                        canvas.set(
+                            view.a.x, sy_g,
+                            Cell(String("●"), bp_attr, 1),
+                        )
+                        break
+                if buf_row == self.exec_line:
+                    var ax = view.a.x + (1 if gutter >= 2 else 0)
+                    canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
         var sel = self.selection()
         var sel_active = self.has_selection()
         var sel_sr = sel[0]; var sel_sc = sel[1]
@@ -470,7 +524,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             else:
                 visible = line
             _ = canvas.put_text(
-                Point(view.a.x, view.a.y + screen_row),
+                Point(text_x0, view.a.y + screen_row),
                 visible,
                 attr,
                 content_right,
@@ -488,10 +542,10 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var hl_end = hl.col_end - self.scroll_x
                 if hl_start < 0:
                     hl_start = 0
-                if hl_end > view.width():
-                    hl_end = view.width()
+                if hl_end > text_w:
+                    hl_end = text_w
                 for c in range(hl_start, hl_end):
-                    var sx_hl = view.a.x + c
+                    var sx_hl = text_x0 + c
                     if sx_hl >= content_right:
                         break
                     var col_in_line = self.scroll_x + c
@@ -511,14 +565,14 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var visible_start = row_start - self.scroll_x
                 var visible_end = row_end - self.scroll_x
                 if visible_start < 0: visible_start = 0
-                var sx0 = view.a.x + visible_start
-                var sx1 = view.a.x + visible_end
+                var sx0 = text_x0 + visible_start
+                var sx1 = text_x0 + visible_end
                 if sx1 > content_right: sx1 = content_right
                 var sy = view.a.y + screen_row
                 for x in range(sx0, sx1):
                     var bytes = line.as_bytes()
                     var ch: String
-                    var col_in_line = self.scroll_x + (x - view.a.x)
+                    var col_in_line = self.scroll_x + (x - text_x0)
                     if col_in_line < n:
                         var b = Int(bytes[col_in_line])
                         if b < 0x80:
@@ -530,9 +584,9 @@ struct Editor(ImplicitlyCopyable, Movable):
                     canvas.set(x, sy, Cell(ch, sel_attr, 1))
         # Cursor: a reverse-video cell when focused (only inside content area).
         if focused:
-            var sx = view.a.x + (self.cursor_col - self.scroll_x)
+            var sx = text_x0 + (self.cursor_col - self.scroll_x)
             var sy = view.a.y + (self.cursor_row - self.scroll_y)
-            if view.a.x <= sx and sx < content_right \
+            if text_x0 <= sx and sx < content_right \
                and view.a.y <= sy and sy < content_bottom:
                 var line = self.buffer.line(self.cursor_row)
                 var bytes = line.as_bytes()
@@ -857,7 +911,12 @@ struct Editor(ImplicitlyCopyable, Movable):
             return False
         if not event.pressed:
             return False
-        var col = event.pos.x - view.a.x + self.scroll_x
+        # The gutter occupies the leftmost ``gutter_width`` columns;
+        # clicks there land on column 0 (so a gutter click still picks
+        # the corresponding line, just like clicking the line number in
+        # most editors). The actual breakpoint toggle is on F9 — handled
+        # by Desktop, since only it knows the active DapManager.
+        var col = event.pos.x - view.a.x - self.gutter_width + self.scroll_x
         var row = event.pos.y - view.a.y + self.scroll_y
         if row < 0: row = 0
         var max_row = self.buffer.line_count() - 1
@@ -977,7 +1036,9 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn _scroll_to_cursor(mut self, view: Rect):
         var h = view.height()
-        var w = view.width()
+        var w = view.width() - self.gutter_width
+        if w < 1:
+            w = 1
         if self.cursor_row < self.scroll_y:
             self.scroll_y = self.cursor_row
         elif self.cursor_row >= self.scroll_y + h:
@@ -997,7 +1058,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         visible — fine for typing, jarring for landings.
         """
         var h = view.height()
-        var w = view.width()
+        var w = view.width() - self.gutter_width
+        if w < 1:
+            w = 1
         var max_row = self.buffer.line_count() - 1
         var bottom = self.cursor_row + margin_below
         if bottom > max_row:

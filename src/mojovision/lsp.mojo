@@ -17,16 +17,20 @@ Phase 2 doesn't yet wire the responses into the editor — Phase 3 maps
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from std.io.file_descriptor import FileDescriptor
+from std.ffi import external_call
+
 from .json import (
     JsonValue, encode_json, json_int, json_object, json_str, parse_json,
 )
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
     alloc_zero_buffer, append_string_bytes, close_fd, getenv_value,
-    kill_pid, pipe_pair, poll_stdin, posix_spawn_file_actions_addclose,
-    posix_spawn_file_actions_adddup2, posix_spawn_file_actions_destroy,
-    posix_spawn_file_actions_init, posix_spawnp_call, read_into,
-    set_nonblocking, waitpid_blocking, waitpid_nohang, write_buffer,
+    kill_pid, monotonic_ms, pipe_pair, poll_stdin,
+    posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
+    posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
+    posix_spawnp_call, read_into, set_nonblocking, waitpid_blocking,
+    waitpid_nohang, write_buffer,
 )
 
 
@@ -75,11 +79,27 @@ fn _build_envp_from_parent() -> ArgvBuffer:
     names.append(String("LD_LIBRARY_PATH"))
     names.append(String("DYLD_LIBRARY_PATH"))
     names.append(String("DYLD_FALLBACK_LIBRARY_PATH"))
+    # Python-flavored vars: debugpy + pyright both consult these to
+    # find their own packages. Without PYTHONPATH a system ``python``
+    # invoked as ``python -m debugpy.adapter`` may locate ``python`` but
+    # not ``debugpy`` and silently stall on import resolution.
+    names.append(String("PYTHONPATH"))
+    names.append(String("PYTHONHOME"))
+    names.append(String("PYTHONUSERBASE"))
+    names.append(String("PYTHONUNBUFFERED"))
     var pairs = List[String]()
     for i in range(len(names)):
         var v = getenv_value(names[i])
         if len(v.as_bytes()) > 0:
             pairs.append(names[i] + String("=") + v)
+    # Force unbuffered Python I/O for any spawned child. Without this,
+    # ``python -m debugpy.adapter`` (and other Python-based servers)
+    # default to *full* stdout buffering when stdout is a pipe — they
+    # write a response, it sits in their internal buffer until the
+    # buffer fills or they explicitly flush, and our ``poll`` sees
+    # nothing. The handshake then hangs at INITIALIZING with no error.
+    # Setting PYTHONUNBUFFERED=1 makes Python flush on every write.
+    pairs.append(String("PYTHONUNBUFFERED=1"))
     return _build_argv_buffer(pairs^)
 
 
@@ -229,6 +249,14 @@ struct LspProcess(Movable):
     var stderr_fd: Int32
     var alive: Bool
     var _read_buffer: List[UInt8]
+    # Optional trace log. When ``trace_fd >= 0`` every wire-level event
+    # (writes, reads, message extractions) is appended to that fd as a
+    # single line. The whole point of streaming the log is so that a
+    # hung session still leaves a complete-up-to-the-hang trail on
+    # disk — no need for the host loop to be alive to flush. We
+    # ``write()`` directly via ``FileDescriptor`` (no userspace
+    # buffering) so each call is durable on return.
+    var trace_fd: Int32
 
     fn __init__(out self):
         self.pid = -1
@@ -237,6 +265,7 @@ struct LspProcess(Movable):
         self.stderr_fd = -1
         self.alive = False
         self._read_buffer = List[UInt8]()
+        self.trace_fd = -1
 
     @staticmethod
     fn spawn(argv: List[String]) raises -> Self:
@@ -317,6 +346,22 @@ struct LspProcess(Movable):
         _ = set_nonblocking(proc.stderr_fd)
         return proc^
 
+    fn trace(self, var line: String):
+        """Append ``line`` (plus a newline) to the trace fd, if open.
+
+        Uses the raw ``write`` syscall — no userspace buffering — so
+        each call is durable on return. Errors are swallowed; this is
+        diagnostics, never load-bearing for correctness."""
+        if self.trace_fd < 0:
+            return
+        var stamped = String("[") + String(monotonic_ms()) + String("] ") \
+            + line + String("\n")
+        var bytes = stamped.as_bytes()
+        if len(bytes) == 0:
+            return
+        var f = FileDescriptor(Int(self.trace_fd))
+        f.write_bytes(bytes)
+
     fn write_message(mut self, payload: String) raises:
         """Frame ``payload`` with ``Content-Length: N\\r\\n\\r\\n`` and write
         the whole thing to the child's stdin in one syscall."""
@@ -325,6 +370,17 @@ struct LspProcess(Movable):
         var buf = List[UInt8]()
         append_string_bytes(buf, hdr)
         append_string_bytes(buf, payload)
+        if self.trace_fd >= 0:
+            # Truncate huge payloads in the trace — full breakpoint
+            # lists, big stack traces etc. can run to several KB and
+            # the log is meant to be human-readable.
+            var preview = payload
+            var pb = payload.as_bytes()
+            if len(pb) > 400:
+                preview = String(StringSlice(
+                    ptr=pb.unsafe_ptr(), length=400,
+                )) + String("…")
+            self.trace(String("> ") + String(n) + String("B ") + preview)
         write_buffer(self.stdin_fd, buf)
 
     fn poll_message(mut self, timeout_ms: Int32) -> Optional[String]:
@@ -337,19 +393,48 @@ struct LspProcess(Movable):
         # Drain anything already in the buffer first.
         var prefab = self._extract_one_message()
         if prefab:
+            if self.trace_fd >= 0:
+                var pb = prefab.value().as_bytes()
+                var preview = prefab.value()
+                if len(pb) > 400:
+                    preview = String(StringSlice(
+                        ptr=pb.unsafe_ptr(), length=400,
+                    )) + String("…")
+                self.trace(
+                    String("< ") + String(len(pb)) + String("B ") + preview,
+                )
             return prefab
         if not poll_stdin(self.stdout_fd, timeout_ms):
             return Optional[String]()
         var scratch = alloc_zero_buffer(4096)
         var n = read_into(self.stdout_fd, scratch, 4096)
         if n <= 0:
+            if self.trace_fd >= 0 and n == 0:
+                self.trace(String("< EOF on stdout"))
             return Optional[String]()
         for i in range(n):
             self._read_buffer.append(scratch[i])
+        if self.trace_fd >= 0:
+            self.trace(
+                String("< raw ") + String(n) + String("B (buffer now ")
+                + String(len(self._read_buffer)) + String("B)"),
+            )
         if len(self._read_buffer) > _BUF_CAP_GUARD:
             self._read_buffer = List[UInt8]()
             return Optional[String]()
-        return self._extract_one_message()
+        var extracted = self._extract_one_message()
+        if extracted and self.trace_fd >= 0:
+            var eb = extracted.value().as_bytes()
+            var preview = extracted.value()
+            if len(eb) > 400:
+                preview = String(StringSlice(
+                    ptr=eb.unsafe_ptr(), length=400,
+                )) + String("…")
+            self.trace(
+                String("< extracted ") + String(len(eb)) + String("B ")
+                + preview,
+            )
+        return extracted
 
     fn _extract_one_message(mut self) -> Optional[String]:
         """Scan ``_read_buffer`` for a complete framed payload; if one is
@@ -377,21 +462,68 @@ struct LspProcess(Movable):
         )
         return Optional[String](body^)
 
+    fn peek_read_buffer(self) -> String:
+        """Return whatever bytes are currently sitting in the read
+        buffer, formatted as a printable preview. Diagnostics for the
+        "framer didn't extract a message" case — when the adapter
+        responds with non-spec output (Python tracebacks on stdout,
+        log lines without Content-Length headers, etc.) the bytes
+        accumulate here forever and ``poll_message`` never returns.
+        Showing them lets a human spot the framing mismatch.
+        """
+        if len(self._read_buffer) == 0:
+            return String("")
+        # Cap the preview at 512 bytes — enough for a partial header
+        # block or the start of a malformed payload, short enough to
+        # not flood the pane.
+        var n = len(self._read_buffer)
+        if n > 512:
+            n = 512
+        var out = List[UInt8]()
+        for i in range(n):
+            var b = self._read_buffer[i]
+            # Replace control bytes (other than ``\r\n\t``) with ``·``
+            # so the preview stays single-line and obvious.
+            if b == 0x0A or b == 0x0D:
+                out.append(b)
+            elif b < 0x20 or b == 0x7F:
+                # 0xC2 0xB7 = U+00B7 MIDDLE DOT.
+                out.append(0xC2)
+                out.append(0xB7)
+            else:
+                out.append(b)
+        return String(StringSlice(
+            ptr=out.unsafe_ptr(), length=len(out),
+        ))
+
     fn drain_stderr(mut self) -> String:
-        """Read whatever's available on the server's stderr — useful for
-        diagnostics when something goes sideways. Non-blocking."""
+        """Drain whatever's available on the server's stderr.
+        Non-blocking; loops until ``poll`` says no more data so a
+        chatty adapter (debugpy logs many lines per second) can't
+        fill the pipe and deadlock on a blocking write. Capped at
+        64 KB per call to bound the cost of a single tick.
+
+        Without the loop we'd read at most 4 KB per frame; debugpy's
+        startup banner alone is ~1 KB, so a frame-aligned drain
+        could fall behind on slow paint cycles and the adapter's
+        write-end would back up against the pipe buffer (~64 KB on
+        macOS). Once that backs up, the adapter's main thread blocks
+        on ``write(stderr, …)`` and never reaches the code that
+        replies to our ``initialize`` — appearing as a total hang.
+        """
         var out = String("")
         if self.stderr_fd < 0:
             return out
-        if not poll_stdin(self.stderr_fd, Int32(0)):
-            return out
+        var total = 0
         var scratch = alloc_zero_buffer(4096)
-        var n = read_into(self.stderr_fd, scratch, 4096)
-        if n <= 0:
-            return out
-        out = String(StringSlice(
-            ptr=scratch.unsafe_ptr(), length=n,
-        ))
+        while poll_stdin(self.stderr_fd, Int32(0)) and total < 65536:
+            var m = read_into(self.stderr_fd, scratch, 4096)
+            if m <= 0:
+                break
+            out = out + String(StringSlice(
+                ptr=scratch.unsafe_ptr(), length=m,
+            ))
+            total += m
         return out
 
     fn terminate(mut self):

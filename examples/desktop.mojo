@@ -27,10 +27,17 @@ opening a file dialog, focusing demo windows, quitting.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 from std.sys import argv
 
 from mojovision import (
-    APP_QUIT_ACTION, Application, Desktop, FileDialog, Menu, MenuItem, Rect,
+    APP_QUIT_ACTION, Application,
+    Event,
+    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_DUMP_DIAGNOSTIC,
+    DEBUG_START_OR_CONTINUE,
+    DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
+    DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
+    Desktop, FileDialog, Menu, MenuItem, Rect,
     Window, EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL, EDITOR_QUICK_OPEN,
     EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
@@ -55,6 +62,10 @@ fn _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
 fn main() raises:
     var app = Application()
     var error_log = List[String]()        # populated in the loop, drained on quit
+    # Hoisted out of the ``try`` block so the ``finally`` can still
+    # print them after ``desktop`` itself goes out of scope.
+    var diagnostic = String("")
+    var diagnostic_path = String("")
     app.start()
     try:
         var desktop = Desktop()
@@ -78,6 +89,18 @@ fn main() raises:
             (String("Go to Symbol..."), EDITOR_GOTO_SYMBOL),
             (String("Toggle Comment"), EDITOR_TOGGLE_COMMENT),
             (String("Toggle Case"), EDITOR_TOGGLE_CASE),
+        ))
+        desktop.menu_bar.add(_mk_menu(String("Debug"),
+            (String("Start / Continue"), DEBUG_START_OR_CONTINUE),
+            (String("Stop"), DEBUG_STOP),
+            (String("Toggle Breakpoint"), DEBUG_TOGGLE_BREAKPOINT),
+            (String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP),
+            (String("Step Over"), DEBUG_STEP_OVER),
+            (String("Step Into"), DEBUG_STEP_IN),
+            (String("Step Out"), DEBUG_STEP_OUT),
+            (String("Add Watch..."), DEBUG_ADD_WATCH),
+            (String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED),
+            (String("Dump Diagnostic"), DEBUG_DUMP_DIAGNOSTIC),
         ))
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
@@ -131,78 +154,184 @@ fn main() raises:
         desktop.status_bar.add(String("F10"), String("Menu"))
         desktop.status_bar.add(String("Ctrl+Q"), String("Quit"))
 
+        var iter_n = 0
         while app.running:
+            iter_n += 1
+            # Stamp every iteration so a Mojo abort that bypasses our
+            # catch-all leaves a trail in the trace log. If the trace
+            # file ends with ``iter N before-X`` and no ``iter N after-X``,
+            # ``X`` is the call that died. (Cheap: 5 syscalls / frame.)
+            if desktop.dap.is_active():
+                desktop.dap.client.process.trace(
+                    String("iter ") + String(iter_n) + String(" start"),
+                )
+                # Forward the trace fd to Terminal so ``poll_event``'s
+                # sub-step traces land in the same log. Idempotent.
+                if app.terminal.trace_fd < 0:
+                    app.terminal.trace_fd = \
+                        desktop.dap.client.process.trace_fd
+            # One catch-all for the whole frame. ``next_event`` and any
+            # other ``raises`` call along the way (terminal cursor-size
+            # query, parse failures, file_dialog mishaps, …) lands here
+            # — without this an unhandled raise would silently exit the
+            # process before ``app.stop()`` could restore the terminal,
+            # and the user would see only an unexplained quit + leaked
+            # cursor-position bytes in the shell.
             try:
-                # Reload any file-backed editor whose file changed on disk and
-                # has no unsaved edits. Stat is cheap; do it every frame.
-                _ = desktop.windows.check_external_changes()
-            except e:
-                error_log.append(String("reload: ") + String(e))
-            # Edit menu visibility tracks whether the focused window is an editor.
-            desktop.menu_bar.set_visible_by_label(
-                String("Edit"), desktop.windows.focused_is_editor(),
-            )
-            # If the user clicked a file in the project tree last frame, open it.
-            var tree_open = desktop.file_tree.consume_open()
-            if tree_open:
-                var p = tree_open.value()
                 try:
-                    desktop.open_file(p, app.screen())
+                    _ = desktop.windows.check_external_changes()
                 except e:
-                    error_log.append(String("open ") + p + String(": ") + String(e))
-
-            app.clear()
-            desktop.paint(app.back, app.screen())
-            file_dialog.paint(app.back, app.screen())
-            try:
-                app.present()
-            except e:
-                error_log.append(String("present: ") + String(e))
-                continue
-
-            var maybe_ev = app.next_event(50)
-            if not maybe_ev:
-                continue
-            var ev = maybe_ev.value()
-
-            # Modal: file dialog eats every event while open.
-            if file_dialog.active:
-                if ev.kind == EVENT_KEY:
-                    _ = file_dialog.handle_key(ev)
-                else:
-                    _ = file_dialog.handle_mouse(ev, app.screen())
-                if file_dialog.submitted:
-                    var path = file_dialog.selected_path
-                    file_dialog.close()
+                    error_log.append(String("reload: ") + String(e))
+                desktop.menu_bar.set_visible_by_label(
+                    String("Edit"), desktop.windows.focused_is_editor(),
+                )
+                var tree_open = desktop.file_tree.consume_open()
+                if tree_open:
+                    var p = tree_open.value()
                     try:
-                        desktop.open_file(path, app.screen())
-                    except:
-                        pass
-                continue
+                        desktop.open_file(p, app.screen())
+                    except e:
+                        error_log.append(
+                            String("open ") + p + String(": ") + String(e),
+                        )
 
-            var maybe_action = desktop.handle_event(ev, app.screen())
-            if maybe_action:
-                var action = maybe_action.value()
-                if action == APP_QUIT_ACTION:
-                    app.quit()
-                elif action == String("file:open"):
-                    file_dialog.open(String("."))
-                elif action == EDITOR_QUICK_OPEN:
-                    # Desktop only intercepts the quick-open action when a
-                    # project is active; otherwise it bubbles up here so we
-                    # can fall back to the regular file dialog.
-                    file_dialog.open(String("."))
-                elif action == String("focus:About"):
-                    desktop.windows.focus_by_title(String("About"))
-            # Drive any in-flight LSP work — forwards Cmd+click definition
-            # requests and routes responses back into window focus + cursor.
-            desktop.lsp_tick(app.screen())
+                app.clear()
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(
+                        String("iter ") + String(iter_n) + String(" before-paint"),
+                    )
+                desktop.paint(app.back, app.screen())
+                file_dialog.paint(app.back, app.screen())
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(
+                        String("iter ") + String(iter_n) + String(" before-present"),
+                    )
+                try:
+                    app.present()
+                except e:
+                    error_log.append(String("present: ") + String(e))
+                    continue
+                # Hand-roll ``app.next_event(50)`` so each step (cursor
+                # query, canvas resize, stdin read+parse) is separately
+                # traced — the death on iter 340 was inside this opaque
+                # call. iter 340 = 17 × 20: cursor-query frame.
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(
+                        String("iter ") + String(iter_n)
+                        + String(" before-refresh_size"),
+                    )
+                var resized = app.terminal.refresh_size()
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(
+                        String("iter ") + String(iter_n)
+                        + String(" after-refresh_size resized=")
+                        + (String("True") if resized else String("False"))
+                        + String(" w=") + String(app.terminal.width)
+                        + String(" h=") + String(app.terminal.height),
+                    )
+                var maybe_ev: Optional[Event] = Optional[Event]()
+                if resized:
+                    if desktop.dap.is_active():
+                        desktop.dap.client.process.trace(
+                            String("iter ") + String(iter_n)
+                            + String(" before-back-resize"),
+                        )
+                    app.back.resize(app.terminal.width, app.terminal.height)
+                    if desktop.dap.is_active():
+                        desktop.dap.client.process.trace(
+                            String("iter ") + String(iter_n)
+                            + String(" after-back-resize"),
+                        )
+                    maybe_ev = Optional[Event](Event.resize_event(
+                        app.terminal.width, app.terminal.height,
+                    ))
+                else:
+                    if desktop.dap.is_active():
+                        desktop.dap.client.process.trace(
+                            String("iter ") + String(iter_n)
+                            + String(" before-poll_event"),
+                        )
+                    maybe_ev = app.terminal.poll_event(50)
+                    if desktop.dap.is_active():
+                        desktop.dap.client.process.trace(
+                            String("iter ") + String(iter_n)
+                            + String(" after-poll_event"),
+                        )
+                desktop.lsp_tick(app.screen())
+                desktop.dap_tick(app.screen())
+                if not maybe_ev:
+                    continue
+                var ev = maybe_ev.value()
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(
+                        String("iter ") + String(iter_n)
+                        + String(" before-handle_event kind=")
+                        + String(Int(ev.kind)),
+                    )
+
+                # Modal: file dialog eats every event while open.
+                if file_dialog.active:
+                    if ev.kind == EVENT_KEY:
+                        _ = file_dialog.handle_key(ev)
+                    else:
+                        _ = file_dialog.handle_mouse(ev, app.screen())
+                    if file_dialog.submitted:
+                        var path = file_dialog.selected_path
+                        file_dialog.close()
+                        try:
+                            desktop.open_file(path, app.screen())
+                        except:
+                            pass
+                    continue
+
+                var maybe_action = desktop.handle_event(ev, app.screen())
+                if maybe_action:
+                    var action = maybe_action.value()
+                    if action == APP_QUIT_ACTION:
+                        # Stamp the trace log so we know exit was triggered
+                        # by an action (Ctrl+Q, menu Quit, etc.) rather than
+                        # a Mojo-side crash that took the process down.
+                        desktop.dap.client.process.trace(
+                            String("APP_QUIT_ACTION fired"),
+                        )
+                        app.quit()
+                    elif action == String("file:open"):
+                        file_dialog.open(String("."))
+                    elif action == EDITOR_QUICK_OPEN:
+                        file_dialog.open(String("."))
+                    elif action == String("focus:About"):
+                        desktop.windows.focus_by_title(String("About"))
+            except e:
+                # Any uncaught raise lands here. Stamp the trace log
+                # AND the error_log so something is visible after exit
+                # whether the user looks at /tmp/mojovision-dap.log or
+                # the post-stop print. We continue rather than break so
+                # a transient terminal hiccup (e.g. one bad cursor-size
+                # response) doesn't kill the whole session.
+                var msg = String("frame raised: ") + String(e)
+                error_log.append(msg)
+                if desktop.dap.is_active():
+                    desktop.dap.client.process.trace(msg)
         # Reap the LSP child before we leave the try block — ``desktop`` isn't
         # in scope from the outer ``finally``, and we'd rather not orphan the
         # subprocess if the loop exits cleanly via Ctrl+Q.
         for i in range(len(desktop.lsp_managers)):
             desktop.lsp_managers[i].shutdown()
+        desktop.dap.shutdown()
+        # Hoist the diagnostic strings out so the ``finally`` can print
+        # them after ``desktop`` is gone.
+        diagnostic = desktop.pending_diagnostic
+        diagnostic_path = desktop.pending_diagnostic_path
     finally:
         app.stop()
         for i in range(len(error_log)):
             print(error_log[i])
+        # If the user requested a DAP diagnostic dump, print it now —
+        # the terminal is back in cooked mode, so the lines land in
+        # scrollback in human-readable form. The same content is also
+        # on disk at ``diagnostic_path`` for copy/paste.
+        if len(diagnostic.as_bytes()) > 0:
+            print("")
+            print(diagnostic)
+            if len(diagnostic_path.as_bytes()) > 0:
+                print("(also written to " + diagnostic_path + ")")
