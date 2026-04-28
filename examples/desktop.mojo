@@ -62,10 +62,6 @@ fn _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
 fn main() raises:
     var app = Application()
     var error_log = List[String]()        # populated in the loop, drained on quit
-    # Hoisted out of the ``try`` block so the ``finally`` can still
-    # print them after ``desktop`` itself goes out of scope.
-    var diagnostic = String("")
-    var diagnostic_path = String("")
     app.start()
     try:
         var desktop = Desktop()
@@ -229,7 +225,7 @@ fn main() raises:
                         + String(" w=") + String(app.terminal.width)
                         + String(" h=") + String(app.terminal.height),
                     )
-                var maybe_ev: Optional[Event] = Optional[Event]()
+                var maybe_ev: Optional[Event]
                 if resized:
                     if desktop.dap.is_active():
                         desktop.dap.client.process.trace(
@@ -318,20 +314,27 @@ fn main() raises:
         for i in range(len(desktop.lsp_managers)):
             desktop.lsp_managers[i].shutdown()
         desktop.dap.shutdown()
-        # Hoist the diagnostic strings out so the ``finally`` can print
-        # them after ``desktop`` is gone.
-        diagnostic = desktop.pending_diagnostic
-        diagnostic_path = desktop.pending_diagnostic_path
-    finally:
+        # Snapshot the diagnostic strings before ``app.stop`` so the
+        # cleanup work runs on stable values. Print them after
+        # ``app.stop`` so the terminal is in cooked mode and lines
+        # land in scrollback. The same content is on disk at
+        # ``diagnostic_path`` for copy/paste.
+        var diagnostic = desktop.pending_diagnostic
+        var diagnostic_path = desktop.pending_diagnostic_path
         app.stop()
         for i in range(len(error_log)):
             print(error_log[i])
-        # If the user requested a DAP diagnostic dump, print it now —
-        # the terminal is back in cooked mode, so the lines land in
-        # scrollback in human-readable form. The same content is also
-        # on disk at ``diagnostic_path`` for copy/paste.
+        # Consume so the ``finally`` backup doesn't double-print on
+        # the clean-exit path.
+        error_log = List[String]()
         if len(diagnostic.as_bytes()) > 0:
             print("")
             print(diagnostic)
             if len(diagnostic_path.as_bytes()) > 0:
                 print("(also written to " + diagnostic_path + ")")
+    finally:
+        # Backup for the exception path: ``app.stop`` is idempotent,
+        # so it's a no-op when the clean path already ran.
+        app.stop()
+        for i in range(len(error_log)):
+            print(error_log[i])

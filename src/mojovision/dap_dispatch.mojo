@@ -347,7 +347,13 @@ struct DapManager(Copyable, Movable):
         return self.state == _STATE_RUNNING and not self._is_stopped
 
     fn is_stopped(self) -> Bool:
-        return self._is_stopped
+        # Gated on ``is_active`` for the same reason ``is_running``
+        # checks state: ``shutdown`` doesn't clear ``_is_stopped``, so
+        # without this gate a session that was paused at a breakpoint
+        # when the user hit Shift+F5 reports as "stopped" forever and
+        # ``_debug_start_or_continue`` keeps routing F5 to ``cont()``
+        # instead of starting a new session.
+        return self._is_stopped and self.is_active()
 
     fn is_failed(self) -> Bool:
         return self.state == _STATE_FAILED
@@ -498,6 +504,75 @@ struct DapManager(Copyable, Movable):
                 pass
         self.client.terminate()
         self.state = _STATE_TERMINATED
+        # Clear pause-related latches. Without this, a session that
+        # was paused at a breakpoint when shutdown ran would still
+        # have ``_is_stopped`` set; while ``is_stopped()`` now gates
+        # on ``is_active()`` so it reads False, code that pokes the
+        # raw fields (e.g. ``status_summary``) still benefits from a
+        # clean reset.
+        self._is_stopped = False
+        self._continued_pending = False
+
+    fn reset_for_restart(mut self):
+        """Return to ``NOT_STARTED`` so ``start()`` can run again,
+        preserving the persistent debugger configuration the user has
+        accumulated this run.
+
+        Kept across restarts:
+          * Breakpoints (``_bp_path``/``_bp_line``/``_bp_condition``)
+          * Exception filter selection (``_exception_filters``)
+
+        Everything else is transient handshake / event state that
+        must not leak from one process spawn to the next: a stale
+        ``_inflight_initialize`` would race the next handshake; a
+        stale ``_pending_stack_ready`` would surface frames from the
+        previous run; the dead ``client`` would let writes go to a
+        closed pipe.
+
+        Sibling to ``shutdown``: callers that want to teardown call
+        ``shutdown`` first, then ``reset_for_restart`` before the
+        next ``start``.
+        """
+        # Discard the dead child + pipes wholesale by giving back a
+        # fresh inert client.
+        self.client = DapClient(LspProcess())
+        self.state = _STATE_NOT_STARTED
+        self.failure_reason = String("")
+        self.adapter_name = String("")
+        self.language_id = String("")
+        self._inflight_initialize = 0
+        self._inflight_launch = 0
+        self._inflight_config_done = 0
+        self._inflight_threads = 0
+        self._inflight_stack_trace = 0
+        self._inflight_scopes = 0
+        self._inflight_variables = 0
+        self._supports_configuration_done = True
+        self._supports_terminate_request = False
+        self._got_initialized_event = False
+        self._launch_request_kind = DAP_REQUEST_LAUNCH
+        self._inflight_evaluate_seqs = List[Int]()
+        self._inflight_evaluate_exprs = List[String]()
+        self._evaluations_expr = List[String]()
+        self._evaluations_value = List[String]()
+        self._evaluations_type = List[String]()
+        self._stopped = Optional[DapStopped]()
+        self._is_stopped = False
+        self._continued_pending = False
+        self._output_events = List[DapOutput]()
+        self._terminated_pending = False
+        self._pending_threads = List[DapThread]()
+        self._pending_threads_ready = False
+        self._pending_stack = List[DapStackFrame]()
+        self._pending_stack_ready = False
+        self._pending_scopes = List[DapScope]()
+        self._pending_scopes_ready = False
+        self._pending_vars = List[DapVariable]()
+        self._pending_vars_ready = False
+        self._pending_launch_args = JsonValue()
+        self.spawn_argv = List[String]()
+        self._state_entered_ms = 0
+        self._last_heartbeat_ms = 0
 
     # --- breakpoints -----------------------------------------------------
 

@@ -1506,10 +1506,14 @@ struct Desktop(Movable):
             )
             return
         # If the manager is already TERMINATED / FAILED from a prior
-        # session, we need a fresh one — DapManager.start no-ops unless
-        # state == NOT_STARTED.
+        # session, return it to NOT_STARTED so ``start`` will run.
+        # ``reset_for_restart`` is preferred over replacing ``self.dap``
+        # because it preserves the user's breakpoints + exception
+        # filter selection — wholesale replacement would silently drop
+        # both, so the second F5 would launch with no breakpoints set
+        # and the program would run straight through.
         if self.dap.is_failed() or self.dap.is_terminated():
-            self.dap = DapManager()
+            self.dap.reset_for_restart()
         var cwd = self.project.value() if self.project else String(".")
         self.dap.start(
             self.dap_specs[deb_idx], path, cwd, List[String](),
