@@ -71,15 +71,16 @@ struct Canvas(Copyable, Movable):
     fn put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
         """Paint ``text`` starting at ``p`` (no wrapping). Returns columns advanced.
 
-        If ``max_x`` is non-negative, painting stops at column ``max_x`` (exclusive)
-        — letting callers like ``Window`` clip text to their own bounds without
-        building a temporary truncated string.
+        If ``max_x`` is non-negative, painting stops at column ``max_x``
+        (exclusive) — letting callers like ``Window`` clip text to their
+        own bounds without building a truncated string.
 
-        ASCII-only at present. Multi-byte UTF-8 glyphs in ``text`` will paint as
-        replacement characters; properly handling them requires a real
-        grapheme-cluster iterator that respects East-Asian widths. To draw
-        non-ASCII glyphs today, build ``Cell`` values directly with the desired
-        UTF-8 string and call ``set()`` (which is what ``draw_box`` does).
+        Codepoint-aligned: each codepoint occupies one cell carrying the
+        full UTF-8 byte sequence as its glyph string. Callers that hold
+        byte indices (the editor's overlay paths) need
+        ``utf8_byte_to_cell`` to translate. East-Asian width is *not*
+        modeled — every glyph advances by one cell — so wide characters
+        will overlap their right neighbour.
         """
         var x = p.x
         var y = p.y
@@ -90,29 +91,49 @@ struct Canvas(Copyable, Movable):
         if max_x >= 0 and max_x < limit:
             limit = max_x
         var bytes = text.as_bytes()
+        var n = len(bytes)
         var i = 0
-        while i < len(bytes):
+        while i < n and x < limit:
             var b = Int(bytes[i])
             var glyph: String
+            var seq_len: Int
             if b < 0x80:
                 glyph = chr(b)
+                seq_len = 1
+            elif (b & 0xE0) == 0xC0 and i + 2 <= n:
+                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+2]))
+                seq_len = 2
+            elif (b & 0xF0) == 0xE0 and i + 3 <= n:
+                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+3]))
+                seq_len = 3
+            elif (b & 0xF8) == 0xF0 and i + 4 <= n:
+                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+4]))
+                seq_len = 4
             else:
-                # Skip past the rest of this UTF-8 sequence and substitute '?'.
+                # Stray continuation or truncated tail — show ``?``
+                # rather than losing the column to silence.
                 glyph = String("?")
-                if (b & 0xF8) == 0xF0:
-                    i += 3
-                elif (b & 0xF0) == 0xE0:
-                    i += 2
-                elif (b & 0xE0) == 0xC0:
-                    i += 1
-            i += 1
-            if x >= limit:
-                break
+                seq_len = 1
             if x >= 0:
                 self.cells[self._index(x, y)] = Cell(glyph, attr, 1)
             x += 1
             advanced += 1
+            i += seq_len
         return advanced
+
+    fn set_attr(mut self, x: Int, y: Int, attr: Attr):
+        """Change the attribute at ``(x, y)`` without touching the glyph.
+
+        Lets overlay passes (highlight, selection, cursor) recolor cells
+        without re-deriving glyphs from byte arrays — which would
+        otherwise force every overlay path to repeat the UTF-8 decoding
+        ``put_text`` already did.
+        """
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return
+        var idx = self._index(x, y)
+        var current = self.cells[idx]
+        self.cells[idx] = Cell(current.glyph, attr, current.width)
 
     fn draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
         if rect.width() < 2 or rect.height() < 2:
@@ -153,3 +174,67 @@ struct Canvas(Copyable, Movable):
         var cell = Cell(glyph, attr, 1)
         for i in range(length):
             self.set(p.x, p.y + i, cell)
+
+
+fn utf8_byte_to_cell(text: String) -> List[Int]:
+    """Map every byte index in ``text`` to the cell column its codepoint
+    occupies under ``Canvas.put_text``'s codepoint-aligned layout.
+
+    Length equals ``len(text.as_bytes())`` so callers can index by raw
+    byte position (the editor's column model). All bytes belonging to
+    one multi-byte UTF-8 sequence map to the same cell. Use
+    ``utf8_codepoint_count(text)`` to find the cell *just past* the
+    last codepoint — useful when a cursor or selection sits at EOL.
+    """
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    var result = List[Int]()
+    var cell = 0
+    var i = 0
+    while i < n:
+        var b = Int(bytes[i])
+        var seq_len: Int
+        if b < 0x80:
+            seq_len = 1
+        elif (b & 0xE0) == 0xC0:
+            seq_len = 2
+        elif (b & 0xF0) == 0xE0:
+            seq_len = 3
+        elif (b & 0xF8) == 0xF0:
+            seq_len = 4
+        else:
+            seq_len = 1
+        if i + seq_len > n:
+            seq_len = n - i
+        for _ in range(seq_len):
+            result.append(cell)
+        cell += 1
+        i += seq_len
+    return result^
+
+
+fn utf8_codepoint_count(text: String) -> Int:
+    """Number of codepoints in ``text``. Equals the cell count
+    ``Canvas.put_text(text)`` produces."""
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    var count = 0
+    var i = 0
+    while i < n:
+        var b = Int(bytes[i])
+        var seq_len: Int
+        if b < 0x80:
+            seq_len = 1
+        elif (b & 0xE0) == 0xC0:
+            seq_len = 2
+        elif (b & 0xF0) == 0xE0:
+            seq_len = 3
+        elif (b & 0xF8) == 0xF0:
+            seq_len = 4
+        else:
+            seq_len = 1
+        if i + seq_len > n:
+            seq_len = n - i
+        count += 1
+        i += seq_len
+    return count

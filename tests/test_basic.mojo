@@ -2164,6 +2164,86 @@ fn test_editor_sticky_col_shift_down_keeps_anchor() raises:
     assert_equal(ed.desired_col, 11)
 
 
+fn test_editor_left_right_steps_over_multibyte_codepoint() raises:
+    """Arrow keys must move by whole UTF-8 codepoints — never park the
+    cursor in the middle of a multi-byte sequence."""
+    # "café" — bytes: c(0), a(1), f(2), é(3-4). 4 codepoints, 5 bytes.
+    var ed = Editor(String("café"))
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    assert_equal(ed.cursor_col, 3)        # at start of é
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    assert_equal(ed.cursor_col, 5)        # past é, end of line (skipped 2 bytes)
+    _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
+    assert_equal(ed.cursor_col, 3)        # back over the whole codepoint
+    _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
+    assert_equal(ed.cursor_col, 2)        # ASCII step works as before
+
+
+fn test_editor_backspace_removes_whole_codepoint() raises:
+    """Backspace at the end of a line containing é must remove all of é."""
+    var ed = Editor(String("café"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    assert_equal(ed.cursor_col, 5)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line(0), String("caf"))
+    assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_delete_key_removes_whole_codepoint() raises:
+    """Delete (forward) at the boundary before é must remove all of é and
+    leave the buffer as valid UTF-8."""
+    var ed = Editor(String("café"))
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    assert_equal(ed.cursor_col, 3)
+    _ = ed.handle_key(_key(KEY_DELETE), _VIEW)
+    assert_equal(ed.buffer.line(0), String("caf"))
+    assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_vertical_movement_uses_cell_column() raises:
+    """Down through a row of multi-byte characters preserves the visual
+    column, not the byte offset. ``ééé`` is 6 bytes / 3 cells; landing
+    column 2 (cells) on it must be byte 4, not byte 2 (mid-codepoint)."""
+    # Line 0: "abcdef" (6 ASCII), line 1: "ééé" (3 codepoints, 6 bytes).
+    var ed = Editor(String("abcdef\néééxyz"))
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
+    _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)        # cursor on 'c'
+    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.desired_col, 2)
+    _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
+    # Cell 2 on "éééxyz" is the third é → byte 4, a codepoint boundary.
+    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.desired_col, 2)
+    _ = ed.handle_key(_key(KEY_UP), _VIEW)
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 2)
+
+
+fn test_editor_mouse_click_lands_on_codepoint_boundary() raises:
+    """A click at cell column N inside a multi-byte run must drop the cursor
+    at the *codepoint* at column N, never mid-sequence."""
+    var ed = Editor(String("ééé"))
+    var view = Rect(0, 0, 40, 10)
+    # Cell column 2 → third é → byte offset 4.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 0), MOUSE_BUTTON_LEFT, True, False),
+        view,
+    )
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 4)
+    # Far past EOL clamps to line end (a boundary).
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(20, 0), MOUSE_BUTTON_LEFT, True, False),
+        view,
+    )
+    assert_equal(ed.cursor_col, 6)
+
+
 fn test_window_v_scrollbar_hit_arrows_and_thumb() raises:
     var lines = String("")
     for i in range(50):
@@ -2785,6 +2865,11 @@ fn main() raises:
     test_editor_sticky_col_reset_by_home_end()
     test_editor_sticky_col_pageup_pagedown()
     test_editor_sticky_col_shift_down_keeps_anchor()
+    test_editor_left_right_steps_over_multibyte_codepoint()
+    test_editor_backspace_removes_whole_codepoint()
+    test_editor_delete_key_removes_whole_codepoint()
+    test_editor_vertical_movement_uses_cell_column()
+    test_editor_mouse_click_lands_on_codepoint_boundary()
     test_window_v_scrollbar_hit_arrows_and_thumb()
     test_window_v_scroll_by_clamps()
     test_window_v_scroll_drag_to_end()

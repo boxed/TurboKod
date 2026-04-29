@@ -169,6 +169,63 @@ fn parent_path(path: String) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[:i]))
 
 
+fn ci_less(a: String, b: String) -> Bool:
+    """``True`` iff ``a < b`` lexicographically, ignoring ASCII case.
+
+    Non-ASCII bytes compare via raw byte value (no Unicode case folding) —
+    fine for the typical mix of English filenames; if the user has Cyrillic
+    / CJK names they'll cluster but stay grouped. Shared by every UI that
+    lists directory contents so the file dialog and the project file tree
+    agree on order.
+    """
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    var n = len(ab) if len(ab) < len(bb) else len(bb)
+    for i in range(n):
+        var ca = Int(ab[i])
+        var cb = Int(bb[i])
+        if 0x41 <= ca and ca <= 0x5A: ca += 0x20
+        if 0x41 <= cb and cb <= 0x5A: cb += 0x20
+        if ca != cb:
+            return ca < cb
+    return len(ab) < len(bb)
+
+
+fn sort_directory_listing(
+    mut names: List[String], mut is_dirs: List[Bool],
+):
+    """Reorder the parallel ``names`` / ``is_dirs`` lists so directories
+    come first, then files, each group sorted case-insensitively by name.
+
+    Operates in-place on both lists in lockstep via a two-key insertion
+    sort: primary key is ``is_dir`` (true before false, so dirs lead),
+    secondary key is ``ci_less(name)``. Both lists must be the same
+    length on entry. Used by both the project file tree and the
+    open-file dialog so the two views show identical ordering.
+    """
+    var n = len(names)
+    for i in range(1, n):
+        var j = i
+        while j > 0:
+            var swap: Bool
+            if is_dirs[j] and not is_dirs[j - 1]:
+                swap = True
+            elif is_dirs[j] == is_dirs[j - 1] \
+                    and ci_less(names[j], names[j - 1]):
+                swap = True
+            else:
+                swap = False
+            if not swap:
+                break
+            var tn = names[j]
+            names[j] = names[j - 1]
+            names[j - 1] = tn
+            var td = is_dirs[j]
+            is_dirs[j] = is_dirs[j - 1]
+            is_dirs[j - 1] = td
+            j -= 1
+
+
 fn basename(path: String) -> String:
     """Return the last path component of ``path`` (no trailing slash).
 

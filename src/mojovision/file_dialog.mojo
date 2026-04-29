@@ -17,7 +17,10 @@ from .events import (
     KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, KEY_PAGEDOWN, KEY_PAGEUP,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .file_io import join_path, list_directory, parent_path, stat_file
+from .file_io import (
+    join_path, list_directory, parent_path, sort_directory_listing,
+    stat_file,
+)
 from .geometry import Point, Rect
 from .posix import realpath
 
@@ -74,19 +77,29 @@ struct FileDialog(Movable):
         self.selected_path = String("")
 
     fn _refresh(mut self):
-        self.entries = List[String]()
-        self.entry_is_dir = List[Bool]()
-        # Always offer ".." so users can ascend even at non-root dirs.
-        self.entries.append(String(".."))
-        self.entry_is_dir.append(True)
+        # Build parallel name + is_dir lists, then run the shared
+        # ``sort_directory_listing`` so the dialog matches the project
+        # file tree's ordering (dirs first, each group case-insensitive
+        # by name). ``..`` is prepended afterwards so it always sits at
+        # the top regardless of how the rest is sorted.
+        var names = List[String]()
+        var is_dirs = List[Bool]()
         var raw = list_directory(self.dir)
         for i in range(len(raw)):
             var name = raw[i]
             if name == String(".") or name == String(".."):
                 continue
             var info = stat_file(join_path(self.dir, name))
-            self.entries.append(name)
-            self.entry_is_dir.append(info.is_dir() if info.ok else False)
+            names.append(name)
+            is_dirs.append(info.is_dir() if info.ok else False)
+        sort_directory_listing(names, is_dirs)
+        self.entries = List[String]()
+        self.entry_is_dir = List[Bool]()
+        self.entries.append(String(".."))
+        self.entry_is_dir.append(True)
+        for i in range(len(names)):
+            self.entries.append(names[i])
+            self.entry_is_dir.append(is_dirs[i])
         self.selected = 0
         self.scroll = 0
 

@@ -127,16 +127,16 @@ struct Window(ImplicitlyCopyable, Movable):
             canvas.set(self.rect.a.x + 2, self.rect.a.y, Cell(String("■"), close_glyph, 1))
             canvas.set(self.rect.a.x + 3, self.rect.a.y, Cell(String("]"), border, 1))
         # Window number (and, when focused, a maximize/restore button) at top-RIGHT.
-        # Format: ``<num>=[↑]`` while normal, ``<num>=[↓]`` while maximized.
-        # Unfocused windows show only the bare number.
+        # Format: ``<num>=[▲]`` while normal, ``<num>=[▼]`` while
+        # maximized. Unfocused windows show only the bare number.
         var num_str = String(number)
         var num_len = len(num_str.as_bytes())
         if focused and self.rect.width() >= num_len + 9:
             var arrow: String
             if self.is_maximized:
-                arrow = String("↓")
+                arrow = String("▼")
             else:
-                arrow = String("↑")
+                arrow = String("▲")
             var indicator = num_str + String("=[") + arrow + String("]")
             _ = canvas.put_text(
                 Point(self.rect.b.x - num_len - 5, self.rect.a.y),

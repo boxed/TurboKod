@@ -11,7 +11,7 @@ inserting / removing a line. Fine for source files up to a few thousand lines.
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
@@ -32,6 +32,7 @@ from .highlight import (
 )
 from std.collections.optional import Optional
 from .geometry import Point, Rect
+from .posix import monotonic_ms
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -46,6 +47,89 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     if s_end > len(bytes): s_end = len(bytes)
     if s_start >= s_end: return String("")
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+
+
+# --- UTF-8 boundary helpers -------------------------------------------------
+#
+# The buffer's column model is byte-indexed (insert/delete need byte access),
+# but the cursor must always land on a codepoint boundary so a multi-byte
+# character behaves as one indivisible step. These helpers keep that invariant
+# and translate between byte offsets and cell columns when vertical movement
+# or a mouse click crosses lines whose byte and cell widths disagree.
+
+
+fn _utf8_codepoint_size(b: Int) -> Int:
+    """Byte length of the UTF-8 codepoint that begins with lead byte ``b``.
+    Returns 1 for invalid leads so a stray continuation byte never traps the
+    cursor in an infinite no-op loop."""
+    if b < 0x80:
+        return 1
+    if (b & 0xE0) == 0xC0:
+        return 2
+    if (b & 0xF0) == 0xE0:
+        return 3
+    if (b & 0xF8) == 0xF0:
+        return 4
+    return 1
+
+
+fn _utf8_step_forward(line: String, col: Int) -> Int:
+    """Byte offset of the codepoint boundary one step forward from ``col``."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    if col >= n:
+        return n
+    var step = _utf8_codepoint_size(Int(bytes[col]))
+    var nxt = col + step
+    if nxt > n:
+        nxt = n
+    return nxt
+
+
+fn _utf8_step_backward(line: String, col: Int) -> Int:
+    """Byte offset of the codepoint boundary one step backward from ``col``.
+    Walks back over UTF-8 continuation bytes (10xxxxxx)."""
+    if col <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    var c = col - 1
+    while c > 0 and (Int(bytes[c]) & 0xC0) == 0x80:
+        c -= 1
+    return c
+
+
+fn _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
+    """Cell column for byte offset ``byte_col`` in ``line``. Past-EOL bytes
+    consume one virtual cell each so cursors parked to the right of the last
+    character stay distinguishable in vertical-movement bookkeeping."""
+    if byte_col <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var cell = 0
+    var i = 0
+    while i < n and i < byte_col:
+        i += _utf8_codepoint_size(Int(bytes[i]))
+        cell += 1
+    if byte_col > n:
+        cell += byte_col - n
+    return cell
+
+
+fn _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
+    """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
+    clamped to ``len(line)``. Used to translate a remembered cell column from
+    one row to another during vertical movement."""
+    if cell_col <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var cell = 0
+    var i = 0
+    while i < n and cell < cell_col:
+        i += _utf8_codepoint_size(Int(bytes[i]))
+        cell += 1
+    return i
 
 
 # --- TextBuffer -------------------------------------------------------------
@@ -98,7 +182,7 @@ struct TextBuffer(ImplicitlyCopyable, Movable):
         self.lines[row] = _slice(line, 0, pos) + text + _slice(line, pos, n)
 
     fn delete_at(mut self, row: Int, col: Int):
-        """Delete one byte at (row, col). If past EOL, joins next line."""
+        """Delete one codepoint at (row, col). If past EOL, joins next line."""
         if row < 0 or row >= len(self.lines):
             return
         var line = self.lines[row]
@@ -108,14 +192,16 @@ struct TextBuffer(ImplicitlyCopyable, Movable):
                 self.lines[row] = line + self.lines[row + 1]
                 _ = self.lines.pop(row + 1)
             return
-        self.lines[row] = _slice(line, 0, col) + _slice(line, col + 1, n)
+        var nxt = _utf8_step_forward(line, col)
+        self.lines[row] = _slice(line, 0, col) + _slice(line, nxt, n)
 
     fn delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
-        """Backspace. Returns the new cursor (row, col)."""
+        """Backspace one codepoint. Returns the new cursor (row, col)."""
         if col > 0:
             var line = self.lines[row]
-            self.lines[row] = _slice(line, 0, col - 1) + _slice(line, col, len(line.as_bytes()))
-            return (row, col - 1)
+            var prev_col = _utf8_step_backward(line, col)
+            self.lines[row] = _slice(line, 0, prev_col) + _slice(line, col, len(line.as_bytes()))
+            return (row, prev_col)
         if row > 0:
             var prev = self.lines[row - 1]
             var prev_len = len(prev.as_bytes())
@@ -154,6 +240,13 @@ comptime _UNDO_STACK_LIMIT = 500
 """Cap per-window undo history. Each entry holds a full ``List[String]`` copy
 of the buffer plus four ints, so a few hundred steps is comfortably more than
 any realistic editing session needs."""
+
+
+comptime _TYPING_DEBOUNCE_MS = 800
+"""How long a typing run can pause before the next keystroke starts a new
+undo step. 800 ms feels right in practice — fast enough that "type sentence,
+think for a moment, type next sentence" produces two undo steps, slow enough
+that a single sentence rarely splits."""
 
 
 struct EditorSnapshot(ImplicitlyCopyable, Movable):
@@ -242,6 +335,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     # subsequent edit (the standard "branching breaks redo" model).
     var _undo_stack: List[EditorSnapshot]
     var _redo_stack: List[EditorSnapshot]
+    # Typing-group debounce. While ``_typing_active`` is True and the gap
+    # since ``_typing_last_ms`` is short, the next printable insert extends
+    # the current undo step instead of pushing a new one. Any non-typing
+    # operation (cursor move, backspace, mouse click, paste, …) clears
+    # the flag so the next character starts a fresh group.
+    var _typing_active: Bool
+    var _typing_last_ms: Int
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -264,6 +364,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = -1
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
+        self._typing_active = False
+        self._typing_last_ms = 0
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -286,6 +388,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = -1
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
+        self._typing_active = False
+        self._typing_last_ms = 0
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -320,6 +424,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = copy.exec_line
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
+        self._typing_active = copy._typing_active
+        self._typing_last_ms = copy._typing_last_ms
 
     fn _refresh_highlights(mut self):
         var ext = extension_of(self.file_path)
@@ -362,16 +468,25 @@ struct Editor(ImplicitlyCopyable, Movable):
                 trimmed.append(self._undo_stack[i])
             self._undo_stack = trimmed^
         self._redo_stack = List[EditorSnapshot]()
+        # Pushing a snapshot ends any typing run that was in flight. The
+        # printable-insert path explicitly re-sets the flag after this
+        # call when it wants the new char to anchor a fresh group.
+        self._typing_active = False
 
     fn _restore(mut self, snap: EditorSnapshot):
         self.buffer.lines = snap.lines.copy()
         self.cursor_row = snap.cursor_row
         self.cursor_col = snap.cursor_col
-        self.desired_col = snap.cursor_col
+        self.desired_col = _utf8_cell_of_byte(
+            self.buffer.line(snap.cursor_row), snap.cursor_col,
+        )
         self.anchor_row = snap.anchor_row
         self.anchor_col = snap.anchor_col
         self.dirty = True
         self._highlights_dirty = True
+        # Undo/redo lands on a saved state; the next typing should start a
+        # new group rather than extend whatever was running before.
+        self._typing_active = False
         self._refresh_highlights()
 
     fn undo(mut self) -> Bool:
@@ -429,7 +544,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         if self.cursor_row > max_row: self.cursor_row = max_row
         var n = self.buffer.line_length(self.cursor_row)
         if self.cursor_col > n: self.cursor_col = n
-        self.desired_col = self.cursor_col
+        self.desired_col = _utf8_cell_of_byte(
+            self.buffer.line(self.cursor_row), self.cursor_col,
+        )
         self.anchor_row = self.cursor_row
         self.anchor_col = self.cursor_col
         return True
@@ -568,18 +685,21 @@ struct Editor(ImplicitlyCopyable, Movable):
         return (sr, sc, er, ec)
 
     fn move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
-        """Place the cursor at ``(row, col)``.
+        """Place the cursor at ``(row, col)`` (``col`` is a byte offset, must
+        sit on a codepoint boundary).
 
-        ``sticky_col=True`` (the default) updates ``desired_col`` to ``col`` —
-        any movement that the user perceives as horizontal (click, type,
-        arrow-left/right, Home/End, ...) should use this. Vertical-only moves
-        (up/down/PgUp/PgDn) pass ``sticky_col=False`` so the remembered column
-        survives a hop through a short line.
+        ``sticky_col=True`` (the default) updates ``desired_col`` to the cell
+        column of ``col`` — any movement that the user perceives as horizontal
+        (click, type, arrow-left/right, Home/End, ...) should use this.
+        Vertical-only moves (up/down/PgUp/PgDn) pass ``sticky_col=False`` so
+        the remembered column survives a hop through a short line. The
+        cell-column representation is what makes this survive lines whose
+        byte and visual widths disagree (multi-byte UTF-8 characters).
         """
         self.cursor_row = row
         self.cursor_col = col
         if sticky_col:
-            self.desired_col = col
+            self.desired_col = _utf8_cell_of_byte(self.buffer.line(row), col)
         if not extend:
             self.anchor_row = row
             self.anchor_col = col
@@ -601,9 +721,6 @@ struct Editor(ImplicitlyCopyable, Movable):
         var content_right = view.b.x
         var content_bottom = view.b.y
         var content_h = view.height()
-        var text_w = view.width() - gutter
-        if text_w < 0:
-            text_w = 0
         # Gutter pass — render breakpoint / exec markers per visible row.
         # Done before text/highlight overlay so the markers aren't
         # clobbered by anything downstream.
@@ -655,31 +772,42 @@ struct Editor(ImplicitlyCopyable, Movable):
                 attr,
                 content_right,
             )
+            # Translate overlay byte offsets into cell columns so
+            # multi-byte codepoints (which paint into a single cell)
+            # don't get aliased against several adjacent columns.
+            var visible_cell_map = utf8_byte_to_cell(visible)
+            var visible_byte_count = len(visible.as_bytes())
+            var visible_cell_count = utf8_codepoint_count(visible)
+            var sy_hl = view.a.y + screen_row
             # Syntax-highlight overlay: change the attr on cells covered by
             # any highlight that targets this buffer row. Glyphs come from
-            # the line so we don't disturb the text already painted above.
-            var line_bytes = line.as_bytes()
-            var sy_hl = view.a.y + screen_row
+            # ``put_text`` above; we only adjust attributes here.
             for h in range(len(self.highlights)):
                 var hl = self.highlights[h]
                 if hl.row != buf_row:
                     continue
-                var hl_start = hl.col_start - self.scroll_x
-                var hl_end = hl.col_end - self.scroll_x
-                if hl_start < 0:
-                    hl_start = 0
-                if hl_end > text_w:
-                    hl_end = text_w
-                for c in range(hl_start, hl_end):
-                    var sx_hl = text_x0 + c
+                var hl_byte_start = hl.col_start - self.scroll_x
+                var hl_byte_end = hl.col_end - self.scroll_x
+                if hl_byte_start < 0:
+                    hl_byte_start = 0
+                if hl_byte_end > visible_byte_count:
+                    hl_byte_end = visible_byte_count
+                if hl_byte_start >= hl_byte_end:
+                    continue
+                # Walk by codepoint via the cell map: each new cell column
+                # we hit gets recoloured exactly once even though several
+                # bytes feed into it.
+                var hl_cell_start = visible_cell_map[hl_byte_start]
+                var hl_cell_end: Int
+                if hl_byte_end < visible_byte_count:
+                    hl_cell_end = visible_cell_map[hl_byte_end]
+                else:
+                    hl_cell_end = visible_cell_count
+                for cell_off in range(hl_cell_start, hl_cell_end):
+                    var sx_hl = text_x0 + cell_off
                     if sx_hl >= content_right:
                         break
-                    var col_in_line = self.scroll_x + c
-                    if col_in_line >= n:
-                        break
-                    var b = Int(line_bytes[col_in_line])
-                    var ch_hl = chr(b) if b < 0x80 else String("?")
-                    canvas.set(sx_hl, sy_hl, Cell(ch_hl, hl.attr, 1))
+                    canvas.set_attr(sx_hl, sy_hl, hl.attr)
             # Overlay selection highlight on this row, if any.
             if sel_active and sel_sr <= buf_row and buf_row <= sel_er:
                 var row_start = 0 if buf_row > sel_sr else sel_sc
@@ -688,50 +816,90 @@ struct Editor(ImplicitlyCopyable, Movable):
                 # selections are still visible.
                 if buf_row < sel_er and row_end == row_start:
                     row_end = row_start + 1
-                var visible_start = row_start - self.scroll_x
-                var visible_end = row_end - self.scroll_x
-                if visible_start < 0: visible_start = 0
-                var sx0 = text_x0 + visible_start
-                var sx1 = text_x0 + visible_end
+                var sel_byte_start = row_start - self.scroll_x
+                var sel_byte_end = row_end - self.scroll_x
+                if sel_byte_start < 0: sel_byte_start = 0
+                # Map each end of the byte range to a cell. Past-EOL
+                # extensions get one cell per virtual byte so empty-line
+                # and trailing-space selections stay visible.
+                var sel_cell_start: Int
+                if sel_byte_start < visible_byte_count:
+                    sel_cell_start = visible_cell_map[sel_byte_start]
+                else:
+                    sel_cell_start = visible_cell_count + (sel_byte_start - visible_byte_count)
+                var sel_cell_end: Int
+                if sel_byte_end < visible_byte_count:
+                    sel_cell_end = visible_cell_map[sel_byte_end]
+                elif sel_byte_end == visible_byte_count:
+                    sel_cell_end = visible_cell_count
+                else:
+                    sel_cell_end = visible_cell_count + (sel_byte_end - visible_byte_count)
+                var sx0 = text_x0 + sel_cell_start
+                var sx1 = text_x0 + sel_cell_end
                 if sx1 > content_right: sx1 = content_right
                 var sy = view.a.y + screen_row
                 for x in range(sx0, sx1):
-                    var bytes = line.as_bytes()
-                    var ch: String
-                    var col_in_line = self.scroll_x + (x - text_x0)
-                    if col_in_line < n:
-                        var b = Int(bytes[col_in_line])
-                        if b < 0x80:
-                            ch = chr(b)
-                        else:
-                            ch = String("?")
+                    var cell_off = x - text_x0
+                    if cell_off < visible_cell_count:
+                        canvas.set_attr(x, sy, sel_attr)
                     else:
-                        ch = String(" ")
-                    canvas.set(x, sy, Cell(ch, sel_attr, 1))
+                        # Past EOL — paint an explicit space so the
+                        # selection extends visibly past the line's
+                        # final character.
+                        canvas.set(x, sy, Cell(String(" "), sel_attr, 1))
         # Cursor: a reverse-video cell when focused (only inside content area).
         if focused:
-            var sx = text_x0 + (self.cursor_col - self.scroll_x)
+            var line = self.buffer.line(self.cursor_row)
+            var line_byte_count = len(line.as_bytes())
+            var cursor_byte = self.cursor_col - self.scroll_x
+            # Visible portion of *this* line for cell-mapping. We can't
+            # reuse the loop's variable since the cursor row may not be
+            # the row currently being painted on a given iteration.
+            var visible_str: String
+            if self.scroll_x >= line_byte_count:
+                visible_str = String("")
+            elif self.scroll_x > 0:
+                visible_str = _slice(line, self.scroll_x, line_byte_count)
+            else:
+                visible_str = line
+            var cursor_cell_map = utf8_byte_to_cell(visible_str)
+            var cursor_cell_count = utf8_codepoint_count(visible_str)
+            var visible_byte_count = len(visible_str.as_bytes())
+            var cell_offset: Int
+            if cursor_byte < 0:
+                cell_offset = 0
+            elif cursor_byte < visible_byte_count:
+                cell_offset = cursor_cell_map[cursor_byte]
+            else:
+                # At or past EOL: each byte beyond the end claims its
+                # own cell so successive ``Right`` presses past EOL
+                # keep advancing visibly.
+                cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
+            var sx = text_x0 + cell_offset
             var sy = view.a.y + (self.cursor_row - self.scroll_y)
             if text_x0 <= sx and sx < content_right \
                and view.a.y <= sy and sy < content_bottom:
-                var line = self.buffer.line(self.cursor_row)
-                var bytes = line.as_bytes()
-                var ch: String
-                if self.cursor_col < len(bytes):
-                    var b = Int(bytes[self.cursor_col])
-                    if b < 0x80:
-                        ch = chr(b)
-                    else:
-                        ch = String("?")
+                if self.cursor_col < line_byte_count:
+                    canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
                 else:
-                    ch = String(" ")
-                canvas.set(sx, sy, Cell(ch, Attr(BLUE, YELLOW), 1))
+                    # Cursor is past EOL — paint a visible block so the
+                    # caret is still visible.
+                    canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
 
     # --- event handling ----------------------------------------------------
 
     fn handle_key(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_KEY:
             return False
+        # Capture the typing-group flag before any branch touches it, then
+        # default to "broken" — every non-typing path (cursor moves, edits,
+        # clipboard ops, …) leaves the flag false so the next keystroke
+        # starts a fresh undo group. The printable-insert branch reads
+        # ``was_typing`` to decide whether to extend, then explicitly
+        # re-arms the flag at the end of its work.
+        var was_typing = self._typing_active
+        var prev_typing_ms = self._typing_last_ms
+        self._typing_active = False
         var k = event.key
         var extend = (event.mods & MOD_SHIFT) != 0
         # Either Ctrl or Alt triggers word jumps. Ctrl is the Linux/Windows
@@ -762,18 +930,14 @@ struct Editor(ImplicitlyCopyable, Movable):
             var step = view.height()
             var nr = self.cursor_row - step
             if nr < 0: nr = 0
-            var nc = self.desired_col
-            var n = self.buffer.line_length(nr)
-            if nc > n: nc = n
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
         elif k == KEY_PAGEDOWN:
             var step = view.height()
             var nr = self.cursor_row + step
             var max_row = self.buffer.line_count() - 1
             if nr > max_row: nr = max_row
-            var nc = self.desired_col
-            var n = self.buffer.line_length(nr)
-            if nc > n: nc = n
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
         elif k == KEY_BACKSPACE:
             # Skip the snapshot when the keystroke can't actually change
@@ -835,11 +999,25 @@ struct Editor(ImplicitlyCopyable, Movable):
             # printable that the terminal pre-folded.
             if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
                 return False
-            self._push_undo()
+            # Group consecutive printable inserts into a single undo step.
+            # Boundaries: a typing pause longer than ``_TYPING_DEBOUNCE_MS``,
+            # an active selection (typing-into-selection is a destructive
+            # replace, not a continuation), or anything that already cleared
+            # ``was_typing`` (cursor move, edit, paste, mouse, …). Spaces
+            # don't break the run on their own — that's what the debounce
+            # is for, and pausing between sentences naturally yields a
+            # boundary while a fast-typed line stays one step.
+            var now = monotonic_ms()
+            var extend_group = was_typing and not self.has_selection() \
+                and now - prev_typing_ms <= _TYPING_DEBOUNCE_MS
+            if not extend_group:
+                self._push_undo()
             if self.has_selection():
                 self._delete_selection()
             self.buffer.insert(self.cursor_row, self.cursor_col, chr(Int(k)))
             self.move_to(self.cursor_row, self.cursor_col + 1, False)
+            self._typing_active = True
+            self._typing_last_ms = now
             self.dirty = True
             self._highlights_dirty = True
         else:
@@ -1064,6 +1242,10 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn handle_mouse(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
+        # Any mouse interaction breaks an active typing run — clicking,
+        # dragging or scrolling means the user has shifted attention and
+        # the next keystroke should anchor a new undo step.
+        self._typing_active = False
         # Wheel events scroll the view without moving the cursor.
         if event.button == MOUSE_WHEEL_UP:
             if event.pressed:
@@ -1086,14 +1268,26 @@ struct Editor(ImplicitlyCopyable, Movable):
         # the corresponding line, just like clicking the line number in
         # most editors). The actual breakpoint toggle is on F9 — handled
         # by Desktop, since only it knows the active DapManager.
-        var col = event.pos.x - view.a.x - self.gutter_width + self.scroll_x
+        var cell_x = event.pos.x - view.a.x - self.gutter_width
+        if cell_x < 0: cell_x = 0
         var row = event.pos.y - view.a.y + self.scroll_y
         if row < 0: row = 0
         var max_row = self.buffer.line_count() - 1
         if row > max_row: row = max_row
-        if col < 0: col = 0
-        var n = self.buffer.line_length(row)
-        if col > n: col = n
+        # Translate cell offset within the visible portion of the row to a
+        # byte offset, so a click on a multi-byte glyph lands at the start
+        # of that codepoint instead of in the middle of its UTF-8 sequence.
+        var line = self.buffer.line(row)
+        var line_n = len(line.as_bytes())
+        var visible: String
+        if self.scroll_x >= line_n:
+            visible = String("")
+        elif self.scroll_x > 0:
+            visible = _slice(line, self.scroll_x, line_n)
+        else:
+            visible = line
+        var col = self.scroll_x + _utf8_byte_of_cell(visible, cell_x)
+        if col > line_n: col = line_n
         # Cmd+click (delivered by iTerm2 as Left+Alt): capture a go-to-
         # definition request without moving the cursor. The host polls
         # ``consume_definition_request`` and forwards to whichever LSP
@@ -1134,7 +1328,9 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn _move_left(mut self, extend: Bool):
         if self.cursor_col > 0:
-            self.move_to(self.cursor_row, self.cursor_col - 1, extend)
+            var line = self.buffer.line(self.cursor_row)
+            var nc = _utf8_step_backward(line, self.cursor_col)
+            self.move_to(self.cursor_row, nc, extend)
         elif self.cursor_row > 0:
             var prev = self.buffer.line_length(self.cursor_row - 1)
             self.move_to(self.cursor_row - 1, prev, extend)
@@ -1142,24 +1338,22 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _move_right(mut self, extend: Bool):
         var n = self.buffer.line_length(self.cursor_row)
         if self.cursor_col < n:
-            self.move_to(self.cursor_row, self.cursor_col + 1, extend)
+            var line = self.buffer.line(self.cursor_row)
+            var nc = _utf8_step_forward(line, self.cursor_col)
+            self.move_to(self.cursor_row, nc, extend)
         elif self.cursor_row + 1 < self.buffer.line_count():
             self.move_to(self.cursor_row + 1, 0, extend)
 
     fn _move_up(mut self, extend: Bool):
         if self.cursor_row > 0:
             var nr = self.cursor_row - 1
-            var nc = self.desired_col
-            var n = self.buffer.line_length(nr)
-            if nc > n: nc = n
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
 
     fn _move_down(mut self, extend: Bool):
         if self.cursor_row + 1 < self.buffer.line_count():
             var nr = self.cursor_row + 1
-            var nc = self.desired_col
-            var n = self.buffer.line_length(nr)
-            if nc > n: nc = n
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
 
     fn _move_word_right(mut self, extend: Bool):
@@ -1213,10 +1407,17 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.scroll_y = self.cursor_row
         elif self.cursor_row >= self.scroll_y + h:
             self.scroll_y = self.cursor_row - h + 1
-        if self.cursor_col < self.scroll_x:
-            self.scroll_x = self.cursor_col
-        elif self.cursor_col >= self.scroll_x + w:
-            self.scroll_x = self.cursor_col - w + 1
+        # Horizontal scroll math is done in cell columns and converted back
+        # to a byte offset so ``scroll_x`` always lands on a codepoint
+        # boundary — the slicing in ``paint`` would corrupt UTF-8 otherwise.
+        var line = self.buffer.line(self.cursor_row)
+        var cur_cell = _utf8_cell_of_byte(line, self.cursor_col)
+        var scroll_cell = _utf8_cell_of_byte(line, self.scroll_x)
+        if cur_cell < scroll_cell:
+            scroll_cell = cur_cell
+        elif cur_cell >= scroll_cell + w:
+            scroll_cell = cur_cell - w + 1
+        self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
     fn reveal_cursor(mut self, view: Rect, margin_below: Int = 5):
         """Scroll so the cursor is visible with at least ``margin_below``
@@ -1241,10 +1442,14 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.scroll_y = bottom - h + 1
         if self.scroll_y < 0:
             self.scroll_y = 0
-        if self.cursor_col < self.scroll_x:
-            self.scroll_x = self.cursor_col
-        elif self.cursor_col >= self.scroll_x + w:
-            self.scroll_x = self.cursor_col - w + 1
+        var line = self.buffer.line(self.cursor_row)
+        var cur_cell = _utf8_cell_of_byte(line, self.cursor_col)
+        var scroll_cell = _utf8_cell_of_byte(line, self.scroll_x)
+        if cur_cell < scroll_cell:
+            scroll_cell = cur_cell
+        elif cur_cell >= scroll_cell + w:
+            scroll_cell = cur_cell - w + 1
+        self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
 
 fn _is_word_char(b: Int) -> Bool:
