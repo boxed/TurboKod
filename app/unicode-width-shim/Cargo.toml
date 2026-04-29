@@ -1,0 +1,14 @@
+[package]
+name = "unicode-width"
+version = "0.2.2"
+edition = "2021"
+description = "mojovision-app override: forces width=1 for every codepoint"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+cjk = []
+no_std = []
+
+[lib]
+path = "src/lib.rs"

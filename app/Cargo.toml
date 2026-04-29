@@ -1,0 +1,40 @@
+[package]
+name = "mojovision-app"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+alacritty_terminal = "0.25"
+winit              = "0.30"
+softbuffer         = "0.4"
+fontdue            = "0.9"
+unicode-width      = "0.2"
+anyhow             = "1"
+parking_lot        = "0.12"
+
+# macOS-only: Core Text gives us the OS's full font fallback chain so
+# emoji/CJK/Thai/etc. — anything fontdue's fixed font list misses —
+# resolves through whatever font the system thinks should handle that
+# codepoint. Rendered into a grayscale bitmap and dropped into the
+# atlas the same way fontdue glyphs are.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text       = "20"
+core-graphics   = "0.23"
+core-foundation = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Override unicode-width with a local shim that reports width=1 for every
+# printable codepoint. alacritty_terminal uses ``c.width()`` to decide
+# whether to allocate a ``WIDE_CHAR_SPACER`` cell next to each emoji/CJK
+# glyph; that double-cell allocation collides with mojovision's
+# one-codepoint-per-column canvas model and leaves stale cells behind
+# whenever content moves. Forcing width=1 keeps the wrapper grid in lock-
+# step with mojovision's canvas — emoji still render correctly because
+# the renderer paints whatever ``cell.c`` carries, regardless of the
+# alacritty WIDE flag.
+[patch.crates-io]
+unicode-width = { path = "unicode-width-shim" }
