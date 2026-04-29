@@ -462,40 +462,6 @@ struct LspProcess(Movable):
         )
         return Optional[String](body^)
 
-    fn peek_read_buffer(self) -> String:
-        """Return whatever bytes are currently sitting in the read
-        buffer, formatted as a printable preview. Diagnostics for the
-        "framer didn't extract a message" case — when the adapter
-        responds with non-spec output (Python tracebacks on stdout,
-        log lines without Content-Length headers, etc.) the bytes
-        accumulate here forever and ``poll_message`` never returns.
-        Showing them lets a human spot the framing mismatch.
-        """
-        if len(self._read_buffer) == 0:
-            return String("")
-        # Cap the preview at 512 bytes — enough for a partial header
-        # block or the start of a malformed payload, short enough to
-        # not flood the pane.
-        var n = len(self._read_buffer)
-        if n > 512:
-            n = 512
-        var out = List[UInt8]()
-        for i in range(n):
-            var b = self._read_buffer[i]
-            # Replace control bytes (other than ``\r\n\t``) with ``·``
-            # so the preview stays single-line and obvious.
-            if b == 0x0A or b == 0x0D:
-                out.append(b)
-            elif b < 0x20 or b == 0x7F:
-                # 0xC2 0xB7 = U+00B7 MIDDLE DOT.
-                out.append(0xC2)
-                out.append(0xB7)
-            else:
-                out.append(b)
-        return String(StringSlice(
-            ptr=out.unsafe_ptr(), length=len(out),
-        ))
-
     fn drain_stderr(mut self) -> String:
         """Drain whatever's available on the server's stderr.
         Non-blocking; loops until ``poll`` says no more data so a

@@ -25,7 +25,7 @@ from std.collections import Optional
 
 from .canvas import Canvas
 from .colors import default_attr
-from .events import Event, EVENT_KEY, EVENT_QUIT, KEY_ESC
+from .events import Event, EVENT_KEY, EVENT_QUIT, EVENT_RESIZE, KEY_ESC
 from .geometry import Rect
 from .terminal import Terminal
 
@@ -63,7 +63,20 @@ struct Application:
         self.terminal.present(self.back)
 
     fn next_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
+        # Polled-cursor refresh stays as a fallback for real terminals where
+        # the wrapper isn't around to push window-size updates.
         if self.terminal.refresh_size():
             self.back.resize(self.terminal.width, self.terminal.height)
-            return Event.resize_event(self.terminal.width, self.terminal.height)
-        return self.terminal.poll_event(timeout_ms)
+            return Optional[Event](
+                Event.resize_event(self.terminal.width, self.terminal.height)
+            )
+        var ev = self.terminal.poll_event(timeout_ms)
+        if ev:
+            var inner = ev.value()
+            # Wrapper-pushed ``CSI 8 ; <rows> ; <cols> t`` lands here as an
+            # ``EVENT_RESIZE``. Sync the back canvas before handing it off
+            # so the next paint targets the new dimensions.
+            if inner.kind == EVENT_RESIZE:
+                self.back.resize(self.terminal.width, self.terminal.height)
+            return Optional[Event](inner)
+        return Optional[Event]()

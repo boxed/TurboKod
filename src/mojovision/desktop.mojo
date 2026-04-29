@@ -40,7 +40,7 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .file_io import basename, find_git_project, join_path, stat_file, write_file
+from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Rect
@@ -60,6 +60,7 @@ from .project import replace_in_project
 from .project_find import ProjectFind
 from .prompt import Prompt
 from .quick_open import QuickOpen
+from .save_as_dialog import SaveAsDialog
 from .status import StatusBar
 from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
@@ -69,6 +70,7 @@ from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 # The Desktop intercepts these; menu items wired to them work without any
 # additional code on the application side.
 
+comptime EDITOR_NEW           = String("file:new")
 comptime EDITOR_SAVE          = String("file:save")
 comptime EDITOR_SAVE_AS       = String("file:save_as")
 comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
@@ -98,7 +100,6 @@ comptime DEBUG_STEP_OUT          = String("debug:step_out")
 comptime DEBUG_STOP              = String("debug:stop")
 comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
 comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
-comptime DEBUG_DUMP_DIAGNOSTIC   = String("debug:dump_diagnostic")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
@@ -121,7 +122,6 @@ comptime _PA_REPLACE_FIND        = String("__pa_replace_find")
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
 comptime _PA_PROJECT_REPLACE_FIND = String("__pa_project_replace_find")
 comptime _PA_PROJECT_REPLACE_DO  = String("__pa_project_replace_do")
-comptime _PA_SAVE_AS             = String("__pa_save_as")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
 
@@ -219,6 +219,7 @@ struct Desktop(Movable):
     var file_tree: FileTree
     var prompt: Prompt
     var quick_open: QuickOpen
+    var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
     var project_find: ProjectFind
     var bg_pattern: String
@@ -229,6 +230,7 @@ struct Desktop(Movable):
     var _pending_action: String      # what to do on next prompt submit
     var _pending_arg: String         # accumulator for two-step prompts
     var _open_count: Int             # cascade counter for Desktop.open_file
+    var _untitled_count: Int         # bumped per ``new_file`` for unique titles
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
     var _esc_armed: Bool             # next keystroke is Alt+<letter> (mnemonic)
     # Spawned LSP managers, one per language id, kept in parallel
@@ -276,12 +278,6 @@ struct Desktop(Movable):
     var _dap_stack_cache: List[DapStackFrame]
     var _dap_watch_exprs: List[String]
     var _dap_watch_values: List[String]   # parallel to exprs (last result)
-    # Diagnostic dump produced by ``Debug → Dump Diagnostic``. Stays
-    # empty in normal use. The host's ``finally`` block reads these
-    # after ``app.stop()`` so the dump prints to the user's restored
-    # terminal scrollback, even if the in-app pane was wedged.
-    var pending_diagnostic: String
-    var pending_diagnostic_path: String
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -290,6 +286,7 @@ struct Desktop(Movable):
         self.file_tree = FileTree()
         self.prompt = Prompt()
         self.quick_open = QuickOpen()
+        self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
         self.project_find = ProjectFind()
         self.bg_pattern = String("▒")
@@ -300,6 +297,7 @@ struct Desktop(Movable):
         self._pending_action = String("")
         self._pending_arg = String("")
         self._open_count = 0
+        self._untitled_count = 0
         self._hotkeys = List[Hotkey]()
         self._esc_armed = False
         self.lsp_specs = built_in_servers()
@@ -318,8 +316,6 @@ struct Desktop(Movable):
         self._dap_stack_cache = List[DapStackFrame]()
         self._dap_watch_exprs = List[String]()
         self._dap_watch_values = List[String]()
-        self.pending_diagnostic = String("")
-        self.pending_diagnostic_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -333,6 +329,7 @@ struct Desktop(Movable):
         # registered so they work as soon as parser support lands.
         self._hotkeys.append(Hotkey(ctrl_key("q"), MOD_NONE, APP_QUIT_ACTION))
         self._hotkeys.append(Hotkey(ctrl_key("w"), MOD_NONE, WINDOW_CLOSE))
+        self._hotkeys.append(Hotkey(ctrl_key("n"), MOD_NONE, EDITOR_NEW))
         self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_QUICK_OPEN))
         self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
@@ -396,12 +393,6 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(KEY_F10, MOD_NONE, DEBUG_STEP_OVER))
         self._hotkeys.append(Hotkey(KEY_F11, MOD_NONE, DEBUG_STEP_IN))
         self._hotkeys.append(Hotkey(KEY_F11, MOD_SHIFT, DEBUG_STEP_OUT))
-        # Ctrl+Shift+D: dump DAP diagnostic. Bypasses the menu so
-        # it works even when the in-app rendering / event loop has
-        # gone sluggish.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("d")), MOD_CTRL | MOD_SHIFT, DEBUG_DUMP_DIAGNOSTIC,
-        ))
         # F8: toggle debug pane focus. Workaround until pane-mouse
         # works; arrow keys then scroll the stack list while the
         # pane is focused.
@@ -458,6 +449,7 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
+        self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen)
 
@@ -521,6 +513,25 @@ struct Desktop(Movable):
             var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
         self._maybe_lsp_open(len(self.windows.windows) - 1)
+
+    fn new_file(mut self, screen: Rect):
+        """Open a fresh, file-less editor window using the same placement
+        rules as ``open_file``. The first window is titled ``Untitled``;
+        subsequent ones get a numeric suffix so the dynamic Window menu
+        and per-window save prompts stay distinguishable.
+        """
+        self._untitled_count += 1
+        var title = String("Untitled")
+        if self._untitled_count > 1:
+            title = title + String(" ") + String(self._untitled_count)
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        self.windows.add(Window.editor_window(title^, rect, String("")))
+        self._open_count += 1
+        if was_max:
+            var idx = len(self.windows.windows) - 1
+            self.windows.windows[idx].toggle_maximize(workspace)
 
     fn _maybe_lsp_open(mut self, idx: Int):
         """If the window at ``idx`` is an editor for a recognized source
@@ -725,6 +736,21 @@ struct Desktop(Movable):
                 if self.prompt.submitted:
                     return self._on_prompt_submit()
             return Optional[String]()
+        if self.save_as_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.save_as_dialog.handle_key(event)
+            else:
+                _ = self.save_as_dialog.handle_mouse(event, screen)
+            if self.save_as_dialog.submitted:
+                var path = self.save_as_dialog.selected_path
+                self.save_as_dialog.close()
+                var idx = self._focused_editor_idx()
+                if idx >= 0:
+                    try:
+                        _ = self.windows.windows[idx].editor.save_as(path)
+                    except:
+                        pass
+            return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:
                 _ = self.quick_open.handle_key(event)
@@ -895,11 +921,14 @@ struct Desktop(Movable):
         if action == PROJECT_TREE_ACTION:
             self._toggle_file_tree()
             return Optional[String]()
+        if action == EDITOR_NEW:
+            self.new_file(screen)
+            return Optional[String]()
         if action == EDITOR_SAVE:
             self._do_save()
             return Optional[String]()
         if action == EDITOR_SAVE_AS:
-            self._open_save_as_prompt()
+            self._open_save_as_dialog()
             return Optional[String]()
         if action == EDITOR_QUICK_OPEN:
             # Project-aware: only meaningful when a project is set. Without
@@ -1032,9 +1061,6 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == DEBUG_TOGGLE_RAISED:
             self._toggle_raised_exceptions()
-            return Optional[String]()
-        if action == DEBUG_DUMP_DIAGNOSTIC:
-            self._dump_dap_diagnostic()
             return Optional[String]()
         if action == DEBUG_FOCUS_PANE:
             # Ctrl+9 from anywhere should *focus* the pane, not
@@ -1463,50 +1489,6 @@ struct Desktop(Movable):
         var label = String("Break when (line ") + String(line + 1) + String("): ")
         self.prompt.open(label, existing)
 
-    fn _dump_dap_diagnostic(mut self):
-        """Write everything we know about the current DAP session into
-        a side file and stash a copy on ``self.pending_diagnostic`` for
-        the host to print after the app exits.
-
-        Bypasses the pane on purpose. The "stuck at initializing" case
-        is exactly the case where the in-app rendering may also be
-        wedged (slow paints, blocked event loop, etc.) — surfacing the
-        diagnostic via a file + post-exit print is the most reliable
-        path: the file is there even if the print is missed, and the
-        print is there even if the file is missed.
-        """
-        var lines = String("--- DAP diagnostic ---\n")
-        lines = lines + String("state: ") + self.dap.status_summary() + String("\n")
-        if len(self.dap.failure_reason.as_bytes()) > 0:
-            lines = lines + String("failure: ") + self.dap.failure_reason \
-                + String("\n")
-        if len(self.dap.spawn_argv) > 0:
-            var av = String("argv:")
-            for k in range(len(self.dap.spawn_argv)):
-                av = av + String(" ") + self.dap.spawn_argv[k]
-            lines = lines + av + String("\n")
-        var stderr_text = self.dap.drain_stderr()
-        if len(stderr_text.as_bytes()) > 0:
-            lines = lines + String("stderr: ") + stderr_text
-            var sb = stderr_text.as_bytes()
-            if len(sb) > 0 and sb[len(sb) - 1] != 0x0A:
-                lines = lines + String("\n")
-        else:
-            lines = lines + String("stderr: <empty>\n")
-        var preview = self.dap.peek_read_buffer()
-        if len(preview.as_bytes()) > 0:
-            lines = lines + String("stdout (unparsed): ") + preview
-            var pb = preview.as_bytes()
-            if len(pb) > 0 and pb[len(pb) - 1] != 0x0A:
-                lines = lines + String("\n")
-        else:
-            lines = lines + String("stdout: <empty>\n")
-        lines = lines + String("--- end diagnostic ---\n")
-        var path = String("/tmp/mojovision-dap.log")
-        if write_file(path, lines):
-            self.pending_diagnostic_path = path
-        self.pending_diagnostic = lines
-
     fn _toggle_raised_exceptions(mut self):
         """Add or remove the ``raised`` exception filter. The
         ``uncaught`` filter is left as-is — that's the always-on
@@ -1679,7 +1661,7 @@ struct Desktop(Movable):
                 pass
             return
         # No backing file — escalate to Save As.
-        self._open_save_as_prompt()
+        self._open_save_as_dialog()
 
     fn _open_symbol_pick(mut self):
         """Open the Go-to-Symbol picker for the focused editor and kick
@@ -1717,13 +1699,19 @@ struct Desktop(Movable):
         if ok:
             self.symbol_pick.open(path)
 
-    fn _open_save_as_prompt(mut self):
+    fn _open_save_as_dialog(mut self):
+        """Open the modal save-as picker, seeded from the focused editor's
+        current path (or the project root for an untitled buffer). The
+        dialog reuses ``DirBrowser`` for the folder listing — see
+        ``SaveAsDialog`` for the keyboard model.
+        """
         var idx = self._focused_editor_idx()
-        var prefill = String("")
+        var seed = String("")
         if idx >= 0:
-            prefill = self.windows.windows[idx].editor.file_path
-        self._pending_action = _PA_SAVE_AS
-        self.prompt.open(String("Save as: "), prefill)
+            seed = self.windows.windows[idx].editor.file_path
+        if len(seed.as_bytes()) == 0 and self.project:
+            seed = self.project.value()
+        self.save_as_dialog.open(seed^)
 
     fn _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input
@@ -1745,14 +1733,6 @@ struct Desktop(Movable):
                     except:
                         n = 0
                 self.windows.windows[idx].editor.goto_line(n)
-            return Optional[String]()
-        if pa == _PA_SAVE_AS:
-            var idx = self._focused_editor_idx()
-            if idx >= 0:
-                try:
-                    _ = self.windows.windows[idx].editor.save_as(text)
-                except:
-                    pass
             return Optional[String]()
         if pa == _PA_REPLACE_FIND:
             self._pending_arg = text

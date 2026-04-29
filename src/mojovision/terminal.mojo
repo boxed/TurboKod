@@ -79,7 +79,6 @@ struct Terminal:
     var _front: Canvas
     var _queue: List[Event]
     var _queue_head: Int            # avoid List.pop(0)'s O(n) shift + churn
-    var _resize_poll_counter: Int   # throttle TIOCGWINSZ to ~1 Hz
     var _pending: List[UInt8]       # trailing bytes of a partial escape sequence
     var _read_buf: List[UInt8]      # persistent read buffer for poll_event
     var width: Int
@@ -94,7 +93,6 @@ struct Terminal:
         self._started = False
         self._queue = List[Event]()
         self._queue_head = 0
-        self._resize_poll_counter = 0
         self._pending = List[UInt8]()
         self._read_buf = alloc_zero_buffer(1024)
         var size = get_window_size()
@@ -173,29 +171,28 @@ struct Terminal:
     fn refresh_size(mut self) raises -> Bool:
         """Re-query terminal dimensions; return True if they changed.
 
-        ``ioctl(TIOCGWINSZ)`` doesn't work reliably via Mojo's
-        ``external_call`` on macOS arm64 (variadic ABI mismatch — the
-        third arg lands in a register but ioctl reads varargs from the
-        stack), so we fall back to the cursor-position query. To avoid
-        racing with user input we:
+        Two paths land us here:
 
-        - throttle to ~1 Hz (every 20 calls at the default 50 ms cadence);
-        - skip when the event queue still has buffered input;
-        - skip when stdin already has bytes ready to read.
+        1. The native wrapper pushes ``CSI 8 ; rows ; cols t`` after each
+           window resize — that goes through ``poll_event``'s parser, not
+           this method, but it's instant.
+        2. On real terminals (Terminal.app, iTerm2) there's no push, so
+           we fall back to polling the cursor position. ``ioctl(TIOCGWINSZ)``
+           doesn't work via Mojo's ``external_call`` on macOS arm64
+           (variadic ABI mismatch — the third arg lands in a register but
+           ``ioctl`` reads varargs from the stack), hence the cursor-query
+           dance instead of a cheap syscall.
 
-        Stray bytes that nevertheless mix in with the cursor response
-        are discarded inside ``query_size_via_cursor`` — losing a key
-        here is much better than the heap corruption an earlier requeue
-        path caused.
+        We poll every call (no throttle) but skip whenever there are
+        already events queued or bytes ready on stdin — a previous ~1 Hz
+        throttle was protecting against a race that the input-pending
+        guard already covers, so removing the counter just makes drag
+        resize feel instant in real terminals.
         """
-        self._resize_poll_counter += 1
-        if self._resize_poll_counter < 20:
-            return False
         if self._queue_head < len(self._queue):
             return False
         if poll_stdin(STDIN_FD, Int32(0)):
             return False
-        self._resize_poll_counter = 0
         var size = query_size_via_cursor(STDIN_FD, STDOUT_FD)
         if size[0] <= 0 or size[1] <= 0:
             return False
@@ -324,6 +321,14 @@ struct Terminal:
                     self._pending.append(combined[i])
                 break
             if parsed[0].kind != EVENT_NONE:
+                if parsed[0].kind == EVENT_RESIZE:
+                    # The resize sequence the wrapper pushes carries the new
+                    # ``(cols, rows)`` in ``pos``; fold it into our cached
+                    # dimensions so callers reading ``self.width/height``
+                    # immediately after see the new size, and the front
+                    # canvas is re-sized in ``present()`` next paint.
+                    self.width = parsed[0].pos.x
+                    self.height = parsed[0].pos.y
                 self._queue.append(parsed[0])
             pos += consumed
         if len(self._pending) > 64:
@@ -582,6 +587,15 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         # Kitty kbd protocol with no explicit modifier (single param).
         var nk = _normalize_ctrl_letter(params[0], MOD_NONE)
         return (Event.key_event(nk[0], nk[1]), consumed)
+
+    if len(params) == 3 and final == 0x74 and params[0] == 8:
+        # ``CSI 8 ; <rows> ; <cols> t`` — xterm window-size report. The
+        # standard says the *terminal emulator* sends this in response to
+        # ``CSI 18 t``; the native wrapper pushes it unsolicited on every
+        # window resize so we get a synchronous size-change notification
+        # instead of waiting for the cursor-query polling loop. Either
+        # source is fine to consume.
+        return (Event.resize_event(params[2], params[1]), consumed)
 
     return (Event(), consumed)
 

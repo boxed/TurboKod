@@ -31,13 +31,14 @@ from .events import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .desktop import (
     APP_QUIT_ACTION,
-    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_DUMP_DIAGNOSTIC,
+    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
     DEBUG_START_OR_CONTINUE, DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER,
     DEBUG_STOP, DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO, EDITOR_GOTO_SYMBOL,
-    EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
-    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
+    EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE,
+    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_UNDO,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE,
     PROJECT_TREE_ACTION,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX, WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
@@ -77,7 +78,9 @@ from .debugger_config import (
     AdapterCandidate, DebuggerSpec,
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
 )
+from .dir_browser import DirBrowser
 from .file_dialog import FileDialog
+from .save_as_dialog import SaveAsDialog
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
     parent_path, read_file, stat_file, write_file,
@@ -92,6 +95,7 @@ from .quick_open import QuickOpen
 from .symbol_pick import SymbolPick, symbol_kind_label
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
+from .painter import Painter
 from .prompt import Prompt
 from .status import StatusBar, StatusItem
 from .terminal import Terminal

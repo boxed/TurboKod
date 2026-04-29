@@ -481,14 +481,6 @@ struct DapManager(Copyable, Movable):
             )
         return text^
 
-    fn peek_read_buffer(self) -> String:
-        """Forward to ``LspProcess.peek_read_buffer`` — diagnostic
-        for "stuck handshake": if bytes are accumulating without any
-        message extracting, the adapter is replying in a shape our
-        framer doesn't recognize."""
-        if self.state == _STATE_NOT_STARTED:
-            return String("")
-        return self.client.process.peek_read_buffer()
 
     fn shutdown(mut self):
         """Best-effort: send ``disconnect`` if active, then terminate the

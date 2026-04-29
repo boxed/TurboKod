@@ -10,15 +10,18 @@ from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
 from mojovision.canvas import Canvas
+from mojovision.dir_browser import DirBrowser
+from mojovision.painter import Painter
 from mojovision.cell import Cell, blank_cell
 from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
 from mojovision.editor import Editor, TextBuffer
 from mojovision.file_dialog import FileDialog
+from mojovision.save_as_dialog import SaveAsDialog
 from mojovision.desktop import (
     APP_QUIT_ACTION,
     Desktop,
-    EDITOR_FIND, EDITOR_GOTO, EDITOR_QUICK_OPEN, EDITOR_REPLACE, EDITOR_SAVE,
-    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_FIND, EDITOR_GOTO, EDITOR_NEW, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
+    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey,
     PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
@@ -64,7 +67,7 @@ from mojovision.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_HOME,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_UP,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
@@ -177,6 +180,24 @@ fn test_parse_input_keys() raises:
     var letter = parse_input(String("a"))
     assert_true(letter[0].kind == EVENT_KEY)
     assert_true(letter[0].key == UInt32(ord("a")))
+
+
+fn test_parse_window_size_report() raises:
+    # ``CSI 8 ; rows ; cols t`` — xterm window-size report. The native
+    # wrapper pushes this on every resize so mojovision sees the new
+    # dimensions immediately; we should turn it into an EVENT_RESIZE
+    # carrying ``(cols, rows)`` in ``pos``.
+    var ev = parse_input(String("\x1b[8;25;80t"))
+    assert_equal(ev[1], 10)  # consumed all 10 bytes of the sequence
+    assert_true(ev[0].kind == EVENT_RESIZE)
+    assert_equal(ev[0].pos.x, 80)  # cols = width
+    assert_equal(ev[0].pos.y, 25)  # rows = height
+
+    # Larger size, just to make sure we're not constant-folding.
+    var ev2 = parse_input(String("\x1b[8;50;200t"))
+    assert_true(ev2[0].kind == EVENT_RESIZE)
+    assert_equal(ev2[0].pos.x, 200)
+    assert_equal(ev2[0].pos.y, 50)
 
 
 fn test_parse_input_sgr_mouse() raises:
@@ -1049,6 +1070,33 @@ fn test_desktop_open_file_inherits_maximize_state() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
+fn test_desktop_new_file_creates_untitled_editor_window() raises:
+    """``new_file`` opens an empty editor with no backing path so Save
+    falls through to Save As, and successive calls get unique titles."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    assert_equal(len(d.windows.windows), 1)
+    assert_true(d.windows.windows[0].is_editor)
+    assert_equal(d.windows.windows[0].title, String("Untitled"))
+    assert_equal(d.windows.windows[0].editor.file_path, String(""))
+    assert_equal(d.windows.windows[0].editor.buffer.line_count(), 1)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String(""))
+    d.new_file(_SCREEN)
+    assert_equal(len(d.windows.windows), 2)
+    assert_equal(d.windows.windows[1].title, String("Untitled 2"))
+
+
+fn test_desktop_dispatch_editor_new_opens_window() raises:
+    """The framework intercepts ``EDITOR_NEW`` so apps wired to the action
+    don't need any extra handling for File → New."""
+    var d = Desktop()
+    var maybe = d.dispatch_action(EDITOR_NEW, _SCREEN)
+    assert_false(Bool(maybe))                    # framework consumed the action
+    assert_equal(len(d.windows.windows), 1)
+    assert_true(d.windows.windows[0].is_editor)
+    assert_equal(d.windows.windows[0].editor.file_path, String(""))
+
+
 fn test_desktop_window_menu_lists_open_windows() raises:
     var d = Desktop()
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))
@@ -1894,18 +1942,116 @@ fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
     assert_true(wm.windows[0].rect == smaller)
 
 
+fn test_painter_clips_text_at_right_edge() raises:
+    """Long text passed to ``Painter.put_text`` must not bleed past the
+    clip's right edge — every cell beyond ``clip.b.x`` stays untouched."""
+    var canvas = Canvas(20, 3)
+    canvas.fill(Rect(0, 0, 20, 3), String("·"), Attr(BLACK, BLUE))
+    var painter = Painter(Rect(2, 1, 8, 2))   # 6-cell wide clip
+    _ = painter.put_text(
+        canvas, Point(2, 1),
+        String("ABCDEFGHIJKLMNOP"), Attr(BLACK, BLUE),
+    )
+    # Cells inside the clip get the letters; cells just outside on the
+    # right keep their sentinel.
+    assert_equal(canvas.get(2, 1).glyph, String("A"))
+    assert_equal(canvas.get(7, 1).glyph, String("F"))
+    assert_equal(canvas.get(8, 1).glyph, String("·"))   # right neighbour intact
+    assert_equal(canvas.get(1, 1).glyph, String("·"))   # left neighbour intact
+    # Drawing on a row outside the clip is a no-op.
+    _ = painter.put_text(
+        canvas, Point(2, 0),
+        String("OUTSIDE"), Attr(BLACK, BLUE),
+    )
+    assert_equal(canvas.get(2, 0).glyph, String("·"))
+
+
+fn test_painter_skips_codepoints_left_of_clip() raises:
+    """When the start point is left of the clip, leading codepoints
+    must be skipped one cell at a time (codepoint-aware) so the
+    remaining glyphs land at the right visual columns. ``café WORLD``
+    occupies cells 0..9; with the clip starting at cell 5, only
+    ``WORLD`` should appear, at its expected columns."""
+    var canvas = Canvas(20, 1)
+    canvas.fill(Rect(0, 0, 20, 1), String("·"), Attr(BLACK, BLUE))
+    var painter = Painter(Rect(5, 0, 15, 1))
+    _ = painter.put_text(
+        canvas, Point(0, 0),
+        String("café WORLD"),
+        Attr(BLACK, BLUE),
+    )
+    # Cells 0..4 left of clip stay sentinel.
+    for x in range(5):
+        assert_equal(canvas.get(x, 0).glyph, String("·"))
+    # ``W``..``D`` land at cells 5..9 — same columns they would in an
+    # unclipped paint, which is the whole point of codepoint-aware
+    # skipping (a byte-stride skip would drop one extra cell from the
+    # 2-byte ``é`` and shift everything left).
+    assert_equal(canvas.get(5, 0).glyph, String("W"))
+    assert_equal(canvas.get(6, 0).glyph, String("O"))
+    assert_equal(canvas.get(9, 0).glyph, String("D"))
+    # Cells 10..14 (still inside the clip) and 15+ (right of clip)
+    # never got a glyph.
+    assert_equal(canvas.get(10, 0).glyph, String("·"))
+    assert_equal(canvas.get(15, 0).glyph, String("·"))
+
+
+fn test_painter_fill_intersects_with_clip() raises:
+    var canvas = Canvas(10, 5)
+    canvas.fill(Rect(0, 0, 10, 5), String("·"), Attr(BLACK, BLUE))
+    var painter = Painter(Rect(2, 1, 7, 4))
+    # Caller-rect overhangs the clip; the fill is automatically trimmed.
+    painter.fill(canvas, Rect(0, 0, 100, 100), String("#"), Attr(BLACK, BLUE))
+    assert_equal(canvas.get(0, 0).glyph, String("·"))
+    assert_equal(canvas.get(2, 1).glyph, String("#"))
+    assert_equal(canvas.get(6, 3).glyph, String("#"))
+    assert_equal(canvas.get(7, 3).glyph, String("·"))   # one past clip
+    assert_equal(canvas.get(2, 4).glyph, String("·"))   # one below clip
+
+
+fn test_dir_browser_long_name_does_not_overflow_listing() raises:
+    """Regression: a directory entry far longer than the listing rect
+    must not overwrite cells outside the rect, on any side. Drives the
+    overflow with a 200-char synthetic entry — anything longer than
+    the rect width would have leaked under the pre-Painter code only
+    when callers forgot ``max_x``."""
+    var canvas = Canvas(40, 5)
+    var sentinel = Attr(BLACK, BLUE)
+    canvas.fill(Rect(0, 0, 40, 5), String("·"), sentinel)
+    var br = DirBrowser(False)
+    br.entries = List[String]()
+    br.entry_is_dir = List[Bool]()
+    var huge = String("")
+    for _ in range(200):
+        huge = huge + String("X")
+    br.entries.append(huge^)
+    br.entry_is_dir.append(False)
+    br.selected = 0
+    var clip = Rect(5, 1, 15, 4)
+    br.paint(canvas, clip, True)
+    # Every cell outside the clip must still be the sentinel.
+    for y in range(5):
+        for x in range(40):
+            var inside = (
+                clip.a.x <= x and x < clip.b.x
+                and clip.a.y <= y and y < clip.b.y
+            )
+            if not inside:
+                assert_equal(canvas.get(x, y).glyph, String("·"))
+
+
 fn test_file_dialog_lists_and_navigates() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     assert_true(dlg.active)
     # Should have at least ".." and a few example files.
-    assert_true(len(dlg.entries) >= 2)
-    assert_equal(dlg.entries[0], String(".."))
+    assert_true(len(dlg.browser.entries) >= 2)
+    assert_equal(dlg.browser.entries[0], String(".."))
     # Navigate to second entry; arrow event-driven.
     _ = dlg.handle_key(Event.key_event(KEY_DOWN))
-    assert_equal(dlg.selected, 1)
+    assert_equal(dlg.browser.selected, 1)
     _ = dlg.handle_key(Event.key_event(KEY_UP))
-    assert_equal(dlg.selected, 0)
+    assert_equal(dlg.browser.selected, 0)
 
 
 fn test_partial_sgr_mouse_does_not_emit_esc() raises:
@@ -1951,12 +2097,12 @@ fn test_file_dialog_selects_a_file() raises:
     dlg.open(String("examples"))
     # Find hello.mojo in the listing and step to it.
     var target = -1
-    for i in range(len(dlg.entries)):
-        if dlg.entries[i] == String("hello.mojo"):
+    for i in range(len(dlg.browser.entries)):
+        if dlg.browser.entries[i] == String("hello.mojo"):
             target = i
             break
     assert_true(target > 0)
-    while dlg.selected < target:
+    while dlg.browser.selected < target:
         _ = dlg.handle_key(Event.key_event(KEY_DOWN))
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
     assert_true(dlg.submitted)
@@ -1973,7 +2119,7 @@ fn test_file_dialog_mouse_click_selects() raises:
         Event.mouse_event(Point(20, 7), MOUSE_BUTTON_LEFT, True, False),
         screen,
     )
-    assert_equal(dlg.selected, 1)
+    assert_equal(dlg.browser.selected, 1)
     assert_false(dlg.submitted)
 
 
@@ -1982,19 +2128,19 @@ fn test_file_dialog_double_click_opens() raises:
     dlg.open(String("examples"))
     # Find hello.mojo, then click it twice.
     var target = -1
-    for i in range(len(dlg.entries)):
-        if dlg.entries[i] == String("hello.mojo"):
+    for i in range(len(dlg.browser.entries)):
+        if dlg.browser.entries[i] == String("hello.mojo"):
             target = i
             break
     assert_true(target > 0)
     var screen = Rect(0, 0, 80, 24)
     var list_top = 6
-    var visible_y = list_top + (target - dlg.scroll)
+    var visible_y = list_top + (target - dlg.browser.scroll)
     _ = dlg.handle_mouse(
         Event.mouse_event(Point(20, visible_y), MOUSE_BUTTON_LEFT, True, False),
         screen,
     )
-    assert_equal(dlg.selected, target)
+    assert_equal(dlg.browser.selected, target)
     assert_false(dlg.submitted)
     _ = dlg.handle_mouse(
         Event.mouse_event(Point(20, visible_y), MOUSE_BUTTON_LEFT, True, False),
@@ -2008,21 +2154,105 @@ fn test_file_dialog_wheel_scrolls() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     var screen = Rect(0, 0, 80, 24)
-    var initial = dlg.scroll
+    var initial = dlg.browser.scroll
     # Wheel down a few times.
     _ = dlg.handle_mouse(
         Event.mouse_event(Point(20, 10), MOUSE_WHEEL_DOWN, True, False),
         screen,
     )
     # If there are more entries than the visible window, scroll moves; else stays.
-    if len(dlg.entries) > 13:
-        assert_true(dlg.scroll > initial)
+    if len(dlg.browser.entries) > 13:
+        assert_true(dlg.browser.scroll > initial)
     # Wheel up resets toward 0.
     _ = dlg.handle_mouse(
         Event.mouse_event(Point(20, 10), MOUSE_WHEEL_UP, True, False),
         screen,
     )
-    assert_true(dlg.scroll <= initial + 3)
+    assert_true(dlg.browser.scroll <= initial + 3)
+
+
+fn test_save_as_dialog_seeds_from_existing_path() raises:
+    """``open(start_path)`` splits the path: directory feeds the listing,
+    basename pre-fills the filename input, focus starts on the input.
+    Listing must be dirs-only (the user is picking a folder)."""
+    var dlg = SaveAsDialog()
+    # Use ``./hello.mojo`` so the listing draws from the repo root —
+    # which actually has subdirectories — making the dirs-only filter
+    # observable. (The ``examples/`` directory has no subdirs, so a
+    # filter test rooted there would pass vacuously.)
+    dlg.open(String("./hello.mojo"))
+    assert_true(dlg.active)
+    assert_equal(dlg.filename, String("hello.mojo"))
+    assert_equal(dlg.browser.dir, String("."))
+    # The repo root has plain files (CLAUDE.md, run.sh, pixi.toml, …).
+    # If the filter were broken, the listing would include them; we
+    # require every entry to be a directory.
+    var saw_real_entry = False
+    for i in range(len(dlg.browser.entries)):
+        if dlg.browser.entries[i] == String(".."):
+            continue
+        saw_real_entry = True
+        assert_true(dlg.browser.entry_is_dir[i])
+    assert_true(saw_real_entry)
+
+
+fn test_save_as_dialog_typing_updates_filename() raises:
+    var dlg = SaveAsDialog()
+    dlg.open(String(""))
+    assert_equal(dlg.filename, String(""))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("a"))))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("b"))))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord(".")), MOD_NONE))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("t"))))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("x"))))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("t"))))
+    assert_equal(dlg.filename, String("ab.txt"))
+    # Backspace deletes from the input while focus stays there.
+    _ = dlg.handle_key(Event.key_event(KEY_BACKSPACE))
+    assert_equal(dlg.filename, String("ab.tx"))
+
+
+fn test_save_as_dialog_enter_submits_joined_path() raises:
+    var dlg = SaveAsDialog()
+    dlg.open(String("examples/hello.mojo"))
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(dlg.submitted)
+    assert_equal(dlg.selected_path, String("examples/hello.mojo"))
+
+
+fn test_save_as_dialog_tab_focus_then_listing_navigation() raises:
+    """Tab moves focus to the listing; Enter on the listing descends
+    rather than submitting, since the user is still picking a folder."""
+    var dlg = SaveAsDialog()
+    dlg.open(String("examples/hello.mojo"))
+    _ = dlg.handle_key(Event.key_event(KEY_TAB))
+    # Up to ``..``, then Enter to ascend.
+    _ = dlg.handle_key(Event.key_event(KEY_UP))
+    assert_equal(dlg.browser.selected, 0)
+    assert_equal(dlg.browser.entries[0], String(".."))
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(dlg.submitted)
+    # Tab back, then Enter — should submit at the new (parent) directory.
+    _ = dlg.handle_key(Event.key_event(KEY_TAB))
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(dlg.submitted)
+    # ``..`` from "examples" lands on the project root; the path joins
+    # the new dir with the unchanged filename.
+    assert_true(dlg.selected_path.as_bytes()[len(dlg.selected_path.as_bytes()) - 1] != 0x2F)
+    var n = len(dlg.selected_path.as_bytes())
+    var b = dlg.selected_path.as_bytes()
+    var hello = String("hello.mojo").as_bytes()
+    var hn = len(hello)
+    assert_true(n >= hn)
+    for i in range(hn):
+        assert_equal(Int(b[n - hn + i]), Int(hello[i]))
+
+
+fn test_save_as_dialog_empty_filename_blocks_submit() raises:
+    var dlg = SaveAsDialog()
+    dlg.open(String(""))
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(dlg.submitted)
 
 
 fn test_editor_sticky_col_down_through_short_line() raises:
@@ -2746,6 +2976,7 @@ fn main() raises:
     test_canvas_fill()
     test_event_factories()
     test_parse_input_keys()
+    test_parse_window_size_report()
     test_parse_input_sgr_mouse()
     test_centered()
     test_text_buffer_split_and_join()
@@ -2818,6 +3049,8 @@ fn main() raises:
     test_desktop_open_file_cascades_by_one()
     test_desktop_open_file_focuses_existing()
     test_desktop_open_file_inherits_maximize_state()
+    test_desktop_new_file_creates_untitled_editor_window()
+    test_desktop_dispatch_editor_new_opens_window()
     test_desktop_window_menu_lists_open_windows()
     test_desktop_window_menu_when_empty()
     test_desktop_window_focus_action_focuses_window()
@@ -2849,6 +3082,10 @@ fn main() raises:
     test_hotkey_does_not_fire_while_prompt_active()
     test_desktop_project_find_requires_active_project()
     test_replace_in_project_round_trip()
+    test_painter_clips_text_at_right_edge()
+    test_painter_skips_codepoints_left_of_clip()
+    test_painter_fill_intersects_with_clip()
+    test_dir_browser_long_name_does_not_overflow_listing()
     test_file_dialog_lists_and_navigates()
     test_partial_sgr_mouse_does_not_emit_esc()
     test_sgr_mouse_wheel_up()
@@ -2856,6 +3093,11 @@ fn main() raises:
     test_file_dialog_mouse_click_selects()
     test_file_dialog_double_click_opens()
     test_file_dialog_wheel_scrolls()
+    test_save_as_dialog_seeds_from_existing_path()
+    test_save_as_dialog_typing_updates_filename()
+    test_save_as_dialog_enter_submits_joined_path()
+    test_save_as_dialog_tab_focus_then_listing_navigation()
+    test_save_as_dialog_empty_filename_blocks_submit()
     test_editor_sticky_col_down_through_short_line()
     test_editor_sticky_col_up_through_short_line()
     test_editor_sticky_col_reset_by_left_arrow()
