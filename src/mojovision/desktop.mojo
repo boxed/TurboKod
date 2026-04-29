@@ -38,7 +38,7 @@ from .events import (
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
     KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_CTRL, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
@@ -173,6 +173,8 @@ fn format_hotkey(key: UInt32, mods: UInt8) -> String:
     var prefix = String("")
     if (mods & MOD_CTRL) != 0:
         prefix = prefix + String("Ctrl+")
+    if (mods & MOD_META) != 0:
+        prefix = prefix + String("Cmd+")
     if (mods & MOD_ALT) != 0:
         prefix = prefix + String("Alt+")
     if (mods & MOD_SHIFT) != 0:

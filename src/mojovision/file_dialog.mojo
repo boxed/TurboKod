@@ -58,13 +58,12 @@ fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
 
 
 fn _list_rect(dialog: Rect) -> Rect:
-    # Below the listing we reserve three rows: button face, button
-    # shadow, and the bottom-edge hint. The buttons themselves butt
-    # right up against the listing — the green button blocks read
-    # as a visual divider on their own, so no extra gap row is
-    # needed.
+    # Below the listing we reserve four rows: a 1-row visual gap
+    # (so the listing's selection bar doesn't appear to bleed into
+    # the green button face), the button face, the button shadow,
+    # and the bottom-edge hint.
     var list_top = dialog.a.y + 3
-    var list_bottom = dialog.b.y - 3
+    var list_bottom = dialog.b.y - 4
     return Rect(dialog.a.x + 2, list_top, dialog.b.x - 1, list_bottom)
 
 
@@ -161,10 +160,10 @@ struct FileDialog(Movable):
         var k = event.key
         # ``list_h`` is recovered from the canonical layout — keeping the
         # geometry computation in one place means navigation can't drift
-        # against painting. ``-6`` accounts for: 1 (top border) + 1
-        # (current-dir line) + 1 (gap) + 1 (jump-button strip) + 1
-        # (hint) + 1 (bottom border).
-        var list_h = _DIALOG_H - 6
+        # against painting. ``-7`` accounts for: 1 (top border) + 1
+        # (current-dir line) + 1 (gap above list) + 1 (gap below list) +
+        # 1 (button face) + 1 (button shadow / hint share) + 1 (bottom).
+        var list_h = _DIALOG_H - 7
         if k == KEY_ESC:
             self.close()
             return True

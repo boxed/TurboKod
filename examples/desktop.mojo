@@ -33,16 +33,16 @@ from std.sys import argv
 from mojovision import (
     APP_QUIT_ACTION, Application,
     Event,
-    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_DUMP_DIAGNOSTIC,
+    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
     DEBUG_START_OR_CONTINUE,
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
     Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO,
-    EDITOR_GOTO_SYMBOL, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
-    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE,
-    EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
-    EVENT_KEY, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
+    EDITOR_GOTO_SYMBOL, EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN,
+    EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
+    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
+    EVENT_KEY, EVENT_RESIZE, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
 )
 
 
@@ -69,7 +69,7 @@ fn main() raises:
         var file_dialog = FileDialog()
 
         desktop.menu_bar.add(_mk_menu(String("File"),
-            (String("New"), String("noop")),
+            (String("New"), EDITOR_NEW),
             (String("Open..."), String("file:open")),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
             (String("Close"), WINDOW_CLOSE),
@@ -105,7 +105,6 @@ fn main() raises:
             (String("Step Out"), DEBUG_STEP_OUT),
             (String("Add Watch..."), DEBUG_ADD_WATCH),
             (String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED),
-            (String("Dump Diagnostic"), DEBUG_DUMP_DIAGNOSTIC),
         ))
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
@@ -262,6 +261,21 @@ fn main() raises:
                             String("iter ") + String(iter_n)
                             + String(" after-poll_event"),
                         )
+                    # The native wrapper pushes ``CSI 8 ; rows ; cols t``
+                    # on resize; ``poll_event`` parses it and returns an
+                    # ``EVENT_RESIZE`` with ``terminal.width/height``
+                    # already updated. We have to mirror that into the
+                    # back canvas here — ``refresh_size`` is short-
+                    # circuited by ``poll_stdin`` whenever the wrapper's
+                    # bytes are still pending, so its ``True`` branch
+                    # above never gets a chance to do the resize on the
+                    # wrapper path.
+                    if maybe_ev:
+                        var pe = maybe_ev.value()
+                        if pe.kind == EVENT_RESIZE:
+                            app.back.resize(
+                                app.terminal.width, app.terminal.height,
+                            )
                 desktop.lsp_tick(app.screen())
                 desktop.dap_tick(app.screen())
                 if not maybe_ev:
@@ -323,24 +337,12 @@ fn main() raises:
         for i in range(len(desktop.lsp_managers)):
             desktop.lsp_managers[i].shutdown()
         desktop.dap.shutdown()
-        # Snapshot the diagnostic strings before ``app.stop`` so the
-        # cleanup work runs on stable values. Print them after
-        # ``app.stop`` so the terminal is in cooked mode and lines
-        # land in scrollback. The same content is on disk at
-        # ``diagnostic_path`` for copy/paste.
-        var diagnostic = desktop.pending_diagnostic
-        var diagnostic_path = desktop.pending_diagnostic_path
         app.stop()
         for i in range(len(error_log)):
             print(error_log[i])
         # Consume so the ``finally`` backup doesn't double-print on
         # the clean-exit path.
         error_log = List[String]()
-        if len(diagnostic.as_bytes()) > 0:
-            print("")
-            print(diagnostic)
-            if len(diagnostic_path.as_bytes()) > 0:
-                print("(also written to " + diagnostic_path + ")")
     finally:
         # Backup for the exception path: ``app.stop`` is idempotent,
         # so it's a no-op when the clean path already ran.

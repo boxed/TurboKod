@@ -74,13 +74,14 @@ fn _input_rect(dialog: Rect) -> Rect:
 
 
 fn _list_rect(dialog: Rect) -> Rect:
-    """Rows 5..height-3 are the directory listing. The three rows
-    below the listing carry the green button face, the half-block
-    drop shadow, and the hint line painted over the bottom border —
-    in that order."""
+    """Listing starts at y+5; the four rows below it carry a 1-row
+    visual gap, the green button face, the half-block drop shadow,
+    and the hint line painted over the bottom border — in that
+    order. The gap keeps the selection bar from looking like it's
+    bleeding into the button face."""
     return Rect(
         dialog.a.x + 2, dialog.a.y + 5,
-        dialog.b.x - 1, dialog.b.y - 3,
+        dialog.b.x - 1, dialog.b.y - 4,
     )
 
 
@@ -220,10 +221,10 @@ struct SaveAsDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
-        # ``-8`` accounts for: 1 (top border) + 1 (gap) + 1 (input) +
-        # 1 (gap) + 1 (current-dir line) + 1 (jump strip) + 1 (hint)
-        # + 1 (bottom border).
-        var list_h = _DIALOG_H - 8
+        # ``-9`` accounts for: 1 (top border) + 1 (gap) + 1 (input)
+        # + 1 (gap) + 1 (current-dir line) + 1 (gap below list) +
+        # 1 (button face) + 1 (button shadow) + 1 (hint / bottom).
+        var list_h = _DIALOG_H - 9
         if k == KEY_ESC:
             self.close()
             return True

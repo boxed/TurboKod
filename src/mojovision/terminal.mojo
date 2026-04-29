@@ -23,7 +23,7 @@ from .events import (
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
     KEY_ENTER, KEY_TAB, KEY_BACKSPACE, KEY_ESC,
-    MOD_NONE, MOD_SHIFT, MOD_ALT, MOD_CTRL,
+    MOD_NONE, MOD_SHIFT, MOD_ALT, MOD_CTRL, MOD_META,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
@@ -428,7 +428,13 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
 
 
 fn _csi_mods_from(mod_num: Int) -> UInt8:
-    """Decode the xterm modifier-parameter (1 + shift|alt<<1|ctrl<<2)."""
+    """Decode the xterm modifier-parameter (1 + shift|alt<<1|ctrl<<2|meta<<3).
+
+    Bit 8 (meta) is the macOS Cmd key. xterm's standard mod values stop at
+    ctrl (bit 4 → up to 8), so the host wrapper for the native window has
+    to opt in to emitting the meta bit; terminals that don't won't reach
+    this branch and behave exactly as before.
+    """
     var raw = mod_num - 1
     if raw < 0:
         raw = 0
@@ -436,6 +442,7 @@ fn _csi_mods_from(mod_num: Int) -> UInt8:
     if (raw & 1) != 0: mods = mods | MOD_SHIFT
     if (raw & 2) != 0: mods = mods | MOD_ALT
     if (raw & 4) != 0: mods = mods | MOD_CTRL
+    if (raw & 8) != 0: mods = mods | MOD_META
     return mods
 
 
@@ -448,16 +455,26 @@ fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
     (hotkeys, the editor's clipboard handlers) standardizes on the bare
     control-byte form, so we collapse the modified form into it. The
     ``Ctrl+Shift+letter`` case is left intact so it remains distinguishable.
+
+    ``Cmd+...`` (``MOD_META``) is collapsed onto ``Ctrl+...`` first — the
+    framework guarantees the two are indistinguishable downstream, so a
+    hotkey table written against ``Ctrl+S`` fires for Cmd+S, and one
+    written against ``Ctrl+Shift+F`` fires for Cmd+Shift+F. After the
+    fold, the same control-byte rule above applies to the bare-Ctrl case.
     """
-    if mods != MOD_CTRL:
-        return (UInt32(cp), mods)
+    var folded = mods
+    if (folded & MOD_META) != 0:
+        # XOR clears the META bit (we just checked it's set), then OR sets CTRL.
+        folded = (folded ^ MOD_META) | MOD_CTRL
+    if folded != MOD_CTRL:
+        return (UInt32(cp), folded)
     if cp < 0x40 or cp > 0x7E:
-        return (UInt32(cp), mods)
+        return (UInt32(cp), folded)
     var letter = cp
     if letter >= 0x60:
         letter = letter - 0x20  # to upper
     if letter < 0x40 or letter > 0x5F:
-        return (UInt32(cp), mods)
+        return (UInt32(cp), folded)
     return (UInt32(letter - 0x40), MOD_NONE)
 
 

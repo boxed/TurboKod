@@ -1341,6 +1341,21 @@ fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
     assert_true((ev[0].mods & MOD_SHIFT) != 0)
 
 
+fn test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f() raises:
+    """``ESC[27;10;102~`` is the meta-bit form (mod = 1 + 1 + 8) of
+    Cmd+Shift+F. The framework treats Cmd as Ctrl across the board, so
+    this collapses to ``(ord('f'), MOD_CTRL|MOD_SHIFT)`` — the exact
+    event Ctrl+Shift+F produces, so a single hotkey registration covers
+    both modifier flavors. Without this fold the keystroke fell through
+    to the focused editor and got typed as 'f'."""
+    var ev = parse_input(String("\x1b[27;10;102~"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), Int(ord("f")))
+    assert_true((ev[0].mods & MOD_CTRL) != 0)
+    assert_true((ev[0].mods & MOD_SHIFT) != 0)
+    assert_true((ev[0].mods & MOD_META) == 0)
+
+
 fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
     """Any unrecognized CSI sequence must be eaten in one bite — without
     that, trailing bytes (digits, ``~``) get re-parsed as printable keys
@@ -1351,6 +1366,32 @@ fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
     var ev = parse_input(s)
     assert_true(ev[0].kind == EVENT_NONE)
     assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form() raises:
+    """``ESC[27;9;115~`` is the meta-bit form (mod = 1 + 8) of Cmd+S that
+    the native Rust host emits for ``super_key()``. The framework folds
+    it onto the same ``(0x13, MOD_NONE)`` event that Ctrl+S produces, so
+    a single hotkey registration covers both modifiers."""
+    var ev = parse_input(String("\x1b[27;9;115~"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), 0x13)
+    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+
+
+fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
+    """End-to-end: a Cmd+S event delivered as ``CSI 27;9;115~`` is folded
+    by the terminal parser onto Ctrl+S and triggers ``EDITOR_SAVE`` —
+    same dispatch as if the user had pressed Ctrl+S."""
+    var d = Desktop()
+    var parsed = parse_input(String("\x1b[27;9;115~"))
+    assert_true(parsed[0].kind == EVENT_KEY)
+    assert_equal(Int(parsed[0].key), 0x13)
+    var maybe = d.handle_event(parsed[0], _SCREEN)
+    # No editor focused → save is a no-op intercepted by Desktop. The
+    # important assertion is that the action *was* recognized: nothing
+    # bubbles back to the caller.
+    assert_false(Bool(maybe))
 
 
 fn test_parse_csi_kitty_u_ctrl_letter() raises:
@@ -3064,7 +3105,10 @@ fn main() raises:
     test_menu_items_get_shortcut_text_after_refresh()
     test_dropdown_widens_to_fit_shortcut()
     test_parse_csi_modify_other_keys_normalizes_ctrl_q()
+    test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form()
+    test_cmd_s_via_modify_other_keys_triggers_save_hotkey()
     test_parse_csi_modify_other_keys_ctrl_shift_f()
+    test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f()
     test_parse_csi_unknown_sequence_is_consumed_whole()
     test_parse_csi_kitty_u_ctrl_letter()
     test_editor_rejects_modified_letter_typing()

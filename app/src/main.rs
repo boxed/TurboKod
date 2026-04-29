@@ -17,8 +17,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use fontdue::{Font, FontSettings};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::dpi::PhysicalPosition;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -441,12 +440,28 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // Open at ~2/3 of the primary monitor so the app feels like a real
+        // workspace on first launch instead of an 80x25 postage stamp.
+        // ``cell_w``/``cell_h`` and the monitor size are both physical
+        // pixels, so no logical/physical conversion is needed. Snap to a
+        // whole-cell boundary to avoid a partial trailing column at startup.
+        // The first ``Resized`` event will drive ``on_resize`` and re-grid
+        // the term, so the placeholder 80x25 it was initialised with only
+        // exists for the millisecond before the window materialises.
+        let inner = el.primary_monitor()
+            .map(|m| {
+                let s = m.size();
+                let cols = ((s.width * 2 / 3) / self.cell_w).max(MIN_COLS);
+                let rows = ((s.height * 2 / 3) / self.cell_h).max(MIN_ROWS);
+                PhysicalSize::new(cols * self.cell_w, rows * self.cell_h)
+            })
+            .unwrap_or_else(|| PhysicalSize::new(
+                self.cell_w * self.cols,
+                self.cell_h * self.rows,
+            ));
         let attrs = WindowAttributes::default()
             .with_title("mojovision")
-            .with_inner_size(LogicalSize::new(
-                (self.cell_w * self.cols) as f64,
-                (self.cell_h * self.rows) as f64,
-            ));
+            .with_inner_size(inner);
         let window = Arc::new(el.create_window(attrs).unwrap());
         let context = softbuffer::Context::new(window.clone()).unwrap();
         let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
@@ -548,6 +563,18 @@ impl App {
             cell_height: self.cell_h as u16,
         };
         let _ = self.notifier.0.send(Msg::Resize(win_size));
+        // Push the standard xterm ``CSI 8 ; rows ; cols t`` window-size
+        // report to the child's stdin so mojovision sees the new
+        // dimensions on the next ``poll_event`` instead of waiting for
+        // the cursor-query polling tick. This is the ``SIGWINCH``
+        // analogue we couldn't get to fire reliably through Mojo's libc
+        // bindings — same idea, routed through the byte stream that
+        // mojovision's parser already consumes.
+        let push = format!("\x1b[8;{};{}t", rows, cols);
+        if std::env::var("MOJOVISION_DEBUG_RESIZE").is_ok() {
+            eprintln!("[mojovision-app] resize push: {:?}", push);
+        }
+        self.notifier.notify(push.into_bytes());
 
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -560,8 +587,13 @@ impl App {
         }
         let mods = self.modifiers;
         // macOS Cmd is reported as SUPER. Cmd+=/+/-/0 control host font size
-        // (matching iTerm/Terminal.app); other Cmd+<letter> are forwarded to
-        // mojovision as ESC<letter> (standard meta-prefix encoding).
+        // (matching iTerm/Terminal.app); other Cmd+<letter> are forwarded
+        // to mojovision via the xterm modifyOtherKeys=2 envelope with the
+        // meta bit set: ``CSI 27;<mod>;<codepoint>~``. The Mojo terminal
+        // parser (``_csi_mods_from`` / ``_normalize_ctrl_letter``) folds
+        // the meta bit onto the same canonical control-byte form Ctrl+
+        // produces, so a hotkey table written against ``Ctrl+<letter>``
+        // fires for both modifiers without any per-modifier branch.
         if mods.super_key() {
             if let Key::Character(s) = &ev.logical_key {
                 match s.as_str() {
@@ -570,11 +602,12 @@ impl App {
                     "0" => return self.change_scale(DEFAULT_SCALE),
                     _ => {}
                 }
-                let mut buf = Vec::with_capacity(1 + s.len());
-                buf.push(0x1b);
-                buf.extend_from_slice(s.as_str().as_bytes());
-                self.notifier.notify(buf);
-                return;
+                if let Some(ch) = s.chars().next() {
+                    let cp = keycap_cp(ch);
+                    let seq = format!("\x1b[27;{};{}~", mod_other_param(mods, true), cp);
+                    self.notifier.notify(seq.into_bytes());
+                    return;
+                }
             }
         }
         let bytes: Cow<'static, [u8]> = match &ev.logical_key {
@@ -610,11 +643,22 @@ impl App {
             Key::Named(NamedKey::F12) => Cow::Owned(csi_tilde(24, mods)),
             Key::Character(s) => {
                 if mods.control_key() {
-                    // Standard ASCII control mapping: Ctrl+a..Ctrl+z → 0x01..0x1A.
                     if let Some(ch) = s.chars().next() {
                         let lower = ch.to_ascii_lowercase();
                         if ('a'..='z').contains(&lower) {
-                            return self.notifier.notify(vec![lower as u8 - b'a' + 1]);
+                            // Plain Ctrl+letter (no shift/alt/meta) → ASCII
+                            // control byte. With any extra modifier, route
+                            // through modifyOtherKeys so the embedded app
+                            // sees the full ``Ctrl+Shift+F`` rather than a
+                            // bare 0x06 with the Shift bit dropped on the
+                            // floor.
+                            if !mods.shift_key() && !mods.alt_key() && !mods.super_key() {
+                                return self.notifier.notify(vec![lower as u8 - b'a' + 1]);
+                            }
+                            let seq = format!(
+                                "\x1b[27;{};{}~", mod_other_param(mods, false), lower as u32,
+                            );
+                            return self.notifier.notify(seq.into_bytes());
                         }
                     }
                 }
@@ -652,6 +696,9 @@ impl App {
             cell_height: self.cell_h as u16,
         };
         let _ = self.notifier.0.send(Msg::Resize(win_size));
+        // Synchronous push of the new size — see ``on_resize`` for the
+        // reasoning. ``Cmd+=`` / ``Cmd+-`` re-grids the cell count too.
+        self.notifier.notify(format!("\x1b[8;{};{}t", rows, cols).into_bytes());
         window.request_redraw();
     }
 
@@ -914,6 +961,31 @@ fn ss3_or_csi(letter: u8, mods: ModifiersState) -> Vec<u8> {
     }
 }
 
+// modifyOtherKeys (xterm) modifier param: 1 + Shift + 2*Alt + 4*Ctrl + 8*Meta.
+// The meta (Cmd) bit is non-standard but the Mojo terminal parser opts in to
+// it, and including it lets the embedded app distinguish Cmd+X from Ctrl+X.
+fn mod_other_param(mods: ModifiersState, force_meta: bool) -> u8 {
+    let mut bits = 0u8;
+    if mods.shift_key()   { bits |= 1; }
+    if mods.alt_key()     { bits |= 2; }
+    if mods.control_key() { bits |= 4; }
+    if force_meta || mods.super_key() { bits |= 8; }
+    1 + bits
+}
+
+// Codepoint that should appear inside the modifyOtherKeys envelope: the
+// "key cap" rather than the produced character. Lowercasing ASCII letters
+// keeps the envelope's codepoint stable across Shift state, so a hotkey
+// table written against ``ord('f')`` matches both Ctrl+F and Ctrl+Shift+F
+// once the modifier bits are decoded separately.
+fn keycap_cp(ch: char) -> u32 {
+    if ch.is_ascii_alphabetic() {
+        ch.to_ascii_lowercase() as u32
+    } else {
+        ch as u32
+    }
+}
+
 // Halftone screens for U+2591/2/3. Returning a function-of-absolute-coords lets
 // the renderer produce a pattern that tiles cleanly across cells regardless of
 // the font's bitmap width. Patterns mirror the IBM ROM's staggered halftones.
@@ -938,6 +1010,10 @@ fn main() -> anyhow::Result<()> {
     let cell_w = CELL_W_BASE * scale;
     let cell_h = CELL_H_BASE * scale;
 
+    // Term + PTY start at 80x25; the window's actual dimensions get
+    // chosen against the primary monitor inside ``resumed`` (winit 0.30
+    // only exposes monitors via ``ActiveEventLoop``). The first
+    // ``Resized`` event then re-grids the term through ``on_resize``.
     let term_size = TermSize::new(INIT_COLS as usize, INIT_ROWS as usize);
     let listener = EventProxy(proxy);
     let term = Arc::new(FairMutex::new(Term::new(
