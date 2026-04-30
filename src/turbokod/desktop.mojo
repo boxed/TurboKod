@@ -845,15 +845,23 @@ struct Desktop(Movable):
             self._set_project(found.value())
 
     fn open_project(mut self, path: String):
-        """Set ``path`` as the project root directly, no ``.git``-walk.
+        """Pick a project root for ``path``.
 
-        Used when the host wants a specific directory treated as the project
-        (e.g. a directory passed on the command line) regardless of whether
-        it contains a ``.git`` directory.
+        Walks up from ``path`` looking for the nearest ``.git`` ancestor;
+        if one is found at any level all the way to ``/``, that ancestor
+        becomes the project. Only if no ancestor anywhere on the path
+        contains a ``.git`` do we fall back to ``path`` itself. So a
+        ``turbokod/app`` arg picks the outer ``turbokod/`` repo (where
+        ``.git`` lives) rather than ``app/``, while a non-repo
+        directory still gets treated as a project.
         """
         if self.project:
             return
-        self._set_project(path)
+        var found = find_git_project(path)
+        if found:
+            self._set_project(found.value())
+        else:
+            self._set_project(path)
 
     fn close_project(mut self):
         self.project = Optional[String]()
