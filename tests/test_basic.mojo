@@ -1893,7 +1893,10 @@ fn test_highlight_for_extension_recognizes_mojo() raises:
 
 
 fn test_highlight_triple_quoted_string_spans_lines() raises:
-    """Multi-line triple-quoted strings keep highlight state across rows."""
+    """Multi-line triple-quoted strings keep highlight state across rows.
+    A docstring (triple-quoted string at statement position) is painted
+    with the comment attr; an inline triple-quoted string keeps the
+    string attr."""
     var lines = _hl_lines(
         String("\"\"\"docstring start"),
         String("middle line"),
@@ -1905,7 +1908,7 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
     var have_row_1 = False
     var have_row_2 = False
     for i in range(len(hls)):
-        if hls[i].attr == highlight_string_attr():
+        if hls[i].attr == highlight_comment_attr():
             if hls[i].row == 0: have_row_0 = True
             if hls[i].row == 1: have_row_1 = True
             if hls[i].row == 2: have_row_2 = True
@@ -1913,12 +1916,21 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
     assert_true(have_row_1)
     assert_true(have_row_2)
     # Row 3 (``var x = 1``) must come back to plain code: ``var`` keyword,
-    # ``1`` number — not all-string.
+    # ``1`` number — not all-comment.
     var saw_kw = False
     for i in range(len(hls)):
         if hls[i].row == 3 and hls[i].attr == highlight_keyword_attr():
             saw_kw = True
     assert_true(saw_kw)
+
+    # Inline triple-quoted string: not at statement position, stays a string.
+    var inline = _hl_lines(String("var s = \"\"\"hi\"\"\""))
+    var ihls = highlight_for_extension(String("py"), inline)
+    var saw_inline_string = False
+    for i in range(len(ihls)):
+        if ihls[i].attr == highlight_string_attr():
+            saw_inline_string = True
+    assert_true(saw_inline_string)
 
 
 fn test_highlight_unknown_extension_returns_empty() raises:

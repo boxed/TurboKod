@@ -748,6 +748,17 @@ struct Desktop(Movable):
         if found:
             self._set_project(found.value())
 
+    fn open_project(mut self, path: String):
+        """Set ``path`` as the project root directly, no ``.git``-walk.
+
+        Used when the host wants a specific directory treated as the project
+        (e.g. a directory passed on the command line) regardless of whether
+        it contains a ``.git`` directory.
+        """
+        if self.project:
+            return
+        self._set_project(path)
+
     fn close_project(mut self):
         self.project = Optional[String]()
         self.file_tree.close()
@@ -759,8 +770,13 @@ struct Desktop(Movable):
             self.menu_bar.menus[self._project_menu_idx].items[0].label = _SHOW_TREE_LABEL
 
     fn _set_project(mut self, path: String):
-        self.project = Optional[String](path)
-        var label = basename(path)
+        # Resolve so a label like ``.`` becomes the actual directory name,
+        # and so the stored project path is canonical for downstream
+        # comparisons. Fall back to the input on resolution failure.
+        var resolved = realpath(path)
+        var canonical = resolved if len(resolved.as_bytes()) > 0 else path
+        self.project = Optional[String](canonical)
+        var label = basename(canonical)
         if self._project_menu_idx < 0:
             var items = List[MenuItem]()
             items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))

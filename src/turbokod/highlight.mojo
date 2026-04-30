@@ -46,10 +46,14 @@ fn highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_N
 
 
 # Line-state passed between line tokenization calls so triple-quoted strings
-# that span multiple lines stay highlighted.
+# that span multiple lines stay highlighted. The DOC variants carry the same
+# delimiter information as TRIPLE but mean "this triple-string opened at
+# statement position, so it's a docstring — paint it with the comment attr."
 comptime _HL_NORMAL          = 0
 comptime _HL_IN_TRIPLE_DQ    = 1
 comptime _HL_IN_TRIPLE_SQ    = 2
+comptime _HL_IN_DOC_DQ       = 3
+comptime _HL_IN_DOC_SQ       = 4
 
 
 fn highlight_for_extension(
@@ -85,23 +89,28 @@ fn _highlight_line(
     var i = 0
     var state = state_in
 
-    # Continuation of a triple-quoted string from a prior line.
-    if state == _HL_IN_TRIPLE_DQ:
+    # Continuation of a triple-quoted string from a prior line. The DOC
+    # variants paint as comments; the TRIPLE variants paint as strings.
+    if state == _HL_IN_TRIPLE_DQ or state == _HL_IN_DOC_DQ:
+        var as_doc = state == _HL_IN_DOC_DQ
+        var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
         var end = _find_triple(line, 0, 0x22)
         if end < 0:
             if n > 0:
-                out.append(Highlight(row, 0, n, highlight_string_attr()))
+                out.append(Highlight(row, 0, n, attr))
             return state
-        out.append(Highlight(row, 0, end + 3, highlight_string_attr()))
+        out.append(Highlight(row, 0, end + 3, attr))
         i = end + 3
         state = _HL_NORMAL
-    elif state == _HL_IN_TRIPLE_SQ:
+    elif state == _HL_IN_TRIPLE_SQ or state == _HL_IN_DOC_SQ:
+        var as_doc = state == _HL_IN_DOC_SQ
+        var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
         var end = _find_triple(line, 0, 0x27)
         if end < 0:
             if n > 0:
-                out.append(Highlight(row, 0, n, highlight_string_attr()))
+                out.append(Highlight(row, 0, n, attr))
             return state
-        out.append(Highlight(row, 0, end + 3, highlight_string_attr()))
+        out.append(Highlight(row, 0, end + 3, attr))
         i = end + 3
         state = _HL_NORMAL
 
@@ -112,16 +121,24 @@ fn _highlight_line(
             out.append(Highlight(row, i, n, highlight_comment_attr()))
             return state
         # Triple-quoted string opener (must precede the single-quote case).
+        # If only whitespace precedes it on this line, it's at statement
+        # position — i.e. a docstring — and is colored as a comment.
         if (c == 0x22 or c == 0x27) and i + 2 < n \
                 and b[i + 1] == c and b[i + 2] == c:
             var start = i
+            var as_doc = True
+            for j in range(i):
+                if b[j] != 0x20 and b[j] != 0x09:
+                    as_doc = False
+                    break
+            var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
             var end = _find_triple(line, i + 3, Int(c))
             if end < 0:
-                out.append(Highlight(row, start, n, highlight_string_attr()))
+                out.append(Highlight(row, start, n, attr))
                 if c == 0x22:
-                    return _HL_IN_TRIPLE_DQ
-                return _HL_IN_TRIPLE_SQ
-            out.append(Highlight(row, start, end + 3, highlight_string_attr()))
+                    return _HL_IN_DOC_DQ if as_doc else _HL_IN_TRIPLE_DQ
+                return _HL_IN_DOC_SQ if as_doc else _HL_IN_TRIPLE_SQ
+            out.append(Highlight(row, start, end + 3, attr))
             i = end + 3
             continue
         # Single-line string. Backslash escapes are skipped so `"\""` parses.

@@ -51,6 +51,7 @@ from turbokod import (
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
+    stat_file,
 )
 
 
@@ -120,13 +121,19 @@ fn main() raises:
             (String("About"), String("focus:About")),
         ))
 
-        # Files passed on the command line replace the demo windows; without
-        # arguments we open the canned tour content instead.
+        # Args passed on the command line replace the demo windows; without
+        # arguments we open the canned tour content instead. A directory arg
+        # is treated as a project root (no file opened); a regular file is
+        # opened as an editor window the usual way.
         var args = argv()
-        var has_files = len(args) > 1
-        if has_files:
+        var has_args = len(args) > 1
+        if has_args:
             for i in range(1, len(args)):
                 var path = String(args[i])
+                var info = stat_file(path)
+                if info.ok and info.is_dir():
+                    desktop.open_project(path)
+                    continue
                 try:
                     desktop.open_file(path, app.screen())
                 except e:
