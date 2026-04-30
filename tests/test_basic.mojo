@@ -1939,6 +1939,79 @@ fn test_highlight_unknown_extension_returns_empty() raises:
     assert_equal(len(hls), 0)
 
 
+fn test_highlight_rust_keywords_strings_comments() raises:
+    """The generic registry-driven tokenizer paints Rust files with the
+    same attr palette as the Mojo/Python path: ``fn`` is a keyword,
+    ``"hi"`` is a string, ``// note`` is a line comment, ``42`` is a
+    number."""
+    var lines = _hl_lines(
+        String("fn main() {"),
+        String("    let s = \"hi\";  // note"),
+        String("    let n = 42;"),
+        String("}"),
+    )
+    var hls = highlight_for_extension(String("rs"), lines)
+    var saw_fn_kw = False
+    var saw_let_kw = False
+    var saw_string = False
+    var saw_comment = False
+    var saw_number = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 0 and h.col_start == 0 and h.col_end == 2 \
+                and h.attr == highlight_keyword_attr():
+            saw_fn_kw = True
+        if h.row == 1 and h.col_start == 4 and h.col_end == 7 \
+                and h.attr == highlight_keyword_attr():
+            saw_let_kw = True
+        if h.row == 1 and h.attr == highlight_string_attr():
+            saw_string = True
+        if h.row == 1 and h.attr == highlight_comment_attr():
+            saw_comment = True
+        if h.row == 2 and h.attr == highlight_number_attr():
+            saw_number = True
+    assert_true(saw_fn_kw)
+    assert_true(saw_let_kw)
+    assert_true(saw_string)
+    assert_true(saw_comment)
+    assert_true(saw_number)
+
+
+fn test_highlight_rust_block_comment_spans_lines() raises:
+    """A ``/* ... */`` block comment that opens on one row and closes on
+    a later row keeps every row in between painted as comment. State is
+    threaded through ``_highlight_generic`` the same way triple-quoted
+    strings are threaded through the Mojo/Python tokenizer."""
+    var lines = _hl_lines(
+        String("/* opening line"),
+        String("middle line"),
+        String("end */ let x = 1;"),
+    )
+    var hls = highlight_for_extension(String("rs"), lines)
+    var have_0 = False
+    var have_1 = False
+    var have_2 = False
+    for i in range(len(hls)):
+        if hls[i].attr == highlight_comment_attr():
+            if hls[i].row == 0: have_0 = True
+            if hls[i].row == 1: have_1 = True
+            if hls[i].row == 2: have_2 = True
+    assert_true(have_0)
+    assert_true(have_1)
+    assert_true(have_2)
+    # Past the closing ``*/`` the tokenizer must be back to normal: ``let``
+    # comes back as a keyword and ``1`` as a number.
+    var saw_let = False
+    var saw_number = False
+    for i in range(len(hls)):
+        if hls[i].row == 2 and hls[i].attr == highlight_keyword_attr():
+            saw_let = True
+        if hls[i].row == 2 and hls[i].attr == highlight_number_attr():
+            saw_number = True
+    assert_true(saw_let)
+    assert_true(saw_number)
+
+
 fn test_editor_refreshes_highlights_after_edits() raises:
     """Newly typed text gets re-tokenized: typing ``fn`` produces a keyword
     highlight that wasn't there a moment ago."""
@@ -3353,6 +3426,8 @@ fn main() raises:
     test_highlight_for_extension_recognizes_mojo()
     test_highlight_triple_quoted_string_spans_lines()
     test_highlight_unknown_extension_returns_empty()
+    test_highlight_rust_keywords_strings_comments()
+    test_highlight_rust_block_comment_spans_lines()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
     test_editor_alt_click_emits_definition_request()

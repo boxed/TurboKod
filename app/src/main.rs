@@ -61,7 +61,7 @@ const DEFAULT_CURSOR: u32 = 0xFF_FF_FF;
 // VGA-ish 16, plus xterm 6×6×6 cube, plus xterm 24-step grayscale ramp.
 fn build_palette() -> [u32; 256] {
     let base16: [u32; 16] = [
-        0x000000, 0xCD0000, 0x00CD00, 0xCDCD00, 0x0000EE, 0xCD00CD, 0x00CDCD, 0xE5E5E5,
+        0x000000, 0xCD0000, 0x00CD00, 0xCDCD00, 0x0021AA, 0xCD00CD, 0x00CDCD, 0xE5E5E5,
         0x7F7F7F, 0xFF0000, 0x00FF00, 0xFFFF00, 0x5C5CFF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
     ];
     let cube: [u8; 6] = [0, 95, 135, 175, 215, 255];

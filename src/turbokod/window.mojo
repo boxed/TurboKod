@@ -217,6 +217,10 @@ struct Window(ImplicitlyCopyable, Movable):
         ``sb_right = sb_left + track_w + 1``."""
         if not self.is_editor:
             return (False, 0, 0, 0, 0, 0)
+        # Soft-wrap means lines reflow vertically; there is no horizontal
+        # scroll axis to drive a bar with.
+        if self.editor.soft_wrap:
+            return (False, 0, 0, 0, 0, 0)
         if self.rect.width() < 14 or self.rect.height() < 2:
             return (False, 0, 0, 0, 0, 0)
         var pos_text = String(self.editor.cursor_row + 1) \
@@ -495,24 +499,31 @@ struct WindowManager(Movable):
         preferred; a window is only resized when it's larger than the
         workspace along that axis. Maximized windows are pinned to the new
         workspace so they keep covering it.
+
+        After fitting, every editor window's scroll offsets get clamped
+        against its (possibly resized) interior — a window that was
+        scrolled right while narrow must not leave leading text wedged
+        off-screen once it's wide enough that the scrollbar disappears.
         """
         for i in range(len(self.windows)):
             if self.windows[i].is_maximized:
                 self.windows[i].rect = workspace
-                continue
-            var w = self.windows[i].rect.width()
-            var h = self.windows[i].rect.height()
-            var ws_w = workspace.width()
-            var ws_h = workspace.height()
-            if w > ws_w: w = ws_w
-            if h > ws_h: h = ws_h
-            var ax = self.windows[i].rect.a.x
-            var ay = self.windows[i].rect.a.y
-            if ax < workspace.a.x: ax = workspace.a.x
-            if ay < workspace.a.y: ay = workspace.a.y
-            if ax + w > workspace.b.x: ax = workspace.b.x - w
-            if ay + h > workspace.b.y: ay = workspace.b.y - h
-            self.windows[i].rect = Rect(ax, ay, ax + w, ay + h)
+            else:
+                var w = self.windows[i].rect.width()
+                var h = self.windows[i].rect.height()
+                var ws_w = workspace.width()
+                var ws_h = workspace.height()
+                if w > ws_w: w = ws_w
+                if h > ws_h: h = ws_h
+                var ax = self.windows[i].rect.a.x
+                var ay = self.windows[i].rect.a.y
+                if ax < workspace.a.x: ax = workspace.a.x
+                if ay < workspace.a.y: ay = workspace.a.y
+                if ax + w > workspace.b.x: ax = workspace.b.x - w
+                if ay + h > workspace.b.y: ay = workspace.b.y - h
+                self.windows[i].rect = Rect(ax, ay, ax + w, ay + h)
+            if self.windows[i].is_editor:
+                self.windows[i].editor.clamp_scroll(self.windows[i].interior())
 
     fn focus_by_title(mut self, title: String):
         for i in range(len(self.windows)):

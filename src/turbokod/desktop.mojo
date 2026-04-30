@@ -40,6 +40,8 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
+from .clipboard import clipboard_copy
+from .config import TurbokodConfig, load_config, save_config
 from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
@@ -75,11 +77,19 @@ comptime EDITOR_SAVE          = String("file:save")
 comptime EDITOR_SAVE_AS       = String("file:save_as")
 comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
 comptime EDITOR_FIND          = String("edit:find")
+comptime EDITOR_FIND_NEXT     = String("edit:find_next")
+comptime EDITOR_FIND_PREV     = String("edit:find_prev")
+# Internal pending-action tag for the "install LSP server?" prompt. Not a
+# public action — it never enters ``dispatch_action`` because the prompt
+# is triggered programmatically from ``_maybe_lsp_open``.
+comptime _PA_LSP_INSTALL      = String("lsp:install")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
+comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
+comptime EDITOR_TOGGLE_SOFT_WRAP    = String("view:soft_wrap")
 comptime EDITOR_CUT           = String("edit:cut")
 comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
@@ -231,6 +241,7 @@ struct Desktop(Movable):
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
     var _pending_action: String      # what to do on next prompt submit
     var _pending_arg: String         # accumulator for two-step prompts
+    var _last_search: String         # last Find needle, repeated by Ctrl+G
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
@@ -246,6 +257,10 @@ struct Desktop(Movable):
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
     var lsp_languages: List[String]
+    # Language ids we've already prompted-to-install for in this session.
+    # The prompt is one-shot per language: once the user says yes or no,
+    # opening another file of the same language doesn't re-nag.
+    var _lsp_install_prompted: List[String]
     # Debugger state. One ``DapManager`` per Desktop (single concurrent
     # session) — multi-session debugging would need a list keyed by
     # something (language? session id?), and we don't have a use case
@@ -280,6 +295,12 @@ struct Desktop(Movable):
     var _dap_stack_cache: List[DapStackFrame]
     var _dap_watch_exprs: List[String]
     var _dap_watch_values: List[String]   # parallel to exprs (last result)
+    # Persistent global preferences (View-menu toggles for now). Loaded
+    # from ``~/.config/turbokod/config.json`` on construction; rewritten
+    # there whenever the user toggles a setting. Synced into every
+    # editor window every paint so the bool is always the source of
+    # truth, regardless of who created the editor.
+    var config: TurbokodConfig
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -298,6 +319,7 @@ struct Desktop(Movable):
         self._window_menu_idx = -1
         self._pending_action = String("")
         self._pending_arg = String("")
+        self._last_search = String("")
         self._open_count = 0
         self._untitled_count = 0
         self._hotkeys = List[Hotkey]()
@@ -305,6 +327,7 @@ struct Desktop(Movable):
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
         self.lsp_languages = List[String]()
+        self._lsp_install_prompted = List[String]()
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
@@ -318,6 +341,7 @@ struct Desktop(Movable):
         self._dap_stack_cache = List[DapStackFrame]()
         self._dap_watch_exprs = List[String]()
         self._dap_watch_values = List[String]()
+        self.config = load_config()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -336,7 +360,8 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
         self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, EDITOR_REPLACE))
-        self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_GOTO))
+        self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_FIND_NEXT))
+        self._hotkeys.append(Hotkey(ctrl_key("l"), MOD_NONE, EDITOR_GOTO))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
         # Clipboard + undo/redo. Registering Ctrl+X/C/V at the desktop layer
         # serves two purposes: the menu items get auto-populated shortcut
@@ -353,6 +378,13 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("r")), MOD_CTRL | MOD_SHIFT, PROJECT_REPLACE,
+        ))
+        # Find Previous: Ctrl/Cmd+Shift+G is the de-facto cross-platform
+        # binding (matches VS Code, JetBrains, browsers, …). On macOS the
+        # bundled native app reports Cmd+Shift+G as ``MOD_CTRL|MOD_SHIFT``
+        # over the same channel as Ctrl-shortcuts.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("g")), MOD_CTRL | MOD_SHIFT, EDITOR_FIND_PREV,
         ))
         # Window switching: Ctrl+1 .. Ctrl+9 focus the first nine windows by
         # the same number shown in the top-right of each window's chrome.
@@ -490,10 +522,30 @@ struct Desktop(Movable):
         var y = (screen.b.y - 3) // 2
         return Rect(x + 1, y + 1, x + width - 1, y + 2)
 
+    fn _apply_view_config(mut self):
+        """Push ``self.config`` into every editor window. Called every
+        paint so the global preference is the source of truth no matter
+        who created the editor (Desktop API, host calling
+        ``Window.editor_window`` directly, etc.). Cheap — two boolean
+        writes per editor."""
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            self.windows.windows[i].editor.line_numbers = self.config.line_numbers
+            self.windows.windows[i].editor.soft_wrap = self.config.soft_wrap
+            if self.config.soft_wrap:
+                # Soft-wrap forces a left-aligned visible area; keep the
+                # invariant even if the host poked ``scroll_x`` directly.
+                self.windows.windows[i].editor.scroll_x = 0
+
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
+        # Sync the persisted view config into every editor before
+        # measurement / paint so newly-added windows pick up the user's
+        # saved preferences on their first frame.
+        self._apply_view_config()
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
@@ -602,8 +654,14 @@ struct Desktop(Movable):
     fn _maybe_lsp_open(mut self, idx: Int):
         """If the window at ``idx`` is an editor for a recognized source
         file type, ensure the matching LSP server is started and inform
-        it of this document. Languages without an installed server are
-        a silent no-op."""
+        it of this document.
+
+        If the file type is known to the registry but no candidate binary
+        is on ``$PATH``, surface an "Install <lang> LSP?" prompt — once
+        per language per session, and only when the spec carries a
+        non-empty ``install_hint`` (otherwise we'd have nothing actionable
+        to suggest). Truly unknown extensions stay a silent no-op.
+        """
         if idx < 0 or idx >= len(self.windows.windows):
             return
         if not self.windows.windows[idx].is_editor:
@@ -611,11 +669,49 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var lsp_idx = self._ensure_lsp_for_extension(extension_of(path))
+        var ext = extension_of(path)
+        var lsp_idx = self._ensure_lsp_for_extension(ext)
         if lsp_idx < 0:
+            self._maybe_prompt_lsp_install(ext)
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
+
+    fn _maybe_prompt_lsp_install(mut self, ext: String):
+        """Open the install prompt when ``ext`` belongs to a known language
+        whose binary isn't on ``$PATH``. Skipped when: we have no install
+        hint to suggest, the user has already been prompted for this
+        language this session, or another modal/prompt is already open."""
+        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        if spec_idx < 0:
+            return
+        var spec = self.lsp_specs[spec_idx]
+        if len(spec.install_hint.as_bytes()) == 0:
+            return
+        # One nag per language per session, regardless of yes/no.
+        for i in range(len(self._lsp_install_prompted)):
+            if self._lsp_install_prompted[i] == spec.language_id:
+                return
+        # Don't pile prompts on top of an open dialog/prompt.
+        if self.prompt.active or self.quick_open.active \
+                or self.symbol_pick.active or self.project_find.active \
+                or self.save_as_dialog.active:
+            return
+        # Re-check that no candidate is on PATH. ``_ensure_lsp_for_extension``
+        # only returns -1-with-known-extension when this is true, so this
+        # is belt-and-suspenders against future refactors.
+        for c in range(len(spec.candidates)):
+            var cand = spec.candidates[c]
+            if len(cand.argv) > 0 \
+                    and len(which(cand.argv[0]).as_bytes()) > 0:
+                return
+        self._lsp_install_prompted.append(spec.language_id)
+        self._pending_action = _PA_LSP_INSTALL
+        self._pending_arg = spec.language_id
+        self.prompt.open(
+            String("Install ") + spec.language_id + String(" LSP? '")
+            + spec.install_hint + String("' (y/N): ")
+        )
 
     fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
         """Spawn (or look up) an LSP manager for files with extension
@@ -1024,6 +1120,38 @@ struct Desktop(Movable):
             self._pending_action = EDITOR_FIND
             self.prompt.open(String("Find: "))
             return Optional[String]()
+        if action == EDITOR_FIND_NEXT:
+            # Repeat the previous Find without re-prompting. ``find_next``
+            # already wraps to the top when it falls off the end. With no
+            # prior search, fall through to the Find prompt so Ctrl+G is
+            # still useful on a fresh editor.
+            if len(self._last_search.as_bytes()) == 0:
+                self._pending_action = EDITOR_FIND
+                self.prompt.open(String("Find: "))
+                return Optional[String]()
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                if self.windows.windows[idx].editor.find_next(self._last_search):
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                        margin_below=10, margin_above=10,
+                    )
+            return Optional[String]()
+        if action == EDITOR_FIND_PREV:
+            # Mirror of Find Next, walking backward from the current
+            # selection / cursor and wrapping to the file end on miss.
+            if len(self._last_search.as_bytes()) == 0:
+                self._pending_action = EDITOR_FIND
+                self.prompt.open(String("Find: "))
+                return Optional[String]()
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                if self.windows.windows[idx].editor.find_prev(self._last_search):
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                        margin_below=10, margin_above=10,
+                    )
+            return Optional[String]()
         if action == EDITOR_REPLACE:
             self._pending_action = _PA_REPLACE_FIND
             self.prompt.open(String("Replace — find: "))
@@ -1044,6 +1172,24 @@ struct Desktop(Movable):
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
                 self.windows.windows[self.windows.focused].editor.toggle_case()
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_LINE_NUMBERS:
+            self.config.line_numbers = not self.config.line_numbers
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_SOFT_WRAP:
+            self.config.soft_wrap = not self.config.soft_wrap
+            self._apply_view_config()
+            # Soft-wrap changes the relationship between buffer rows
+            # and screen rows; re-scroll every editor so its cursor
+            # stays visible after the layout change.
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor:
+                    self.windows.windows[i].editor.reveal_cursor(
+                        self.windows.windows[i].interior(),
+                    )
+            _ = save_config(self.config)
             return Optional[String]()
         if action == EDITOR_CUT:
             if self.windows.focused >= 0 \
@@ -1801,9 +1947,41 @@ struct Desktop(Movable):
         var pa = self._pending_action
         self._pending_action = String("")
         if pa == EDITOR_FIND:
+            self._last_search = text
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                _ = self.windows.windows[idx].editor.find_next(text)
+                if self.windows.windows[idx].editor.find_next(text):
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                        margin_below=10, margin_above=10,
+                    )
+            return Optional[String]()
+        if pa == _PA_LSP_INSTALL:
+            # Yes → copy the install command to the clipboard and surface
+            # it in the status bar so the user can paste-and-run in their
+            # shell. We deliberately do NOT spawn the install ourselves:
+            # package managers vary widely (sudo, network, multi-minute
+            # builds, interactive prompts) and silently running them from
+            # the editor would be a footgun. ``_pending_arg`` carries the
+            # language id for the spec lookup.
+            var lang = self._pending_arg
+            self._pending_arg = String("")
+            var tb = text.as_bytes()
+            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
+            if said_yes:
+                var spec_idx = -1
+                for i in range(len(self.lsp_specs)):
+                    if self.lsp_specs[i].language_id == lang:
+                        spec_idx = i
+                        break
+                if spec_idx >= 0:
+                    var hint = self.lsp_specs[spec_idx].install_hint
+                    clipboard_copy(hint)
+                    self.status_bar.set_message(
+                        String("Run: ") + hint
+                            + String("  (copied to clipboard)"),
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
             return Optional[String]()
         if pa == EDITOR_GOTO:
             var idx = self._focused_editor_idx()

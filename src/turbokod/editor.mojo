@@ -348,6 +348,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     var gutter_width: Int
     var breakpoint_lines: List[Int]
     var exec_line: Int
+    # View options. ``line_numbers`` paints a right-aligned line-number
+    # gutter to the right of the debugger gutter; its width is derived
+    # from ``buffer.line_count()`` at paint time. ``soft_wrap`` forces
+    # ``scroll_x = 0`` and breaks long lines across multiple screen rows
+    # at the text-area's right edge. Both default off and are toggled
+    # via the View menu.
+    var line_numbers: Bool
+    var soft_wrap: Bool
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -381,6 +389,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self.line_numbers = False
+        self.soft_wrap = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -406,6 +416,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self.line_numbers = False
+        self.soft_wrap = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -444,6 +456,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.exec_line = copy.exec_line
+        self.line_numbers = copy.line_numbers
+        self.soft_wrap = copy.soft_wrap
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -788,70 +802,250 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.anchor_row = row
             self.anchor_col = col
 
+    # --- view options ------------------------------------------------------
+
+    fn toggle_line_numbers(mut self):
+        self.line_numbers = not self.line_numbers
+
+    fn toggle_soft_wrap(mut self):
+        self.soft_wrap = not self.soft_wrap
+        if self.soft_wrap:
+            # Soft wrap forces a left-aligned visible area: keep the
+            # invariant that scroll_x == 0 by snapping it back here.
+            self.scroll_x = 0
+
+    fn _line_number_gutter(self) -> Int:
+        """Width of the line-number gutter in cells, including a trailing
+        space. Zero when line numbers are off."""
+        if not self.line_numbers:
+            return 0
+        var n = self.buffer.line_count()
+        var digits = 1
+        var v = n
+        while v >= 10:
+            v //= 10
+            digits += 1
+        return digits + 1
+
+    fn _total_gutter(self) -> Int:
+        return self.gutter_width + self._line_number_gutter()
+
+    fn _layout_lines(
+        self, content_h: Int, text_width: Int,
+    ) -> List[Tuple[Int, Int, Int, Int]]:
+        """Per-screen-row ``(buffer_row, start_byte, end_byte, indent_cells)``.
+
+        ``indent_cells`` is the cell offset to apply *before* painting the
+        segment's text — zero on the first visual segment of a buffer
+        row, and the buffer line's leading-whitespace width plus one
+        indent unit on continuation segments. The hanging-indent matches
+        the original line's indent so wrapped code stays visually
+        aligned with its parent.
+
+        Without soft-wrap, returns one tuple per visible buffer row from
+        ``scroll_y`` onward, with ``start_byte = scroll_x``, ``end_byte``
+        at the line length, and ``indent_cells = 0``. With soft-wrap on,
+        every buffer row is broken into successive segments that fit
+        within ``text_width`` cells (minus the hanging indent on
+        continuations); codepoint boundaries are honored so a multi-byte
+        glyph is never split. ``scroll_x`` is ignored on the wrap path
+        (callers force it to 0 in ``toggle_soft_wrap`` and on every
+        cursor move via ``_scroll_to_cursor``).
+        """
+        var out = List[Tuple[Int, Int, Int, Int]]()
+        var n_lines = self.buffer.line_count()
+        var br = self.scroll_y
+        if not self.soft_wrap:
+            while br < n_lines and len(out) < content_h:
+                var n = self.buffer.line_length(br)
+                out.append((br, self.scroll_x, n, 0))
+                br += 1
+            return out^
+        var w = text_width
+        if w < 1:
+            w = 1
+        var tab = self.editorconfig.effective_indent_size()
+        if tab < 1:
+            tab = 4
+        while br < n_lines and len(out) < content_h:
+            var line = self.buffer.line(br)
+            var bytes = line.as_bytes()
+            var line_n = len(bytes)
+            if line_n == 0:
+                out.append((br, 0, 0, 0))
+                br += 1
+                continue
+            # Hanging indent applied to every wrap continuation: original
+            # line's leading-whitespace width plus one indent unit. Capped
+            # to ``w - 1`` so there's always at least one cell of text
+            # room even on absurdly narrow viewports.
+            var prefix = _leading_indent_cells(line)
+            var cont_indent = prefix + tab
+            if cont_indent > w - 1:
+                cont_indent = w - 1
+            if cont_indent < 0:
+                cont_indent = 0
+            var c = 0
+            var first = True
+            while c < line_n and len(out) < content_h:
+                var indent_cells = 0 if first else cont_indent
+                var seg_w = w - indent_cells
+                if seg_w < 1:
+                    seg_w = 1
+                # Hard upper bound: at most ``seg_w`` cells from ``c``,
+                # walking codepoints so a multi-byte glyph is never split.
+                var cells = 0
+                var e_hard = c
+                while e_hard < line_n and cells < seg_w:
+                    e_hard += _utf8_codepoint_size(Int(bytes[e_hard]))
+                    cells += 1
+                if e_hard > line_n:
+                    e_hard = line_n
+                # Walk back to the last symbol boundary inside ``[c, e_hard)``
+                # so wrap points land between identifiers / words instead of
+                # mid-symbol. Only ASCII non-word bytes count — multi-byte
+                # bytes would land mid-codepoint, and a single very long
+                # word with no boundary falls through to the hard break.
+                var e = e_hard
+                if e_hard < line_n:
+                    var p = e_hard
+                    while p > c + 1:
+                        var b = Int(bytes[p - 1])
+                        if b < 0x80 and not _is_word_char(b):
+                            e = p
+                            break
+                        p -= 1
+                out.append((br, c, e, indent_cells))
+                c = e
+                first = False
+            br += 1
+        return out^
+
+    fn _cursor_screen_row(
+        self, layout: List[Tuple[Int, Int, Int, Int]],
+    ) -> Int:
+        """Index into ``layout`` of the screen row that hosts the cursor,
+        or -1 if the cursor lies outside the painted layout. The cursor
+        sits on a buffer-row segment when its byte column falls in the
+        segment's range; ties at the segment boundary go to the *next*
+        segment (so a cursor parked at a wrap point shows up at the
+        start of the next visual line, matching most editors)."""
+        for sr in range(len(layout)):
+            var br = layout[sr][0]
+            if br != self.cursor_row:
+                continue
+            var sb = layout[sr][1]
+            var eb = layout[sr][2]
+            # Last segment of this buffer row in the layout?
+            var is_last = (sr + 1 >= len(layout)) or (
+                layout[sr + 1][0] != self.cursor_row
+            )
+            if self.cursor_col < sb:
+                continue
+            if self.cursor_col < eb:
+                return sr
+            if is_last:
+                return sr
+            # Cursor sits exactly at the wrap point — let the next
+            # segment claim it.
+        return -1
+
     # --- painting ----------------------------------------------------------
 
     fn paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         var attr = Attr(YELLOW, BLUE)
         var sel_attr = Attr(YELLOW, CYAN)
         canvas.fill(view, String(" "), attr)
-        # Reserve ``gutter`` columns at the left for the debugger gutter.
-        # Everything in this method's text/cursor/selection passes uses
-        # ``text_x0`` as its origin x — the original code used
-        # ``view.a.x`` directly, and adding the gutter is just a shift.
-        # When ``gutter_width == 0`` this is a no-op and behaves
-        # identically to the pre-DAP editor.
-        var gutter = self.gutter_width
-        var text_x0 = view.a.x + gutter
+        # Two stacked left gutters: the debugger gutter (breakpoint dot
+        # and exec arrow, owned by Desktop) sits at the very left, then
+        # the line-number gutter (right-aligned, one trailing space)
+        # sits between it and the text. Either or both can be zero-width.
+        var dap_gutter = self.gutter_width
+        var ln_gutter = self._line_number_gutter()
+        var total_gutter = dap_gutter + ln_gutter
+        var text_x0 = view.a.x + total_gutter
         var content_right = view.b.x
         var content_bottom = view.b.y
         var content_h = view.height()
-        # Gutter pass — render breakpoint / exec markers per visible row.
-        # Done before text/highlight overlay so the markers aren't
-        # clobbered by anything downstream.
-        if gutter > 0:
+        var content_w = view.width() - total_gutter
+        if content_w < 1:
+            content_w = 1
+        # Layout drives every per-screen-row decision below: with soft-
+        # wrap off it's a 1:1 mapping (one tuple per buffer row from
+        # ``scroll_y``); with soft-wrap on each buffer row produces one
+        # tuple per visual segment.
+        var layout = self._layout_lines(content_h, content_w)
+        # Gutter pass — debugger markers + line numbers, both painted
+        # before the text overlay so they aren't clobbered downstream.
+        # Markers / line numbers are only stamped on the *first* visual
+        # segment of each buffer row (start_byte == 0 in the segment, AND
+        # this segment isn't a continuation row produced by soft-wrap).
+        if total_gutter > 0:
             var gutter_attr = Attr(LIGHT_GRAY, BLUE)
             var bp_attr = Attr(LIGHT_RED, BLUE)
             var exec_attr = Attr(LIGHT_YELLOW, BLUE)
-            for screen_row in range(content_h):
-                var buf_row = self.scroll_y + screen_row
-                if buf_row >= self.buffer.line_count():
-                    break
+            var ln_attr = Attr(DARK_GRAY, BLUE)
+            for screen_row in range(len(layout)):
+                var buf_row = layout[screen_row][0]
+                var seg_start = layout[screen_row][1]
                 var sy_g = view.a.y + screen_row
-                for gx in range(gutter):
+                for gx in range(total_gutter):
                     canvas.set(
                         view.a.x + gx, sy_g,
                         Cell(String(" "), gutter_attr, 1),
                     )
-                # Breakpoint dot in column 0 of the gutter.
-                for k in range(len(self.breakpoint_lines)):
-                    if self.breakpoint_lines[k] == buf_row:
-                        canvas.set(
-                            view.a.x, sy_g,
-                            Cell(String("●"), bp_attr, 1),
-                        )
-                        break
-                if buf_row == self.exec_line:
-                    var ax = view.a.x + (1 if gutter >= 2 else 0)
-                    canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
+                # Each layout entry is the *first* visual segment of its
+                # buffer row when either soft-wrap is off (one segment per
+                # row) or this segment starts at byte 0 of the row.
+                var is_first_seg = (not self.soft_wrap) or (seg_start == 0)
+                if dap_gutter > 0 and is_first_seg:
+                    for k in range(len(self.breakpoint_lines)):
+                        if self.breakpoint_lines[k] == buf_row:
+                            canvas.set(
+                                view.a.x, sy_g,
+                                Cell(String("●"), bp_attr, 1),
+                            )
+                            break
+                    if buf_row == self.exec_line:
+                        var ax = view.a.x + (1 if dap_gutter >= 2 else 0)
+                        canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
+                if ln_gutter > 0 and is_first_seg:
+                    var num_str = String(buf_row + 1)
+                    var num_w = len(num_str.as_bytes())
+                    # Right-align inside the line-number gutter, leaving
+                    # the trailing column as a one-cell separator.
+                    var sx = view.a.x + dap_gutter + (ln_gutter - 1) - num_w
+                    if sx < view.a.x + dap_gutter:
+                        sx = view.a.x + dap_gutter
+                    _ = canvas.put_text(
+                        Point(sx, sy_g), num_str, ln_attr,
+                        view.a.x + total_gutter,
+                    )
         var sel = self.selection()
         var sel_active = self.has_selection()
         var sel_sr = sel[0]; var sel_sc = sel[1]
         var sel_er = sel[2]; var sel_ec = sel[3]
-        for screen_row in range(content_h):
-            var buf_row = self.scroll_y + screen_row
-            if buf_row >= self.buffer.line_count():
-                break
+        for screen_row in range(len(layout)):
+            var buf_row = layout[screen_row][0]
+            var start_byte = layout[screen_row][1]
+            var end_byte = layout[screen_row][2]
+            var indent_cells = layout[screen_row][3]
+            var seg_x0 = text_x0 + indent_cells
             var line = self.buffer.line(buf_row)
             var n = len(line.as_bytes())
+            # Last segment of this buffer row in the painted layout?
+            # Past-EOL selection / cursor extensions are only meaningful
+            # at the trailing visual line of a wrapped buffer row.
+            var is_last_seg = (screen_row + 1 >= len(layout)) or (
+                layout[screen_row + 1][0] != buf_row
+            )
             var visible: String
-            if self.scroll_x >= n:
+            if start_byte >= n:
                 visible = String("")
-            elif self.scroll_x > 0:
-                visible = _slice(line, self.scroll_x, n)
             else:
-                visible = line
+                visible = _slice(line, start_byte, end_byte)
             _ = canvas.put_text(
-                Point(text_x0, view.a.y + screen_row),
+                Point(seg_x0, view.a.y + screen_row),
                 visible,
                 attr,
                 content_right,
@@ -870,8 +1064,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var hl = self.highlights[h]
                 if hl.row != buf_row:
                     continue
-                var hl_byte_start = hl.col_start - self.scroll_x
-                var hl_byte_end = hl.col_end - self.scroll_x
+                var hl_byte_start = hl.col_start - start_byte
+                var hl_byte_end = hl.col_end - start_byte
                 if hl_byte_start < 0:
                     hl_byte_start = 0
                 if hl_byte_end > visible_byte_count:
@@ -888,7 +1082,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 else:
                     hl_cell_end = visible_cell_count
                 for cell_off in range(hl_cell_start, hl_cell_end):
-                    var sx_hl = text_x0 + cell_off
+                    var sx_hl = seg_x0 + cell_off
                     if sx_hl >= content_right:
                         break
                     canvas.set_attr(sx_hl, sy_hl, hl.attr)
@@ -896,12 +1090,20 @@ struct Editor(ImplicitlyCopyable, Movable):
             if sel_active and sel_sr <= buf_row and buf_row <= sel_er:
                 var row_start = 0 if buf_row > sel_sr else sel_sc
                 var row_end = n if buf_row < sel_er else sel_ec
-                # Selection past EOL: highlight one trailing cell so empty-line
-                # selections are still visible.
-                if buf_row < sel_er and row_end == row_start:
+                # Selection past EOL: highlight one trailing cell so empty-
+                # line selections are still visible. Only meaningful on the
+                # last visual segment of the wrapped buffer row.
+                if buf_row < sel_er and row_end == row_start and is_last_seg:
                     row_end = row_start + 1
-                var sel_byte_start = row_start - self.scroll_x
-                var sel_byte_end = row_end - self.scroll_x
+                # Clip to the visible segment.
+                var seg_lo = row_start if row_start > start_byte else start_byte
+                var seg_hi = row_end
+                if not is_last_seg and seg_hi > end_byte:
+                    seg_hi = end_byte
+                if seg_lo >= seg_hi:
+                    continue
+                var sel_byte_start = seg_lo - start_byte
+                var sel_byte_end = seg_hi - start_byte
                 if sel_byte_start < 0: sel_byte_start = 0
                 # Map each end of the byte range to a cell. Past-EOL
                 # extensions get one cell per virtual byte so empty-line
@@ -918,12 +1120,12 @@ struct Editor(ImplicitlyCopyable, Movable):
                     sel_cell_end = visible_cell_count
                 else:
                     sel_cell_end = visible_cell_count + (sel_byte_end - visible_byte_count)
-                var sx0 = text_x0 + sel_cell_start
-                var sx1 = text_x0 + sel_cell_end
+                var sx0 = seg_x0 + sel_cell_start
+                var sx1 = seg_x0 + sel_cell_end
                 if sx1 > content_right: sx1 = content_right
                 var sy = view.a.y + screen_row
                 for x in range(sx0, sx1):
-                    var cell_off = x - text_x0
+                    var cell_off = x - seg_x0
                     if cell_off < visible_cell_count:
                         canvas.set_attr(x, sy, sel_attr)
                     else:
@@ -933,42 +1135,40 @@ struct Editor(ImplicitlyCopyable, Movable):
                         canvas.set(x, sy, Cell(String(" "), sel_attr, 1))
         # Cursor: a reverse-video cell when focused (only inside content area).
         if focused:
-            var line = self.buffer.line(self.cursor_row)
-            var line_byte_count = len(line.as_bytes())
-            var cursor_byte = self.cursor_col - self.scroll_x
-            # Visible portion of *this* line for cell-mapping. We can't
-            # reuse the loop's variable since the cursor row may not be
-            # the row currently being painted on a given iteration.
-            var visible_str: String
-            if self.scroll_x >= line_byte_count:
-                visible_str = String("")
-            elif self.scroll_x > 0:
-                visible_str = _slice(line, self.scroll_x, line_byte_count)
-            else:
-                visible_str = line
-            var cursor_cell_map = utf8_byte_to_cell(visible_str)
-            var cursor_cell_count = utf8_codepoint_count(visible_str)
-            var visible_byte_count = len(visible_str.as_bytes())
-            var cell_offset: Int
-            if cursor_byte < 0:
-                cell_offset = 0
-            elif cursor_byte < visible_byte_count:
-                cell_offset = cursor_cell_map[cursor_byte]
-            else:
-                # At or past EOL: each byte beyond the end claims its
-                # own cell so successive ``Right`` presses past EOL
-                # keep advancing visibly.
-                cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
-            var sx = text_x0 + cell_offset
-            var sy = view.a.y + (self.cursor_row - self.scroll_y)
-            if text_x0 <= sx and sx < content_right \
-               and view.a.y <= sy and sy < content_bottom:
-                if self.cursor_col < line_byte_count:
-                    canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
+            var sr = self._cursor_screen_row(layout)
+            if sr >= 0:
+                var seg_start = layout[sr][1]
+                var seg_end = layout[sr][2]
+                var indent = layout[sr][3]
+                var seg_x0 = text_x0 + indent
+                var line = self.buffer.line(self.cursor_row)
+                var line_byte_count = len(line.as_bytes())
+                var visible_str: String
+                if seg_start >= line_byte_count:
+                    visible_str = String("")
                 else:
-                    # Cursor is past EOL — paint a visible block so the
-                    # caret is still visible.
-                    canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
+                    visible_str = _slice(line, seg_start, seg_end)
+                var cursor_cell_map = utf8_byte_to_cell(visible_str)
+                var cursor_cell_count = utf8_codepoint_count(visible_str)
+                var visible_byte_count = len(visible_str.as_bytes())
+                var cursor_byte = self.cursor_col - seg_start
+                var cell_offset: Int
+                if cursor_byte < 0:
+                    cell_offset = 0
+                elif cursor_byte < visible_byte_count:
+                    cell_offset = cursor_cell_map[cursor_byte]
+                else:
+                    cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
+                var sx = seg_x0 + cell_offset
+                var sy = view.a.y + sr
+                if seg_x0 <= sx and sx < content_right \
+                   and view.a.y <= sy and sy < content_bottom:
+                    if self.cursor_col < line_byte_count:
+                        canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
+                    else:
+                        # Cursor is past EOL — paint a visible block so the
+                        # caret is still visible.
+                        canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
 
     # --- event handling ----------------------------------------------------
 
@@ -1226,6 +1426,59 @@ struct Editor(ImplicitlyCopyable, Movable):
                         return True
         return False
 
+    fn find_prev(mut self, needle: String) -> Bool:
+        """Search backward from the cursor for ``needle``; select on hit.
+        Wraps around to the file end when nothing earlier matches."""
+        if len(needle.as_bytes()) == 0:
+            return False
+        var n = len(needle.as_bytes())
+        var nb = needle.as_bytes()
+        # Anchor: the leftmost end of the current selection / cursor. We
+        # subtract one byte so a repeated press steps to the *previous*
+        # match instead of re-finding the one already selected.
+        var sel = self.selection()
+        var anchor_row = sel[0]
+        var anchor_col = sel[1] - 1
+        # First pass walks rows from anchor_row down to 0 inclusive;
+        # second pass wraps and walks from the last row back up to
+        # anchor_row + 1 (so the anchor row's earlier columns get a
+        # chance on the first pass, never twice).
+        for pass_idx in range(2):
+            var r_top: Int
+            var r_bot: Int
+            if pass_idx == 0:
+                r_top = 0
+                r_bot = anchor_row
+            else:
+                r_top = anchor_row + 1
+                r_bot = self.buffer.line_count() - 1
+            var r = r_bot
+            while r >= r_top:
+                var line = self.buffer.line(r)
+                var lb = line.as_bytes()
+                if len(lb) >= n:
+                    var last_col: Int
+                    if pass_idx == 0 and r == anchor_row:
+                        last_col = anchor_col
+                        if last_col > len(lb) - n:
+                            last_col = len(lb) - n
+                    else:
+                        last_col = len(lb) - n
+                    var c = last_col
+                    while c >= 0:
+                        var matches = True
+                        for k in range(n):
+                            if lb[c + k] != nb[k]:
+                                matches = False
+                                break
+                        if matches:
+                            self.move_to(r, c, False)
+                            self.move_to(r, c + n, True)
+                            return True
+                        c -= 1
+                r -= 1
+        return False
+
     fn toggle_comment(mut self, prefix: String = String("// ")):
         """Toggle a line-comment prefix on every line touched by the selection
         (or the current line if no selection)."""
@@ -1351,30 +1604,63 @@ struct Editor(ImplicitlyCopyable, Movable):
             return False
         if not event.pressed:
             return False
-        # The gutter occupies the leftmost ``gutter_width`` columns;
-        # clicks there land on column 0 (so a gutter click still picks
-        # the corresponding line, just like clicking the line number in
-        # most editors). The actual breakpoint toggle is on F9 — handled
-        # by Desktop, since only it knows the active DapManager.
-        var cell_x = event.pos.x - view.a.x - self.gutter_width
+        # The gutter (debugger + line numbers) occupies the leftmost
+        # columns; clicks there land on column 0 (so a gutter click
+        # still picks the corresponding line, just like clicking the
+        # line number in most editors). The actual breakpoint toggle is
+        # on F9 — handled by Desktop, since only it knows the active
+        # DapManager.
+        var total_gutter = self._total_gutter()
+        var cell_x = event.pos.x - view.a.x - total_gutter
         if cell_x < 0: cell_x = 0
-        var row = event.pos.y - view.a.y + self.scroll_y
-        if row < 0: row = 0
-        var max_row = self.buffer.line_count() - 1
-        if row > max_row: row = max_row
-        # Translate cell offset within the visible portion of the row to a
-        # byte offset, so a click on a multi-byte glyph lands at the start
-        # of that codepoint instead of in the middle of its UTF-8 sequence.
+        # Map the click's screen row through the same layout used by
+        # paint, so soft-wrapped buffer rows resolve to their wrapped
+        # segment instead of advancing buffer rows 1:1.
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter
+        if content_w < 1:
+            content_w = 1
+        var layout = self._layout_lines(content_h, content_w)
+        var screen_row = event.pos.y - view.a.y
+        if screen_row < 0:
+            screen_row = 0
+        var row: Int
+        var seg_start: Int
+        var seg_end: Int
+        var seg_indent: Int
+        if len(layout) == 0:
+            row = 0
+            seg_start = 0
+            seg_end = 0
+            seg_indent = 0
+        elif screen_row >= len(layout):
+            var last = layout[len(layout) - 1]
+            row = last[0]
+            seg_start = last[1]
+            seg_end = last[2]
+            seg_indent = last[3]
+        else:
+            row = layout[screen_row][0]
+            seg_start = layout[screen_row][1]
+            seg_end = layout[screen_row][2]
+            seg_indent = layout[screen_row][3]
+        # Continuation segments paint their text shifted right by the
+        # hanging indent; subtract that here so a click on the indent
+        # area lands at the segment start.
+        cell_x -= seg_indent
+        if cell_x < 0:
+            cell_x = 0
+        # Translate cell offset within the visible segment to a byte
+        # offset, so a click on a multi-byte glyph lands at the start of
+        # that codepoint instead of in the middle of its UTF-8 sequence.
         var line = self.buffer.line(row)
         var line_n = len(line.as_bytes())
         var visible: String
-        if self.scroll_x >= line_n:
+        if seg_start >= line_n:
             visible = String("")
-        elif self.scroll_x > 0:
-            visible = _slice(line, self.scroll_x, line_n)
         else:
-            visible = line
-        var col = self.scroll_x + _utf8_byte_of_cell(visible, cell_x)
+            visible = _slice(line, seg_start, seg_end)
+        var col = seg_start + _utf8_byte_of_cell(visible, cell_x)
         if col > line_n: col = line_n
         # Cmd+click (delivered by iTerm2 as Left+Alt): capture a go-to-
         # definition request without moving the cursor. The host polls
@@ -1488,13 +1774,26 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn _scroll_to_cursor(mut self, view: Rect):
         var h = view.height()
-        var w = view.width() - self.gutter_width
+        var total_gutter = self._total_gutter()
+        var w = view.width() - total_gutter
         if w < 1:
             w = 1
         if self.cursor_row < self.scroll_y:
             self.scroll_y = self.cursor_row
         elif self.cursor_row >= self.scroll_y + h:
             self.scroll_y = self.cursor_row - h + 1
+        if self.soft_wrap:
+            # No horizontal scroll on the wrap path: text reflows
+            # vertically instead. Walk wrapped segments to make sure the
+            # cursor's screen row fits inside the view; if the buffer
+            # row's wraps push the cursor past the bottom, anchor
+            # ``scroll_y`` to the cursor row so the cursor is on the
+            # first visible line.
+            self.scroll_x = 0
+            var layout = self._layout_lines(h, w)
+            if self._cursor_screen_row(layout) < 0:
+                self.scroll_y = self.cursor_row
+            return
         # Horizontal scroll math is done in cell columns and converted back
         # to a byte offset so ``scroll_x`` always lands on a codepoint
         # boundary — the slicing in ``paint`` would corrupt UTF-8 otherwise.
@@ -1507,29 +1806,82 @@ struct Editor(ImplicitlyCopyable, Movable):
             scroll_cell = cur_cell - w + 1
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
-    fn reveal_cursor(mut self, view: Rect, margin_below: Int = 5):
-        """Scroll so the cursor is visible with at least ``margin_below``
-        rows of context underneath it (clamped to file end).
+    fn clamp_scroll(mut self, view: Rect):
+        """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.
 
-        Used after non-incremental jumps (e.g. goto-definition): plain
-        ``_scroll_to_cursor`` brings the cursor *just* into view, which
-        leaves it stuck at the bottom edge with no surrounding code
-        visible — fine for typing, jarring for landings.
+        Called every frame from ``WindowManager.fit_into``. The interesting
+        case is a grow-resize: the user scrolled right while the window
+        was narrow, then widened the window so the horizontal scroll bar
+        disappears entirely — without this clamp, ``scroll_x`` would
+        stay positive and hide leading characters that the user can no
+        longer scroll back to. Vertical axis is clamped symmetrically.
+        """
+        var total_gutter = self._total_gutter()
+        var content_w = view.width() - total_gutter
+        if content_w < 1:
+            content_w = 1
+        var content_h = view.height()
+        if content_h < 1:
+            content_h = 1
+        if self.soft_wrap:
+            self.scroll_x = 0
+        else:
+            var max_x = self.longest_line_width() - content_w
+            if max_x < 0: max_x = 0
+            if self.scroll_x > max_x:
+                self.scroll_x = max_x
+            if self.scroll_x < 0:
+                self.scroll_x = 0
+            # Re-snap to a codepoint boundary on the cursor row so a
+            # multi-byte glyph isn't sliced by paint's substring.
+            var line = self.buffer.line(self.cursor_row)
+            var cell = _utf8_cell_of_byte(line, self.scroll_x)
+            self.scroll_x = _utf8_byte_of_cell(line, cell)
+        var max_y = self.buffer.line_count() - content_h
+        if max_y < 0: max_y = 0
+        if self.scroll_y > max_y:
+            self.scroll_y = max_y
+        if self.scroll_y < 0:
+            self.scroll_y = 0
+
+    fn reveal_cursor(
+        mut self, view: Rect,
+        margin_below: Int = 5, margin_above: Int = 0,
+    ):
+        """Scroll so the cursor is visible with up to ``margin_above``
+        rows of context above it and ``margin_below`` below (each
+        clamped to the file boundaries).
+
+        Used after non-incremental jumps (e.g. goto-definition,
+        find-next / find-prev): plain ``_scroll_to_cursor`` brings the
+        cursor *just* into view, which leaves it stuck at the edge
+        with no surrounding code visible — fine for typing, jarring
+        for landings.
         """
         var h = view.height()
-        var w = view.width() - self.gutter_width
+        var total_gutter = self._total_gutter()
+        var w = view.width() - total_gutter
         if w < 1:
             w = 1
         var max_row = self.buffer.line_count() - 1
+        var top = self.cursor_row - margin_above
+        if top < 0:
+            top = 0
         var bottom = self.cursor_row + margin_below
         if bottom > max_row:
             bottom = max_row
-        if self.cursor_row < self.scroll_y:
-            self.scroll_y = self.cursor_row
+        if top < self.scroll_y:
+            self.scroll_y = top
         elif bottom >= self.scroll_y + h:
             self.scroll_y = bottom - h + 1
         if self.scroll_y < 0:
             self.scroll_y = 0
+        if self.soft_wrap:
+            self.scroll_x = 0
+            var layout = self._layout_lines(h, w)
+            if self._cursor_screen_row(layout) < 0:
+                self.scroll_y = self.cursor_row
+            return
         var line = self.buffer.line(self.cursor_row)
         var cur_cell = _utf8_cell_of_byte(line, self.cursor_col)
         var scroll_cell = _utf8_cell_of_byte(line, self.scroll_x)
@@ -1538,6 +1890,20 @@ struct Editor(ImplicitlyCopyable, Movable):
         elif cur_cell >= scroll_cell + w:
             scroll_cell = cur_cell - w + 1
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
+
+
+fn _leading_indent_cells(line: String) -> Int:
+    """Cell width of the leading whitespace on ``line``.
+
+    Each leading space or tab byte counts as one cell — matching the
+    rest of the editor's byte-as-cell column model. Used by soft-wrap to
+    align continuation lines under their parent's indent.
+    """
+    var bytes = line.as_bytes()
+    var i = 0
+    while i < len(bytes) and (bytes[i] == 0x20 or bytes[i] == 0x09):
+        i += 1
+    return i
 
 
 fn _is_word_char(b: Int) -> Bool:

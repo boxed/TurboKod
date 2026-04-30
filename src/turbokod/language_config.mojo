@@ -41,25 +41,32 @@ struct LanguageSpec(ImplicitlyCopyable, Movable):
 
     ``language_id`` is what ends up in ``didOpen``'s ``languageId`` field;
     ``file_types`` are matched against the lower-cased extension after
-    the last ``.`` in the basename.
+    the last ``.`` in the basename. ``install_hint`` is a one-line shell
+    command we suggest to the user when none of the candidates are on
+    ``$PATH`` — empty string means "no canonical install command, don't
+    bother prompting" (e.g. ``mojo-lsp-server`` ships with the toolchain).
     """
     var language_id: String
     var file_types: List[String]
     var candidates: List[ServerCandidate]
+    var install_hint: String
 
     fn __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var candidates: List[ServerCandidate],
+        var install_hint: String = String(""),
     ):
         self.language_id = language_id^
         self.file_types = file_types^
         self.candidates = candidates^
+        self.install_hint = install_hint^
 
     fn __copyinit__(out self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.candidates = copy.candidates.copy()
+        self.install_hint = copy.install_hint
 
 
 fn _argv1(a: String) -> ServerCandidate:
@@ -113,6 +120,7 @@ fn built_in_servers() -> List[LanguageSpec]:
         String("python"),
         _exts(String("py"), String("pyi"), String("pyw")),
         py_cands^,
+        String("pip install pyright"),
     ))
 
     # --- Rust ---------------------------------------------------------
@@ -120,6 +128,7 @@ fn built_in_servers() -> List[LanguageSpec]:
     rs_cands.append(_argv1(String("rust-analyzer")))
     out.append(LanguageSpec(
         String("rust"), _exts(String("rs")), rs_cands^,
+        String("rustup component add rust-analyzer"),
     ))
 
     # --- Go -----------------------------------------------------------
@@ -127,6 +136,7 @@ fn built_in_servers() -> List[LanguageSpec]:
     go_cands.append(_argv1(String("gopls")))
     out.append(LanguageSpec(
         String("go"), _exts(String("go")), go_cands^,
+        String("go install golang.org/x/tools/gopls@latest"),
     ))
 
     # --- TypeScript / JavaScript -------------------------------------
@@ -139,6 +149,7 @@ fn built_in_servers() -> List[LanguageSpec]:
             String("mjs"), String("cjs"),
         ),
         ts_cands^,
+        String("npm install -g typescript-language-server typescript"),
     ))
 
     # --- C / C++ ------------------------------------------------------
@@ -151,6 +162,7 @@ fn built_in_servers() -> List[LanguageSpec]:
             String("cxx"), String("hpp"), String("hh"), String("hxx"),
         ),
         c_cands^,
+        String("brew install llvm  # or apt install clangd"),
     ))
 
     # --- Zig ----------------------------------------------------------
@@ -158,6 +170,7 @@ fn built_in_servers() -> List[LanguageSpec]:
     zig_cands.append(_argv1(String("zls")))
     out.append(LanguageSpec(
         String("zig"), _exts(String("zig")), zig_cands^,
+        String("brew install zls  # or see https://github.com/zigtools/zls"),
     ))
 
     # --- Ruby ---------------------------------------------------------
@@ -166,6 +179,7 @@ fn built_in_servers() -> List[LanguageSpec]:
     rb_cands.append(_argv2(String("ruby-lsp"), String("stdio")))
     out.append(LanguageSpec(
         String("ruby"), _exts(String("rb")), rb_cands^,
+        String("gem install solargraph"),
     ))
 
     # --- JSON ---------------------------------------------------------
@@ -175,6 +189,7 @@ fn built_in_servers() -> List[LanguageSpec]:
         String("json"),
         _exts(String("json"), String("jsonc")),
         json_cands^,
+        String("npm install -g vscode-langservers-extracted"),
     ))
 
     # --- YAML ---------------------------------------------------------
@@ -184,6 +199,7 @@ fn built_in_servers() -> List[LanguageSpec]:
         String("yaml"),
         _exts(String("yaml"), String("yml")),
         yaml_cands^,
+        String("npm install -g yaml-language-server"),
     ))
 
     # --- Bash ---------------------------------------------------------
@@ -193,6 +209,7 @@ fn built_in_servers() -> List[LanguageSpec]:
         String("bash"),
         _exts(String("sh"), String("bash")),
         sh_cands^,
+        String("npm install -g bash-language-server"),
     ))
 
     return out^

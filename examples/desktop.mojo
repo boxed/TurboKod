@@ -45,10 +45,12 @@ from turbokod import (
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
-    Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO,
+    Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
+    EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN,
     EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
+    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
     stat_file,
@@ -96,6 +98,8 @@ fn main() raises:
         edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
         edit_items.append(MenuItem.separator())
         edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
+        edit_items.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
+        edit_items.append(MenuItem(String("Find Previous"),         EDITOR_FIND_PREV))
         edit_items.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
         edit_items.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
         edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
@@ -104,6 +108,10 @@ fn main() raises:
         edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
         edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
         desktop.menu_bar.add(Menu(String("Edit"), edit_items^))
+        desktop.menu_bar.add(_mk_menu(String("View"),
+            (String("Toggle Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS),
+            (String("Toggle Soft Wrap"),    EDITOR_TOGGLE_SOFT_WRAP),
+        ))
         desktop.menu_bar.add(_mk_menu(String("Debug"),
             (String("Start / Continue"), DEBUG_START_OR_CONTINUE),
             (String("Stop"), DEBUG_STOP),
@@ -203,6 +211,9 @@ fn main() raises:
                     error_log.append(String("reload: ") + String(e))
                 desktop.menu_bar.set_visible_by_label(
                     String("Edit"), desktop.windows.focused_is_editor(),
+                )
+                desktop.menu_bar.set_visible_by_label(
+                    String("View"), desktop.windows.focused_is_editor(),
                 )
                 var tree_open = desktop.file_tree.consume_open()
                 if tree_open:
