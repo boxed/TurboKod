@@ -10,12 +10,12 @@ Run with::
     mojo run -I src examples/checkerboard.mojo
 """
 
-from mojovision import (
+from turbokod import (
     Application, Attr, Point,
     BLACK, WHITE,
     EVENT_KEY, KEY_ESC,
 )
-from mojovision.cell import Cell
+from turbokod.cell import Cell
 
 
 fn main() raises:

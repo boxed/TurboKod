@@ -22,7 +22,7 @@ hypothesis is wrong and the bug lives elsewhere.
 from std.collections.list import List
 from std.ffi import external_call
 
-from mojovision.posix import (
+from turbokod.posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, STDIN_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, cfmakeraw, poll_stdin,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,

@@ -9,7 +9,7 @@ What it does:
 1. Puts ``stdin`` into raw mode.
 2. Enters a tight loop of ``poll`` + ``read(2)`` on STDIN, plus a
    parallel stream of ``read(2)`` calls on a self-built pipe (mimics
-   what mojovision's LSP/DAP framers do — those reads work fine).
+   what turbokod's LSP/DAP framers do — those reads work fine).
 3. Press a few keys. Type some text, scroll the wheel, click around.
 4. Eventually the process segfaults inside ``read(0, ptr, n)``.
 
@@ -18,13 +18,13 @@ works for the pipe FD throughout. The crash is consistent and
 reproducible after a few hundred frames of activity.
 
 Filed as a Mojo bug — see the comment in
-``src/mojovision/terminal.mojo`` for the workaround status.
+``src/turbokod/terminal.mojo`` for the workaround status.
 """
 
 from std.collections.list import List
 from std.ffi import external_call
 
-from mojovision.posix import (
+from turbokod.posix import (
     STDIN_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, cfmakeraw, pipe_pair, poll_stdin,
     tcgetattr, tcsetattr, write_buffer,

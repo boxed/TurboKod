@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A port of Turbo Vision to Mojo. Two distinct trees:
 
-- **`src/mojovision/`** — the Mojo port. **This is the product.** All new work goes here.
+- **`src/turbokod/`** — the Mojo port. **This is the product.** All new work goes here.
 - **`tvision/`** — a vendored snapshot of the upstream C++ reference (`magiblot/tvision`, its own `.git` inside). **Read-only reference.** Do not edit unless explicitly asked. When porting behavior, mirror it in Mojo rather than touching this tree.
 
 `examples/` and `tests/` are Mojo. `pixi.toml` and `run.sh` drive the toolchain.
@@ -19,7 +19,7 @@ A port of Turbo Vision to Mojo. Two distinct trees:
 ./run.sh tests/test_basic.mojo   # pure-data tests, no TTY required
 ```
 
-`run.sh` is just `mojo run -I src "$@"` from the repo root. The `-I src` flag makes `from mojovision import ...` resolve. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) wrap the same.
+`run.sh` is just `mojo run -I src "$@"` from the repo root. The `-I src` flag makes `from turbokod import ...` resolve. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) wrap the same.
 
 The Mojo toolchain is not installed in this checkout's environment — assume the user runs the commands. If you change the package, rely on a careful read of the diff plus `tests/test_basic.mojo` (which exercises everything that doesn't need a TTY) for confidence.
 

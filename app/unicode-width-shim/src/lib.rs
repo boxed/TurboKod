@@ -4,14 +4,14 @@
 //! Why: alacritty_terminal calls `c.width()` to decide whether a glyph takes
 //! one or two terminal cells. Wide codepoints (emoji, CJK) produce a
 //! `WIDE_CHAR` cell plus a `WIDE_CHAR_SPACER` cell, which conflicts with
-//! mojovision's "one codepoint = one canvas column" model — the wrapper's
+//! turbokod's "one codepoint = one canvas column" model — the wrapper's
 //! grid drifts +1 column past every wide char and stale cells leak through
 //! when content moves. Forcing every printable codepoint to width 1 keeps
 //! the grids aligned: emoji still get drawn at full visual fidelity by our
 //! atlas, but the alacritty grid no longer interleaves spacer cells.
 //!
 //! This is a deliberate departure from terminal-correct behavior. The wrapper
-//! is a single-purpose UI for mojovision, not a general-purpose terminal —
+//! is a single-purpose UI for turbokod, not a general-purpose terminal —
 //! we own the renderer end-to-end and pay no penalty for ignoring East Asian
 //! Width.
 

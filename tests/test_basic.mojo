@@ -9,18 +9,18 @@ Run with::
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
-from mojovision.canvas import Canvas
-from mojovision.dir_browser import DirBrowser
-from mojovision.painter import Painter
-from mojovision.cell import Cell, blank_cell
-from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
-from mojovision.editor import Editor, TextBuffer
-from mojovision.editorconfig import (
+from turbokod.canvas import Canvas
+from turbokod.dir_browser import DirBrowser
+from turbokod.painter import Painter
+from turbokod.cell import Cell, blank_cell
+from turbokod.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
+from turbokod.editor import Editor, TextBuffer
+from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
 )
-from mojovision.file_dialog import FileDialog
-from mojovision.save_as_dialog import SaveAsDialog
-from mojovision.desktop import (
+from turbokod.file_dialog import FileDialog
+from turbokod.save_as_dialog import SaveAsDialog
+from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
     EDITOR_FIND, EDITOR_GOTO, EDITOR_NEW, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
@@ -30,54 +30,54 @@ from mojovision.desktop import (
     WINDOW_CLOSE,
     ctrl_key, format_hotkey,
 )
-from mojovision.file_io import (
+from turbokod.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
     read_file, stat_file, write_file,
 )
-from mojovision.file_tree import FILE_TREE_WIDTH, FileTree
-from mojovision.menu import Menu, MenuBar, MenuItem
-from mojovision.project import (
+from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
+from turbokod.menu import Menu, MenuBar, MenuItem
+from turbokod.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
-from mojovision.quick_open import QuickOpen, quick_open_match
-from mojovision.json import (
+from turbokod.quick_open import QuickOpen, quick_open_match
+from turbokod.json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
 )
-from mojovision.lsp import (
+from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     _drop_prefix, _find_double_crlf, _parse_content_length, classify_message,
 )
-from mojovision.dap import (
+from turbokod.dap import (
     DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
     DapClient, DapIncoming, classify_dap_message, dap_initialize_arguments,
 )
-from mojovision.dap_dispatch import (
+from turbokod.dap_dispatch import (
     DapManager, DapStackFrame, DapScope, DapVariable, DapThread,
     _parse_scopes, _parse_stack_trace, _parse_threads, _parse_variables,
 )
-from mojovision.debugger_config import (
+from turbokod.debugger_config import (
     DAP_REQUEST_LAUNCH, DebuggerSpec,
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
 )
-from mojovision.highlight import (
+from turbokod.highlight import (
     DefinitionRequest, Highlight, extension_of, highlight_for_extension,
     highlight_comment_attr, highlight_keyword_attr, highlight_number_attr,
     highlight_string_attr, word_at,
 )
-from mojovision.window import WindowManager
-from mojovision.events import (
+from turbokod.window import WindowManager
+from turbokod.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
-    MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from mojovision.geometry import Point, Rect
-from mojovision.terminal import parse_input
-from mojovision.view import Fill, Frame, Label, centered
-from mojovision.window import Window
+from turbokod.geometry import Point, Rect
+from turbokod.terminal import parse_input
+from turbokod.view import Fill, Frame, Label, centered
+from turbokod.window import Window
 
 
 fn test_point_arithmetic() raises:
@@ -187,7 +187,7 @@ fn test_parse_input_keys() raises:
 
 fn test_parse_window_size_report() raises:
     # ``CSI 8 ; rows ; cols t`` — xterm window-size report. The native
-    # wrapper pushes this on every resize so mojovision sees the new
+    # wrapper pushes this on every resize so turbokod sees the new
     # dimensions immediately; we should turn it into an EVENT_RESIZE
     # carrying ``(cols, rows)`` in ``pos``.
     var ev = parse_input(String("\x1b[8;25;80t"))
@@ -679,14 +679,14 @@ fn test_right_aligned_menu_layout() raises:
     bar.add(Menu(String("File"), left_items^))
     var right_items = List[MenuItem]()
     right_items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
-    bar.add(Menu(String("mojovision"), right_items^, right_aligned=True))
+    bar.add(Menu(String("turbokod"), right_items^, right_aligned=True))
     var rects = bar._layout(80)
     # Left menu starts at x=3 and gets " File "  (label + 2 padding).
     assert_equal(rects[0].a.x, 3)
     assert_equal(rects[0].b.x, 3 + len(String("File").as_bytes()) + 2)
     # Right-aligned menu's right edge is the screen width; width = label+2.
     assert_equal(rects[1].b.x, 80)
-    var right_w = len(String("mojovision").as_bytes()) + 2
+    var right_w = len(String("turbokod").as_bytes()) + 2
     assert_equal(rects[1].a.x, 80 - right_w)
 
 
@@ -700,15 +700,15 @@ fn test_desktop_project_lifecycle() raises:
     assert_true(idx >= 0)
     assert_true(d.menu_bar.menus[idx].visible)
     assert_true(d.menu_bar.menus[idx].right_aligned)
-    # Label is the project root's basename — for this repo, "mojovision".
-    assert_equal(d.menu_bar.menus[idx].label, String("mojovision"))
+    # Label is the project root's basename — for this repo, "turbokod".
+    assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
     # The project menu starts with two items: tree-toggle and close.
     assert_equal(len(d.menu_bar.menus[idx].items), 2)
     assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
     assert_equal(d.menu_bar.menus[idx].items[1].action, PROJECT_CLOSE_ACTION)
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
-    d.detect_project_from(String("src/mojovision/desktop.mojo"))
+    d.detect_project_from(String("src/turbokod/desktop.mojo"))
     assert_equal(d.project.value(), first)
     # close_project clears state and hides the menu.
     d.close_project()
@@ -803,7 +803,7 @@ fn _temp_path(suffix: String) -> String:
     """Cheap unique path under /tmp; pid+suffix is enough for our serial test
     suite (no parallelism)."""
     var pid = external_call["getpid", Int32]()
-    return String("/tmp/mojovision_test_") + String(Int(pid)) + suffix
+    return String("/tmp/turbokod_test_") + String(Int(pid)) + suffix
 
 
 fn test_write_file_round_trip() raises:
@@ -975,7 +975,7 @@ fn test_editor_save_applies_editorconfig_transforms() raises:
 fn test_editor_save_uses_editorconfig_line_endings() raises:
     """When ``end_of_line`` is ``crlf``, ``save`` should join lines with
     ``\\r\\n`` even though the buffer uses ``\\n`` internally."""
-    var dir = String("/tmp/mojovision_ec_eol_") + String(
+    var dir = String("/tmp/turbokod_ec_eol_") + String(
         Int(external_call["getpid", Int32]())
     )
     _ = external_call["mkdir", Int32](
@@ -1055,11 +1055,11 @@ fn test_find_in_project_locates_string() raises:
     """Search the repo for a string that's known to live in exactly one place."""
     var root = find_git_project(String("examples/hello.mojo"))
     assert_true(root)
-    var matches = find_in_project(root.value(), String("Mojovision: a Mojo-idiomatic port"))
+    var matches = find_in_project(root.value(), String("Turbokod: a Mojo-idiomatic port"))
     assert_true(len(matches) >= 1)
     var found_in_init = False
     for i in range(len(matches)):
-        if matches[i].rel == String("src/mojovision/__init__.mojo"):
+        if matches[i].rel == String("src/turbokod/__init__.mojo"):
             found_in_init = True
             assert_true(matches[i].line_no >= 1)
     assert_true(found_in_init)
@@ -2001,15 +2001,15 @@ fn test_quick_open_match_rules() raises:
     """Locked-in spec: each token is a case-insensitive subsequence;
     first token matches anywhere, later tokens require a word boundary.
     Word boundaries: start, after non-alnum, lowercase→uppercase split."""
-    var path = String("src/mojovision/cell.mojo")
+    var path = String("src/turbokod/cell.mojo")
     # Single token with a literal slash — subsequence match.
-    assert_true(quick_open_match(path, String("j/c")))
-    # Two tokens — j anywhere, c at a word boundary.
-    assert_true(quick_open_match(path, String("j c")))
-    # Subsequence within a token: j (in mojovision) → / → m (in .mojo).
-    assert_true(quick_open_match(path, String("j/m")))
+    assert_true(quick_open_match(path, String("k/c")))
+    # Two tokens — k anywhere, c at a word boundary.
+    assert_true(quick_open_match(path, String("k c")))
+    # Subsequence within a token: k (in turbokod) → / → m (in .mojo).
+    assert_true(quick_open_match(path, String("k/m")))
     # No / after the m in .mojo, so this can't match.
-    assert_false(quick_open_match(path, String("jm/")))
+    assert_false(quick_open_match(path, String("km/")))
 
     # Multi-token across other shapes:
     assert_true(quick_open_match(String("job_call"),  String("j c")))
@@ -2048,7 +2048,7 @@ fn test_quick_open_filters_as_you_type() raises:
     assert_true(len(qo.matched) < initial_count)
     var found_editor_module = False
     for i in range(len(qo.matched)):
-        if qo.entries[qo.matched[i]] == String("src/mojovision/editor.mojo"):
+        if qo.entries[qo.matched[i]] == String("src/turbokod/editor.mojo"):
             found_editor_module = True
             break
     assert_true(found_editor_module)
@@ -3121,7 +3121,7 @@ fn test_dap_classify_response_with_failure() raises:
 
 fn test_dap_initialize_arguments_shape() raises:
     var args = dap_initialize_arguments(
-        String("mojovision"), String("debugpy"),
+        String("turbokod"), String("debugpy"),
     )
     assert_true(args.is_object())
     assert_true(args.object_has(String("clientID")))

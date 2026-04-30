@@ -7,7 +7,7 @@ actually has installed.
 
 The data is hardcoded for now — Mojo doesn't ship a TOML parser and
 shelling out to one would be silly. A future extension could merge
-entries from ``~/.config/mojovision/languages.toml`` (or similar) with
+entries from ``~/.config/turbokod/languages.toml`` (or similar) with
 JSON since we already have a parser; the structure here is shaped to
 make that mechanical.
 
@@ -87,7 +87,7 @@ fn built_in_servers() -> List[LanguageSpec]:
 
     Order within ``candidates`` is the spawn-priority order: pyright →
     basedpyright → pylsp for Python, etc. Add to this list to teach
-    mojovision about a new language. Entries that don't apply (because
+    turbokod about a new language. Entries that don't apply (because
     their binary isn't on ``$PATH``) are silently skipped at spawn time.
     """
     var out = List[LanguageSpec]()

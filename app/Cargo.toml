@@ -1,5 +1,5 @@
 [package]
-name = "mojovision-app"
+name = "turbokod-app"
 version = "0.0.1"
 edition = "2021"
 publish = false
@@ -30,10 +30,10 @@ codegen-units = 1
 # Override unicode-width with a local shim that reports width=1 for every
 # printable codepoint. alacritty_terminal uses ``c.width()`` to decide
 # whether to allocate a ``WIDE_CHAR_SPACER`` cell next to each emoji/CJK
-# glyph; that double-cell allocation collides with mojovision's
+# glyph; that double-cell allocation collides with turbokod's
 # one-codepoint-per-column canvas model and leaves stale cells behind
 # whenever content moves. Forcing width=1 keeps the wrapper grid in lock-
-# step with mojovision's canvas — emoji still render correctly because
+# step with turbokod's canvas — emoji still render correctly because
 # the renderer paints whatever ``cell.c`` carries, regardless of the
 # alacritty WIDE flag.
 [patch.crates-io]

@@ -62,7 +62,7 @@ comptime SEQ_MOUSE_OFF = String("\x1b[?1006l\x1b[?1003l\x1b[?1002l")
 comptime SEQ_MODIFY_KEYS_ON  = String("\x1b[>1;2m\x1b[>2;2m\x1b[>4;2m")
 comptime SEQ_MODIFY_KEYS_OFF = String("\x1b[>1m\x1b[>2m\x1b[>4m")
 # Mouse-pointer shape is signalled by piggy-backing on OSC 2 (window
-# title). The native mojovision host recognises titles starting with
+# title). The native turbokod host recognises titles starting with
 # ``__mvc_cursor:`` as a private cursor-shape command and routes them
 # to the platform cursor instead of the title bar; generic terminals
 # either ignore the prefix or briefly flash it as a title — the trade-
@@ -168,7 +168,7 @@ struct Terminal:
         """Ask the host to display ``shape`` as the mouse-pointer icon.
 
         Only emitted when the bundled native app is detected (it sets
-        ``MOJOVISION_HOST=1`` in the PTY env). Generic terminals would
+        ``TURBOKOD_HOST=1`` in the PTY env). Generic terminals would
         otherwise interpret the OSC as a window-title set and briefly
         flash ``__mvc_cursor:...`` in their title bar, which is worse
         UX than just leaving the cursor alone. Supported shapes match
@@ -178,7 +178,7 @@ struct Terminal:
             return
         if shape == self._last_pointer_shape:
             return
-        if getenv_value(String("MOJOVISION_HOST")) != String("1"):
+        if getenv_value(String("TURBOKOD_HOST")) != String("1"):
             return
         self._last_pointer_shape = shape
         write_string(

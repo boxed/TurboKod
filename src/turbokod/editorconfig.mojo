@@ -626,7 +626,7 @@ fn load_editorconfig_for_path(file_path: String) -> EditorConfig:
         var ec_path = join_path(dir, String(".editorconfig"))
         var info = stat_file(ec_path)
         if info.ok and not info.is_dir():
-            var contents = String("")
+            var contents: String
             try:
                 contents = read_file(ec_path)
             except:

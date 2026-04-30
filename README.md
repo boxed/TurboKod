@@ -1,6 +1,6 @@
-# Mojovision
+# Turbokod
 
-A port of [Turbo Vision](https://en.wikipedia.org/wiki/Turbo_Vision) to [Mojo](https://www.modular.com/mojo). The C++ reference implementation (the [`magiblot/tvision`](https://github.com/magiblot/tvision) snapshot) lives under `tvision/` for reference; the Mojo port lives under `src/mojovision/`.
+A port of [Turbo Vision](https://en.wikipedia.org/wiki/Turbo_Vision) to [Mojo](https://www.modular.com/mojo). The C++ reference implementation (the [`magiblot/tvision`](https://github.com/magiblot/tvision) snapshot) lives under `tvision/` for reference; the Mojo port lives under `src/turbokod/`.
 
 ## Status
 
@@ -33,8 +33,8 @@ pixi run test
 ## Layout
 
 ```
-mojovision/
-├── src/mojovision/        # the Mojo port (the actual product)
+turbokod/
+├── src/turbokod/        # the Mojo port (the actual product)
 │   ├── geometry.mojo      # Point, Rect
 │   ├── colors.mojo        # Attr, named colors, SGR encoding
 │   ├── cell.mojo          # Cell, blank_cell, cell_width

@@ -1,4 +1,4 @@
-"""Desktop demo using the high-level mojovision widgets.
+"""Desktop demo using the high-level turbokod widgets.
 
 Mouse:
   * click a menu name to open its dropdown; click an item or click outside to close
@@ -37,7 +37,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 from std.sys import argv
 
-from mojovision import (
+from turbokod import (
     APP_QUIT_ACTION, Application,
     Event,
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
@@ -143,7 +143,7 @@ fn main() raises:
                     + String("// Open the Edit menu for Find / Go to Line / etc.\n")
                     + String("\n")
                     + String("fn main() raises:\n")
-                    + String("    print(\"Hello, Mojovision!\")\n"),
+                    + String("    print(\"Hello, Turbokod!\")\n"),
             ))
             desktop.windows.add(Window(String("Mouse"), Rect(20, 8, 56, 16), _lines(
                 String("Click a window to focus."),
@@ -153,7 +153,7 @@ fn main() raises:
                 String("Click [■] to close."),
             )))
             desktop.windows.add(Window(String("About"), Rect(40, 5, 70, 11), _lines(
-                String("Mojovision v0.1"),
+                String("Turbokod v0.1"),
                 String(""),
                 String("A Mojo-idiomatic port"),
                 String("of Turbo Vision."),
@@ -343,7 +343,7 @@ fn main() raises:
             except e:
                 # Any uncaught raise lands here. Stamp the trace log
                 # AND the error_log so something is visible after exit
-                # whether the user looks at /tmp/mojovision-dap.log or
+                # whether the user looks at /tmp/turbokod-dap.log or
                 # the post-stop print. We continue rather than break so
                 # a transient terminal hiccup (e.g. one bad cursor-size
                 # response) doesn't kill the whole session.

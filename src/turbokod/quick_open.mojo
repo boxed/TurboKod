@@ -299,7 +299,7 @@ struct QuickOpen(Movable):
 # Tokens (space-separated) match in order as case-insensitive **subsequences**
 # of the path. The first token can start anywhere; every subsequent token
 # must start at a word boundary. Within a token, characters are matched as
-# subsequences (so ``j/c`` matches ``src/mojovision/cell.mojo`` because
+# subsequences (so ``j/c`` matches ``src/turbokod/cell.mojo`` because
 # j → '/' → c can be found in order). Word boundaries are: start of string,
 # the position right after a non-alphanumeric byte, or a camelCase split
 # (lowercase byte followed by an uppercase byte).
@@ -308,7 +308,7 @@ struct QuickOpen(Movable):
 fn quick_open_match(path: String, query: String) -> Bool:
     """Return True iff ``query`` matches ``path`` under the QuickOpen rules.
 
-    Examples (with ``path = src/mojovision/cell.mojo``):
+    Examples (with ``path = src/turbokod/cell.mojo``):
 
     * ``"j/c"``    → matches (one token, j then '/' then c, in order).
     * ``"j c"``    → matches (j anywhere, then c at a word boundary).

@@ -421,7 +421,7 @@ struct DapManager(Copyable, Movable):
         # Open the streaming trace log right after spawn. ``creat``
         # truncates so the file is fresh per session. Errors yield -1,
         # which keeps tracing disabled — never load-bearing.
-        var trace_path = String("/tmp/mojovision-dap.log\0")
+        var trace_path = String("/tmp/turbokod-dap.log\0")
         var tfd = external_call["creat", Int32](
             trace_path.unsafe_ptr(), Int32(0o644),
         )
@@ -432,7 +432,7 @@ struct DapManager(Copyable, Movable):
                 hdr = hdr + String(" ") + self.spawn_argv[k]
             self.client.process.trace(hdr)
         var init_args = dap_initialize_arguments(
-            String("mojovision"), spec.name,
+            String("turbokod"), spec.name,
         )
         try:
             self._inflight_initialize = self.client.send_request(

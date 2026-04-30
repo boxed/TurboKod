@@ -1,5 +1,5 @@
 """Reproduce what happens when the user clicks a non-top stack frame
-in mojovision's debug pane. Drives the DAP protocol directly, no UI.
+in turbokod's debug pane. Drives the DAP protocol directly, no UI.
 
 Run::
 
@@ -26,12 +26,12 @@ from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
 
-from mojovision.dap_dispatch import DapManager, DapStackFrame
-from mojovision.debugger_config import (
+from turbokod.dap_dispatch import DapManager, DapStackFrame
+from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language,
 )
-from mojovision.file_io import write_file
-from mojovision.posix import monotonic_ms
+from turbokod.file_io import write_file
+from turbokod.posix import monotonic_ms
 
 
 fn _sleep_ms(ms: Int):
@@ -138,7 +138,7 @@ fn main() raises:
                 print(" ", top_vars[k].name, "=", top_vars[k].value)
 
     # Step 3: scopes + variables for a NON-TOP frame.
-    # This is what mojovision does in response to a pane click.
+    # This is what turbokod does in response to a pane click.
     if len(frames) < 2:
         print("only 1 frame; can't test non-top click")
         mgr.shutdown(); return

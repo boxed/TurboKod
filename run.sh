@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Convenience wrapper: `./run.sh examples/hello.mojo` or `./run.sh tests/test_basic.mojo`.
 # Runs through pixi so the project's pinned Mojo toolchain is used; -I src makes
-# `from mojovision import ...` resolve.
+# `from turbokod import ...` resolve.
 #
 # Restores the terminal on EXIT / INT / TERM so a hung process killed with
 # ``kill <pid>`` (or even ``Ctrl+C`` while the app is in raw mode) doesn't

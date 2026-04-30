@@ -7,14 +7,14 @@ Run with::
     mojo run -I src examples/boxes.mojo
 """
 
-from mojovision import (
+from turbokod import (
     Application, Attr, Frame, Label, Point, Rect,
     BLACK, BLUE, CYAN, GREEN, MAGENTA, WHITE, YELLOW,
     EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     KEY_DOWN, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_UP,
     MOUSE_BUTTON_LEFT,
 )
-from mojovision.view import Fill
+from turbokod.view import Fill
 
 
 fn main() raises:

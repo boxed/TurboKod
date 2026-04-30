@@ -10,7 +10,7 @@ Run with::
 
 from std.ffi import external_call
 
-from mojovision.posix import (
+from turbokod.posix import (
     O_RDWR, STDERR_FD, STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, cfmakeraw, get_window_size, query_size_via_cursor,
     query_winsize, tcgetattr, tcsetattr, tiocgwinsz,
@@ -28,7 +28,7 @@ fn _report_ioctl(label: String, fd: Int32):
 
 
 fn main() raises:
-    print("--- mojovision terminal size diagnostics ---")
+    print("--- turbokod terminal size diagnostics ---")
     print("TIOCGWINSZ =", hex(tiocgwinsz()))
     print()
     print("ioctl(TIOCGWINSZ) per fd:")

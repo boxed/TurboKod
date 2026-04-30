@@ -2,7 +2,7 @@
 name = "unicode-width"
 version = "0.2.2"
 edition = "2021"
-description = "mojovision-app override: forces width=1 for every codepoint"
+description = "turbokod-app override: forces width=1 for every codepoint"
 license = "MIT OR Apache-2.0"
 
 [features]

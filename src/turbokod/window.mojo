@@ -200,21 +200,15 @@ struct Window(ImplicitlyCopyable, Movable):
         var total = self.editor.buffer.line_count()
         var visible = self.rect.height() - 2
         if visible < 1: visible = 1
-        var max_scroll: Int
-        var knob_h: Int
-        var knob_off: Int
         if total <= visible:
-            max_scroll = 0
-            knob_h = track_h
-            knob_off = 0
-        else:
-            max_scroll = total - visible
-            knob_h = (track_h * visible) // total
-            if knob_h < 1: knob_h = 1
-            if knob_h > track_h: knob_h = track_h
-            knob_off = (self.editor.scroll_y * (track_h - knob_h)) // max_scroll
-            if knob_off < 0: knob_off = 0
-            if knob_off > track_h - knob_h: knob_off = track_h - knob_h
+            return (False, 0, 0, 0, 0, 0)
+        var max_scroll = total - visible
+        var knob_h = (track_h * visible) // total
+        if knob_h < 1: knob_h = 1
+        if knob_h > track_h: knob_h = track_h
+        var knob_off = (self.editor.scroll_y * (track_h - knob_h)) // max_scroll
+        if knob_off < 0: knob_off = 0
+        if knob_off > track_h - knob_h: knob_off = track_h - knob_h
         return (True, track_y0, track_h, knob_off, knob_h, max_scroll)
 
     fn _h_sb_metrics(self) -> Tuple[Bool, Int, Int, Int, Int, Int]:
@@ -239,21 +233,15 @@ struct Window(ImplicitlyCopyable, Movable):
         var total = self.editor.longest_line_width()
         var visible = self.rect.width() - 2
         if visible < 1: visible = 1
-        var max_scroll: Int
-        var knob_w: Int
-        var knob_off: Int
         if total <= visible:
-            max_scroll = 0
-            knob_w = track_w
-            knob_off = 0
-        else:
-            max_scroll = total - visible
-            knob_w = (track_w * visible) // total
-            if knob_w < 1: knob_w = 1
-            if knob_w > track_w: knob_w = track_w
-            knob_off = (self.editor.scroll_x * (track_w - knob_w)) // max_scroll
-            if knob_off < 0: knob_off = 0
-            if knob_off > track_w - knob_w: knob_off = track_w - knob_w
+            return (False, 0, 0, 0, 0, 0)
+        var max_scroll = total - visible
+        var knob_w = (track_w * visible) // total
+        if knob_w < 1: knob_w = 1
+        if knob_w > track_w: knob_w = track_w
+        var knob_off = (self.editor.scroll_x * (track_w - knob_w)) // max_scroll
+        if knob_off < 0: knob_off = 0
+        if knob_off > track_w - knob_w: knob_off = track_w - knob_w
         return (True, sb_left, track_w, knob_off, knob_w, max_scroll)
 
     fn _paint_v_scrollbar(self, mut canvas: Canvas, border: Attr):
@@ -317,19 +305,15 @@ struct Window(ImplicitlyCopyable, Movable):
     # time (only meaningful for part==3, used as the drag anchor).
 
     fn v_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
-        if not self.is_editor:
-            return (0, 0)
-        if self.rect.width() < 2 or self.rect.height() < 5:
-            return (0, 0)
         if p.x != self.rect.b.x - 1:
+            return (0, 0)
+        var m = self._v_sb_metrics()
+        if not m[0]:
             return (0, 0)
         var top = self.rect.a.y + 1
         var bot = self.rect.b.y - 2
         if p.y == top: return (1, 0)
         if p.y == bot: return (5, 0)
-        var m = self._v_sb_metrics()
-        if not m[0]:
-            return (0, 0)
         var track_y0 = m[1]
         var track_h = m[2]
         var knob_off = m[3]

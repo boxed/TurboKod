@@ -460,7 +460,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cell_h * self.rows,
             ));
         let attrs = WindowAttributes::default()
-            .with_title("mojovision")
+            .with_title("turbokod")
             .with_inner_size(inner);
         let window = Arc::new(el.create_window(attrs).unwrap());
         let context = softbuffer::Context::new(window.clone()).unwrap();
@@ -473,7 +473,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
         let UserEvent::Term(te) = ev;
         match te {
-            // mojovision (and most TUIs) detect window size by writing CSI 6 n
+            // turbokod (and most TUIs) detect window size by writing CSI 6 n
             // and reading the cursor-position response. Alacritty parses that
             // request and emits PtyWrite with the response — we have to forward
             // it back to the child via the PTY writer.
@@ -501,7 +501,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.notifier.notify(reply.into_bytes());
             }
             TermEvent::Title(title) => {
-                // mojovision piggy-backs on OSC 2 for cursor-shape hints —
+                // turbokod piggy-backs on OSC 2 for cursor-shape hints —
                 // ``__mvc_cursor:<shape>`` switches the platform pointer
                 // instead of the window title. Generic terminals don't
                 // know about it, so the same sequence is harmless there
@@ -522,7 +522,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             TermEvent::ResetTitle => {
                 if let Some(w) = &self.window {
-                    w.set_title("mojovision");
+                    w.set_title("turbokod");
                 }
             }
             TermEvent::ChildExit(_) | TermEvent::Exit => {
@@ -579,15 +579,15 @@ impl App {
         };
         let _ = self.notifier.0.send(Msg::Resize(win_size));
         // Push the standard xterm ``CSI 8 ; rows ; cols t`` window-size
-        // report to the child's stdin so mojovision sees the new
+        // report to the child's stdin so turbokod sees the new
         // dimensions on the next ``poll_event`` instead of waiting for
         // the cursor-query polling tick. This is the ``SIGWINCH``
         // analogue we couldn't get to fire reliably through Mojo's libc
         // bindings — same idea, routed through the byte stream that
-        // mojovision's parser already consumes.
+        // turbokod's parser already consumes.
         let push = format!("\x1b[8;{};{}t", rows, cols);
-        if std::env::var("MOJOVISION_DEBUG_RESIZE").is_ok() {
-            eprintln!("[mojovision-app] resize push: {:?}", push);
+        if std::env::var("TURBOKOD_DEBUG_RESIZE").is_ok() {
+            eprintln!("[turbokod-app] resize push: {:?}", push);
         }
         self.notifier.notify(push.into_bytes());
 
@@ -603,7 +603,7 @@ impl App {
         let mods = self.modifiers;
         // macOS Cmd is reported as SUPER. Cmd+=/+/-/0 control host font size
         // (matching iTerm/Terminal.app); other Cmd+<letter> are forwarded
-        // to mojovision via the xterm modifyOtherKeys=2 envelope with the
+        // to turbokod via the xterm modifyOtherKeys=2 envelope with the
         // meta bit set: ``CSI 27;<mod>;<codepoint>~``. The Mojo terminal
         // parser (``_csi_mods_from`` / ``_normalize_ctrl_letter``) folds
         // the meta bit onto the same canonical control-byte form Ctrl+
@@ -642,7 +642,7 @@ impl App {
             Key::Named(NamedKey::PageUp) => Cow::Owned(csi_tilde(5, mods)),
             Key::Named(NamedKey::PageDown) => Cow::Owned(csi_tilde(6, mods)),
             // F1..F4 use SS3 (ESC O P/Q/R/S) when unmodified — what xterm
-            // emits and what mojovision's terminal.mojo expects. With
+            // emits and what turbokod's terminal.mojo expects. With
             // modifiers they fall back to CSI 1;<mod>P (xterm convention).
             Key::Named(NamedKey::F1) => Cow::Owned(ss3_or_csi(b'P', mods)),
             Key::Named(NamedKey::F2) => Cow::Owned(ss3_or_csi(b'Q', mods)),
@@ -728,7 +728,7 @@ impl App {
         if self.mouse_buttons != 0 {
             // Drag motion is meaningful in both ``?1002`` (button-event
             // tracking) and ``?1003`` (any-event tracking) — 1003 is a
-            // superset of 1002 in the xterm spec. mojovision turns on
+            // superset of 1002 in the xterm spec. turbokod turns on
             // *both* (so a real terminal delivers hover and drag), but
             // alacritty's MouseMode handling treats them as mutually
             // exclusive: each new ``h`` sequence clears the others, so
@@ -1059,7 +1059,7 @@ fn main() -> anyhow::Result<()> {
     // wrapper supports but generic terminals don't (currently: the
     // OSC-encoded mouse-pointer shape hint).
     let mut env = HashMap::new();
-    env.insert("MOJOVISION_HOST".to_string(), "1".to_string());
+    env.insert("TURBOKOD_HOST".to_string(), "1".to_string());
     let pty_opts = PtyOptions {
         shell: argv.next().map(|prog| Shell::new(prog, argv.collect())),
         env,
@@ -1299,7 +1299,7 @@ mod tests {
         // The unicode-width shim forces width=1 for every printable codepoint;
         // alacritty's WIDE_CHAR / WIDE_CHAR_SPACER pair therefore never gets
         // emitted, which is what keeps the wrapper grid aligned with
-        // mojovision's one-codepoint-per-column canvas. If anyone removes the
+        // turbokod's one-codepoint-per-column canvas. If anyone removes the
         // [patch.crates-io] in Cargo.toml, this test will fail loudly.
         use alacritty_terminal::event::VoidListener;
         use alacritty_terminal::term::cell::Flags;

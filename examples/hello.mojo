@@ -1,17 +1,17 @@
-"""Mojovision hello-world: a centered greeting in a window. Press q or ESC to quit.
+"""Turbokod hello-world: a centered greeting in a window. Press q or ESC to quit.
 
 Run with::
 
     mojo run -I src examples/hello.mojo
 """
 
-from mojovision import (
+from turbokod import (
     Application, Attr, Frame, Label, Point, Rect,
     BLUE, BLACK, CYAN, WHITE, YELLOW,
     EVENT_KEY, KEY_ESC,
     centered,
 )
-from mojovision.view import Drawable, Fill
+from turbokod.view import Drawable, Fill
 
 
 fn main() raises:
@@ -19,7 +19,7 @@ fn main() raises:
     app.start()
     try:
         var bg = Fill(String("░"), Attr(CYAN, BLACK))
-        var frame = Frame(String("Mojovision"), Attr(WHITE, BLUE), True)
+        var frame = Frame(String("Turbokod"), Attr(WHITE, BLUE), True)
         var greeting = Label(String("Hello from Mojo!"), Attr(YELLOW, BLUE))
         var hint = Label(String("press q or ESC to quit"), Attr(WHITE, BLUE))
 

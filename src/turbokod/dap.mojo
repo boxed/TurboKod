@@ -208,7 +208,7 @@ fn dap_initialize_arguments(client_id: String, adapter_id: String) -> JsonValue:
     """
     var args = json_object()
     args.put(String("clientID"), json_str(client_id))
-    args.put(String("clientName"), json_str(String("mojovision")))
+    args.put(String("clientName"), json_str(String("turbokod")))
     args.put(String("adapterID"), json_str(adapter_id))
     args.put(String("locale"), json_str(String("en")))
     args.put(String("linesStartAt1"), json_bool(False))

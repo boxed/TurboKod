@@ -12,7 +12,7 @@ Run with::
     ./run.sh examples/mouse_probe.mojo
 """
 
-from mojovision.posix import (
+from turbokod.posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, cfmakeraw, poll_stdin, read_into,
     tcgetattr, tcsetattr, write_string,

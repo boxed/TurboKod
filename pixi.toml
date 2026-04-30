@@ -1,5 +1,5 @@
 [workspace]
-name = "mojovision"
+name = "turbokod"
 version = "0.1.0"
 description = "A Mojo-idiomatic port of Turbo Vision."
 channels = ["https://conda.modular.com/max", "conda-forge"]

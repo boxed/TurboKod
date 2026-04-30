@@ -15,7 +15,7 @@ editor uses, and ticks the manager until either:
 * the manager latches FAILED.
 
 Output is plain ``print()``s plus the streaming trace at
-``/tmp/mojovision-dap.log`` (DapManager's existing instrument). With
+``/tmp/turbokod-dap.log`` (DapManager's existing instrument). With
 the UI removed there's no rendering or input loop to mask issues —
 anything we observe is purely the protocol layer's behavior.
 """
@@ -25,18 +25,18 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 from std.sys import argv
 
-from mojovision.canvas import Canvas
-from mojovision.dap_dispatch import (
+from turbokod.canvas import Canvas
+from turbokod.dap_dispatch import (
     DapManager, DapStackFrame, DapVariable,
 )
-from mojovision.debug_pane import DebugPane
-from mojovision.debugger_config import (
+from turbokod.debug_pane import DebugPane
+from turbokod.debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
 )
-from mojovision.desktop import Desktop, DEBUG_START_OR_CONTINUE
-from mojovision.file_io import write_file
-from mojovision.geometry import Rect
-from mojovision.posix import monotonic_ms
+from turbokod.desktop import Desktop, DEBUG_START_OR_CONTINUE
+from turbokod.file_io import write_file
+from turbokod.geometry import Rect
+from turbokod.posix import monotonic_ms
 
 
 fn _sleep_ms(ms: Int):
@@ -238,7 +238,7 @@ fn main() raises:
         )
 
     mgr.shutdown()
-    print("done — see /tmp/mojovision-dap.log for the wire trace")
+    print("done — see /tmp/turbokod-dap.log for the wire trace")
     print("")
     print("=" * 60)
     print("Phase 2: drive Desktop.dap_tick end-to-end (UI path)")

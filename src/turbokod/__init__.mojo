@@ -1,7 +1,7 @@
-"""Mojovision: a Mojo-idiomatic port of Turbo Vision.
+"""Turbokod: a Mojo-idiomatic port of Turbo Vision.
 
 Public surface — re-export the most common types so users can write
-``from mojovision import Application, Frame, ...``.
+``from turbokod import Application, Frame, ...``.
 """
 
 from .app import Application
