@@ -19,7 +19,9 @@ A port of Turbo Vision to Mojo. Two distinct trees:
 ./run.sh tests/test_basic.mojo   # pure-data tests, no TTY required
 ```
 
-`run.sh` is just `mojo run -I src "$@"` from the repo root. The `-I src` flag makes `from turbokod import ...` resolve. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) wrap the same.
+`run.sh` does `mojo build -I src` and runs the resulting native binary. We use `mojo build` (not `mojo run`) because `mojo run` is JIT-only and silently ignores `-Xlinker` — the build step is what makes linking C deps (e.g. libonig for TextMate-grammar highlighting) actually work. Built binaries are cached under `.build/` keyed by source path; the script skips the build when no `.mojo` file in `src/` (or the entry point itself) is newer than the cached binary, so repeat runs are essentially free. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) all route through `run.sh`.
+
+First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 
 The Mojo toolchain is not installed in this checkout's environment — assume the user runs the commands. If you change the package, rely on a careful read of the diff plus `tests/test_basic.mojo` (which exercises everything that doesn't need a TTY) for confidence.
 

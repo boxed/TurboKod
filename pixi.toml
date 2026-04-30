@@ -9,8 +9,11 @@ platforms = ["osx-arm64", "linux-64"]
 modular = ">=26.1"
 
 [tasks]
-hello    = "mojo run -I src examples/hello.mojo"
-boxes    = "mojo run -I src examples/boxes.mojo"
-desktop  = "mojo run -I src examples/desktop.mojo"
-diagnose = "mojo run -I src examples/diagnose.mojo"
-test     = "mojo run -I src tests/test_basic.mojo"
+# All tasks route through run.sh so they share the .build/ cache and the
+# build-time linker config. ``mojo run`` is JIT-only and silently ignores
+# ``-Xlinker``, which is why we build instead.
+hello    = "./run.sh examples/hello.mojo"
+boxes    = "./run.sh examples/boxes.mojo"
+desktop  = "./run.sh examples/desktop.mojo"
+diagnose = "./run.sh examples/diagnose.mojo"
+test     = "./run.sh tests/test_basic.mojo"
