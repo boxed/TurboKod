@@ -14,7 +14,8 @@ from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, MOUSE_BUTTON_LEFT,
+    KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
 
@@ -98,12 +99,14 @@ fn _menu_rank(label: String) -> Int:
 struct MenuBar(Movable):
     var menus: List[Menu]
     var open_idx: Int
-    var selected_item: Int   # row index inside the open dropdown (kbd nav)
+    var selected_item: Int   # row index inside the open dropdown (kbd nav / hover)
+    var tracking: Bool       # True between mouse press and release — drag-select gesture
 
     fn __init__(out self):
         self.menus = List[Menu]()
         self.open_idx = -1
         self.selected_item = 0
+        self.tracking = False
 
     fn add(mut self, var menu: Menu):
         self.menus.append(menu^)
@@ -131,6 +134,7 @@ struct MenuBar(Movable):
             self.selected_item = self._first_non_separator(idx)
         else:
             self.selected_item = 0
+            self.tracking = False
 
     fn _first_non_separator(self, menu_idx: Int) -> Int:
         if menu_idx < 0 or menu_idx >= len(self.menus):
@@ -388,39 +392,104 @@ struct MenuBar(Movable):
 
     # --- events ------------------------------------------------------------
 
+    fn _menu_at(self, pos: Point, screen_width: Int) -> Int:
+        """Index of the visible menu-bar entry under ``pos``, or -1."""
+        if pos.y != 0:
+            return -1
+        var rects = self._layout(screen_width)
+        for i in range(len(rects)):
+            if not self.menus[i].visible:
+                continue
+            if rects[i].contains(pos):
+                return i
+        return -1
+
+    fn _item_at(self, pos: Point, screen_width: Int) -> Int:
+        """Index of the dropdown item under ``pos``, or -1 (also -1 for
+        separators and hits on the dropdown border)."""
+        if self.open_idx < 0:
+            return -1
+        var dr = self._dropdown_rect(screen_width)
+        if not dr.contains(pos):
+            return -1
+        var item_idx = pos.y - dr.a.y - 1
+        if item_idx < 0 or item_idx >= len(self.menus[self.open_idx].items):
+            return -1
+        if self.menus[self.open_idx].items[item_idx].is_separator:
+            return -1
+        return item_idx
+
     fn handle_event(mut self, event: Event, screen_width: Int) -> MenuResult:
-        if event.kind != EVENT_MOUSE or event.button != MOUSE_BUTTON_LEFT:
+        if event.kind != EVENT_MOUSE:
             return MenuResult(Optional[String](), False)
-        if not (event.pressed and not event.motion):
+
+        # --- motion / hover --------------------------------------------------
+        # Mouse-mode 1003 delivers motion both with a button held (drag) and
+        # without (hover). When a menu is open we treat both the same: hover
+        # over a different menu in the bar switches to it, hover over a
+        # dropdown row repaints the highlight there.
+        if event.motion:
+            if self.open_idx < 0:
+                return MenuResult(Optional[String](), False)
+            var bar_hit = self._menu_at(event.pos, screen_width)
+            if bar_hit >= 0:
+                if bar_hit != self.open_idx:
+                    self.open_menu(bar_hit)
+                return MenuResult(Optional[String](), True)
+            var item_hit = self._item_at(event.pos, screen_width)
+            if item_hit >= 0:
+                self.selected_item = item_hit
+                return MenuResult(Optional[String](), True)
+            # Motion outside the bar and dropdown: don't consume so other
+            # widgets (e.g., the focused editor's drag-select) still see it.
             return MenuResult(Optional[String](), False)
-        # Click on the menu-bar row toggles a menu open/closed.
-        if event.pos.y == 0:
-            var rects = self._layout(screen_width)
-            for i in range(len(rects)):
-                if not self.menus[i].visible:
-                    continue
-                if rects[i].contains(event.pos):
-                    if i == self.open_idx:
-                        self.open_menu(-1)
-                    else:
-                        self.open_menu(i)
-                    return MenuResult(Optional[String](), True)
-            # Click on the bar but not on a menu name still belongs to us.
-            return MenuResult(Optional[String](), True)
-        # Click anywhere while a menu is open: dropdown item, or close.
-        if self.open_idx >= 0:
-            var dr = self._dropdown_rect(screen_width)
-            if dr.contains(event.pos):
-                var item_idx = event.pos.y - dr.a.y - 1
-                if 0 <= item_idx and item_idx < len(self.menus[self.open_idx].items):
-                    var item = self.menus[self.open_idx].items[item_idx]
-                    if item.is_separator:
-                        # Click on a divider: eat the event, leave menu open.
-                        return MenuResult(Optional[String](), True)
-                    var action = item.action
+
+        # --- press / release of the left button -----------------------------
+        if event.button != MOUSE_BUTTON_LEFT:
+            return MenuResult(Optional[String](), False)
+
+        if event.pressed:
+            # PRESS: starts a possible drag-select gesture.
+            var bar_hit = self._menu_at(event.pos, screen_width)
+            if bar_hit >= 0:
+                if bar_hit == self.open_idx:
+                    self.open_menu(-1)
+                else:
+                    self.open_menu(bar_hit)
+                    self.tracking = True
+                return MenuResult(Optional[String](), True)
+            if self.open_idx >= 0:
+                # In sticky mode, pressing on a dropdown item triggers it.
+                var item_hit = self._item_at(event.pos, screen_width)
+                if item_hit >= 0:
+                    var action = self.menus[self.open_idx].items[item_hit].action
                     self.open_menu(-1)
                     return MenuResult(Optional[String](action), True)
+                # Press on a dropdown separator or border: eat it, stay open.
+                var dr = self._dropdown_rect(screen_width)
+                if dr.contains(event.pos):
+                    return MenuResult(Optional[String](), True)
+                # Press anywhere else: close (clicked off the menu).
+                self.open_menu(-1)
                 return MenuResult(Optional[String](), True)
+            return MenuResult(Optional[String](), False)
+
+        # RELEASE: only meaningful while we're tracking a drag-select.
+        if not self.tracking:
+            return MenuResult(Optional[String](), False)
+        var item_hit = self._item_at(event.pos, screen_width)
+        if item_hit >= 0:
+            var action = self.menus[self.open_idx].items[item_hit].action
             self.open_menu(-1)
+            return MenuResult(Optional[String](action), True)
+        # Release on the open menu's bar label or anywhere inside its dropdown
+        # (separator / border): drop tracking and stay open in sticky mode.
+        # Release outside both: close — drag-select that ends off-menu is a
+        # cancellation gesture.
+        var dr = self._dropdown_rect(screen_width)
+        var bar_rect = self._layout(screen_width)[self.open_idx]
+        if dr.contains(event.pos) or bar_rect.contains(event.pos):
+            self.tracking = False
             return MenuResult(Optional[String](), True)
-        return MenuResult(Optional[String](), False)
+        self.open_menu(-1)
+        return MenuResult(Optional[String](), True)

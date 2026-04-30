@@ -300,6 +300,14 @@ struct SaveAsDialog(Movable):
 
     # --- mouse ------------------------------------------------------------
 
+    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+        """True iff ``pos`` lies on the editable filename row. Used by
+        the host to hint a text-cursor shape over the input but a
+        default arrow over the listing and buttons."""
+        if not self.active:
+            return False
+        return _input_rect(_dialog_rect(screen, self.pos)).contains(pos)
+
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False

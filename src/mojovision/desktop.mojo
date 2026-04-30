@@ -43,7 +43,7 @@ from .events import (
 from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
-from .geometry import Rect
+from .geometry import Point, Rect
 from .highlight import DefinitionRequest, extension_of
 from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
@@ -425,6 +425,70 @@ struct Desktop(Movable):
         if top < 1:
             top = 1
         return Rect(0, top, screen.b.x, screen.b.y - 1)
+
+    fn pointer_shape_at(self, pos: Point, screen: Rect) -> String:
+        """Mouse-pointer icon the host should display at ``pos``.
+
+        ``"text"`` over a text-input region (editor body, prompt input,
+        dialog filename / search inputs) — anywhere a click lands or an
+        I-beam helps the user line up a caret. ``"default"`` everywhere
+        else: chrome, list rows, buttons. Hosts that don't speak the
+        OSC just ignore whatever shape we ask for, so this is purely a
+        UX hint."""
+        # Menu bar — both the bar itself and any open dropdown sit on
+        # top of every other layer, so resolve them first.
+        if pos.y == 0:
+            return String("default")
+        if self.menu_bar.is_open() \
+                and self.menu_bar._dropdown_rect(screen.b.x).contains(pos):
+            return String("default")
+        # Modals win — they cover whatever's underneath. Resolve in the
+        # same order ``handle_event`` consults them so the shape matches
+        # which widget would actually claim the next click.
+        if self.prompt.active:
+            if self._prompt_input_rect(screen).contains(pos):
+                return String("text")
+            return String("default")
+        if self.save_as_dialog.active:
+            if self.save_as_dialog.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
+        if self.quick_open.active:
+            if self.quick_open.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
+        if self.symbol_pick.active:
+            if self.symbol_pick.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
+        if self.project_find.active:
+            if self.project_find.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
+        # Topmost editor window's interior.
+        var workspace = self.workspace_rect(screen)
+        if workspace.contains(pos):
+            var k = len(self.windows.z_order) - 1
+            while k >= 0:
+                var i = self.windows.z_order[k]
+                var win = self.windows.windows[i]
+                if win.rect.contains(pos):
+                    if win.is_editor and win.interior().contains(pos):
+                        return String("text")
+                    return String("default")
+                k -= 1
+        return String("default")
+
+    fn _prompt_input_rect(self, screen: Rect) -> Rect:
+        """Mirror of the layout in ``Prompt.paint``: the input row is the
+        middle line of the centered 3-row box. Kept here so we can hit-
+        test without forcing ``Prompt`` to retain layout state."""
+        var width = 60
+        if width > screen.b.x - 4:
+            width = screen.b.x - 4
+        var x = (screen.b.x - width) // 2
+        var y = (screen.b.y - 3) // 2
+        return Rect(x + 1, y + 1, x + width - 1, y + 2)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find

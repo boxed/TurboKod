@@ -24,6 +24,13 @@ Run with::
 The Desktop owns all the standard editor / project actions (save, find,
 replace, project search, etc.). The demo only handles app-policy actions:
 opening a file dialog, focusing demo windows, quitting.
+
+editorconfig: any ``.editorconfig`` files (https://editorconfig.org/) found
+walking up from an opened file's directory are honored automatically.
+Supported keys: ``indent_style`` / ``indent_size`` / ``tab_width`` (drive
+the Tab key), ``end_of_line``, ``trim_trailing_whitespace``,
+``insert_final_newline`` (applied on save). No host wiring needed — the
+editor loads the resolved config in ``Editor.from_file``.
 """
 
 from std.collections.list import List
@@ -42,7 +49,8 @@ from mojovision import (
     EDITOR_GOTO_SYMBOL, EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN,
     EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_UNDO,
-    EVENT_KEY, EVENT_RESIZE, PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
+    EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
+    PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
 )
 
 
@@ -287,6 +295,18 @@ fn main() raises:
                         + String(" before-handle_event kind=")
                         + String(Int(ev.kind)),
                     )
+
+                # Hint a text-cursor / arrow-cursor to the host based
+                # on what's under the mouse. Generic terminals ignore
+                # the OSC; the bundled native app picks it up and calls
+                # ``winit::Window::set_cursor``.
+                if ev.kind == EVENT_MOUSE and not file_dialog.active:
+                    try:
+                        app.terminal.set_pointer_shape(
+                            desktop.pointer_shape_at(ev.pos, app.screen()),
+                        )
+                    except:
+                        pass
 
                 # Modal: file dialog eats every event while open.
                 if file_dialog.active:

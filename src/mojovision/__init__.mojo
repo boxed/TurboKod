@@ -45,6 +45,10 @@ from .desktop import (
     ctrl_key, format_hotkey,
 )
 from .editor import Editor, TextBuffer
+from .editorconfig import (
+    EditorConfig, EditorConfigFile, EditorConfigSection,
+    load_editorconfig_for_path, match_section, parse_editorconfig,
+)
 from .highlight import (
     DefinitionRequest, Highlight, extension_of, highlight_for_extension,
     highlight_comment_attr, highlight_decorator_attr, highlight_keyword_attr,

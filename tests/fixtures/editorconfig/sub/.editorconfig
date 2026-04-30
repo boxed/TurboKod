@@ -1,0 +1,3 @@
+# Demonstrates rule overrides — closer file wins per-property only.
+[*.py]
+indent_size = 2

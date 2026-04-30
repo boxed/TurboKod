@@ -25,6 +25,7 @@ from .events import (
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
 from .highlight import (
     DefinitionRequest, Highlight, extension_of, highlight_for_extension,
@@ -47,6 +48,18 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     if s_end > len(bytes): s_end = len(bytes)
     if s_start >= s_end: return String("")
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+
+
+fn _rtrim(s: String) -> String:
+    """Drop trailing ASCII spaces and tabs. Used by ``_disk_text`` to honor
+    the editorconfig ``trim_trailing_whitespace`` property."""
+    var bytes = s.as_bytes()
+    var n = len(bytes)
+    while n > 0 and (bytes[n - 1] == 0x20 or bytes[n - 1] == 0x09):
+        n -= 1
+    if n == len(bytes):
+        return s
+    return _slice(s, 0, n)
 
 
 # --- UTF-8 boundary helpers -------------------------------------------------
@@ -313,6 +326,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     var file_size: Int64
     var file_mtime: Int64
     var dirty: Bool
+    # Resolved editorconfig settings (default-constructed when no
+    # ``.editorconfig`` is found; in that case the editor falls back to
+    # its pre-editorconfig behavior — 4-space tabs, ``\n`` line endings,
+    # no trim/final-newline enforcement).
+    var editorconfig: EditorConfig
     # Syntax highlighting overlay. ``_highlights_dirty`` triggers
     # ``_refresh_highlights`` after edits / file loads.
     var highlights: List[Highlight]
@@ -356,6 +374,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self.pending_definition = Optional[DefinitionRequest]()
@@ -380,6 +399,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self.pending_definition = Optional[DefinitionRequest]()
@@ -396,6 +416,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         var text = read_file(path)
         var info = stat_file(path)
         var ed = Editor(text^)
+        ed.editorconfig = load_editorconfig_for_path(path)
         ed.file_path = path^
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
@@ -416,6 +437,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
         self.dirty = copy.dirty
+        self.editorconfig = copy.editorconfig
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
         self.pending_definition = copy.pending_definition
@@ -557,7 +579,10 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Concatenate buffer lines with ``\\n`` separators (no trailing
         newline appended — a file that originally ended in ``\\n`` produces
         a trailing empty line in the buffer, which round-trips correctly).
-        Used by ``save`` and by the LSP layer for didOpen/didChange payloads.
+        Used by the LSP layer for didOpen/didChange payloads. Saving uses
+        ``_disk_text`` instead so editorconfig transforms (line endings,
+        trailing-whitespace trim, final newline) are only applied on disk
+        — the LSP server should see the buffer as-is.
         """
         var out = String("")
         var n = self.buffer.line_count()
@@ -567,6 +592,53 @@ struct Editor(ImplicitlyCopyable, Movable):
             out = out + self.buffer.line(i)
         return out
 
+    fn _disk_text(self) -> String:
+        """Build the byte sequence to write to disk for the current buffer,
+        applying any active editorconfig transforms.
+
+        Three editorconfig properties feed in here:
+
+        * ``trim_trailing_whitespace`` — strip trailing spaces/tabs from
+          every line.
+        * ``insert_final_newline`` — ensure (or forbid) a trailing newline.
+          The buffer convention encodes a trailing newline as a final
+          empty line, so we add or drop that empty line accordingly.
+        * ``end_of_line`` — replaces the line separator (``\\n`` by
+          default) with the configured byte sequence.
+
+        When no ``.editorconfig`` was found, ``editorconfig`` is
+        default-constructed and this reduces to the same join-with-``\\n``
+        behavior that ``text_snapshot`` produces.
+        """
+        var trim = self.editorconfig.trim_trailing_whitespace == 1
+        var ifn = self.editorconfig.insert_final_newline
+        var sep = self.editorconfig.line_separator()
+        var n = self.buffer.line_count()
+        # ``has_trailing_newline``: by buffer convention, a file that ends
+        # in ``\n`` produces a final empty line. Use that as the test.
+        var has_trailing_newline = n > 0 \
+            and len(self.buffer.line(n - 1).as_bytes()) == 0
+        var emit_count = n
+        if ifn == 1 and not has_trailing_newline:
+            # Pretend there's an extra empty line at the end.
+            emit_count = n + 1
+        elif ifn == 0 and has_trailing_newline:
+            # Drop the trailing empty line.
+            emit_count = n - 1
+        var out = String("")
+        for i in range(emit_count):
+            var line: String
+            if i < n:
+                line = self.buffer.line(i)
+            else:
+                line = String("")
+            if trim:
+                line = _rtrim(line)
+            if i > 0:
+                out = out + sep
+            out = out + line
+        return out
+
     fn save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the
         editor has no backing path (caller should trigger Save As) or the
@@ -574,7 +646,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         """
         if len(self.file_path.as_bytes()) == 0:
             return False
-        if not write_file(self.file_path, self.text_snapshot()):
+        if not write_file(self.file_path, self._disk_text()):
             return False
         # Refresh stat info so check_for_external_change doesn't pick up our
         # own write as an external change.
@@ -586,10 +658,22 @@ struct Editor(ImplicitlyCopyable, Movable):
         return True
 
     fn save_as(mut self, var path: String) raises -> Bool:
-        """Write the buffer to ``path`` and adopt it as the new backing file."""
-        if not write_file(path, self.text_snapshot()):
-            return False
+        """Write the buffer to ``path`` and adopt it as the new backing file.
+
+        Resolves editorconfig for the destination *before* writing so disk
+        transforms (line endings, trailing-whitespace trim, final newline)
+        reflect the new path. If the write fails the previous backing path
+        and editorconfig are restored — observable state matches the
+        original "noop on failure" contract.
+        """
+        var prev_path = self.file_path
+        var prev_config = self.editorconfig
+        self.editorconfig = load_editorconfig_for_path(path)
         self.file_path = path^
+        if not write_file(self.file_path, self._disk_text()):
+            self.file_path = prev_path^
+            self.editorconfig = prev_config^
+            return False
         var info = stat_file(self.file_path)
         if info.ok:
             self.file_size = info.size
@@ -979,8 +1063,12 @@ struct Editor(ImplicitlyCopyable, Movable):
             self._push_undo()
             if self.has_selection():
                 self._delete_selection()
-            self.buffer.insert(self.cursor_row, self.cursor_col, String("    "))
-            self.move_to(self.cursor_row, self.cursor_col + 4, False)
+            # editorconfig drives indent width / style. Default produces
+            # the original 4-space tab when no ``.editorconfig`` was found.
+            var indent = self.editorconfig.indent_string()
+            var indent_n = len(indent.as_bytes())
+            self.buffer.insert(self.cursor_row, self.cursor_col, indent)
+            self.move_to(self.cursor_row, self.cursor_col + indent_n, False)
             self.dirty = True
             self._highlights_dirty = True
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating

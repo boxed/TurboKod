@@ -59,7 +59,7 @@ from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 
@@ -617,7 +617,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         if event.kind != EVENT_MOUSE:
             return False
         if not panel.contains(event.pos):
-            self.focused = False
+            # Bare hover under mouse-mode 1003 must not steal focus.
+            if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
+                self.focused = False
             return False
         # Wheel routes to the section under the cursor — independent
         # scroll for the two inspect columns and the output is what

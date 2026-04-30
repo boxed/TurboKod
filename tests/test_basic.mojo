@@ -15,6 +15,9 @@ from mojovision.painter import Painter
 from mojovision.cell import Cell, blank_cell
 from mojovision.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
 from mojovision.editor import Editor, TextBuffer
+from mojovision.editorconfig import (
+    EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
+)
 from mojovision.file_dialog import FileDialog
 from mojovision.save_as_dialog import SaveAsDialog
 from mojovision.desktop import (
@@ -69,7 +72,7 @@ from mojovision.events import (
     KEY_F5, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from mojovision.geometry import Point, Rect
 from mojovision.terminal import parse_input
@@ -863,6 +866,135 @@ fn test_editor_replace_all() raises:
     assert_false(ed2.dirty)
     # Empty needle is a no-op (avoids infinite-loop semantics).
     assert_equal(ed.replace_all(String(""), String("Q")), 0)
+
+
+fn test_editorconfig_parse_basic() raises:
+    """Parser walks an INI-ish blob into sections + global ``root`` flag."""
+    var text = String(
+        "# leading comment\n"
+        + "root = true\n"
+        + "\n"
+        + "[*]\n"
+        + "indent_style = space\n"
+        + "indent_size = 4\n"
+        + "\n"
+        + "[*.{c,h}]\n"
+        + "indent_style = tab\n"
+    )
+    var f = parse_editorconfig(String("/tmp/x"), text)
+    assert_true(f.is_root)
+    assert_equal(len(f.sections), 2)
+    assert_equal(f.sections[0].pattern, String("*"))
+    assert_equal(len(f.sections[0].keys), 2)
+    assert_equal(f.sections[1].pattern, String("*.{c,h}"))
+
+
+fn test_editorconfig_match_section() raises:
+    # No-slash patterns match basenames at any depth.
+    assert_true(match_section(String("*.py"), String("foo.py")))
+    assert_true(match_section(String("*.py"), String("a/b/foo.py")))
+    assert_false(match_section(String("*.py"), String("foo.pyc")))
+    # Anchored (slashed) patterns match relative path from the start.
+    assert_true(match_section(String("src/*.c"), String("src/main.c")))
+    assert_false(match_section(String("src/*.c"), String("a/src/main.c")))
+    # ``**`` crosses directory boundaries.
+    assert_true(match_section(String("**/foo"), String("foo")))
+    assert_true(match_section(String("**/foo"), String("a/b/foo")))
+    # Alternation.
+    assert_true(match_section(String("*.{c,h}"), String("main.c")))
+    assert_true(match_section(String("*.{c,h}"), String("main.h")))
+    assert_false(match_section(String("*.{c,h}"), String("main.cpp")))
+    # Character class.
+    assert_true(match_section(String("[ab].txt"), String("a.txt")))
+    assert_true(match_section(String("[ab].txt"), String("b.txt")))
+    assert_false(match_section(String("[ab].txt"), String("c.txt")))
+    # Negated character class.
+    assert_true(match_section(String("[!a].txt"), String("b.txt")))
+    assert_false(match_section(String("[!a].txt"), String("a.txt")))
+    # Range.
+    assert_true(match_section(String("[a-z].txt"), String("k.txt")))
+    assert_false(match_section(String("[a-z].txt"), String("K.txt")))
+
+
+fn test_editorconfig_load_from_fixture() raises:
+    """The fixture: top-level config sets 4-space LF + trim + final-NL,
+    overrides ``*.{c,h}`` to tab/2 and ``Makefile`` to tab. The ``sub/``
+    dir's file overrides ``*.py`` to indent_size=2 — and inherits the
+    rest from the parent because that file lacks ``root = true``."""
+    var fix = String("tests/fixtures/editorconfig/")
+    var c = load_editorconfig_for_path(fix + String("foo.txt"))
+    assert_equal(c.indent_style, String("space"))
+    assert_equal(c.indent_size, 4)
+    assert_equal(c.end_of_line, String("lf"))
+    assert_equal(c.trim_trailing_whitespace, 1)
+    assert_equal(c.insert_final_newline, 1)
+    var c2 = load_editorconfig_for_path(fix + String("main.c"))
+    assert_equal(c2.indent_style, String("tab"))
+    assert_equal(c2.tab_width, 2)
+    # ``end_of_line`` was set on ``[*]`` and inherits.
+    assert_equal(c2.end_of_line, String("lf"))
+    # Closer file wins per-property: sub/ overrides *.py size to 2,
+    # but inherits other settings from the parent's ``[*]``.
+    var c3 = load_editorconfig_for_path(fix + String("sub/foo.py"))
+    assert_equal(c3.indent_style, String("space"))
+    assert_equal(c3.indent_size, 2)
+    assert_equal(c3.end_of_line, String("lf"))
+
+
+fn test_editor_uses_editorconfig_indent() raises:
+    """Tab key respects ``indent_style`` / ``indent_size`` from editorconfig.
+    The fixture sets ``[*.{c,h}]`` to ``indent_style=tab``, so opening a
+    .c file under that tree should make Tab insert a literal tab."""
+    var path = String("tests/fixtures/editorconfig/test_indent.c")
+    assert_true(write_file(path, String("")))
+    var ed = Editor.from_file(path)
+    assert_equal(ed.editorconfig.indent_style, String("tab"))
+    _ = ed.handle_key(_key(KEY_TAB), _VIEW)
+    assert_equal(ed.buffer.line(0), String("\t"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_save_applies_editorconfig_transforms() raises:
+    """``save`` should trim trailing whitespace and ensure a final newline
+    when the editorconfig says to. The fixture's top-level ``[*]`` sets
+    both, so saving a .txt file inside the fixture tree exercises both."""
+    var path = String("tests/fixtures/editorconfig/test_save.txt")
+    # Bootstrap with a payload that ``trim`` + ``final newline`` will rewrite.
+    assert_true(write_file(path, String("alpha   \nbeta")))
+    var ed = Editor.from_file(path)
+    assert_equal(ed.editorconfig.trim_trailing_whitespace, 1)
+    assert_equal(ed.editorconfig.insert_final_newline, 1)
+    assert_true(ed.save())
+    var got = read_file(path)
+    # ``alpha   `` → ``alpha`` (trailing spaces trimmed) and a final ``\n``
+    # is appended even though the original file lacked one.
+    assert_equal(got, String("alpha\nbeta\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_save_uses_editorconfig_line_endings() raises:
+    """When ``end_of_line`` is ``crlf``, ``save`` should join lines with
+    ``\\r\\n`` even though the buffer uses ``\\n`` internally."""
+    var dir = String("/tmp/mojovision_ec_eol_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var ec_path = dir + String("/.editorconfig")
+    assert_true(write_file(ec_path, String(
+        "root = true\n[*]\nend_of_line = crlf\n"
+    )))
+    var f_path = dir + String("/x.txt")
+    assert_true(write_file(f_path, String("a\nb")))
+    var ed = Editor.from_file(f_path)
+    assert_equal(ed.editorconfig.end_of_line, String("crlf"))
+    assert_true(ed.save())
+    var got = read_file(f_path)
+    assert_equal(got, String("a\r\nb"))
+    _ = external_call["unlink", Int32]((f_path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((ec_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
 fn test_walk_project_files_finds_known_files() raises:
@@ -2133,6 +2265,136 @@ fn test_sgr_mouse_wheel_up() raises:
     assert_true(ev[0].button == MOUSE_WHEEL_UP)
 
 
+fn test_sgr_mouse_motion_no_button() raises:
+    """Mouse-mode 1003 reports motion with no button held as raw button-bits
+    ``3 | 32`` (35). The parser must surface that as MOUSE_BUTTON_NONE +
+    motion=True; mapping it to RIGHT (the legacy bug) made every hover look
+    like a phantom right-click."""
+    var ev = parse_input(String("\x1b[<35;10;1M"))
+    assert_true(ev[0].kind == EVENT_MOUSE)
+    assert_true(ev[0].button == MOUSE_BUTTON_NONE)
+    assert_true(ev[0].motion)
+    assert_equal(ev[0].pos.x, 9)
+    assert_equal(ev[0].pos.y, 0)
+
+
+fn test_menu_hover_switches_open_menu() raises:
+    """While a menu is open, hovering (button=NONE, motion=True) over a
+    different menu in the bar switches the open menu to it. This is the
+    macOS-style sticky behavior the user gets after a click-then-move."""
+    var bar = MenuBar()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("Save"), EDITOR_SAVE))
+    bar.add(Menu(String("File"), file_items^))
+    var edit_items = List[MenuItem]()
+    edit_items.append(MenuItem(String("Find"), EDITOR_FIND))
+    bar.add(Menu(String("Edit"), edit_items^))
+    bar.open_menu(0)
+    var rects = bar._layout(80)
+    var edit_x = (rects[1].a.x + rects[1].b.x) // 2
+    var hover = Event.mouse_event(
+        Point(edit_x, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    var r = bar.handle_event(hover, 80)
+    assert_true(r.consumed)
+    assert_equal(bar.open_idx, 1)
+
+
+fn test_menu_drag_release_on_item_triggers() raises:
+    """Click-and-hold on File, drag down into the dropdown, release on the
+    Save row → the release fires EDITOR_SAVE without an extra click."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    items.append(MenuItem(String("Save"), EDITOR_SAVE))
+    items.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
+    bar.add(Menu(String("File"), items^))
+    var rects = bar._layout(80)
+    var fx = (rects[0].a.x + rects[0].b.x) // 2
+    # Press on File — opens the menu, starts tracking.
+    var press = Event.mouse_event(Point(fx, 0), MOUSE_BUTTON_LEFT, True, False)
+    _ = bar.handle_event(press, 80)
+    assert_equal(bar.open_idx, 0)
+    assert_true(bar.tracking)
+    # Drag onto the second item in the dropdown.
+    var dr = bar._dropdown_rect(80)
+    var item_y = dr.a.y + 1 + 1   # row 1 inside the dropdown = "Quit"
+    var drag = Event.mouse_event(
+        Point(dr.a.x + 2, item_y), MOUSE_BUTTON_LEFT, True, True,
+    )
+    _ = bar.handle_event(drag, 80)
+    assert_equal(bar.selected_item, 1)
+    # Release on the dragged-onto item triggers it.
+    var release = Event.mouse_event(
+        Point(dr.a.x + 2, item_y), MOUSE_BUTTON_LEFT, False, False,
+    )
+    var r = bar.handle_event(release, 80)
+    assert_true(r.action)
+    assert_equal(r.action.value(), APP_QUIT_ACTION)
+    assert_false(bar.is_open())
+    assert_false(bar.tracking)
+
+
+fn test_menu_drag_release_outside_closes() raises:
+    """Click-and-hold on File, drag off the bar and dropdown, release in
+    empty space → the menu closes (drag-select cancellation)."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    items.append(MenuItem(String("Save"), EDITOR_SAVE))
+    bar.add(Menu(String("File"), items^))
+    var rects = bar._layout(80)
+    var fx = (rects[0].a.x + rects[0].b.x) // 2
+    _ = bar.handle_event(
+        Event.mouse_event(Point(fx, 0), MOUSE_BUTTON_LEFT, True, False), 80,
+    )
+    assert_true(bar.is_open())
+    assert_true(bar.tracking)
+    # Drag well below the dropdown, then release there.
+    var dr = bar._dropdown_rect(80)
+    var off = Point(dr.b.x + 5, dr.b.y + 5)
+    _ = bar.handle_event(
+        Event.mouse_event(off, MOUSE_BUTTON_LEFT, True, True), 80,
+    )
+    var r = bar.handle_event(
+        Event.mouse_event(off, MOUSE_BUTTON_LEFT, False, False), 80,
+    )
+    assert_false(r.action)
+    assert_false(bar.is_open())
+    assert_false(bar.tracking)
+
+
+fn test_menu_click_then_click_flow() raises:
+    """Sticky/Mac-style flow: a click that lands on File and releases there
+    leaves the menu open in non-tracking mode; a separate later click on a
+    dropdown item then triggers it."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    items.append(MenuItem(String("Save"), EDITOR_SAVE))
+    bar.add(Menu(String("File"), items^))
+    var rects = bar._layout(80)
+    var fx = (rects[0].a.x + rects[0].b.x) // 2
+    # First click: press + release on File. Menu opens, tracking clears on
+    # release.
+    _ = bar.handle_event(
+        Event.mouse_event(Point(fx, 0), MOUSE_BUTTON_LEFT, True, False), 80,
+    )
+    assert_true(bar.tracking)
+    _ = bar.handle_event(
+        Event.mouse_event(Point(fx, 0), MOUSE_BUTTON_LEFT, False, False), 80,
+    )
+    assert_equal(bar.open_idx, 0)
+    assert_false(bar.tracking)
+    # Second click: press on dropdown item triggers it (no drag needed).
+    var dr = bar._dropdown_rect(80)
+    var item_y = dr.a.y + 1
+    var r = bar.handle_event(
+        Event.mouse_event(Point(dr.a.x + 2, item_y), MOUSE_BUTTON_LEFT, True, False),
+        80,
+    )
+    assert_true(r.action)
+    assert_equal(r.action.value(), EDITOR_SAVE)
+    assert_false(bar.is_open())
+
+
 fn test_file_dialog_selects_a_file() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
@@ -3063,6 +3325,12 @@ fn main() raises:
     test_editor_save_clears_dirty()
     test_editor_save_as_adopts_path()
     test_editor_replace_all()
+    test_editorconfig_parse_basic()
+    test_editorconfig_match_section()
+    test_editorconfig_load_from_fixture()
+    test_editor_uses_editorconfig_indent()
+    test_editor_save_applies_editorconfig_transforms()
+    test_editor_save_uses_editorconfig_line_endings()
     test_walk_project_files_finds_known_files()
     test_find_in_project_locates_string()
     test_gitignore_matches_directory_pattern()
@@ -3133,6 +3401,11 @@ fn main() raises:
     test_file_dialog_lists_and_navigates()
     test_partial_sgr_mouse_does_not_emit_esc()
     test_sgr_mouse_wheel_up()
+    test_sgr_mouse_motion_no_button()
+    test_menu_hover_switches_open_menu()
+    test_menu_drag_release_on_item_triggers()
+    test_menu_drag_release_outside_closes()
+    test_menu_click_then_click_flow()
     test_file_dialog_selects_a_file()
     test_file_dialog_mouse_click_selects()
     test_file_dialog_double_click_opens()

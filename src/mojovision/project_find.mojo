@@ -202,6 +202,13 @@ struct ProjectFind(Movable):
             return 0
         return h
 
+    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+        """True iff ``pos`` lies on the ``Search:`` query row."""
+        if not self.active:
+            return False
+        var y = self._input_y(screen)
+        return Rect(screen.a.x + 1, y, screen.b.x - 1, y + 1).contains(pos)
+
     # --- paint ------------------------------------------------------------
 
     fn paint(self, mut canvas: Canvas, screen: Rect):

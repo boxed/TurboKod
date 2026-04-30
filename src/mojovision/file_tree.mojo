@@ -20,7 +20,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .file_io import (
     basename, join_path, list_directory, sort_directory_listing, stat_file,
@@ -325,7 +325,10 @@ struct FileTree(Movable):
             return False
         var area = self.rect(screen)
         if not area.contains(event.pos):
-            self.focused = False
+            # Only an actual click outside loses focus; bare hover (button
+            # NONE) under mouse-mode 1003 must not steal it on every move.
+            if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
+                self.focused = False
             return False
         # Wheel anywhere over the panel scrolls the listing.
         if event.pressed and not event.motion:

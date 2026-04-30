@@ -130,6 +130,13 @@ struct SymbolPick(Movable):
             return 0
         return h
 
+    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+        """True iff ``pos`` lies on the ``Find:`` query row."""
+        if not self.active:
+            return False
+        var rect = self._rect(screen)
+        return Rect(rect.a.x + 2, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2).contains(pos)
+
     # --- paint ------------------------------------------------------------
 
     fn paint(self, mut canvas: Canvas, screen: Rect):

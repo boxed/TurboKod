@@ -21,7 +21,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 const INIT_COLS: u32 = 80;
 const INIT_ROWS: u32 = 25;
@@ -501,7 +501,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.notifier.notify(reply.into_bytes());
             }
             TermEvent::Title(title) => {
-                if let Some(w) = &self.window {
+                // mojovision piggy-backs on OSC 2 for cursor-shape hints —
+                // ``__mvc_cursor:<shape>`` switches the platform pointer
+                // instead of the window title. Generic terminals don't
+                // know about it, so the same sequence is harmless there
+                // (it just briefly flashes the prefix in their title bar).
+                const CURSOR_PREFIX: &str = "__mvc_cursor:";
+                if let Some(shape) = title.strip_prefix(CURSOR_PREFIX) {
+                    if let Some(w) = &self.window {
+                        let icon = match shape {
+                            "text"    => CursorIcon::Text,
+                            "pointer" => CursorIcon::Pointer,
+                            _          => CursorIcon::Default,
+                        };
+                        w.set_cursor(icon);
+                    }
+                } else if let Some(w) = &self.window {
                     w.set_title(&title);
                 }
             }
@@ -711,9 +726,16 @@ impl App {
         self.mouse_col = col;
         self.mouse_row = row;
         if self.mouse_buttons != 0 {
-            // While a button is held: drag motion (only if MOUSE_DRAG mode set).
+            // Drag motion is meaningful in both ``?1002`` (button-event
+            // tracking) and ``?1003`` (any-event tracking) — 1003 is a
+            // superset of 1002 in the xterm spec. mojovision turns on
+            // *both* (so a real terminal delivers hover and drag), but
+            // alacritty's MouseMode handling treats them as mutually
+            // exclusive: each new ``h`` sequence clears the others, so
+            // we end up with only MOUSE_MOTION set even though the
+            // embedded app expects drag too. Accept either flag here.
             let mode = *self.term.lock().mode();
-            if mode.contains(TermMode::MOUSE_DRAG) {
+            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
                 let btn = lowest_set_bit(self.mouse_buttons);
                 self.send_mouse(btn | 32, true);
             }
@@ -799,13 +821,22 @@ impl App {
         };
         surface.resize(w, h).unwrap();
         let mut buf = surface.buffer_mut().unwrap();
-        // Clear margin (window may be larger than cols*cell_w on a partial cell).
-        for px in buf.iter_mut() {
-            *px = DEFAULT_BG;
-        }
 
         let cols_u = *cols as usize;
         let rows_u = *rows as usize;
+        // The per-cell painter below writes every pixel of every cell, so
+        // the upfront full-buffer clear is only needed when the window
+        // has a margin strip outside the cell grid (right/bottom edges
+        // when win_w / win_h aren't an integer multiple of cell size).
+        // ``resumed`` opens cell-aligned, so on launch and through any
+        // resize that lands on a multiple, we skip a 1.5M-pixel memset.
+        let cells_w = cols_u * (*cell_w as usize);
+        let cells_h = rows_u * (*cell_h as usize);
+        if cells_w < size.width as usize || cells_h < size.height as usize {
+            for px in buf.iter_mut() {
+                *px = DEFAULT_BG;
+            }
+        }
         let mut cells: Vec<RenderCell> = Vec::with_capacity(cols_u * rows_u);
         {
             let term = term.lock();
@@ -1023,8 +1054,15 @@ fn main() -> anyhow::Result<()> {
     )));
 
     let mut argv = std::env::args().skip(1);
+    // Tag the PTY environment so the Mojo runtime can detect it's
+    // hosted by the native app and unlock features the alacritty
+    // wrapper supports but generic terminals don't (currently: the
+    // OSC-encoded mouse-pointer shape hint).
+    let mut env = HashMap::new();
+    env.insert("MOJOVISION_HOST".to_string(), "1".to_string());
     let pty_opts = PtyOptions {
         shell: argv.next().map(|prog| Shell::new(prog, argv.collect())),
+        env,
         ..Default::default()
     };
     let win_size = WindowSize {

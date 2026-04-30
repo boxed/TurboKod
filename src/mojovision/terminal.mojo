@@ -31,7 +31,7 @@ from .geometry import Point
 from .posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
-    poll_stdin, query_size_via_cursor, read_into, set_nonblocking,
+    getenv_value, poll_stdin, query_size_via_cursor, read_into, set_nonblocking,
     tcflush, tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
@@ -48,14 +48,28 @@ comptime SEQ_CURSOR_SHOW    = String("\x1b[?25h")
 comptime SEQ_RESET          = String("\x1b[0m")
 comptime SEQ_CLEAR_SCREEN   = String("\x1b[2J")
 comptime SEQ_CURSOR_HOME    = String("\x1b[H")
-# Mouse: 1002 = button-event tracking (motion only when held); 1006 = SGR encoding.
-comptime SEQ_MOUSE_ON  = String("\x1b[?1002h\x1b[?1006h")
-comptime SEQ_MOUSE_OFF = String("\x1b[?1006l\x1b[?1002l")
+# Mouse:
+#   1002 = button-event tracking — motion while a button is held (drag).
+#   1003 = any-event tracking    — motion with no button held (hover).
+# The native host treats these as independent flags, so we enable both:
+# 1002 alone misses hover-to-switch in the menu bar, 1003 alone drops drag
+# events while click-and-holding. 1006 selects SGR-encoded reports.
+comptime SEQ_MOUSE_ON  = String("\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+comptime SEQ_MOUSE_OFF = String("\x1b[?1006l\x1b[?1003l\x1b[?1002l")
 # Force xterm-style modifier reporting on cursor & function keys, so shift /
 # ctrl with the arrows arrive as `ESC[1;<mod><letter>` even in terminals
 # (iTerm2!) that otherwise strip the modifiers.
 comptime SEQ_MODIFY_KEYS_ON  = String("\x1b[>1;2m\x1b[>2;2m\x1b[>4;2m")
 comptime SEQ_MODIFY_KEYS_OFF = String("\x1b[>1m\x1b[>2m\x1b[>4m")
+# Mouse-pointer shape is signalled by piggy-backing on OSC 2 (window
+# title). The native mojovision host recognises titles starting with
+# ``__mvc_cursor:`` as a private cursor-shape command and routes them
+# to the platform cursor instead of the title bar; generic terminals
+# either ignore the prefix or briefly flash it as a title — the trade-
+# off is worth not having to fork ``alacritty_terminal`` to dispatch a
+# new OSC. The shape names map to ``winit::CursorIcon`` variants.
+comptime POINTER_SHAPE_PREFIX = String("\x1b]2;__mvc_cursor:")
+comptime POINTER_SHAPE_SUFFIX = String("\x07")
 
 
 fn move_cursor(x: Int, y: Int) -> String:
@@ -87,6 +101,10 @@ struct Terminal:
     # them up so terminal-side events appear in the same log as
     # protocol-side events. ``-1`` disables.
     var trace_fd: Int32
+    # Last mouse-pointer shape we asked the host to display. Used to
+    # dedupe ``set_pointer_shape`` so we don't spam the OSC sequence
+    # on every mouse-motion event.
+    var _last_pointer_shape: String
 
     fn __init__(out self) raises:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
@@ -100,6 +118,7 @@ struct Terminal:
         self.height = size[1]
         self._front = Canvas(self.width, self.height)
         self.trace_fd = -1
+        self._last_pointer_shape = String("")
 
     fn _trace(self, var line: String):
         """Write ``line`` to ``trace_fd`` if open. No newline added —
@@ -144,6 +163,28 @@ struct Terminal:
 
     fn _query_size_via_cursor(mut self) -> Tuple[Int, Int]:
         return query_size_via_cursor(STDIN_FD, STDOUT_FD)
+
+    fn set_pointer_shape(mut self, shape: String) raises:
+        """Ask the host to display ``shape`` as the mouse-pointer icon.
+
+        Only emitted when the bundled native app is detected (it sets
+        ``MOJOVISION_HOST=1`` in the PTY env). Generic terminals would
+        otherwise interpret the OSC as a window-title set and briefly
+        flash ``__mvc_cursor:...`` in their title bar, which is worse
+        UX than just leaving the cursor alone. Supported shapes match
+        the winit ``CursorIcon`` taxonomy: ``"default"``, ``"text"``,
+        ``"pointer"``. Repeat calls with the same shape are no-ops."""
+        if not self._started:
+            return
+        if shape == self._last_pointer_shape:
+            return
+        if getenv_value(String("MOJOVISION_HOST")) != String("1"):
+            return
+        self._last_pointer_shape = shape
+        write_string(
+            STDOUT_FD,
+            POINTER_SHAPE_PREFIX + shape + POINTER_SHAPE_SUFFIX,
+        )
 
     fn stop(mut self) raises:
         if not self._started:
@@ -666,7 +707,8 @@ fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
                 var bn = raw & 3
                 if bn == 0:   button = MOUSE_BUTTON_LEFT
                 elif bn == 1: button = MOUSE_BUTTON_MIDDLE
-                else:         button = MOUSE_BUTTON_RIGHT
+                elif bn == 2: button = MOUSE_BUTTON_RIGHT
+                else:         button = MOUSE_BUTTON_NONE  # 1003 hover
             return (
                 Event.mouse_event(Point(x, y), button, pressed, motion, mods),
                 i + 1,
