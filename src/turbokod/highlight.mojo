@@ -52,15 +52,11 @@ fn highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,    BLUE, STYLE_N
 fn highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_NONE)
 
 
-# Line-state passed between line tokenization calls so triple-quoted strings
-# that span multiple lines stay highlighted. The DOC variants carry the same
-# delimiter information as TRIPLE but mean "this triple-string opened at
-# statement position, so it's a docstring — paint it with the comment attr."
+# Per-line state passed between calls to ``_highlight_generic_line``.
+# ``_HL_NORMAL`` is the default; ``_HL_IN_BLOCK_COMMENT`` (defined
+# alongside the generic tokenizer below) means the line opened
+# inside an unfinished ``/* ... */`` from a previous row.
 comptime _HL_NORMAL          = 0
-comptime _HL_IN_TRIPLE_DQ    = 1
-comptime _HL_IN_TRIPLE_SQ    = 2
-comptime _HL_IN_DOC_DQ       = 3
-comptime _HL_IN_DOC_SQ       = 4
 
 
 fn highlight_for_extension(
@@ -88,8 +84,6 @@ fn highlight_for_extension(
     the generic tokenizer rather than letting an exception kill the
     editor's render pass.
     """
-    if ext == String("mojo") or ext == String("py") or ext == String("pyi"):
-        return _highlight_mojo_python(lines)
     var tm_opt = _try_textmate(ext, lines)
     if tm_opt:
         return tm_opt.value().copy()
@@ -106,6 +100,10 @@ fn _grammar_path_for_ext(ext: String) -> String:
     new grammar is one entry here plus the JSON file under
     ``src/turbokod/grammars/``.
     """
+    if ext == String("py") or ext == String("pyi") or ext == String("pyw"):
+        return String("src/turbokod/grammars/python.tmLanguage.json")
+    if ext == String("mojo") or ext == String("🔥"):
+        return String("src/turbokod/grammars/mojo.tmLanguage.json")
     if ext == String("rs"):
         return String("src/turbokod/grammars/rust.tmLanguage.json")
     if ext == String("json") or ext == String("jsonc"):
@@ -244,11 +242,9 @@ fn highlight_incremental(
 
     Falls back to a full retokenize when the cache is cold, the
     extension changed, the line count changed, or ``dirty_row``
-    is 0. Falls through to Mojo/Python and the generic tokenizer
-    on the same three signals as the non-incremental path.
+    is 0. Falls through to the generic tokenizer when there's no
+    bundled grammar for the extension.
     """
-    if ext == String("mojo") or ext == String("py") or ext == String("pyi"):
-        return _highlight_mojo_python(lines)
     var path = _grammar_path_for_ext(ext)
     if len(path.as_bytes()) == 0:
         return _fallback_for_extension(ext, lines)
@@ -407,150 +403,22 @@ fn _has_nonempty_line(lines: List[String]) -> Bool:
     return False
 
 
-fn _highlight_mojo_python(lines: List[String]) -> List[Highlight]:
-    var out = List[Highlight]()
-    var state = _HL_NORMAL
-    for row in range(len(lines)):
-        state = _highlight_line(lines[row], row, state, out)
-    return out^
+# --- shared lexical helpers ------------------------------------------------
+#
+# Used by ``_highlight_generic_line`` (the fallback per-language
+# tokenizer) and ``word_at`` (the editor's identifier-around-cursor
+# helper). The bespoke Mojo/Python tokenizer that previously lived
+# here was retired in favor of TextMate grammars in
+# ``src/turbokod/grammars/{python,mojo}.tmLanguage.json``.
 
 
-# --- per-line tokenizer ----------------------------------------------------
-
-
-fn _highlight_line(
-    line: String, row: Int, state_in: Int, mut out: List[Highlight],
-) -> Int:
-    var b = line.as_bytes()
-    var n = len(b)
-    var i = 0
-    var state = state_in
-
-    # Continuation of a triple-quoted string from a prior line. The DOC
-    # variants paint as comments; the TRIPLE variants paint as strings.
-    if state == _HL_IN_TRIPLE_DQ or state == _HL_IN_DOC_DQ:
-        var as_doc = state == _HL_IN_DOC_DQ
-        var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
-        var end = _find_triple(line, 0, 0x22)
-        if end < 0:
-            if n > 0:
-                out.append(Highlight(row, 0, n, attr))
-            return state
-        out.append(Highlight(row, 0, end + 3, attr))
-        i = end + 3
-        state = _HL_NORMAL
-    elif state == _HL_IN_TRIPLE_SQ or state == _HL_IN_DOC_SQ:
-        var as_doc = state == _HL_IN_DOC_SQ
-        var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
-        var end = _find_triple(line, 0, 0x27)
-        if end < 0:
-            if n > 0:
-                out.append(Highlight(row, 0, n, attr))
-            return state
-        out.append(Highlight(row, 0, end + 3, attr))
-        i = end + 3
-        state = _HL_NORMAL
-
-    while i < n:
-        var c = b[i]
-        # Hash comment: rest of line.
-        if c == 0x23:
-            out.append(Highlight(row, i, n, highlight_comment_attr()))
-            return state
-        # Triple-quoted string opener (must precede the single-quote case).
-        # If only whitespace precedes it on this line, it's at statement
-        # position — i.e. a docstring — and is colored as a comment.
-        if (c == 0x22 or c == 0x27) and i + 2 < n \
-                and b[i + 1] == c and b[i + 2] == c:
-            var start = i
-            var as_doc = True
-            for j in range(i):
-                if b[j] != 0x20 and b[j] != 0x09:
-                    as_doc = False
-                    break
-            var attr = highlight_comment_attr() if as_doc else highlight_string_attr()
-            var end = _find_triple(line, i + 3, Int(c))
-            if end < 0:
-                out.append(Highlight(row, start, n, attr))
-                if c == 0x22:
-                    return _HL_IN_DOC_DQ if as_doc else _HL_IN_TRIPLE_DQ
-                return _HL_IN_DOC_SQ if as_doc else _HL_IN_TRIPLE_SQ
-            out.append(Highlight(row, start, end + 3, attr))
-            i = end + 3
-            continue
-        # Single-line string. Backslash escapes are skipped so `"\""` parses.
-        if c == 0x22 or c == 0x27:
-            var quote = c
-            var start = i
-            i += 1
-            var done = False
-            while i < n:
-                if b[i] == 0x5C and i + 1 < n:
-                    i += 2
-                    continue
-                if b[i] == quote:
-                    i += 1
-                    done = True
-                    break
-                i += 1
-            if done:
-                out.append(Highlight(row, start, i, highlight_string_attr()))
-            else:
-                # Unterminated string — color the rest of the line.
-                out.append(Highlight(row, start, n, highlight_string_attr()))
-            continue
-        # Decorator (``@name``). Highlights from ``@`` through the identifier.
-        if c == 0x40 and i + 1 < n and _is_ident_start(b[i + 1]):
-            var start = i
-            i += 1
-            while i < n and _is_ident_part(b[i]):
-                i += 1
-            out.append(Highlight(row, start, i, highlight_decorator_attr()))
-            continue
-        # Identifier or keyword.
-        if _is_ident_start(c):
-            var start = i
-            while i < n and _is_ident_part(b[i]):
-                i += 1
-            var word = String(StringSlice(unsafe_from_utf8=b[start:i]))
-            if _is_mojo_python_keyword(word):
-                out.append(Highlight(row, start, i, highlight_keyword_attr()))
-            else:
-                out.append(Highlight(row, start, i, highlight_ident_attr()))
-            continue
-        # Number (decimal int or float — keeps it minimal).
-        if _is_digit(c):
-            var start = i
-            while i < n and (_is_digit(b[i]) or b[i] == 0x2E):
-                i += 1
-            out.append(Highlight(row, start, i, highlight_number_attr()))
-            continue
-        # Operator run (`+`, `-`, `*`, `/`, `%`, `=`, `<`, `>`, `!`, `&`,
-        # `|`, `^`, `~`, `@`, `(`, `)`, `.`, `:`, `[`, `]`, `{`, `}`).
-        # Consecutive bytes coalesce so `==`, `->`, `**=`, `[]`, etc. render
-        # as a single span. `@` followed by an identifier was already
-        # consumed as a decorator above; `.` inside a numeric literal was
-        # already consumed as part of the number.
-        if _is_operator(c):
-            var start = i
-            while i < n and _is_operator(b[i]):
-                i += 1
-            out.append(Highlight(row, start, i, highlight_operator_attr()))
-            continue
-        i += 1
-    return state
-
-
-fn _find_triple(line: String, start: Int, quote: Int) -> Int:
-    var b = line.as_bytes()
-    var n = len(b)
-    var i = start
-    while i + 2 < n:
-        if Int(b[i]) == quote and Int(b[i + 1]) == quote \
-                and Int(b[i + 2]) == quote:
-            return i
-        i += 1
-    return -1
+# --- bespoke Mojo/Python per-line tokenizer (retired) ----------------------
+# The block that lived here was the original triple-quote/docstring-aware
+# tokenizer for ``.mojo`` / ``.py``. It was removed once those file types
+# moved onto TextMate grammars (``grammars/{python,mojo}.tmLanguage.json``).
+# What remains below is the lexical-classification helpers
+# (``_is_ident_start`` etc.) that the *generic* fallback tokenizer and
+# ``word_at`` still depend on.
 
 
 fn _is_ident_start(c: UInt8) -> Bool:
@@ -585,31 +453,6 @@ fn _is_operator(c: UInt8) -> Bool:
         or v == 0x2E or v == 0x3A or v == 0x5B or v == 0x5D \
         or v == 0x7B or v == 0x7D
 
-
-fn _is_mojo_python_keyword(word: String) -> Bool:
-    return word == String("fn") or word == String("var") \
-        or word == String("let") or word == String("alias") \
-        or word == String("comptime") \
-        or word == String("struct") or word == String("trait") \
-        or word == String("class") or word == String("def") \
-        or word == String("if") or word == String("elif") \
-        or word == String("else") or word == String("while") \
-        or word == String("for") or word == String("return") \
-        or word == String("from") or word == String("import") \
-        or word == String("as") or word == String("try") \
-        or word == String("except") or word == String("finally") \
-        or word == String("raise") or word == String("raises") \
-        or word == String("True") or word == String("False") \
-        or word == String("None") or word == String("pass") \
-        or word == String("break") or word == String("continue") \
-        or word == String("in") or word == String("not") \
-        or word == String("and") or word == String("or") \
-        or word == String("is") or word == String("with") \
-        or word == String("lambda") or word == String("yield") \
-        or word == String("mut") or word == String("out") \
-        or word == String("owned") or word == String("self") \
-        or word == String("Self") or word == String("inout") \
-        or word == String("borrowed")
 
 
 # --- editor-side helpers ---------------------------------------------------

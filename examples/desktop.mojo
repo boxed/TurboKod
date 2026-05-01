@@ -52,7 +52,7 @@ from turbokod import (
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
-    PROJECT_FIND, PROJECT_REPLACE, WINDOW_CLOSE,
+    PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
 
@@ -112,17 +112,19 @@ fn main() raises:
             (String("Toggle Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS),
             (String("Toggle Soft Wrap"),    EDITOR_TOGGLE_SOFT_WRAP),
         ))
-        desktop.menu_bar.add(_mk_menu(String("Debug"),
-            (String("Start / Continue"), DEBUG_START_OR_CONTINUE),
-            (String("Stop"), DEBUG_STOP),
-            (String("Toggle Breakpoint"), DEBUG_TOGGLE_BREAKPOINT),
-            (String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP),
-            (String("Step Over"), DEBUG_STEP_OVER),
-            (String("Step Into"), DEBUG_STEP_IN),
-            (String("Step Out"), DEBUG_STEP_OUT),
-            (String("Add Watch..."), DEBUG_ADD_WATCH),
-            (String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED),
-        ))
+        var debug_items = List[MenuItem]()
+        debug_items.append(MenuItem(String("Run"), TARGET_RUN))
+        debug_items.append(MenuItem.separator())
+        debug_items.append(MenuItem(String("Start / Continue"),       DEBUG_START_OR_CONTINUE))
+        debug_items.append(MenuItem(String("Stop"),                   DEBUG_STOP))
+        debug_items.append(MenuItem(String("Toggle Breakpoint"),      DEBUG_TOGGLE_BREAKPOINT))
+        debug_items.append(MenuItem(String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP))
+        debug_items.append(MenuItem(String("Step Over"),              DEBUG_STEP_OVER))
+        debug_items.append(MenuItem(String("Step Into"),              DEBUG_STEP_IN))
+        debug_items.append(MenuItem(String("Step Out"),               DEBUG_STEP_OUT))
+        debug_items.append(MenuItem(String("Add Watch..."),           DEBUG_ADD_WATCH))
+        debug_items.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
+        desktop.menu_bar.add(Menu(String("Debug"), debug_items^))
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
         desktop.menu_bar.add(_mk_menu(String("Help"),
@@ -353,9 +355,15 @@ fn main() raises:
                         )
                         app.quit()
                     elif action == String("file:open"):
-                        file_dialog.open(String("."))
+                        var start = desktop.project.value() \
+                            if desktop.project else String(".")
+                        file_dialog.open(start)
+                        file_dialog.set_project(desktop.project)
                     elif action == EDITOR_QUICK_OPEN:
-                        file_dialog.open(String("."))
+                        var start = desktop.project.value() \
+                            if desktop.project else String(".")
+                        file_dialog.open(start)
+                        file_dialog.set_project(desktop.project)
                     elif action == String("focus:About"):
                         desktop.windows.focus_by_title(String("About"))
             except e:

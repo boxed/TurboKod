@@ -150,7 +150,7 @@ struct SaveAsDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         # Same Turbo Vision palette as ``FileDialog``: light-gray

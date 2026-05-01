@@ -36,7 +36,10 @@ caret movement isn't worth the complexity for one-shot config.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .buttons import ShadowButton, paint_shadow_button, shadow_button_hit
+from .buttons import (
+    BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
+    ShadowButton, paint_shadow_button,
+)
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
@@ -44,8 +47,8 @@ from .colors import (
 )
 from .debugger_config import built_in_debuggers
 from .dropdown import (
-    DROPDOWN_HIT_BODY, DROPDOWN_HIT_LEFT, DROPDOWN_HIT_NONE,
-    DROPDOWN_HIT_RIGHT, Dropdown,
+    DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
+    DROPDOWN_HIT_POPUP, Dropdown,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -211,8 +214,11 @@ struct TargetsDialog(Movable):
     var _drag: Optional[Point]
     var _list_scroll: Int
     var _buttons: List[_PlacedButton]
-    """Captured by paint, read by mouse — ensures click targeting
-    matches what was drawn."""
+    """Persistent button table. Each entry's ``ShadowButton`` carries
+    its own press latch (see ``ShadowButton.handle_mouse``), so the
+    table must outlive paint cycles — ``_paint_buttons`` repositions
+    in place rather than rebuilding from scratch. Layout indices are
+    stable: entries 0..3 are Add / Remove / Save / Cancel in order."""
 
     fn __init__(out self):
         self.active = False
@@ -224,7 +230,22 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        # Build the persistent button table once — ``_paint_buttons``
+        # repositions and updates ``enabled`` per frame, but the press
+        # latch on each ShadowButton has to survive across paints.
         self._buttons = List[_PlacedButton]()
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" + Add "), 0, 0), _FOCUS_ADD, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" - Remove "), 0, 0), _FOCUS_REMOVE, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" Save "), 0, 0), _FOCUS_SAVE, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
+        ))
 
     fn open(mut self, var targets: ProjectTargets):
         """Take a snapshot of ``targets`` for editing. Subsequent
@@ -254,7 +275,11 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
-        self._buttons = List[_PlacedButton]()
+        # Drop any in-flight press latches so re-opening the dialog
+        # starts with a clean button row.
+        for i in range(len(self._buttons)):
+            self._buttons[i].button.pressed = False
+            self._buttons[i].button.pressed_inside = False
 
     fn into_targets(self) -> ProjectTargets:
         """Build a fresh ProjectTargets from the editable state. The
@@ -584,54 +609,40 @@ struct TargetsDialog(Movable):
         ``y`` reserves a row below the button face for the bottom
         shadow, then a row for the bottom border — so layout from the
         dialog bottom up is: border (y-1), shadow (y-2), face (y-3).
-        Captured into ``_buttons`` so mouse routing hits exactly the
-        cells we drew on. Disabled buttons (Remove, with an empty
-        list) get a dim attr and are excluded from the hit table.
+        Repositions the persistent ``_buttons`` table in place — the
+        press latch on each entry has to survive across paints, so
+        we ``move_to`` rather than re-allocate. Disabled buttons
+        (Remove, with an empty list) get a dim attr; their
+        ``handle_mouse`` is still called but ``enabled=False`` makes
+        ``_dispatch_buttons`` ignore any FIRED status.
         """
-        self._buttons = List[_PlacedButton]()
-        # Face row sits two rows above the bottom border so the
-        # shadow row immediately below has somewhere to land.
-        var y = rect.b.y - 3
-        var add_label    = String(" + Add ")
-        var rm_label     = String(" - Remove ")
-        var save_label   = String(" Save ")
-        var cancel_label = String(" Cancel ")
         # Lay out left-to-right from the body's left margin; each
         # button claims face + 1 shadow column, plus 1 column gap
         # before the next so adjacent shadows don't collide.
-        var add_btn = ShadowButton(add_label, rect.a.x + 2, y)
-        var rm_btn  = ShadowButton(
-            rm_label, add_btn.x + add_btn.total_width() + 1, y,
-        )
-        # Right-anchored Save / Cancel pair. Compute Cancel's left
-        # edge from the dialog's right margin, then back Save off
-        # that — both buttons claim face + shadow columns.
-        var cancel_btn = ShadowButton(
-            cancel_label,
-            rect.b.x - 2 - (len(cancel_label.as_bytes()) + 1), y,
-        )
-        var save_btn = ShadowButton(
-            save_label,
-            cancel_btn.x - 1 - (len(save_label.as_bytes()) + 1), y,
-        )
-        self._paint_button(canvas, add_btn,    _FOCUS_ADD,    True)
-        self._paint_button(
-            canvas, rm_btn, _FOCUS_REMOVE, len(self.entries) > 0,
-        )
-        self._paint_button(canvas, save_btn,   _FOCUS_SAVE,   True)
-        self._paint_button(canvas, cancel_btn, _FOCUS_CANCEL, True)
+        var y = rect.b.y - 3
+        var add_x = rect.a.x + 2
+        var rm_x = add_x + self._buttons[0].button.total_width() + 1
+        var cancel_w = self._buttons[3].button.face_width()
+        var cancel_x = rect.b.x - 2 - (cancel_w + 1)
+        var save_w = self._buttons[2].button.face_width()
+        var save_x = cancel_x - 1 - (save_w + 1)
+        self._buttons[0].button.move_to(add_x, y)
+        self._buttons[1].button.move_to(rm_x, y)
+        self._buttons[2].button.move_to(save_x, y)
+        self._buttons[3].button.move_to(cancel_x, y)
+        self._buttons[1].enabled = len(self.entries) > 0
+        for i in range(len(self._buttons)):
+            self._paint_button(canvas, i)
 
-    fn _paint_button(
-        mut self, mut canvas: Canvas, button: ShadowButton,
-        focus: UInt8, enabled: Bool,
-    ):
+    fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
+        var pb = self._buttons[idx]
         var face: Attr
-        if not enabled:
+        if not pb.enabled:
             # Dim face — same hue, but light-gray text on green
             # signals "not actionable right now" without dropping
             # the visual weight of the button entirely.
             face = Attr(LIGHT_GRAY, GREEN)
-        elif self.focus == focus:
+        elif self.focus == pb.focus:
             # Focused: blue face. Matches the focus colour used for
             # input strips so the eye groups them as "where typing
             # / Enter goes next".
@@ -640,9 +651,9 @@ struct TargetsDialog(Movable):
             face = Attr(BLACK, GREEN)
         # Shadow tone tracks the dialog body bg (LIGHT_GRAY) — that's
         # what makes the button look "lifted" rather than smeared.
-        paint_shadow_button(canvas, button, face, LIGHT_GRAY)
-        if enabled:
-            self._buttons.append(_PlacedButton(button, focus, True))
+        # ``paint_shadow_button`` reads ``button.show_pressed()`` to
+        # decide whether to draw the shadow or paint flush.
+        paint_shadow_button(canvas, pb.button, face, LIGHT_GRAY)
 
     # --- key handling -----------------------------------------------
 
@@ -784,6 +795,28 @@ struct TargetsDialog(Movable):
 
     # --- mouse ------------------------------------------------------
 
+    fn _dispatch_buttons(mut self, event: Event) -> Bool:
+        """Route ``event`` through every button's ``handle_mouse``.
+        Returns True if any button consumed the event. On
+        ``BUTTON_FIRED`` the button's action runs before returning;
+        on ``BUTTON_CAPTURED`` / ``BUTTON_CANCELED`` the event is
+        consumed without firing.
+
+        Disabled buttons still receive the event (so a stale press
+        latch from an enabled-then-disabled transition resolves
+        cleanly), but a FIRED status from a disabled button is
+        ignored — clicking through to "fire" requires the button to
+        be enabled at release time."""
+        for i in range(len(self._buttons)):
+            var status = self._buttons[i].button.handle_mouse(event)
+            if status == BUTTON_NONE:
+                continue
+            if status == BUTTON_FIRED and self._buttons[i].enabled:
+                self.focus = self._buttons[i].focus
+                _ = self._activate_focus()
+            return True
+        return False
+
     fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True if ``pos`` would land on an editable strip — used by
         the host to surface a text-cursor pointer over those cells."""
@@ -810,6 +843,14 @@ struct TargetsDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        # Buttons run their own press / move / release state machine
+        # (see ``ShadowButton.handle_mouse``). Dispatch first so a
+        # captured button continues to receive drag-motion + release
+        # events without the title-bar / list code intercepting them.
+        # ``_dispatch_buttons`` returns True for any consumed event,
+        # and runs the button's action on FIRED before doing so.
+        if self._dispatch_buttons(event):
+            return True
         # Title-bar drag: same model as the file dialogs.
         if self._drag:
             if event.button == MOUSE_BUTTON_LEFT and event.pressed \
@@ -844,14 +885,6 @@ struct TargetsDialog(Movable):
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
-        # Buttons sit above the list so they win when their hit rect
-        # (face + shadow rows) overlaps the list border.
-        for i in range(len(self._buttons)):
-            if self._buttons[i].enabled \
-                    and shadow_button_hit(self._buttons[i].button, event):
-                self.focus = self._buttons[i].focus
-                _ = self._activate_focus()
-                return True
         # Click inside the list: select the row that was hit. With
         # the framing border gone, every row of ``list_rect`` is a
         # data row — no inset to skip past.
@@ -878,20 +911,21 @@ struct TargetsDialog(Movable):
                     return True
                 self.focus = fields[i]
                 if fields[i] == _FOCUS_LANG:
-                    self._click_lang(ir, event)
+                    self._click_lang(ir, screen, event)
                 return True
         return True
 
-    fn _click_lang(mut self, ir: Rect, event: Event):
-        """Forward a click on the language field to the dropdown so
-        clicks on the ``<`` / ``>`` arrow cells cycle the selection.
-        Body clicks fall through (focus has already been set by the
-        caller)."""
+    fn _click_lang(mut self, ir: Rect, screen: Rect, event: Event):
+        """Forward a click on the language field to the dropdown.
+        The dropdown is rebuilt fresh each paint so it has no
+        persistent open state — body clicks just set focus (already
+        done by the caller); popup interactions are unreachable
+        from this stateless instance.
+        """
         if self.selected < 0:
             return
         var t = self._selected_target()
         var dd = self._lang_dropdown(t.debug_language)
-        var hit = dd.handle_mouse(ir, event)
-        if hit == DROPDOWN_HIT_LEFT or hit == DROPDOWN_HIT_RIGHT:
-            t.debug_language = dd.value()
-            self._put_selected(t^)
+        _ = dd.handle_mouse(ir, screen, event)
+        t.debug_language = dd.value()
+        self._put_selected(t^)

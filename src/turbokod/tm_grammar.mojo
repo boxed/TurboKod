@@ -260,6 +260,8 @@ fn _path_for_scope(scope: String) -> String:
         return String("src/turbokod/grammars/html.tmLanguage.json")
     if scope == String("source.json"):
         return String("src/turbokod/grammars/json.tmLanguage.json")
+    if scope == String("source.python"):
+        return String("src/turbokod/grammars/python.tmLanguage.json")
     return String("")
 
 

@@ -1,0 +1,88 @@
+{
+  "information_for_contributors": [
+    "Hand-rolled minimal Python grammar. We replaced MagicPython (the conversion from the upstream Atom/MagicStack grammar that VS Code ships) because its end-regex backreferences (e.g. ``\\1`` to match the same quote that opened a string) interact poorly with our libonig-based tokenizer — the end never matched and the string scope leaked across the whole file. The simpler approach below covers the common cases (keywords, strings, comments, numbers, decorators, docstrings-as-comments) without backref tricks."
+  ],
+  "scopeName": "source.python",
+  "fileTypes": ["py", "pyi", "pyw"],
+  "patterns": [
+    { "include": "#docstring_double" },
+    { "include": "#docstring_single" },
+    { "include": "#comment" },
+    { "include": "#string_triple_double" },
+    { "include": "#string_triple_single" },
+    { "include": "#string_double" },
+    { "include": "#string_single" },
+    { "include": "#decorator" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#type_primitive" },
+    { "include": "#number" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.python"
+    },
+    "docstring_double": {
+      "begin": "^\\s*\"{3}",
+      "end": "\"{3}",
+      "name": "comment.block.documentation.python"
+    },
+    "docstring_single": {
+      "begin": "^\\s*'{3}",
+      "end": "'{3}",
+      "name": "comment.block.documentation.python"
+    },
+    "string_triple_double": {
+      "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?\"{3}",
+      "end": "\"{3}",
+      "name": "string.quoted.triple.double.python"
+    },
+    "string_triple_single": {
+      "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?'{3}",
+      "end": "'{3}",
+      "name": "string.quoted.triple.single.python"
+    },
+    "string_double": {
+      "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?\"",
+      "end": "\"",
+      "name": "string.quoted.double.python",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.python" }
+      ]
+    },
+    "string_single": {
+      "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?'",
+      "end": "'",
+      "name": "string.quoted.single.python",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.python" }
+      ]
+    },
+    "decorator": {
+      "match": "@\\s*[A-Za-z_][A-Za-z0-9_.]*",
+      "name": "meta.decorator.python"
+    },
+    "keyword": {
+      "match": "\\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|match|case)\\b",
+      "name": "keyword.control.python"
+    },
+    "constant": {
+      "match": "\\b(True|False|None|self|cls|NotImplemented|Ellipsis|__name__|__main__)\\b",
+      "name": "constant.language.python"
+    },
+    "type_primitive": {
+      "match": "\\b(int|float|complex|bool|str|bytes|bytearray|memoryview|list|tuple|dict|set|frozenset|object|type|range|slice|enumerate|zip|filter|map|reversed|property|classmethod|staticmethod|super|Exception|BaseException|ValueError|TypeError|KeyError|IndexError|AttributeError|RuntimeError|StopIteration|GeneratorExit|KeyboardInterrupt|SystemExit|ArithmeticError|FloatingPointError|OverflowError|ZeroDivisionError|AssertionError|ImportError|LookupError|NameError|UnboundLocalError|OSError|FileNotFoundError|FileExistsError|PermissionError|IsADirectoryError|NotADirectoryError|IOError|EnvironmentError)\\b",
+      "name": "support.type.python"
+    },
+    "number": {
+      "match": "\\b(?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?j?)\\b",
+      "name": "constant.numeric.python"
+    },
+    "operator": {
+      "match": "->|=>|:=|\\*\\*=?|//=?|<<=?|>>=?|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|@=|[+\\-*/%=<>!&|^~@:]",
+      "name": "keyword.operator.python"
+    }
+  }
+}

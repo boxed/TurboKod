@@ -1,0 +1,93 @@
+{
+  "information_for_contributors": [
+    "Hand-rolled minimal Mojo grammar. Mojo's syntax is a Python superset, but trying to layer Mojo keywords on top of MagicPython's grammar via 'include: source.python' didn't reliably reach the Mojo patterns: Python's begin/end frames hid them. So we keep this self-contained — keywords (Mojo + the Python-shared subset), strings, comments, numbers, decorators."
+  ],
+  "scopeName": "source.mojo",
+  "fileTypes": ["mojo"],
+  "patterns": [
+    { "include": "#docstring_double" },
+    { "include": "#docstring_single" },
+    { "include": "#comment" },
+    { "include": "#string_triple_double" },
+    { "include": "#string_triple_single" },
+    { "include": "#string_double" },
+    { "include": "#string_single" },
+    { "include": "#decorator" },
+    { "include": "#keyword_mojo" },
+    { "include": "#keyword_python" },
+    { "include": "#constant" },
+    { "include": "#type_primitive" },
+    { "include": "#number" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.mojo"
+    },
+    "docstring_double": {
+      "begin": "^\\s*\"{3}",
+      "end": "\"{3}",
+      "name": "comment.block.documentation.mojo"
+    },
+    "docstring_single": {
+      "begin": "^\\s*'{3}",
+      "end": "'{3}",
+      "name": "comment.block.documentation.mojo"
+    },
+    "string_triple_double": {
+      "begin": "\"{3}",
+      "end": "\"{3}",
+      "name": "string.quoted.triple.double.mojo"
+    },
+    "string_triple_single": {
+      "begin": "'{3}",
+      "end": "'{3}",
+      "name": "string.quoted.triple.single.mojo"
+    },
+    "string_double": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.mojo",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.mojo" }
+      ]
+    },
+    "string_single": {
+      "begin": "'",
+      "end": "'",
+      "name": "string.quoted.single.mojo",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.mojo" }
+      ]
+    },
+    "decorator": {
+      "match": "@\\s*[A-Za-z_][A-Za-z0-9_.]*",
+      "name": "meta.decorator.mojo"
+    },
+    "keyword_mojo": {
+      "match": "\\b(fn|var|alias|comptime|struct|trait|impl|owned|out|mut|borrowed|inout|ref|let|read|raises|raise|escaping|origin|register_passable|copyable|movable)\\b",
+      "name": "keyword.control.mojo"
+    },
+    "keyword_python": {
+      "match": "\\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|return|try|while|with|yield)\\b",
+      "name": "keyword.control.python"
+    },
+    "constant": {
+      "match": "\\b(True|False|None|Self|self|cls)\\b",
+      "name": "constant.language.mojo"
+    },
+    "type_primitive": {
+      "match": "\\b(Int|UInt|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Bool|Byte|String|StringSlice|StringLiteral|UnsafePointer|Pointer|Reference|List|Dict|Set|Tuple|Optional|Span|SIMD|DType|AnyType|Movable|Copyable|ImplicitlyCopyable|Stringable|Writable|EqualityComparable)\\b",
+      "name": "support.type.mojo"
+    },
+    "number": {
+      "match": "\\b(?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\\b",
+      "name": "constant.numeric.mojo"
+    },
+    "operator": {
+      "match": "->|=>|::|\\.\\.|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=?|>>=?|==|!=|<=|>=|&&|\\|\\||[+\\-*/%=<>!&|^~?@:]",
+      "name": "keyword.operator.mojo"
+    }
+  }
+}

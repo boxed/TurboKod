@@ -43,11 +43,12 @@ Pure-data modules (everything except `terminal.mojo` and `app.mojo`) are TTY-fre
 
 ## Syntax highlighting
 
-Three tiers, picked by file extension in `highlight_for_extension`:
+Two tiers, picked by file extension in `highlight_for_extension`:
 
-1. **Mojo / Python** use the bespoke `_highlight_mojo_python` path because they need docstring-aware triple-quote handling.
-2. **TextMate grammars** for languages with a JSON file under `src/turbokod/grammars/<lang>.tmLanguage.json` and an entry in `_grammar_path_for_ext` (in `highlight.mojo`). The grammars are parsed by `tm_grammar.mojo` and tokenized by `tm_tokenizer.mojo` against `libonig` via the FFI in `onig.mojo`. The runtime supports `match`, `begin`/`end`, `include` (repository + `$self`); skipped: capture-group scopes, `while`-rules, embedded grammars, injections.
-3. **Generic per-language config** (`LangSpec` registry in `highlight.mojo`) is the fallback for languages without a grammar — keyword set + comment markers + string quotes drives a small hand-rolled tokenizer.
+1. **TextMate grammars** for languages with a JSON file under `src/turbokod/grammars/<lang>.tmLanguage.json` and an entry in `_grammar_path_for_ext` (in `highlight.mojo`). The grammars are parsed by `tm_grammar.mojo` and tokenized by `tm_tokenizer.mojo` against `libonig` via the FFI in `onig.mojo`.
+2. **Generic per-language config** (`LangSpec` registry in `highlight.mojo`) is the fallback for languages without a grammar — keyword set + comment markers + string quotes drives a small hand-rolled tokenizer.
+
+Mojo and Python used to have a third "bespoke tokenizer" path (`_highlight_mojo_python`) for docstring-aware triple-quote handling. That's gone — both languages now go through TextMate grammars (`grammars/{python,mojo}.tmLanguage.json`). The Python grammar is hand-rolled rather than vendored MagicPython because MagicPython relies on `\1`-style end-regex backreferences that our runtime doesn't fully resolve, which made the triple-quoted string scope leak across lines.
 
 Adding a new TextMate grammar: drop the `.tmLanguage.json` under `src/turbokod/grammars/`, add the extension → path mapping in `_grammar_path_for_ext`, and tokens with scopes the runtime recognizes (`keyword.*`, `string.*`, `comment.*`, `constant.numeric.*`, etc. — see `_scope_attr` in `tm_tokenizer.mojo`) get colored automatically. Grammars are loaded relative to cwd; `run.sh` cd's to project root before exec, so the relative paths Just Work for the bundled toolchain. The currently-shipped vendored grammars (sourced from `microsoft/vscode/extensions/<lang>/syntaxes/`, all MIT) cover Rust, Go, TypeScript/JavaScript, JSON, C/C++, Shell, HTML, CSS. Ruby, YAML, and Markdown are *bundled but unmapped* — their vscode grammars rely heavily on `while`-rules and external-grammar includes that the runtime doesn't implement yet, so they fall through to the generic per-language config tokenizer (which has Ruby + YAML specs).
 

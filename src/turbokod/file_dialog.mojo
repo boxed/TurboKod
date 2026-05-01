@@ -107,6 +107,13 @@ struct FileDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
 
+    fn set_project(mut self, project: Optional[String]):
+        """Tell the dialog about the active project so the listing's
+        jump-button row gets a ``Project`` entry pointing to its
+        root. Pass ``Optional[String]()`` to clear it. Cheap and
+        idempotent — call after ``open`` from the host."""
+        self.browser.set_project(project)
+
     fn close(mut self):
         self.active = False
         self.submitted = False
@@ -117,7 +124,7 @@ struct FileDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         # Turbo Vision palette: the dialog body sits on a light-gray

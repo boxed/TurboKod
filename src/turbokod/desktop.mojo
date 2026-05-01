@@ -351,6 +351,11 @@ struct Desktop(Movable):
     # the tab strip can paint a ``●`` indicator and ``TARGET_RUN``
     # can know whether to terminate before respawning.
     var run_session: RunSession
+    # Sticky flag set when a run finishes so the output pane stays
+    # visible after the process exits — the user needs to see what
+    # happened. Cleared when a new run/debug starts, the project
+    # closes, or the user dismisses the pane (ESC while focused).
+    var _run_output_held: Bool
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -398,6 +403,7 @@ struct Desktop(Movable):
         self.config = load_config()
         self.targets = ProjectTargets()
         self.run_session = RunSession()
+        self._run_output_held = False
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -965,6 +971,7 @@ struct Desktop(Movable):
         # Drop the targets list and stop any in-flight run — the
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
+        self._run_output_held = False
         self.targets = ProjectTargets()
 
     fn _set_project(mut self, path: String):
@@ -1134,6 +1141,14 @@ struct Desktop(Movable):
             # Option+F as ``ESC f`` by default.
             if self.menu_bar.is_open():
                 self.menu_bar.close()
+            elif self._run_output_held \
+                    and not self.dap.is_active() \
+                    and not self.run_session.is_active():
+                # Dismiss the held run-output pane. The status text
+                # advertises this binding so the user knows ESC works
+                # here regardless of whether the pane has focus.
+                self._run_output_held = False
+                self.debug_pane.focused = False
             else:
                 self._esc_armed = True
             return Optional[String]()
@@ -1765,14 +1780,20 @@ struct Desktop(Movable):
         # always visible whether the user is looking up or down.
         # Keep the pane open while a run-session is active too — its
         # output is the only place the user sees stdout/stderr.
+        # Once a run finishes, ``_run_output_held`` keeps the pane
+        # open so the user can read the output instead of having
+        # it disappear with the exit.
         self.debug_pane.visible = self.dap.is_active() \
-            or self.run_session.is_active()
+            or self.run_session.is_active() \
+            or self._run_output_held
         if self.dap.is_active():
             self.debug_pane.set_status(self.dap.status_summary())
         elif self.run_session.is_active():
             self.debug_pane.set_status(
                 String("running ") + self.run_session.target_name,
             )
+        elif self._run_output_held:
+            self.debug_pane.set_status(String("(exited — Esc to dismiss)"))
         elif self.dap.is_failed():
             # Surface the failure once even though we hide the pane —
             # status-bar message is more discoverable than nothing.
@@ -2122,6 +2143,7 @@ struct Desktop(Movable):
             self._dap_exec_line = -1
         # Stop any prior run, regardless of which target it was for.
         self.run_session.terminate()
+        self._run_output_held = False
         self.debug_pane.clear()
         self.debug_pane.visible = True
         var cwd = resolved_cwd(self.project.value(), target.cwd)
@@ -2200,6 +2222,7 @@ struct Desktop(Movable):
         # Stop any in-flight run for this target — the user just
         # asked for a debug session of the same thing.
         self.run_session.terminate()
+        self._run_output_held = False
         # Tear down any prior debug session before starting a new one.
         if self.dap.is_active():
             self.dap.shutdown()
@@ -2254,6 +2277,10 @@ struct Desktop(Movable):
                 name + String(" exited (") + String(code) + String(")"),
                 attr,
             )
+            # Pin the output pane open until the user dismisses it —
+            # otherwise the exit message and any tail output flash off
+            # screen as ``run_session.is_active()`` flips to False.
+            self._run_output_held = True
 
     fn _refresh_target_tabs(mut self):
         """Push the current target list + active selection into the

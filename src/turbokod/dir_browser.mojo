@@ -14,12 +14,17 @@ cluttering the picker. ``..`` is always included regardless of the flag.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
-from .buttons import ShadowButton, paint_shadow_button
+from .buttons import (
+    BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
+    ShadowButton, paint_shadow_button,
+)
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_CYAN, LIGHT_GRAY, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_CYAN, LIGHT_GRAY,
+    LIGHT_YELLOW, WHITE,
 )
 from .events import (
     Event, EVENT_MOUSE,
@@ -47,11 +52,17 @@ struct JumpShortcut(ImplicitlyCopyable, Movable):
     var x: Int
 
 
-fn jump_shortcuts(start_x: Int) -> List[JumpShortcut]:
-    """Build the Desktop / Home / Root button row, laid out left-
-    to-right from ``start_x`` with a single-column gap between
+fn jump_shortcuts(
+    start_x: Int, project: Optional[String] = Optional[String](),
+) -> List[JumpShortcut]:
+    """Build the Project / Desktop / Home / Root button row, laid out
+    left-to-right from ``start_x`` with a single-column gap between
     buttons. ``$HOME`` is consulted at call time so a session that
     inherits a different value picks it up.
+
+    The ``Project`` button is included only when ``project`` is set —
+    it points to the active project's root, so the user can jump
+    back to where their work lives in one click.
 
     When ``$HOME`` is unset the user-relative buttons collapse to
     ``"."`` rather than to bare paths like ``/Desktop`` — clicking a
@@ -68,6 +79,9 @@ fn jump_shortcuts(start_x: Int) -> List[JumpShortcut]:
     # button face has visible breathing room around the letters —
     # matches the Turbo C/C++ "OK" / "Cancel" / "Help" buttons,
     # which are also rendered as " Label " on a green background.
+    if project:
+        labels.append(String(" Project "))
+        paths.append(project.value())
     labels.append(String(" Desktop "))
     if has_home:
         paths.append(home + String("/Desktop"))
@@ -101,12 +115,23 @@ struct DirBrowser(Movable):
     var selected: Int
     var scroll: Int
     var dirs_only: Bool
+    var project: Optional[String]
+    """Active project root, when one is open. Drives the optional
+    ``Project`` jump button. Set via ``set_project`` so
+    ``_jump_buttons`` can be rebuilt to match (the button table is
+    persistent, so growing/shrinking it has to be explicit)."""
     var _search_buf: String
     """Accumulated type-to-search keystrokes. Reset on every
     ``refresh`` (so navigating to a new dir starts fresh) and on
     timeout (when the user pauses long enough that a fresh letter
     is clearly a new search, not a continuation)."""
     var _search_last_ms: Int
+    var _jump_buttons: List[ShadowButton]
+    """Persistent jump-button row. ``ShadowButton.handle_mouse``
+    keeps a press latch on each entry, so the table outlives paint
+    cycles — ``paint_jump_buttons`` repositions each entry's
+    ``(x, y)`` to the current row, and ``handle_jump_click`` runs
+    every event through ``handle_mouse``."""
 
     fn __init__(out self, dirs_only: Bool = False):
         self.dir = String(".")
@@ -115,8 +140,39 @@ struct DirBrowser(Movable):
         self.selected = 0
         self.scroll = 0
         self.dirs_only = dirs_only
+        self.project = Optional[String]()
         self._search_buf = String("")
         self._search_last_ms = 0
+        # Build the persistent jump-button row. The labels are baked
+        # in here (matching ``jump_shortcuts``) so the press latch
+        # outlives a paint that re-derives positions; the *paths*
+        # come from ``jump_shortcuts`` per click since ``$HOME`` can
+        # change session-to-session.
+        self._jump_buttons = List[ShadowButton]()
+        self._rebuild_jump_buttons()
+
+    fn _rebuild_jump_buttons(mut self):
+        """Sync ``_jump_buttons`` to the current ``project``. Called
+        from ``__init__`` and ``set_project``; the button labels are
+        baked in once the row exists so the press-latch state
+        survives paints, but a project showing up / going away
+        changes the *count*, which the persistent table can't
+        absorb on its own."""
+        self._jump_buttons = List[ShadowButton]()
+        var labels = jump_shortcuts(0, self.project)
+        for i in range(len(labels)):
+            self._jump_buttons.append(
+                ShadowButton(labels[i].label, 0, 0),
+            )
+
+    fn set_project(mut self, project: Optional[String]):
+        """Switch the active project (or clear it). Triggers a rebuild
+        of the jump-button row so a ``Project`` entry appears /
+        disappears in lockstep — the host calls this when opening a
+        dialog to reflect whatever project the editor currently
+        owns."""
+        self.project = project
+        self._rebuild_jump_buttons()
 
     fn open(mut self, var start_dir: String):
         self.dir = start_dir^
@@ -188,48 +244,61 @@ struct DirBrowser(Movable):
         self.dir = path^
         self.refresh()
 
-    fn paint_jump_buttons(self, mut canvas: Canvas, row: Rect):
+    fn paint_jump_buttons(mut self, mut canvas: Canvas, row: Rect):
         """Paint the Desktop / Home / Root buttons across ``row``.
 
-        Delegates the visual to ``paint_shadow_button`` so every
-        Turbo Vision–style button in the codebase shares one
-        rendering path. The layout (which buttons, their order, and
-        their column positions) is owned here via
-        ``jump_shortcuts(row.a.x)``.
+        Repositions the persistent ``_jump_buttons`` table to ``row``
+        (the table's press-latch state outlives paint cycles, so we
+        ``move_to`` rather than re-allocate), then delegates the
+        visual to ``paint_shadow_button``. Held buttons paint flush
+        — ``ShadowButton.show_pressed()`` drives that — so the user
+        sees the press registered.
         """
         var face = Attr(BLACK, GREEN)
-        var buttons = jump_shortcuts(row.a.x)
-        for i in range(len(buttons)):
-            if buttons[i].x >= row.b.x:
+        var layout = jump_shortcuts(row.a.x, self.project)
+        for i in range(len(self._jump_buttons)):
+            if i >= len(layout):
                 break
+            if layout[i].x >= row.b.x:
+                break
+            self._jump_buttons[i].move_to(layout[i].x, row.a.y)
             paint_shadow_button(
-                canvas,
-                ShadowButton(buttons[i].label, buttons[i].x, row.a.y),
-                face, LIGHT_GRAY, row.b.x,
+                canvas, self._jump_buttons[i], face, LIGHT_GRAY, row.b.x,
             )
 
     fn handle_jump_click(mut self, event: Event, row: Rect) -> Bool:
-        """Map a left-click landing on a jump button (face *or*
-        shadow row, since users frequently miss-click downward) to a
-        ``jump_to`` call. Returns True iff a button was hit; the
-        host should treat that as a fully-consumed event."""
+        """Route ``event`` through each jump button's ``handle_mouse``
+        and run ``jump_to`` when one fires. Returns True iff the
+        event was consumed by the button row.
+
+        ``ShadowButton.handle_mouse`` runs the press / move / release
+        state machine — the press latches, drag-out reverts the
+        flush visual, release inside fires, release outside
+        cancels. Nothing about that lives here; the dispatcher just
+        turns FIRED into a ``jump_to`` call.
+        """
         if event.kind != EVENT_MOUSE:
             return False
-        if event.button != MOUSE_BUTTON_LEFT:
-            return False
-        if not event.pressed or event.motion:
-            return False
-        if event.pos.y < row.a.y or event.pos.y > row.a.y + 1:
-            return False
-        if event.pos.x < row.a.x or event.pos.x >= row.b.x:
-            return False
-        var buttons = jump_shortcuts(row.a.x)
-        for i in range(len(buttons)):
-            var label_w = len(buttons[i].label.as_bytes())
-            if buttons[i].x <= event.pos.x \
-                    and event.pos.x < buttons[i].x + label_w + 1:
-                self.jump_to(buttons[i].path)
-                return True
+        # Ensure the buttons' hit rects line up with the row before
+        # dispatching — the host may invoke ``handle_jump_click``
+        # without a fresh paint (e.g. a release event arriving
+        # between frames).
+        var layout = jump_shortcuts(row.a.x, self.project)
+        for i in range(len(self._jump_buttons)):
+            if i >= len(layout):
+                break
+            self._jump_buttons[i].move_to(layout[i].x, row.a.y)
+        for i in range(len(self._jump_buttons)):
+            if i >= len(layout):
+                break
+            if layout[i].x >= row.b.x:
+                break
+            var status = self._jump_buttons[i].handle_mouse(event)
+            if status == BUTTON_NONE:
+                continue
+            if status == BUTTON_FIRED:
+                self.jump_to(layout[i].path)
+            return True
         return False
 
     fn current_name(self) -> String:
@@ -362,12 +431,15 @@ struct DirBrowser(Movable):
         short.
         """
         # Turbo Vision file-dialog palette: cyan listing, white file
-        # names, yellow directory names. Selection inverts to a high-
-        # contrast bar — black on light-cyan when keyboard focus is
-        # here, light-gray on blue when it isn't, so an unfocused
+        # names, bright-yellow directory names. ``LIGHT_YELLOW`` (11)
+        # not plain ``YELLOW`` (3) — the latter renders as brown on
+        # most terminals and is hard to read against cyan; the bright
+        # variant matches the TV reference. Selection inverts to a
+        # high-contrast bar — black on light-cyan when keyboard focus
+        # is here, light-gray on blue when it isn't, so an unfocused
         # listing reads as inactive without disappearing.
         var bg = Attr(WHITE, CYAN)
-        var dir_entry_attr = Attr(YELLOW, CYAN)
+        var dir_entry_attr = Attr(LIGHT_YELLOW, CYAN)
         var sel_attr = (
             Attr(BLACK, LIGHT_CYAN) if focused
             else Attr(LIGHT_GRAY, BLUE)
