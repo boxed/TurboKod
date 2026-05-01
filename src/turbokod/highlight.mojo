@@ -20,6 +20,12 @@ from .colors import (
     Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_YELLOW,
     RED, WHITE, STYLE_NONE,
 )
+from .tm_grammar import Grammar, load_grammar_from_file
+from .tm_tokenizer import (
+    Frame, copy_stack, stack_eq,
+    tokenize_lines_from, tokenize_with_grammar,
+    tokenize_with_grammar_full,
+)
 
 
 @fieldwise_init
@@ -66,17 +72,339 @@ fn highlight_for_extension(
     module has no upward dependency — the editor simply passes
     ``self.buffer.lines``.
 
-    Mojo/Python keep their bespoke tokenizer because they need
-    docstring-aware triple-quote handling. Everything else routes through
-    the registry-driven ``_highlight_generic`` so adding a new language
-    is a one-liner in ``_lang_spec_for_ext``.
+    Three tiers:
+    1. Mojo/Python use a bespoke tokenizer because they need
+       docstring-aware triple-quote handling.
+    2. Languages with a TextMate grammar bundled under
+       ``src/turbokod/grammars/`` go through that runtime — same
+       data path VS Code / Sublime use.
+    3. Everything else falls back to ``_highlight_generic``, the
+       small per-language config registry. Crude but pure-Mojo and
+       always available.
+
+    The TextMate path can fail (grammar file missing, regex
+    compile error in the bundled JSON, runtime exception inside
+    the tokenizer); when that happens we silently fall through to
+    the generic tokenizer rather than letting an exception kill the
+    editor's render pass.
     """
     if ext == String("mojo") or ext == String("py") or ext == String("pyi"):
         return _highlight_mojo_python(lines)
+    var tm_opt = _try_textmate(ext, lines)
+    if tm_opt:
+        return tm_opt.value().copy()
     var spec_opt = _lang_spec_for_ext(ext)
     if spec_opt:
         return _highlight_generic(lines, spec_opt.value())
     return List[Highlight]()
+
+
+fn _grammar_path_for_ext(ext: String) -> String:
+    """Map extension → grammar JSON path, relative to project root.
+
+    Empty string means "no grammar for this extension." Adding a
+    new grammar is one entry here plus the JSON file under
+    ``src/turbokod/grammars/``.
+    """
+    if ext == String("rs"):
+        return String("src/turbokod/grammars/rust.tmLanguage.json")
+    if ext == String("json") or ext == String("jsonc"):
+        return String("src/turbokod/grammars/json.tmLanguage.json")
+    if ext == String("go"):
+        return String("src/turbokod/grammars/go.tmLanguage.json")
+    if ext == String("ts") or ext == String("tsx"):
+        return String("src/turbokod/grammars/typescript.tmLanguage.json")
+    if ext == String("js") or ext == String("jsx") \
+            or ext == String("mjs") or ext == String("cjs"):
+        return String("src/turbokod/grammars/javascript.tmLanguage.json")
+    if ext == String("rb"):
+        return String("src/turbokod/grammars/ruby.tmLanguage.json")
+    if ext == String("c") or ext == String("h") or ext == String("cc") \
+            or ext == String("cpp") or ext == String("cxx") \
+            or ext == String("hpp") or ext == String("hh") \
+            or ext == String("hxx"):
+        return String("src/turbokod/grammars/cpp.tmLanguage.json")
+    if ext == String("sh") or ext == String("bash"):
+        return String("src/turbokod/grammars/shell.tmLanguage.json")
+    if ext == String("yaml") or ext == String("yml"):
+        return String("src/turbokod/grammars/yaml.tmLanguage.json")
+    if ext == String("html") or ext == String("htm"):
+        return String("src/turbokod/grammars/html.tmLanguage.json")
+    if ext == String("css"):
+        return String("src/turbokod/grammars/css.tmLanguage.json")
+    # Markdown — the vscode grammar is dominated by ``while`` rules
+    # (block-context tracking) and external-grammar embedding (code
+    # fences). Without those, leaving it on the generic fallback
+    # actually produces nothing for ``.md`` today; keeping the
+    # grammar bundled but unmapped lets a follow-up wire it up once
+    # we grow ``while`` support.
+    return String("")
+
+
+struct GrammarRegistry(Movable):
+    """Process-wide loaded-grammar cache.
+
+    Multiple ``Editor``s share one ``GrammarRegistry``, so opening
+    a second ``.rs`` file after closing the first reuses the
+    already-compiled grammar instead of re-parsing the JSON and
+    re-allocating ~125 KB-12 MB of regex handles. The natural
+    owner is ``Desktop`` (the top-level UI controller); editor
+    methods that need it take it as a ``mut`` parameter.
+
+    Storage is parallel ``keys`` / ``grammars`` arrays. A linear
+    scan suffices — sessions rarely load more than a handful of
+    distinct languages, so the constant factor beats a hash map
+    plus the bookkeeping it'd require.
+
+    Not ``ImplicitlyCopyable``: ``Grammar`` isn't copyable (its
+    ``OnigRegex`` list aliases libonig handles). The struct is
+    intended to live in exactly one place per process; owners
+    that copy themselves should construct a fresh registry rather
+    than try to copy this one.
+    """
+    var keys: List[String]
+    var grammars: List[Grammar]
+
+    fn __init__(out self):
+        self.keys = List[String]()
+        self.grammars = List[Grammar]()
+
+    fn lookup_idx(self, key: String) -> Int:
+        """Index of the cached grammar for ``key``, or -1.
+        ``key`` is whatever the caller wants to key on — typically
+        the file extension (``"rs"``, ``"py"``).
+        """
+        for i in range(len(self.keys)):
+            if self.keys[i] == key:
+                return i
+        return -1
+
+
+struct HighlightCache(Movable):
+    """Per-``Editor`` incremental tokenizer state.
+
+    Holds the most recently produced highlights and the per-line
+    tokenizer stack at end-of-line so the next ``_refresh_highlights``
+    can re-tokenize starting from the dirty row instead of from the
+    top of the buffer. Lives on ``Editor`` (one per buffer);
+    ``GrammarRegistry`` carries the actual loaded grammars and is
+    owned at a higher layer (``Desktop``).
+
+    ``ext`` records the extension the cached state was produced
+    against — when it changes (file_path swap), the per-line state
+    is invalidated and the next refresh does a full retokenize.
+    """
+    var ext: String
+    var highlights: List[Highlight]
+    var post_stacks: List[List[Frame]]
+
+    fn __init__(out self):
+        self.ext = String("")
+        self.highlights = List[Highlight]()
+        self.post_stacks = List[List[Frame]]()
+
+    fn invalidate(mut self):
+        """Drop the per-line state — used when the line count or
+        extension shifts in a way the incremental path can't
+        reconcile."""
+        self.highlights = List[Highlight]()
+        self.post_stacks = List[List[Frame]]()
+
+
+fn highlight_for_extension_cached(
+    ext: String, lines: List[String],
+    mut registry: GrammarRegistry, mut cache: HighlightCache,
+) -> List[Highlight]:
+    """Non-incremental cached entry point. Always re-tokenizes the
+    whole buffer, but reuses the registry's grammars across calls.
+    Suitable for callers that don't track which row was edited.
+
+    For the incremental path used by ``Editor`` — re-tokenize only
+    from the dirty row down, with early-exit when the tokenizer
+    state rejoins the cached state — call
+    ``highlight_incremental`` instead.
+    """
+    return highlight_incremental(ext, lines, 0, registry, cache)
+
+
+fn highlight_incremental(
+    ext: String, lines: List[String], dirty_row: Int,
+    mut registry: GrammarRegistry, mut cache: HighlightCache,
+) -> List[Highlight]:
+    """Cached + incremental TextMate path.
+
+    ``dirty_row`` is a hint: rows ``< dirty_row`` are guaranteed
+    unchanged from the last call, so we can skip re-tokenizing
+    them and just fix up rows from ``dirty_row`` down. After
+    re-tokenizing those, we compare each line's post-stack against
+    the cached one — when they match, we know the tokenizer has
+    rejoined its previous trajectory and the rest of the buffer's
+    cached highlights are still valid, so we splice rather than
+    re-emit them.
+
+    Falls back to a full retokenize when the cache is cold, the
+    extension changed, the line count changed, or ``dirty_row``
+    is 0. Falls through to Mojo/Python and the generic tokenizer
+    on the same three signals as the non-incremental path.
+    """
+    if ext == String("mojo") or ext == String("py") or ext == String("pyi"):
+        return _highlight_mojo_python(lines)
+    var path = _grammar_path_for_ext(ext)
+    if len(path.as_bytes()) == 0:
+        return _fallback_for_extension(ext, lines)
+
+    # Grammar load — registry hit if the extension is already known,
+    # else cold load + register. The registry is process-shared so
+    # the next ``Editor`` for the same language reuses the same
+    # ``Grammar`` instance instead of re-parsing the JSON and
+    # re-allocating libonig handles.
+    var grammar_idx = registry.lookup_idx(ext)
+    if grammar_idx < 0:
+        try:
+            var g = load_grammar_from_file(path)
+            registry.keys.append(ext)
+            registry.grammars.append(g^)
+            grammar_idx = len(registry.keys) - 1
+        except:
+            return _fallback_for_extension(ext, lines)
+
+    # Per-Editor state: invalidate when the extension changes.
+    if cache.ext != ext:
+        cache.invalidate()
+        cache.ext = ext
+
+    # Decide whether we can incrementalize. Conditions for "yes":
+    #   * cache is warm: we already tokenized this extension before
+    #     and have ``post_stacks`` of the right length;
+    #   * dirty_row > 0 (else there's nothing to skip);
+    #   * dirty_row is in range.
+    # Anything else collapses to a full retokenize.
+    var n_lines = len(lines)
+    var can_incr = (dirty_row > 0
+                    and dirty_row <= n_lines
+                    and len(cache.post_stacks) == n_lines)
+    if not can_incr:
+        var hls = _full_retokenize(
+            registry.grammars[grammar_idx], cache, lines,
+        )
+        if len(hls) == 0 and _has_nonempty_line(lines):
+            return _fallback_for_extension(ext, lines)
+        return hls^
+
+    # Incremental path. Start state = post-state at end of line
+    # (dirty_row - 1), i.e. what dirty_row was tokenized against
+    # last time. The tokenizer itself stops as soon as state
+    # rejoins the cached trajectory and reports back via
+    # ``stable_row``.
+    var start_stack = cache.post_stacks[dirty_row - 1].copy()
+    var new_post = List[List[Frame]]()
+    var stable_row: Int = 0
+    var new_hls = tokenize_lines_from(
+        registry.grammars[grammar_idx], lines, dirty_row, start_stack,
+        cache.post_stacks, new_post, stable_row,
+    )
+
+    # Splice highlights:
+    #   1. Keep cached highlights with row < dirty_row.
+    #   2. Append re-tokenized highlights (rows ``[dirty_row,
+    #      stable_row)``).
+    #   3. Append cached highlights with row >= stable_row.
+    # ``new_hls`` already contains only rows up to ``stable_row``
+    # because that's where the tokenizer stopped.
+    var out = List[Highlight]()
+    for i in range(len(cache.highlights)):
+        if cache.highlights[i].row < dirty_row:
+            out.append(cache.highlights[i])
+    for i in range(len(new_hls)):
+        out.append(new_hls[i])
+    if stable_row < n_lines:
+        for i in range(len(cache.highlights)):
+            if cache.highlights[i].row >= stable_row:
+                out.append(cache.highlights[i])
+
+    # Update cached post_stacks: replace ``[dirty_row, stable_row)``
+    # with the new ones, keep cached entries below dirty_row and
+    # at-or-above stable_row.
+    var updated_stacks = List[List[Frame]]()
+    for i in range(dirty_row):
+        updated_stacks.append(cache.post_stacks[i].copy())
+    for k in range(len(new_post)):
+        updated_stacks.append(new_post[k].copy())
+    if stable_row < len(cache.post_stacks):
+        for i in range(stable_row, len(cache.post_stacks)):
+            updated_stacks.append(cache.post_stacks[i].copy())
+    cache.post_stacks = updated_stacks^
+    cache.highlights = out.copy()
+
+    if len(out) == 0 and _has_nonempty_line(lines):
+        return _fallback_for_extension(ext, lines)
+    return out^
+
+
+fn _full_retokenize(
+    grammar: Grammar, mut cache: HighlightCache, lines: List[String],
+) -> List[Highlight]:
+    """Re-tokenize ``lines`` from scratch, refreshing both
+    ``cache.highlights`` and ``cache.post_stacks``. Caller owns
+    the decision of whether to call us versus the incremental
+    path — we just do the work."""
+    var post = List[List[Frame]]()
+    var hls = tokenize_with_grammar_full(grammar, lines, post)
+    cache.highlights = hls.copy()
+    cache.post_stacks = post^
+    return hls^
+
+
+fn _fallback_for_extension(
+    ext: String, lines: List[String],
+) -> List[Highlight]:
+    """The "no TextMate grammar usable" branch shared by the
+    incremental + non-incremental cached entry points: defer to
+    the generic per-language tokenizer registry, then return
+    empty if even that doesn't cover the extension."""
+    var spec_opt = _lang_spec_for_ext(ext)
+    if spec_opt:
+        return _highlight_generic(lines, spec_opt.value())
+    return List[Highlight]()
+
+
+fn _try_textmate(
+    ext: String, lines: List[String],
+) -> Optional[List[Highlight]]:
+    """Load the matching TextMate grammar (if any) and tokenize.
+
+    Returns ``None`` to signal "fall back to the generic tokenizer"
+    on three conditions:
+
+    1. No bundled grammar for this extension.
+    2. Loading or tokenizing raised (malformed JSON, regex libonig
+       can't compile, etc.) — better degrade than crash the editor.
+    3. The grammar ran cleanly but emitted *zero* highlights against
+       non-empty input. That's the signal that the grammar relies on
+       a feature our runtime doesn't implement (typically ``while``
+       rules); the generic tokenizer is a better answer than blank.
+    """
+    var path = _grammar_path_for_ext(ext)
+    if len(path.as_bytes()) == 0:
+        return Optional[List[Highlight]]()
+    try:
+        var g = load_grammar_from_file(path)
+        var hls = tokenize_with_grammar(g, lines)
+        if len(hls) == 0 and _has_nonempty_line(lines):
+            return Optional[List[Highlight]]()
+        return Optional[List[Highlight]](hls^)
+    except:
+        return Optional[List[Highlight]]()
+
+
+fn _has_nonempty_line(lines: List[String]) -> Bool:
+    """Returns True if ``lines`` contains at least one non-empty
+    line. Used to disambiguate "grammar produced nothing" from
+    "input was empty so of course nothing was produced."""
+    for i in range(len(lines)):
+        if len(lines[i].as_bytes()) > 0:
+            return True
+    return False
 
 
 fn _highlight_mojo_python(lines: List[String]) -> List[Highlight]:

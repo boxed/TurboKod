@@ -42,11 +42,16 @@ from .events import (
 )
 from .clipboard import clipboard_copy
 from .config import TurbokodConfig, load_config, save_config
-from .file_io import basename, find_git_project, join_path, stat_file
+from std.ffi import external_call
+
+from .file_io import (
+    basename, find_git_project, join_path, stat_file, write_file,
+)
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Point, Rect
-from .highlight import DefinitionRequest, extension_of
+from .highlight import DefinitionRequest, GrammarRegistry, extension_of
+from .install_runner import InstallResult, InstallRunner
 from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
@@ -60,10 +65,15 @@ from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, which
 from .project import replace_in_project
 from .project_find import ProjectFind
+from .project_targets import (
+    ProjectTargets, RunTarget, load_project_targets,
+    resolved_cwd, resolved_program, save_project_targets,
+)
 from .prompt import Prompt
 from .quick_open import QuickOpen
+from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
-from .status import StatusBar
+from .status import StatusBar, StatusTab
 from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 
@@ -99,6 +109,7 @@ comptime PROJECT_FIND         = String("edit:project_find")
 comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
+comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
 # Debugger actions. ``DEBUG_START_OR_CONTINUE`` is a single F5-style
 # binding: starts the session if none is active, continues if stopped.
 comptime DEBUG_START_OR_CONTINUE = String("debug:start_or_continue")
@@ -111,6 +122,18 @@ comptime DEBUG_STOP              = String("debug:stop")
 comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
 comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
+# Project-target run/debug actions. ``TARGET_RUN`` (Cmd+R) launches
+# the active target's ``run_command`` as a captured subprocess;
+# ``TARGET_DEBUG`` (Cmd+D) launches the same target under DAP. Each
+# action stops the *other* mode for that target before starting, so
+# the user can flip between run and debug freely without leaking
+# child processes.
+comptime TARGET_RUN              = String("target:run")
+comptime TARGET_DEBUG            = String("target:debug")
+# Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
+# the active tab to that index. The dispatch parser walks the
+# prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
+comptime TARGET_SELECT_PREFIX    = String("target:select:")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
@@ -257,10 +280,27 @@ struct Desktop(Movable):
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
     var lsp_languages: List[String]
+    # Process-wide loaded-grammar cache. Editors share this rather
+    # than each owning their own per-file copy; closing a buffer
+    # and opening another one in the same language reuses the
+    # already-compiled grammar instead of re-parsing the JSON and
+    # re-allocating libonig handles. ``Desktop.paint`` flushes
+    # every editor's highlights against this registry before
+    # drawing.
+    var grammar_registry: GrammarRegistry
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
     var _lsp_install_prompted: List[String]
+    # Background ``sh -c <hint>`` runner for the LSP install prompt. One
+    # in-flight install at a time; subsequent prompts fall back to the
+    # clipboard-only path while ``install_runner`` is busy.
+    var install_runner: InstallRunner
+    # Language id of the install currently in flight. We remember it so
+    # that on success we can re-attempt to start the LSP for any open
+    # editor windows of that language without the user having to close
+    # and re-open the file.
+    var _install_lang: String
     # Debugger state. One ``DapManager`` per Desktop (single concurrent
     # session) — multi-session debugging would need a list keyed by
     # something (language? session id?), and we don't have a use case
@@ -301,6 +341,17 @@ struct Desktop(Movable):
     # editor window every paint so the bool is always the source of
     # truth, regardless of who created the editor.
     var config: TurbokodConfig
+    # Per-project run/debug targets, loaded from
+    # ``<project>/.turbokod/targets.json`` when ``_set_project`` runs.
+    # Empty (no targets) when no project is open. The active index
+    # carries through to the status bar's tab strip and to the
+    # ``TARGET_RUN`` / ``TARGET_DEBUG`` dispatch.
+    var targets: ProjectTargets
+    # Single-slot run-session for the active target. ``run_session.matches``
+    # tells us whether something is in flight for *this* target, so
+    # the tab strip can paint a ``●`` indicator and ``TARGET_RUN``
+    # can know whether to terminate before respawning.
+    var run_session: RunSession
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -327,7 +378,10 @@ struct Desktop(Movable):
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
         self.lsp_languages = List[String]()
+        self.grammar_registry = GrammarRegistry()
         self._lsp_install_prompted = List[String]()
+        self.install_runner = InstallRunner()
+        self._install_lang = String("")
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
@@ -342,6 +396,8 @@ struct Desktop(Movable):
         self._dap_watch_exprs = List[String]()
         self._dap_watch_values = List[String]()
         self.config = load_config()
+        self.targets = ProjectTargets()
+        self.run_session = RunSession()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -359,7 +415,10 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_QUICK_OPEN))
         self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
-        self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, EDITOR_REPLACE))
+        # Ctrl/Cmd+H for replace (matches VS Code). Ctrl+R is the
+        # run-target shortcut below, so the old Ctrl+R-for-replace
+        # binding had to move; H is the de-facto cross-editor default.
+        self._hotkeys.append(Hotkey(ctrl_key("h"), MOD_NONE, EDITOR_REPLACE))
         self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_FIND_NEXT))
         self._hotkeys.append(Hotkey(ctrl_key("l"), MOD_NONE, EDITOR_GOTO))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
@@ -431,6 +490,14 @@ struct Desktop(Movable):
         # works; arrow keys then scroll the stack list while the
         # pane is focused.
         self._hotkeys.append(Hotkey(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE))
+        # Cmd+R / Cmd+D — run / debug the active project target.
+        # On macOS terminals Cmd+letter is folded to MOD_CTRL by the
+        # terminal parser (see ``events.MOD_META``), so a single
+        # binding on ``ctrl_key`` covers both ⌘ and Ctrl. Registered
+        # last so they win the newest-first hotkey lookup against the
+        # earlier Ctrl-letter defaults.
+        self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, TARGET_RUN))
+        self._hotkeys.append(Hotkey(ctrl_key("d"), MOD_NONE, TARGET_DEBUG))
 
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
@@ -546,6 +613,16 @@ struct Desktop(Movable):
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
         self._apply_view_config()
+        # Flush deferred highlight refreshes for every editor that
+        # was edited since the last frame. ``flush_highlights`` is
+        # a no-op when the dirty flag is clear, so this is cheap on
+        # idle frames; on edited frames it does the actual TextMate
+        # tokenization against the shared ``grammar_registry``.
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.flush_highlights(
+                    self.grammar_registry,
+                )
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
@@ -556,12 +633,20 @@ struct Desktop(Movable):
         # Stamp the right-aligned shortcut text onto each menu item so it
         # picks up user-registered hotkey overrides automatically.
         self._refresh_shortcuts()
+        # Refresh the target-tab strip every frame so tab indicators
+        # (running, debugging, active) stay in sync with the actual
+        # session state — single source of truth for the painter.
+        self._refresh_target_tabs()
         canvas.fill(self.workspace_rect(screen), self.bg_pattern, self.bg_attr)
         self.windows.paint(canvas)
         self.file_tree.paint(canvas, screen)
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         self.menu_bar.paint(canvas, screen)
         self.status_bar.paint(canvas, screen)
+        # Non-modal install-progress popup. Sits between the workspace and
+        # the modal dialogs — visible while the user keeps editing, but
+        # dismissed by any modal that pops over the top.
+        self.install_runner.paint(canvas, screen)
         # Modal layers float above everything else. Only one is ever active
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.
@@ -872,6 +957,10 @@ struct Desktop(Movable):
                 self.menu_bar.open_idx = -1
             # Reset the tree-toggle label for the next project.
             self.menu_bar.menus[self._project_menu_idx].items[0].label = _SHOW_TREE_LABEL
+        # Drop the targets list and stop any in-flight run — the
+        # next project's targets get loaded fresh on ``_set_project``.
+        self.run_session.terminate()
+        self.targets = ProjectTargets()
 
     fn _set_project(mut self, path: String):
         # Resolve so a label like ``.`` becomes the actual directory name,
@@ -884,12 +973,21 @@ struct Desktop(Movable):
         if self._project_menu_idx < 0:
             var items = List[MenuItem]()
             items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
+            items.append(MenuItem(
+                String("Configure targets..."), PROJECT_CONFIG_TARGETS,
+            ))
+            items.append(MenuItem.separator())
             items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
             self.menu_bar.add(Menu(label, items^, right_aligned=True))
             self._project_menu_idx = len(self.menu_bar.menus) - 1
         else:
             self.menu_bar.menus[self._project_menu_idx].label = label
             self.menu_bar.menus[self._project_menu_idx].visible = True
+        # Load the per-project target list now that we know the root.
+        # Empty/missing config yields an empty ``targets`` list, which
+        # the status bar paints as no tabs at all — Cmd+R / Cmd+D
+        # silently no-op until the user authors ``.turbokod/targets.json``.
+        self.targets = load_project_targets(canonical)
 
     fn _toggle_file_tree(mut self):
         if self._project_menu_idx < 0 or not self.project:
@@ -994,6 +1092,14 @@ struct Desktop(Movable):
             return self.dispatch_action(result.action.value(), screen)
         if result.consumed:
             return Optional[String]()
+        # Status-bar tab strip sits on the bottom row. Check it before
+        # the workspace so a click on a tab doesn't also fall through
+        # to whatever editor is rendered above it.
+        var tab_idx = self.status_bar.handle_mouse(event, screen)
+        if tab_idx >= 0:
+            return self.dispatch_action(
+                TARGET_SELECT_PREFIX + String(tab_idx), screen,
+            )
         if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
             return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
@@ -1106,6 +1212,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_TREE_ACTION:
             self._toggle_file_tree()
+            return Optional[String]()
+        if action == PROJECT_CONFIG_TARGETS:
+            self._open_targets_config(screen)
             return Optional[String]()
         if action == EDITOR_NEW:
             self.new_file(screen)
@@ -1311,6 +1420,20 @@ struct Desktop(Movable):
             self.file_tree.focused = True
             self.debug_pane.focused = False
             return Optional[String]()
+        if action == TARGET_RUN:
+            self._target_run()
+            return Optional[String]()
+        if action == TARGET_DEBUG:
+            self._target_debug()
+            return Optional[String]()
+        if _starts_with(action, TARGET_SELECT_PREFIX):
+            var idx = _parse_int(
+                action, len(TARGET_SELECT_PREFIX.as_bytes()),
+            )
+            if idx >= 0 and self.targets.set_active_index(idx):
+                if self.project:
+                    _ = save_project_targets(self.project.value(), self.targets)
+            return Optional[String]()
         return Optional[String](action)
 
     # --- LSP tick ---------------------------------------------------------
@@ -1343,7 +1466,68 @@ struct Desktop(Movable):
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
                 )
+        # Drive the background LSP-install runner from the same per-frame
+        # tick. When the install completes we either flash a status-bar
+        # success or open the captured output as a new editor window.
+        var maybe_install = self.install_runner.tick()
+        if maybe_install:
+            self._on_install_complete(maybe_install.value(), screen)
         self._refresh_lsp_status()
+
+    fn _on_install_complete(
+        mut self, result: InstallResult, screen: Rect,
+    ):
+        """React to an install run finishing. Success: flash the status
+        bar and re-attempt LSP startup for any open editors of that
+        language so the user gets autocomplete without having to close
+        and re-open the file. Failure: pop the captured output into a
+        new editor window so the user can read what went wrong."""
+        var lang = self._install_lang
+        self._install_lang = String("")
+        if result.ok():
+            self.status_bar.set_message(
+                String("Installed ") + result.label,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            self._retry_lsp_for_language(lang)
+        else:
+            var title = String("Install failed: ") + result.label \
+                + String(" (exit ") + String(result.exit_code()) + String(")")
+            var workspace = self.workspace_rect(screen)
+            var rect = self._default_window_rect(workspace)
+            var was_max = self._frontmost_maximized()
+            var body = String("$ ") + result.command + String("\n\n") \
+                + result.output
+            self.windows.add(Window.editor_window(title^, rect, body^))
+            self._open_count += 1
+            if was_max:
+                var idx = len(self.windows.windows) - 1
+                self.windows.windows[idx].toggle_maximize(workspace)
+            self.status_bar.set_message(
+                String("Install failed (exit ")
+                    + String(result.exit_code()) + String(") — see new window"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _retry_lsp_for_language(mut self, lang: String):
+        """After a successful install, re-attempt LSP startup for any
+        editors whose language matches ``lang``. Cheap: ``open_file`` and
+        ``_maybe_lsp_open`` both go through ``_ensure_lsp_for_extension``
+        and stay no-ops if the binary is still missing.
+        """
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var path = self.windows.windows[i].editor.file_path
+            if len(path.as_bytes()) == 0:
+                continue
+            var ext = extension_of(path)
+            var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+            if spec_idx < 0:
+                continue
+            if self.lsp_specs[spec_idx].language_id != lang:
+                continue
+            self._maybe_lsp_open(i)
 
     fn _dispatch_definition_request(
         mut self, win_idx: Int, var req: DefinitionRequest,
@@ -1386,7 +1570,7 @@ struct Desktop(Movable):
         if not ok:
             self.status_bar.set_message(
                 String("LSP: still starting up — try again"),
-                Attr(YELLOW, LIGHT_GRAY),
+                Attr(BLACK, LIGHT_GRAY),
             )
 
     fn _refresh_lsp_status(mut self):
@@ -1556,14 +1740,26 @@ struct Desktop(Movable):
                     self._dap_exec_line
             else:
                 self.windows.windows[i].editor.exec_line = -1
+        # Drive the run-target session forward. Sits inside dap_tick
+        # rather than its own host call because there's exactly one
+        # per-frame integration point and adding a second one would
+        # force every example to remember to call it.
+        self.target_tick()
         # Pane visibility + status. Pane is shown the entire time the
         # session is alive (initialize → terminated) so the user sees
         # the spawn happen in real time. ``set_status`` mirrors the
         # right-aligned status-bar indicator so the same words are
         # always visible whether the user is looking up or down.
-        self.debug_pane.visible = self.dap.is_active()
-        if self.debug_pane.visible:
+        # Keep the pane open while a run-session is active too — its
+        # output is the only place the user sees stdout/stderr.
+        self.debug_pane.visible = self.dap.is_active() \
+            or self.run_session.is_active()
+        if self.dap.is_active():
             self.debug_pane.set_status(self.dap.status_summary())
+        elif self.run_session.is_active():
+            self.debug_pane.set_status(
+                String("running ") + self.run_session.target_name,
+            )
         elif self.dap.is_failed():
             # Surface the failure once even though we hide the pane —
             # status-bar message is more discoverable than nothing.
@@ -1699,7 +1895,7 @@ struct Desktop(Movable):
             if self.dap.is_failed():
                 attr = Attr(LIGHT_RED, LIGHT_GRAY)
             elif self.dap.is_stopped():
-                attr = Attr(YELLOW, LIGHT_GRAY)
+                attr = Attr(BLACK, LIGHT_GRAY)
             self.status_bar.set_message(self.dap.status_summary(), attr)
 
     fn _debug_open_condition_prompt(mut self):
@@ -1784,14 +1980,14 @@ struct Desktop(Movable):
         if idx < 0:
             self.status_bar.set_message(
                 String("debug: focus a source file first"),
-                Attr(YELLOW, LIGHT_GRAY),
+                Attr(BLACK, LIGHT_GRAY),
             )
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("debug: save the file first"),
-                Attr(YELLOW, LIGHT_GRAY),
+                Attr(BLACK, LIGHT_GRAY),
             )
             return
         var ext = extension_of(path)
@@ -1838,6 +2034,243 @@ struct Desktop(Movable):
                 line = line + self.dap.spawn_argv[k]
             self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
             self.debug_pane.visible = True
+
+    # --- target run / debug ----------------------------------------------
+
+    fn _open_targets_config(mut self, screen: Rect):
+        """Open ``<project>/.turbokod/targets.json`` in an editor.
+
+        Creates the directory + a starter config when missing so the
+        user lands on a working scaffold rather than an empty buffer.
+        Subsequent edits + Ctrl+S round-trip back through
+        ``_maybe_reload_targets`` so the tab strip refreshes the
+        moment the user saves.
+        """
+        if not self.project:
+            self.status_bar.set_message(
+                String("Configure targets: open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var root = self.project.value()
+        var dir = join_path(root, String(".turbokod"))
+        var path = join_path(dir, String("targets.json"))
+        if not stat_file(path).ok:
+            # Best-effort mkdir; ignore EEXIST. ``write_file`` below
+            # will fail visibly if the directory creation actually
+            # didn't take.
+            var c_dir = dir + String("\0")
+            _ = external_call["mkdir", Int32](
+                c_dir.unsafe_ptr(), Int32(0o755),
+            )
+            # Seed with a small comment-free example. Using JSON
+            # (not commented) so ``parse_json`` accepts the file
+            # straight out of the box.
+            var stub = String(
+                "{\n"
+                + "  \"active\": \"example\",\n"
+                + "  \"targets\": [\n"
+                + "    {\n"
+                + "      \"name\": \"example\",\n"
+                + "      \"run\": \"echo hello\",\n"
+                + "      \"debug\": {\n"
+                + "        \"language\": \"python\",\n"
+                + "        \"program\": \"main.py\",\n"
+                + "        \"args\": []\n"
+                + "      }\n"
+                + "    }\n"
+                + "  ]\n"
+                + "}\n"
+            )
+            _ = write_file(path, stub)
+            # Pick up the seed immediately so the bar reflects the
+            # new file even before the user has saved any edits.
+            self.targets = load_project_targets(root)
+        try:
+            self.open_file(path, screen)
+        except:
+            self.status_bar.set_message(
+                String("Configure targets: failed to open ") + path,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _target_run(mut self):
+        """Cmd+R: spawn the active target's ``run_command``.
+
+        If a debug session is running for the same target, terminate
+        it first; if a run is already in flight (same or different
+        target), terminate that too. The user's mental model is "this
+        tab now means a run" — leaving the previous shape alive would
+        make Cmd+R + Cmd+D + Cmd+R produce two children for one tab.
+        """
+        if not self.targets.has_active():
+            self.status_bar.set_message(
+                String("run: no targets defined — author .turbokod/targets.json"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        if not self.project:
+            self.status_bar.set_message(
+                String("run: open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var target = self.targets.targets[self.targets.active]
+        if len(target.run_command.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("run: target '") + target.name
+                    + String("' has no run command"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        # Stop any debug session — running and debugging the same
+        # target are mutually exclusive by design (cmd+r kills debug,
+        # cmd+d kills run).
+        if self.dap.is_active():
+            self.dap.shutdown()
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+        # Stop any prior run, regardless of which target it was for.
+        self.run_session.terminate()
+        self.debug_pane.clear()
+        self.debug_pane.visible = True
+        self.debug_pane.append_output(
+            String("$ ") + target.run_command, UInt8(2),  # PANE_OUT_CONSOLE
+        )
+        var cwd = resolved_cwd(self.project.value(), target.cwd)
+        try:
+            self.run_session.start(
+                String(target.name), String(target.run_command), cwd,
+            )
+            self.status_bar.set_message(
+                String("running ") + target.name + String("…"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except e:
+            self.status_bar.set_message(
+                String("run: spawn failed — ") + String(e),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _target_debug(mut self):
+        """Cmd+D: launch the active target under the DAP adapter for
+        its ``debug_language``.
+
+        Stops any in-flight run for the same tab first (same reason
+        Cmd+R stops debug). Reuses the existing DAP plumbing — just
+        a different program / args / cwd seed.
+        """
+        if not self.targets.has_active():
+            self.status_bar.set_message(
+                String("debug: no targets defined — author .turbokod/targets.json"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        if not self.project:
+            self.status_bar.set_message(
+                String("debug: open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var target = self.targets.targets[self.targets.active]
+        if len(target.debug_language.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: target '") + target.name
+                    + String("' has no debug config"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        if len(target.debug_program.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: target '") + target.name
+                    + String("' has no debug program"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var deb_idx = find_debugger_for_language(
+            self.dap_specs, target.debug_language,
+        )
+        if deb_idx < 0:
+            self.status_bar.set_message(
+                String("debug: no adapter for language '")
+                    + target.debug_language + String("'"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        # Stop any in-flight run for this target — the user just
+        # asked for a debug session of the same thing.
+        self.run_session.terminate()
+        # Tear down any prior debug session before starting a new one.
+        if self.dap.is_active():
+            self.dap.shutdown()
+        if self.dap.is_failed() or self.dap.is_terminated():
+            self.dap.reset_for_restart()
+        var cwd = resolved_cwd(self.project.value(), target.cwd)
+        var program = resolved_program(
+            self.project.value(), target.debug_program,
+        )
+        var args = target.debug_args.copy()
+        self.dap.start(self.dap_specs[deb_idx], program, cwd, args^)
+        self.debug_pane.clear()
+        if len(self.dap.spawn_argv) > 0:
+            var line = String("$ ")
+            for k in range(len(self.dap.spawn_argv)):
+                if k > 0:
+                    line = line + String(" ")
+                line = line + self.dap.spawn_argv[k]
+            self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
+        self.debug_pane.visible = True
+        self.status_bar.set_message(
+            String("debugging ") + target.name + String("…"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
+    fn target_tick(mut self):
+        """Drain the run session's output into the debug pane and
+        reap on exit. Called once per frame by the host (paired with
+        ``lsp_tick`` / ``dap_tick``).
+
+        Cheap when no run is in flight — early-out on the first line.
+        """
+        if not self.run_session.is_active():
+            return
+        var out = drain_run_output(self.run_session)
+        if len(out.stdout.as_bytes()) > 0:
+            self.debug_pane.append_output(out.stdout, UInt8(0))  # PANE_OUT_STDOUT
+        if len(out.stderr.as_bytes()) > 0:
+            self.debug_pane.append_output(out.stderr, UInt8(1))  # PANE_OUT_STDERR
+        if poll_run_exit(self.run_session):
+            var name = self.run_session.target_name
+            var code = self.run_session.exit_code
+            self.run_session.terminate()
+            self.debug_pane.append_output(
+                String("[") + name + String(" exited with ")
+                    + String(code) + String("]"),
+                UInt8(2),  # PANE_OUT_CONSOLE
+            )
+            var attr = Attr(BLACK, LIGHT_GRAY) if code == 0 \
+                else Attr(LIGHT_RED, LIGHT_GRAY)
+            self.status_bar.set_message(
+                name + String(" exited (") + String(code) + String(")"),
+                attr,
+            )
+
+    fn _refresh_target_tabs(mut self):
+        """Push the current target list + active selection into the
+        status bar so the tabs render with up-to-date state. Called
+        every paint — cheap (one short list)."""
+        var tabs = List[StatusTab]()
+        for i in range(len(self.targets.targets)):
+            var t = self.targets.targets[i]
+            var running = self.run_session.matches(t.name)
+            var debugging = (
+                self.dap.is_active()
+                and self.dap.language_id == t.debug_language
+                and len(t.debug_language.as_bytes()) > 0
+                and self.targets.active == i
+            )
+            tabs.append(StatusTab(t.name, running, debugging))
+        self.status_bar.set_tabs(tabs^, self.targets.active)
 
     fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
         """Focus the window for ``target.path`` (opening it if needed) and
@@ -1893,11 +2326,29 @@ struct Desktop(Movable):
         if has_path:
             try:
                 _ = self.windows.windows[idx].editor.save()
+                # If the user just saved the targets file, reload so
+                # the tab strip reflects their edit on the next frame
+                # without needing to close/reopen the project.
+                # Copy the path out before calling the reload helper —
+                # passing the field directly would alias the borrowed
+                # ``self`` (Mojo's exclusivity check rejects the call).
+                var saved_path = self.windows.windows[idx].editor.file_path
+                self._maybe_reload_targets(saved_path)
             except:
                 pass
             return
         # No backing file — escalate to Save As.
         self._open_save_as_dialog()
+
+    fn _maybe_reload_targets(mut self, saved_path: String):
+        if not self.project:
+            return
+        var expected = join_path(
+            join_path(self.project.value(), String(".turbokod")),
+            String("targets.json"),
+        )
+        if saved_path == expected:
+            self.targets = load_project_targets(self.project.value())
 
     fn _open_symbol_pick(mut self):
         """Open the Go-to-Symbol picker for the focused editor and kick
@@ -1925,7 +2376,7 @@ struct Desktop(Movable):
         if not self.lsp_managers[lsp_idx].is_ready():
             self.status_bar.set_message(
                 String("LSP: still starting up — try again"),
-                Attr(YELLOW, LIGHT_GRAY),
+                Attr(BLACK, LIGHT_GRAY),
             )
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
@@ -1965,13 +2416,13 @@ struct Desktop(Movable):
                     )
             return Optional[String]()
         if pa == _PA_LSP_INSTALL:
-            # Yes → copy the install command to the clipboard and surface
-            # it in the status bar so the user can paste-and-run in their
-            # shell. We deliberately do NOT spawn the install ourselves:
-            # package managers vary widely (sudo, network, multi-minute
-            # builds, interactive prompts) and silently running them from
-            # the editor would be a footgun. ``_pending_arg`` carries the
-            # language id for the spec lookup.
+            # Yes → run the install command as ``sh -c <hint>`` and show
+            # a non-modal progress popup. The clipboard copy is preserved
+            # as a fallback for cases that genuinely need a real shell
+            # (interactive sudo, password prompts, anything that wants a
+            # TTY) — those will fail in our non-TTY child and the user
+            # can paste from the clipboard into their own terminal.
+            # ``_pending_arg`` carries the language id for the spec lookup.
             var lang = self._pending_arg
             self._pending_arg = String("")
             var tb = text.as_bytes()
@@ -1985,11 +2436,35 @@ struct Desktop(Movable):
                 if spec_idx >= 0:
                     var hint = self.lsp_specs[spec_idx].install_hint
                     clipboard_copy(hint)
-                    self.status_bar.set_message(
-                        String("Run: ") + hint
-                            + String("  (copied to clipboard)"),
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    if self.install_runner.is_active():
+                        # Another install is already in flight — fall back
+                        # to clipboard-only and ask the user to run this
+                        # one themselves.
+                        self.status_bar.set_message(
+                            String("Install busy; copied to clipboard: ")
+                                + hint,
+                            Attr(BLACK, LIGHT_GRAY),
+                        )
+                    else:
+                        try:
+                            self.install_runner.start(
+                                String(lang), String(hint),
+                            )
+                            self._install_lang = lang
+                            self.status_bar.set_message(
+                                String("Installing ") + lang
+                                    + String("…  (also copied to clipboard)"),
+                                Attr(BLACK, LIGHT_GRAY),
+                            )
+                        except:
+                            # Spawn failed (e.g. ``sh`` missing) — fall
+                            # back to the original copy-and-tell flow so
+                            # the user can run it manually.
+                            self.status_bar.set_message(
+                                String("Run: ") + hint
+                                    + String("  (copied to clipboard)"),
+                                Attr(BLACK, LIGHT_GRAY),
+                            )
             return Optional[String]()
         if pa == EDITOR_GOTO:
             var idx = self._focused_editor_idx()
@@ -2161,7 +2636,7 @@ fn _refresh_status_for(
     if m.is_initializing():
         sb.set_message(
             prefix + String("starting..."),
-            Attr(YELLOW, LIGHT_GRAY),
+            Attr(BLACK, LIGHT_GRAY),
         )
         return
     if m.is_ready():

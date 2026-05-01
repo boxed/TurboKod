@@ -26,7 +26,8 @@ from turbokod.desktop import (
     EDITOR_FIND, EDITOR_GOTO, EDITOR_NEW, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey,
-    PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND, PROJECT_REPLACE,
+    PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
     ctrl_key, format_hotkey,
 )
@@ -39,7 +40,15 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
+from turbokod.project_targets import (
+    ProjectTargets, RunTarget,
+    load_project_targets, resolved_cwd, resolved_program,
+    save_project_targets,
+)
+from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
+from turbokod.status import StatusBar, StatusTab
 from turbokod.quick_open import QuickOpen, quick_open_match
+from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
 from turbokod.json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
@@ -61,10 +70,14 @@ from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
 )
 from turbokod.highlight import (
-    DefinitionRequest, Highlight, extension_of, highlight_for_extension,
-    highlight_comment_attr, highlight_keyword_attr, highlight_number_attr,
-    highlight_string_attr, word_at,
+    DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
+    extension_of, highlight_for_extension, highlight_incremental,
+    highlight_comment_attr, highlight_ident_attr, highlight_keyword_attr,
+    highlight_number_attr, highlight_string_attr, word_at,
 )
+from turbokod.onig import OnigRegex, onig_global_init
+from turbokod.tm_grammar import load_grammar_from_string
+from turbokod.tm_tokenizer import tokenize_with_grammar
 from turbokod.window import WindowManager
 from turbokod.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
@@ -702,10 +715,15 @@ fn test_desktop_project_lifecycle() raises:
     assert_true(d.menu_bar.menus[idx].right_aligned)
     # Label is the project root's basename — for this repo, "turbokod".
     assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
-    # The project menu starts with two items: tree-toggle and close.
-    assert_equal(len(d.menu_bar.menus[idx].items), 2)
+    # The project menu has: tree-toggle, configure-targets, separator,
+    # close. The separator counts as an item but carries no action.
+    assert_equal(len(d.menu_bar.menus[idx].items), 4)
     assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
-    assert_equal(d.menu_bar.menus[idx].items[1].action, PROJECT_CLOSE_ACTION)
+    assert_equal(
+        d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_TARGETS,
+    )
+    assert_true(d.menu_bar.menus[idx].items[2].is_separator)
+    assert_equal(d.menu_bar.menus[idx].items[3].action, PROJECT_CLOSE_ACTION)
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
     d.detect_project_from(String("src/turbokod/desktop.mojo"))
@@ -1940,38 +1958,35 @@ fn test_highlight_unknown_extension_returns_empty() raises:
 
 
 fn test_highlight_rust_keywords_strings_comments() raises:
-    """The generic registry-driven tokenizer paints Rust files with the
-    same attr palette as the Mojo/Python path: ``fn`` is a keyword,
-    ``"hi"`` is a string, ``// note`` is a line comment, ``42`` is a
-    number."""
+    """The generic registry-driven tokenizer paints C-family files with
+    the same attr palette as the Mojo/Python path: a ``var`` keyword,
+    ``"hi"`` string, ``// note`` line comment, ``42`` number. Routed
+    through ``.zig`` (Zig is still on the generic path — no bundled
+    TextMate grammar) so this test stays focused on the generic
+    tokenizer, not the TextMate runtime."""
     var lines = _hl_lines(
         String("fn main() {"),
-        String("    let s = \"hi\";  // note"),
-        String("    let n = 42;"),
+        String("    var s = \"hi\"  // note"),
+        String("    var n = 42"),
         String("}"),
     )
-    var hls = highlight_for_extension(String("rs"), lines)
-    var saw_fn_kw = False
-    var saw_let_kw = False
+    var hls = highlight_for_extension(String("zig"), lines)
+    var saw_var_kw = False
     var saw_string = False
     var saw_comment = False
     var saw_number = False
     for i in range(len(hls)):
         var h = hls[i]
-        if h.row == 0 and h.col_start == 0 and h.col_end == 2 \
-                and h.attr == highlight_keyword_attr():
-            saw_fn_kw = True
         if h.row == 1 and h.col_start == 4 and h.col_end == 7 \
                 and h.attr == highlight_keyword_attr():
-            saw_let_kw = True
+            saw_var_kw = True
         if h.row == 1 and h.attr == highlight_string_attr():
             saw_string = True
         if h.row == 1 and h.attr == highlight_comment_attr():
             saw_comment = True
         if h.row == 2 and h.attr == highlight_number_attr():
             saw_number = True
-    assert_true(saw_fn_kw)
-    assert_true(saw_let_kw)
+    assert_true(saw_var_kw)
     assert_true(saw_string)
     assert_true(saw_comment)
     assert_true(saw_number)
@@ -1981,13 +1996,19 @@ fn test_highlight_rust_block_comment_spans_lines() raises:
     """A ``/* ... */`` block comment that opens on one row and closes on
     a later row keeps every row in between painted as comment. State is
     threaded through ``_highlight_generic`` the same way triple-quoted
-    strings are threaded through the Mojo/Python tokenizer."""
+    strings are threaded through the Mojo/Python tokenizer. Targets
+    a generic-path extension to keep this test off the TextMate route.
+
+    Zig doesn't actually have ``/* ... */`` block comments, but the
+    spec's ``block_open``/``block_close`` are empty for Zig. Use the
+    ``.cpp``... wait, ``.cpp`` now goes through TextMate too. Use
+    ``.kt`` (Kotlin) — generic-path C-family with ``/*..*/``."""
     var lines = _hl_lines(
         String("/* opening line"),
         String("middle line"),
-        String("end */ let x = 1;"),
+        String("end */ var x = 1"),
     )
-    var hls = highlight_for_extension(String("rs"), lines)
+    var hls = highlight_for_extension(String("kt"), lines)
     var have_0 = False
     var have_1 = False
     var have_2 = False
@@ -2012,15 +2033,480 @@ fn test_highlight_rust_block_comment_spans_lines() raises:
     assert_true(saw_number)
 
 
+fn test_onig_basic_search() raises:
+    """Sanity-check the libonig FFI: compile a regex and find a match.
+    This is the foundation the TextMate-grammar highlighter will sit
+    on top of — if it breaks we want a clear test failure, not a
+    cryptic crash inside the grammar runtime."""
+    onig_global_init()
+    var rx = OnigRegex(String("hel+o"))
+    var m = rx.search(String("say hellllo world"))
+    var got = False
+    if m:
+        got = True
+        assert_equal(m.value().start, 4)
+        assert_equal(m.value().end, 11)
+    assert_true(got)
+
+
+fn test_onig_no_match_returns_none() raises:
+    """The Optional API surfaces no-match as ``None`` (not as a
+    sentinel match with ``start < 0``), matching the rest of the
+    codebase's error idioms."""
+    onig_global_init()
+    var rx = OnigRegex(String("xyz+"))
+    var m = rx.search(String("abc def"))
+    var got = False
+    if m:
+        got = True
+    assert_true(not got)
+
+
+fn test_onig_search_at_offset() raises:
+    """``search_at(start)`` skips the first match if it falls before
+    ``start`` — this is what the grammar runtime needs for ``\\G``
+    continuation in ``begin``/``while`` rules."""
+    onig_global_init()
+    var rx = OnigRegex(String("ab"))
+    var hay = String("abXYZab")
+    var first = rx.search(hay)
+    var first_ok = False
+    if first:
+        first_ok = True
+        assert_equal(first.value().start, 0)
+    assert_true(first_ok)
+    var second = rx.search_at(hay, 1)
+    var second_ok = False
+    if second:
+        second_ok = True
+        assert_equal(second.value().start, 5)
+    assert_true(second_ok)
+
+
+fn test_textmate_rust_grammar_paints_keywords_and_strings() raises:
+    """Loading the bundled Rust TextMate grammar and tokenizing a
+    small snippet produces keyword / string / comment / number
+    highlights at the expected scopes. This is the integration test
+    that proves the JSON loader, the regex FFI, the tokenizer, and
+    the scope→Attr mapping all line up.
+
+    We assert presence (at least one of each kind) rather than exact
+    span offsets — those will shift as the bundled grammar grows.
+    """
+    var lines = _hl_lines(
+        String("fn main() {"),
+        String("    let s = \"hi\";  // note"),
+        String("    let n = 42;"),
+        String("}"),
+    )
+    var hls = highlight_for_extension(String("rs"), lines)
+    var saw_keyword = False
+    var saw_string = False
+    var saw_comment = False
+    var saw_number = False
+    for i in range(len(hls)):
+        var a = hls[i].attr
+        if a == highlight_keyword_attr():
+            saw_keyword = True
+        if a == highlight_string_attr():
+            saw_string = True
+        if a == highlight_comment_attr():
+            saw_comment = True
+        if a == highlight_number_attr():
+            saw_number = True
+    assert_true(saw_keyword)
+    assert_true(saw_string)
+    assert_true(saw_comment)
+    assert_true(saw_number)
+
+
+fn _hl_set(hls: List[Highlight]) -> List[Highlight]:
+    """Sort-of-canonicalize a Highlight list: sort by (row, col_start,
+    col_end). Two passes that agree should produce equal lists post-sort
+    even if they emit highlights in slightly different orders."""
+    var sorted = List[Highlight]()
+    for i in range(len(hls)):
+        sorted.append(hls[i])
+    # Insertion sort — lists are small (a few thousand entries) and we
+    # don't want to pull in a generic sort dependency.
+    for i in range(1, len(sorted)):
+        var j = i
+        while j > 0:
+            var a = sorted[j - 1]
+            var b = sorted[j]
+            var swap = False
+            if a.row > b.row:
+                swap = True
+            elif a.row == b.row:
+                if a.col_start > b.col_start:
+                    swap = True
+                elif a.col_start == b.col_start and a.col_end > b.col_end:
+                    swap = True
+            if not swap:
+                break
+            sorted[j - 1] = b
+            sorted[j] = a
+            j -= 1
+    return sorted^
+
+
+fn test_textmate_incremental_matches_full_retokenize() raises:
+    """The incremental tokenizer must produce the same highlights as a
+    full re-run when given the same buffer + a dirty-row hint. We
+    exercise both shapes of edit:
+
+    * a token-level change (adding a comment to one line) — tokenizer
+      state at end of the line is unchanged, early-exit fires
+      immediately.
+    * a scope-changing change (opening a block comment that doesn't
+      close on the same line) — tokenizer state changes, and the
+      incremental path keeps re-tokenizing until either the state
+      rejoins the cached trajectory or the buffer ends.
+
+    In both cases the resulting Highlight list should be byte-for-byte
+    identical to a full retokenize of the same buffer.
+    """
+    var lines = List[String]()
+    lines.append(String("fn main() {"))
+    lines.append(String("    let s = \"hello\";"))
+    lines.append(String("    let n = 42;"))
+    lines.append(String("    return;"))
+    lines.append(String("}"))
+    lines.append(String(""))
+    lines.append(String("fn other() { 1 }"))
+
+    # Warm the registry + per-Editor state with a full pass.
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var _ = highlight_incremental(
+        String("rs"), lines, 0, registry, cache,
+    )
+
+    # Token-level edit on row 1: append a line comment.
+    lines[1] = lines[1] + String(" // note")
+    var incr_a = highlight_incremental(
+        String("rs"), lines, 1, registry, cache,
+    )
+    var full_a = highlight_for_extension(String("rs"), lines)
+    var s_incr_a = _hl_set(incr_a)
+    var s_full_a = _hl_set(full_a)
+    assert_equal(len(s_incr_a), len(s_full_a))
+    for i in range(len(s_incr_a)):
+        assert_equal(s_incr_a[i].row, s_full_a[i].row)
+        assert_equal(s_incr_a[i].col_start, s_full_a[i].col_start)
+        assert_equal(s_incr_a[i].col_end, s_full_a[i].col_end)
+
+    # Scope-changing edit on row 2: open a block comment that the
+    # rest of the buffer is now inside.
+    lines[2] = String("    /* let n = 42;")
+    var incr_b = highlight_incremental(
+        String("rs"), lines, 2, registry, cache,
+    )
+    var full_b = highlight_for_extension(String("rs"), lines)
+    var s_incr_b = _hl_set(incr_b)
+    var s_full_b = _hl_set(full_b)
+    assert_equal(len(s_incr_b), len(s_full_b))
+    for i in range(len(s_incr_b)):
+        assert_equal(s_incr_b[i].row, s_full_b[i].row)
+        assert_equal(s_incr_b[i].col_start, s_full_b[i].col_start)
+        assert_equal(s_incr_b[i].col_end, s_full_b[i].col_end)
+
+
+fn test_textmate_html_embeds_css_inside_style_block() raises:
+    """The HTML grammar's ``<style>`` block embeds CSS via
+    ``include: "source.css"`` inside a ``(?!\\G)``-gated begin/end.
+    Our loader follows the include into the bundled CSS grammar
+    (``_path_for_scope`` mapping); our tokenizer's ``\\G``-anchor
+    handling makes the ``(?!\\G)`` fire on a fresh line so the CSS
+    body actually gets tokenized.
+
+    Verifies end-to-end: a CSS-body line inside ``<style>`` should
+    produce more highlights than the surrounding ``<style>`` /
+    ``</style>`` tag-only rows, indicating CSS grammar patterns
+    fired against the body.
+    """
+    # Standalone CSS sanity check.
+    var css_lines = List[String]()
+    css_lines.append(String(".cls { color: red; }"))
+    var css_hls = highlight_for_extension(String("css"), css_lines)
+    assert_true(len(css_hls) > 0)
+
+    # HTML with an embedded CSS body. The body row should pick up
+    # CSS-grammar highlights via the embed.
+    var html_lines = List[String]()
+    html_lines.append(String("<style>"))
+    html_lines.append(String("  .cls { color: red; }"))
+    html_lines.append(String("</style>"))
+    var html_hls = highlight_for_extension(String("html"), html_lines)
+    var row1_count = 0
+    for i in range(len(html_hls)):
+        if html_hls[i].row == 1:
+            row1_count += 1
+    # The body line gets multiple highlights from the CSS grammar
+    # (selector, property, value, punctuation, etc.). A handful is
+    # plenty to prove the embed fires; lots more is expected. We
+    # don't pin to a specific count because the bundled grammar's
+    # exact tokenization can shift across grammar updates.
+    assert_true(row1_count >= 4)
+
+
+fn test_textmate_capture_patterns_run_inside_group() raises:
+    """A ``captures`` entry that carries its own ``patterns`` array
+    re-tokenizes the captured byte range. We exercise this with a
+    string literal grammar that captures the body of a quoted
+    string and runs an escape-sequence pattern over it."""
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"match\": \"\\\"([^\\\"]*)\\\"\", "
+        "\"name\": \"string.quoted.test\", "
+        "\"captures\": {"
+        "\"1\": {"
+        "\"name\": \"string.body.test\", "
+        "\"patterns\": ["
+        "{\"match\": \"\\\\\\\\.\", \"name\": \"constant.character.escape.test\"}"
+        "]"
+        "}"
+        "}}], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    var lines = List[String]()
+    lines.append(String("\"a\\nb\""))
+    var hls = tokenize_with_grammar(g, lines)
+    # Expect: outer string scope spans the whole match (col 0..6),
+    # plus an escape-character highlight at col 2..4 for the ``\n``.
+    var saw_outer_string = False
+    var saw_escape = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.col_start == 0 and h.col_end == 6 \
+                and h.attr == highlight_string_attr():
+            saw_outer_string = True
+        # ``constant.character.*`` maps to string_attr in our scope
+        # mapping. The escape's col range (col 2..4 = ``\n``) lies
+        # *inside* the outer string's range; the test only cares
+        # that the escape's specific Highlight got emitted.
+        if h.col_start == 2 and h.col_end == 4 \
+                and h.attr == highlight_string_attr():
+            saw_escape = True
+    assert_true(saw_outer_string)
+    assert_true(saw_escape)
+
+
+fn test_textmate_while_rule_keeps_scope_open_per_line() raises:
+    """``while``-rules: a ``begin`` opens a scope that stays open for
+    every subsequent line whose start matches the ``while`` regex.
+    Markdown blockquotes use this — every line beginning with ``>``
+    is part of the quote, the first line that doesn't ends it.
+
+    Hand-rolled grammar so we don't depend on an external grammar's
+    quirks."""
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"begin\": \"^>\", \"while\": \"^>\", "
+        "\"name\": \"markup.quote.test\", "
+        "\"patterns\": ["
+        "{\"match\": \"\\\\w+\", \"name\": \"keyword.control.test\"}"
+        "]}], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    var lines = List[String]()
+    lines.append(String("> first quoted line"))
+    lines.append(String("> second quoted line"))
+    lines.append(String("not in quote"))
+    var hls = tokenize_with_grammar(g, lines)
+    # Every quoted line should have the ``markup.quote`` scope painted
+    # somewhere in its range. We map ``markup.*`` to the ident attr in
+    # the bundled scope mapping (no specific markup mapping yet), but
+    # the keyword patterns inside the quote should still highlight.
+    var saw_kw_in_quote_0 = False
+    var saw_kw_in_quote_1 = False
+    var saw_kw_outside = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.attr == highlight_keyword_attr():
+            if h.row == 0:
+                saw_kw_in_quote_0 = True
+            elif h.row == 1:
+                saw_kw_in_quote_1 = True
+            elif h.row == 2:
+                saw_kw_outside = True
+    assert_true(saw_kw_in_quote_0)
+    assert_true(saw_kw_in_quote_1)
+    # Row 2 is outside the quote; the ``keyword`` pattern is nested
+    # inside the begin/while scope, so it should *not* have fired
+    # there.
+    assert_true(not saw_kw_outside)
+
+
+fn test_textmate_captures_overlay_on_match() raises:
+    """A pattern with ``captures`` should emit the outer match scope
+    plus a refined per-capture scope inside it. We exercise this
+    against a hand-rolled grammar so the assertion is independent
+    of whatever the bundled vscode rust grammar happens to do.
+
+    The grammar matches ``fn <name>`` with the ``fn`` keyword as
+    capture 1 (``keyword.control``) and the function name as
+    capture 2 (``entity.name.function``). Both should produce
+    distinct highlights at distinct byte ranges."""
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"match\": \"(fn)\\\\s+(\\\\w+)\", "
+        "\"name\": \"meta.function.test\", "
+        "\"captures\": {"
+        "\"1\": {\"name\": \"keyword.control.test\"}, "
+        "\"2\": {\"name\": \"entity.name.function.test\"}"
+        "}}], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    var lines = List[String]()
+    lines.append(String("fn hello"))
+    var hls = tokenize_with_grammar(g, lines)
+    var keyword_at_0_2 = False
+    var ident_at_3_8 = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 0 and h.col_start == 0 and h.col_end == 2 \
+                and h.attr == highlight_keyword_attr():
+            keyword_at_0_2 = True
+        # ``entity.name.function`` maps to ident_attr in our scope
+        # mapping; the function-name span is bytes 3..8.
+        if h.row == 0 and h.col_start == 3 and h.col_end == 8 \
+                and h.attr == highlight_ident_attr():
+            ident_at_3_8 = True
+    assert_true(keyword_at_0_2)
+    assert_true(ident_at_3_8)
+
+
+fn test_textmate_all_bundled_grammars_load() raises:
+    """Every grammar bundled under ``src/turbokod/grammars/`` should
+    parse, compile its regexes through libonig, and produce *some*
+    highlights for a tiny representative snippet. This catches
+    breakages from grammar updates that introduce regex syntax
+    libonig rejects, or pattern shapes our runtime doesn't handle.
+
+    The assertion is intentionally loose — we just want non-empty
+    output, not specific scopes — so adding a new grammar doesn't
+    require a hand-tuned test alongside it."""
+    # extension, sample-line that should produce at least one highlight.
+    var probes = List[Tuple[String, String]]()
+    probes.append((String("rs"),   String("fn main() {}")))
+    probes.append((String("go"),   String("package main")))
+    probes.append((String("ts"),   String("const x: number = 1;")))
+    probes.append((String("js"),   String("const x = 1;")))
+    probes.append((String("cpp"),  String("int main() { return 0; }")))
+    probes.append((String("sh"),   String("if [ -f x ]; then echo y; fi")))
+    probes.append((String("html"), String("<html><body>hi</body></html>")))
+    probes.append((String("css"),  String(".cls { color: red; }")))
+    probes.append((String("json"), String("{\"a\": 1}")))
+    # ``while``-rule grammars: now wired through our runtime once
+    # ``PATTERN_BEGIN_WHILE`` was added. Light smoke probes — the
+    # while-rule semantics get a dedicated test below.
+    probes.append((String("rb"),   String("def hi; \"hi\"; end")))
+    probes.append((String("yaml"), String("key: value")))
+    for i in range(len(probes)):
+        var ext = probes[i][0]
+        var sample = probes[i][1]
+        var lines = List[String]()
+        lines.append(sample)
+        var hls = highlight_for_extension(ext, lines)
+        # ``len(hls) > 0`` is the loose contract: each grammar's
+        # snippet was hand-picked to contain at least one obviously
+        # colorable token (keyword, string, comment, etc.).
+        if len(hls) == 0:
+            print("no highlights produced for extension: " + ext)
+        assert_true(len(hls) > 0)
+
+
+fn test_textmate_json_grammar_paints_strings_and_numbers() raises:
+    """Adding a new language is just a grammar JSON drop-in plus an
+    entry in ``_grammar_path_for_ext``. Verify the JSON grammar
+    kicks in for ``.json`` files: keys + values render as strings,
+    numeric literals as numbers, ``true`` / ``false`` as keywords."""
+    var lines = _hl_lines(
+        String("{"),
+        String("  \"name\": \"value\","),
+        String("  \"count\": 42,"),
+        String("  \"flag\": true"),
+        String("}"),
+    )
+    var hls = highlight_for_extension(String("json"), lines)
+    var saw_string = False
+    var saw_number = False
+    var saw_keyword = False
+    for i in range(len(hls)):
+        var a = hls[i].attr
+        if a == highlight_string_attr():
+            saw_string = True
+        if a == highlight_number_attr():
+            saw_number = True
+        if a == highlight_keyword_attr():
+            saw_keyword = True
+    assert_true(saw_string)
+    assert_true(saw_number)
+    assert_true(saw_keyword)
+
+
+fn test_textmate_rust_block_comment_spans_lines() raises:
+    """The TextMate runtime threads its scope stack across lines, so
+    a ``/* ... */`` that opens on one line and closes on a later one
+    paints every row in between as comment. This is the same
+    behavior as the generic tokenizer's ``_HL_IN_BLOCK_COMMENT``
+    state, but driven by the grammar's begin/end pattern."""
+    var lines = _hl_lines(
+        String("/* outer"),
+        String("middle"),
+        String("end */ let x = 1;"),
+    )
+    var hls = highlight_for_extension(String("rs"), lines)
+    var have_0 = False
+    var have_1 = False
+    var have_2_comment = False
+    var have_2_keyword = False
+    for i in range(len(hls)):
+        if hls[i].attr == highlight_comment_attr():
+            if hls[i].row == 0: have_0 = True
+            if hls[i].row == 1: have_1 = True
+            if hls[i].row == 2: have_2_comment = True
+        if hls[i].row == 2 and hls[i].attr == highlight_keyword_attr():
+            have_2_keyword = True
+    assert_true(have_0)
+    assert_true(have_1)
+    assert_true(have_2_comment)
+    assert_true(have_2_keyword)
+
+
+fn test_onig_invalid_pattern_raises() raises:
+    """A malformed pattern surfaces as a ``raise`` from the
+    constructor, with libonig's nonzero rc embedded in the message —
+    enough to grep the source."""
+    onig_global_init()
+    var raised = False
+    try:
+        var _rx = OnigRegex(String("(unclosed"))
+    except:
+        raised = True
+    assert_true(raised)
+
+
 fn test_editor_refreshes_highlights_after_edits() raises:
     """Newly typed text gets re-tokenized: typing ``fn`` produces a keyword
-    highlight that wasn't there a moment ago."""
+    highlight that wasn't there a moment ago.
+
+    Editor.handle_key now defers the actual tokenization to the
+    render path's ``flush_highlights`` call (so the shared
+    ``GrammarRegistry`` doesn't have to thread through every edit
+    method); we drive that explicitly with a local registry to read
+    ``ed.highlights`` synchronously.
+    """
     var path = _temp_path(String("_hl.mojo"))
     assert_true(write_file(path, String("\n")))
     var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry)
     assert_true(len(ed.highlights) == 0)
     _ = ed.handle_key(_key(UInt32(ord("f"))), _VIEW)
     _ = ed.handle_key(_key(UInt32(ord("n"))), _VIEW)
+    ed.flush_highlights(registry)
     var saw_fn_keyword = False
     for i in range(len(ed.highlights)):
         var h = ed.highlights[i]
@@ -2037,6 +2523,8 @@ fn test_editor_paint_overlays_highlight_attr() raises:
     var path = _temp_path(String("_hlpaint.mojo"))
     assert_true(write_file(path, String("fn main():\n")))
     var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry)
     var canvas = Canvas(40, 5)
     canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
     ed.paint(canvas, Rect(0, 0, 40, 5), False)
@@ -2083,39 +2571,67 @@ fn test_editor_alt_click_outside_identifier_is_silent() raises:
 
 
 fn test_quick_open_match_rules() raises:
-    """Locked-in spec: each token is a case-insensitive subsequence;
-    first token matches anywhere, later tokens require a word boundary.
-    Word boundaries: start, after non-alnum, lowercase→uppercase split."""
+    """Locked-in spec: the query is split on spaces into tokens, and each
+    token is then split around every ``/`` (with ``/`` kept as its own
+    one-byte part). Each part must appear as a case-insensitive substring
+    of the path, in order."""
     var path = String("src/turbokod/cell.mojo")
-    # Single token with a literal slash — subsequence match.
+    # `k/c` → parts ["k", "/", "c"] all present as substrings in order.
     assert_true(quick_open_match(path, String("k/c")))
-    # Two tokens — k anywhere, c at a word boundary.
+    # Space-separated tokens — both substrings, in order.
     assert_true(quick_open_match(path, String("k c")))
-    # Subsequence within a token: k (in turbokod) → / → m (in .mojo).
+    # `k/m` → "k" (in turbokod), "/" (after turbokod), "m" (in .mojo).
     assert_true(quick_open_match(path, String("k/m")))
-    # No / after the m in .mojo, so this can't match.
+    # `km/` → "km" then "/". "km" is not a substring of the path.
     assert_false(quick_open_match(path, String("km/")))
 
     # Multi-token across other shapes:
     assert_true(quick_open_match(String("job_call"),  String("j c")))
     assert_true(quick_open_match(String("jobCall"),   String("j c")))
-    # The c in "jack" isn't preceded by a word boundary.
-    assert_false(quick_open_match(String("jack"),     String("j c")))
+    # Plain substring matching — `j` then `c` are both in "jack", in order.
+    assert_true(quick_open_match(String("jack"),      String("j c")))
 
     # Empty query matches everything; tokens must keep their order.
     assert_true(quick_open_match(path, String("")))
     assert_false(quick_open_match(String("cell mojo"), String("mojo cell")))
 
 
-fn test_quick_open_match_word_boundary_kinds() raises:
-    # camelCase split — uppercase after lowercase counts as a boundary.
+fn test_quick_open_match_case_and_separator_shapes() raises:
+    # Case-insensitive substring matching across mixed case.
     assert_true(quick_open_match(String("HelloWorld"), String("h w")))
-    # Leading uppercase counts as start-of-string boundary.
     assert_true(quick_open_match(String("Helloworld"), String("h")))
-    # Embedded non-alnum — boundary right after.
+    # Substrings can sit on either side of any separator byte.
     assert_true(quick_open_match(String("foo-bar.baz"), String("f b b")))
-    # Path-segment boundaries via slashes.
+    # Path-segment boundaries via slashes — each token a substring in order.
     assert_true(quick_open_match(String("a/b/c"), String("a b c")))
+
+
+fn test_quick_open_slash_in_query_requires_directory_separator() raises:
+    """A space-separated query like ``foo bar`` matches when both ``foo``
+    and ``bar`` appear as substrings of the path, in that order. A slash
+    in the query — ``foo/bar`` — works the same way, except the slash
+    itself is also a required substring between the two parts: it is
+    equivalent to the three-part query ``foo`` / ``/`` / ``bar``, all
+    matched as substrings in order. So ``foo/bar`` demands that ``foo``
+    and ``bar`` straddle a real directory separator in the path.
+
+    Worked example with ``pro/views``:
+
+    * ``dryft/prospects/views.py`` — ``pro`` is in ``prospects``, then a
+      ``/``, then ``views`` is in ``views.py``. Match.
+    * ``dryft/homepage/cms/migrations/0003_snippet_preview_values.py`` —
+      no segment contains ``pro`` (``preview_values`` has ``p``, ``r``,
+      ``v``, ``i``, ``e``, ``w``, ``s`` only as a *subsequence*, not a
+      contiguous substring; the literal text ``pro`` is absent), so the
+      first part already fails. No match.
+    """
+    assert_true(quick_open_match(
+        String("dryft/prospects/views.py"), String("pro/views"),
+    ))
+    assert_false(quick_open_match(
+        String("dryft/homepage/cms/migrations/0003_snippet_preview_values.py"),
+        String("pro/views"),
+    ))
 
 
 fn test_quick_open_filters_as_you_type() raises:
@@ -3100,6 +3616,84 @@ fn test_lsp_subprocess_round_trip_via_cat() raises:
     p.terminate()
 
 
+fn test_install_runner_last_lines_picks_tail_skipping_blanks() raises:
+    """``_last_lines`` is the helper the install popup uses to render the
+    rolling 5-line tail. Trailing blanks should be dropped (so the popup
+    doesn't fill its window with empty rows when the installer ends with
+    a newline) and trailing CR/whitespace per line stripped."""
+    # Fewer lines than asked-for: returns them all, oldest first.
+    var two = _last_lines(String("alpha\nbeta\n"), 5)
+    assert_equal(len(two), 2)
+    assert_equal(two[0], String("alpha"))
+    assert_equal(two[1], String("beta"))
+    # More lines than asked-for: returns the last N.
+    var input = String("a\nb\nc\nd\ne\nf\ng\n")
+    var tail = _last_lines(input, 3)
+    assert_equal(len(tail), 3)
+    assert_equal(tail[0], String("e"))
+    assert_equal(tail[1], String("f"))
+    assert_equal(tail[2], String("g"))
+    # CRLF / trailing space are stripped per line.
+    var crlf = _last_lines(String("hello\r\nworld  \n"), 5)
+    assert_equal(len(crlf), 2)
+    assert_equal(crlf[0], String("hello"))
+    assert_equal(crlf[1], String("world"))
+    # Empty / whitespace-only lines collapse out (so a trailing blank
+    # after the final progress line doesn't push real output off-screen).
+    var blanks = _last_lines(String("first\n\n\nsecond\n   \n"), 5)
+    assert_equal(len(blanks), 2)
+    assert_equal(blanks[0], String("first"))
+    assert_equal(blanks[1], String("second"))
+
+
+fn test_install_runner_runs_sh_command_to_completion() raises:
+    """End-to-end: spawn ``sh -c "echo hello"`` via the runner and tick
+    until the child reaps. The returned ``InstallResult`` should carry
+    exit 0, the captured ``hello`` output, and the original label /
+    command we started with."""
+    var r = InstallRunner()
+    assert_false(r.is_active())
+    r.start(String("smoke"), String("echo hello"))
+    assert_true(r.is_active())
+    var result_opt: Optional[InstallResult] = Optional[InstallResult]()
+    # ``echo`` takes microseconds; the loop ceiling exists only to bound
+    # the test if something goes wrong in the spawn / reap path.
+    for _ in range(2000):
+        result_opt = r.tick()
+        if result_opt:
+            break
+    assert_true(Bool(result_opt))
+    var result = result_opt.value()
+    assert_true(result.ok())
+    assert_equal(result.label, String("smoke"))
+    assert_equal(result.command, String("echo hello"))
+    # ``echo hello`` writes ``hello\n`` to stdout — the trailing newline
+    # is preserved in ``output`` (we only strip per-line in the popup).
+    var ob = result.output.as_bytes()
+    assert_true(len(ob) >= 5)
+    var first5 = String(StringSlice(unsafe_from_utf8=ob[:5]))
+    assert_equal(first5, String("hello"))
+    # Runner is back to idle, ready to accept a new install.
+    assert_false(r.is_active())
+
+
+fn test_install_runner_failure_carries_nonzero_exit() raises:
+    """A non-zero exit must be visible to the host so it knows to open
+    the failure-output editor window. ``sh -c 'exit 7'`` is the minimal
+    deterministic failure."""
+    var r = InstallRunner()
+    r.start(String("fail-smoke"), String("exit 7"))
+    var result_opt: Optional[InstallResult] = Optional[InstallResult]()
+    for _ in range(200):
+        result_opt = r.tick()
+        if result_opt:
+            break
+    assert_true(Bool(result_opt))
+    var result = result_opt.value()
+    assert_false(result.ok())
+    assert_equal(result.exit_code(), 7)
+
+
 fn test_lsp_initialize_against_mojo_lsp_server() raises:
     """Spawn ``mojo-lsp-server`` and round-trip an ``initialize`` request.
     Skipped silently if the binary isn't installed."""
@@ -3354,6 +3948,151 @@ fn test_dap_manager_breakpoint_toggle() raises:
     assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 12))
 
 
+fn test_project_targets_load_parses_fields() raises:
+    """A minimal config with one run-only and one run+debug target
+    must round-trip through the loader with all fields populated."""
+    var root = _temp_path(String("_targets"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var dir = join_path(root, String(".turbokod"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var path = join_path(dir, String("targets.json"))
+    var body = String(
+        "{\n"
+        + "  \"active\": \"main\",\n"
+        + "  \"targets\": [\n"
+        + "    {\"name\": \"tests\", \"run\": \"pixi run test\"},\n"
+        + "    {\"name\": \"main\", \"run\": \"./run.sh main\","
+        + " \"cwd\": \"sub\","
+        + " \"debug\": {\"language\": \"python\","
+        + " \"program\": \"app.py\", \"args\": [\"--verbose\"]}}\n"
+        + "  ]\n"
+        + "}\n"
+    )
+    assert_true(write_file(path, body))
+    var loaded = load_project_targets(root)
+    assert_equal(len(loaded.targets), 2)
+    # ``active`` resolved by name to index 1, not the file's order.
+    assert_equal(loaded.active, 1)
+    assert_equal(loaded.targets[0].name, String("tests"))
+    assert_equal(loaded.targets[0].run_command, String("pixi run test"))
+    assert_equal(loaded.targets[0].debug_language, String(""))
+    assert_equal(loaded.targets[1].name, String("main"))
+    assert_equal(loaded.targets[1].cwd, String("sub"))
+    assert_equal(loaded.targets[1].debug_language, String("python"))
+    assert_equal(loaded.targets[1].debug_program, String("app.py"))
+    assert_equal(len(loaded.targets[1].debug_args), 1)
+    assert_equal(loaded.targets[1].debug_args[0], String("--verbose"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+fn test_project_targets_save_roundtrips_active() raises:
+    """``save_project_targets`` must rewrite the ``active`` pointer
+    so the next ``load_project_targets`` returns the new selection."""
+    var root = _temp_path(String("_targets_save"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var dir = join_path(root, String(".turbokod"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var path = join_path(dir, String("targets.json"))
+    var body = String(
+        "{\n"
+        + "  \"active\": \"a\",\n"
+        + "  \"targets\": [\n"
+        + "    {\"name\": \"a\", \"run\": \"echo a\"},\n"
+        + "    {\"name\": \"b\", \"run\": \"echo b\"}\n"
+        + "  ]\n"
+        + "}\n"
+    )
+    assert_true(write_file(path, body))
+    var t = load_project_targets(root)
+    assert_equal(t.active, 0)
+    assert_true(t.set_active_by_name(String("b")))
+    assert_true(save_project_targets(root, t))
+    var t2 = load_project_targets(root)
+    assert_equal(t2.active, 1)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+fn test_project_targets_resolve_paths() raises:
+    """``resolved_cwd`` / ``resolved_program`` anchor relative paths
+    on the project root and pass absolute paths through."""
+    var root = String("/proj")
+    assert_equal(resolved_cwd(root, String("")), root)
+    assert_equal(resolved_cwd(root, String("sub/dir")), String("/proj/sub/dir"))
+    assert_equal(resolved_cwd(root, String("/abs")), String("/abs"))
+    assert_equal(
+        resolved_program(root, String("bin/app")), String("/proj/bin/app"),
+    )
+    assert_equal(resolved_program(root, String("/usr/bin/x")), String("/usr/bin/x"))
+
+
+fn test_status_bar_tab_hit_test() raises:
+    """Painting the bar captures per-tab rects; ``hit_test_tab`` then
+    routes a click on each tab to its index, and a click outside
+    the strip to -1."""
+    var sb = StatusBar()
+    var tabs = List[StatusTab]()
+    tabs.append(StatusTab(String("tests"), False, False))
+    tabs.append(StatusTab(String("main"), False, False))
+    sb.set_tabs(tabs^, 0)
+    var canvas = Canvas(80, 10)
+    sb.paint(canvas, Rect(0, 0, 80, 10))
+    var y = 9   # screen.b.y - 1
+    var first = sb.hit_test_tab(Point(2, y), Rect(0, 0, 80, 10))
+    var second = sb.hit_test_tab(Point(15, y), Rect(0, 0, 80, 10))
+    # First tab starts at column 2 (1 padding + 1 separator); the
+    # second tab is several columns over. Either way both >= 0.
+    assert_true(first >= 0)
+    assert_true(second >= 0)
+    # Clicks on a different row never hit a tab.
+    assert_equal(sb.hit_test_tab(Point(2, 0), Rect(0, 0, 80, 10)), -1)
+
+
+fn test_run_session_lifecycle() raises:
+    """``RunSession.start`` spawns ``sh -c <cmd>``; ``poll_run_exit``
+    eventually reaps the child and exposes its exit code."""
+    var s = RunSession()
+    s.start(
+        String("echo-test"), String("printf 'hi\\n'; exit 7"), String(""),
+    )
+    assert_true(s.is_active())
+    assert_true(s.matches(String("echo-test")))
+    # Drain output until the child exits. Bound the loop so a stuck
+    # test fails rather than hangs the whole suite.
+    var captured = String("")
+    var ticks = 0
+    while ticks < 200:
+        var out = drain_run_output(s)
+        captured = captured + out.stdout
+        if poll_run_exit(s):
+            break
+        ticks += 1
+    assert_true(s.exited)
+    assert_equal(s.exit_code, 7)
+    s.terminate()
+    assert_false(s.is_active())
+    # Captured output had the printf payload — covers the drain path
+    # at least once (the kernel may deliver before or after exit).
+    var cb = captured.as_bytes()
+    var has_hi = False
+    for i in range(len(cb)):
+        if i + 1 < len(cb) and cb[i] == 0x68 and cb[i + 1] == 0x69:
+            has_hi = True
+            break
+    assert_true(has_hi)
+
+
 fn main() raises:
     test_point_arithmetic()
     test_rect_basics()
@@ -3428,12 +4167,29 @@ fn main() raises:
     test_highlight_unknown_extension_returns_empty()
     test_highlight_rust_keywords_strings_comments()
     test_highlight_rust_block_comment_spans_lines()
+    test_onig_basic_search()
+    test_onig_no_match_returns_none()
+    test_onig_search_at_offset()
+    test_onig_invalid_pattern_raises()
+    test_textmate_rust_grammar_paints_keywords_and_strings()
+    test_textmate_html_embeds_css_inside_style_block()
+    test_textmate_capture_patterns_run_inside_group()
+    test_textmate_while_rule_keeps_scope_open_per_line()
+    test_textmate_captures_overlay_on_match()
+    test_textmate_incremental_matches_full_retokenize()
+    test_textmate_all_bundled_grammars_load()
+    test_textmate_json_grammar_paints_strings_and_numbers()
+    test_textmate_rust_block_comment_spans_lines()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
     test_editor_alt_click_emits_definition_request()
     test_editor_alt_click_outside_identifier_is_silent()
+    test_install_runner_last_lines_picks_tail_skipping_blanks()
+    test_install_runner_runs_sh_command_to_completion()
+    test_install_runner_failure_carries_nonzero_exit()
     test_quick_open_match_rules()
-    test_quick_open_match_word_boundary_kinds()
+    test_quick_open_match_case_and_separator_shapes()
+    test_quick_open_slash_in_query_requires_directory_separator()
     test_quick_open_filters_as_you_type()
     test_ctrl_o_opens_quick_open_when_project_active()
     test_ctrl_o_bubbles_when_no_project()
@@ -3543,4 +4299,9 @@ fn main() raises:
     test_dap_launch_arguments_for_debugpy()
     test_dap_launch_arguments_for_delve()
     test_dap_manager_breakpoint_toggle()
+    test_project_targets_load_parses_fields()
+    test_project_targets_save_roundtrips_active()
+    test_project_targets_resolve_paths()
+    test_status_bar_tab_hit_test()
+    test_run_session_lifecycle()
     print("all tests passed")

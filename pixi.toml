@@ -7,6 +7,7 @@ platforms = ["osx-arm64", "linux-64"]
 
 [dependencies]
 modular = ">=26.1"
+oniguruma = ">=6.9.10,<7"
 
 [tasks]
 # All tasks route through run.sh so they share the .build/ cache and the

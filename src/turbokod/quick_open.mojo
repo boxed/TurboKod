@@ -296,83 +296,91 @@ struct QuickOpen(Movable):
 
 
 # --- match algorithm ---------------------------------------------------------
-# Tokens (space-separated) match in order as case-insensitive **subsequences**
-# of the path. The first token can start anywhere; every subsequent token
-# must start at a word boundary. Within a token, characters are matched as
-# subsequences (so ``j/c`` matches ``src/turbokod/cell.mojo`` because
-# j → '/' → c can be found in order). Word boundaries are: start of string,
-# the position right after a non-alphanumeric byte, or a camelCase split
-# (lowercase byte followed by an uppercase byte).
+# The query is split on spaces into tokens; each token is then split around
+# every ``/``, with each ``/`` kept as its own one-byte part. Every part
+# must appear as a case-insensitive **substring** of the path, in order.
+# So ``foo bar`` requires the substrings ``foo`` then ``bar``; ``foo/bar``
+# additionally requires a literal ``/`` between them — i.e. the parts
+# ``foo``, ``/``, ``bar`` matched as substrings in that order.
 
 
 fn quick_open_match(path: String, query: String) -> Bool:
     """Return True iff ``query`` matches ``path`` under the QuickOpen rules.
 
-    Examples (with ``path = src/turbokod/cell.mojo``):
+    Examples (with ``path = "src/turbokod/cell.mojo"``):
 
-    * ``"j/c"``    → matches (one token, j then '/' then c, in order).
-    * ``"j c"``    → matches (j anywhere, then c at a word boundary).
+    * ``"k/c"`` → matches (``k`` in ``turbokod``, then ``/``, then ``c``
+      in ``cell``).
+    * ``"k c"`` → matches (``k`` then ``c`` as substrings, in order).
+    * ``"km/"`` → does **not** match (``km`` is not a substring).
 
-    With ``path = "jobCall"``:
-    * ``"j c"``    → matches (j at start, c at the camelCase boundary).
-
-    With ``path = "jack"``:
-    * ``"j c"``    → does **not** match (no word boundary precedes the c).
+    With ``path = "dryft/homepage/cms/migrations/0003_snippet_preview_values.py"``
+    and query ``"pro/views"``: does **not** match. The literal text
+    ``pro`` is absent (``preview`` has ``pre``, not ``pro``), so the
+    first part already fails.
     """
-    var tokens = _split_tokens(query)
-    if len(tokens) == 0:
+    var parts = _split_query_to_parts(query)
+    if len(parts) == 0:
         return True
     var pos = 0
-    for ti in range(len(tokens)):
-        var anywhere = (ti == 0)
-        var ne = _find_token_match(path, pos, tokens[ti], anywhere)
-        if ne < 0:
+    for pi in range(len(parts)):
+        var found = _find_substring_ci(path, parts[pi], pos)
+        if found < 0:
             return False
-        pos = ne
+        pos = found + len(parts[pi].as_bytes())
     return True
 
 
-fn _split_tokens(q: String) -> List[String]:
+fn _split_query_to_parts(q: String) -> List[String]:
+    """Split ``q`` on spaces, then split each token around every ``/``,
+    keeping ``/`` as its own one-byte part. Empty parts are dropped.
+    """
     var out = List[String]()
     var b = q.as_bytes()
-    var start = 0
+    var n = len(b)
     var i = 0
-    while i < len(b):
+    while i < n:
         if b[i] == 0x20:
-            if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-        i += 1
-    if start < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:])))
+            i += 1
+            continue
+        # Walk one space-delimited token, emitting parts split on '/'.
+        var run_start = i
+        while i < n and b[i] != 0x20:
+            if b[i] == 0x2F:
+                if i > run_start:
+                    out.append(String(StringSlice(
+                        unsafe_from_utf8=b[run_start:i],
+                    )))
+                out.append(String("/"))
+                i += 1
+                run_start = i
+            else:
+                i += 1
+        if i > run_start:
+            out.append(String(StringSlice(
+                unsafe_from_utf8=b[run_start:i],
+            )))
     return out^
 
 
-fn _find_token_match(
-    path: String, start_pos: Int, token: String, anywhere: Bool,
-) -> Int:
-    """Earliest end-index of a subsequence match for ``token`` starting at
-    or after ``start_pos``. ``-1`` if the token can't be matched. When
-    ``anywhere`` is False, the start position is constrained to a word
-    boundary in ``path``.
+fn _find_substring_ci(path: String, needle: String, start: Int) -> Int:
+    """Earliest index ``>= start`` where ``needle`` occurs as a
+    case-insensitive substring of ``path``, or ``-1`` if absent.
     """
     var pb = path.as_bytes()
-    var tb = token.as_bytes()
-    if len(tb) == 0:
-        return start_pos
-    var sp = start_pos
-    while sp < len(pb):
-        if (anywhere or _is_word_boundary(path, sp)) \
-                and _ci_byte_eq(pb[sp], tb[0]):
-            var ti = 1
-            var pi = sp + 1
-            while ti < len(tb) and pi < len(pb):
-                if _ci_byte_eq(pb[pi], tb[ti]):
-                    ti += 1
-                pi += 1
-            if ti == len(tb):
-                return pi
-        sp += 1
+    var nb = needle.as_bytes()
+    if len(nb) == 0:
+        return start
+    var i = start
+    while i + len(nb) <= len(pb):
+        var ok = True
+        for j in range(len(nb)):
+            if not _ci_byte_eq(pb[i + j], nb[j]):
+                ok = False
+                break
+        if ok:
+            return i
+        i += 1
     return -1
 
 
@@ -382,27 +390,3 @@ fn _ci_byte_eq(a: UInt8, b: UInt8) -> Bool:
     if 0x41 <= ai and ai <= 0x5A: ai = ai + 0x20
     if 0x41 <= bi and bi <= 0x5A: bi = bi + 0x20
     return ai == bi
-
-
-fn _is_alnum(c: Int) -> Bool:
-    if 0x30 <= c and c <= 0x39: return True
-    if 0x41 <= c and c <= 0x5A: return True
-    if 0x61 <= c and c <= 0x7A: return True
-    return False
-
-
-fn _is_word_boundary(path: String, p: Int) -> Bool:
-    var pb = path.as_bytes()
-    if p == 0:
-        return True
-    if p > len(pb) or p < 0:
-        return False
-    var prev = Int(pb[p - 1])
-    if not _is_alnum(prev):
-        return True
-    if p < len(pb):
-        var cur = Int(pb[p])
-        # camelCase split: lowercase → uppercase.
-        if 0x61 <= prev and prev <= 0x7A and 0x41 <= cur and cur <= 0x5A:
-            return True
-    return False

@@ -48,13 +48,14 @@ hash="$(printf '%s' "$src" | shasum -a 256 | cut -c1-8)"
 bin=".build/$(basename -- "$src" .mojo)_${hash}"
 
 # Skip the build when the cached binary is newer than every Mojo source
-# in ``src/`` and the entry point itself. ``find -newer`` returns the
-# first match and we short-circuit on -print -quit, so this scales fine
-# as the package grows.
+# in ``src/``, the entry point itself, and the libonig shim object
+# (linked into the binary, so a shim rebuild needs a binary rebuild).
+# ``find -newer`` returns the first match and we short-circuit on
+# -print -quit, so this scales fine as the package grows.
 needs_build=1
 if [ -x "$bin" ]; then
   newer=$(find src "$src" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
-  if [ -z "$newer" ]; then
+  if [ -z "$newer" ] && [ ! "src/turbokod/onig_shim.c" -nt "$bin" ]; then
     needs_build=0
   fi
 fi
@@ -65,9 +66,54 @@ restore_term() {
 }
 trap restore_term EXIT INT TERM
 
-if [ "$needs_build" -eq 1 ]; then
-  echo "[run.sh] building $src -> $bin" >&2
-  pixi run mojo build -I src -o "$bin" "$src"
+# Resolve the pixi env's lib/include dirs once. We need:
+#   * ``-Lenv/lib -lonig`` at link time so the build resolves libonig
+#     symbols (used by the TextMate-grammar highlighter via FFI).
+#   * ``DYLD/LD_LIBRARY_PATH=env/lib`` at exec time so the resulting
+#     dylib reference resolves when the binary actually runs.
+# ``pixi info`` is the supported way to ask for the env path; fall back
+# to the conventional location when not available so this still works
+# in CI / headless setups that pre-populate ``.pixi``.
+env_prefix="$(pixi info --json 2>/dev/null \
+  | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["environments_info"][0]["prefix"])' \
+  2>/dev/null)"
+if [ -z "${env_prefix:-}" ]; then
+  env_prefix="$(pwd)/.pixi/envs/default"
 fi
 
+# Compile the libonig shim (process-exit registry that batches the
+# ``onig_free`` calls we can't safely run from Mojo's per-instance
+# ``__del__``). We rebuild it only when the .c file is newer than
+# the cached object, since it's tiny and rarely changes.
+shim_src="src/turbokod/onig_shim.c"
+shim_obj=".build/onig_shim.o"
+if [ ! -f "$shim_obj" ] || [ "$shim_src" -nt "$shim_obj" ]; then
+  echo "[run.sh] compiling onig shim -> $shim_obj" >&2
+  if ! clang -c -O2 -fPIC "$shim_src" -o "$shim_obj"; then
+    echo "[run.sh] onig shim compilation failed; aborting (would otherwise run a stale binary)" >&2
+    exit 1
+  fi
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+  echo "[run.sh] building $src -> $bin" >&2
+  if ! pixi run mojo build \
+    -I src \
+    -Xlinker "-L${env_prefix}/lib" \
+    -Xlinker "-lonig" \
+    -Xlinker "$shim_obj" \
+    -o "$bin" "$src"; then
+    # Without this guard, ``exec "$bin"`` below would silently run the
+    # previous successful build — making "all tests passed" mean
+    # "nothing changed since the last build that worked." Ask me how I
+    # know.
+    echo "[run.sh] mojo build failed; aborting (would otherwise run a stale binary)" >&2
+    exit 1
+  fi
+fi
+
+# macOS uses DYLD_LIBRARY_PATH, Linux uses LD_LIBRARY_PATH; setting both
+# is harmless on whichever platform isn't relevant.
+export DYLD_LIBRARY_PATH="${env_prefix}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${env_prefix}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$bin" ${prog_args[@]+"${prog_args[@]}"}

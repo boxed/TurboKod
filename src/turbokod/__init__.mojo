@@ -42,8 +42,9 @@ from .desktop import (
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_UNDO,
-    Hotkey, PROJECT_CLOSE_ACTION, PROJECT_FIND, PROJECT_REPLACE,
-    PROJECT_TREE_ACTION,
+    Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
+    PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX, WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
     ctrl_key, format_hotkey,
 )
@@ -93,18 +94,27 @@ from .file_io import (
     parent_path, read_file, stat_file, write_file,
 )
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
+from .install_runner import InstallResult, InstallRunner
 from .project import (
     GitignoreMatcher, GitignorePattern, ProjectMatch,
     find_in_project, replace_in_project, walk_project_files,
 )
 from .project_find import ProjectFind
+from .project_targets import (
+    ProjectTargets, RunTarget,
+    load_project_targets, resolved_cwd, resolved_program,
+    save_project_targets,
+)
+from .run_manager import (
+    RunOutput, RunSession, drain_run_output, poll_run_exit,
+)
 from .quick_open import QuickOpen
 from .symbol_pick import SymbolPick, symbol_kind_label
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .painter import Painter
 from .prompt import Prompt
-from .status import StatusBar, StatusItem
+from .status import StatusBar, StatusItem, StatusTab
 from .terminal import Terminal
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
 from .window import Window, WindowManager

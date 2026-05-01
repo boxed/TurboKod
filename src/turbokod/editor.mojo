@@ -28,7 +28,8 @@ from .events import (
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
 from .highlight import (
-    DefinitionRequest, Highlight, extension_of, highlight_for_extension,
+    DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
+    extension_of, highlight_for_extension, highlight_incremental,
     word_at,
 )
 from std.collections.optional import Optional
@@ -332,9 +333,15 @@ struct Editor(ImplicitlyCopyable, Movable):
     # no trim/final-newline enforcement).
     var editorconfig: EditorConfig
     # Syntax highlighting overlay. ``_highlights_dirty`` triggers
-    # ``_refresh_highlights`` after edits / file loads.
+    # ``_refresh_highlights`` after edits / file loads;
+    # ``_hl_dirty_row`` says where to start re-tokenizing — every
+    # row below it potentially has stale state (block comment
+    # opened, scope changed, etc.). 0 means "the whole buffer"
+    # (the conservative default for operations that may have
+    # touched any row, e.g. undo / redo / file load).
     var highlights: List[Highlight]
     var _highlights_dirty: Bool
+    var _hl_dirty_row: Int
     # ``pending_definition`` is set when the user Cmd+left-clicks an
     # identifier (delivered as Left+Alt by iTerm2) — the host polls
     # ``consume_definition_request`` and forwards to whichever LSP client
@@ -368,6 +375,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the flag so the next character starts a fresh group.
     var _typing_active: Bool
     var _typing_last_ms: Int
+    # TextMate grammar cache. Refreshing highlights re-loads the grammar
+    # via this slot; a cold load is ~100 ms for the bundled rust grammar
+    # so we *really* want hits here on every keystroke. Reset on copy
+    # because the cached ``Grammar`` isn't ``ImplicitlyCopyable`` (its
+    # ``OnigRegex`` list aliases libonig handles); the next refresh will
+    # rebuild it from the file path.
+    var _hl_cache: HighlightCache
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -385,6 +399,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
+        self._hl_dirty_row = 0
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -395,6 +410,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
+        self._hl_cache = HighlightCache()
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -412,6 +428,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
+        self._hl_dirty_row = 0
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -422,6 +439,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
+        self._hl_cache = HighlightCache()
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -433,7 +451,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
         ed.dirty = False
-        ed._refresh_highlights()
+        # No inline tokenization: ``_highlights_dirty`` is True
+        # from ``__init__``, so the next ``flush_highlights`` call
+        # from the render path will populate ``ed.highlights``.
+        # Tests that need synchronous highlights call
+        # ``ed.flush_highlights(local_registry)`` directly.
         return ed^
 
     fn __copyinit__(out self, copy: Self):
@@ -452,6 +474,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.editorconfig = copy.editorconfig
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
+        self._hl_dirty_row = copy._hl_dirty_row
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
@@ -462,17 +485,66 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
         self._typing_last_ms = copy._typing_last_ms
+        # Don't carry the cached grammar across a copy. ``Grammar`` owns
+        # ``OnigRegex`` instances whose libonig handles we share via a
+        # bitwise-aliasing copy; once we add proper ``__del__`` support
+        # the aliasing could double-free. Letting the copy rebuild on
+        # first refresh costs one cold load but is always correct.
+        self._hl_cache = HighlightCache()
 
-    fn _refresh_highlights(mut self):
+    fn flush_highlights(mut self, mut registry: GrammarRegistry):
+        """Bring ``self.highlights`` up to date by tokenizing against
+        the shared ``GrammarRegistry``. No-op if not ``_highlights_dirty``.
+
+        Called from the render path (``Desktop.paint`` walks all
+        editors before drawing). Edit methods on ``Editor`` no
+        longer tokenize inline — they just set the dirty flag and
+        the dirty-row marker via ``_mark_hl_dirty``, so highlights
+        stay slightly stale between an edit and the next paint.
+        Tests that need synchronous highlights call this directly.
+        """
+        if not self._highlights_dirty:
+            return
         var ext = extension_of(self.file_path)
-        self.highlights = highlight_for_extension(ext, self.buffer.lines)
+        self.highlights = highlight_incremental(
+            ext, self.buffer.lines, self._hl_dirty_row,
+            registry, self._hl_cache,
+        )
         self._highlights_dirty = False
+        # Mark the cache as fully clean by parking the dirty row
+        # past the end of the buffer. Any subsequent edit will
+        # bring it back to a real row via ``_mark_hl_dirty``.
+        self._hl_dirty_row = self.buffer.line_count()
+
+    fn _mark_hl_dirty(mut self, row: Int):
+        """Note that ``row`` (and possibly later rows) need
+        re-tokenizing. The dirty pointer only ever moves *up*
+        toward the top of the buffer — once row 5 is dirty,
+        subsequent edits at row 12 don't lift it back to 12.
+
+        ``row < 0`` is the conservative "I don't know which row
+        was touched" signal; it sets the dirty pointer to 0,
+        forcing a full retokenize."""
+        var r = row
+        if r < 0:
+            r = 0
+        if r < self._hl_dirty_row:
+            self._hl_dirty_row = r
+        self._highlights_dirty = True
 
     fn refresh_highlights(mut self):
-        """Re-tokenize and replace ``highlights`` immediately. Call this when
-        the host knows the buffer changed in a way that bypassed
-        ``handle_key`` (e.g., setting ``file_path`` directly)."""
-        self._refresh_highlights()
+        """Mark highlights dirty so the next ``flush_highlights``
+        call (driven by the render path) re-tokenizes. Use this
+        when the host changes the buffer through a path that
+        bypassed the normal edit-handlers — setting ``file_path``
+        directly is the canonical example.
+
+        We *don't* tokenize inline here: the actual work needs the
+        shared ``GrammarRegistry`` which lives at the layer above.
+        Callers that need a synchronous refresh in test code can
+        call ``flush_highlights(local_registry)`` instead.
+        """
+        self._mark_hl_dirty(0)
 
     # --- undo / redo ------------------------------------------------------
 
@@ -519,11 +591,17 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.anchor_row = snap.anchor_row
         self.anchor_col = snap.anchor_col
         self.dirty = True
-        self._highlights_dirty = True
+        # Undo/redo restores the entire buffer; we don't know which
+        # rows differ from the post-state we last tokenized, so we
+        # force a full retokenize. Could narrow this by diffing
+        # ``snap.lines`` against ``self.buffer.lines`` pre-restore,
+        # but the marginal cost of a full retokenize on undo is
+        # acceptable for now.
+        self._mark_hl_dirty(0)
         # Undo/redo lands on a saved state; the next typing should start a
         # new group rather than extend whatever was running before.
         self._typing_active = False
-        self._refresh_highlights()
+        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     fn undo(mut self) -> Bool:
         """Roll back the last mutation. Returns False when the stack is empty.
@@ -574,7 +652,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.buffer = TextBuffer(text)
         self.file_size = info.size
         self.file_mtime = info.mtime_sec
-        self._refresh_highlights()
+        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         # Clamp cursor to the new buffer.
         var max_row = self.buffer.line_count() - 1
         if self.cursor_row > max_row: self.cursor_row = max_row
@@ -694,7 +772,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.file_mtime = info.mtime_sec
         self.dirty = False
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``); re-tokenize.
-        self._refresh_highlights()
+        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         return True
 
     fn replace_all(mut self, find: String, replacement: String) -> Int:
@@ -748,7 +826,9 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self.buffer.lines[row] = rebuilt
         if count > 0:
             self.dirty = True
-            self._highlights_dirty = True
+            # ``replace_all`` may have touched any number of lines;
+            # we don't track the lowest, so force a full retokenize.
+            self._mark_hl_dirty(0)
             # Clamp the cursor (line lengths may have changed under it).
             var max_row = self.buffer.line_count() - 1
             if self.cursor_row > max_row: self.cursor_row = max_row
@@ -757,7 +837,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.anchor_row = self.cursor_row
             self.anchor_col = self.cursor_col
             _ = rb_len   # silence unused warning if compiler reports it
-            self._refresh_highlights()
+            # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         else:
             # Nothing changed — roll back the speculative snapshot so the
             # undo stack stays in sync and redo isn't clobbered.
@@ -1184,6 +1264,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         var was_typing = self._typing_active
         var prev_typing_ms = self._typing_last_ms
         self._typing_active = False
+        # Capture the lowest pre-edit row that any selection or
+        # cursor-line edit could touch. The dirty-row marker the
+        # tokenizer reads must be ``<=`` the actual lowest changed
+        # row, so we take the min of cursor + anchor *before* any
+        # mutation moves them, and use that for ``_mark_hl_dirty``
+        # below. Subsequent moves of the cursor don't matter — we
+        # already captured the floor.
+        var pre_dirty_row = self.cursor_row
+        if self.anchor_row < pre_dirty_row:
+            pre_dirty_row = self.anchor_row
         var k = event.key
         var extend = (event.mods & MOD_SHIFT) != 0
         # Either Ctrl or Alt triggers word jumps. Ctrl is the Linux/Windows
@@ -1236,7 +1326,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var p = self.buffer.delete_before(self.cursor_row, self.cursor_col)
                 self.move_to(p[0], p[1], False)
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_DELETE:
             # Same no-op guard: at end-of-buffer with no selection, Delete
             # is a no-op and shouldn't burn an undo entry.
@@ -1250,7 +1340,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             else:
                 self.buffer.delete_at(self.cursor_row, self.cursor_col)
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_ENTER:
             self._push_undo()
             if self.has_selection():
@@ -1258,7 +1348,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             var p = self.buffer.split(self.cursor_row, self.cursor_col)
             self.move_to(p[0], p[1], False)
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_TAB:
             self._push_undo()
             if self.has_selection():
@@ -1270,15 +1360,15 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.buffer.insert(self.cursor_row, self.cursor_col, indent)
             self.move_to(self.cursor_row, self.cursor_col + indent_n, False)
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
             self.copy_to_clipboard()
         elif k == UInt32(0x18):    # Ctrl+X
             self.cut_to_clipboard()
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif k == UInt32(0x16):    # Ctrl+V
             self.paste_from_clipboard()
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
             # Modified letters are commands, not text — defer to whatever
             # the caller wants to do with them (e.g., a hotkey table).
@@ -1307,16 +1397,16 @@ struct Editor(ImplicitlyCopyable, Movable):
             self._typing_active = True
             self._typing_last_ms = now
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre_dirty_row)
         else:
             return False
         self._scroll_to_cursor(view)
-        # Re-tokenize only when this keystroke actually mutated the buffer.
-        # Mutating branches set ``_highlights_dirty`` next to their existing
-        # ``self.dirty = True`` write, so cursor moves don't trigger a
-        # rebuild every press.
-        if self._highlights_dirty:
-            self._refresh_highlights()
+        # Re-tokenize only when this keystroke actually mutated the
+        # buffer. Mutating branches set ``_highlights_dirty`` via
+        # ``_mark_hl_dirty`` next to their existing ``self.dirty =
+        # True`` write; the actual tokenization is deferred to the
+        # render path's ``Editor.flush_highlights`` call so we don't
+        # need a ``GrammarRegistry`` parameter on every edit method.
         return True
 
     # --- clipboard / programmatic edit API --------------------------------
@@ -1343,10 +1433,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         true no-op)."""
         var text = self.selection_text()
         if self.has_selection():
+            var pre = self.cursor_row
+            if self.anchor_row < pre:
+                pre = self.anchor_row
             self._push_undo()
             self._delete_selection()
             self.dirty = True
-            self._highlights_dirty = True
+            self._mark_hl_dirty(pre)
         return text
 
     fn paste_text(mut self, text: String):
@@ -1374,12 +1467,15 @@ struct Editor(ImplicitlyCopyable, Movable):
         untouched in that case."""
         if not self.has_selection():
             return
+        var pre = self.cursor_row
+        if self.anchor_row < pre:
+            pre = self.anchor_row
         var text = self.selection_text()
         clipboard_copy(text)
         self._push_undo()
         self._delete_selection()
         self.dirty = True
-        self._highlights_dirty = True
+        self._mark_hl_dirty(pre)
 
     fn paste_from_clipboard(mut self):
         """Replace any selection with the system clipboard's contents."""
@@ -1512,8 +1608,12 @@ struct Editor(ImplicitlyCopyable, Movable):
             else:
                 self.buffer.lines[r] = prefix + line
         self.dirty = True
-        self._highlights_dirty = True
-        self._refresh_highlights()
+        # Toggle-comment touches rows ``sr..er``; mark dirty from
+        # the lowest one. The early-exit logic in
+        # ``highlight_incremental`` will still skip below ``er``
+        # once tokenizer state stabilizes.
+        self._mark_hl_dirty(sr)
+        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     fn toggle_case(mut self):
         """Invert ASCII case across the current selection (no-op if empty)."""
@@ -1544,8 +1644,9 @@ struct Editor(ImplicitlyCopyable, Movable):
                 ptr=new_bytes.unsafe_ptr(), length=len(new_bytes),
             ))
         self.dirty = True
-        self._highlights_dirty = True
-        self._refresh_highlights()
+        # ``toggle_case`` walks ``sr..er``; lowest changed is ``sr``.
+        self._mark_hl_dirty(sr)
+        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     fn _insert_text(mut self, text: String):
         var bytes = text.as_bytes()
