@@ -15,6 +15,7 @@ cluttering the picker. ``..`` is always included regardless of the flag.
 
 from std.collections.list import List
 
+from .buttons import ShadowButton, paint_shadow_button
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
@@ -188,54 +189,24 @@ struct DirBrowser(Movable):
         self.refresh()
 
     fn paint_jump_buttons(self, mut canvas: Canvas, row: Rect):
-        """Paint the Desktop / Home / Root buttons across ``row`` in
-        the classic Turbo Vision style: green face with black text,
-        a lower-half-block shadow on the right edge of the face row,
-        and an upper-half-block shadow on the row below — together
-        they read as a continuous half-cell-thin drop shadow.
+        """Paint the Desktop / Home / Root buttons across ``row``.
 
-        Half-block rendering depends on the terminal font lining
-        ``▄`` and ``▀`` up vertically (i.e. no inter-line gap and
-        identical cell heights). When the font misrenders them,
-        switch to one that doesn't — DOS / Cascadia Code / Iosevka
-        all do this correctly.
-
-        The painted layout matches what ``jump_shortcuts(row.a.x)``
-        produces so ``handle_jump_click`` hits the same cells.
+        Delegates the visual to ``paint_shadow_button`` so every
+        Turbo Vision–style button in the codebase shares one
+        rendering path. The layout (which buttons, their order, and
+        their column positions) is owned here via
+        ``jump_shortcuts(row.a.x)``.
         """
         var face = Attr(BLACK, GREEN)
-        var shadow = Attr(BLACK, LIGHT_GRAY)
         var buttons = jump_shortcuts(row.a.x)
         for i in range(len(buttons)):
             if buttons[i].x >= row.b.x:
                 break
-            var w = len(buttons[i].label.as_bytes())
-            # Face row.
-            _ = canvas.put_text(
-                Point(buttons[i].x, row.a.y),
-                buttons[i].label, face, row.b.x,
+            paint_shadow_button(
+                canvas,
+                ShadowButton(buttons[i].label, buttons[i].x, row.a.y),
+                face, LIGHT_GRAY, row.b.x,
             )
-            # Right-edge shadow column. ``▄`` (lower-half block)
-            # painted in BLACK on LIGHT_GRAY puts the dark bar at
-            # the bottom of the cell, lining up with the bottom-
-            # shadow row painted underneath.
-            var right_x = buttons[i].x + w
-            if right_x < row.b.x:
-                canvas.set(
-                    right_x, row.a.y, Cell(String("▄"), shadow, 1),
-                )
-            # Bottom-shadow row, shifted right by one column. ``▀``
-            # (upper-half block) gives the dark bar along the top
-            # of the cells underneath the button — the same offset
-            # produces the "lifted" 3D effect.
-            if row.a.y + 1 < row.b.y:
-                var sx_end = buttons[i].x + w + 1
-                if sx_end > row.b.x:
-                    sx_end = row.b.x
-                for sx in range(buttons[i].x + 1, sx_end):
-                    canvas.set(
-                        sx, row.a.y + 1, Cell(String("▀"), shadow, 1),
-                    )
 
     fn handle_jump_click(mut self, event: Event, row: Rect) -> Bool:
         """Map a left-click landing on a jump button (face *or*

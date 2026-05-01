@@ -1,8 +1,15 @@
-"""Background ``sh -c <command>`` runner for project targets.
+"""Background subprocess runner for project targets.
 
 This is the "Run" half of the run/debug pair triggered from the status
 bar tabs (Cmd+R). One in-flight session at a time: starting a new run
 while another is alive terminates the old one first.
+
+The child is spawned argv-style (``program`` + ``args``, no shell
+interpolation) so the same configuration drives both run and debug —
+``RunTarget.program`` / ``args`` is what we pass here, and what the
+DAP launch path passes to the adapter. Shell features (pipes,
+redirects, glob expansion) aren't supported; users that need them
+write a wrapper script and point the target at it.
 
 Output (stdout + stderr) is captured incrementally and pushed into the
 shared ``DebugPane`` so the user sees it live, just like a debug
@@ -29,7 +36,7 @@ from .posix import (
 
 
 struct RunSession(Movable):
-    """One running ``sh -c`` child plus its captured pipes.
+    """One running child plus its captured pipes.
 
     Lifecycle: NOT_STARTED → RUNNING → TERMINATED. ``start`` flips into
     RUNNING; ``tick`` drains output and reaps the child on exit;
@@ -42,6 +49,8 @@ struct RunSession(Movable):
     var active: Bool
     var target_name: String
     var command: String
+    """Pretty-printed argv for the pane log — ``"<program> <arg1> …"``.
+    Not parsed by anything; pure diagnostic surface."""
     var process: LspProcess
     var exited: Bool
     var exit_code: Int
@@ -63,31 +72,41 @@ struct RunSession(Movable):
         return self.active and self.target_name == name
 
     fn start(
-        mut self, var target_name: String, var command: String, cwd: String,
+        mut self, var target_name: String, program: String,
+        args: List[String], cwd: String,
     ) raises:
-        """Spawn ``sh -c command``. Raises if a run is already in
-        flight — caller should ``terminate`` first.
+        """Spawn ``program`` with ``args`` (argv-style, no shell).
+        Raises if a run is already in flight — caller should
+        ``terminate`` first.
 
-        ``cwd`` is unused at spawn time today: ``LspProcess.spawn``
-        doesn't expose ``chdir`` and threading one through would be
-        a posix_spawn-level patch. Workaround: callers prepend
-        ``cd <cwd> && `` themselves when the cwd matters."""
+        ``cwd`` is honored by routing the spawn through ``sh -c 'cd
+        <cwd> && exec <program> <args…>'`` since ``LspProcess.spawn``
+        doesn't expose ``chdir``. ``exec`` replaces the shell with
+        the real program so the spawn keeps the kernel's view of
+        argv[0] aligned with the user's binary, and signals
+        (SIGTERM from ``terminate``) reach the right process.
+        """
         if self.active and not self.exited:
             raise Error("run session already active")
+        var pretty = program
+        for k in range(len(args)):
+            pretty = pretty + String(" ") + args[k]
+        # Build the ``sh -c`` line the same way every time so the
+        # diagnostic ``command`` field always matches what the
+        # kernel actually ran.
+        var script = String("exec ") + _shell_quote(program)
+        for k in range(len(args)):
+            script = script + String(" ") + _shell_quote(args[k])
+        if len(cwd.as_bytes()) > 0:
+            script = String("cd ") + _shell_quote(cwd) \
+                + String(" && ") + script
         var argv = List[String]()
         argv.append(String("sh"))
         argv.append(String("-c"))
-        # Emit the cd-prefix ourselves so the caller can leave ``cwd``
-        # opaque. ``cd`` failure aborts before the user's command runs,
-        # which matches the user's mental model — a missing cwd should
-        # not silently land them at the editor's cwd instead.
-        var full = command
-        if len(cwd.as_bytes()) > 0:
-            full = String("cd ") + _shell_quote(cwd) + String(" && ") + command
-        argv.append(full)
+        argv.append(script)
         self.process = LspProcess.spawn(argv)
         self.target_name = target_name^
-        self.command = command^
+        self.command = pretty^
         self.exited = False
         self.exit_code = 0
         self.started_ms = monotonic_ms()

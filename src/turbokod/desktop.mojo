@@ -42,11 +42,7 @@ from .events import (
 )
 from .clipboard import clipboard_copy
 from .config import TurbokodConfig, load_config, save_config
-from std.ffi import external_call
-
-from .file_io import (
-    basename, find_git_project, join_path, stat_file, write_file,
-)
+from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -68,12 +64,14 @@ from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
     resolved_cwd, resolved_program, save_project_targets,
+    write_all_targets,
 )
 from .prompt import Prompt
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .status import StatusBar, StatusTab
+from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 
@@ -257,6 +255,7 @@ struct Desktop(Movable):
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
     var project_find: ProjectFind
+    var targets_dialog: TargetsDialog
     var bg_pattern: String
     var bg_attr: Attr
     var project: Optional[String]
@@ -363,6 +362,7 @@ struct Desktop(Movable):
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
         self.project_find = ProjectFind()
+        self.targets_dialog = TargetsDialog()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
         self.project = Optional[String]()
@@ -564,6 +564,10 @@ struct Desktop(Movable):
             if self.project_find.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.targets_dialog.active:
+            if self.targets_dialog.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
         # Topmost editor window's interior.
         var workspace = self.workspace_rect(screen)
         if workspace.contains(pos):
@@ -655,6 +659,7 @@ struct Desktop(Movable):
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen)
+        self.targets_dialog.paint(canvas, screen)
 
     fn _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -1077,6 +1082,14 @@ struct Desktop(Movable):
                     DefinitionResolved(path, line_no - 1, 0), screen,
                 )
             return Optional[String]()
+        if self.targets_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.targets_dialog.handle_key(event)
+            else:
+                _ = self.targets_dialog.handle_mouse(event, screen)
+            if self.targets_dialog.submitted:
+                self._on_targets_dialog_submit()
+            return Optional[String]()
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
             # if neither claims the key, fall through to the regular
@@ -1214,7 +1227,7 @@ struct Desktop(Movable):
             self._toggle_file_tree()
             return Optional[String]()
         if action == PROJECT_CONFIG_TARGETS:
-            self._open_targets_config(screen)
+            self._open_targets_config()
             return Optional[String]()
         if action == EDITOR_NEW:
             self.new_file(screen)
@@ -2037,14 +2050,12 @@ struct Desktop(Movable):
 
     # --- target run / debug ----------------------------------------------
 
-    fn _open_targets_config(mut self, screen: Rect):
-        """Open ``<project>/.turbokod/targets.json`` in an editor.
+    fn _open_targets_config(mut self):
+        """Open the structured targets-configuration dialog.
 
-        Creates the directory + a starter config when missing so the
-        user lands on a working scaffold rather than an empty buffer.
-        Subsequent edits + Ctrl+S round-trip back through
-        ``_maybe_reload_targets`` so the tab strip refreshes the
-        moment the user saves.
+        Editing happens against a private copy inside ``TargetsDialog``;
+        the host's ``self.targets`` is only updated on Save (handled
+        in ``handle_event``'s modal-dispatch path).
         """
         if not self.project:
             self.status_bar.set_message(
@@ -2052,47 +2063,26 @@ struct Desktop(Movable):
                 Attr(BLACK, LIGHT_GRAY),
             )
             return
-        var root = self.project.value()
-        var dir = join_path(root, String(".turbokod"))
-        var path = join_path(dir, String("targets.json"))
-        if not stat_file(path).ok:
-            # Best-effort mkdir; ignore EEXIST. ``write_file`` below
-            # will fail visibly if the directory creation actually
-            # didn't take.
-            var c_dir = dir + String("\0")
-            _ = external_call["mkdir", Int32](
-                c_dir.unsafe_ptr(), Int32(0o755),
-            )
-            # Seed with a small comment-free example. Using JSON
-            # (not commented) so ``parse_json`` accepts the file
-            # straight out of the box.
-            var stub = String(
-                "{\n"
-                + "  \"active\": \"example\",\n"
-                + "  \"targets\": [\n"
-                + "    {\n"
-                + "      \"name\": \"example\",\n"
-                + "      \"run\": \"echo hello\",\n"
-                + "      \"debug\": {\n"
-                + "        \"language\": \"python\",\n"
-                + "        \"program\": \"main.py\",\n"
-                + "        \"args\": []\n"
-                + "      }\n"
-                + "    }\n"
-                + "  ]\n"
-                + "}\n"
-            )
-            _ = write_file(path, stub)
-            # Pick up the seed immediately so the bar reflects the
-            # new file even before the user has saved any edits.
-            self.targets = load_project_targets(root)
-        try:
-            self.open_file(path, screen)
-        except:
-            self.status_bar.set_message(
-                String("Configure targets: failed to open ") + path,
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+        # Make a copy so the dialog's snapshot can't alias our state
+        # before the user saves. ``ProjectTargets`` opts out of
+        # ImplicitlyCopyable (it carries a single mutable ``active``
+        # index meant to live in one place at a time), so the copy
+        # is explicit.
+        var snapshot = ProjectTargets()
+        snapshot.targets = self.targets.targets.copy()
+        snapshot.active = self.targets.active
+        self.targets_dialog.open(snapshot^)
+
+    fn _on_targets_dialog_submit(mut self):
+        """Copy the dialog's edited list back into the host and
+        persist it. Called from the modal-dispatch loop when the
+        user clicks Save / hits Enter on the Save button."""
+        if not self.project:
+            self.targets_dialog.close()
+            return
+        self.targets = self.targets_dialog.into_targets()
+        _ = write_all_targets(self.project.value(), self.targets)
+        self.targets_dialog.close()
 
     fn _target_run(mut self):
         """Cmd+R: spawn the active target's ``run_command``.
@@ -2116,10 +2106,10 @@ struct Desktop(Movable):
             )
             return
         var target = self.targets.targets[self.targets.active]
-        if len(target.run_command.as_bytes()) == 0:
+        if len(target.program.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("run: target '") + target.name
-                    + String("' has no run command"),
+                    + String("' has no program"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
@@ -2134,13 +2124,23 @@ struct Desktop(Movable):
         self.run_session.terminate()
         self.debug_pane.clear()
         self.debug_pane.visible = True
-        self.debug_pane.append_output(
-            String("$ ") + target.run_command, UInt8(2),  # PANE_OUT_CONSOLE
-        )
         var cwd = resolved_cwd(self.project.value(), target.cwd)
+        var program = resolved_program(
+            self.project.value(), target.cwd, target.program,
+        )
+        # Build a pretty argv line for the pane log so the user sees
+        # exactly what got spawned (resolved paths, not the source
+        # config strings).
+        var pretty = program
+        for k in range(len(target.args)):
+            pretty = pretty + String(" ") + target.args[k]
+        self.debug_pane.append_output(
+            String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
+        )
+        var args = target.args.copy()
         try:
             self.run_session.start(
-                String(target.name), String(target.run_command), cwd,
+                String(target.name), program, args^, cwd,
             )
             self.status_bar.set_message(
                 String("running ") + target.name + String("…"),
@@ -2176,14 +2176,14 @@ struct Desktop(Movable):
         if len(target.debug_language.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("debug: target '") + target.name
-                    + String("' has no debug config"),
+                    + String("' has no debug language set"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        if len(target.debug_program.as_bytes()) == 0:
+        if len(target.program.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("debug: target '") + target.name
-                    + String("' has no debug program"),
+                    + String("' has no program"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
@@ -2207,9 +2207,9 @@ struct Desktop(Movable):
             self.dap.reset_for_restart()
         var cwd = resolved_cwd(self.project.value(), target.cwd)
         var program = resolved_program(
-            self.project.value(), target.debug_program,
+            self.project.value(), target.cwd, target.program,
         )
-        var args = target.debug_args.copy()
+        var args = target.args.copy()
         self.dap.start(self.dap_specs[deb_idx], program, cwd, args^)
         self.debug_pane.clear()
         if len(self.dap.spawn_argv) > 0:

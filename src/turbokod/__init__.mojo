@@ -28,6 +28,9 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_NONE,
     MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .buttons import (
+    ShadowButton, paint_shadow_button, shadow_button_hit,
+)
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import TurbokodConfig, load_config, save_config
 from .desktop import (
@@ -87,6 +90,10 @@ from .debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
 )
 from .dir_browser import DirBrowser
+from .dropdown import (
+    DROPDOWN_HIT_BODY, DROPDOWN_HIT_LEFT, DROPDOWN_HIT_NONE,
+    DROPDOWN_HIT_RIGHT, Dropdown,
+)
 from .file_dialog import FileDialog
 from .save_as_dialog import SaveAsDialog
 from .file_io import (
@@ -103,8 +110,9 @@ from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget,
     load_project_targets, resolved_cwd, resolved_program,
-    save_project_targets,
+    save_project_targets, write_all_targets,
 )
+from .targets_dialog import TargetsDialog
 from .run_manager import (
     RunOutput, RunSession, drain_run_output, poll_run_exit,
 )

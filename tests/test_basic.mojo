@@ -13,7 +13,9 @@ from turbokod.canvas import Canvas
 from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
-from turbokod.colors import Attr, BLACK, BLUE, WHITE, YELLOW, default_attr
+from turbokod.colors import (
+    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, YELLOW, default_attr,
+)
 from turbokod.editor import Editor, TextBuffer
 from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
@@ -45,8 +47,12 @@ from turbokod.project_targets import (
     load_project_targets, resolved_cwd, resolved_program,
     save_project_targets,
 )
+from turbokod.buttons import (
+    ShadowButton, paint_shadow_button, shadow_button_hit,
+)
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
+from turbokod.targets_dialog import TargetsDialog
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
 from turbokod.json import (
@@ -3964,11 +3970,11 @@ fn test_project_targets_load_parses_fields() raises:
         "{\n"
         + "  \"active\": \"main\",\n"
         + "  \"targets\": [\n"
-        + "    {\"name\": \"tests\", \"run\": \"pixi run test\"},\n"
-        + "    {\"name\": \"main\", \"run\": \"./run.sh main\","
-        + " \"cwd\": \"sub\","
-        + " \"debug\": {\"language\": \"python\","
-        + " \"program\": \"app.py\", \"args\": [\"--verbose\"]}}\n"
+        + "    {\"name\": \"tests\","
+        + " \"program\": \"pixi\", \"args\": [\"run\", \"test\"]},\n"
+        + "    {\"name\": \"main\","
+        + " \"program\": \"app.py\", \"args\": [\"--verbose\"],"
+        + " \"cwd\": \"sub\", \"language\": \"python\"}\n"
         + "  ]\n"
         + "}\n"
     )
@@ -3978,14 +3984,17 @@ fn test_project_targets_load_parses_fields() raises:
     # ``active`` resolved by name to index 1, not the file's order.
     assert_equal(loaded.active, 1)
     assert_equal(loaded.targets[0].name, String("tests"))
-    assert_equal(loaded.targets[0].run_command, String("pixi run test"))
+    assert_equal(loaded.targets[0].program, String("pixi"))
+    assert_equal(len(loaded.targets[0].args), 2)
+    assert_equal(loaded.targets[0].args[0], String("run"))
+    assert_equal(loaded.targets[0].args[1], String("test"))
     assert_equal(loaded.targets[0].debug_language, String(""))
     assert_equal(loaded.targets[1].name, String("main"))
+    assert_equal(loaded.targets[1].program, String("app.py"))
     assert_equal(loaded.targets[1].cwd, String("sub"))
     assert_equal(loaded.targets[1].debug_language, String("python"))
-    assert_equal(loaded.targets[1].debug_program, String("app.py"))
-    assert_equal(len(loaded.targets[1].debug_args), 1)
-    assert_equal(loaded.targets[1].debug_args[0], String("--verbose"))
+    assert_equal(len(loaded.targets[1].args), 1)
+    assert_equal(loaded.targets[1].args[0], String("--verbose"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
@@ -4025,16 +4034,30 @@ fn test_project_targets_save_roundtrips_active() raises:
 
 
 fn test_project_targets_resolve_paths() raises:
-    """``resolved_cwd`` / ``resolved_program`` anchor relative paths
-    on the project root and pass absolute paths through."""
+    """``resolved_cwd`` anchors relative cwds on the project root.
+    ``resolved_program`` anchors a relative ``program`` on the
+    *resolved cwd* — so ``cwd: "build", program: "app"`` runs
+    ``<root>/build/app`` rather than ``<root>/app``. Absolute paths
+    pass through unchanged."""
     var root = String("/proj")
     assert_equal(resolved_cwd(root, String("")), root)
     assert_equal(resolved_cwd(root, String("sub/dir")), String("/proj/sub/dir"))
     assert_equal(resolved_cwd(root, String("/abs")), String("/abs"))
+    # No cwd → program resolves against the project root.
     assert_equal(
-        resolved_program(root, String("bin/app")), String("/proj/bin/app"),
+        resolved_program(root, String(""), String("bin/app")),
+        String("/proj/bin/app"),
     )
-    assert_equal(resolved_program(root, String("/usr/bin/x")), String("/usr/bin/x"))
+    # Relative cwd composes with relative program.
+    assert_equal(
+        resolved_program(root, String("build"), String("app")),
+        String("/proj/build/app"),
+    )
+    # Absolute program ignores cwd entirely.
+    assert_equal(
+        resolved_program(root, String("build"), String("/usr/bin/x")),
+        String("/usr/bin/x"),
+    )
 
 
 fn test_status_bar_tab_hit_test() raises:
@@ -4059,12 +4082,152 @@ fn test_status_bar_tab_hit_test() raises:
     assert_equal(sb.hit_test_tab(Point(2, 0), Rect(0, 0, 80, 10)), -1)
 
 
+fn test_shadow_button_paints_face_and_shadow() raises:
+    """The shared button widget must paint the label on a green
+    face and drop a half-block shadow on the right column + the
+    row below — same idiom the dir_browser jump strip uses."""
+    var canvas = Canvas(20, 4)
+    canvas.fill(Rect(0, 0, 20, 4), String(" "), Attr(BLACK, LIGHT_GRAY))
+    var btn = ShadowButton(String(" OK "), 2, 1)
+    paint_shadow_button(canvas, btn, Attr(BLACK, GREEN), LIGHT_GRAY)
+    # Face row carries the label on green.
+    assert_equal(canvas.get(2, 1).glyph, String(" "))
+    assert_equal(canvas.get(3, 1).glyph, String("O"))
+    assert_equal(canvas.get(4, 1).glyph, String("K"))
+    assert_equal(canvas.get(3, 1).attr.bg, GREEN)
+    # Right-edge shadow column at face_width + x.
+    assert_equal(canvas.get(2 + 4, 1).glyph, String("▄"))
+    assert_equal(canvas.get(2 + 4, 1).attr.bg, LIGHT_GRAY)
+    # Bottom shadow row, shifted right by 1.
+    assert_equal(canvas.get(3, 2).glyph, String("▀"))
+    assert_equal(canvas.get(2 + 4, 2).glyph, String("▀"))
+    # Cell to the left of the button stays untouched.
+    assert_equal(canvas.get(1, 1).glyph, String(" "))
+    assert_equal(canvas.get(1, 1).attr.bg, LIGHT_GRAY)
+
+
+fn test_shadow_button_hit_includes_shadow_rows() raises:
+    """A click on the bottom-shadow row should still register —
+    users miss-click downward routinely. Clicks outside the hit
+    rect (or on motion / non-press events) must be rejected."""
+    var btn = ShadowButton(String(" OK "), 2, 1)
+    # Press inside the face.
+    var press_face = Event.mouse_event(Point(3, 1), MOUSE_BUTTON_LEFT)
+    assert_true(shadow_button_hit(btn, press_face))
+    # Press on the right-shadow column.
+    var press_shadow_r = Event.mouse_event(Point(6, 1), MOUSE_BUTTON_LEFT)
+    assert_true(shadow_button_hit(btn, press_shadow_r))
+    # Press on the bottom-shadow row.
+    var press_shadow_b = Event.mouse_event(Point(4, 2), MOUSE_BUTTON_LEFT)
+    assert_true(shadow_button_hit(btn, press_shadow_b))
+    # Press just below the shadow row — outside.
+    var miss = Event.mouse_event(Point(4, 3), MOUSE_BUTTON_LEFT)
+    assert_false(shadow_button_hit(btn, miss))
+    # Release events don't activate.
+    var release = Event.mouse_event(
+        Point(3, 1), MOUSE_BUTTON_LEFT, pressed=False,
+    )
+    assert_false(shadow_button_hit(btn, release))
+
+
+fn test_targets_dialog_edit_and_submit() raises:
+    """A dialog round-trip: open with two existing targets, type a
+    new name into the focused input, then add a third target — the
+    final ``into_targets`` must reflect both edits and place the
+    active marker on the original active row."""
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("alpha")
+    t1.program = String("echo")
+    t1.args.append(String("a"))
+    src.targets.append(t1^)
+    var t2 = RunTarget()
+    t2.name = String("beta")
+    t2.program = String("echo")
+    t2.args.append(String("b"))
+    src.targets.append(t2^)
+    src.active = 1
+    var dlg = TargetsDialog()
+    dlg.open(src^)
+    assert_true(dlg.active)
+    assert_equal(len(dlg.entries), 2)
+    # ``selected`` honors ``active`` — index 1 (beta).
+    assert_equal(dlg.selected, 1)
+    # Tab from list focus to the Name input, then append "X".
+    _ = dlg.handle_key(Event.key_event(KEY_TAB))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("X"))))
+    var rebuilt = dlg.into_targets()
+    assert_equal(rebuilt.targets[1].name, String("betaX"))
+    # Active marker still points at the renamed row (we tracked it
+    # by ``active_name`` set at open).
+    assert_equal(rebuilt.targets[rebuilt.active].name, String("betaX"))
+
+
+fn test_targets_dialog_add_and_remove() raises:
+    """Adding then removing yields the original list (modulo empty
+    ``run`` field on the new entry, which is fine for this test —
+    we never persist it)."""
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("only")
+    t1.program = String("echo")
+    src.targets.append(t1^)
+    src.active = 0
+    var dlg = TargetsDialog()
+    dlg.open(src^)
+    # _activate_focus on Add — focus is on the list initially, walk
+    # there via mouse-style direct manipulation.
+    dlg.focus = 6   # _FOCUS_ADD
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_equal(len(dlg.entries), 2)
+    assert_equal(dlg.selected, 1)
+    # Selected is now the new "new" target. Switch focus to Remove
+    # and activate.
+    dlg.focus = 7   # _FOCUS_REMOVE
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_equal(len(dlg.entries), 1)
+    assert_equal(dlg.entries[0].name, String("only"))
+
+
+fn test_targets_dialog_save_button_submits() raises:
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("only")
+    src.targets.append(t1^)
+    src.active = 0
+    var dlg = TargetsDialog()
+    dlg.open(src^)
+    dlg.focus = 8   # _FOCUS_SAVE
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(dlg.submitted)
+
+
+fn test_targets_dialog_esc_discards_edits() raises:
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("a")
+    src.targets.append(t1^)
+    src.active = 0
+    var dlg = TargetsDialog()
+    dlg.open(src^)
+    # Move to name input, type something, then ESC. Dialog should
+    # close *and* not be submitted.
+    _ = dlg.handle_key(Event.key_event(KEY_TAB))
+    _ = dlg.handle_key(Event.key_event(UInt32(ord("Z"))))
+    _ = dlg.handle_key(Event.key_event(KEY_ESC))
+    assert_false(dlg.active)
+    assert_false(dlg.submitted)
+
+
 fn test_run_session_lifecycle() raises:
-    """``RunSession.start`` spawns ``sh -c <cmd>``; ``poll_run_exit``
-    eventually reaps the child and exposes its exit code."""
+    """``RunSession.start`` spawns ``program`` + ``args``;
+    ``poll_run_exit`` reaps the child and exposes its exit code."""
     var s = RunSession()
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("printf 'hi\\n'; exit 7"))
     s.start(
-        String("echo-test"), String("printf 'hi\\n'; exit 7"), String(""),
+        String("echo-test"), String("sh"), args^, String(""),
     )
     assert_true(s.is_active())
     assert_true(s.matches(String("echo-test")))
@@ -4072,7 +4235,12 @@ fn test_run_session_lifecycle() raises:
     # test fails rather than hangs the whole suite.
     var captured = String("")
     var ticks = 0
-    while ticks < 200:
+    # Each tick polls stdout (non-blocking) and waitpid_nohang. The
+    # spawn pipeline goes through two ``sh`` instances now (outer
+    # shell ``exec``-ing the inner ``sh -c …``), so leave plenty of
+    # iterations — the child still wins the race almost always, but
+    # CI under load occasionally needs a few hundred polls.
+    while ticks < 2000:
         var out = drain_run_output(s)
         captured = captured + out.stdout
         if poll_run_exit(s):
@@ -4303,5 +4471,11 @@ fn main() raises:
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
     test_status_bar_tab_hit_test()
+    test_shadow_button_paints_face_and_shadow()
+    test_shadow_button_hit_includes_shadow_rows()
+    test_targets_dialog_edit_and_submit()
+    test_targets_dialog_add_and_remove()
+    test_targets_dialog_save_button_submits()
+    test_targets_dialog_esc_discards_edits()
     test_run_session_lifecycle()
     print("all tests passed")
