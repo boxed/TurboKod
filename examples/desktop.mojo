@@ -45,7 +45,7 @@ from turbokod import (
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
-    Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
+    EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_PASTE,
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
@@ -55,13 +55,6 @@ from turbokod import (
     PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
-
-
-fn _lines(*texts: String) -> List[String]:
-    var out = List[String]()
-    for t in texts:
-        out.append(String(t))
-    return out^
 
 
 fn _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
@@ -136,50 +129,25 @@ fn main() raises:
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
 
-        # Args passed on the command line replace the demo windows; without
-        # arguments we open the canned tour content instead. A directory arg
-        # is treated as a project root (no file opened); a regular file is
-        # opened as an editor window the usual way.
+        # Cmd-line args open files / projects. A directory arg is
+        # treated as a project root (no file opened); a regular file
+        # is opened as an editor window the usual way. With no args
+        # the desktop comes up empty — the user opens files via F3 or
+        # the Project menu, and ``_set_project`` then arms the
+        # session restore.
         var args = argv()
-        var has_args = len(args) > 1
-        if has_args:
-            for i in range(1, len(args)):
-                var path = String(args[i])
-                var info = stat_file(path)
-                if info.ok and info.is_dir():
-                    desktop.open_project(path)
-                    continue
-                try:
-                    desktop.open_file(path, app.screen())
-                except e:
-                    error_log.append(
-                        String("open ") + path + String(": ") + String(e),
-                    )
-        else:
-            desktop.windows.add(Window.editor_window(
-                String("editor.txt"),
-                Rect(4, 3, 50, 16),
-                String("// A tiny pure-Mojo text editor.\n")
-                    + String("// Type to insert; arrows navigate.\n")
-                    + String("// Ctrl+C/X/V cut/copy/paste, Ctrl+arrow word jump.\n")
-                    + String("// Open the Edit menu for Find / Go to Line / etc.\n")
-                    + String("\n")
-                    + String("fn main() raises:\n")
-                    + String("    print(\"Hello, Turbokod!\")\n"),
-            ))
-            desktop.windows.add(Window(String("Mouse"), Rect(20, 8, 56, 16), _lines(
-                String("Click a window to focus."),
-                String(""),
-                String("Drag the title bar."),
-                String("Drag any edge to resize."),
-                String("Click [■] to close."),
-            )))
-            desktop.windows.add(Window(String("About"), Rect(40, 5, 70, 11), _lines(
-                String("Turbokod v0.1"),
-                String(""),
-                String("A Mojo-idiomatic port"),
-                String("of Turbo Vision."),
-            )))
+        for i in range(1, len(args)):
+            var path = String(args[i])
+            var info = stat_file(path)
+            if info.ok and info.is_dir():
+                desktop.open_project(path)
+                continue
+            try:
+                desktop.open_file(path, app.screen())
+            except e:
+                error_log.append(
+                    String("open ") + path + String(": ") + String(e),
+                )
 
         desktop.status_bar.add(String("F1"),  String("Help"))
         desktop.status_bar.add(String("F2"),  String("Save"))

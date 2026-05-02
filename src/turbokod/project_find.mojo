@@ -29,9 +29,12 @@ from .events import (
     KEY_UP, MOD_ALT, MOD_CTRL,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .file_io import read_file
+from .file_io import read_file, stat_file
 from .geometry import Point, Rect
-from .highlight import Highlight, extension_of, highlight_for_extension
+from .highlight import (
+    GrammarRegistry, Highlight, HighlightCache,
+    extension_of, highlight_for_extension, highlight_for_extension_cached,
+)
 from .lsp import CaptureResult, LspProcess, capture_command
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch, find_in_project
@@ -40,6 +43,14 @@ from .text_field import text_field_clipboard_key
 
 comptime _DEBOUNCE_MS: Int = 200
 comptime _CONTEXT_LINES: Int = 5     # lines on each side of the match
+# Hard caps on per-line work. Minified JS / CSS bundles routinely have a
+# single multi-MB line — without these the TextMate tokenizer would burn
+# whole seconds on it per paint frame, pegging the UI thread at 100% CPU
+# while ESC and keystrokes wait their turn behind paint.
+comptime _MATCH_TEXT_CAP: Int = 1024     # truncate rg's matched-line text
+comptime _ROW_HIGHLIGHT_CAP: Int = 2048  # skip syntax overlay above this
+comptime _CTX_LINE_CAP: Int = 4096       # skip context tokenize above this
+comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
 
 
 struct ProjectFind(Movable):
@@ -199,6 +210,11 @@ struct ProjectFind(Movable):
         self._refresh_context_for_selection()
 
     fn _refresh_context_for_selection(mut self):
+        """Reload + retokenize the context panel for the current
+        selection. The retokenize defers to ``paint`` (which has the
+        shared ``GrammarRegistry``) by leaving ``_context_highlights``
+        empty here; the panel falls back to plain text until the next
+        paint frame fills it in via ``_ensure_context_highlights``."""
         if self.selected < 0 or self.selected >= len(self.matches):
             self._context_path = String("")
             self._context_lines = List[String]()
@@ -210,16 +226,47 @@ struct ProjectFind(Movable):
         self._context_path = path
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+        # Skip oversized files entirely: a multi-MB minified bundle
+        # would still be readable but the next-frame tokenize step
+        # would burn seconds on it. The ±5-line context view isn't
+        # the right surface for those anyway — the user can hit Enter
+        # to open the file in a real editor window.
+        var info = stat_file(path)
+        if info.ok and Int(info.size) > _CTX_FILE_CAP:
+            return
         var text: String
         try:
             text = read_file(path)
         except:
             return
         self._context_lines = _split_lines(text)
-        # Best-effort syntax overlay; languages without a highlighter
-        # just get an empty list and the context renders in plain ctx_attr.
-        self._context_highlights = highlight_for_extension(
-            extension_of(path), self._context_lines,
+        # Highlights are filled in lazily during paint via
+        # ``_ensure_context_highlights`` — that's where the cached
+        # ``GrammarRegistry`` is in scope.
+
+    fn _ensure_context_highlights(
+        mut self, mut registry: GrammarRegistry,
+    ):
+        """Tokenize the loaded context file once, using the shared
+        registry. No-op when the file is empty or already tokenized.
+
+        Skips the tokenizer when any line is over ``_CTX_LINE_CAP``:
+        that's the minified-bundle signature (one giant line), and
+        running the TextMate grammar over it is what was hanging the
+        UI thread on Cmd+F-into-minified-JS. The context panel still
+        renders as plain text, just without syntax color."""
+        if len(self._context_lines) == 0:
+            return
+        if len(self._context_highlights) > 0:
+            return
+        for i in range(len(self._context_lines)):
+            if len(self._context_lines[i].as_bytes()) > _CTX_LINE_CAP:
+                return
+        var ctx_cache = HighlightCache()
+        self._context_highlights = highlight_for_extension_cached(
+            extension_of(self._context_path),
+            self._context_lines,
+            registry, ctx_cache,
         )
 
     # --- geometry ---------------------------------------------------------
@@ -252,7 +299,8 @@ struct ProjectFind(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect,
+             mut registry: GrammarRegistry):
         if not self.active:
             return
         var bg          = Attr(YELLOW, BLUE)
@@ -322,9 +370,14 @@ struct ProjectFind(Movable):
             var idx = self.scroll + i
             if idx >= len(self.matches):
                 break
+            # Copy the match out before the call: ``_paint_match_row``
+            # takes ``mut self``, so an aliased ``self.matches[idx]``
+            # reference would fail Mojo's exclusivity check.
+            var m = self.matches[idx]
             self._paint_match_row(
-                canvas, screen, top + i, self.matches[idx], idx == self.selected,
+                canvas, screen, top + i, m, idx == self.selected,
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
+                registry,
             )
         # Separator above the context panel.
         var ctx_top = self._list_bottom(screen)
@@ -333,7 +386,10 @@ struct ProjectFind(Movable):
         var ctx_label = String(" Context ")
         var lx = screen.a.x + (screen.width() - len(ctx_label.as_bytes())) // 2
         _ = canvas.put_text(Point(lx, ctx_top), ctx_label, title_attr)
-        # Context body.
+        # Context body. Lazy-tokenize the loaded file using the shared
+        # registry so the grammar's regexes only get compiled once per
+        # session (not per paint frame).
+        self._ensure_context_highlights(registry)
         self._paint_context(
             canvas, screen, ctx_top + 1, ctx_attr, ctx_match,
         )
@@ -345,11 +401,12 @@ struct ProjectFind(Movable):
         _ = canvas.put_text(Point(hx, screen.b.y - 1), hint, hint_attr)
 
     fn _paint_match_row(
-        self, mut canvas: Canvas, screen: Rect, y: Int,
+        mut self, mut canvas: Canvas, screen: Rect, y: Int,
         m: ProjectMatch, is_sel: Bool,
         line_attr: Attr, sel_line: Attr,
         hl_attr: Attr, sel_hl_attr: Attr,
         path_attr: Attr, sel_path: Attr,
+        mut registry: GrammarRegistry,
     ):
         var row_attr = sel_line if is_sel else line_attr
         var row_path = sel_path if is_sel else path_attr
@@ -397,11 +454,26 @@ struct ProjectFind(Movable):
         # We tokenize just this one line, so a token that opened on a
         # prior line (e.g. a triple-quoted string) won't be recognized;
         # acceptable for a one-line preview.
-        if not is_sel:
+        if not is_sel and len(bytes) <= _ROW_HIGHLIGHT_CAP:
             var one_line = List[String]()
             one_line.append(line_stripped)
-            var hls = highlight_for_extension(
-                extension_of(m.path), one_line,
+            # Cached path: the shared ``GrammarRegistry`` keeps compiled
+            # grammars across paint frames, so each visible row only
+            # pays the regex-compile cost the first time we see a new
+            # extension this session — not on every paint. (Going
+            # through ``highlight_for_extension`` instead would re-load
+            # and re-compile the grammar 30+ times per frame, pegging
+            # the UI thread at 100% CPU on any sizable result set.)
+            #
+            # Long-line guard: tokenizing a 5 KB+ single line with a
+            # complex grammar (e.g. TypeScript on minified JS output)
+            # walks every regex across the whole string, easily eating
+            # 100 ms per row. The plain-text rendering above is
+            # already correct without highlights — we just lose color
+            # for that row, which is the right tradeoff vs. a hang.
+            var row_cache = HighlightCache()
+            var hls = highlight_for_extension_cached(
+                extension_of(m.path), one_line, registry, row_cache,
             )
             for h in range(len(hls)):
                 var hl = hls[h]
@@ -682,6 +754,12 @@ struct _RgRunner(Movable):
     var root: String
     var query: String
     var _buf: List[UInt8]   # incoming bytes not yet split on '\n'
+    # How far we've already scanned ``_buf`` for a newline. Persists
+    # across ticks so a single huge unterminated line (e.g. a multi-MB
+    # match preview that ``--max-columns`` somehow let through) doesn't
+    # rescan ``_buf[0..]`` on every tick — that turned line-finding
+    # into O(N²) over the search lifetime.
+    var _scan_pos: Int
     var _new: List[ProjectMatch]   # parsed but not yet handed to caller
 
     fn __init__(out self):
@@ -690,6 +768,7 @@ struct _RgRunner(Movable):
         self.root = String("")
         self.query = String("")
         self._buf = List[UInt8]()
+        self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
     fn is_active(self) -> Bool:
@@ -707,6 +786,7 @@ struct _RgRunner(Movable):
         self.root = String("")
         self.query = String("")
         self._buf = List[UInt8]()
+        self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
     fn start(mut self, root: String, query: String) -> Bool:
@@ -726,6 +806,17 @@ struct _RgRunner(Movable):
         argv.append(String("--color=never"))
         argv.append(String("--smart-case"))
         argv.append(String("-F"))                # fixed-string (no regex)
+        # Cap how much rg emits per matched line. Without this, a hit
+        # in a minified JS / CSS bundle would push a single multi-MB
+        # match line into our pipe; we'd have to buffer it whole
+        # before finding the trailing ``\n`` (since lines are our
+        # match boundary), and a paint-frame's worth of work would
+        # turn into seconds. ``--max-columns-preview`` keeps the
+        # matched substring visible so the user still sees what they
+        # found, just truncated.
+        argv.append(String("--max-columns"))
+        argv.append(String("1024"))
+        argv.append(String("--max-columns-preview"))
         argv.append(String("--"))                # end of options
         argv.append(query)
         argv.append(root)
@@ -770,9 +861,12 @@ struct _RgRunner(Movable):
             for i in range(n):
                 self._buf.append(scratch[i])
             total += n
-        # Parse complete lines (terminated by '\n').
+        # Parse complete lines (terminated by '\n'). Scan only the
+        # newly-appended bytes (``_scan_pos`` carries forward from
+        # last tick) so a long unterminated tail doesn't get rescanned
+        # on every tick.
         var consumed = 0
-        var i = 0
+        var i = self._scan_pos
         while i < len(self._buf):
             if self._buf[i] == 0x0A:
                 if i > consumed:
@@ -786,11 +880,18 @@ struct _RgRunner(Movable):
                 consumed = i + 1
             i += 1
         if consumed > 0:
-            # Drop the parsed prefix from _buf in one tail-copy.
+            # Drop the parsed prefix from _buf in one tail-copy. The
+            # unscanned remainder (``_buf[consumed:]``) becomes the new
+            # ``_buf`` and the scan resumes at its start next tick.
             var tail = List[UInt8]()
             for j in range(consumed, len(self._buf)):
                 tail.append(self._buf[j])
             self._buf = tail^
+            self._scan_pos = 0
+        else:
+            # No newline this tick: remember how far we got so the
+            # next tick picks up where we left off.
+            self._scan_pos = len(self._buf)
         # Process exited (EOF on stdout): reap the child, drop any
         # trailing partial line (rg always terminates lines), and
         # transition to idle. ``terminate`` is safe to call after a
@@ -800,6 +901,7 @@ struct _RgRunner(Movable):
             self.proc.terminate()
             self.active = False
             self._buf = List[UInt8]()
+            self._scan_pos = 0
             changed = True
         return changed
 
@@ -830,6 +932,12 @@ fn _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     var text = _slice_str(line, p3 + 1, len(line.as_bytes()))
     if line_no <= 0:
         return Optional[ProjectMatch]()
+    # Truncate the matched-line text up front. We display at most a few
+    # hundred cells of it, and storing the full line keeps multi-MB
+    # minified-file matches alive in memory across the whole result
+    # list. The cap is well above any plausible visible width.
+    if len(text.as_bytes()) > _MATCH_TEXT_CAP:
+        text = _slice_str(text, 0, _MATCH_TEXT_CAP)
     return Optional[ProjectMatch](ProjectMatch(
         path, _strip_root(path, root), line_no, text,
     ))

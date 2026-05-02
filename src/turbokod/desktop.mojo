@@ -764,7 +764,7 @@ struct Desktop(Movable):
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
-        self.project_find.paint(canvas, screen)
+        self.project_find.paint(canvas, screen, self.grammar_registry)
         self.targets_dialog.paint(canvas, screen)
         # Persist the window session if it changed since the last save.
         # No-op when no project is open or no file-backed windows are
@@ -1113,12 +1113,13 @@ struct Desktop(Movable):
         self.targets = load_project_targets(canonical)
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
-        # against. Skipped when there are already windows open: the
-        # user has just opened a specific file (or set up windows
-        # programmatically), and we don't want to layer the prior
-        # session's rects on top of an active workspace.
-        if len(self.windows.windows) == 0:
-            self._pending_restore = True
+        # against. The restore code merges by file path (existing
+        # editor windows for files in the session get their saved
+        # rect; non-matching windows are left alone), so it's safe to
+        # arm even when host-added demo or non-editor windows are
+        # already on screen — they're not file-backed and so aren't
+        # in the session.
+        self._pending_restore = True
 
     # --- session restore / save -------------------------------------------
 
@@ -1268,13 +1269,13 @@ struct Desktop(Movable):
                 session_to_window.append(existing)
                 continue
             try:
-                # Build the window with the un-maximized rect so the
-                # ``_restore_rect`` baked in by the constructor matches
-                # the user's saved layout. We then flip ``is_maximized``
-                # and overwrite ``rect`` to ``workspace`` if needed,
-                # rather than calling ``toggle_maximize`` (which would
-                # overwrite ``_restore_rect`` with the current rect).
-                var w = Window.from_file(basename(resolved), restore, resolved)
+                # Construct at the saved ``rect`` (the current/last-known
+                # position) and explicitly set ``_restore_rect`` to the
+                # saved un-maximized rect. The maximized branch below
+                # then overwrites ``rect`` to ``workspace`` if needed.
+                # We don't call ``toggle_maximize`` because that would
+                # clobber ``_restore_rect`` with the current rect.
+                var w = Window.from_file(basename(resolved), rect, resolved)
                 w._restore_rect = restore
                 # Apply per-buffer view state. Bounds-check the cursor
                 # against the restored buffer so a stale row from a

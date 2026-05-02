@@ -5277,6 +5277,88 @@ fn test_desktop_restores_session_from_disk() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+fn test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
+    """``_set_project`` must arm the session restore even when host-added
+    placeholder windows are already present. Regression for: a host that
+    adds non-file-backed demo windows before opening a file blocked the
+    restore path entirely, and the subsequent save then overwrote the
+    on-disk session with the cascade-default rect."""
+    var root = String("/tmp/turbokod_set_project_arms_restore_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var d = Desktop()
+    # Host adds a non-editor placeholder window (mimicking demo content)
+    # before any project is set.
+    var placeholder_lines = List[String]()
+    placeholder_lines.append(String("placeholder"))
+    d.windows.add(Window(
+        String("Demo"), Rect(4, 3, 50, 16), placeholder_lines^,
+    ))
+    assert_equal(len(d.windows.windows), 1)
+    d.open_project(root)
+    assert_true(d._pending_restore)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
+    """When a saved window's ``rect`` differs from its ``restore_rect``
+    (e.g. user dragged a non-maximized window after creation, so the
+    constructor-stamped ``_restore_rect`` is now stale), restoring it
+    must place the window at ``rect`` — the user's last-known position
+    — not at ``restore_rect``. Regression for: new windows pulled in
+    from session were being constructed with ``restore``, so a moved
+    non-maximized window came back at its original cascade slot."""
+    var root = String("/tmp/turbokod_restore_rect_vs_rect_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var file_path = root + String("/moved.txt")
+    assert_true(write_file(file_path, String("one\ntwo\n")))
+    var s = Session()
+    var sw = SessionWindow()
+    sw.path = String("moved.txt")
+    # User dragged the window to (20, 8, 80, 28); the stale
+    # ``_restore_rect`` is the original cascade slot at (5, 2, 60, 20).
+    sw.rect_a_x = 20
+    sw.rect_a_y = 8
+    sw.rect_b_x = 80
+    sw.rect_b_y = 28
+    sw.is_maximized = False
+    sw.restore_a_x = 5
+    sw.restore_a_y = 2
+    sw.restore_b_x = 60
+    sw.restore_b_y = 20
+    sw.cursor_row = 0
+    sw.cursor_col = 0
+    sw.scroll_x = 0
+    sw.scroll_y = 0
+    s.windows.append(sw^)
+    s.z_order.append(0)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var d = Desktop()
+    d.open_project(root)
+    d._pending_restore = False
+    d._restore_session(Rect(0, 0, 100, 30))
+    assert_equal(len(d.windows.windows), 1)
+    var w0 = d.windows.windows[0]
+    assert_equal(w0.rect.a.x, 20)
+    assert_equal(w0.rect.a.y, 8)
+    assert_equal(w0.rect.b.x, 80)
+    assert_equal(w0.rect.b.y, 28)
+    # ``_restore_rect`` should preserve the saved un-maximized rect so
+    # a later un-maximize lands the window where the user last left it
+    # *before* maximizing — even though we never maximized in this run.
+    assert_equal(w0._restore_rect.a.x, 5)
+    assert_equal(w0._restore_rect.b.x, 60)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
 fn test_desktop_snapshot_captures_per_window_rects() raises:
     """Each open file-backed window must show up in the snapshot with
     its own rect. Regression guard: a copy bug or wrong loop variable
@@ -5802,6 +5884,8 @@ fn main() raises:
     test_session_relative_path_round_trip()
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_restores_session_from_disk()
+    test_desktop_arms_session_restore_when_non_editor_windows_present()
+    test_desktop_restores_non_maximized_rect_not_restore_rect()
     test_desktop_restores_multiple_windows_at_distinct_positions()
     test_desktop_snapshot_captures_per_window_rects()
     test_desktop_save_then_restore_round_trip_through_paint()
