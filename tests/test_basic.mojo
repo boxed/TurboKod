@@ -5277,6 +5277,60 @@ fn test_desktop_restores_session_from_disk() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+fn test_desktop_resize_reapplies_clipped_session_rect() raises:
+    """When the first restore lands on a smaller-than-saved workspace
+    (the host pushes its real dimensions a few ms after startup), the
+    saved rects get clipped down. A subsequent resize event must re-
+    apply the originally-saved rects against the now-correct
+    workspace, instead of leaving windows stuck at their initial
+    clip values forever."""
+    var root = String("/tmp/turbokod_resize_reapply_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var file_path = root + String("/foo.txt")
+    assert_true(write_file(file_path, String("a\nb\nc\n")))
+    var s = Session()
+    var sw = SessionWindow()
+    sw.path = String("foo.txt")
+    # Saved rect (20, 8, 75, 24) — fits a 100x30 screen, NOT a 80x24 one.
+    sw.rect_a_x = 20
+    sw.rect_a_y = 8
+    sw.rect_b_x = 75
+    sw.rect_b_y = 24
+    sw.is_maximized = False
+    sw.restore_a_x = 20
+    sw.restore_a_y = 8
+    sw.restore_b_x = 75
+    sw.restore_b_y = 24
+    s.windows.append(sw^)
+    s.z_order.append(0)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var d = Desktop()
+    d.open_project(root)
+    d._pending_restore = False
+    # First restore at the cramped 80x24 workspace clips ay from 8 to 7.
+    d._restore_session(Rect(0, 0, 80, 24))
+    assert_equal(len(d.windows.windows), 1)
+    var initial = d.windows.windows[0].rect
+    assert_equal(initial.a.y, 7)
+    assert_equal(initial.b.y, 23)
+    # The host now pushes the real dimensions — feed an EVENT_RESIZE
+    # to the desktop and confirm the saved rect is re-applied at the
+    # larger workspace.
+    var resize_ev = Event.resize_event(100, 30)
+    _ = d.handle_event(resize_ev, Rect(0, 0, 100, 30))
+    var refit = d.windows.windows[0].rect
+    assert_equal(refit.a.x, 20)
+    assert_equal(refit.a.y, 8)
+    assert_equal(refit.b.x, 75)
+    assert_equal(refit.b.y, 24)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
 fn test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
     """``_set_project`` must arm the session restore even when host-added
     placeholder windows are already present. Regression for: a host that
@@ -5885,6 +5939,7 @@ fn main() raises:
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_restores_session_from_disk()
     test_desktop_arms_session_restore_when_non_editor_windows_present()
+    test_desktop_resize_reapplies_clipped_session_rect()
     test_desktop_restores_non_maximized_rect_not_restore_rect()
     test_desktop_restores_multiple_windows_at_distinct_positions()
     test_desktop_snapshot_captures_per_window_rects()

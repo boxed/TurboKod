@@ -408,9 +408,15 @@ struct Desktop(Movable):
     # ``paint`` performs the restore — needs ``screen`` for window
     # placement, which only ``paint`` has handy. ``_last_session_json``
     # caches the most recently written encoding so we only touch disk
-    # when window state actually changes.
+    # when window state actually changes. ``_pending_restore_refit``
+    # carries the saved session through to the next resize so the
+    # initial restore (often against the host terminal's pre-resize
+    # default size) gets re-applied at the now-correct workspace —
+    # otherwise rects clipped at startup stay clipped forever even
+    # after the host pushes its real dimensions.
     var _pending_restore: Bool
     var _last_session_json: String
+    var _pending_restore_refit: Optional[Session]
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -468,6 +474,7 @@ struct Desktop(Movable):
         self._run_output_held = False
         self._pending_restore = False
         self._last_session_json = String("")
+        self._pending_restore_refit = Optional[Session]()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -1084,6 +1091,7 @@ struct Desktop(Movable):
         # file rather than the stale in-memory value).
         self._pending_restore = False
         self._last_session_json = String("")
+        self._pending_restore_refit = Optional[Session]()
 
     fn _set_project(mut self, path: String):
         # Resolve so a label like ``.`` becomes the actual directory name,
@@ -1224,7 +1232,21 @@ struct Desktop(Movable):
             # later ``_save_session_if_changed`` will write the first
             # real session out fresh.
             self._last_session_json = String("")
+            self._pending_restore_refit = Optional[Session]()
             return
+        # Stash the loaded session so the next resize event re-applies
+        # the saved rects against the now-correct workspace. The host
+        # terminal often hands us its default size (80x24) for the
+        # first paint and pushes the real dimensions a few ms later;
+        # without re-application, rects saved at the larger size would
+        # stay clipped to 80x24 forever.
+        var session_copy = Session()
+        for i in range(len(session.windows)):
+            session_copy.windows.append(session.windows[i])
+        for i in range(len(session.z_order)):
+            session_copy.z_order.append(session.z_order[i])
+        session_copy.focused = session.focused
+        self._pending_restore_refit = Optional[Session](session_copy^)
         var workspace = self.workspace_rect(screen)
         var root = self.project.value()
         # Track which session entry maps to which final window index
@@ -1339,6 +1361,45 @@ struct Desktop(Movable):
         # re-write the file with the same bytes.
         self._last_session_json = encode_session(self._snapshot_session())
 
+    fn _reapply_session_rects(mut self, screen: Rect):
+        """Re-apply saved rects from ``_pending_restore_refit`` to any
+        already-open editor windows whose ``file_path`` matches a
+        session entry. Used to recover from a startup-time clip when
+        the host terminal pushes its real dimensions a few ms after
+        the first ``_restore_session``. Only file-path-matched windows
+        are touched; new windows that weren't open at restore time and
+        windows the user manually moved (refit cleared) stay where they
+        are."""
+        if not self._pending_restore_refit or not self.project:
+            return
+        ref session = self._pending_restore_refit.value()
+        var workspace = self.workspace_rect(screen)
+        var root = self.project.value()
+        for i in range(len(session.windows)):
+            var sw = session.windows[i]
+            var resolved = _resolve_session_path(root, sw.path)
+            var existing = self._find_window_for_path(resolved)
+            if existing < 0:
+                continue
+            var rect = _clip_rect_to_workspace(
+                Rect(sw.rect_a_x, sw.rect_a_y, sw.rect_b_x, sw.rect_b_y),
+                workspace,
+            )
+            var restore = _clip_rect_to_workspace(
+                Rect(sw.restore_a_x, sw.restore_a_y,
+                     sw.restore_b_x, sw.restore_b_y),
+                workspace,
+            )
+            if sw.is_maximized:
+                self.windows.windows[existing].rect = workspace
+            else:
+                self.windows.windows[existing].rect = rect
+            self.windows.windows[existing].is_maximized = sw.is_maximized
+            self.windows.windows[existing]._restore_rect = restore
+        # Re-seed the change-detection cache so the post-refit paint
+        # doesn't re-write the file with the now-correctly-fit bytes.
+        self._last_session_json = encode_session(self._snapshot_session())
+
     fn _toggle_file_tree(mut self):
         if self._project_menu_idx < 0 or not self.project:
             return
@@ -1364,6 +1425,16 @@ struct Desktop(Movable):
         action the Desktop doesn't claim is returned verbatim for the
         caller to dispatch.
         """
+        # The first resize after a session restore is typically the
+        # host terminal pushing its real dimensions. Re-apply the saved
+        # rects against the now-correct workspace so windows that were
+        # clipped to the host's 80x24 default at startup land where the
+        # user left them. Mouse drags / window dragging clear the refit
+        # marker (see drag handling) so this can't trample user moves
+        # made between restore and the resize.
+        if event.kind == EVENT_RESIZE and self._pending_restore_refit:
+            self._reapply_session_rects(screen)
+            self._pending_restore_refit = Optional[Session]()
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
@@ -1495,6 +1566,15 @@ struct Desktop(Movable):
         if self.file_tree.handle_mouse(event, screen):
             return Optional[String]()
         _ = self.windows.handle_mouse(event, self.workspace_rect(screen))
+        # A click that reaches the window manager could have started a
+        # drag/resize — drop the pending refit so the next resize event
+        # doesn't trample the user's intended move. (This is coarse:
+        # any click within the workspace clears it, even hover. That's
+        # fine — the refit is only meaningful in the brief window
+        # between restore and the host's first resize push, and clicks
+        # in that window are rare.)
+        if event.kind == EVENT_MOUSE and self._pending_restore_refit:
+            self._pending_restore_refit = Optional[Session]()
         return Optional[String]()
 
     fn _handle_key(mut self, event: Event, screen: Rect) -> Optional[String]:
@@ -3532,6 +3612,8 @@ fn _starts_with(s: String, prefix: String) -> Bool:
         if sb[i] != pb[i]:
             return False
     return True
+
+
 
 
 fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
