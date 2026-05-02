@@ -26,17 +26,30 @@ struct MenuItem(ImplicitlyCopyable, Movable):
     var action: String
     var is_separator: Bool
     var shortcut: String     # rendered right-aligned in the dropdown
+    # Toggle items: ``checkable=True`` reserves a two-cell prefix on the
+    # left of the label so a ``✓`` glyph can render when ``checked`` is
+    # True. The host (e.g., ``Desktop``) keeps ``checked`` in sync with
+    # the underlying state by calling ``MenuBar.set_item_checked``
+    # before paint. Non-checkable items render without the prefix —
+    # unless the dropdown contains any checkable item, in which case all
+    # rows pad by 2 cells so labels stay vertically aligned.
+    var checkable: Bool
+    var checked: Bool
 
     fn __init__(
         out self,
         var label: String,
         var action: String,
         is_separator: Bool = False,
+        checkable: Bool = False,
+        checked: Bool = False,
     ):
         self.label = label^
         self.action = action^
         self.is_separator = is_separator
         self.shortcut = String("")
+        self.checkable = checkable
+        self.checked = checked
 
     @staticmethod
     fn separator() -> Self:
@@ -48,6 +61,8 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.action = copy.action
         self.is_separator = copy.is_separator
         self.shortcut = copy.shortcut
+        self.checkable = copy.checkable
+        self.checked = copy.checked
 
 
 struct Menu(ImplicitlyCopyable, Movable):
@@ -126,6 +141,18 @@ struct MenuBar(Movable):
                 if not visible and self.open_idx == i:
                     self.open_menu(-1)
                 return
+
+    fn set_item_checked(mut self, action: String, checked: Bool):
+        """Flip the ``checked`` flag on the first menu item whose action
+        matches. No-op if no such item exists. Used by the host to keep
+        the View-menu checkmarks in sync with persisted state."""
+        for i in range(len(self.menus)):
+            for j in range(len(self.menus[i].items)):
+                if self.menus[i].items[j].is_separator:
+                    continue
+                if self.menus[i].items[j].action == action:
+                    self.menus[i].items[j].checked = checked
+                    return
 
     fn is_open(self) -> Bool:
         return self.open_idx >= 0
@@ -208,23 +235,36 @@ struct MenuBar(Movable):
             rx -= w + 1
         return rects^
 
+    fn _menu_has_checkable(self, menu_idx: Int) -> Bool:
+        """True when *any* item in this dropdown is checkable. Used to
+        decide whether every row gets a 2-cell label-indent so labels
+        stay aligned in mixed checkable/non-checkable menus."""
+        if menu_idx < 0 or menu_idx >= len(self.menus):
+            return False
+        var menu = self.menus[menu_idx]
+        for i in range(len(menu.items)):
+            if menu.items[i].checkable:
+                return True
+        return False
+
     fn _dropdown_rect(self, screen_width: Int) -> Rect:
         if self.open_idx < 0:
             return Rect(0, 0, 0, 0)
         var anchor = self._layout(screen_width)[self.open_idx]
         var menu = self.menus[self.open_idx]
-        # Width = max(2 + label + 2, 2 + label + gap + shortcut + 2). The +4
-        # constant covers left padding, right padding; the +6 form adds the
-        # 2-cell gap that separates the label from the shortcut.
-        var width = 8
+        var indent = 2 if self._menu_has_checkable(self.open_idx) else 0
+        # Width = max(2 + indent + label + 2, 2 + indent + label + gap + shortcut + 2).
+        # The +4 constant covers left padding + right padding; the +6 form adds
+        # the 2-cell gap that separates the label from the shortcut.
+        var width = 8 + indent
         for i in range(len(menu.items)):
             if menu.items[i].is_separator:
                 continue
             var label_w = len(menu.items[i].label.as_bytes())
             var sc_w = len(menu.items[i].shortcut.as_bytes())
-            var w = label_w + 4
+            var w = indent + label_w + 4
             if sc_w > 0:
-                w = label_w + sc_w + 6
+                w = indent + label_w + sc_w + 6
             if w > width:
                 width = w
         var height = len(menu.items) + 2
@@ -291,6 +331,11 @@ struct MenuBar(Movable):
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
         var menu = self.menus[self.open_idx]
+        # When the dropdown contains any checkable item, every row reserves
+        # a 2-cell prefix between the left padding and the label so the
+        # ``✓`` glyph slot lines up across the menu — non-checkable items
+        # in the same dropdown just leave that prefix blank.
+        var indent = 2 if self._menu_has_checkable(self.open_idx) else 0
         for i in range(len(menu.items)):
             var y = rect.a.y + 1 + i
             if menu.items[i].is_separator:
@@ -307,11 +352,14 @@ struct MenuBar(Movable):
                     Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
                     String(" "), row_attr,
                 )
+            if menu.items[i].checkable and menu.items[i].checked:
+                canvas.set(rect.a.x + 2, y, Cell(String("✓"), row_attr, 1))
+            var label_x = rect.a.x + 2 + indent
             var label_bytes = menu.items[i].label.as_bytes()
             for j in range(len(label_bytes)):
                 var ch = String(chr(Int(label_bytes[j])))
                 var a = row_key if j == 0 else row_attr
-                canvas.set(rect.a.x + 2 + j, y, Cell(ch, a, 1))
+                canvas.set(label_x + j, y, Cell(ch, a, 1))
             # Right-aligned shortcut text — last cell sits at rect.b.x - 2
             # (one in from the right border), so the start x is computed
             # backwards from there. ``_dropdown_rect`` already widened the

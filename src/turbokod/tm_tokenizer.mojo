@@ -744,6 +744,21 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_keyword_attr())
     if _starts_with_str(scope, String("meta.attribute")):
         return Optional[Attr](highlight_decorator_attr())
+    # Diff scopes: render like ``git diff`` does in a color terminal —
+    # deleted lines red, inserted lines green, hunk-range hints cyan,
+    # file headers white-on-blue (the keyword color, which is the most
+    # eye-catching cell in our palette).
+    if _starts_with_str(scope, String("markup.deleted")):
+        return Optional[Attr](highlight_string_attr())
+    if _starts_with_str(scope, String("markup.inserted")):
+        return Optional[Attr](highlight_ident_attr())
+    if _starts_with_str(scope, String("markup.changed")):
+        return Optional[Attr](highlight_decorator_attr())
+    if _starts_with_str(scope, String("meta.diff.range")) \
+            or _starts_with_str(scope, String("meta.toc-list.line-number")):
+        return Optional[Attr](highlight_decorator_attr())
+    if _starts_with_str(scope, String("meta.diff")):
+        return Optional[Attr](highlight_keyword_attr())
     if _starts_with_str(scope, String("punctuation")):
         return Optional[Attr](highlight_operator_attr())
     # ``variable.*`` covers generic variables, function parameters,

@@ -52,8 +52,10 @@ from turbokod import (
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
+    EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
+    GIT_LOCAL_CHANGES,
     PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
@@ -115,12 +117,27 @@ fn main() raises:
         edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
         edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
         desktop.menu_bar.add(Menu(String("Edit"), edit_items^))
-        desktop.menu_bar.add(_mk_menu(String("View"),
-            (String("Toggle Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS),
-            (String("Toggle Soft Wrap"),    EDITOR_TOGGLE_SOFT_WRAP),
+        # View menu items are checkable toggles — the host's _mk_menu
+        # helper produces non-checkable items, so build this menu
+        # explicitly so each item carries ``checkable=True``. Desktop
+        # syncs the ``checked`` flag from ``self.config`` before paint.
+        var view_items = List[MenuItem]()
+        view_items.append(MenuItem(
+            String("Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS,
+            checkable=True,
         ))
+        view_items.append(MenuItem(
+            String("Soft Wrap"), EDITOR_TOGGLE_SOFT_WRAP,
+            checkable=True,
+        ))
+        view_items.append(MenuItem(
+            String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES,
+            checkable=True,
+        ))
+        desktop.menu_bar.add(Menu(String("View"), view_items^))
         desktop.menu_bar.add(_mk_menu(String("Git"),
-            (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
+            (String("Toggle Blame"),       EDITOR_TOGGLE_BLAME),
+            (String("Show local changes"), GIT_LOCAL_CHANGES),
         ))
         var debug_items = List[MenuItem]()
         debug_items.append(MenuItem(String("Run"), TARGET_RUN))
@@ -199,8 +216,15 @@ fn main() raises:
                 desktop.menu_bar.set_visible_by_label(
                     String("View"), desktop.windows.focused_is_editor(),
                 )
+                # Git menu: visible while an editor is focused (Toggle
+                # Blame applies to it) or whenever a project is set
+                # (Show local changes is project-scoped and shouldn't
+                # require opening a file first).
+                var git_visible = desktop.windows.focused_is_editor()
+                if not git_visible and desktop.project:
+                    git_visible = True
                 desktop.menu_bar.set_visible_by_label(
-                    String("Git"), desktop.windows.focused_is_editor(),
+                    String("Git"), git_visible,
                 )
                 var tree_open = desktop.file_tree.consume_open()
                 if tree_open:

@@ -51,10 +51,12 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     """Global preferences. Defaults match the pre-config behavior."""
     var line_numbers: Bool
     var soft_wrap: Bool
+    var git_changes: Bool
 
     fn __init__(out self):
         self.line_numbers = False
         self.soft_wrap = False
+        self.git_changes = False
 
 
 fn load_config() -> TurbokodConfig:
@@ -77,6 +79,9 @@ fn load_config() -> TurbokodConfig:
         var sw = root.object_get(String("soft_wrap"))
         if sw and sw.value().is_bool():
             cfg.soft_wrap = sw.value().as_bool()
+        var gc = root.object_get(String("git_changes"))
+        if gc and gc.value().is_bool():
+            cfg.git_changes = gc.value().as_bool()
     except:
         pass
     return cfg
@@ -96,4 +101,5 @@ fn save_config(config: TurbokodConfig) -> Bool:
     var root = json_object()
     root.put(String("line_numbers"), json_bool(config.line_numbers))
     root.put(String("soft_wrap"), json_bool(config.soft_wrap))
+    root.put(String("git_changes"), json_bool(config.git_changes))
     return write_file(path, encode_json(root) + String("\n"))

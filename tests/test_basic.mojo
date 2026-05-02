@@ -45,6 +45,11 @@ from turbokod.file_io import (
     read_file, stat_file, write_file,
 )
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
+from turbokod.git_changes import (
+    ChangedFile, GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
+    diff_buffer_against_head, parse_unified_diff_files,
+)
+from turbokod.local_changes import LocalChanges
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
@@ -96,7 +101,8 @@ from turbokod.debugger_config import (
 from turbokod.highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension, highlight_incremental,
-    highlight_comment_attr, highlight_ident_attr, highlight_keyword_attr,
+    highlight_comment_attr, highlight_decorator_attr, highlight_ident_attr,
+    highlight_keyword_attr,
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
@@ -1495,6 +1501,34 @@ fn test_menu_items_get_shortcut_text_after_refresh() raises:
     assert_equal(fm.items[3].shortcut, String(""))
 
 
+fn test_dropdown_reserves_indent_for_checkable_items() raises:
+    """A dropdown that contains any checkable item must reserve a 2-cell
+    label-indent so the ``✓`` glyph slot is consistent across rows.
+    ``set_item_checked`` flips state by action without disturbing the
+    rest of the menu."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    items.append(MenuItem(
+        String("Line Numbers"), String("view:ln"), checkable=True,
+    ))
+    items.append(MenuItem(
+        String("Soft Wrap"), String("view:sw"), checkable=True,
+    ))
+    bar.add(Menu(String("View"), items^))
+    bar.open_idx = 0
+    assert_true(bar._menu_has_checkable(0))
+    var dr = bar._dropdown_rect(80)
+    var widest_label = len(String("Line Numbers").as_bytes())
+    # 2 (left pad) + 2 (checkbox slot) + label + 2 (right pad)
+    var expected_min_w = widest_label + 6
+    assert_true(dr.b.x - dr.a.x >= expected_min_w)
+    bar.set_item_checked(String("view:ln"), True)
+    assert_true(bar.menus[0].items[0].checked)
+    assert_false(bar.menus[0].items[1].checked)
+    bar.set_item_checked(String("view:ln"), False)
+    assert_false(bar.menus[0].items[0].checked)
+
+
 fn test_dropdown_widens_to_fit_shortcut() raises:
     """The dropdown rect must accommodate label + gap + shortcut; without
     the widening, ``Ctrl+Shift+F`` would overlap the menu item label."""
@@ -2576,6 +2610,7 @@ fn test_textmate_all_bundled_grammars_load() raises:
     probes.append((String("html"), String("<html><body>hi</body></html>")))
     probes.append((String("css"),  String(".cls { color: red; }")))
     probes.append((String("json"), String("{\"a\": 1}")))
+    probes.append((String("diff"), String("-removed line")))
     # ``while``-rule grammars: now wired through our runtime once
     # ``PATTERN_BEGIN_WHILE`` was added. Light smoke probes — the
     # while-rule semantics get a dedicated test below.
@@ -5731,6 +5766,35 @@ fn test_desktop_snapshot_skips_untitled_windows() raises:
     assert_equal(path, String("examples/hello.mojo"))
 
 
+fn test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
+    """The bundled diff TextMate grammar maps ``-`` lines to the string
+    color (red), ``+`` lines to the ident color (green), and the
+    ``@@`` hunk header to the decorator color (cyan)."""
+    var lines = _hl_lines(
+        String("--- a/file.txt"),
+        String("+++ b/file.txt"),
+        String("@@ -1,3 +1,3 @@"),
+        String(" context"),
+        String("-removed"),
+        String("+added"),
+    )
+    var hls = highlight_for_extension(String("diff"), lines)
+    var saw_deleted = False
+    var saw_inserted = False
+    var saw_range = False
+    for i in range(len(hls)):
+        var a = hls[i].attr
+        if hls[i].row == 4 and a == highlight_string_attr():
+            saw_deleted = True
+        if hls[i].row == 5 and a == highlight_ident_attr():
+            saw_inserted = True
+        if hls[i].row == 2 and a == highlight_decorator_attr():
+            saw_range = True
+    assert_true(saw_deleted)
+    assert_true(saw_inserted)
+    assert_true(saw_range)
+
+
 fn test_diff_identical_inputs_have_no_hunks() raises:
     """Two identical inputs produce only the file headers — no ``@@``."""
     var same = String("alpha\nbeta\ngamma\n")
@@ -5911,7 +5975,110 @@ fn test_editor_blame_gutter_widens_total_gutter() raises:
     assert_equal(ed._blame_gutter(), 0)
 
 
+fn test_parse_unified_diff_splits_two_files() raises:
+    """Two files in one diff stream — the parser must split on the
+    ``diff --git`` boundary and pull each path from the ``+++ b/...``
+    header. The first file's chunk gets ``+++ b/foo.txt`` so its path
+    is ``foo.txt``; the second has ``+++ b/dir/bar.mojo``."""
+    var text = (
+        String("diff --git a/foo.txt b/foo.txt\n")
+        + String("index abcdef..123456 100644\n")
+        + String("--- a/foo.txt\n")
+        + String("+++ b/foo.txt\n")
+        + String("@@ -1,2 +1,2 @@\n")
+        + String("-old\n")
+        + String("+new\n")
+        + String(" unchanged\n")
+        + String("diff --git a/dir/bar.mojo b/dir/bar.mojo\n")
+        + String("index 999..888 100644\n")
+        + String("--- a/dir/bar.mojo\n")
+        + String("+++ b/dir/bar.mojo\n")
+        + String("@@ -10 +10 @@\n")
+        + String("-fn old(): pass\n")
+        + String("+fn new(): pass\n")
+    )
+    var files = parse_unified_diff_files(text)
+    assert_equal(len(files), 2)
+    assert_equal(files[0].path, String("foo.txt"))
+    assert_equal(files[1].path, String("dir/bar.mojo"))
+
+
+fn test_parse_unified_diff_handles_pure_delete() raises:
+    """A pure file delete shows ``+++ /dev/null``; the parser must
+    fall back to ``--- a/<path>`` so the sidebar still has a real
+    name to show."""
+    var text = (
+        String("diff --git a/gone.txt b/gone.txt\n")
+        + String("deleted file mode 100644\n")
+        + String("index abc..0000000\n")
+        + String("--- a/gone.txt\n")
+        + String("+++ /dev/null\n")
+        + String("@@ -1 +0,0 @@\n")
+        + String("-bye\n")
+    )
+    var files = parse_unified_diff_files(text)
+    assert_equal(len(files), 1)
+    assert_equal(files[0].path, String("gone.txt"))
+
+
+fn test_diff_buffer_against_head_marks_added_and_modified() raises:
+    """Diffing the editor's in-memory line list against the HEAD blob
+    marks pure inserts as ADDED and inserts paired with deletes as
+    MODIFIED. Lines untouched on either side land as NONE."""
+    var head = (
+        String("alpha\n")
+        + String("beta\n")
+        + String("gamma\n")
+        + String("delta\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("BETA"))           # modified (replaces "beta")
+    buffer.append(String("gamma"))
+    buffer.append(String("inserted"))       # pure add
+    buffer.append(String("delta"))
+    buffer.append(String(""))               # trailing empty (was newline at EOF)
+    var marks = diff_buffer_against_head(head, buffer)
+    assert_equal(len(marks), len(buffer))
+    assert_equal(marks[0], GIT_CHANGE_NONE)
+    assert_equal(marks[1], GIT_CHANGE_MODIFIED)
+    assert_equal(marks[2], GIT_CHANGE_NONE)
+    assert_equal(marks[3], GIT_CHANGE_ADDED)
+    assert_equal(marks[4], GIT_CHANGE_NONE)
+
+
+fn test_editor_git_changes_gutter_widens_total_gutter() raises:
+    """``set_git_changes`` flips the column on; the editor's overall
+    left margin grows by exactly one cell. ``invalidate_git_changes``
+    drops the cache so the gutter goes away again."""
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    ed.git_changes_visible = True
+    var marks = List[Int]()
+    marks.append(GIT_CHANGE_ADDED)
+    marks.append(GIT_CHANGE_MODIFIED)
+    marks.append(GIT_CHANGE_NONE)
+    ed.set_git_changes(marks^)
+    assert_equal(ed._git_changes_gutter(), 1)
+    ed.invalidate_git_changes()
+    # Visible flag still on, but no data → no column.
+    assert_equal(ed._git_changes_gutter(), 0)
+
+
+fn test_local_changes_open_records_status_when_clean() raises:
+    """Pointing the widget at ``/tmp`` (not a git repo) makes
+    ``compute_local_changes`` return empty; ``open`` should record a
+    user-readable status string and end up with no files."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    assert_true(lc.active)
+    assert_equal(len(lc.files), 0)
+    assert_true(len(lc.status_message.as_bytes()) > 0)
+    lc.close()
+    assert_false(lc.active)
+
+
 fn main() raises:
+    test_diff_grammar_paints_inserted_deleted_and_hunk_header()
     test_diff_identical_inputs_have_no_hunks()
     test_diff_lines_pure_insert()
     test_diff_lines_pure_delete()
@@ -5921,6 +6088,11 @@ fn main() raises:
     test_git_blame_propagates_cached_author_for_repeated_sha()
     test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder()
     test_editor_blame_gutter_widens_total_gutter()
+    test_parse_unified_diff_splits_two_files()
+    test_parse_unified_diff_handles_pure_delete()
+    test_diff_buffer_against_head_marks_added_and_modified()
+    test_editor_git_changes_gutter_widens_total_gutter()
+    test_local_changes_open_records_status_when_clean()
     test_point_arithmetic()
     test_rect_basics()
     test_rect_helpers()
@@ -6059,6 +6231,7 @@ fn main() raises:
     test_format_hotkey_renders_combinations()
     test_menu_items_get_shortcut_text_after_refresh()
     test_dropdown_widens_to_fit_shortcut()
+    test_dropdown_reserves_indent_for_checkable_items()
     test_parse_csi_modify_other_keys_normalizes_ctrl_q()
     test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form()
     test_cmd_s_via_modify_other_keys_triggers_save_hotkey()

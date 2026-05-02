@@ -130,6 +130,8 @@ fn _grammar_path_for_ext(ext: String) -> String:
         return String("src/turbokod/grammars/html.tmLanguage.json")
     if ext == String("css"):
         return String("src/turbokod/grammars/css.tmLanguage.json")
+    if ext == String("diff") or ext == String("patch"):
+        return String("src/turbokod/grammars/diff.tmLanguage.json")
     # Markdown — the vscode grammar is dominated by ``while`` rules
     # (block-context tracking) and external-grammar embedding (code
     # fences). Without those, leaving it on the generic fallback

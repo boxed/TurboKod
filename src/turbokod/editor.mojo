@@ -28,6 +28,9 @@ from .events import (
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
 from .git_blame import BlameLine
+from .git_changes import (
+    GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
+)
 from .highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension, highlight_incremental,
@@ -379,6 +382,28 @@ struct Editor(ImplicitlyCopyable, Movable):
     # would be noise for casual editing.
     var blame_lines: List[BlameLine]
     var blame_visible: Bool
+    # Git-changes gutter. ``git_change_lines[i]`` is one of
+    # ``GIT_CHANGE_NONE/ADDED/MODIFIED`` for buffer row ``i``; the host
+    # populates it by diffing the in-memory buffer against the file at
+    # ``HEAD``. ``git_changes_visible`` mirrors the global config flag
+    # (the column only renders when *visible* AND the lines list is
+    # non-empty, so non-git files silently produce no column even when
+    # the toggle is on).
+    var git_changes_visible: Bool
+    var git_change_lines: List[Int]
+    # ``_git_head_text`` caches the file's content at HEAD so the
+    # gutter can re-diff against the in-memory buffer on every edit
+    # without re-spawning git. ``_git_head_loaded`` distinguishes "not
+    # fetched yet" from "fetched and confirmed absent" (untracked
+    # file) — only the former triggers a fetch on the next paint.
+    # ``_git_head_present`` is True when the fetch produced a real
+    # baseline; ``_git_changes_dirty`` is set on every buffer edit
+    # (piggy-backing on ``_mark_hl_dirty``) so the desktop paint pass
+    # re-runs the line-diff.
+    var _git_head_text: String
+    var _git_head_loaded: Bool
+    var _git_head_present: Bool
+    var _git_changes_dirty: Bool
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -425,6 +450,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
+        self.git_changes_visible = False
+        self.git_change_lines = List[Int]()
+        self._git_head_text = String("")
+        self._git_head_loaded = False
+        self._git_head_present = False
+        self._git_changes_dirty = True
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -457,6 +488,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
+        self.git_changes_visible = False
+        self.git_change_lines = List[Int]()
+        self._git_head_text = String("")
+        self._git_head_loaded = False
+        self._git_head_present = False
+        self._git_changes_dirty = True
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -506,6 +543,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
+        self.git_changes_visible = copy.git_changes_visible
+        self.git_change_lines = copy.git_change_lines.copy()
+        self._git_head_text = copy._git_head_text
+        self._git_head_loaded = copy._git_head_loaded
+        self._git_head_present = copy._git_head_present
+        self._git_changes_dirty = copy._git_changes_dirty
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -556,6 +599,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         if r < self._hl_dirty_row:
             self._hl_dirty_row = r
         self._highlights_dirty = True
+        # Every code path that mutates the buffer eventually flows
+        # through here — same hook drives the change-bar gutter so
+        # we don't need to thread a separate "buffer changed" signal
+        # to every edit handler.
+        self._git_changes_dirty = True
 
     fn refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
@@ -939,6 +987,39 @@ struct Editor(ImplicitlyCopyable, Movable):
             return 0
         return 8 + 1 + 14 + 1
 
+    fn set_git_head_text(mut self, var text: String, present: Bool):
+        """Cache the file's content at ``HEAD`` for the change-bar
+        gutter. ``present=False`` records "no baseline" (file is
+        untracked, brand new, or git couldn't resolve the path) — the
+        column then renders nothing for this editor.
+
+        Setting the baseline arms ``_git_changes_dirty`` so the next
+        paint re-diffs the buffer against it.
+        """
+        self._git_head_text = text^
+        self._git_head_loaded = True
+        self._git_head_present = present
+        self._git_changes_dirty = True
+
+    fn set_git_changes(mut self, var lines: List[Int]):
+        """Replace the per-line change-status cache. The desktop paint
+        pass calls this after running the buffer-vs-HEAD diff."""
+        self.git_change_lines = lines^
+        self._git_changes_dirty = False
+
+    fn invalidate_git_changes(mut self):
+        """Drop the cached HEAD baseline and per-line change status.
+        The next paint with the toggle on re-fetches HEAD via
+        ``git show`` and re-runs the diff. Call this on save / file
+        reload so the column reflects the freshly written state — the
+        on-disk HEAD blob may itself have changed (commit, checkout)
+        between when we cached it and now."""
+        self.git_change_lines = List[Int]()
+        self._git_head_text = String("")
+        self._git_head_loaded = False
+        self._git_head_present = False
+        self._git_changes_dirty = True
+
     fn toggle_soft_wrap(mut self):
         self.soft_wrap = not self.soft_wrap
         if self.soft_wrap:
@@ -959,9 +1040,21 @@ struct Editor(ImplicitlyCopyable, Movable):
             digits += 1
         return digits + 1
 
+    fn _git_changes_gutter(self) -> Int:
+        """Width of the git-changes gutter in cells (one column for the
+        bar, no trailing separator — line-number gutter already gives a
+        space, and the blame / text columns abut directly). Zero when
+        the toggle is off or no change data has been loaded — non-git
+        files produce no column."""
+        if not self.git_changes_visible:
+            return 0
+        if len(self.git_change_lines) == 0:
+            return 0
+        return 1
+
     fn _total_gutter(self) -> Int:
         return self.gutter_width + self._line_number_gutter() \
-            + self._blame_gutter()
+            + self._git_changes_gutter() + self._blame_gutter()
 
     fn _layout_lines(
         self, content_h: Int, text_width: Int,
@@ -1104,8 +1197,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         # Any of them can be zero-width.
         var dap_gutter = self.gutter_width
         var ln_gutter = self._line_number_gutter()
+        var gc_gutter = self._git_changes_gutter()
         var bl_gutter = self._blame_gutter()
-        var total_gutter = dap_gutter + ln_gutter + bl_gutter
+        var total_gutter = dap_gutter + ln_gutter + gc_gutter + bl_gutter
         var text_x0 = view.a.x + total_gutter
         var content_right = view.b.x
         var content_bottom = view.b.y
@@ -1164,10 +1258,23 @@ struct Editor(ImplicitlyCopyable, Movable):
                         Point(sx, sy_g), num_str, ln_attr,
                         view.a.x + total_gutter,
                     )
+                if gc_gutter > 0 and is_first_seg \
+                        and buf_row < len(self.git_change_lines):
+                    var status = self.git_change_lines[buf_row]
+                    if status != GIT_CHANGE_NONE:
+                        # ADDED → green vertical bar, MODIFIED → yellow.
+                        # Same glyph for both so the column reads as a
+                        # bar by colour rather than by shape; matches
+                        # what most editors do in their change gutter.
+                        var fg = LIGHT_GREEN if status == GIT_CHANGE_ADDED \
+                            else LIGHT_YELLOW
+                        var bar_attr = Attr(fg, BLUE)
+                        var gx = view.a.x + dap_gutter + ln_gutter
+                        canvas.set(gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row < len(self.blame_lines):
                     var bl = self.blame_lines[buf_row]
-                    var bx = view.a.x + dap_gutter + ln_gutter
+                    var bx = view.a.x + dap_gutter + ln_gutter + gc_gutter
                     var bl_right = bx + bl_gutter - 1
                     _ = canvas.put_text(
                         Point(bx, sy_g), bl.commit, ln_attr, bl_right,

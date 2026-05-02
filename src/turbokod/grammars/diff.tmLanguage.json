@@ -1,0 +1,58 @@
+{
+    "name": "Diff",
+    "scopeName": "source.diff",
+    "fileTypes": ["diff", "patch", "rej"],
+    "patterns": [
+        {
+            "comment": "Index/file headers from `git diff`, `svn diff`, etc. — listed before the bare `-`/`+` patterns so they win.",
+            "match": "^((?:diff|Index)[: ].*)$",
+            "name": "meta.diff.index.header"
+        },
+        {
+            "comment": "Mercurial / svn separator under an Index: line.",
+            "match": "^={3,}.*$",
+            "name": "meta.diff.header"
+        },
+        {
+            "comment": "Old-file header (`--- <path>`).",
+            "match": "^---[^-].*$",
+            "name": "meta.diff.header.from-file"
+        },
+        {
+            "comment": "New-file header (`+++ <path>`).",
+            "match": "^\\+\\+\\+.*$",
+            "name": "meta.diff.header.to-file"
+        },
+        {
+            "comment": "Unified-diff hunk range (`@@ -l,c +l,c @@`). The trailing portion after the second `@@` is the optional function-context hint.",
+            "match": "^(@@)\\s*(.+?)\\s*(@@)(.*)$",
+            "name": "meta.diff.range.unified",
+            "captures": {
+                "1": { "name": "punctuation.definition.range.diff" },
+                "2": { "name": "meta.toc-list.line-number.diff" },
+                "3": { "name": "punctuation.definition.range.diff" },
+                "4": { "name": "meta.function.diff" }
+            }
+        },
+        {
+            "comment": "Context-diff hunk separator (`***************`).",
+            "match": "^\\*{3,}.*$",
+            "name": "meta.diff.range.context"
+        },
+        {
+            "comment": "Inserted line — must come AFTER the `+++` rule so a file header isn't classified as an inserted line.",
+            "match": "^\\+.*$",
+            "name": "markup.inserted.diff"
+        },
+        {
+            "comment": "Deleted line — must come AFTER the `---` rule for the same reason.",
+            "match": "^-.*$",
+            "name": "markup.deleted.diff"
+        },
+        {
+            "comment": "Conflict markers — surface them in the same view so a pasted merge-conflict block is obvious.",
+            "match": "^(<{7}|>{7}|={7}|\\|{7}).*$",
+            "name": "markup.changed.diff"
+        }
+    ]
+}

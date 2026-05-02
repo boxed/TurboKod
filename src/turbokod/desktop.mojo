@@ -45,11 +45,15 @@ from .config import TurbokodConfig, load_config, save_config
 from .diff import unified_diff
 from .file_io import basename, find_git_project, join_path, stat_file
 from .git_blame import compute_blame
+from .git_changes import (
+    diff_buffer_against_head, fetch_head_text, project_is_git_repo,
+)
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
 from .install_runner import InstallResult, InstallRunner
+from .local_changes import LocalChanges
 from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
     find_docset_by_language, find_docset_for_extension,
@@ -120,10 +124,19 @@ comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
 comptime EDITOR_TOGGLE_SOFT_WRAP    = String("view:soft_wrap")
+# View-menu toggle for the per-line "+/~" change-bar gutter. The flag
+# lives on ``TurbokodConfig`` so it survives across sessions; the
+# column itself only paints when a ``.git`` is reachable from the
+# project root, so flipping it on outside a repo is a silent no-op.
+comptime EDITOR_TOGGLE_GIT_CHANGES  = String("view:git_changes")
 # Git actions. ``EDITOR_TOGGLE_BLAME`` runs ``git blame --porcelain`` for
 # the focused editor's file the first time it's switched on, then re-uses
 # the cached attribution for subsequent toggles in the same session.
 comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
+# ``GIT_LOCAL_CHANGES`` runs ``git diff HEAD`` for the active project and
+# opens the unified diff as a read-only window. Untracked files are not
+# included — only modifications against the last commit.
+comptime GIT_LOCAL_CHANGES          = String("git:local_changes")
 comptime EDITOR_CUT           = String("edit:cut")
 comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
@@ -290,6 +303,7 @@ struct Desktop(Movable):
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
     var project_find: ProjectFind
+    var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
     var bg_pattern: String
     var bg_attr: Attr
@@ -438,6 +452,7 @@ struct Desktop(Movable):
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
         self.project_find = ProjectFind()
+        self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
@@ -657,6 +672,8 @@ struct Desktop(Movable):
             if self.project_find.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.local_changes.active:
+            return String("default")
         if self.targets_dialog.active:
             if self.targets_dialog.is_input_at(pos, screen):
                 return String("text")
@@ -710,6 +727,29 @@ struct Desktop(Movable):
         Read-only editors (the docs viewer) are special-cased: line
         numbers are forced off regardless of the global toggle, since
         a rendered docs page isn't a numbered source file."""
+        # Sync the View-menu checkmarks with the current config so the
+        # dropdown always reflects the live state (Desktop owns the
+        # config, the host owns the menu items, and this is the one
+        # place both are reachable).
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_LINE_NUMBERS, self.config.line_numbers,
+        )
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_SOFT_WRAP, self.config.soft_wrap,
+        )
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_GIT_CHANGES, self.config.git_changes,
+        )
+        # Resolve "is this a git repo" once. The check is cheap (a stat
+        # walk up to ``/``), but doing it once per editor per frame
+        # adds up; ``self.project`` is the only relevant root because
+        # editors without a project still share the desktop's git
+        # context.
+        var have_git = False
+        var root = String("")
+        if self.project:
+            root = self.project.value()
+            have_git = project_is_git_repo(root)
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
@@ -722,6 +762,46 @@ struct Desktop(Movable):
                 # Soft-wrap forces a left-aligned visible area; keep the
                 # invariant even if the host poked ``scroll_x`` directly.
                 self.windows.windows[i].editor.scroll_x = 0
+            # Git-changes column. Read-only editors (the docs viewer)
+            # always skip it. When the toggle's on and we haven't
+            # cached lines yet, spawn ``git diff HEAD -- <file>`` once
+            # — subsequent paints reuse the cache. ``invalidate_git_changes``
+            # on save / reload gets the next paint to refresh.
+            if self.windows.windows[i].editor.read_only:
+                self.windows.windows[i].editor.git_changes_visible = False
+            else:
+                self.windows.windows[i].editor.git_changes_visible = \
+                    self.config.git_changes and have_git
+                if self.config.git_changes and have_git:
+                    var fp = self.windows.windows[i].editor.file_path
+                    # Step 1: fetch HEAD content once per file. Bracket
+                    # the spawn with the loaded flag so untracked / new
+                    # files don't re-spawn ``git show`` every paint.
+                    if len(fp.as_bytes()) > 0 \
+                            and not self.windows.windows[i].editor._git_head_loaded:
+                        var head = fetch_head_text(root, fp)
+                        if head:
+                            self.windows.windows[i].editor.set_git_head_text(
+                                head.value(), True,
+                            )
+                        else:
+                            self.windows.windows[i].editor.set_git_head_text(
+                                String(""), False,
+                            )
+                    # Step 2: re-diff the buffer against the cached
+                    # baseline whenever the buffer has changed. The
+                    # diff is in-process (Myers), no spawn — fine to
+                    # do per paint while the user types.
+                    if self.windows.windows[i].editor._git_head_present \
+                            and self.windows.windows[i].editor._git_changes_dirty:
+                        var buf_lines = \
+                            self.windows.windows[i].editor.buffer.lines.copy()
+                        var head_text = \
+                            self.windows.windows[i].editor._git_head_text
+                        var lines = diff_buffer_against_head(
+                            head_text, buf_lines,
+                        )
+                        self.windows.windows[i].editor.set_git_changes(lines^)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
@@ -782,6 +862,7 @@ struct Desktop(Movable):
         self.symbol_pick.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen, self.grammar_registry)
+        self.local_changes.paint(canvas, screen)
         self.targets_dialog.paint(canvas, screen)
         # Persist the window session if it changed since the last save.
         # No-op when no project is open or no file-backed windows are
@@ -913,6 +994,7 @@ struct Desktop(Movable):
         # Don't pile prompts on top of an open dialog/prompt.
         if self.prompt.active or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
+                or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return
         # Re-check that no candidate is on PATH. ``_ensure_lsp_for_extension``
@@ -1062,6 +1144,11 @@ struct Desktop(Movable):
         var new_idx = len(self.windows.windows) - 1
         self.windows.windows[new_idx].editor.read_only = True
         self.windows.windows[new_idx].editor.line_numbers = False
+        # Synthetic ``.diff`` path so the highlighter routes through
+        # the bundled diff TextMate grammar. ``check_external_changes``
+        # is gated by ``stat_file(...).ok`` and ``save`` by ``read_only``,
+        # so the made-up path can't cause file operations.
+        self.windows.windows[new_idx].editor.file_path = String("compare.diff")
         if was_max:
             self.windows.windows[new_idx].toggle_maximize(workspace)
 
@@ -1555,6 +1642,25 @@ struct Desktop(Movable):
                     DefinitionResolved(path, line_no - 1, 0), screen,
                 )
             return Optional[String]()
+        if self.local_changes.active:
+            if event.kind == EVENT_KEY:
+                _ = self.local_changes.handle_key(event, screen)
+            else:
+                _ = self.local_changes.handle_mouse(event, screen)
+            if self.local_changes.submitted:
+                # ``selected_path`` is project-relative; resolve against
+                # the project root before opening so ``open_file`` can
+                # find it on disk regardless of the host's cwd.
+                var rel = self.local_changes.selected_path
+                self.local_changes.close()
+                var abs = rel
+                if not _starts_with(rel, String("/")) and self.project:
+                    abs = join_path(self.project.value(), rel)
+                try:
+                    self.open_file(abs, screen)
+                except:
+                    pass
+            return Optional[String]()
         if self.targets_dialog.active:
             if event.kind == EVENT_KEY:
                 _ = self.targets_dialog.handle_key(event)
@@ -1834,6 +1940,21 @@ struct Desktop(Movable):
                         self.windows.windows[i].interior(),
                     )
             _ = save_config(self.config)
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_GIT_CHANGES:
+            self.config.git_changes = not self.config.git_changes
+            # Drop every editor's cached change-line list so that
+            # toggling off-then-on always re-queries git instead of
+            # showing stale state from before the user's last edits.
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor:
+                    self.windows.windows[i].editor.invalidate_git_changes()
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
+        if action == GIT_LOCAL_CHANGES:
+            if self.project:
+                self.local_changes.open(self.project.value())
             return Optional[String]()
         if action == EDITOR_TOGGLE_BLAME:
             var idx = self._focused_editor_idx()
@@ -3022,6 +3143,9 @@ struct Desktop(Movable):
                 # ``self`` (Mojo's exclusivity check rejects the call).
                 var saved_path = self.windows.windows[idx].editor.file_path
                 self._maybe_reload_targets(saved_path)
+                # The diff against ``HEAD`` is now stale; clear the
+                # cache so the next paint re-queries git for this file.
+                self.windows.windows[idx].editor.invalidate_git_changes()
             except:
                 pass
             return
@@ -3269,6 +3393,7 @@ struct Desktop(Movable):
                 return
         if self.prompt.active or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
+                or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return
         self._doc_install_prompted.append(spec.language_id)

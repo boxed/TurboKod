@@ -48,8 +48,10 @@ from .desktop import (
     EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
+    EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_UNDO,
+    GIT_LOCAL_CHANGES,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
     PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX, TARGET_TEST,
@@ -114,6 +116,10 @@ from .file_io import (
 )
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from .git_blame import BlameLine, compute_blame, parse_blame_porcelain
+from .git_changes import (
+    ChangedFile, compute_local_changes, parse_unified_diff_files,
+)
+from .local_changes import LocalChanges
 from .install_runner import InstallResult, InstallRunner
 from .project import (
     GitignoreMatcher, GitignorePattern, ProjectMatch,
