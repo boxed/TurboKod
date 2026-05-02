@@ -23,6 +23,7 @@ from .events import (
 )
 from .file_io import join_path
 from .geometry import Point, Rect
+from .window import hit_close_button, paint_close_button, paint_drop_shadow
 
 
 # Geometry must stay in sync between ``paint`` and ``handle_mouse`` —
@@ -136,11 +137,18 @@ struct FileDialog(Movable):
         var title_attr = Attr(BLACK, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        # Drop shadow first — it darkens cells *outside* ``rect`` so
+        # whatever workspace content sits behind the dialog reads as
+        # dim-on-black underneath the right and bottom edges.
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
         var title = String(" Open File ")
         var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
         _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        # TV-style close button in the top-left corner. Same chrome as
+        # editor windows — the framework helper paints all three cells.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 1),
             self.browser.dir, dir_attr, rect.b.x - 1,
@@ -246,6 +254,14 @@ struct FileDialog(Movable):
                 self._drag = Optional[Point]()
                 return True
             # In-progress drag swallows everything else.
+            return True
+        # Close button [■] dismisses the dialog. Checked before the
+        # title-bar drag-start below so a click on the close glyph
+        # doesn't also begin a move.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.close()
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion and event.pos.y == rect.a.y \

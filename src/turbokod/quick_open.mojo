@@ -25,6 +25,8 @@ from .events import (
 from .file_io import join_path
 from .geometry import Point, Rect
 from .project import walk_project_files
+from .text_field import text_field_clipboard_key
+from .window import paint_drop_shadow
 
 
 struct QuickOpen(Movable):
@@ -143,6 +145,7 @@ struct QuickOpen(Movable):
         var sel_attr    = Attr(BLACK,  YELLOW)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(screen)
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
         var title = String(" Quick Open ")
@@ -232,6 +235,15 @@ struct QuickOpen(Movable):
                 self.query = String(StringSlice(
                     unsafe_from_utf8=qb[:len(qb) - 1],
                 ))
+                self._refilter()
+            return True
+        # Cut / copy / paste before the MOD_CTRL early-out below — those
+        # arrive as raw control codepoints with MOD_NONE, but the guard
+        # would otherwise catch the Ctrl+letter form on terminals that
+        # report it as MOD_CTRL.
+        var clip = text_field_clipboard_key(event, self.query)
+        if clip.consumed:
+            if clip.changed:
                 self._refilter()
             return True
         # Modified letters are commands (e.g., a hotkey) — leave them alone.

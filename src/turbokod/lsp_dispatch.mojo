@@ -83,6 +83,13 @@ struct LspManager(Copyable, Movable):
     var _inflight_def_id: Int
     var _inflight_word: String       # surfaced via status_summary() while pending
     var _last_empty: Bool            # latched when a response had no location
+    # Word from a definition request whose response *just* arrived empty.
+    # One-shot: ``take_empty_word()`` returns it and clears, so the host
+    # can chain a fallback (e.g. open the docs entry for that word) on
+    # the same frame the empty response lands. Distinct from the latched
+    # ``_last_empty`` flag, which persists across frames so the status
+    # bar can keep showing "no definition found" until the next request.
+    var _empty_word: String
     var _inflight_symbol_id: Int
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
@@ -106,6 +113,7 @@ struct LspManager(Copyable, Movable):
         self._inflight_def_id = 0
         self._inflight_word = String("")
         self._last_empty = False
+        self._empty_word = String("")
         self._inflight_symbol_id = 0
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
@@ -132,6 +140,7 @@ struct LspManager(Copyable, Movable):
         self._inflight_def_id = 0
         self._inflight_word = String("")
         self._last_empty = False
+        self._empty_word = String("")
         self._inflight_symbol_id = 0
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
@@ -164,6 +173,25 @@ struct LspManager(Copyable, Movable):
 
     fn last_empty(self) -> Bool:
         return self._last_empty
+
+    fn take_empty_word(mut self) -> String:
+        """One-shot consume of the just-resolved-empty word, or empty
+        string when no fresh empty response is parked. Subsequent calls
+        return empty until the next empty response lands. ``_last_empty``
+        is *not* reset here — that flag persists across frames so the
+        status bar can keep showing "no definition found" until the
+        user retries; the host clears it via ``clear_empty()`` once it
+        has handled the empty response another way (e.g. opened docs).
+        """
+        var word = self._empty_word^
+        self._empty_word = String("")
+        return word^
+
+    fn clear_empty(mut self):
+        """Drop the latched ``_last_empty`` flag. Host calls this after
+        successfully handling an empty response some other way so the
+        status bar stops claiming "no definition found"."""
+        self._last_empty = False
 
     fn inflight_symbols(self) -> Bool:
         return self._inflight_symbol_id != 0
@@ -404,11 +432,17 @@ struct LspManager(Copyable, Movable):
                 if loc:
                     resolved = loc
                     self._last_empty = False
+                    self._empty_word = String("")
                 else:
                     # Server replied (with null / empty array / parseable but
                     # missing fields). Surface this so the user sees the
                     # difference between "still waiting" and "no result".
                     self._last_empty = True
+                    # Stash the word so the host can chain a fallback
+                    # (e.g. opening the docs entry for that word) on the
+                    # same tick. ``_inflight_word`` is about to be
+                    # cleared below, so capture it first.
+                    self._empty_word = self._inflight_word
                 self._inflight_def_id = 0
                 self._inflight_word = String("")
                 continue

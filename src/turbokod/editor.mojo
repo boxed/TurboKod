@@ -15,8 +15,8 @@ from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
-    Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
-    WHITE, YELLOW,
+    Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
+    LIGHT_YELLOW, WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -363,6 +363,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     # via the View menu.
     var line_numbers: Bool
     var soft_wrap: Bool
+    # ``read_only`` makes every mutating operation a no-op: typing,
+    # backspace/delete, paste, cut, undo/redo, replace_all,
+    # toggle_comment, toggle_case. Cursor movement, selection, copy,
+    # search, and scrolling stay enabled. Used by the docs viewer so
+    # the user can browse rendered HTML without accidentally typing
+    # into it.
+    var read_only: Bool
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -406,6 +413,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = -1
         self.line_numbers = False
         self.soft_wrap = False
+        self.read_only = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -435,6 +443,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = -1
         self.line_numbers = False
         self.soft_wrap = False
+        self.read_only = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -481,6 +490,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.exec_line = copy.exec_line
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
+        self.read_only = copy.read_only
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -609,6 +619,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         The caller is responsible for re-scrolling — pass the editor's view
         rect to ``reveal_cursor`` afterwards if you want the cursor on screen.
         """
+        if self.read_only:
+            return False
         if len(self._undo_stack) == 0:
             return False
         var snap = self._undo_stack.pop()
@@ -618,6 +630,8 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn redo(mut self) -> Bool:
         """Replay the most recently undone mutation. False when nothing to redo."""
+        if self.read_only:
+            return False
         if len(self._redo_stack) == 0:
             return False
         var snap = self._redo_stack.pop()
@@ -782,7 +796,9 @@ struct Editor(ImplicitlyCopyable, Movable):
 
         An undo step is pushed eagerly and rolled back when no replacements
         actually fired, so a bulk replace that finds nothing won't blow
-        away redo history."""
+        away redo history. No-op when the editor is read-only."""
+        if self.read_only:
+            return 0
         var fb = find.as_bytes()
         var rb_len = len(replacement.as_bytes())
         var n = len(fb)
@@ -1033,8 +1049,16 @@ struct Editor(ImplicitlyCopyable, Movable):
     # --- painting ----------------------------------------------------------
 
     fn paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
-        var attr = Attr(YELLOW, BLUE)
-        var sel_attr = Attr(YELLOW, CYAN)
+        # Default text: LIGHT_GREEN on BLUE — identifiers / variables
+        # are the bulk of "unhighlighted" tokens in code, so this is
+        # what every scope-less span lands as. Keywords / strings /
+        # comments / numbers / operators paint over this via the
+        # highlight overlay; ``YELLOW`` stays reserved for tokens
+        # that *want* to stand out against the green baseline (e.g.
+        # the exec-line marker in the gutter, dirty-buffer asterisk,
+        # selection inversion below).
+        var attr = Attr(LIGHT_GREEN, BLUE)
+        var sel_attr = Attr(LIGHT_GREEN, CYAN)
         canvas.fill(view, String(" "), attr)
         # Two stacked left gutters: the debugger gutter (breakpoint dot
         # and exec arrow, owned by Desktop) sits at the very left, then
@@ -1314,6 +1338,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
         elif k == KEY_BACKSPACE:
+            if self.read_only:
+                return True
             # Skip the snapshot when the keystroke can't actually change
             # anything (cursor at (0, 0) with no selection) — otherwise
             # repeated backspaces at the buffer head would clobber redo.
@@ -1328,6 +1354,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_DELETE:
+            if self.read_only:
+                return True
             # Same no-op guard: at end-of-buffer with no selection, Delete
             # is a no-op and shouldn't burn an undo entry.
             var at_end = self.cursor_col \
@@ -1342,6 +1370,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_ENTER:
+            if self.read_only:
+                return True
             self._push_undo()
             if self.has_selection():
                 self._delete_selection()
@@ -1350,6 +1380,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.dirty = True
             self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_TAB:
+            if self.read_only:
+                return True
             self._push_undo()
             if self.has_selection():
                 self._delete_selection()
@@ -1364,9 +1396,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
             self.copy_to_clipboard()
         elif k == UInt32(0x18):    # Ctrl+X
+            if self.read_only:
+                return True
             self.cut_to_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif k == UInt32(0x16):    # Ctrl+V
+            if self.read_only:
+                return True
             self.paste_from_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
@@ -1377,6 +1413,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             # printable that the terminal pre-folded.
             if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
                 return False
+            if self.read_only:
+                return True
             # Group consecutive printable inserts into a single undo step.
             # Boundaries: a typing pause longer than ``_TYPING_DEBOUNCE_MS``,
             # an active selection (typing-into-selection is a destructive
@@ -1430,7 +1468,10 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn cut_selection(mut self) -> String:
         """Remove and return the selected text. Pushes an undo step iff a
         selection actually existed (so calling cut with no selection is a
-        true no-op)."""
+        true no-op). No-op (returns empty string) when the editor is
+        read-only."""
+        if self.read_only:
+            return String("")
         var text = self.selection_text()
         if self.has_selection():
             var pre = self.cursor_row
@@ -1446,7 +1487,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Replace any selection then insert ``text`` (newlines split lines).
         Pushes an undo step when there's something to do — a paste with
         empty clipboard and no selection is a no-op and won't disturb the
-        undo history."""
+        undo history. No-op when the editor is read-only."""
+        if self.read_only:
+            return
         if len(text.as_bytes()) == 0 and not self.has_selection():
             return
         self._push_undo()
@@ -1464,8 +1507,12 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn cut_to_clipboard(mut self):
         """Copy the selection to the clipboard, then remove it from the
         buffer. No-op when nothing is selected — the undo stack is left
-        untouched in that case."""
+        untouched in that case. Read-only editors fall through to a copy
+        (so Ctrl+X still grabs the selection) without mutating the buffer."""
         if not self.has_selection():
+            return
+        if self.read_only:
+            clipboard_copy(self.selection_text())
             return
         var pre = self.cursor_row
         if self.anchor_row < pre:
@@ -1577,7 +1624,10 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn toggle_comment(mut self, prefix: String = String("// ")):
         """Toggle a line-comment prefix on every line touched by the selection
-        (or the current line if no selection)."""
+        (or the current line if no selection). No-op when the editor is
+        read-only."""
+        if self.read_only:
+            return
         self._push_undo()
         var sel = self.selection()
         var sr = sel[0]
@@ -1616,7 +1666,10 @@ struct Editor(ImplicitlyCopyable, Movable):
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     fn toggle_case(mut self):
-        """Invert ASCII case across the current selection (no-op if empty)."""
+        """Invert ASCII case across the current selection (no-op if empty
+        or when the editor is read-only)."""
+        if self.read_only:
+            return
         if not self.has_selection():
             return
         self._push_undo()
@@ -1763,7 +1816,8 @@ struct Editor(ImplicitlyCopyable, Movable):
             visible = _slice(line, seg_start, seg_end)
         var col = seg_start + _utf8_byte_of_cell(visible, cell_x)
         if col > line_n: col = line_n
-        # Cmd+click (delivered by iTerm2 as Left+Alt): capture a go-to-
+        # Cmd+click (native app folds super onto the alt bit; iTerm2
+        # delivers Option+click on the same bit): capture a go-to-
         # definition request without moving the cursor. The host polls
         # ``consume_definition_request`` and forwards to whichever LSP
         # client is wired up. (No effect during drag-extend — that's still

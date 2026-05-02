@@ -1,14 +1,18 @@
-"""SymbolPick: type-to-filter list of LSP document symbols.
+"""DocPick: type-to-filter list of documentation entries.
 
-A modal centered dialog, like ``QuickOpen``, but populated from a
-``textDocument/documentSymbol`` response instead of the project file
-walk. The Desktop opens the picker (in a "loading…" state), kicks off
-the LSP request, and feeds the result list in via ``set_entries`` once
-``lsp.consume_symbols`` returns. Selection submits ``(line, character)``
-which the host uses to move the cursor.
+A modal centered dialog (same shape as ``SymbolPick`` and ``QuickOpen``)
+populated from a ``DocStore``'s ``entries``. The Desktop opens the
+picker after ensuring docs are installed and loaded; selecting an
+entry submits ``selected_index``, which the host uses to open the
+rendered HTML body in a read-only editor pane.
 
 The match algorithm is borrowed from ``quick_open_match`` so users get
-the same fuzzy-with-word-boundary feel they're already used to.
+the same fuzzy-with-word-boundary feel as Quick Open / Go to Symbol.
+
+A two-line preview of the rendered body is painted under each row so
+the user can disambiguate ``str.find`` from ``re.find`` without opening
+each one. The preview is computed lazily on selection change to avoid
+rendering thousands of HTML bodies up front.
 """
 
 from std.collections.list import List
@@ -16,6 +20,7 @@ from std.collections.list import List
 from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
+from .doc_store import DocEntry, html_to_text
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP,
@@ -23,72 +28,61 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .lsp_dispatch import SymbolItem
 from .quick_open import quick_open_match
 from .text_field import text_field_clipboard_key
 from .window import paint_drop_shadow
 
 
-struct SymbolPick(Movable):
+struct DocPick(Movable):
     var active: Bool
-    var loading: Bool       # True while waiting for the LSP response
     var submitted: Bool
-    var path: String        # the file the symbols belong to
+    var display: String          # docset name shown in title ("Python 3.12")
     var query: String
-    var entries: List[SymbolItem]
+    var entries: List[DocEntry]
     var matched: List[Int]
     var selected: Int
     var scroll: Int
-    # Submission output — read after ``submitted`` flips True.
-    var selected_line: Int
-    var selected_character: Int
+    # Submission output — index into ``entries`` (not ``matched``), set
+    # before ``submitted`` flips True so the host doesn't have to keep
+    # the picker alive after consuming.
+    var selected_index: Int
 
     fn __init__(out self):
         self.active = False
-        self.loading = False
         self.submitted = False
-        self.path = String("")
+        self.display = String("")
         self.query = String("")
-        self.entries = List[SymbolItem]()
+        self.entries = List[DocEntry]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
-        self.selected_line = 0
-        self.selected_character = 0
+        self.selected_index = -1
 
-    fn open(mut self, var path: String):
-        """Open the picker in a loading state for ``path``. Entries arrive
-        later via ``set_entries`` once the LSP responds."""
-        self.path = path^
+    fn open(
+        mut self, var display: String, var entries: List[DocEntry],
+    ):
+        """Open the picker with ``entries`` already loaded."""
+        self.display = display^
+        self.entries = entries^
         self.query = String("")
         self.active = True
-        self.loading = True
         self.submitted = False
-        self.entries = List[SymbolItem]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
-        self.selected_line = 0
-        self.selected_character = 0
-
-    fn set_entries(mut self, var items: List[SymbolItem]):
-        """Populate the picker with the response and clear the loading flag.
-        Refilters with the current query in case the user typed while we
-        were waiting."""
-        self.entries = items^
-        self.loading = False
+        self.selected_index = -1
         self._refilter()
 
     fn close(mut self):
         self.active = False
-        self.loading = False
         self.submitted = False
-        self.path = String("")
+        self.display = String("")
         self.query = String("")
-        self.entries = List[SymbolItem]()
+        self.entries = List[DocEntry]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self.selected_index = -1
 
     # --- filtering --------------------------------------------------------
 
@@ -99,11 +93,12 @@ struct SymbolPick(Movable):
                 self.matched.append(i)
         else:
             for i in range(len(self.entries)):
-                # Match against ``container.name`` so users can type a
-                # parent-class prefix to narrow nested methods.
+                # Match against ``type.name`` so the user can type a
+                # section prefix (e.g. ``stdt`` for ``str.find`` under
+                # "Standard Types") to narrow nested entries.
                 var hay: String
-                if len(self.entries[i].container.as_bytes()) > 0:
-                    hay = self.entries[i].container + String(".") \
+                if len(self.entries[i].type_name.as_bytes()) > 0:
+                    hay = self.entries[i].type_name + String(".") \
                         + self.entries[i].name
                 else:
                     hay = self.entries[i].name
@@ -115,8 +110,8 @@ struct SymbolPick(Movable):
     # --- geometry ---------------------------------------------------------
 
     fn _rect(self, screen: Rect) -> Rect:
-        var width = 70
-        var height = 20
+        var width = 80
+        var height = 22
         if width > screen.b.x - 4: width = screen.b.x - 4
         if height > screen.b.y - 4: height = screen.b.y - 4
         var x = (screen.b.x - width) // 2
@@ -133,7 +128,6 @@ struct SymbolPick(Movable):
         return h
 
     fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
-        """True iff ``pos`` lies on the ``Find:`` query row."""
         if not self.active:
             return False
         var rect = self._rect(screen)
@@ -148,13 +142,13 @@ struct SymbolPick(Movable):
         var title_attr  = Attr(WHITE,  BLUE)
         var sel_attr    = Attr(BLACK,  YELLOW)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var kind_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var sel_kind    = Attr(BLUE,   YELLOW)
+        var type_attr   = Attr(BLUE,   LIGHT_GRAY)
+        var sel_type    = Attr(BLUE,   YELLOW)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var title = String(" Go to Symbol ")
+        var title = String(" Docs: ") + self.display + String(" ")
         var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
         _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
         # Search line.
@@ -172,16 +166,10 @@ struct SymbolPick(Movable):
         # Listing.
         var top = self._list_top(rect)
         var h = self._list_height(rect)
-        if self.loading:
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top),
-                String("Loading symbols..."),
-                hint_attr, rect.b.x - 1,
-            )
-        elif len(self.matched) == 0:
+        if len(self.matched) == 0:
             var msg: String
             if len(self.entries) == 0:
-                msg = String("No symbols.")
+                msg = String("No entries.")
             else:
                 msg = String("No matches.")
             _ = canvas.put_text(
@@ -191,42 +179,36 @@ struct SymbolPick(Movable):
             var idx = self.scroll + i
             if idx >= len(self.matched):
                 break
-            var sym = self.entries[self.matched[idx]]
+            var ent = self.entries[self.matched[idx]]
             var is_sel = (idx == self.selected)
             var row_attr = sel_attr if is_sel else bg
-            var k_attr = sel_kind if is_sel else kind_attr
+            var t_attr = sel_type if is_sel else type_attr
             canvas.fill(
                 Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), row_attr,
             )
-            var kind_label = symbol_kind_label(sym.kind)
             _ = canvas.put_text(
-                Point(rect.a.x + 2, top + i), kind_label, k_attr,
+                Point(rect.a.x + 2, top + i), ent.name, row_attr,
                 rect.b.x - 1,
             )
-            var name_x = rect.a.x + 2 + len(kind_label.as_bytes()) + 1
-            _ = canvas.put_text(
-                Point(name_x, top + i), sym.name, row_attr, rect.b.x - 1,
-            )
-            if len(sym.container.as_bytes()) > 0:
-                var cx = name_x + len(sym.name.as_bytes()) + 2
-                if cx < rect.b.x - 2:
+            if len(ent.type_name.as_bytes()) > 0:
+                var tx2 = rect.a.x + 2 + len(ent.name.as_bytes()) + 2
+                if tx2 < rect.b.x - 2:
                     _ = canvas.put_text(
-                        Point(cx, top + i),
-                        String("(") + sym.container + String(")"),
-                        hint_attr, rect.b.x - 1,
+                        Point(tx2, top + i),
+                        String("(") + ent.type_name + String(")"),
+                        t_attr, rect.b.x - 1,
                     )
         # Bottom hint.
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.b.y - 1),
-            String(" Enter: jump  ESC: cancel "),
+            String(" Enter: open  ESC: cancel "),
             hint_attr, rect.b.x - 1,
         )
 
     # --- events -----------------------------------------------------------
 
     fn handle_key(mut self, event: Event) -> Bool:
-        """Returns True if the event was consumed (always True while active)."""
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -238,9 +220,7 @@ struct SymbolPick(Movable):
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.matched):
                 return True
-            var sym = self.entries[self.matched[self.selected]]
-            self.selected_line = sym.line
-            self.selected_character = sym.character
+            self.selected_index = self.matched[self.selected]
             self.submitted = True
             return True
         if k == KEY_UP:
@@ -325,39 +305,15 @@ struct SymbolPick(Movable):
         if idx < 0 or idx >= len(self.matched):
             return True
         if idx == self.selected:
-            var sym = self.entries[self.matched[idx]]
-            self.selected_line = sym.line
-            self.selected_character = sym.character
+            self.selected_index = self.matched[idx]
             self.submitted = True
             return True
         self.selected = idx
         return True
 
     fn _scroll_to_selection(mut self):
-        var visible = 14
+        var visible = 16
         if self.selected < self.scroll:
             self.scroll = self.selected
         elif self.selected >= self.scroll + visible:
             self.scroll = self.selected - visible + 1
-
-
-fn symbol_kind_label(kind: Int) -> String:
-    """Map an LSP ``SymbolKind`` integer to a 5-char fixed-width label so
-    list rows align cleanly. Unknown kinds render as ``[ ? ]``."""
-    if kind == 5:  return String("[cls]")    # Class
-    if kind == 23: return String("[str]")    # Struct
-    if kind == 6:  return String("[mtd]")    # Method
-    if kind == 9:  return String("[new]")    # Constructor
-    if kind == 12: return String("[fn ]")    # Function
-    if kind == 13: return String("[var]")    # Variable
-    if kind == 14: return String("[con]")    # Constant
-    if kind == 7:  return String("[prp]")    # Property
-    if kind == 8:  return String("[fld]")    # Field
-    if kind == 10: return String("[enm]")    # Enum
-    if kind == 22: return String("[em ]")    # EnumMember
-    if kind == 11: return String("[ifc]")    # Interface
-    if kind == 2:  return String("[mod]")    # Module
-    if kind == 3:  return String("[ns ]")    # Namespace
-    if kind == 4:  return String("[pkg]")    # Package
-    if kind == 26: return String("[tp ]")    # TypeParameter
-    return String("[ ? ]")

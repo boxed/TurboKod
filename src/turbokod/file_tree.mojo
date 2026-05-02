@@ -29,6 +29,13 @@ from .geometry import Point, Rect
 
 
 comptime FILE_TREE_WIDTH: Int = 28
+comptime FILE_TREE_MIN_WIDTH: Int = 10
+"""Lower bound for resize drags: enough to keep a usable filename
+column once the indent + marker glyphs are accounted for."""
+comptime FILE_TREE_RIGHT_RESERVE: Int = 20
+"""Min editor columns left after the tree eats its share of the
+screen. Keeps the user from accidentally dragging the tree across
+the whole window."""
 
 
 @fieldwise_init
@@ -54,6 +61,10 @@ struct FileTree(Movable):
     (set by the host on Ctrl+0). Mirrors the same field on
     ``DebugPane`` so the keyboard-focus model is uniform across
     docked side panels."""
+    var _resizing: Bool
+    """True while the user holds the left button after pressing on
+    the panel's left border. Mouse motion in this state updates
+    ``width``; the next non-pressed event clears the flag."""
 
     fn __init__(out self):
         self.visible = False
@@ -65,6 +76,7 @@ struct FileTree(Movable):
         self.opened_path = String("")
         self.submitted = False
         self.focused = False
+        self._resizing = False
 
     fn open(mut self, var root: String):
         self.root = root^
@@ -87,6 +99,7 @@ struct FileTree(Movable):
         self.opened_path = String("")
         self.submitted = False
         self.focused = False
+        self._resizing = False
 
     fn consume_open(mut self) -> Optional[String]:
         """If a file was just opened, return its path and clear the flag."""
@@ -302,6 +315,21 @@ struct FileTree(Movable):
             return True
         return False
 
+    fn _clamp_width(self, want: Int, screen: Rect) -> Int:
+        """Pin a proposed width to ``[FILE_TREE_MIN_WIDTH, screen.b.x -
+        FILE_TREE_RIGHT_RESERVE]`` so a runaway drag can't shrink the
+        editor area below something usable. Order of clamps matters on
+        very narrow terminals: when the upper bound would fall below the
+        lower, the lower wins (we'd rather have an unusable workspace
+        for one frame than a 0-column tree)."""
+        var w = want
+        var hi = screen.b.x - FILE_TREE_RIGHT_RESERVE
+        if w > hi:
+            w = hi
+        if w < FILE_TREE_MIN_WIDTH:
+            w = FILE_TREE_MIN_WIDTH
+        return w
+
     fn _scroll_to_selection(mut self):
         # Visible-window height isn't known without ``screen``, so
         # use a conservative fixed visible count — the listing is
@@ -317,6 +345,18 @@ struct FileTree(Movable):
         elif self.selected >= self.scroll + visible:
             self.scroll = self.selected - visible + 1
 
+    fn is_on_resize_edge(self, pos: Point, screen: Rect) -> Bool:
+        """Hit-test for the left border column — the row-tall handle the
+        user drags to widen / narrow the panel. Used by the host to
+        switch the mouse pointer to ``ew-resize`` while hovering."""
+        if not self.visible:
+            return False
+        var area = self.rect(screen)
+        return pos.x == area.a.x and pos.y >= area.a.y and pos.y < area.b.y
+
+    fn is_resizing(self) -> Bool:
+        return self._resizing
+
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         """Returns True iff the event was inside the panel (consumed)."""
         if not self.visible:
@@ -324,6 +364,26 @@ struct FileTree(Movable):
         if event.kind != EVENT_MOUSE:
             return False
         var area = self.rect(screen)
+        # Resize-drag: once started, every subsequent mouse event
+        # belongs to the resize until the button is released — even
+        # when the cursor leaves the original panel rect. Checked
+        # before the area-contains gate for that reason.
+        if self._resizing:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._resizing = False
+                return True
+            # Any pressed event (motion or otherwise) updates width.
+            # Bare hover events under 1003 also flow here while a drag
+            # is in progress, but they have button=NONE & motion=True;
+            # we still want them to update the width since some
+            # terminals report drag motion that way.
+            self.width = self._clamp_width(screen.b.x - event.pos.x, screen)
+            return True
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
+            if event.pos.x == area.a.x \
+                    and event.pos.y >= area.a.y and event.pos.y < area.b.y:
+                self._resizing = True
+                return True
         if not area.contains(event.pos):
             # Only an actual click outside loses focus; bare hover (button
             # NONE) under mouse-mode 1003 must not steal it on every move.

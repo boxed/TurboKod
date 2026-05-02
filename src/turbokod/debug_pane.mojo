@@ -85,6 +85,19 @@ comptime PANE_OUT_STDERR     = UInt8(1)
 comptime PANE_OUT_CONSOLE    = UInt8(2)
 
 
+# --- pane mode ------------------------------------------------------------
+# DEBUG mode shows the full Stack / Locals / Watches inspect view above
+# the Output log — the original ``Debug`` panel. RUN mode is the same
+# pane reused for plain ``Cmd+R`` runs and for the post-run "exited" hold:
+# stack / locals are always empty in those states, so we drop the inspect
+# section entirely and let Output use the full content height. The title
+# also flips ("Run" vs. "Debug") so the user can see at a glance which
+# kind of session the pane is showing.
+
+comptime PANE_MODE_DEBUG     = UInt8(0)
+comptime PANE_MODE_RUN       = UInt8(1)
+
+
 @fieldwise_init
 struct PaneRow(ImplicitlyCopyable, Movable):
     """One renderable row in the inspect view.
@@ -123,6 +136,11 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var visible: Bool
     var preferred_height: Int
     var status_text: String
+    var mode: UInt8
+    """``PANE_MODE_DEBUG`` (default) shows Stack/Locals/Watches +
+    Output. ``PANE_MODE_RUN`` collapses the pane to Output-only and
+    flips the title to "Run". Set by the host on every tick to match
+    the active session (or the post-run hold)."""
 
     var rows: List[PaneRow]
     """Inspect-view rows (status not included). Sectioned via
@@ -164,6 +182,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var _last_inspect_y0: Int   # screen y of the first inspect row
     var _last_output_y0: Int
     var _last_divider_x: Int    # screen x of the column divider
+    var _last_panel_top: Int    # screen y of the top-border / drag handle
     var _left_indices: List[Int]
     """Absolute ``rows`` indices that belong to the left (Stack)
     column, in paint order. Populated by ``paint`` and read by
@@ -171,11 +190,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var _right_indices: List[Int]
     """Absolute ``rows`` indices that belong to the right
     (Locals / Watches) column, in paint order."""
+    var _resizing: Bool
+    """True while the user holds the left button after pressing on
+    the pane's top border. Mouse motion in this state updates
+    ``preferred_height``; the next non-pressed event clears it."""
 
     fn __init__(out self):
         self.visible = False
         self.preferred_height = 14
         self.status_text = String("")
+        self.mode = PANE_MODE_DEBUG
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
         self.output_lines = List[String]()
@@ -194,13 +218,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._last_inspect_y0 = 0
         self._last_output_y0 = 0
         self._last_divider_x = 0
+        self._last_panel_top = 0
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
+        self._resizing = False
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
         self.preferred_height = copy.preferred_height
         self.status_text = copy.status_text
+        self.mode = copy.mode
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
         self.output_lines = copy.output_lines.copy()
@@ -219,13 +246,18 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._last_inspect_y0 = copy._last_inspect_y0
         self._last_output_y0 = copy._last_output_y0
         self._last_divider_x = copy._last_divider_x
+        self._last_panel_top = copy._last_panel_top
         self._left_indices = copy._left_indices.copy()
         self._right_indices = copy._right_indices.copy()
+        self._resizing = copy._resizing
 
     # --- setters (used by Desktop) ---------------------------------------
 
     fn set_status(mut self, var text: String):
         self.status_text = text^
+
+    fn set_mode(mut self, mode: UInt8):
+        self.mode = mode
 
     fn rebuild_inspect(
         mut self,
@@ -446,13 +478,15 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var dim = Attr(LIGHT_GRAY, BLACK)
         var stderr_attr = Attr(LIGHT_RED, BLACK)
         canvas.fill(panel, String(" "), bg)
+        self._last_panel_top = panel.a.y
         # Top border with title. Focus is shown via line weight (single →
         # double), mirroring how normal windows render their frame.
         var top = panel.a.y
         var top_glyph = String("═") if self.focused else String("─")
         for x in range(panel.a.x, panel.b.x):
             canvas.set(x, top, Cell(top_glyph, border, 1))
-        var title_text = String(" Debug ")
+        var title_text = String(" Run ") if self.mode == PANE_MODE_RUN \
+            else String(" Debug ")
         _ = canvas.put_text(
             Point(panel.a.x + 2, top), title_text, title, panel.b.x,
         )
@@ -470,20 +504,30 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 Point(panel.a.x + 2, row_y), self.status_text, dim,
                 panel.b.x - 1,
             )
-        # Compute the inspect/output split — 60% / 40%, with at least
-        # 2 rows for output when the pane is taller than 6 rows.
+        # Compute the inspect/output split. In RUN mode the inspect
+        # section would always be empty (no DAP stack frames to show),
+        # so the pane collapses to Output-only and gives the full
+        # content area to the log. In DEBUG mode we keep the original
+        # 60% / 40% split with at least 2 output rows when the pane
+        # is taller than 6.
         var content_top = top + 2
         var content_h = panel.b.y - content_top
         if content_h < 1:
             return
-        var output_h = content_h * 4 // 10
-        if output_h < 2 and content_h >= 6:
-            output_h = 2
-        if output_h > content_h - 2:
-            output_h = content_h - 2
-        if output_h < 0:
-            output_h = 0
-        var inspect_h = content_h - output_h
+        var output_h: Int
+        var inspect_h: Int
+        if self.mode == PANE_MODE_RUN:
+            output_h = content_h
+            inspect_h = 0
+        else:
+            output_h = content_h * 4 // 10
+            if output_h < 2 and content_h >= 6:
+                output_h = 2
+            if output_h > content_h - 2:
+                output_h = content_h - 2
+            if output_h < 0:
+                output_h = 0
+            inspect_h = content_h - output_h
         # Recompute the column membership from the row list each
         # paint — ``rows`` is rebuilt wholesale on stop, but expand /
         # collapse splices in place, so we can't rely on a stale
@@ -572,19 +616,26 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
-        # Inspect / output divider.
-        var div_y = content_top + inspect_h
-        if div_y < panel.b.y and output_h > 0:
-            for x in range(panel.a.x, panel.b.x):
-                canvas.set(x, div_y, Cell(String("─"), border, 1))
-            _ = canvas.put_text(
-                Point(panel.a.x + 2, div_y), String(" Output "),
-                title, panel.b.x,
-            )
+        # Inspect / output divider — only meaningful in DEBUG mode.
+        # In RUN mode there's no inspect section to divide off, and
+        # the top title already says "Run", so the row is dropped and
+        # output starts immediately under the status row.
+        var out_top: Int
+        if self.mode == PANE_MODE_RUN:
+            out_top = content_top
+        else:
+            var div_y = content_top + inspect_h
+            if div_y < panel.b.y and output_h > 0:
+                for x in range(panel.a.x, panel.b.x):
+                    canvas.set(x, div_y, Cell(String("─"), border, 1))
+                _ = canvas.put_text(
+                    Point(panel.a.x + 2, div_y), String(" Output "),
+                    title, panel.b.x,
+                )
+            out_top = div_y + 1
         # Output lines (last visible window). Autoscroll places the
         # *most recent* line on the bottom row so eyes track new
         # output as it arrives.
-        var out_top = div_y + 1
         self._last_output_y0 = out_top
         var out_visible = panel.b.y - out_top
         if out_visible < 0:
@@ -611,11 +662,44 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     # --- input -----------------------------------------------------------
 
+    fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
+        """Hit-test for the top-border row — the pane's drag handle.
+        Used by the host to switch the mouse pointer to ``ns-resize``
+        on hover."""
+        if not self.visible or panel.is_empty():
+            return False
+        return pos.y == panel.a.y \
+            and pos.x >= panel.a.x and pos.x < panel.b.x
+
+    fn is_resizing(self) -> Bool:
+        return self._resizing
+
     fn handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
         """Return True if the click landed in the pane (consumed),
         False to let it fall through to the workspace."""
         if event.kind != EVENT_MOUSE:
             return False
+        # Resize-drag: once started, every mouse event belongs to the
+        # resize until the button is released — even when the cursor
+        # leaves the original panel rect. Checked before the
+        # contains() gate for that reason.
+        if self._resizing:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._resizing = False
+                return True
+            # ``panel.b.y`` is the fixed bottom anchor (one row above
+            # the status bar); subtract the new top to get the desired
+            # height. The pane refits next frame from the updated
+            # ``preferred_height``.
+            self.preferred_height = self._clamp_height(
+                panel.b.y - event.pos.y, panel,
+            )
+            return True
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
+            if event.pos.y == panel.a.y \
+                    and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+                self._resizing = True
+                return True
         if not panel.contains(event.pos):
             # Bare hover under mouse-mode 1003 must not steal focus.
             if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
@@ -695,6 +779,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             self.output_autoscroll = True
             return True
         return False
+
+    fn _clamp_height(self, want: Int, panel: Rect) -> Int:
+        """Pin a proposed pane height to a usable range. Lower bound 4
+        keeps the title bar, status row, and at least two content rows
+        on screen; upper bound leaves at least 5 rows of workspace
+        above the pane (menu bar + a couple of editor rows)."""
+        var h = want
+        var hi = panel.b.y - 5
+        if h > hi:
+            h = hi
+        if h < 4:
+            h = 4
+        return h
 
     fn _on_row_click(mut self, row_idx: Int):
         var r = self.rows[row_idx]

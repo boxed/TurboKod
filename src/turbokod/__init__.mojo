@@ -42,16 +42,23 @@ from .desktop import (
     Desktop,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV,
     EDITOR_GOTO, EDITOR_GOTO_SYMBOL,
+    EDITOR_LOOKUP_DOCS,
     EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_UNDO,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
     PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
-    TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX,
+    TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX, TARGET_TEST,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX, WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
     ctrl_key, format_hotkey,
 )
+from .doc_config import (
+    DocSpec, built_in_docsets, docs_install_command,
+    find_docset_by_language, find_docset_for_extension,
+)
+from .doc_pick import DocPick
+from .doc_store import DocEntry, DocStore, html_to_text
 from .editor import Editor, TextBuffer
 from .editorconfig import (
     EditorConfig, EditorConfigFile, EditorConfigSection,
@@ -84,7 +91,7 @@ from .dap_dispatch import (
     DapEvaluations, DapManager, DapOutput, DapScope, DapStackFrame,
     DapStopped, DapThread, DapVariable,
 )
-from .debug_pane import DebugPane, PaneRow
+from .debug_pane import DebugPane, PaneRow, PANE_MODE_DEBUG, PANE_MODE_RUN
 from .debugger_config import (
     DAP_REQUEST_ATTACH, DAP_REQUEST_LAUNCH,
     AdapterCandidate, DebuggerSpec,
@@ -110,8 +117,9 @@ from .project import (
 from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget,
-    load_project_targets, resolved_cwd, resolved_program,
-    save_project_targets, write_all_targets,
+    detect_project_language,
+    load_project_targets, resolve_python_interpreter, resolved_cwd,
+    resolved_program, save_project_targets, write_all_targets,
 )
 from .targets_dialog import TargetsDialog
 from .run_manager import (
@@ -125,5 +133,6 @@ from .painter import Painter
 from .prompt import Prompt
 from .status import StatusBar, StatusItem, StatusTab
 from .terminal import Terminal
+from .text_field import TextFieldKeyResult, text_field_clipboard_key
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
-from .window import Window, WindowManager
+from .window import Window, WindowManager, paint_drop_shadow

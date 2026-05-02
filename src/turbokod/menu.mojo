@@ -18,6 +18,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
+from .window import paint_drop_shadow
 
 
 struct MenuItem(ImplicitlyCopyable, Movable):
@@ -54,23 +55,30 @@ struct Menu(ImplicitlyCopyable, Movable):
     var items: List[MenuItem]
     var visible: Bool
     var right_aligned: Bool
+    # Pinned to the leftmost cells of the bar and rendered as the ``≡``
+    # hamburger glyph rather than the menu's textual label. Mutually
+    # exclusive with ``right_aligned``.
+    var is_system: Bool
 
     fn __init__(
         out self,
         var label: String,
         var items: List[MenuItem],
         right_aligned: Bool = False,
+        is_system: Bool = False,
     ):
         self.label = label^
         self.items = items^
         self.visible = True
         self.right_aligned = right_aligned
+        self.is_system = is_system
 
     fn __copyinit__(out self, copy: Self):
         self.label = copy.label
         self.items = copy.items.copy()
         self.visible = copy.visible
         self.right_aligned = copy.right_aligned
+        self.is_system = copy.is_system
 
 
 @fieldwise_init
@@ -161,10 +169,18 @@ struct MenuBar(Movable):
         var rects = List[Rect]()
         for _ in range(len(self.menus)):
             rects.append(Rect(0, 0, 0, 0))
+        # System (hamburger) menu always occupies cells 0..3 — the same slot
+        # the static ``≡`` glyph used to live in. Pinned outside the rank
+        # sort so it can never be displaced by a host's left-aligned menus.
+        for i in range(len(self.menus)):
+            if self.menus[i].visible and self.menus[i].is_system:
+                rects[i] = Rect(0, 0, 3, 1)
         # Collect left-aligned visible indices and insertion-sort by rank.
         var left = List[Int]()
         for i in range(len(self.menus)):
-            if self.menus[i].visible and not self.menus[i].right_aligned:
+            if self.menus[i].visible \
+                    and not self.menus[i].right_aligned \
+                    and not self.menus[i].is_system:
                 left.append(i)
         for i in range(1, len(left)):
             var j = i
@@ -226,8 +242,17 @@ struct MenuBar(Movable):
         var open_bg  = Attr(BLACK, GREEN)
         var open_key = Attr(WHITE, GREEN)
         canvas.fill(Rect(0, 0, screen.b.x, 1), String(" "), bar)
-        canvas.set(1, 0, Cell(String("≡"), bar, 1))
         var rects = self._layout(screen.b.x)
+        # Default-paint the static ``≡`` brand mark; gets overdrawn below if
+        # an actual system menu is registered (so the hit zone gains a real
+        # hover/open background).
+        var have_system = False
+        for i in range(len(self.menus)):
+            if self.menus[i].visible and self.menus[i].is_system:
+                have_system = True
+                break
+        if not have_system:
+            canvas.set(1, 0, Cell(String("≡"), bar, 1))
         for i in range(len(self.menus)):
             if not self.menus[i].visible:
                 continue
@@ -238,6 +263,14 @@ struct MenuBar(Movable):
             else:
                 bg = bar; key = bar_key
             var r = rects[i]
+            if self.menus[i].is_system:
+                # Three-cell slot: bg fill across cells 0..3, ``≡`` glyph
+                # at cell 1 carrying the hotkey-color attr so it pops the
+                # same way a normal menu's first letter does.
+                for x in range(r.a.x, r.b.x):
+                    canvas.set(x, 0, Cell(String(" "), bg, 1))
+                canvas.set(r.a.x + 1, 0, Cell(String("≡"), key, 1))
+                continue
             canvas.set(r.a.x, 0, Cell(String(" "), bg, 1))
             var label_bytes = self.menus[i].label.as_bytes()
             for j in range(len(label_bytes)):
@@ -254,6 +287,7 @@ struct MenuBar(Movable):
         var attr_key = Attr(RED,   LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         var sel_key  = Attr(WHITE, GREEN)
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
         var menu = self.menus[self.open_idx]
@@ -291,15 +325,19 @@ struct MenuBar(Movable):
     # --- keyboard navigation ----------------------------------------------
 
     fn _display_order_indices(self) -> List[Int]:
-        """Indices of visible menus in painted left-to-right order: rank-
-        sorted left-aligned menus first, then right-aligned menus reversed
-        so the leftmost-visible (last-inserted) right menu comes first."""
+        """Indices of visible menus in painted left-to-right order: the
+        system menu (if any) first, then rank-sorted left-aligned menus,
+        then right-aligned menus reversed so the leftmost-visible
+        (last-inserted) right menu comes first."""
+        var system = -1
         var left = List[Int]()
         var right = List[Int]()
         for i in range(len(self.menus)):
             if not self.menus[i].visible:
                 continue
-            if self.menus[i].right_aligned:
+            if self.menus[i].is_system:
+                system = i
+            elif self.menus[i].right_aligned:
                 right.append(i)
             else:
                 left.append(i)
@@ -314,11 +352,16 @@ struct MenuBar(Movable):
                 left[j] = left[j - 1]
                 left[j - 1] = tmp
                 j -= 1
+        var order = List[Int]()
+        if system >= 0:
+            order.append(system)
+        for i in range(len(left)):
+            order.append(left[i])
         var k = len(right) - 1
         while k >= 0:
-            left.append(right[k])
+            order.append(right[k])
             k -= 1
-        return left^
+        return order^
 
     fn _step_item(mut self, delta: Int):
         if self.open_idx < 0:

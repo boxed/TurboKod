@@ -10,7 +10,7 @@ simple List-of-Cells rather than a packed 16-bit attribute buffer.
 from std.collections import List
 
 from .cell import Cell, blank_cell
-from .colors import Attr, default_attr
+from .colors import Attr, BLACK, DARK_GRAY, default_attr
 from .geometry import Point, Rect
 
 
@@ -134,6 +134,26 @@ struct Canvas(Copyable, Movable):
         var idx = self._index(x, y)
         var current = self.cells[idx]
         self.cells[idx] = Cell(current.glyph, attr, current.width)
+
+    fn darken_rect(mut self, rect: Rect):
+        """Recolor every cell inside ``rect`` to a "shadow" attr,
+        preserving each glyph and width.
+
+        Compositor primitive for drop shadows under floating widgets
+        (dialogs, popups). The shadow region is whatever was already
+        painted underneath — we don't overwrite the glyph, just dim
+        it. The fixed shadow attr is ``DARK_GRAY`` (color 8 / "bright
+        black") on ``BLACK``: any visible glyph beneath the shadow
+        reads as faintly visible dim text, and a blank cell renders
+        as a black square — the classic Turbo Vision look.
+        """
+        var shadow = Attr(DARK_GRAY, BLACK)
+        var clipped = rect.intersect(Rect(0, 0, self.width, self.height))
+        for y in range(clipped.a.y, clipped.b.y):
+            for x in range(clipped.a.x, clipped.b.x):
+                var idx = self._index(x, y)
+                var current = self.cells[idx]
+                self.cells[idx] = Cell(current.glyph, shadow, current.width)
 
     fn draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
         if rect.width() < 2 or rect.height() < 2:

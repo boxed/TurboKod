@@ -32,6 +32,8 @@ from .events import (
 )
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect
+from .text_field import text_field_clipboard_key
+from .window import hit_close_button, paint_close_button, paint_drop_shadow
 
 
 comptime _DIALOG_W = 60
@@ -163,12 +165,16 @@ struct SaveAsDialog(Movable):
         var input_focused_attr = Attr(WHITE, BLUE)
         var input_blur_attr = Attr(BLACK, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        # Drop shadow first — see ``FileDialog.paint`` for the rationale.
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
         # Title bar.
         var title = String(" Save As ")
         var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
         _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        # Close button shares the same chrome as editor windows.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Filename label + editable strip.
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 2), String("File:"), bg,
@@ -271,6 +277,14 @@ struct SaveAsDialog(Movable):
                 return True
             self.browser.ascend()
             return True
+        if self.focus == _FOCUS_INPUT:
+            # Cut / copy / paste only edit the filename strip; the
+            # listing has no editable text, so a Ctrl+V there should
+            # fall through to the type-to-search branch (which itself
+            # ignores control codepoints).
+            var clip = text_field_clipboard_key(event, self.filename)
+            if clip.consumed:
+                return True
         if UInt32(0x20) <= k and k < UInt32(0x7F):
             if self.focus == _FOCUS_LISTING:
                 # Type-to-search: jump the directory selection to the
@@ -330,6 +344,13 @@ struct SaveAsDialog(Movable):
             if not event.pressed:
                 self._drag = Optional[Point]()
                 return True
+            return True
+        # Close button [■] dismisses the dialog. Resolved before the
+        # title-bar drag so a click on the glyph doesn't begin a move.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.close()
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion and event.pos.y == rect.a.y \

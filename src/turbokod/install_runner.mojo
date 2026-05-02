@@ -25,6 +25,7 @@ from .canvas import Canvas
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
+from .window import paint_drop_shadow
 from .posix import (
     alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
     waitpid_nohang,
@@ -199,6 +200,7 @@ struct InstallRunner(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var title_attr = Attr(WHITE, BLUE)
         var spin_attr = Attr(YELLOW, LIGHT_GRAY)
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
         # Title row: `Installing <label>… [spinner]`.

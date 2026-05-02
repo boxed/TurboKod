@@ -27,6 +27,69 @@ comptime MIN_WIN_W: Int = 12
 comptime MIN_WIN_H: Int = 4
 
 
+fn paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
+    """Draw the ``[■]`` close-button decoration at a frame's top-LEFT
+    corner. ``top_left`` is the frame's top-left cell — the bracket
+    starts one column in. ``border`` is the frame's existing border
+    attr; the brackets reuse it so they blend into the title bar,
+    and the green ■ glyph reuses ``border.bg`` so the same helper
+    works on any frame colour (blue editor windows, light-gray
+    dialogs, …) without the caller having to thread a separate
+    glyph attr through.
+
+    Framework feature: dialogs as well as windows pull this in so
+    the close affordance lives in the same place everywhere.
+    """
+    var glyph_attr = Attr(GREEN, border.bg, border.style)
+    canvas.set(
+        top_left.x + 1, top_left.y, Cell(String("["), border, 1),
+    )
+    canvas.set(
+        top_left.x + 2, top_left.y, Cell(String("■"), glyph_attr, 1),
+    )
+    canvas.set(
+        top_left.x + 3, top_left.y, Cell(String("]"), border, 1),
+    )
+
+
+fn hit_close_button(top_left: Point, p: Point) -> Bool:
+    """Hit-test counterpart for ``paint_close_button``: True iff
+    ``p`` lies on any of the three cells the button paints. Named
+    ``hit_*`` rather than ``*_hit`` so the free function doesn't
+    shadow ``Window.close_button_hit``, which keeps the method
+    form for backwards compat with ``WindowManager``.
+    """
+    return p.y == top_left.y \
+        and top_left.x + 1 <= p.x and p.x <= top_left.x + 3
+
+
+fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
+    """Paint a Turbo Vision–style drop shadow under ``rect``.
+
+    The shadow is two cells wide on the right and one cell tall
+    along the bottom, offset so the diagonal "lifted" effect lands
+    in the same direction as the per-button shadows
+    (``paint_shadow_button``): right strip starts one row below the
+    top edge, bottom strip starts two cells right of the left edge.
+
+    This is a *compositing* operation, not an overpaint: the shadow
+    cells keep whatever glyph was already underneath the dialog and
+    only get their colours swapped to dim-on-black via
+    ``Canvas.darken_rect``. Callers therefore must invoke this
+    after the workspace and any other widgets the dialog is meant
+    to "float above" have been painted, and before drawing the
+    dialog body itself (drawing order inside the dialog's own
+    rect doesn't matter — the shadow strips never overlap it).
+    """
+    if rect.is_empty():
+        return
+    # Right-side strip: 2 cells wide starting one row below the top.
+    canvas.darken_rect(Rect(rect.b.x, rect.a.y + 1, rect.b.x + 2, rect.b.y))
+    # Bottom strip: 1 row tall, shifted right by 2 so the corner
+    # below-and-right of the dialog gets the full 2×1 + 1×2 hook.
+    canvas.darken_rect(Rect(rect.a.x + 2, rect.b.y, rect.b.x + 2, rect.b.y + 1))
+
+
 struct Window(ImplicitlyCopyable, Movable):
     var title: String
     var rect: Rect
@@ -119,13 +182,12 @@ struct Window(ImplicitlyCopyable, Movable):
             var tx = self.rect.a.x + (self.rect.width() - title_len) // 2
             _ = canvas.put_text(Point(tx, self.rect.a.y), title_padded, border)
         # Close button [■] at top-LEFT (TV convention) — focused only.
-        # The ■ glyph is green like in classic Turbo Vision; brackets keep the
-        # border color.
+        # Drawing is delegated to ``paint_close_button`` so dialogs
+        # can reuse the same chrome without copy-pasting the glyphs.
         if focused and self.rect.width() >= 8:
-            var close_glyph = Attr(GREEN, BLUE)
-            canvas.set(self.rect.a.x + 1, self.rect.a.y, Cell(String("["), border, 1))
-            canvas.set(self.rect.a.x + 2, self.rect.a.y, Cell(String("■"), close_glyph, 1))
-            canvas.set(self.rect.a.x + 3, self.rect.a.y, Cell(String("]"), border, 1))
+            paint_close_button(
+                canvas, Point(self.rect.a.x, self.rect.a.y), border,
+            )
         # Window number (and, when focused, a maximize/restore button) at top-RIGHT.
         # Format: ``<num>=[▲]`` while normal, ``<num>=[▼]`` while
         # maximized. Unfocused windows show only the bare number.
@@ -414,7 +476,7 @@ struct Window(ImplicitlyCopyable, Movable):
         self.editor.scroll_x = nx
 
     fn close_button_hit(self, p: Point) -> Bool:
-        return p.y == self.rect.a.y and self.rect.a.x + 1 <= p.x and p.x <= self.rect.a.x + 3
+        return hit_close_button(Point(self.rect.a.x, self.rect.a.y), p)
 
     fn maximize_button_hit(self, p: Point) -> Bool:
         # The `[↑]` / `[↓]` triplet sits one cell in from the right corner.

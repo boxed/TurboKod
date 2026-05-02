@@ -47,9 +47,9 @@ from turbokod import (
     Desktop, FileDialog, Menu, MenuItem, Rect,
     Window, EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
-    EDITOR_GOTO_SYMBOL, EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN,
-    EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_PASTE,
+    EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
@@ -79,6 +79,14 @@ fn main() raises:
         var desktop = Desktop()
         var file_dialog = FileDialog()
 
+        # Hamburger menu (≡) — app-level commands that don't belong on the
+        # File/Edit/View axis. Quit lives here so the File menu can stay
+        # focused on document operations.
+        var hamburger_items = List[MenuItem]()
+        hamburger_items.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
+        desktop.menu_bar.add(Menu(
+            String("≡"), hamburger_items^, is_system=True,
+        ))
         desktop.menu_bar.add(_mk_menu(String("File"),
             (String("New"), EDITOR_NEW),
             (String("Open..."), String("file:open")),
@@ -86,7 +94,6 @@ fn main() raises:
             (String("Close"), WINDOW_CLOSE),
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),
-            (String("Quit"), APP_QUIT_ACTION),
         ))
         # Edit menu — built by hand so the separators land where they should.
         var edit_items = List[MenuItem]()
@@ -105,6 +112,7 @@ fn main() raises:
         edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
         edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
         edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+        edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
         edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
         edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
         desktop.menu_bar.add(Menu(String("Edit"), edit_items^))
@@ -127,9 +135,6 @@ fn main() raises:
         desktop.menu_bar.add(Menu(String("Debug"), debug_items^))
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
-        desktop.menu_bar.add(_mk_menu(String("Help"),
-            (String("About"), String("focus:About")),
-        ))
 
         # Args passed on the command line replace the demo windows; without
         # arguments we open the canned tour content instead. A directory arg
@@ -364,8 +369,6 @@ fn main() raises:
                             if desktop.project else String(".")
                         file_dialog.open(start)
                         file_dialog.set_project(desktop.project)
-                    elif action == String("focus:About"):
-                        desktop.windows.focus_by_title(String("About"))
             except e:
                 # Any uncaught raise lands here. Stamp the trace log
                 # AND the error_log so something is visible after exit

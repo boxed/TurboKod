@@ -335,27 +335,37 @@ fn _parse_array(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
 
 
 fn _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
+    """Read one JSON-escaped string starting at ``pos``.
+
+    Accumulates into a ``List[UInt8]`` rather than ``out + chr(c)`` —
+    String concat is O(N) per step in Mojo, so a multi-MB JSON value
+    (DevDocs ``db.json`` body) would otherwise take O(N²) and turn the
+    first ``Cmd+K`` of a session into a multi-minute hang.
+    """
     var bytes = text.as_bytes()
     if pos >= len(bytes) or bytes[pos] != 0x22:
         raise Error("expected string")
     var p = pos + 1
-    var out = String("")
+    var out = List[UInt8]()
     while p < len(bytes):
         var c = Int(bytes[p])
         if c == 0x22:
-            return (out^, p + 1)
+            return (
+                String(StringSlice(unsafe_from_utf8=Span(out))),
+                p + 1,
+            )
         if c == 0x5C:
             if p + 1 >= len(bytes):
                 raise Error("unterminated escape")
             var e = Int(bytes[p + 1])
-            if e == 0x22:    out = out + String("\""); p += 2
-            elif e == 0x5C:  out = out + String("\\"); p += 2
-            elif e == 0x2F:  out = out + String("/");  p += 2
-            elif e == 0x62:  out = out + chr(0x08);    p += 2
-            elif e == 0x66:  out = out + chr(0x0C);    p += 2
-            elif e == 0x6E:  out = out + chr(0x0A);    p += 2
-            elif e == 0x72:  out = out + chr(0x0D);    p += 2
-            elif e == 0x74:  out = out + chr(0x09);    p += 2
+            if e == 0x22:    out.append(0x22); p += 2
+            elif e == 0x5C:  out.append(0x5C); p += 2
+            elif e == 0x2F:  out.append(0x2F); p += 2
+            elif e == 0x62:  out.append(0x08); p += 2
+            elif e == 0x66:  out.append(0x0C); p += 2
+            elif e == 0x6E:  out.append(0x0A); p += 2
+            elif e == 0x72:  out.append(0x0D); p += 2
+            elif e == 0x74:  out.append(0x09); p += 2
             elif e == 0x75:
                 if p + 5 >= len(bytes):
                     raise Error("truncated \\uXXXX escape")
@@ -369,21 +379,21 @@ fn _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
             continue
         if c < 0x20:
             raise Error("control byte in string")
-        out = out + chr(c)
+        out.append(bytes[p])
         p += 1
     raise Error("unterminated string")
 
 
-fn _emit_utf8(cp: Int, mut out: String):
+fn _emit_utf8(cp: Int, mut out: List[UInt8]):
     if cp < 0x80:
-        out = out + chr(cp)
+        out.append(UInt8(cp))
     elif cp < 0x800:
-        out = out + chr(0xC0 | (cp >> 6))
-        out = out + chr(0x80 | (cp & 0x3F))
+        out.append(UInt8(0xC0 | (cp >> 6)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
     else:
-        out = out + chr(0xE0 | (cp >> 12))
-        out = out + chr(0x80 | ((cp >> 6) & 0x3F))
-        out = out + chr(0x80 | (cp & 0x3F))
+        out.append(UInt8(0xE0 | (cp >> 12)))
+        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
 fn _hex_value(c: Int) raises -> Int:

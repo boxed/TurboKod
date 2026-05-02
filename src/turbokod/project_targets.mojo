@@ -43,11 +43,14 @@ re-saves through the dialog.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .file_io import join_path, read_file, stat_file, write_file
+from .file_io import (
+    join_path, list_directory, read_file, stat_file, write_file,
+)
 from .json import (
     JsonValue, encode_json, json_array, json_object, json_str,
     parse_json,
 )
+from .posix import getenv_value
 from std.ffi import external_call
 
 
@@ -389,22 +392,134 @@ fn resolved_cwd(project_root: String, target_cwd: String) -> String:
     return join_path(project_root, target_cwd)
 
 
+fn _contains_slash(s: String) -> Bool:
+    var b = s.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x2F:
+            return True
+    return False
+
+
 fn resolved_program(
     project_root: String, target_cwd: String, program: String,
 ) -> String:
-    """Resolve ``program`` relative to the *working directory*, not
-    the project root.
+    """Resolve ``program`` for ``posix_spawnp``.
 
-    The mental model: a target says "from this directory, run this
-    binary". Relative ``program`` therefore anchors on the resolved
-    cwd, so ``cwd: "build", program: "app"`` runs ``<project>/build/app``
-    rather than ``<project>/app``. Absolute paths are passed through
+    Mirrors shell semantics: a name with no ``/`` (e.g. ``python``,
+    ``cargo``, ``make``) is left alone so the kernel does a ``$PATH``
+    lookup; anything that contains a slash is treated as a path and
+    anchored on the working directory. Absolute paths pass through
     unchanged.
+
+    Examples::
+
+        program="python"        → "python"            (PATH lookup)
+        program="./app"         → "<cwd>/./app"       (anchored)
+        program="bin/app"       → "<cwd>/bin/app"     (anchored)
+        program="/usr/bin/app"  → "/usr/bin/app"      (absolute)
+
+    Users who actually want a bare name in the cwd to win should write
+    ``./name`` — same convention every shell uses.
     """
     if len(program.as_bytes()) == 0:
         return program
     var b = program.as_bytes()
-    if len(b) > 0 and b[0] == 0x2F:
+    if b[0] == 0x2F:
+        return program
+    if not _contains_slash(program):
         return program
     var cwd = resolved_cwd(project_root, target_cwd)
     return join_path(cwd, program)
+
+
+fn detect_project_language(project_root: String) -> String:
+    """Best-effort guess at the project's primary language. Returns a
+    value matching ``RunTarget.debug_language`` (e.g. ``"python"``) or
+    the empty string when no marker matches.
+
+    Used by ``Cmd+T`` (run tests) when there's no active target — the
+    test command is language-keyed, so we need *something* to key off.
+    The guess is deliberately shallow: a few well-known marker files
+    cover ~all real Python projects, and a wrong guess just produces
+    a "no test runner" status message rather than running the wrong
+    command. Heavier detection (parsing build configs, scanning the
+    whole tree) isn't worth the complexity for this one keystroke.
+
+    Heuristic order — first match wins:
+
+      1. ``pyproject.toml``       (modern Python: setuptools, poetry, hatch, uv, pdm)
+      2. ``setup.py`` / ``setup.cfg``  (legacy Python)
+      3. any ``*.py`` file at the project root
+    """
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var py_markers = List[String]()
+    py_markers.append(String("pyproject.toml"))
+    py_markers.append(String("setup.py"))
+    py_markers.append(String("setup.cfg"))
+    for i in range(len(py_markers)):
+        var info = stat_file(join_path(project_root, py_markers[i]))
+        if info.ok and not info.is_dir():
+            return String("python")
+    # Fall back to a top-level ``*.py`` scan. Skip into subdirs would
+    # let a single vendored Python tool flip a non-Python project to
+    # "python", so we look only at the root.
+    var entries = list_directory(project_root)
+    for i in range(len(entries)):
+        var name = entries[i]
+        if name == String(".") or name == String(".."):
+            continue
+        if _ends_with(name, String(".py")):
+            return String("python")
+    return String("")
+
+
+fn _ends_with(s: String, suffix: String) -> Bool:
+    var sb = s.as_bytes()
+    var fb = suffix.as_bytes()
+    if len(fb) > len(sb):
+        return False
+    for i in range(len(fb)):
+        if sb[len(sb) - len(fb) + i] != fb[i]:
+            return False
+    return True
+
+
+fn resolve_python_interpreter(
+    project_root: String, program: String,
+) -> String:
+    """If ``program`` is a bare ``python`` / ``python3`` and a project
+    virtual environment exists, swap it for the venv's interpreter
+    path. Otherwise return ``program`` unchanged so the caller's
+    normal PATH-resolution logic takes over.
+
+    Detection order, mirroring what every modern Python tool defaults
+    to (uv, poetry, hatch, pdm, vscode):
+
+      1. ``<project>/.venv/bin/python``
+      2. ``<project>/venv/bin/python``
+      3. ``$VIRTUAL_ENV/bin/python``    (user-activated venv)
+      4. ``$CONDA_PREFIX/bin/python``   (conda environment)
+
+    Stops at the first hit, so a project-local ``.venv`` wins over an
+    ambient ``VIRTUAL_ENV`` — matches the principle of least surprise
+    when the user opens a checkout that has its own venv but happens
+    to be running inside a different shell-activated env.
+    """
+    if program != String("python") and program != String("python3"):
+        return program
+    var candidates = List[String]()
+    if len(project_root.as_bytes()) > 0:
+        candidates.append(join_path(project_root, String(".venv/bin/python")))
+        candidates.append(join_path(project_root, String("venv/bin/python")))
+    var venv_env = getenv_value(String("VIRTUAL_ENV"))
+    if len(venv_env.as_bytes()) > 0:
+        candidates.append(join_path(venv_env, String("bin/python")))
+    var conda_env = getenv_value(String("CONDA_PREFIX"))
+    if len(conda_env.as_bytes()) > 0:
+        candidates.append(join_path(conda_env, String("bin/python")))
+    for i in range(len(candidates)):
+        var info = stat_file(candidates[i])
+        if info.ok and not info.is_dir():
+            return candidates[i]
+    return program

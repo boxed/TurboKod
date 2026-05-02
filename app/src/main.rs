@@ -789,7 +789,12 @@ impl App {
         if mods.shift_key() {
             b |= 4;
         }
-        if mods.alt_key() {
+        // Fold Cmd (super) onto the alt bit. The xterm SGR mouse encoding has
+        // no Cmd bit, and Mojo's editor treats Alt+left-click as the goto-
+        // definition gesture (matching what iTerm2 sends for Option+click);
+        // folding super here makes Cmd+click — the natural macOS gesture —
+        // trigger the same path through the native app.
+        if mods.alt_key() || mods.super_key() {
             b |= 8;
         }
         if mods.control_key() {

@@ -16,6 +16,7 @@ recently opened one — typical navigation stays inside the same file.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .cell import Cell
@@ -31,8 +32,10 @@ from .events import (
 from .file_io import read_file
 from .geometry import Point, Rect
 from .highlight import Highlight, extension_of, highlight_for_extension
-from .lsp import CaptureResult, capture_command
+from .lsp import CaptureResult, LspProcess, capture_command
+from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch, find_in_project
+from .text_field import text_field_clipboard_key
 
 
 comptime _DEBOUNCE_MS: Int = 200
@@ -59,6 +62,11 @@ struct ProjectFind(Movable):
     var _context_path: String
     var _context_lines: List[String]
     var _context_highlights: List[Highlight]
+    # Streaming ripgrep runner. Holds the spawned child for the in-flight
+    # search (if any); a fresh keystroke after the debounce kills the old
+    # one and starts a new one, so a query that turns out to be too broad
+    # never blocks the UI thread. ``close()`` also cancels.
+    var _runner: _RgRunner
 
     fn __init__(out self):
         self.active = False
@@ -75,8 +83,10 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+        self._runner = _RgRunner()
 
     fn open(mut self, var root: String):
+        self._runner.cancel()
         self.root = root^
         self.query = String("")
         self._last_searched_query = String("")
@@ -93,6 +103,7 @@ struct ProjectFind(Movable):
         self.submitted = False
 
     fn close(mut self):
+        self._runner.cancel()
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -111,7 +122,8 @@ struct ProjectFind(Movable):
     # --- per-frame tick ---------------------------------------------------
 
     fn tick(mut self, now_ms: Int):
-        """Run the pending search if the debounce window has elapsed.
+        """Run the pending search if the debounce window has elapsed,
+        and pump any in-flight streaming runner.
 
         ``now_ms`` is a monotonic wall-clock reading; the host pulls it
         from ``posix.monotonic_ms()`` once per frame. ``_query_dirty_at_ms``
@@ -120,41 +132,70 @@ struct ProjectFind(Movable):
         """
         if not self.active:
             return
-        if self._query_dirty_at_ms == 0:
-            return
-        if now_ms - self._query_dirty_at_ms < _DEBOUNCE_MS:
-            return
-        self._query_dirty_at_ms = 0
-        self._run_search()
+        # Debounce expiry: kick off (or restart) the search.
+        if self._query_dirty_at_ms != 0 \
+                and now_ms - self._query_dirty_at_ms >= _DEBOUNCE_MS:
+            self._query_dirty_at_ms = 0
+            self._run_search()
+        # Pump the streaming runner each frame so partial results stream
+        # into ``self.matches`` as ``rg`` writes them.
+        if self._runner.is_active():
+            var changed = self._runner.tick()
+            if changed:
+                # Append any newly-parsed matches into the public list.
+                # The runner only ever appends, so this is just a tail
+                # copy from runner.drain_new() to keep the snapshot in
+                # sync without disturbing ``selected`` / ``scroll``.
+                var fresh = self._runner.drain_new()
+                if len(fresh) > 0:
+                    var was_empty = len(self.matches) == 0
+                    for k in range(len(fresh)):
+                        self.matches.append(fresh[k])
+                    if was_empty:
+                        # First match just landed: seed the context panel
+                        # so the user sees something useful immediately
+                        # instead of "(loading <rel>)".
+                        self._refresh_context_for_selection()
 
     fn _mark_query_dirty(mut self, now_ms: Int):
         # Reset the debounce on every keystroke. ``now_ms == 0`` (clock
         # syscall failure) gets clamped to 1 so the "no pending" sentinel
         # stays distinguishable.
         self._query_dirty_at_ms = now_ms if now_ms > 0 else 1
+        # Cancel any in-flight search now — the user has typed something
+        # new, and the old query's results are stale. Without this, a
+        # slow query (e.g. "a" across a huge tree) would keep streaming
+        # into ``self.matches`` even after the user typed something more
+        # specific, mixing two queries' results until the old one
+        # completes.
+        if self._runner.is_active():
+            self._runner.cancel()
+            self.matches = List[ProjectMatch]()
+            self.selected = 0
+            self.scroll = 0
 
     fn _run_search(mut self):
         self._last_searched_query = self.query
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
+        # Cancel any previous in-flight rg before we either spawn a new
+        # one or fall back synchronously.
+        self._runner.cancel()
         if len(self.query.as_bytes()) == 0:
             return
-        # Prefer ripgrep — orders of magnitude faster on large trees,
-        # honors .gitignore, skips binaries. Fall back to the pure-Mojo
-        # walker if ``rg`` isn't installed (or anything else goes wrong).
-        var rg = _ripgrep(self.root, self.query)
-        if rg.ok:
-            self.matches = rg.matches^
-            # Re-seat ``rg.matches`` so the struct's auto-destructor has
-            # a valid List to destroy after the partial move.
-            rg.matches = List[ProjectMatch]()
-        else:
-            try:
-                self.matches = find_in_project(self.root, self.query)
-            except:
-                self.matches = List[ProjectMatch]()
-        # Refresh the context cache for the new top match.
+        # Streaming ripgrep: spawns a child that writes match lines to
+        # stdout as they're found. ``ProjectFind.tick`` drains those
+        # incrementally so the UI thread never blocks on a slow query.
+        if self._runner.start(self.root, self.query):
+            return
+        # rg unavailable (or spawn failed): fall back to the pure-Mojo
+        # walker synchronously. This blocks but is rare and the walker
+        # caps its own recursion at sane bounds.
+        try:
+            self.matches = find_in_project(self.root, self.query)
+        except:
+            self.matches = List[ProjectMatch]()
         self._refresh_context_for_selection()
 
     fn _refresh_context_for_selection(mut self):
@@ -269,7 +310,8 @@ struct ProjectFind(Movable):
             if len(self.query.as_bytes()) == 0:
                 msg = String("Type to search.")
             elif self._query_dirty_at_ms != 0 \
-                    or self.query != self._last_searched_query:
+                    or self.query != self._last_searched_query \
+                    or self._runner.is_active():
                 msg = String("Searching...")
             else:
                 msg = String("No matches.")
@@ -521,6 +563,11 @@ struct ProjectFind(Movable):
                 ))
                 self._mark_query_dirty(now_ms)
             return True
+        var clip = text_field_clipboard_key(event, self.query)
+        if clip.consumed:
+            if clip.changed:
+                self._mark_query_dirty(now_ms)
+            return True
         if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
             return True
         if UInt32(0x20) <= k and k < UInt32(0x7F):
@@ -611,77 +658,181 @@ fn _lstrip_tabs(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[i:len(b)]))
 
 
-@fieldwise_init
-struct _RgResult(Movable):
-    """Internal: ``ok=False`` flags an unusable rg run (binary missing,
-    spawn error, malformed output) and tells the caller to fall back."""
-    var ok: Bool
-    var matches: List[ProjectMatch]
+struct _RgRunner(Movable):
+    """Streaming ripgrep child: spawns ``rg`` as a non-blocking
+    subprocess and parses its line-oriented output incrementally as it
+    arrives, so a query that scans a huge tree never blocks the UI
+    thread. Cancellable mid-search by sending SIGTERM to the child.
 
+    State machine:
 
-fn _ripgrep(root: String, query: String) -> _RgResult:
-    """Shell out to ``rg`` and parse its match-line output.
+    * idle: ``active == False``, ``proc.alive == False``.
+    * running: ``active == True``; ``tick()`` drains stdout.
+    * draining: ``active == True``, child has exited (EOF on stdout)
+      but our line buffer might still hold bytes. ``tick()`` walks them
+      out and then transitions back to idle.
 
-    We pass ``--no-heading --line-number --column --color=never`` so the
-    format is stable across rg versions: match lines look like
-    ``path:line:col:text``. ``rel`` is computed by stripping ``root/``
-    from the front of the path (rg prints that prefix when invoked with
-    a directory). Exit codes 0 and 1 are both success — rg uses 1 to
-    mean "no matches", which is a normal outcome here.
+    The runner only ever *appends* to its match list — callers can
+    snapshot via ``drain_new()`` mid-search without losing earlier
+    rows. Re-spawning via ``start()`` cancels any in-flight child first.
     """
-    var argv = List[String]()
-    argv.append(String("rg"))
-    argv.append(String("--no-heading"))
-    argv.append(String("--line-number"))
-    argv.append(String("--column"))
-    argv.append(String("--color=never"))
-    argv.append(String("--smart-case"))
-    argv.append(String("-F"))                # fixed-string (no regex)
-    argv.append(String("--"))                # end of options
-    argv.append(query)
-    argv.append(root)
-    var out: String
-    var status: Int32
-    try:
-        var result = capture_command(argv)
-        status = result.status
-        out = result.stdout^
-        # Reseat the moved field so ``result``'s auto-destructor still
-        # has a valid String to drop.
-        result.stdout = String("")
-    except:
-        return _RgResult(False, List[ProjectMatch]())
-    var exit_code = (Int(status) >> 8) & 0xFF
-    if exit_code != 0 and exit_code != 1:
-        return _RgResult(False, List[ProjectMatch]())
-    var matches = List[ProjectMatch]()
-    var i = 0
-    var n = len(out.as_bytes())
-    while i < n:
-        var line_end = _scan_to_newline(out, i)
-        var p1 = _scan_to(out, i, line_end, 0x3A)        # first ':'
-        if p1 < 0:
-            i = line_end + 1
-            continue
-        var p2 = _scan_to(out, p1 + 1, line_end, 0x3A)   # second ':'
-        if p2 < 0:
-            i = line_end + 1
-            continue
-        var p3 = _scan_to(out, p2 + 1, line_end, 0x3A)   # third ':'
-        if p3 < 0:
-            i = line_end + 1
-            continue
-        var path = _slice_str(out, i, p1)
-        var line_no = _parse_uint(out, p1 + 1, p2)
-        # Column at p2+1..p3 isn't stored — only line is needed for
-        # cursor placement; the row highlighter re-finds the match span.
-        var text = _slice_str(out, p3 + 1, line_end)
-        if line_no > 0:
-            matches.append(ProjectMatch(
-                path, _strip_root(path, root), line_no, text,
-            ))
-        i = line_end + 1
-    return _RgResult(True, matches^)
+
+    var proc: LspProcess
+    var active: Bool
+    var root: String
+    var query: String
+    var _buf: List[UInt8]   # incoming bytes not yet split on '\n'
+    var _new: List[ProjectMatch]   # parsed but not yet handed to caller
+
+    fn __init__(out self):
+        self.proc = LspProcess()
+        self.active = False
+        self.root = String("")
+        self.query = String("")
+        self._buf = List[UInt8]()
+        self._new = List[ProjectMatch]()
+
+    fn is_active(self) -> Bool:
+        return self.active
+
+    fn cancel(mut self):
+        """Stop the running child (if any) and reset state.
+
+        Safe to call when idle. Sends SIGTERM via ``LspProcess.terminate``
+        and waits for the child to exit; ``rg`` reacts immediately to
+        SIGTERM so the wait is microseconds in practice."""
+        if self.active:
+            self.proc.terminate()
+        self.active = False
+        self.root = String("")
+        self.query = String("")
+        self._buf = List[UInt8]()
+        self._new = List[ProjectMatch]()
+
+    fn start(mut self, root: String, query: String) -> Bool:
+        """Spawn a fresh ``rg`` child for ``(root, query)``. Returns
+        False when ``rg`` isn't on PATH or the spawn syscall failed —
+        caller should fall back to a pure-Mojo walker.
+
+        Any previous in-flight search is cancelled first, so calling
+        ``start`` repeatedly (one per debounced keystroke) never lets
+        old children pile up."""
+        self.cancel()
+        var argv = List[String]()
+        argv.append(String("rg"))
+        argv.append(String("--no-heading"))
+        argv.append(String("--line-number"))
+        argv.append(String("--column"))
+        argv.append(String("--color=never"))
+        argv.append(String("--smart-case"))
+        argv.append(String("-F"))                # fixed-string (no regex)
+        argv.append(String("--"))                # end of options
+        argv.append(query)
+        argv.append(root)
+        try:
+            self.proc = LspProcess.spawn(argv)
+        except:
+            return False
+        self.active = True
+        self.root = root
+        self.query = query
+        return True
+
+    fn tick(mut self) -> Bool:
+        """Drain any bytes available on the child's stdout and parse
+        complete lines. Returns True when at least one new match was
+        appended (or the search just completed) so the caller knows to
+        refresh UI state for that frame.
+
+        Reads in non-blocking, capped-per-tick batches so a single
+        frame can't be hijacked by a high-volume query — anything we
+        don't read this frame stays in the kernel pipe buffer for the
+        next ``tick``."""
+        if not self.active:
+            return False
+        var changed = False
+        # Read up to ~64 KB per frame. rg writes line-buffered when its
+        # stdout is a pipe; for typical queries this is plenty per
+        # frame, and it bounds the cost of pumping a runaway query.
+        var scratch = alloc_zero_buffer(8192)
+        var total = 0
+        var got_eof = False
+        while total < 65536:
+            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
+                break
+            var n = read_into(self.proc.stdout_fd, scratch, 8192)
+            if n < 0:
+                # EAGAIN-equivalent: nothing ready right now.
+                break
+            if n == 0:
+                got_eof = True
+                break
+            for i in range(n):
+                self._buf.append(scratch[i])
+            total += n
+        # Parse complete lines (terminated by '\n').
+        var consumed = 0
+        var i = 0
+        while i < len(self._buf):
+            if self._buf[i] == 0x0A:
+                if i > consumed:
+                    var line_str = String(StringSlice(
+                        unsafe_from_utf8=Span(self._buf)[consumed:i],
+                    ))
+                    var m = _parse_rg_line(line_str, self.root)
+                    if m:
+                        self._new.append(m.value())
+                        changed = True
+                consumed = i + 1
+            i += 1
+        if consumed > 0:
+            # Drop the parsed prefix from _buf in one tail-copy.
+            var tail = List[UInt8]()
+            for j in range(consumed, len(self._buf)):
+                tail.append(self._buf[j])
+            self._buf = tail^
+        # Process exited (EOF on stdout): reap the child, drop any
+        # trailing partial line (rg always terminates lines), and
+        # transition to idle. ``terminate`` is safe to call after a
+        # natural exit — ``kill`` returns ESRCH, ``waitpid`` reaps
+        # the zombie.
+        if got_eof:
+            self.proc.terminate()
+            self.active = False
+            self._buf = List[UInt8]()
+            changed = True
+        return changed
+
+    fn drain_new(mut self) -> List[ProjectMatch]:
+        """Move out the matches parsed since the last ``drain_new``.
+        Caller appends them to its own snapshot."""
+        var out = self._new^
+        self._new = List[ProjectMatch]()
+        return out^
+
+
+fn _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
+    """Decode one ``--no-heading --line-number --column`` output line
+    (``path:line:col:text``) into a ``ProjectMatch``. Returns None when
+    the prefix doesn't have three colons (rg sometimes emits other
+    informational lines)."""
+    var p1 = _scan_to(line, 0, len(line.as_bytes()), 0x3A)       # first ':'
+    if p1 < 0:
+        return Optional[ProjectMatch]()
+    var p2 = _scan_to(line, p1 + 1, len(line.as_bytes()), 0x3A)  # second ':'
+    if p2 < 0:
+        return Optional[ProjectMatch]()
+    var p3 = _scan_to(line, p2 + 1, len(line.as_bytes()), 0x3A)  # third ':'
+    if p3 < 0:
+        return Optional[ProjectMatch]()
+    var path = _slice_str(line, 0, p1)
+    var line_no = _parse_uint(line, p1 + 1, p2)
+    var text = _slice_str(line, p3 + 1, len(line.as_bytes()))
+    if line_no <= 0:
+        return Optional[ProjectMatch]()
+    return Optional[ProjectMatch](ProjectMatch(
+        path, _strip_root(path, root), line_no, text,
+    ))
 
 
 fn _scan_to_newline(s: String, start: Int) -> Int:

@@ -192,6 +192,11 @@ fn _tokenize_line(
     var hb = line.as_bytes()
     var n = len(hb)
     var pos = 0
+    # Where this row's highlights start in ``out``. The bracket post-pass
+    # below (after the main tokenization loop) only inspects highlights
+    # added in *this* call, so a previous row's highlights for the same
+    # byte position can't accidentally suppress a paint here.
+    var hl_start = len(out)
     # ``\\G`` anchor position. ``-1`` is a sentinel meaning "no
     # match has fired on this line yet"; libonig's ``\\G`` won't
     # match anywhere when we pass ``ONIG_OPTION_NOT_BEGIN_POSITION``,
@@ -327,6 +332,32 @@ fn _tokenize_line(
         # Unknown / INCLUDE shouldn't reach here because expansion
         # filters them out. Defensive advance.
         pos = match_end
+
+    # Bracket post-pass. TextMate grammars vary wildly in whether they
+    # tag ``()`` / ``[]`` / ``{}`` — Python's vendored grammar doesn't
+    # tag them at all, so by default they fall through with no scope
+    # and read as plain text. We treat brackets as operators (matching
+    # how the generic per-language tokenizer in ``highlight.mojo``
+    # already paints them), so any bracket byte not already covered
+    # by a highlight from this row gets an explicit operator paint.
+    # Bytes inside a string / comment / other open scope are already
+    # covered by ``_emit_unmatched``'s scope-chain paint, so they
+    # silently keep the surrounding color — we don't overpaint.
+    if n > 0:
+        var op_attr = highlight_operator_attr()
+        for i in range(n):
+            var c = Int(hb[i])
+            if c != 0x28 and c != 0x29 and c != 0x5B and c != 0x5D \
+                    and c != 0x7B and c != 0x7D:
+                continue
+            var covered = False
+            for k in range(hl_start, len(out)):
+                var h = out[k]
+                if h.col_start <= i and i < h.col_end:
+                    covered = True
+                    break
+            if not covered:
+                out.append(Highlight(row, i, i + 1, op_attr))
 
 
 fn _process_while_frames(
@@ -715,6 +746,15 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_decorator_attr())
     if _starts_with_str(scope, String("punctuation")):
         return Optional[Attr](highlight_operator_attr())
+    # ``variable.*`` covers generic variables, function parameters,
+    # ``self`` / ``this`` (variable.language), and assigned-name
+    # references. Without this mapping these tokens fall through with
+    # no highlight and read as plain text — which is the editor's
+    # default ``YELLOW`` on ``BLUE``, making every identifier look
+    # like a syntax error against the green-on-blue idents the rest
+    # of the palette already paints (functions, type names, etc.).
+    if _starts_with_str(scope, String("variable")):
+        return Optional[Attr](highlight_ident_attr())
     return Optional[Attr]()
 
 

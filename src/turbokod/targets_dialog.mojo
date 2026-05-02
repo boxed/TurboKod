@@ -58,6 +58,8 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .project_targets import ProjectTargets, RunTarget
+from .text_field import text_field_clipboard_key
+from .window import hit_close_button, paint_close_button, paint_drop_shadow
 
 
 # --- focus discriminants --------------------------------------------------
@@ -424,12 +426,17 @@ struct TargetsDialog(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var title_attr = Attr(BLACK, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        # Drop shadow first — see ``FileDialog.paint`` for the rationale.
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
         # Title.
         var title = String(" Configure Targets ")
         var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
         _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        # Close button [■] in the top-left corner — same chrome as
+        # editor windows, drawn by the framework helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Section labels.
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 2), String("Targets:"), bg,
@@ -688,9 +695,57 @@ struct TargetsDialog(Movable):
             return True
         if k == KEY_BACKSPACE:
             return self._backspace_focused()
+        if self._clipboard_focused(event):
+            return True
         if UInt32(0x20) <= k and k < UInt32(0x7F):
             return self._type_focused(chr(Int(k)))
         return True
+
+    fn _clipboard_focused(mut self, event: Event) -> Bool:
+        """Apply Ctrl+C/X/V to whichever editable field has focus.
+
+        The list, language dropdown, and button focuses have no text
+        to operate on — clipboard ops are silently swallowed there
+        (returning ``False`` so the caller's normal swallow-keystroke
+        path still runs).
+        """
+        if self.selected < 0:
+            return False
+        if self.focus == _FOCUS_NAME:
+            var t = self._selected_target()
+            var clip = text_field_clipboard_key(event, t.name)
+            if not clip.consumed:
+                return False
+            if clip.changed:
+                self._put_selected(t^)
+            return True
+        if self.focus == _FOCUS_PROGRAM:
+            var t = self._selected_target()
+            var clip = text_field_clipboard_key(event, t.program)
+            if not clip.consumed:
+                return False
+            if clip.changed:
+                self._put_selected(t^)
+            return True
+        if self.focus == _FOCUS_ARGS:
+            var t = self._selected_target()
+            var joined = _join_args(t.args)
+            var clip = text_field_clipboard_key(event, joined)
+            if not clip.consumed:
+                return False
+            if clip.changed:
+                t.args = _split_args(joined)
+                self._put_selected(t^)
+            return True
+        if self.focus == _FOCUS_CWD:
+            var t = self._selected_target()
+            var clip = text_field_clipboard_key(event, t.cwd)
+            if not clip.consumed:
+                return False
+            if clip.changed:
+                self._put_selected(t^)
+            return True
+        return False
 
     fn _cycle_lang(mut self, event: Event):
         """Step the debug-language dropdown in response to a Left /
@@ -862,6 +917,13 @@ struct TargetsDialog(Movable):
                 return True
             if not event.pressed:
                 self._drag = Optional[Point]()
+            return True
+        # Close button [■] dismisses the dialog. Resolved before the
+        # title-bar drag so a click on the glyph doesn't start a move.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.close()
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion and event.pos.y == rect.a.y \

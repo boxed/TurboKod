@@ -14,7 +14,8 @@ from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, YELLOW, default_attr,
+    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_GREEN,
+    WHITE, YELLOW, default_attr,
 )
 from turbokod.editor import Editor, TextBuffer
 from turbokod.editorconfig import (
@@ -22,6 +23,10 @@ from turbokod.editorconfig import (
 )
 from turbokod.file_dialog import FileDialog
 from turbokod.save_as_dialog import SaveAsDialog
+from turbokod.session_store import (
+    Session, SessionWindow, _resolve_session_path, _session_relative,
+    encode_session, load_session, save_session,
+)
 from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
@@ -31,6 +36,7 @@ from turbokod.desktop import (
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND, PROJECT_REPLACE,
     PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
+    _find_doc_entry_for_word,
     ctrl_key, format_hotkey,
 )
 from turbokod.file_io import (
@@ -44,17 +50,27 @@ from turbokod.project import (
 )
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
-    load_project_targets, resolved_cwd, resolved_program,
-    save_project_targets,
+    detect_project_language,
+    load_project_targets, resolve_python_interpreter, resolved_cwd,
+    resolved_program, save_project_targets,
 )
 from turbokod.buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit,
+)
+from turbokod.debug_pane import (
+    DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN,
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
 from turbokod.targets_dialog import TargetsDialog
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
+from turbokod.doc_config import (
+    DocSpec, built_in_docsets, docs_install_command,
+    find_docset_by_language, find_docset_for_extension,
+)
+from turbokod.doc_store import DocEntry, DocStore, html_to_text
+from turbokod.doc_pick import DocPick
 from turbokod.json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
@@ -79,12 +95,13 @@ from turbokod.highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension, highlight_incremental,
     highlight_comment_attr, highlight_ident_attr, highlight_keyword_attr,
-    highlight_number_attr, highlight_string_attr, word_at,
+    highlight_number_attr, highlight_operator_attr, highlight_string_attr,
+    word_at,
 )
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
-from turbokod.window import WindowManager
+from turbokod.window import WindowManager, paint_drop_shadow
 from turbokod.events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
@@ -95,6 +112,7 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.terminal import parse_input
+from turbokod.text_field import text_field_clipboard_key
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
@@ -687,6 +705,26 @@ fn test_menu_layout_pins_file_edit_window_help() raises:
     # The menus list itself must NOT be reordered (cached indices rely on it).
     assert_equal(bar.menus[0].label, String("Help"))
     assert_equal(bar.menus[5].label, String("Edit"))
+
+
+fn test_system_menu_pins_to_left_edge() raises:
+    """The hamburger (``is_system``) menu always occupies cells 0..3, the
+    same slot the static glyph used to live in, regardless of insertion
+    order or what other left-aligned menus are present."""
+    var bar = MenuBar()
+    var file_items = List[MenuItem]()
+    file_items.append(MenuItem(String("New"), String("noop")))
+    bar.add(Menu(String("File"), file_items^))
+    var sys_items = List[MenuItem]()
+    sys_items.append(MenuItem(String("Quit"), String("quit")))
+    bar.add(Menu(String("≡"), sys_items^, is_system=True))
+    var rects = bar._layout(80)
+    # System menu pinned to cells 0..3 (insertion order index 1).
+    assert_equal(rects[1].a.x, 0)
+    assert_equal(rects[1].b.x, 3)
+    # File still starts at x=3 — the system slot doesn't shift packing.
+    assert_equal(rects[0].a.x, 3)
+    assert_equal(rects[0].b.x, 3 + len(String("File").as_bytes()) + 2)
 
 
 fn test_right_aligned_menu_layout() raises:
@@ -1925,7 +1963,7 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
         String("\"\"\"docstring start"),
         String("middle line"),
         String("end of docstring\"\"\""),
-        String("var x = 1"),
+        String("def f(): pass"),
     )
     var hls = highlight_for_extension(String("py"), lines)
     var have_row_0 = False
@@ -1939,8 +1977,12 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
     assert_true(have_row_0)
     assert_true(have_row_1)
     assert_true(have_row_2)
-    # Row 3 (``var x = 1``) must come back to plain code: ``var`` keyword,
-    # ``1`` number — not all-comment.
+    # Row 3 (``def f(): pass``) must come back to plain code: ``def`` is
+    # a keyword. The previous version of this test used ``var x = 1``,
+    # left over from when Python and Mojo shared a bespoke tokenizer
+    # that recognized both keyword sets — Python's grammar (rightly)
+    # has no notion of ``var``, so that line produced no keyword
+    # highlights and silently broke the docstring-close check.
     var saw_kw = False
     for i in range(len(hls)):
         if hls[i].row == 3 and hls[i].attr == highlight_keyword_attr():
@@ -1948,7 +1990,7 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
     assert_true(saw_kw)
 
     # Inline triple-quoted string: not at statement position, stays a string.
-    var inline = _hl_lines(String("var s = \"\"\"hi\"\"\""))
+    var inline = _hl_lines(String("s = \"\"\"hi\"\"\""))
     var ihls = highlight_for_extension(String("py"), inline)
     var saw_inline_string = False
     for i in range(len(ihls)):
@@ -2124,6 +2166,63 @@ fn test_textmate_rust_grammar_paints_keywords_and_strings() raises:
     assert_true(saw_string)
     assert_true(saw_comment)
     assert_true(saw_number)
+
+
+fn test_textmate_brackets_paint_as_operators() raises:
+    """``()`` / ``[]`` / ``{}`` must be painted with the operator attr
+    in TextMate-tokenized files. The vendored Python grammar doesn't
+    tag brackets at all, so without the post-pass they fall through
+    uncolored — the bug this test guards against.
+
+    We assert positively (each bracket has an operator highlight) and
+    negatively (a bracket inside a string keeps the string color, not
+    the operator color)."""
+    var lines = _hl_lines(
+        String("def f(a, b): return a + [1, 2, 3][0]"),
+        String("s = \"(not an operator)\""),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    var op_attr = highlight_operator_attr()
+    var str_attr = highlight_string_attr()
+    var line0 = lines[0]
+    var b0 = line0.as_bytes()
+    # Every bracket on row 0 outside any string scope: ``(``, ``)``,
+    # ``[`` (after ``+``), ``]``, ``[`` (the index), ``]`` (the index).
+    # Last-writer wins (mirrors how the editor paints overlapping
+    # highlights) so we walk all matches and keep the latest.
+    for i in range(len(b0)):
+        var c = Int(b0[i])
+        if c != 0x28 and c != 0x29 and c != 0x5B and c != 0x5D \
+                and c != 0x7B and c != 0x7D:
+            continue
+        var got = Attr(0, 0)
+        var found = False
+        for hi in range(len(hls)):
+            var h = hls[hi]
+            if h.row == 0 and h.col_start <= i and i < h.col_end:
+                got = h.attr
+                found = True
+        assert_true(found)
+        assert_true(got == op_attr)
+
+    # Row 1 has ``"(not an operator)"`` — the parens are inside the
+    # string scope and should keep the string color (we don't
+    # overpaint inside strings).
+    var line1 = lines[1]
+    var b1 = line1.as_bytes()
+    for i in range(len(b1)):
+        var c = Int(b1[i])
+        if c != 0x28 and c != 0x29:
+            continue
+        var got = Attr(0, 0)
+        var found = False
+        for hi in range(len(hls)):
+            var h = hls[hi]
+            if h.row == 1 and h.col_start <= i and i < h.col_end:
+                got = h.attr
+                found = True
+        assert_true(found)
+        assert_true(got == str_attr)
 
 
 fn _hl_set(hls: List[Highlight]) -> List[Highlight]:
@@ -2381,6 +2480,33 @@ fn test_textmate_captures_overlay_on_match() raises:
             ident_at_3_8 = True
     assert_true(keyword_at_0_2)
     assert_true(ident_at_3_8)
+
+
+fn test_editor_default_text_is_light_green() raises:
+    """Cells that no scope claims must paint LIGHT_GREEN on BLUE —
+    that's the "identifier" baseline. Variables and bare names in
+    languages whose grammar doesn't tag every token (e.g. Python's
+    ``def f(x): pass`` — neither ``f`` nor ``x`` get a scope) read
+    as green identifiers instead of inheriting the brighter
+    ``YELLOW`` baseline they used to.
+
+    Regression: when the default was ``YELLOW`` everything not
+    keyword / string / comment / number / operator looked like it
+    was meant to stand out, which made unrecognized identifiers
+    visually pop more than the keywords surrounding them.
+    """
+    var ed = Editor(String("hello world"))
+    var c = Canvas(20, 3)
+    # ``focused=False`` so the cursor inversion (BLUE on YELLOW at
+    # the cursor position) doesn't fight the default-attr probe.
+    ed.paint(c, Rect(0, 0, 20, 3), False)
+    # Column 0 of an unhighlighted, plain-text buffer must carry
+    # the new default.
+    assert_equal(c.get(0, 0).attr.fg, LIGHT_GREEN)
+    assert_equal(c.get(0, 0).attr.bg, BLUE)
+    # Past EOL the trailing fill cells must also be the new default.
+    assert_equal(c.get(15, 0).attr.fg, LIGHT_GREEN)
+    assert_equal(c.get(15, 0).attr.bg, BLUE)
 
 
 fn test_textmate_all_bundled_grammars_load() raises:
@@ -4035,29 +4161,143 @@ fn test_project_targets_save_roundtrips_active() raises:
 
 fn test_project_targets_resolve_paths() raises:
     """``resolved_cwd`` anchors relative cwds on the project root.
-    ``resolved_program`` anchors a relative ``program`` on the
-    *resolved cwd* — so ``cwd: "build", program: "app"`` runs
-    ``<root>/build/app`` rather than ``<root>/app``. Absolute paths
-    pass through unchanged."""
+    ``resolved_program`` mirrors shell semantics: a bare name (no
+    slash) is left alone for ``$PATH`` resolution, anything with a
+    slash is anchored on the resolved cwd, and absolute paths pass
+    through unchanged."""
     var root = String("/proj")
     assert_equal(resolved_cwd(root, String("")), root)
     assert_equal(resolved_cwd(root, String("sub/dir")), String("/proj/sub/dir"))
     assert_equal(resolved_cwd(root, String("/abs")), String("/abs"))
-    # No cwd → program resolves against the project root.
+    # Bare name → PATH lookup, untouched.
+    assert_equal(
+        resolved_program(root, String(""), String("python")),
+        String("python"),
+    )
+    assert_equal(
+        resolved_program(root, String("build"), String("make")),
+        String("make"),
+    )
+    # Slash in name → anchored on resolved cwd.
     assert_equal(
         resolved_program(root, String(""), String("bin/app")),
         String("/proj/bin/app"),
     )
-    # Relative cwd composes with relative program.
     assert_equal(
-        resolved_program(root, String("build"), String("app")),
-        String("/proj/build/app"),
+        resolved_program(root, String("build"), String("./app")),
+        String("/proj/build/./app"),
     )
     # Absolute program ignores cwd entirely.
     assert_equal(
         resolved_program(root, String("build"), String("/usr/bin/x")),
         String("/usr/bin/x"),
     )
+
+
+fn test_resolve_python_interpreter() raises:
+    """Bare ``python`` swaps to ``<project>/.venv/bin/python`` when one
+    exists; otherwise it's returned unchanged for ``$PATH`` lookup.
+    Anything that isn't ``python`` / ``python3`` is also pass-through
+    so non-Python targets aren't accidentally rewritten."""
+    var root = _temp_path(String("_pyresolve"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    # No venv yet — bare ``python`` falls through. (We can't assert
+    # equality with literal "python" because an ambient ``VIRTUAL_ENV``
+    # in the test runner's env would make ``resolve_python_interpreter``
+    # pick that instead; just check it doesn't bogusly point into the
+    # bare project root.)
+    var no_venv = resolve_python_interpreter(root, String("python"))
+    assert_true(no_venv != join_path(root, String(".venv/bin/python")))
+    assert_true(no_venv != join_path(root, String("venv/bin/python")))
+    # Non-Python program is always pass-through, regardless of env.
+    assert_equal(
+        resolve_python_interpreter(root, String("ruby")),
+        String("ruby"),
+    )
+    assert_equal(
+        resolve_python_interpreter(root, String("/usr/bin/python")),
+        String("/usr/bin/python"),
+    )
+    # Drop a ``.venv/bin/python`` shim and confirm the lookup finds it.
+    # ``.venv`` lives next to the source root so we exercise the
+    # project-local detection branch (not the env-var fallback).
+    var venv_dir = join_path(root, String(".venv"))
+    _ = external_call["mkdir", Int32](
+        (venv_dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var venv_bin = join_path(venv_dir, String("bin"))
+    _ = external_call["mkdir", Int32](
+        (venv_bin + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var venv_python = join_path(venv_bin, String("python"))
+    assert_true(write_file(venv_python, String("#!/bin/sh\nexec /usr/bin/false\n")))
+    assert_equal(
+        resolve_python_interpreter(root, String("python")),
+        venv_python,
+    )
+    assert_equal(
+        resolve_python_interpreter(root, String("python3")),
+        venv_python,
+    )
+    # Cleanup. Tear down deepest-first; ``.venv/bin/python`` is the
+    # only file we created.
+    _ = external_call["unlink", Int32]((venv_python + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((venv_bin + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((venv_dir + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+fn test_detect_project_language_python_markers() raises:
+    """``detect_project_language`` flags any project root that
+    contains a known Python marker file (``pyproject.toml`` /
+    ``setup.py`` / ``setup.cfg``) as ``python``. A bare ``*.py``
+    at the root is enough on its own."""
+    var root = _temp_path(String("_pylang"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    # Empty project: no markers, no guess.
+    assert_equal(detect_project_language(root), String(""))
+    # Drop pyproject.toml — ``python`` wins immediately.
+    var pyproj = join_path(root, String("pyproject.toml"))
+    assert_true(write_file(pyproj, String("[project]\nname=\"x\"\n")))
+    assert_equal(detect_project_language(root), String("python"))
+    _ = external_call["unlink", Int32]((pyproj + String("\0")).unsafe_ptr())
+    # setup.py also flips the result.
+    var setup = join_path(root, String("setup.py"))
+    assert_true(write_file(setup, String("from setuptools import setup\n")))
+    assert_equal(detect_project_language(root), String("python"))
+    _ = external_call["unlink", Int32]((setup + String("\0")).unsafe_ptr())
+    # ``setup.cfg`` — same thing.
+    var setup_cfg = join_path(root, String("setup.cfg"))
+    assert_true(write_file(setup_cfg, String("[metadata]\nname = x\n")))
+    assert_equal(detect_project_language(root), String("python"))
+    _ = external_call["unlink", Int32]((setup_cfg + String("\0")).unsafe_ptr())
+    # Bare *.py at the root is the last-resort signal.
+    var py_file = join_path(root, String("main.py"))
+    assert_true(write_file(py_file, String("print('hi')\n")))
+    assert_equal(detect_project_language(root), String("python"))
+    _ = external_call["unlink", Int32]((py_file + String("\0")).unsafe_ptr())
+    # No markers left → no guess.
+    assert_equal(detect_project_language(root), String(""))
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+fn test_detect_project_language_no_match() raises:
+    """A project root with no known markers returns the empty string,
+    which the caller surfaces as a "couldn't detect" status hint
+    rather than picking the wrong runner."""
+    var root = _temp_path(String("_unknown"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var rb = join_path(root, String("hello.rb"))
+    assert_true(write_file(rb, String("puts 'hi'\n")))
+    assert_equal(detect_project_language(root), String(""))
+    _ = external_call["unlink", Int32]((rb + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
 fn test_status_bar_tab_hit_test() raises:
@@ -4128,6 +4368,145 @@ fn test_shadow_button_hit_includes_shadow_rows() raises:
         Point(3, 1), MOUSE_BUTTON_LEFT, pressed=False,
     )
     assert_false(shadow_button_hit(btn, release))
+
+
+fn test_canvas_darken_rect_preserves_glyph() raises:
+    """``darken_rect`` is the compositor primitive for drop shadows:
+    it changes a cell's attr to dim-on-black but must leave the
+    glyph (and width) alone, so whatever the caller painted there
+    earlier still reads through the shadow."""
+    var c = Canvas(10, 5)
+    # Stamp some content that the shadow will overlay.
+    _ = c.put_text(Point(0, 0), String("hello"), Attr(WHITE, BLUE))
+    _ = c.put_text(Point(0, 1), String("world"), Attr(YELLOW, BLUE))
+    c.darken_rect(Rect(2, 0, 4, 2))
+    # Glyphs survive.
+    assert_equal(c.get(2, 0).glyph, String("l"))
+    assert_equal(c.get(3, 0).glyph, String("l"))
+    assert_equal(c.get(2, 1).glyph, String("r"))
+    assert_equal(c.get(3, 1).glyph, String("l"))
+    # Attr is the shadow attr — DARK_GRAY on BLACK.
+    assert_equal(c.get(2, 0).attr.fg, DARK_GRAY)
+    assert_equal(c.get(2, 0).attr.bg, BLACK)
+    assert_equal(c.get(3, 1).attr.fg, DARK_GRAY)
+    assert_equal(c.get(3, 1).attr.bg, BLACK)
+    # Cells outside the rect are untouched.
+    assert_equal(c.get(0, 0).attr.fg, WHITE)
+    assert_equal(c.get(0, 0).attr.bg, BLUE)
+    assert_equal(c.get(4, 0).attr.fg, WHITE)
+
+
+fn test_paint_drop_shadow_targets_right_and_bottom() raises:
+    """``paint_drop_shadow`` darkens the 2-cell right strip (offset
+    one row down from the top edge) and the 1-row bottom strip
+    (offset 2 cells right of the left edge), matching the diagonal
+    "lifted" effect of the per-button shadows."""
+    var c = Canvas(20, 8)
+    # Background that the shadow needs to dim.
+    c.fill(Rect(0, 0, 20, 8), String("·"), Attr(WHITE, BLUE))
+    var dialog = Rect(3, 2, 13, 6)   # 10×4 dialog
+    paint_drop_shadow(c, dialog)
+    # Right strip: x in {13, 14}, y in [3, 6).
+    assert_equal(c.get(13, 3).attr.bg, BLACK)
+    assert_equal(c.get(14, 3).attr.bg, BLACK)
+    assert_equal(c.get(13, 5).attr.bg, BLACK)
+    assert_equal(c.get(14, 5).attr.bg, BLACK)
+    # Glyph underneath the shadow survives.
+    assert_equal(c.get(13, 3).glyph, String("·"))
+    # Top-right corner of the dialog is *not* shadowed (shadow starts
+    # one row down so the top edge looks "lit").
+    assert_equal(c.get(13, 2).attr.bg, BLUE)
+    # Bottom strip: x in [5, 15), y == 6.
+    assert_equal(c.get(5, 6).attr.bg, BLACK)
+    assert_equal(c.get(14, 6).attr.bg, BLACK)
+    # The two cells immediately under the dialog's left edge are
+    # *not* shadowed (offset 2) — keeps the bottom-left corner lit.
+    assert_equal(c.get(3, 6).attr.bg, BLUE)
+    assert_equal(c.get(4, 6).attr.bg, BLUE)
+    # Cells inside the dialog rect are untouched by the shadow.
+    assert_equal(c.get(5, 3).attr.bg, BLUE)
+
+
+fn test_debug_pane_default_title_is_debug() raises:
+    """``DebugPane`` defaults to DEBUG mode — the pane's top border
+    paints ``Debug`` so existing callers see no behavioural change."""
+    var pane = DebugPane()
+    pane.visible = True
+    var c = Canvas(40, 10)
+    pane.paint(c, Rect(0, 0, 40, 10))
+    assert_equal(c.get(2, 0).glyph, String(" "))
+    assert_equal(c.get(3, 0).glyph, String("D"))
+    assert_equal(c.get(4, 0).glyph, String("e"))
+    assert_equal(c.get(5, 0).glyph, String("b"))
+
+
+fn test_debug_pane_run_mode_swaps_title() raises:
+    """RUN mode flips the title to ``Run`` — the pane's the same
+    code path, just a different label."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    var c = Canvas(40, 10)
+    pane.paint(c, Rect(0, 0, 40, 10))
+    assert_equal(c.get(3, 0).glyph, String("R"))
+    assert_equal(c.get(4, 0).glyph, String("u"))
+    assert_equal(c.get(5, 0).glyph, String("n"))
+
+
+fn test_debug_pane_run_mode_hides_inspect_divider() raises:
+    """RUN mode collapses Stack/Locals (always empty there) so Output
+    fills the pane. The ``─ Output ─`` divider row that DEBUG paints
+    between the two sections must NOT be drawn — a row of ``─``
+    glyphs in the inspect area would confirm the pre-fix behaviour."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("hello"))
+    var c = Canvas(40, 10)
+    c.fill(Rect(0, 0, 40, 10), String("·"), Attr(BLACK, LIGHT_GRAY))
+    pane.paint(c, Rect(0, 0, 40, 10))
+    # Scan rows 2..9 (below the title and status row): no row should
+    # be a continuous ``─`` strip carrying an ``Output`` label.
+    for y in range(2, 10):
+        if c.get(3, y).glyph == String("O") \
+                and c.get(4, y).glyph == String("u") \
+                and c.get(5, y).glyph == String("t"):
+            assert_true(False)
+
+
+fn test_debug_pane_run_mode_uses_full_height_for_output() raises:
+    """The most recent output line must reach the bottom row of the
+    panel — RUN mode saves the divider row that DEBUG mode would have
+    painted, and that row goes to Output instead."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    for i in range(20):
+        pane.append_output(String("line ") + String(i))
+    var c = Canvas(40, 10)
+    pane.paint(c, Rect(0, 0, 40, 10))
+    # Bottom panel row is y=9. Autoscroll keeps the latest line
+    # ("line 19") pinned there.
+    assert_equal(c.get(2, 9).glyph, String("l"))
+    assert_equal(c.get(3, 9).glyph, String("i"))
+    assert_equal(c.get(4, 9).glyph, String("n"))
+
+
+fn test_debug_pane_debug_mode_keeps_output_divider() raises:
+    """DEBUG mode still paints the ``─ Output ─`` divider so the
+    inspect column reads as a separate section above the log."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.append_output(String("debug output"))
+    var c = Canvas(40, 12)
+    pane.paint(c, Rect(0, 0, 40, 12))
+    var found = False
+    for y in range(2, 11):
+        if c.get(3, y).glyph == String("O") \
+                and c.get(4, y).glyph == String("u") \
+                and c.get(5, y).glyph == String("t"):
+            found = True
+    assert_true(found)
 
 
 fn test_targets_dialog_edit_and_submit() raises:
@@ -4261,6 +4640,915 @@ fn test_run_session_lifecycle() raises:
     assert_true(has_hi)
 
 
+fn test_doc_registry_lookup() raises:
+    """Built-in docsets should resolve every language id we ship with
+    a server in the LSP catalog (so the user can hit Ctrl+K on the
+    same files Cmd+click works on), and every spec's language_id must
+    round-trip through both lookup helpers."""
+    var specs = built_in_docsets()
+    assert_true(len(specs) > 0)
+    # Spot-check the python entry: extension routing + language lookup
+    # both find it, and the slug is the pinned form (not bare "python").
+    var py_idx = find_docset_for_extension(specs, String("py"))
+    assert_true(py_idx >= 0)
+    assert_equal(specs[py_idx].language_id, String("python"))
+    var by_lang = find_docset_by_language(specs, String("python"))
+    assert_equal(by_lang, py_idx)
+    var pb = specs[py_idx].slug.as_bytes()
+    var has_tilde = False
+    for i in range(len(pb)):
+        if pb[i] == 0x7E:    # '~'
+            has_tilde = True
+            break
+    assert_true(has_tilde)
+    # Unknown extension hits the not-found path.
+    assert_equal(find_docset_for_extension(specs, String("xyz")), -1)
+
+
+fn test_doc_install_command_shape() raises:
+    """The install command must:
+    * mkdir the destination dir,
+    * curl both index.json and db.json,
+    * use ``-f`` so an HTTP 4xx writes nothing rather than saving an
+      error page as the docset (and keeps the install runner's
+      "non-zero exit on failure" contract intact)."""
+    var cmd = docs_install_command(
+        String("python~3.12"),
+        String("/tmp/.turbokod/docs/python~3.12"),
+    )
+    var b = cmd.as_bytes()
+    # ``index.json`` and ``db.json`` both referenced.
+    var idx_marker = String("index.json")
+    var db_marker  = String("db.json")
+    var ib = idx_marker.as_bytes()
+    var dbb = db_marker.as_bytes()
+    var found_idx = False
+    var found_db = False
+    for i in range(len(b)):
+        if i + len(ib) <= len(b):
+            var matches = True
+            for k in range(len(ib)):
+                if b[i + k] != ib[k]:
+                    matches = False
+                    break
+            if matches:
+                found_idx = True
+        if i + len(dbb) <= len(b):
+            var matches2 = True
+            for k in range(len(dbb)):
+                if b[i + k] != dbb[k]:
+                    matches2 = False
+                    break
+            if matches2:
+                found_db = True
+    assert_true(found_idx)
+    assert_true(found_db)
+    # ``-f`` flag (curl's "fail silently on HTTP error") is in both
+    # invocations — the input-flag character ``f`` should appear at
+    # least twice. Coarse but enough to detect a regression that
+    # silently drops the flag.
+    var f_count = 0
+    for i in range(len(b)):
+        if i + 1 < len(b) and b[i] == 0x2D and b[i + 1] == 0x66:    # '-f'
+            f_count += 1
+    assert_true(f_count >= 2)
+    # mkdir -p so a missing parent doesn't bork the run.
+    var mkdir_marker = String("mkdir -p")
+    var mb = mkdir_marker.as_bytes()
+    var has_mkdir = False
+    for i in range(len(b) - len(mb) + 1):
+        var matches = True
+        for k in range(len(mb)):
+            if b[i + k] != mb[k]:
+                matches = False
+                break
+        if matches:
+            has_mkdir = True
+            break
+    assert_true(has_mkdir)
+
+
+fn test_html_to_text_basics() raises:
+    """Tags strip cleanly, entities decode, ``<b>`` becomes ``**``, and
+    paragraphs are separated by a blank line."""
+    var rendered = html_to_text(String(
+        "<p>Hello, <b>world</b>!</p>"
+        + String("<p>Second &amp; line.</p>"),
+    ))
+    # ``<b>`` rendered as markdown bold around its content.
+    var b = rendered.as_bytes()
+    var marker = String("Hello, **world**!")
+    var mb = marker.as_bytes()
+    var found = False
+    for i in range(len(b) - len(mb) + 1):
+        var ok = True
+        for k in range(len(mb)):
+            if b[i + k] != mb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+    # Entity decoded.
+    var amp_marker = String("Second & line.")
+    var ab = amp_marker.as_bytes()
+    var amp_found = False
+    for i in range(len(b) - len(ab) + 1):
+        var ok = True
+        for k in range(len(ab)):
+            if b[i + k] != ab[k]:
+                ok = False
+                break
+        if ok:
+            amp_found = True
+            break
+    assert_true(amp_found)
+    # Paragraphs separated by a blank line (``\n\n``) — that's the bit
+    # the old non-markdown renderer was missing.
+    var blank_marker = String("**!\n\nSecond")
+    var blb = blank_marker.as_bytes()
+    var blank_found = False
+    for i in range(len(b) - len(blb) + 1):
+        var ok = True
+        for k in range(len(blb)):
+            if b[i + k] != blb[k]:
+                ok = False
+                break
+        if ok:
+            blank_found = True
+            break
+    assert_true(blank_found)
+    # No leftover '<' or '>' from tags.
+    for i in range(len(b)):
+        assert_true(b[i] != 0x3C and b[i] != 0x3E)
+
+
+fn test_html_to_text_headings_become_hashes() raises:
+    """``<h1>`` -> ``#``, ``<h2>`` -> ``##``, … with a blank line below."""
+    var rendered = html_to_text(String(
+        "<h1>Title</h1><h2>Sub</h2><p>Body.</p>"
+    ))
+    var b = rendered.as_bytes()
+    var want = String("# Title\n\n## Sub\n\nBody.")
+    var wb = want.as_bytes()
+    var found = False
+    for i in range(len(b) - len(wb) + 1):
+        var ok = True
+        for k in range(len(wb)):
+            if b[i + k] != wb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_html_to_text_lists_and_inline() raises:
+    """``<ul>`` items get ``- ``, ``<ol>`` items get ``1. ``,
+    ``<code>`` becomes backticks, ``<a href>`` becomes
+    ``[text](href)``."""
+    var rendered = html_to_text(String(
+        "<p>Try <a href=\"x.html\">this</a> or <code>foo</code>.</p>"
+        + String("<ul><li>one</li><li>two</li></ul>")
+        + String("<ol><li>first</li><li>second</li></ol>"),
+    ))
+    var b = rendered.as_bytes()
+    # Inline link.
+    var link_m = String("[this](x.html)")
+    var lmb = link_m.as_bytes()
+    var link_found = False
+    for i in range(len(b) - len(lmb) + 1):
+        var ok = True
+        for k in range(len(lmb)):
+            if b[i + k] != lmb[k]:
+                ok = False
+                break
+        if ok:
+            link_found = True
+            break
+    assert_true(link_found)
+    # Inline code.
+    var code_m = String("`foo`")
+    var cmb = code_m.as_bytes()
+    var code_found = False
+    for i in range(len(b) - len(cmb) + 1):
+        var ok = True
+        for k in range(len(cmb)):
+            if b[i + k] != cmb[k]:
+                ok = False
+                break
+        if ok:
+            code_found = True
+            break
+    assert_true(code_found)
+    # ``<ul>`` items.
+    var ul_m = String("- one\n- two")
+    var umb = ul_m.as_bytes()
+    var ul_found = False
+    for i in range(len(b) - len(umb) + 1):
+        var ok = True
+        for k in range(len(umb)):
+            if b[i + k] != umb[k]:
+                ok = False
+                break
+        if ok:
+            ul_found = True
+            break
+    assert_true(ul_found)
+    # ``<ol>`` items numbered.
+    var ol_m = String("1. first\n2. second")
+    var omb = ol_m.as_bytes()
+    var ol_found = False
+    for i in range(len(b) - len(omb) + 1):
+        var ok = True
+        for k in range(len(omb)):
+            if b[i + k] != omb[k]:
+                ok = False
+                break
+        if ok:
+            ol_found = True
+            break
+    assert_true(ol_found)
+
+
+fn test_html_to_text_pre_uses_fence() raises:
+    """``<pre>`` blocks are wrapped in ```` ``` ```` fences while
+    keeping their internal whitespace verbatim."""
+    var rendered = html_to_text(String(
+        "<p>before</p><pre>fn foo():\n    return 42</pre><p>after</p>"
+    ))
+    var b = rendered.as_bytes()
+    var want = String("```\nfn foo():\n    return 42\n```")
+    var wb = want.as_bytes()
+    var found = False
+    for i in range(len(b) - len(wb) + 1):
+        var ok = True
+        for k in range(len(wb)):
+            if b[i + k] != wb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_html_to_text_preserves_pre() raises:
+    """``<pre>`` blocks must keep their internal whitespace verbatim —
+    that's the whole point of code samples in the docs.
+
+    We use a deliberately weird indent that a generic whitespace-collapse
+    pass would mangle (two leading spaces, internal tab) so a regression
+    that breaks the ``pre_depth`` branch shows up as a failed match.
+    """
+    var html = String(
+        "<p>before</p><pre>  fn foo():\n\treturn 42</pre><p>after</p>"
+    )
+    var rendered = html_to_text(html)
+    # The tab and leading two spaces survived.
+    var marker = String("  fn foo():\n\treturn 42")
+    var b = rendered.as_bytes()
+    var mb = marker.as_bytes()
+    var found = False
+    for i in range(len(b) - len(mb) + 1):
+        var ok = True
+        for k in range(len(mb)):
+            if b[i + k] != mb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_find_doc_entry_exact_match_wins() raises:
+    """Exact name match beats both case-insensitive and suffix matches.
+
+    Without this priority a click on ``find`` (which has a top-level
+    DevDocs entry in some languages) would land on a method like
+    ``str.find`` instead of the canonical entry, even though both are
+    plausible — the LSP couldn't resolve, so we don't know which one
+    the user meant. Exact equality is the least surprising default.
+    """
+    var entries = List[DocEntry]()
+    entries.append(DocEntry(
+        String("str.find"), String("library/str"),
+        String("find"), String("Methods"),
+    ))
+    entries.append(DocEntry(
+        String("find"), String("library/find"),
+        String(""), String("Built-in Functions"),
+    ))
+    var idx = _find_doc_entry_for_word(entries, String("find"))
+    # Exact "find" should win over the suffix match on "str.find".
+    assert_equal(idx, 1)
+
+
+fn test_find_doc_entry_falls_back_to_suffix_match() raises:
+    """When no entry matches the bare word, ``foo`` should still resolve
+    to ``Type.foo`` so a Cmd+click on ``s.find()`` opens ``str.find``."""
+    var entries = List[DocEntry]()
+    entries.append(DocEntry(
+        String("dict.get"), String("library/stdtypes"),
+        String("dict.get"), String("Methods"),
+    ))
+    entries.append(DocEntry(
+        String("str.find"), String("library/stdtypes"),
+        String("str.find"), String("Methods"),
+    ))
+    var idx = _find_doc_entry_for_word(entries, String("find"))
+    assert_equal(idx, 1)
+
+
+fn test_find_doc_entry_returns_minus_one_when_no_match() raises:
+    var entries = List[DocEntry]()
+    entries.append(DocEntry(
+        String("abs"), String("library/functions"),
+        String("abs"), String("Built-in Functions"),
+    ))
+    assert_equal(
+        _find_doc_entry_for_word(entries, String("nonexistent")),
+        -1,
+    )
+    # Empty word never matches anything.
+    assert_equal(_find_doc_entry_for_word(entries, String("")), -1)
+
+
+fn test_find_doc_entry_case_insensitive_when_no_exact() raises:
+    """CSS / HTML docs spell some entries lowercase even if the source
+    site uses TitleCase; a Cmd+click that comes back empty from the
+    LSP should still find the entry. Exact match would have already
+    been preferred (this case has none), so case-folded match is the
+    next best signal."""
+    var entries = List[DocEntry]()
+    entries.append(DocEntry(
+        String("Display"), String("css/display"),
+        String(""), String("Properties"),
+    ))
+    var idx = _find_doc_entry_for_word(entries, String("display"))
+    assert_equal(idx, 0)
+
+
+fn test_html_to_text_strips_script_and_style() raises:
+    """``<script>`` / ``<style>`` content must not leak into the
+    rendered text. DevDocs HTML doesn't ship script tags, but vendored
+    HTML from arbitrary doc sources sometimes does, and surfacing
+    JavaScript verbatim in a doc viewer is jarring."""
+    var rendered = html_to_text(String(
+        "<p>Hi</p><script>alert('boom');</script><p>bye</p>",
+    ))
+    var b = rendered.as_bytes()
+    var bad = String("alert")
+    var bb = bad.as_bytes()
+    var leaked = False
+    for i in range(len(b) - len(bb) + 1):
+        var ok = True
+        for k in range(len(bb)):
+            if b[i + k] != bb[k]:
+                ok = False
+                break
+        if ok:
+            leaked = True
+            break
+    assert_false(leaked)
+
+
+fn test_html_to_text_table_renders_as_gfm_table() raises:
+    """``<table>`` becomes a GFM table: pipe-bordered rows, a separator
+    after the first row, columns padded to the widest cell, and inline
+    markup inside cells survives the recursive cell render. The earlier
+    renderer just emitted tab-separated cells, which collapsed to a
+    single illegible line in the doc pane.
+    """
+    # Inline markup, header row, multiple body rows, ragged cell widths.
+    var rendered = html_to_text(String(
+        "<p>Before.</p>"
+        + String("<table>")
+        + String("<tr><th>Function</th><th>Description</th></tr>")
+        + String("<tr><td><code>abs(x)</code></td>")
+        + String("<td>The <em>absolute</em> value of <strong>x</strong>.</td></tr>")
+        + String("<tr><td><code>min(a)</code></td><td>min docs.</td></tr>")
+        + String("</table>")
+        + String("<p>After.</p>"),
+    ))
+    var want = String(
+        "Before.\n\n"
+        + String("| Function | Description                    |\n")
+        + String("| -------- | ------------------------------ |\n")
+        + String("| `abs(x)` | The *absolute* value of **x**. |\n")
+        + String("| `min(a)` | min docs.                      |\n")
+        + String("\nAfter."),
+    )
+    var b = rendered.as_bytes()
+    var wb = want.as_bytes()
+    var found = False
+    for i in range(len(b) - len(wb) + 1):
+        var ok = True
+        for k in range(len(wb)):
+            if b[i + k] != wb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_html_to_text_table_escapes_pipes_in_cells() raises:
+    """A literal ``|`` inside a cell would otherwise terminate the cell
+    early and shift every column to its right; we escape as ``\\|``."""
+    var rendered = html_to_text(String(
+        "<table><tr><th>Op</th></tr><tr><td>a|b</td></tr></table>",
+    ))
+    var b = rendered.as_bytes()
+    var want = String("| a\\|b |")
+    var wb = want.as_bytes()
+    var found = False
+    for i in range(len(b) - len(wb) + 1):
+        var ok = True
+        for k in range(len(wb)):
+            if b[i + k] != wb[k]:
+                ok = False
+                break
+        if ok:
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_text_field_clipboard_key_ignores_non_key_event() raises:
+    var text = String("hello")
+    var ev = Event.mouse_event(Point(0, 0), MOUSE_BUTTON_LEFT)
+    var r = text_field_clipboard_key(ev, text)
+    assert_false(r.consumed)
+    assert_false(r.changed)
+    assert_equal(text, String("hello"))
+
+
+fn test_text_field_clipboard_key_ignores_printable() raises:
+    var text = String("abc")
+    var r = text_field_clipboard_key(Event.key_event(UInt32(ord("d"))), text)
+    assert_false(r.consumed)
+    assert_false(r.changed)
+    assert_equal(text, String("abc"))
+
+
+fn test_text_field_clipboard_key_ctrl_x_clears_text() raises:
+    var text = String("delete me")
+    var r = text_field_clipboard_key(Event.key_event(UInt32(0x18)), text)
+    assert_true(r.consumed)
+    assert_true(r.changed)
+    assert_equal(text, String(""))
+    # A second Ctrl+X on the now-empty field still consumes the keystroke
+    # but reports nothing changed (no spurious refilters / dirty marks).
+    var r2 = text_field_clipboard_key(Event.key_event(UInt32(0x18)), text)
+    assert_true(r2.consumed)
+    assert_false(r2.changed)
+
+
+fn test_text_field_clipboard_key_round_trips_through_clipboard() raises:
+    """Ctrl+X copies to the system clipboard; a subsequent Ctrl+V on a
+    fresh field should restore the same payload. Validates the
+    end-to-end framework path; relies on the platform's clipboard
+    helper (pbcopy/pbpaste on macOS) being available."""
+    var src = String("payload-from-ctrl-x")
+    _ = text_field_clipboard_key(Event.key_event(UInt32(0x18)), src)
+    var dst = String("")
+    var r = text_field_clipboard_key(Event.key_event(UInt32(0x16)), dst)
+    assert_true(r.consumed)
+    assert_true(r.changed)
+    assert_equal(dst, String("payload-from-ctrl-x"))
+
+
+fn test_session_round_trip() raises:
+    """A persisted session should decode to the same fields it was
+    encoded from. Covers the full ``encode_session`` → ``parse_json``
+    → ``load_session`` path against a temp project root so the test
+    doesn't touch the repo's own ``.turbokod/session.json``."""
+    var root = String("/tmp/turbokod_session_test_round_trip")
+    # Clean up any prior run so a stale ``.turbokod/`` doesn't shadow
+    # the empty-state assertion below.
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var s = Session()
+    var w0 = SessionWindow()
+    w0.path = String("src/turbokod/desktop.mojo")
+    w0.rect_a_x = 5
+    w0.rect_a_y = 3
+    w0.rect_b_x = 75
+    w0.rect_b_y = 28
+    w0.is_maximized = False
+    w0.restore_a_x = 5
+    w0.restore_a_y = 3
+    w0.restore_b_x = 75
+    w0.restore_b_y = 28
+    w0.cursor_row = 42
+    w0.cursor_col = 7
+    w0.scroll_x = 0
+    w0.scroll_y = 30
+    s.windows.append(w0^)
+    var w1 = SessionWindow()
+    w1.path = String("/abs/somewhere/else.txt")
+    w1.rect_a_x = 0
+    w1.rect_a_y = 0
+    w1.rect_b_x = 40
+    w1.rect_b_y = 20
+    w1.is_maximized = True
+    w1.restore_a_x = 10
+    w1.restore_a_y = 4
+    w1.restore_b_x = 60
+    w1.restore_b_y = 22
+    w1.cursor_row = 0
+    w1.cursor_col = 12
+    w1.scroll_x = 5
+    w1.scroll_y = 0
+    s.windows.append(w1^)
+    s.z_order.append(1)
+    s.z_order.append(0)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var loaded = load_session(root)
+    assert_equal(len(loaded.windows), 2)
+    assert_equal(loaded.windows[0].path, String("src/turbokod/desktop.mojo"))
+    assert_equal(loaded.windows[0].rect_a_x, 5)
+    assert_equal(loaded.windows[0].rect_b_y, 28)
+    assert_equal(loaded.windows[0].cursor_row, 42)
+    assert_equal(loaded.windows[0].scroll_y, 30)
+    assert_false(loaded.windows[0].is_maximized)
+    assert_true(loaded.windows[1].is_maximized)
+    assert_equal(loaded.windows[1].restore_a_x, 10)
+    assert_equal(loaded.windows[1].path, String("/abs/somewhere/else.txt"))
+    assert_equal(len(loaded.z_order), 2)
+    assert_equal(loaded.z_order[0], 1)
+    assert_equal(loaded.z_order[1], 0)
+    assert_equal(loaded.focused, 0)
+    # Cleanup so re-running the test starts from a clean state.
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+fn test_session_load_missing_returns_empty() raises:
+    """A project root with no ``.turbokod/session.json`` should yield
+    an empty session — that's the signal ``_restore_session`` uses to
+    skip the restore path entirely."""
+    var s = load_session(String("/tmp/turbokod_session_does_not_exist_abcxyz"))
+    assert_equal(len(s.windows), 0)
+    assert_equal(len(s.z_order), 0)
+    assert_equal(s.focused, -1)
+
+
+fn test_session_relative_path_round_trip() raises:
+    """``_session_relative`` strips the project prefix; the inverse
+    re-anchors. Files outside the project keep their absolute form
+    on the way out and pass through on the way back in."""
+    var root = String("/Users/foo/proj")
+    var inside = String("/Users/foo/proj/src/main.mojo")
+    var outside = String("/etc/hosts")
+    var rel_in = _session_relative(root, inside)
+    assert_equal(rel_in, String("src/main.mojo"))
+    var rel_out = _session_relative(root, outside)
+    assert_equal(rel_out, outside)
+    var resolved_in = _resolve_session_path(root, rel_in)
+    assert_equal(resolved_in, inside)
+    var resolved_out = _resolve_session_path(root, rel_out)
+    assert_equal(resolved_out, outside)
+
+
+fn test_desktop_restores_session_from_disk() raises:
+    """Open a project that already has a ``.turbokod/session.json`` and
+    confirm the desktop replays it: a window for the saved file shows
+    up, the rect / cursor / scroll are reapplied, and the focused
+    index points at the saved entry."""
+    var root = String("/tmp/turbokod_session_restore_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var file_path = root + String("/foo.txt")
+    assert_true(write_file(file_path, String("alpha\nbeta\ngamma\ndelta\n")))
+    # Author a session that places the file at a non-default rect with
+    # cursor on row 2 col 3.
+    var s = Session()
+    var sw = SessionWindow()
+    sw.path = String("foo.txt")
+    sw.rect_a_x = 4
+    sw.rect_a_y = 2
+    sw.rect_b_x = 50
+    sw.rect_b_y = 18
+    sw.is_maximized = False
+    sw.restore_a_x = 4
+    sw.restore_a_y = 2
+    sw.restore_b_x = 50
+    sw.restore_b_y = 18
+    sw.cursor_row = 2
+    sw.cursor_col = 3
+    sw.scroll_x = 0
+    sw.scroll_y = 0
+    s.windows.append(sw^)
+    s.z_order.append(0)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var d = Desktop()
+    d.open_project(root)
+    assert_true(d.project)
+    assert_true(d._pending_restore)
+    var screen = Rect(0, 0, 80, 30)
+    d._pending_restore = False
+    d._restore_session(screen)
+    assert_equal(len(d.windows.windows), 1)
+    var w0 = d.windows.windows[0]
+    assert_true(w0.is_editor)
+    assert_equal(w0.rect.a.x, 4)
+    assert_equal(w0.rect.a.y, 2)
+    assert_equal(w0.rect.b.x, 50)
+    assert_equal(w0.rect.b.y, 18)
+    assert_equal(w0.editor.cursor_row, 2)
+    assert_equal(w0.editor.cursor_col, 3)
+    assert_equal(d.windows.focused, 0)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_snapshot_captures_per_window_rects() raises:
+    """Each open file-backed window must show up in the snapshot with
+    its own rect. Regression guard: a copy bug or wrong loop variable
+    would yield identical rects across the session entries."""
+    var root = String("/tmp/turbokod_snapshot_rects_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/a.txt"), String("aaa\n")))
+    assert_true(write_file(root + String("/b.txt"), String("bbb\n")))
+    var d = Desktop()
+    d.open_project(root)
+    d._pending_restore = False     # skip any auto-restore in this test
+    var screen = Rect(0, 0, 80, 30)
+    d.open_file(root + String("/a.txt"), screen)
+    d.open_file(root + String("/b.txt"), screen)
+    assert_equal(len(d.windows.windows), 2)
+    # Force the two windows to distinct rects via direct mutation —
+    # avoids depending on the cascade default sliding them apart by
+    # exactly some specific amount.
+    d.windows.windows[0].rect = Rect(2, 1, 30, 12)
+    d.windows.windows[0]._restore_rect = Rect(2, 1, 30, 12)
+    d.windows.windows[0].is_maximized = False
+    d.windows.windows[1].rect = Rect(40, 5, 75, 25)
+    d.windows.windows[1]._restore_rect = Rect(40, 5, 75, 25)
+    d.windows.windows[1].is_maximized = False
+    var session = d._snapshot_session()
+    assert_equal(len(session.windows), 2)
+    # The snapshot should map each window through to its own rect, not
+    # a shared one. We don't depend on order — find by path suffix
+    # (the snapshot may emit relative or absolute paths depending on
+    # whether ``editor.file_path`` is canonical-equal to the
+    # project root).
+    var idx_a = -1
+    var idx_b = -1
+    for i in range(len(session.windows)):
+        var p = session.windows[i].path
+        var pb = p.as_bytes()
+        var alen = len(String("a.txt").as_bytes())
+        var blen = len(String("b.txt").as_bytes())
+        if len(pb) >= alen \
+                and String(StringSlice(unsafe_from_utf8=pb[len(pb) - alen:])) \
+                == String("a.txt"):
+            idx_a = i
+        if len(pb) >= blen \
+                and String(StringSlice(unsafe_from_utf8=pb[len(pb) - blen:])) \
+                == String("b.txt"):
+            idx_b = i
+    assert_true(idx_a >= 0)
+    assert_true(idx_b >= 0)
+    assert_equal(session.windows[idx_a].rect_a_x, 2)
+    assert_equal(session.windows[idx_a].rect_b_x, 30)
+    assert_equal(session.windows[idx_b].rect_a_x, 40)
+    assert_equal(session.windows[idx_b].rect_b_x, 75)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_restores_multiple_windows_at_distinct_positions() raises:
+    """Two saved windows must come back at the *two* rects on disk —
+    not both at the same position. Regression guard against snapshot
+    or restore code accidentally copying one window's rect into the
+    others (e.g. a closure-capture or single-Rect-buffer bug)."""
+    var root = String("/tmp/turbokod_session_multi_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/foo.txt"), String("a\nb\nc\n")))
+    assert_true(write_file(root + String("/bar.txt"), String("x\ny\nz\nw\n")))
+    var s = Session()
+    var w0 = SessionWindow()
+    w0.path = String("foo.txt")
+    w0.rect_a_x = 2
+    w0.rect_a_y = 1
+    w0.rect_b_x = 30
+    w0.rect_b_y = 12
+    w0.restore_a_x = 2
+    w0.restore_a_y = 1
+    w0.restore_b_x = 30
+    w0.restore_b_y = 12
+    s.windows.append(w0^)
+    var w1 = SessionWindow()
+    w1.path = String("bar.txt")
+    w1.rect_a_x = 40
+    w1.rect_a_y = 5
+    w1.rect_b_x = 75
+    w1.rect_b_y = 25
+    w1.restore_a_x = 40
+    w1.restore_a_y = 5
+    w1.restore_b_x = 75
+    w1.restore_b_y = 25
+    w1.cursor_row = 1
+    w1.cursor_col = 2
+    s.windows.append(w1^)
+    s.z_order.append(0)
+    s.z_order.append(1)
+    s.focused = 1
+    assert_true(save_session(root, s))
+    var d = Desktop()
+    d.open_project(root)
+    var screen = Rect(0, 0, 80, 30)
+    d._pending_restore = False
+    d._restore_session(screen)
+    assert_equal(len(d.windows.windows), 2)
+    # ``open_project`` canonicalizes via ``realpath``, so on macOS the
+    # stored project root is ``/private/tmp/...``, not ``/tmp/...``.
+    # Compare against the canonical project root rather than the
+    # original test path.
+    var canonical = d.project.value()
+    var foo_idx = -1
+    var bar_idx = -1
+    for i in range(len(d.windows.windows)):
+        var fp = d.windows.windows[i].editor.file_path
+        if fp == canonical + String("/foo.txt"):
+            foo_idx = i
+        if fp == canonical + String("/bar.txt"):
+            bar_idx = i
+    assert_true(foo_idx >= 0)
+    assert_true(bar_idx >= 0)
+    assert_equal(d.windows.windows[foo_idx].rect.a.x, 2)
+    assert_equal(d.windows.windows[foo_idx].rect.a.y, 1)
+    assert_equal(d.windows.windows[foo_idx].rect.b.x, 30)
+    assert_equal(d.windows.windows[foo_idx].rect.b.y, 12)
+    assert_equal(d.windows.windows[bar_idx].rect.a.x, 40)
+    assert_equal(d.windows.windows[bar_idx].rect.a.y, 5)
+    assert_equal(d.windows.windows[bar_idx].rect.b.x, 75)
+    assert_equal(d.windows.windows[bar_idx].rect.b.y, 25)
+    assert_equal(d.windows.windows[bar_idx].editor.cursor_row, 1)
+    assert_equal(d.windows.windows[bar_idx].editor.cursor_col, 2)
+    assert_equal(d.windows.focused, bar_idx)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raises:
+    """A saved maximized window must come back maximized AND keep its
+    own ``_restore_rect`` so un-maximizing returns to the user's
+    pre-max layout — not to the shared workspace rect. Regression for
+    the bug where ``toggle_maximize`` clobbered the just-loaded
+    ``_restore_rect``."""
+    var root = String("/tmp/turbokod_session_max_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/m.txt"), String("m\n")))
+    var s = Session()
+    var sw = SessionWindow()
+    sw.path = String("m.txt")
+    # Saved state: window is maximized to a 100×30 workspace, but the
+    # underlying un-maximized rect is small (8, 4)→(40, 18).
+    sw.rect_a_x = 0
+    sw.rect_a_y = 1
+    sw.rect_b_x = 100
+    sw.rect_b_y = 28
+    sw.is_maximized = True
+    sw.restore_a_x = 8
+    sw.restore_a_y = 4
+    sw.restore_b_x = 40
+    sw.restore_b_y = 18
+    s.windows.append(sw^)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var d = Desktop()
+    d.open_project(root)
+    var screen = Rect(0, 0, 100, 30)
+    d._pending_restore = False
+    d._restore_session(screen)
+    assert_equal(len(d.windows.windows), 1)
+    var w = d.windows.windows[0]
+    assert_true(w.is_maximized)
+    # _restore_rect must reflect the saved un-maximized layout.
+    assert_equal(w._restore_rect.a.x, 8)
+    assert_equal(w._restore_rect.a.y, 4)
+    assert_equal(w._restore_rect.b.x, 40)
+    assert_equal(w._restore_rect.b.y, 18)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_save_then_restore_round_trip_through_paint() raises:
+    """End-to-end: open two files in a project at distinct rects via
+    ``paint`` (which writes the session), then construct a fresh
+    ``Desktop`` against the same project and confirm the saved layout
+    is restored. Covers the full ``_save_session_if_changed`` →
+    ``load_session`` → ``_restore_session`` loop."""
+    var root = String("/tmp/turbokod_session_e2e_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/p.txt"), String("p\n")))
+    assert_true(write_file(root + String("/q.txt"), String("q\n")))
+    var screen = Rect(0, 0, 80, 30)
+    var canvas = Canvas(80, 30)
+
+    # --- session 1: open two files, position them, paint to save ---------
+    var d1 = Desktop()
+    d1.open_project(root)
+    d1.open_file(root + String("/p.txt"), screen)
+    d1.open_file(root + String("/q.txt"), screen)
+    assert_equal(len(d1.windows.windows), 2)
+    d1.windows.windows[0].rect = Rect(2, 1, 30, 12)
+    d1.windows.windows[0]._restore_rect = Rect(2, 1, 30, 12)
+    d1.windows.windows[0].is_maximized = False
+    d1.windows.windows[1].rect = Rect(40, 5, 75, 25)
+    d1.windows.windows[1]._restore_rect = Rect(40, 5, 75, 25)
+    d1.windows.windows[1].is_maximized = False
+    d1.windows.focused = 1
+    d1.paint(canvas, screen)
+    var session_path = root + String("/.turbokod/session.json")
+    assert_true(stat_file(session_path).ok)
+
+    # --- session 2: fresh Desktop, restore via paint ---------------------
+    var d2 = Desktop()
+    d2.open_project(root)
+    assert_true(d2._pending_restore)
+    d2.paint(canvas, screen)
+    assert_equal(len(d2.windows.windows), 2)
+    var p_idx = -1
+    var q_idx = -1
+    for i in range(len(d2.windows.windows)):
+        var fp = d2.windows.windows[i].editor.file_path
+        var fpb = fp.as_bytes()
+        var slen = len(String("/p.txt").as_bytes())
+        if len(fpb) >= slen \
+                and String(StringSlice(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
+                == String("/p.txt"):
+            p_idx = i
+        if len(fpb) >= slen \
+                and String(StringSlice(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
+                == String("/q.txt"):
+            q_idx = i
+    assert_true(p_idx >= 0)
+    assert_true(q_idx >= 0)
+    # Each restored window must keep its own saved rect — not collapse
+    # to a shared default.
+    assert_true(d2.windows.windows[p_idx].rect.a.x \
+                != d2.windows.windows[q_idx].rect.a.x)
+    assert_equal(d2.windows.windows[p_idx].rect.a.x, 2)
+    assert_equal(d2.windows.windows[p_idx].rect.b.x, 30)
+    assert_equal(d2.windows.windows[q_idx].rect.a.x, 40)
+    assert_equal(d2.windows.windows[q_idx].rect.b.x, 75)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+fn test_desktop_snapshot_skips_untitled_windows() raises:
+    """``_snapshot_session`` filters out non-editor windows and
+    file-less editors (Untitled buffers). Only file-backed editors
+    show up in the saved session."""
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    assert_true(d.project)
+    var screen = Rect(0, 0, 80, 30)
+    d.new_file(screen)                          # file-less Untitled
+    try:
+        d.open_file(String("examples/hello.mojo"), screen)
+    except:
+        pass
+    var session = d._snapshot_session()
+    # Only the file-backed window should be in the snapshot.
+    assert_equal(len(session.windows), 1)
+    var path = session.windows[0].path
+    # Stored relative to the project root resolved by
+    # ``find_git_project`` — for this checkout that's the repo root,
+    # so the path becomes ``examples/hello.mojo``.
+    assert_equal(path, String("examples/hello.mojo"))
+
+
 fn main() raises:
     test_point_arithmetic()
     test_rect_basics()
@@ -4306,6 +5594,7 @@ fn main() raises:
     test_basename()
     test_find_git_project()
     test_menu_layout_pins_file_edit_window_help()
+    test_system_menu_pins_to_left_edge()
     test_right_aligned_menu_layout()
     test_desktop_project_lifecycle()
     test_file_tree_expand_collapse()
@@ -4340,11 +5629,13 @@ fn main() raises:
     test_onig_search_at_offset()
     test_onig_invalid_pattern_raises()
     test_textmate_rust_grammar_paints_keywords_and_strings()
+    test_textmate_brackets_paint_as_operators()
     test_textmate_html_embeds_css_inside_style_block()
     test_textmate_capture_patterns_run_inside_group()
     test_textmate_while_rule_keeps_scope_open_per_line()
     test_textmate_captures_overlay_on_match()
     test_textmate_incremental_matches_full_retokenize()
+    test_editor_default_text_is_light_green()
     test_textmate_all_bundled_grammars_load()
     test_textmate_json_grammar_paints_strings_and_numbers()
     test_textmate_rust_block_comment_spans_lines()
@@ -4355,6 +5646,20 @@ fn main() raises:
     test_install_runner_last_lines_picks_tail_skipping_blanks()
     test_install_runner_runs_sh_command_to_completion()
     test_install_runner_failure_carries_nonzero_exit()
+    test_doc_registry_lookup()
+    test_doc_install_command_shape()
+    test_html_to_text_basics()
+    test_html_to_text_headings_become_hashes()
+    test_html_to_text_lists_and_inline()
+    test_html_to_text_pre_uses_fence()
+    test_html_to_text_preserves_pre()
+    test_html_to_text_strips_script_and_style()
+    test_html_to_text_table_renders_as_gfm_table()
+    test_html_to_text_table_escapes_pipes_in_cells()
+    test_find_doc_entry_exact_match_wins()
+    test_find_doc_entry_falls_back_to_suffix_match()
+    test_find_doc_entry_returns_minus_one_when_no_match()
+    test_find_doc_entry_case_insensitive_when_no_exact()
     test_quick_open_match_rules()
     test_quick_open_match_case_and_separator_shapes()
     test_quick_open_slash_in_query_requires_directory_separator()
@@ -4470,12 +5775,35 @@ fn main() raises:
     test_project_targets_load_parses_fields()
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
+    test_resolve_python_interpreter()
+    test_detect_project_language_python_markers()
+    test_detect_project_language_no_match()
     test_status_bar_tab_hit_test()
     test_shadow_button_paints_face_and_shadow()
     test_shadow_button_hit_includes_shadow_rows()
+    test_canvas_darken_rect_preserves_glyph()
+    test_paint_drop_shadow_targets_right_and_bottom()
+    test_debug_pane_default_title_is_debug()
+    test_debug_pane_run_mode_swaps_title()
+    test_debug_pane_run_mode_hides_inspect_divider()
+    test_debug_pane_run_mode_uses_full_height_for_output()
+    test_debug_pane_debug_mode_keeps_output_divider()
     test_targets_dialog_edit_and_submit()
     test_targets_dialog_add_and_remove()
     test_targets_dialog_save_button_submits()
     test_targets_dialog_esc_discards_edits()
     test_run_session_lifecycle()
+    test_text_field_clipboard_key_ignores_non_key_event()
+    test_text_field_clipboard_key_ignores_printable()
+    test_text_field_clipboard_key_ctrl_x_clears_text()
+    test_text_field_clipboard_key_round_trips_through_clipboard()
+    test_session_round_trip()
+    test_session_load_missing_returns_empty()
+    test_session_relative_path_round_trip()
+    test_desktop_snapshot_skips_untitled_windows()
+    test_desktop_restores_session_from_disk()
+    test_desktop_restores_multiple_windows_at_distinct_positions()
+    test_desktop_snapshot_captures_per_window_rects()
+    test_desktop_save_then_restore_round_trip_through_paint()
+    test_desktop_restores_maximized_window_keeps_per_window_restore_rect()
     print("all tests passed")

@@ -36,6 +36,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .window import paint_drop_shadow
 
 
 # Hit-test result codes for ``Dropdown.handle_mouse``.
@@ -231,6 +232,7 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         var rect = self.popup_rect(anchor, screen)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
         var visible = rect.height() - 2

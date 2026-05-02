@@ -12,6 +12,8 @@ from .events import (
     Event, EVENT_KEY, KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
 )
 from .geometry import Point, Rect
+from .text_field import text_field_clipboard_key
+from .window import paint_drop_shadow
 
 
 struct Prompt(Movable):
@@ -48,6 +50,7 @@ struct Prompt(Movable):
         var x = (screen.b.x - width) // 2
         var y = (screen.b.y - 3) // 2
         var rect = Rect(x, y, x + width, y + 3)
+        paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
         var label_x = x + 2
@@ -73,6 +76,9 @@ struct Prompt(Movable):
             return True
         if k == KEY_ESC:
             self.close()
+            return True
+        var clip = text_field_clipboard_key(event, self.input)
+        if clip.consumed:
             return True
         if k == KEY_BACKSPACE:
             var bytes = self.input.as_bytes()

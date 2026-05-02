@@ -46,14 +46,22 @@ from .file_io import basename, find_git_project, join_path, stat_file
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Point, Rect
-from .highlight import DefinitionRequest, GrammarRegistry, extension_of
+from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
 from .install_runner import InstallResult, InstallRunner
+from .doc_config import (
+    DocSpec, built_in_docsets, docs_install_command,
+    find_docset_by_language, find_docset_for_extension,
+)
+from .doc_pick import DocPick
+from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .dap_dispatch import DapManager, DapStackFrame, DapVariable
-from .debug_pane import DebugPane, PANE_ROW_WATCH
+from .debug_pane import (
+    DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
+)
 from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
 )
@@ -63,13 +71,19 @@ from .project import replace_in_project
 from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
-    resolved_cwd, resolved_program, save_project_targets,
+    detect_project_language,
+    resolve_python_interpreter, resolved_cwd, resolved_program,
+    save_project_targets,
     write_all_targets,
 )
 from .prompt import Prompt
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
+from .session_store import (
+    Session, SessionWindow, _resolve_session_path, _session_relative,
+    encode_session, load_session, save_session,
+)
 from .status import StatusBar, StatusTab
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
@@ -91,6 +105,12 @@ comptime EDITOR_FIND_PREV     = String("edit:find_prev")
 # public action — it never enters ``dispatch_action`` because the prompt
 # is triggered programmatically from ``_maybe_lsp_open``.
 comptime _PA_LSP_INSTALL      = String("lsp:install")
+# "Look up in docs" — Ctrl+K opens the picker for the focused editor's
+# language, prompting to install the offline DevDocs database the first
+# time it's used per language.
+comptime EDITOR_LOOKUP_DOCS   = String("docs:lookup")
+# Internal pending-action tag for the "Download docs?" prompt.
+comptime _PA_DOC_INSTALL      = String("docs:install")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
@@ -128,6 +148,11 @@ comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
 # child processes.
 comptime TARGET_RUN              = String("target:run")
 comptime TARGET_DEBUG            = String("target:debug")
+# ``TARGET_TEST`` (Cmd+T) launches a language-appropriate test runner
+# in the project root. Unlike Run / Debug it doesn't need an active
+# target — the language guess is enough to pick a sensible default
+# (``python -m pytest`` for Python projects).
+comptime TARGET_TEST             = String("target:test")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
 # the active tab to that index. The dispatch parser walks the
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
@@ -279,6 +304,27 @@ struct Desktop(Movable):
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
     var lsp_languages: List[String]
+    # DevDocs-style offline documentation. ``doc_specs`` is the registry;
+    # ``doc_stores`` / ``doc_languages`` are parallel lists of loaded
+    # docsets keyed by language id. Populated lazily — opening a picker
+    # is what triggers the install prompt and (on success) the load.
+    var doc_specs: List[DocSpec]
+    var doc_stores: List[DocStore]
+    var doc_languages: List[String]
+    var doc_pick: DocPick
+    # Language id of the docs install currently in flight. Mirrors
+    # ``_install_lang`` but for the docs path so the two install kinds
+    # don't fight over the same field. ``install_runner`` is shared:
+    # one of LSP-install / docs-install can be in flight at a time.
+    var _doc_install_lang: String
+    # One nag per language per session for docs (mirrors ``_lsp_install_prompted``).
+    var _doc_install_prompted: List[String]
+    # Most recently opened docset's language id. Used as the fallback
+    # when Ctrl+K fires without a focused editor (or without a
+    # recognized file extension) — repeat lookups stay on the same
+    # docset across windows so the user can park their cursor in any
+    # window and keep searching the same docs.
+    var _last_doc_lang: String
     # Process-wide loaded-grammar cache. Editors share this rather
     # than each owning their own per-file copy; closing a buffer
     # and opening another one in the same language reuses the
@@ -356,6 +402,15 @@ struct Desktop(Movable):
     # happened. Cleared when a new run/debug starts, the project
     # closes, or the user dismisses the pane (ESC while focused).
     var _run_output_held: Bool
+    # Per-project window session, persisted in
+    # ``<project>/.turbokod/session.json``. ``_pending_restore`` is
+    # raised when a project is opened (or auto-detected) so the next
+    # ``paint`` performs the restore — needs ``screen`` for window
+    # placement, which only ``paint`` has handy. ``_last_session_json``
+    # caches the most recently written encoding so we only touch disk
+    # when window state actually changes.
+    var _pending_restore: Bool
+    var _last_session_json: String
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -383,6 +438,13 @@ struct Desktop(Movable):
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
         self.lsp_languages = List[String]()
+        self.doc_specs = built_in_docsets()
+        self.doc_stores = List[DocStore]()
+        self.doc_languages = List[String]()
+        self.doc_pick = DocPick()
+        self._doc_install_lang = String("")
+        self._doc_install_prompted = List[String]()
+        self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
         self._lsp_install_prompted = List[String]()
         self.install_runner = InstallRunner()
@@ -404,6 +466,8 @@ struct Desktop(Movable):
         self.targets = ProjectTargets()
         self.run_session = RunSession()
         self._run_output_held = False
+        self._pending_restore = False
+        self._last_session_json = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -428,6 +492,7 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_FIND_NEXT))
         self._hotkeys.append(Hotkey(ctrl_key("l"), MOD_NONE, EDITOR_GOTO))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
+        self._hotkeys.append(Hotkey(ctrl_key("k"), MOD_NONE, EDITOR_LOOKUP_DOCS))
         # Clipboard + undo/redo. Registering Ctrl+X/C/V at the desktop layer
         # serves two purposes: the menu items get auto-populated shortcut
         # text via ``_shortcut_for_action``, and the dispatch path is
@@ -504,6 +569,7 @@ struct Desktop(Movable):
         # earlier Ctrl-letter defaults.
         self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, TARGET_RUN))
         self._hotkeys.append(Hotkey(ctrl_key("d"), MOD_NONE, TARGET_DEBUG))
+        self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, TARGET_TEST))
 
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
@@ -566,6 +632,10 @@ struct Desktop(Movable):
             if self.symbol_pick.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.doc_pick.active:
+            if self.doc_pick.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
         if self.project_find.active:
             if self.project_find.is_input_at(pos, screen):
                 return String("text")
@@ -574,6 +644,20 @@ struct Desktop(Movable):
             if self.targets_dialog.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        # Resize edges of the docked side panels — checked before the
+        # window pass so the cursor flips the moment the user crosses
+        # the border, even when an editor's interior would otherwise
+        # claim the cell. An in-flight drag also pins the cursor in
+        # the resize shape so it doesn't flicker as the pointer moves
+        # across the workspace.
+        if self.debug_pane.is_resizing() \
+                or self.debug_pane.is_on_resize_edge(
+                    pos, self.debug_pane_rect(screen)
+                ):
+            return String("ns-resize")
+        if self.file_tree.is_resizing() \
+                or self.file_tree.is_on_resize_edge(pos, screen):
+            return String("ew-resize")
         # Topmost editor window's interior.
         var workspace = self.workspace_rect(screen)
         if workspace.contains(pos):
@@ -604,11 +688,18 @@ struct Desktop(Movable):
         paint so the global preference is the source of truth no matter
         who created the editor (Desktop API, host calling
         ``Window.editor_window`` directly, etc.). Cheap — two boolean
-        writes per editor."""
+        writes per editor.
+
+        Read-only editors (the docs viewer) are special-cased: line
+        numbers are forced off regardless of the global toggle, since
+        a rendered docs page isn't a numbered source file."""
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-            self.windows.windows[i].editor.line_numbers = self.config.line_numbers
+            if self.windows.windows[i].editor.read_only:
+                self.windows.windows[i].editor.line_numbers = False
+            else:
+                self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             self.windows.windows[i].editor.soft_wrap = self.config.soft_wrap
             if self.config.soft_wrap:
                 # Soft-wrap forces a left-aligned visible area; keep the
@@ -619,6 +710,14 @@ struct Desktop(Movable):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
+        # Restore the saved per-project window session before any
+        # other per-frame work so newly-restored editors see the same
+        # treatment (highlight flush, view-config sync, fit-into) as
+        # ones that were already open. The flag is one-shot: armed in
+        # ``_set_project`` and cleared here even on failure.
+        if self._pending_restore:
+            self._pending_restore = False
+            self._restore_session(screen)
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
@@ -664,8 +763,14 @@ struct Desktop(Movable):
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
+        self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen)
         self.targets_dialog.paint(canvas, screen)
+        # Persist the window session if it changed since the last save.
+        # No-op when no project is open or no file-backed windows are
+        # showing — closing the last window leaves the previously-saved
+        # session intact so the next ``open_project`` can restore it.
+        self._save_session_if_changed()
 
     fn _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -791,7 +896,7 @@ struct Desktop(Movable):
         # Don't pile prompts on top of an open dialog/prompt.
         if self.prompt.active or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
-                or self.save_as_dialog.active:
+                or self.save_as_dialog.active or self.doc_pick.active:
             return
         # Re-check that no candidate is on PATH. ``_ensure_lsp_for_extension``
         # only returns -1-with-known-extension when this is true, so this
@@ -973,6 +1078,12 @@ struct Desktop(Movable):
         self.run_session.terminate()
         self._run_output_held = False
         self.targets = ProjectTargets()
+        # Forget the cached session signature so the next project's
+        # restore-then-save cycle starts from a clean slate (and so a
+        # later switch back to this project can re-read the on-disk
+        # file rather than the stale in-memory value).
+        self._pending_restore = False
+        self._last_session_json = String("")
 
     fn _set_project(mut self, path: String):
         # Resolve so a label like ``.`` becomes the actual directory name,
@@ -1000,6 +1111,232 @@ struct Desktop(Movable):
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
         # silently no-op until the user authors ``.turbokod/targets.json``.
         self.targets = load_project_targets(canonical)
+        # Arm a session restore for the next ``paint`` — that's the
+        # earliest place we have ``screen`` to clip restored rects
+        # against. Skipped when there are already windows open: the
+        # user has just opened a specific file (or set up windows
+        # programmatically), and we don't want to layer the prior
+        # session's rects on top of an active workspace.
+        if len(self.windows.windows) == 0:
+            self._pending_restore = True
+
+    # --- session restore / save -------------------------------------------
+
+    fn _snapshot_session(self) -> Session:
+        """Build a ``Session`` describing every file-backed editor window
+        currently open. Non-editor windows and Untitled buffers (no
+        ``file_path``) are skipped — they have nothing meaningful to
+        restore from disk later. The returned ``z_order`` and
+        ``focused`` index into the *filtered* window list, not into
+        ``self.windows.windows``.
+        """
+        var session = Session()
+        # Map from window-list index to session-list index (or -1 when
+        # the window was filtered out). Used to translate ``z_order``
+        # and ``focused`` into the session's own indexing.
+        var win_to_session = List[Int]()
+        if not self.project:
+            return session^
+        var root = self.project.value()
+        for i in range(len(self.windows.windows)):
+            # Index in directly rather than binding to a local — Window
+            # carries the full Editor (buffer, undo stack, highlights),
+            # which is dozens of KB; ``var w = self.windows.windows[i]``
+            # would make a per-frame copy of all of it.
+            if not self.windows.windows[i].is_editor:
+                win_to_session.append(-1)
+                continue
+            var fp = self.windows.windows[i].editor.file_path
+            if len(fp.as_bytes()) == 0:
+                win_to_session.append(-1)
+                continue
+            var sw = SessionWindow()
+            sw.path = _session_relative(root, fp)
+            sw.rect_a_x = self.windows.windows[i].rect.a.x
+            sw.rect_a_y = self.windows.windows[i].rect.a.y
+            sw.rect_b_x = self.windows.windows[i].rect.b.x
+            sw.rect_b_y = self.windows.windows[i].rect.b.y
+            sw.is_maximized = self.windows.windows[i].is_maximized
+            sw.restore_a_x = self.windows.windows[i]._restore_rect.a.x
+            sw.restore_a_y = self.windows.windows[i]._restore_rect.a.y
+            sw.restore_b_x = self.windows.windows[i]._restore_rect.b.x
+            sw.restore_b_y = self.windows.windows[i]._restore_rect.b.y
+            sw.cursor_row = self.windows.windows[i].editor.cursor_row
+            sw.cursor_col = self.windows.windows[i].editor.cursor_col
+            sw.scroll_x = self.windows.windows[i].editor.scroll_x
+            sw.scroll_y = self.windows.windows[i].editor.scroll_y
+            session.windows.append(sw^)
+            win_to_session.append(len(session.windows) - 1)
+        # Translate z-order. Drop windows that filtered out so the
+        # session's z_order stays internally consistent.
+        for k in range(len(self.windows.z_order)):
+            var src = self.windows.z_order[k]
+            if 0 <= src and src < len(win_to_session):
+                var mapped = win_to_session[src]
+                if mapped >= 0:
+                    session.z_order.append(mapped)
+        # Translate focused. Fall back to the top of the session's
+        # z-order when the actual focused window was filtered out.
+        var f = self.windows.focused
+        if 0 <= f and f < len(win_to_session) and win_to_session[f] >= 0:
+            session.focused = win_to_session[f]
+        elif len(session.z_order) > 0:
+            session.focused = session.z_order[len(session.z_order) - 1]
+        else:
+            session.focused = -1
+        return session^
+
+    fn _save_session_if_changed(mut self):
+        """Re-encode the current session and write it to disk only when
+        the encoding differs from the previously-written one. Two
+        deliberate skip cases: no project is open (nowhere to write),
+        or no file-backed windows are showing (we want the prior
+        session to survive a "close all windows" cycle so reopening
+        the project later restores them)."""
+        if not self.project:
+            return
+        var session = self._snapshot_session()
+        if len(session.windows) == 0:
+            return
+        var encoded = encode_session(session)
+        if encoded == self._last_session_json:
+            return
+        if save_session(self.project.value(), session):
+            self._last_session_json = encoded
+
+    fn _restore_session(mut self, screen: Rect):
+        """Recreate windows from ``<project>/.turbokod/session.json``.
+
+        Files already open are left in place (so calling this from the
+        ``open_file`` flow doesn't duplicate the user's freshly-opened
+        window); only previously-saved files that aren't open get
+        added. Restored rects are clipped to the current workspace —
+        a smaller terminal than last time still produces visible
+        windows. Z-order and focus are reapplied at the end so the
+        user lands on the same window they left.
+        """
+        if not self.project:
+            return
+        var session = load_session(self.project.value())
+        if len(session.windows) == 0:
+            # Nothing to restore. Leave the cached encoding empty so a
+            # later ``_save_session_if_changed`` will write the first
+            # real session out fresh.
+            self._last_session_json = String("")
+            return
+        var workspace = self.workspace_rect(screen)
+        var root = self.project.value()
+        # Track which session entry maps to which final window index
+        # so we can reapply z-order and focus afterwards.
+        var session_to_window = List[Int]()
+        for i in range(len(session.windows)):
+            var sw = session.windows[i]
+            var resolved = _resolve_session_path(root, sw.path)
+            var rect = _clip_rect_to_workspace(
+                Rect(sw.rect_a_x, sw.rect_a_y, sw.rect_b_x, sw.rect_b_y),
+                workspace,
+            )
+            var restore = _clip_rect_to_workspace(
+                Rect(sw.restore_a_x, sw.restore_a_y,
+                     sw.restore_b_x, sw.restore_b_y),
+                workspace,
+            )
+            var existing = self._find_window_for_path(resolved)
+            if existing >= 0:
+                # The window for this file is already open — likely the
+                # user just opened it via ``open_file`` which triggered
+                # us. The session's saved rect / cursor / scroll wins
+                # over the cascade default the open_file path applied,
+                # because the session is the user's last-known intent.
+                # Set ``is_maximized`` and ``rect`` directly rather than
+                # calling ``toggle_maximize`` — that helper clobbers
+                # ``_restore_rect`` with the current rect, which would
+                # erase the per-window un-maximized rect we just loaded
+                # from disk.
+                if sw.is_maximized:
+                    self.windows.windows[existing].rect = workspace
+                else:
+                    self.windows.windows[existing].rect = rect
+                self.windows.windows[existing].is_maximized = sw.is_maximized
+                self.windows.windows[existing]._restore_rect = restore
+                self.windows.windows[existing].editor.cursor_row = sw.cursor_row
+                self.windows.windows[existing].editor.anchor_row = sw.cursor_row
+                self.windows.windows[existing].editor.cursor_col = sw.cursor_col
+                self.windows.windows[existing].editor.anchor_col = sw.cursor_col
+                self.windows.windows[existing].editor.scroll_x = sw.scroll_x
+                self.windows.windows[existing].editor.scroll_y = sw.scroll_y
+                session_to_window.append(existing)
+                continue
+            try:
+                # Build the window with the un-maximized rect so the
+                # ``_restore_rect`` baked in by the constructor matches
+                # the user's saved layout. We then flip ``is_maximized``
+                # and overwrite ``rect`` to ``workspace`` if needed,
+                # rather than calling ``toggle_maximize`` (which would
+                # overwrite ``_restore_rect`` with the current rect).
+                var w = Window.from_file(basename(resolved), restore, resolved)
+                w._restore_rect = restore
+                # Apply per-buffer view state. Bounds-check the cursor
+                # against the restored buffer so a stale row from a
+                # file that's since been truncated doesn't put us off
+                # the end.
+                var line_count = w.editor.buffer.line_count()
+                var cr = sw.cursor_row
+                if cr < 0:
+                    cr = 0
+                if line_count > 0 and cr >= line_count:
+                    cr = line_count - 1
+                w.editor.cursor_row = cr
+                w.editor.anchor_row = cr
+                w.editor.cursor_col = sw.cursor_col
+                w.editor.anchor_col = sw.cursor_col
+                w.editor.scroll_x = sw.scroll_x
+                w.editor.scroll_y = sw.scroll_y
+                self.windows.add(w^)
+                var idx = len(self.windows.windows) - 1
+                if sw.is_maximized:
+                    # Direct field set — see the existing-window branch
+                    # for why we don't call toggle_maximize here.
+                    self.windows.windows[idx].rect = workspace
+                    self.windows.windows[idx].is_maximized = True
+                    self.windows.windows[idx]._restore_rect = restore
+                self._maybe_lsp_open(idx)
+                session_to_window.append(idx)
+            except:
+                session_to_window.append(-1)
+        # Reapply z-order: rebuild from session order, dropping
+        # entries we couldn't restore. Anything not in the session
+        # (e.g. a window the user opened mid-restore) stays where it
+        # naturally ended up — appended at the end.
+        var new_z = List[Int]()
+        var in_session = List[Bool]()
+        for _ in range(len(self.windows.windows)):
+            in_session.append(False)
+        for k in range(len(session.z_order)):
+            var sidx = session.z_order[k]
+            if 0 <= sidx and sidx < len(session_to_window):
+                var widx = session_to_window[sidx]
+                if widx >= 0 and widx < len(in_session) \
+                        and not in_session[widx]:
+                    new_z.append(widx)
+                    in_session[widx] = True
+        for i in range(len(self.windows.windows)):
+            if not in_session[i]:
+                new_z.append(i)
+        self.windows.z_order = new_z^
+        # Restore focus: the session's focused index, or the top of
+        # the rebuilt z-order as fallback.
+        var focus_idx = -1
+        if 0 <= session.focused and session.focused < len(session_to_window):
+            focus_idx = session_to_window[session.focused]
+        if focus_idx < 0 and len(self.windows.z_order) > 0:
+            focus_idx = self.windows.z_order[len(self.windows.z_order) - 1]
+        if focus_idx >= 0:
+            self.windows.focused = focus_idx
+        # Seed the change-detection cache with the encoding of what we
+        # just loaded so the immediate post-restore ``paint`` doesn't
+        # re-write the file with the same bytes.
+        self._last_session_json = encode_session(self._snapshot_session())
 
     fn _toggle_file_tree(mut self):
         if self._project_menu_idx < 0 or not self.project:
@@ -1074,6 +1411,17 @@ struct Desktop(Movable):
                     DefinitionResolved(path, line, character), screen,
                 )
             return Optional[String]()
+        if self.doc_pick.active:
+            if event.kind == EVENT_KEY:
+                _ = self.doc_pick.handle_key(event)
+            else:
+                _ = self.doc_pick.handle_mouse(event, screen)
+            if self.doc_pick.submitted:
+                var entry_idx = self.doc_pick.selected_index
+                var display = self.doc_pick.display
+                self._open_doc_entry(entry_idx, display, screen)
+                self.doc_pick.close()
+            return Optional[String]()
         if self.project_find.active:
             if event.kind == EVENT_KEY:
                 _ = self.project_find.handle_key(event, monotonic_ms())
@@ -1106,6 +1454,27 @@ struct Desktop(Movable):
             if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
+        # Resize drags get first dibs: a click on a pane's resize edge
+        # — or motion while a resize is already in flight — must reach
+        # that pane before menu / status / overlapping-pane dispatch
+        # can steal it. The file tree's left border can sit on top of
+        # the debug pane's bottom rows, and the debug pane's top
+        # border sits over the workspace where ``windows.handle_mouse``
+        # would otherwise grab clicks.
+        if event.kind == EVENT_MOUSE:
+            var dp_rect = self.debug_pane_rect(screen)
+            if self.debug_pane.is_resizing() \
+                    or (event.button == MOUSE_BUTTON_LEFT \
+                        and event.pressed and not event.motion \
+                        and self.debug_pane.is_on_resize_edge(event.pos, dp_rect)):
+                if self.debug_pane.handle_mouse(event, dp_rect):
+                    return Optional[String]()
+            if self.file_tree.is_resizing() \
+                    or (event.button == MOUSE_BUTTON_LEFT \
+                        and event.pressed and not event.motion \
+                        and self.file_tree.is_on_resize_edge(event.pos, screen)):
+                if self.file_tree.handle_mouse(event, screen):
+                    return Optional[String]()
         # Mouse events (and everything else): route through menu → pane → tree → windows.
         var result = self.menu_bar.handle_event(event, screen.b.x)
         if result.action:
@@ -1308,6 +1677,9 @@ struct Desktop(Movable):
         if action == EDITOR_GOTO_SYMBOL:
             self._open_symbol_pick()
             return Optional[String]()
+        if action == EDITOR_LOOKUP_DOCS:
+            self._open_doc_pick(screen)
+            return Optional[String]()
         if action == EDITOR_TOGGLE_COMMENT:
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
@@ -1454,6 +1826,9 @@ struct Desktop(Movable):
         if action == TARGET_DEBUG:
             self._target_debug()
             return Optional[String]()
+        if action == TARGET_TEST:
+            self._target_test()
+            return Optional[String]()
         if _starts_with(action, TARGET_SELECT_PREFIX):
             var idx = _parse_int(
                 action, len(TARGET_SELECT_PREFIX.as_bytes()),
@@ -1489,6 +1864,22 @@ struct Desktop(Movable):
             var resolved = self.lsp_managers[i].tick()
             if resolved:
                 self._jump_to(resolved.value(), screen)
+            else:
+                # Empty response just landed: no source location, but
+                # we may still have offline docs for this symbol — try
+                # the docs fallback before letting the status bar
+                # settle on "no definition found". Stdlib symbols (the
+                # common case for this fallback) live in DevDocs even
+                # when the LSP can't see source for them.
+                var unresolved = self.lsp_managers[i].take_empty_word()
+                if len(unresolved.as_bytes()) > 0:
+                    var lang = self.lsp_languages[i]
+                    if self._try_docs_fallback(lang, unresolved, screen):
+                        # Clear the latched flag so ``_refresh_lsp_status``
+                        # doesn't overwrite our "opened docs" message
+                        # with the stale "no definition found" one on
+                        # the next tick.
+                        self.lsp_managers[i].clear_empty()
             if self.symbol_pick.active and self.symbol_pick.loading \
                     and self.lsp_managers[i].has_pending_symbols():
                 self.symbol_pick.set_entries(
@@ -1509,7 +1900,16 @@ struct Desktop(Movable):
         bar and re-attempt LSP startup for any open editors of that
         language so the user gets autocomplete without having to close
         and re-open the file. Failure: pop the captured output into a
-        new editor window so the user can read what went wrong."""
+        new editor window so the user can read what went wrong.
+
+        Docs installs share the same ``InstallRunner`` slot but go
+        through a separate completion path — the dispatch is by
+        whichever ``_*_install_lang`` field was set when the install
+        started (mutually exclusive: only one runner is active at a
+        time, and only one of these fields is non-empty)."""
+        if len(self._doc_install_lang.as_bytes()) > 0:
+            self._on_doc_install_complete(result, screen)
+            return
         var lang = self._install_lang
         self._install_lang = String("")
         if result.ok():
@@ -1786,13 +2186,22 @@ struct Desktop(Movable):
         self.debug_pane.visible = self.dap.is_active() \
             or self.run_session.is_active() \
             or self._run_output_held
+        # Mode drives the pane's title ("Run"/"Debug") and whether
+        # Stack/Locals/Watches show at all. DAP is the only state
+        # that produces meaningful inspect content; Run sessions
+        # (and the post-run "exited" hold) are output-only by
+        # nature, so the inspect column would always be empty in
+        # those modes — we collapse it and give Output the full pane.
         if self.dap.is_active():
+            self.debug_pane.set_mode(PANE_MODE_DEBUG)
             self.debug_pane.set_status(self.dap.status_summary())
         elif self.run_session.is_active():
+            self.debug_pane.set_mode(PANE_MODE_RUN)
             self.debug_pane.set_status(
                 String("running ") + self.run_session.target_name,
             )
         elif self._run_output_held:
+            self.debug_pane.set_mode(PANE_MODE_RUN)
             self.debug_pane.set_status(String("(exited — Esc to dismiss)"))
         elif self.dap.is_failed():
             # Surface the failure once even though we hide the pane —
@@ -2147,8 +2556,14 @@ struct Desktop(Movable):
         self.debug_pane.clear()
         self.debug_pane.visible = True
         var cwd = resolved_cwd(self.project.value(), target.cwd)
+        # Swap a bare ``python`` / ``python3`` for the project venv's
+        # interpreter when one exists — anything else (or any path
+        # the user spelled out) is passed straight through.
+        var program_seed = resolve_python_interpreter(
+            self.project.value(), target.program,
+        )
         var program = resolved_program(
-            self.project.value(), target.cwd, target.program,
+            self.project.value(), target.cwd, program_seed,
         )
         # Build a pretty argv line for the pane log so the user sees
         # exactly what got spawned (resolved paths, not the source
@@ -2229,8 +2644,11 @@ struct Desktop(Movable):
         if self.dap.is_failed() or self.dap.is_terminated():
             self.dap.reset_for_restart()
         var cwd = resolved_cwd(self.project.value(), target.cwd)
+        var program_seed = resolve_python_interpreter(
+            self.project.value(), target.program,
+        )
         var program = resolved_program(
-            self.project.value(), target.cwd, target.program,
+            self.project.value(), target.cwd, program_seed,
         )
         var args = target.args.copy()
         self.dap.start(self.dap_specs[deb_idx], program, cwd, args^)
@@ -2247,6 +2665,91 @@ struct Desktop(Movable):
             String("debugging ") + target.name + String("…"),
             Attr(BLACK, LIGHT_GRAY),
         )
+
+    fn _target_test(mut self):
+        """Cmd+T: run the project's test suite.
+
+        Unlike ``_target_run`` / ``_target_debug``, this doesn't read
+        ``program`` / ``args`` off the active target — the user just
+        wants "run the tests" without authoring a separate target for
+        them. The language guess (active target's ``debug_language``
+        first; otherwise ``detect_project_language`` on the project
+        root) picks the runner: for ``python``, we invoke
+        ``python -m pytest`` in the project root, swapping ``python``
+        for the project venv's interpreter when one exists (same
+        idiom as Cmd+R).
+
+        Like Cmd+R, this terminates any in-flight run / debug session
+        first — the debug pane only has one slot and the user's
+        intent is "this pane now means tests". Test output streams
+        through the same RUN-mode pane as Cmd+R, so the title flips
+        to ``Run`` and the inspect column collapses to give the
+        output log the full pane.
+        """
+        if not self.project:
+            self.status_bar.set_message(
+                String("test: open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var project_root = self.project.value()
+        # Active-target language wins when set (the user has already
+        # told us what kind of project this is via the targets dialog);
+        # otherwise probe the project root for known markers.
+        var language = String("")
+        if self.targets.has_active():
+            language = self.targets.targets[self.targets.active].debug_language
+        if len(language.as_bytes()) == 0:
+            language = detect_project_language(project_root)
+        if language != String("python"):
+            var hint: String
+            if len(language.as_bytes()) == 0:
+                hint = String(
+                    "test: couldn't detect project language —"
+                    " no pyproject.toml / setup.py / *.py at root"
+                )
+            else:
+                hint = String("test: no test runner configured for '") \
+                    + language + String("'")
+            self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
+            return
+        var program_seed = resolve_python_interpreter(
+            project_root, String("python"),
+        )
+        var program = resolved_program(
+            project_root, String(""), program_seed,
+        )
+        var args = List[String]()
+        args.append(String("-m"))
+        args.append(String("pytest"))
+        # Stop any prior run / debug — the debug pane is single-slot.
+        if self.dap.is_active():
+            self.dap.shutdown()
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+        self.run_session.terminate()
+        self._run_output_held = False
+        self.debug_pane.clear()
+        self.debug_pane.visible = True
+        var pretty = program
+        for k in range(len(args)):
+            pretty = pretty + String(" ") + args[k]
+        self.debug_pane.append_output(
+            String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
+        )
+        try:
+            self.run_session.start(
+                String("pytest"), program, args^, project_root,
+            )
+            self.status_bar.set_message(
+                String("running tests…"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except e:
+            self.status_bar.set_message(
+                String("test: spawn failed — ") + String(e),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
 
     fn target_tick(mut self):
         """Drain the run session's output into the debug pane and
@@ -2427,6 +2930,385 @@ struct Desktop(Movable):
             seed = self.project.value()
         self.save_as_dialog.open(seed^)
 
+    # --- documentation lookup -------------------------------------------
+
+    fn _doc_dest_dir(self, slug: String) -> String:
+        """Where the offline DevDocs JSON for ``slug`` lives on disk.
+
+        Per-project (under ``<project>/.turbokod/docs/<slug>/``) when a
+        project is open; falls back to ``./.turbokod/docs/<slug>/`` so
+        the user can still install docs while editing a stray file. The
+        same path is used for the ``is_installed`` check, the install
+        command, and the load — so all three agree without round-tripping
+        through a registry.
+        """
+        var root = self.project.value() if self.project else String(".")
+        return join_path(
+            join_path(root, String(".turbokod")),
+            join_path(String("docs"), slug),
+        )
+
+    fn _ensure_doc_store(mut self, lang: String) -> Int:
+        """Index into ``doc_stores`` of the (possibly already-loaded)
+        store for language ``lang``. Returns -1 when the language isn't
+        in the docset registry. Doesn't load from disk — that happens
+        on first ``_open_doc_pick`` after install confirms the files
+        are actually there."""
+        for i in range(len(self.doc_languages)):
+            if self.doc_languages[i] == lang:
+                return i
+        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        if spec_idx < 0:
+            return -1
+        var spec = self.doc_specs[spec_idx]
+        self.doc_stores.append(DocStore(spec.slug, spec.display))
+        self.doc_languages.append(lang)
+        return len(self.doc_stores) - 1
+
+    fn _open_doc_pick(mut self, screen: Rect):
+        """Entry point for ``Ctrl+K`` / "Look up in docs".
+
+        Routing tiers (first hit wins):
+
+        1. **Focused editor's language** — if a recognized file is
+           focused and its docset is installed, use that. The query
+           is seeded with the identifier under the cursor.
+        2. **Last-used docset** — sticky across windows so repeat
+           lookups land on the same docs even after the user clicks
+           into a different file.
+        3. **Any installed docset** — when the user hasn't opened one
+           this session but has an installed docset on disk from a
+           previous run, just open it. First match in registry order.
+        4. **Install prompt** — only if a focused editor pointed at a
+           recognized-but-not-installed docset, ask the user to
+           download. Otherwise we surface a status hint instead of
+           prompting blind.
+
+        The point: docs lookup never silently does nothing because no
+        editor is focused. The fallback chain finds *something* to
+        show as long as any docset is installed anywhere.
+        """
+        # Tier 1: focused editor with a recognized extension.
+        var idx = self._focused_editor_idx()
+        var ext_spec_idx = -1
+        if idx >= 0:
+            var path = self.windows.windows[idx].editor.file_path
+            ext_spec_idx = find_docset_for_extension(
+                self.doc_specs, extension_of(path),
+            )
+            if ext_spec_idx >= 0:
+                var ext_lang = self.doc_specs[ext_spec_idx].language_id
+                if self._open_doc_pick_for_lang(ext_lang, idx):
+                    return
+        # Tier 2: last-used docset. Copy out before the call — Mojo's
+        # exclusivity check rejects passing an alias of ``self`` while
+        # the method takes ``mut self``.
+        if len(self._last_doc_lang.as_bytes()) > 0:
+            var last = self._last_doc_lang
+            if self._open_doc_pick_for_lang(last, idx):
+                return
+        # Tier 3: scan the registry for any docset that's installed on
+        # disk. Earlier specs win — pinned slugs are listed in roughly
+        # popularity order in ``built_in_docsets``.
+        for i in range(len(self.doc_specs)):
+            var spec = self.doc_specs[i]
+            var dest = self._doc_dest_dir(spec.slug)
+            # Cheap stat-based check before we materialize a store —
+            # ``DocStore.is_installed`` only stats the two JSON files,
+            # so a throwaway probe asks the disk question without
+            # committing to a store entry for an unused language.
+            var probe = DocStore(String(""), String(""))
+            if probe.is_installed(dest):
+                if self._open_doc_pick_for_lang(spec.language_id, idx):
+                    return
+        # Tier 4: nothing installed. If the focused file pointed at a
+        # known docset, prompt to install it; otherwise hint that the
+        # user needs to focus a recognized file once to bootstrap.
+        if ext_spec_idx >= 0:
+            var ext_spec = self.doc_specs[ext_spec_idx]
+            self._maybe_prompt_doc_install(ext_spec)
+            return
+        self.status_bar.set_message(
+            String("Docs: open a recognized source file once to install a docset"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
+    fn _open_doc_pick_for_lang(
+        mut self, lang: String, focused_editor_idx: Int,
+    ) -> Bool:
+        """Open the picker for ``lang`` if its docset is installed on
+        disk. Returns False (no side effects) when the docset isn't in
+        the registry or hasn't been downloaded — caller falls through
+        to the next tier. Returns True even on a load error so the
+        caller doesn't keep falling through and stomp the error
+        message we just set on the status bar.
+
+        ``focused_editor_idx`` is the editor whose cursor word seeds
+        the query; pass -1 to skip seeding (fallback tiers where no
+        editor was usable).
+        """
+        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        if spec_idx < 0:
+            return False
+        var spec = self.doc_specs[spec_idx]
+        var dest = self._doc_dest_dir(spec.slug)
+        var store_idx = self._ensure_doc_store(spec.language_id)
+        if store_idx < 0:
+            return False
+        if not self.doc_stores[store_idx].is_installed(dest):
+            return False
+        try:
+            self.doc_stores[store_idx].load(dest)
+        except e:
+            self.status_bar.set_message(
+                String("Docs load failed: ") + String(e),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return True
+        self.doc_pick.open(
+            spec.display, self.doc_stores[store_idx].entries.copy(),
+        )
+        if focused_editor_idx >= 0:
+            self._seed_doc_query_from_cursor(focused_editor_idx)
+        self._last_doc_lang = spec.language_id
+        return True
+
+    fn _seed_doc_query_from_cursor(mut self, win_idx: Int):
+        """Pre-fill the doc picker's query with the identifier under the
+        focused editor's cursor (if any). No-op for buffers with no
+        identifier under the cursor (whitespace, punctuation, etc.) —
+        the user just gets the full entry list."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var editor = self.windows.windows[win_idx].editor
+        var row = editor.cursor_row
+        if row < 0 or row >= editor.buffer.line_count():
+            return
+        var line = editor.buffer.line(row)
+        var word = word_at(line, editor.cursor_col)
+        if len(word.as_bytes()) == 0:
+            return
+        self.doc_pick.query = word^
+        self.doc_pick._refilter()
+
+    fn _maybe_prompt_doc_install(mut self, spec: DocSpec):
+        """Open the "Download <X> docs?" prompt. Skipped when another
+        modal is open or when the user has already been asked for this
+        language this session — same one-nag rule as the LSP installer.
+        """
+        for i in range(len(self._doc_install_prompted)):
+            if self._doc_install_prompted[i] == spec.language_id:
+                # Already declined / pending — surface a hint so the
+                # user knows why nothing happened on their second
+                # Ctrl+K attempt for this language.
+                self.status_bar.set_message(
+                    String("Docs: ") + spec.display
+                        + String(" not installed (asked earlier this session)"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+                return
+        if self.prompt.active or self.quick_open.active \
+                or self.symbol_pick.active or self.project_find.active \
+                or self.save_as_dialog.active or self.doc_pick.active:
+            return
+        self._doc_install_prompted.append(spec.language_id)
+        self._pending_action = _PA_DOC_INSTALL
+        self._pending_arg = spec.language_id
+        self.prompt.open(
+            String("Download ") + spec.display
+                + String(" docs (~few MB)? (y/N): ")
+        )
+
+    fn _start_doc_install(mut self, lang: String):
+        """Spawn the ``curl`` install for the docset matching ``lang``,
+        through the same ``InstallRunner`` that handles LSP installs.
+
+        ``InstallRunner`` is single-slot — if an install (LSP *or* docs)
+        is already in flight we surface the conflict on the status bar
+        rather than queue, since the popup only renders one at a time.
+        """
+        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        if spec_idx < 0:
+            return
+        var spec = self.doc_specs[spec_idx]
+        var dest = self._doc_dest_dir(spec.slug)
+        var cmd = docs_install_command(spec.slug, dest)
+        if self.install_runner.is_active():
+            self.status_bar.set_message(
+                String("Install busy; try ") + spec.display
+                    + String(" docs again in a moment"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        try:
+            self.install_runner.start(
+                spec.display + String(" docs"), cmd,
+            )
+            self._doc_install_lang = lang
+            self.status_bar.set_message(
+                String("Downloading ") + spec.display + String(" docs..."),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except:
+            self.status_bar.set_message(
+                String("Failed to start docs download"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _on_doc_install_complete(
+        mut self, result: InstallResult, screen: Rect,
+    ):
+        """React to a docs download finishing. Success: load + open the
+        picker right away so the user sees the entries they just paid
+        for. Failure: same shape as the LSP install path — popup an
+        editor window with the curl output."""
+        var lang = self._doc_install_lang
+        self._doc_install_lang = String("")
+        if result.ok():
+            var store_idx = self._ensure_doc_store(lang)
+            if store_idx < 0:
+                return
+            var spec_idx = find_docset_by_language(self.doc_specs, lang)
+            if spec_idx < 0:
+                return
+            var spec = self.doc_specs[spec_idx]
+            var dest = self._doc_dest_dir(spec.slug)
+            try:
+                self.doc_stores[store_idx].load(dest)
+            except e:
+                self.status_bar.set_message(
+                    String("Docs load failed: ") + String(e),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+                return
+            self.status_bar.set_message(
+                String("Installed ") + result.label,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            # Open the picker now — the user just opted in to docs, so
+            # taking them straight to the listing is the obvious follow-up.
+            self.doc_pick.open(
+                spec.display, self.doc_stores[store_idx].entries.copy(),
+            )
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                self._seed_doc_query_from_cursor(idx)
+            # Remember this language so a subsequent Ctrl+K from any
+            # window (focused editor or not) lands on the same docset.
+            self._last_doc_lang = lang
+        else:
+            var title = String("Docs install failed: ") + result.label \
+                + String(" (exit ") + String(result.exit_code()) + String(")")
+            var workspace = self.workspace_rect(screen)
+            var rect = self._default_window_rect(workspace)
+            var was_max = self._frontmost_maximized()
+            var body = String("$ ") + result.command + String("\n\n") \
+                + result.output
+            self.windows.add(Window.editor_window(title^, rect, body^))
+            self._open_count += 1
+            if was_max:
+                var w_idx = len(self.windows.windows) - 1
+                self.windows.windows[w_idx].toggle_maximize(workspace)
+            self.status_bar.set_message(
+                String("Docs install failed (exit ")
+                    + String(result.exit_code()) + String(") — see new window"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _try_docs_fallback(
+        mut self, lang: String, word: String, screen: Rect,
+    ) -> Bool:
+        """When the LSP returns no definition for ``word``, try to open
+        the matching DevDocs entry instead. Returns True iff we
+        actually opened something.
+
+        Conservative behavior on purpose:
+
+        * We **don't** prompt to install — a single Cmd+click should
+          never escalate to a network download. If the docset isn't on
+          disk we silently fall through and the existing "no definition
+          found" status takes over.
+        * We do an *exact* name match first, then a ``*.<word>`` suffix
+          match (``find`` → ``str.find``) so unqualified clicks on
+          methods still resolve. Multiple suffix matches → first one
+          wins; the user can still hit Ctrl+K to disambiguate.
+        """
+        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        if spec_idx < 0:
+            return False
+        var spec = self.doc_specs[spec_idx]
+        var dest = self._doc_dest_dir(spec.slug)
+        var store_idx = self._ensure_doc_store(lang)
+        if store_idx < 0:
+            return False
+        # Don't trigger an install here — silently bail when the user
+        # hasn't opted in to docs for this language yet.
+        if not self.doc_stores[store_idx].is_installed(dest):
+            return False
+        if not self.doc_stores[store_idx].loaded:
+            try:
+                self.doc_stores[store_idx].load(dest)
+            except:
+                return False
+        var entry_idx = _find_doc_entry_for_word(
+            self.doc_stores[store_idx].entries, word,
+        )
+        if entry_idx < 0:
+            return False
+        self._open_doc_entry(entry_idx, spec.display, screen)
+        self.status_bar.set_message(
+            String("Opened docs: ") + word + String(" (")
+                + spec.display + String(")"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+        return True
+
+    fn _open_doc_entry(
+        mut self, entry_idx: Int, display: String, screen: Rect,
+    ):
+        """Render a doc entry's HTML and open it in a read-only viewer
+        window.
+
+        The window title carries the entry name + docset; the body is
+        markdown-flavoured plain text from ``html_to_text``. The
+        editor's ``read_only`` flag suppresses every mutating
+        operation (typing, paste, undo, …) so the user can scroll and
+        copy without accidentally typing into the rendered page.
+        ``_apply_view_config`` keeps the line-number gutter off on
+        read-only editors regardless of the global view toggle.
+        """
+        # Find which loaded store this index belongs to. Picker
+        # tracked the docset by ``display``; we look up the store by
+        # display since multiple docsets can share a language id is
+        # not currently a thing but might be in the future.
+        var store_idx = -1
+        for i in range(len(self.doc_stores)):
+            if self.doc_stores[i].display == display:
+                store_idx = i
+                break
+        if store_idx < 0:
+            return
+        if entry_idx < 0 or entry_idx >= len(self.doc_stores[store_idx].entries):
+            return
+        var entry = self.doc_stores[store_idx].entries[entry_idx]
+        var html = self.doc_stores[store_idx].html_for(entry_idx)
+        var text = html_to_text(html)
+        if len(text.as_bytes()) == 0:
+            text = String("(no body — this entry's path was missing from db.json)")
+        var title = entry.name + String(" — ") + display
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        self.windows.add(Window.editor_window(title^, rect, text^))
+        self._open_count += 1
+        var idx = len(self.windows.windows) - 1
+        self.windows.windows[idx].editor.read_only = True
+        self.windows.windows[idx].editor.line_numbers = False
+        if was_max:
+            self.windows.windows[idx].toggle_maximize(workspace)
+
     fn _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input
         self.prompt.close()
@@ -2441,6 +3323,19 @@ struct Desktop(Movable):
                         self.windows.windows[idx].interior(),
                         margin_below=10, margin_above=10,
                     )
+            return Optional[String]()
+        if pa == _PA_DOC_INSTALL:
+            # Mirrors the LSP install branch but goes through the docs
+            # spec table and drops the clipboard-fallback (curl
+            # commands aren't useful to the user in their own shell —
+            # they're very long, and the destination dir is project-
+            # internal). Yes / no parsed by first-byte initial.
+            var lang = self._pending_arg
+            self._pending_arg = String("")
+            var tb = text.as_bytes()
+            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
+            if said_yes:
+                self._start_doc_install(lang)
             return Optional[String]()
         if pa == _PA_LSP_INSTALL:
             # Yes → run the install command as ``sh -c <hint>`` and show
@@ -2571,6 +3466,62 @@ struct Desktop(Movable):
 # --- Small helpers ----------------------------------------------------------
 
 
+fn _find_doc_entry_for_word(
+    entries: List[DocEntry], word: String,
+) -> Int:
+    """Return the index of the entry whose name best matches ``word``,
+    or -1 when no entry matches.
+
+    Match priority: exact equality → exact equality ignoring ASCII
+    case → suffix match (entry name ends with ``.<word>``, e.g.
+    ``str.find`` for the word ``find``). The suffix path is what makes
+    Cmd+click on an unqualified method name (``s.find()`` → click on
+    ``find``) land on the right entry; the case-insensitive tier is a
+    safety net for languages where DevDocs and the user's source
+    spell things differently (CSS property names, HTML attrs)."""
+    if len(word.as_bytes()) == 0:
+        return -1
+    # Exact match wins, regardless of position in the list.
+    for i in range(len(entries)):
+        if entries[i].name == word:
+            return i
+    var wb = word.as_bytes()
+    # Case-insensitive exact match.
+    for i in range(len(entries)):
+        var nb = entries[i].name.as_bytes()
+        if len(nb) != len(wb):
+            continue
+        var ok = True
+        for k in range(len(nb)):
+            var ca = Int(nb[k])
+            var cb = Int(wb[k])
+            if 0x41 <= ca and ca <= 0x5A: ca += 0x20
+            if 0x41 <= cb and cb <= 0x5A: cb += 0x20
+            if ca != cb:
+                ok = False
+                break
+        if ok:
+            return i
+    # Suffix match: ``.<word>``. First hit wins (DevDocs typically
+    # lists the most common parent type first — ``str.find`` ahead of
+    # ``bytes.find`` for example).
+    for i in range(len(entries)):
+        var nb = entries[i].name.as_bytes()
+        if len(nb) <= len(wb):
+            continue
+        # The byte before ``word`` must be ``.``.
+        if nb[len(nb) - len(wb) - 1] != 0x2E:
+            continue
+        var ok2 = True
+        for k in range(len(wb)):
+            if nb[len(nb) - len(wb) + k] != wb[k]:
+                ok2 = False
+                break
+        if ok2:
+            return i
+    return -1
+
+
 fn _starts_with(s: String, prefix: String) -> Bool:
     var sb = s.as_bytes()
     var pb = prefix.as_bytes()
@@ -2580,6 +3531,40 @@ fn _starts_with(s: String, prefix: String) -> Bool:
         if sb[i] != pb[i]:
             return False
     return True
+
+
+fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
+    """Shrink-and-shift ``rect`` so it fits entirely inside ``workspace``,
+    preserving the upper-left anchor when possible. Used for restored
+    sessions: a window saved at terminal size 200×60 gets clipped down
+    if the user opens the project in an 80×24 terminal, instead of
+    being painted off-screen.
+
+    Width / height are clamped first (to ``MIN_WIN_*``-or-workspace,
+    whichever is smaller); then the anchor slides up-and-left until
+    the clipped rect fits.
+    """
+    var w = rect.width()
+    var h = rect.height()
+    if w < MIN_WIN_W:
+        w = MIN_WIN_W
+    if h < MIN_WIN_H:
+        h = MIN_WIN_H
+    if w > workspace.width():
+        w = workspace.width()
+    if h > workspace.height():
+        h = workspace.height()
+    var ax = rect.a.x
+    var ay = rect.a.y
+    if ax < workspace.a.x:
+        ax = workspace.a.x
+    if ay < workspace.a.y:
+        ay = workspace.a.y
+    if ax + w > workspace.b.x:
+        ax = workspace.b.x - w
+    if ay + h > workspace.b.y:
+        ay = workspace.b.y - h
+    return Rect(ax, ay, ax + w, ay + h)
 
 
 fn _category_to_pane(category: String) -> UInt8:
