@@ -12,6 +12,8 @@ fontdue            = "0.9"
 unicode-width      = "0.2"
 anyhow             = "1"
 parking_lot        = "0.12"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
 
 # macOS-only: Core Text gives us the OS's full font fallback chain so
 # emoji/CJK/Thai/etc. — anything fontdue's fixed font list misses —

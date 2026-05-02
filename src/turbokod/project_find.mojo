@@ -37,7 +37,7 @@ from .highlight import (
 )
 from .lsp import CaptureResult, LspProcess, capture_command
 from .posix import alloc_zero_buffer, poll_stdin, read_into
-from .project import ProjectMatch, find_in_project
+from .project import ProjectMatch
 from .text_field import text_field_clipboard_key
 
 
@@ -190,24 +190,17 @@ struct ProjectFind(Movable):
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
-        # Cancel any previous in-flight rg before we either spawn a new
-        # one or fall back synchronously.
+        # Cancel any previous in-flight rg before spawning a new one.
         self._runner.cancel()
         if len(self.query.as_bytes()) == 0:
             return
         # Streaming ripgrep: spawns a child that writes match lines to
         # stdout as they're found. ``ProjectFind.tick`` drains those
         # incrementally so the UI thread never blocks on a slow query.
-        if self._runner.start(self.root, self.query):
-            return
-        # rg unavailable (or spawn failed): fall back to the pure-Mojo
-        # walker synchronously. This blocks but is rare and the walker
-        # caps its own recursion at sane bounds.
-        try:
-            self.matches = find_in_project(self.root, self.query)
-        except:
-            self.matches = List[ProjectMatch]()
-        self._refresh_context_for_selection()
+        # Callers gate ``open()`` on ``rg`` being on PATH, so a spawn
+        # failure here is a transient OS error — leave matches empty
+        # and let the user retry.
+        _ = self._runner.start(self.root, self.query)
 
     fn _refresh_context_for_selection(mut self):
         """Reload + retokenize the context panel for the current
@@ -791,8 +784,8 @@ struct _RgRunner(Movable):
 
     fn start(mut self, root: String, query: String) -> Bool:
         """Spawn a fresh ``rg`` child for ``(root, query)``. Returns
-        False when ``rg`` isn't on PATH or the spawn syscall failed —
-        caller should fall back to a pure-Mojo walker.
+        False when the spawn syscall failed (callers gate on rg being
+        on PATH before opening the find UI).
 
         Any previous in-flight search is cancelled first, so calling
         ``start`` repeatedly (one per debounced keystroke) never lets

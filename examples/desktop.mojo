@@ -45,13 +45,15 @@ from turbokod import (
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
+    EDITOR_COMPARE_CLIPBOARD,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_PASTE,
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
-    EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
+    EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
-    EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
+    EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
@@ -96,6 +98,10 @@ fn main() raises:
         edit_items.append(MenuItem(String("Cut"),   EDITOR_CUT))
         edit_items.append(MenuItem(String("Copy"),  EDITOR_COPY))
         edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
+        edit_items.append(MenuItem(
+            String("Compare selection with clipboard"),
+            EDITOR_COMPARE_CLIPBOARD,
+        ))
         edit_items.append(MenuItem.separator())
         edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
         edit_items.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
@@ -112,6 +118,9 @@ fn main() raises:
         desktop.menu_bar.add(_mk_menu(String("View"),
             (String("Toggle Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS),
             (String("Toggle Soft Wrap"),    EDITOR_TOGGLE_SOFT_WRAP),
+        ))
+        desktop.menu_bar.add(_mk_menu(String("Git"),
+            (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
         ))
         var debug_items = List[MenuItem]()
         debug_items.append(MenuItem(String("Run"), TARGET_RUN))
@@ -189,6 +198,9 @@ fn main() raises:
                 )
                 desktop.menu_bar.set_visible_by_label(
                     String("View"), desktop.windows.focused_is_editor(),
+                )
+                desktop.menu_bar.set_visible_by_label(
+                    String("Git"), desktop.windows.focused_is_editor(),
                 )
                 var tree_open = desktop.file_tree.consume_open()
                 if tree_open:
@@ -300,6 +312,26 @@ fn main() raises:
                         )
                     except:
                         pass
+
+                # Path forwarded from a second wrapper invocation. Same
+                # treatment as a startup argv entry — directory ⇒ project
+                # root, regular file ⇒ editor window, anything that
+                # doesn't stat is silently ignored.
+                if ev.kind == EVENT_OPEN_PATH:
+                    var path = ev.text
+                    if len(path) > 0:
+                        var info = stat_file(path)
+                        if info.ok and info.is_dir():
+                            desktop.open_project(path)
+                        else:
+                            try:
+                                desktop.open_file(path, app.screen())
+                            except e:
+                                error_log.append(
+                                    String("open ") + path + String(": ")
+                                    + String(e),
+                                )
+                    continue
 
                 # Modal: file dialog eats every event while open.
                 if file_dialog.active:

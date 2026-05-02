@@ -17,6 +17,7 @@ from turbokod.colors import (
     Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_GREEN,
     WHITE, YELLOW, default_attr,
 )
+from turbokod.diff import diff_lines, unified_diff
 from turbokod.editor import Editor, TextBuffer
 from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
@@ -43,6 +44,7 @@ from turbokod.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
     read_file, stat_file, write_file,
 )
+from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
@@ -103,7 +105,8 @@ from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
 from turbokod.window import WindowManager, paint_drop_shadow
 from turbokod.events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
+    EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
@@ -1560,6 +1563,49 @@ fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
     var ev = parse_input(s)
     assert_true(ev[0].kind == EVENT_NONE)
     assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_osc_open_path_emits_event_open_path() raises:
+    """The native wrapper forwards a second-instance argv as ``OSC 2;
+    __mvc_open:<path> BEL``. The terminal parser must recognise it, emit
+    EVENT_OPEN_PATH carrying the path, and consume the entire sequence.
+    """
+    var s = String("\x1b]2;__mvc_open:/Users/me/foo.txt\x07")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_OPEN_PATH)
+    assert_equal(ev[0].text, String("/Users/me/foo.txt"))
+    assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_osc_open_path_st_terminator() raises:
+    """OSC's other valid terminator is ``ESC \\``. We must accept both;
+    xterm style guides recommend it for any payload that might contain a
+    BEL byte (paths can't, but the parser shouldn't care about that)."""
+    var s = String("\x1b]2;__mvc_open:/tmp/x\x1b\\")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_OPEN_PATH)
+    assert_equal(ev[0].text, String("/tmp/x"))
+    assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_osc_unknown_is_consumed_silently() raises:
+    """Unrecognised OSC (window-title sets, palette queries, etc.) must
+    be swallowed — leaking the trailing bytes through the generic ESC
+    handler would emit an ``Alt+]`` keypress and corrupt the editor."""
+    var s = String("\x1b]0;some title\x07")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_NONE)
+    assert_equal(ev[1], len(s.as_bytes()))
+
+
+fn test_parse_osc_partial_defers() raises:
+    """Without a terminator yet, parse_input should signal "not enough
+    data" via (EVENT_NONE, 0) so Terminal.poll_event saves the bytes for
+    the next read instead of misinterpreting them."""
+    var s = String("\x1b]2;__mvc_open:/half-")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_NONE)
+    assert_equal(ev[1], 0)
 
 
 fn test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form() raises:
@@ -5685,7 +5731,196 @@ fn test_desktop_snapshot_skips_untitled_windows() raises:
     assert_equal(path, String("examples/hello.mojo"))
 
 
+fn test_diff_identical_inputs_have_no_hunks() raises:
+    """Two identical inputs produce only the file headers — no ``@@``."""
+    var same = String("alpha\nbeta\ngamma\n")
+    var out = unified_diff(same, same, String("a"), String("b"))
+    var idx = out.find(String("@@"))
+    assert_equal(idx, -1)
+
+
+fn test_diff_lines_pure_insert() raises:
+    """Inserting one line in the middle: one delete-free, one insert op."""
+    var a = List[String]()
+    a.append(String("one"))
+    a.append(String("three"))
+    var b = List[String]()
+    b.append(String("one"))
+    b.append(String("two"))
+    b.append(String("three"))
+    var ops = diff_lines(a, b)
+    var equals = 0
+    var inserts = 0
+    var deletes = 0
+    for i in range(len(ops)):
+        if ops[i].kind == 0:
+            equals += 1
+        elif ops[i].kind == 1:
+            deletes += 1
+        else:
+            inserts += 1
+    assert_equal(equals, 2)
+    assert_equal(inserts, 1)
+    assert_equal(deletes, 0)
+
+
+fn test_diff_lines_pure_delete() raises:
+    """Removing one line: one delete op, no inserts."""
+    var a = List[String]()
+    a.append(String("one"))
+    a.append(String("two"))
+    a.append(String("three"))
+    var b = List[String]()
+    b.append(String("one"))
+    b.append(String("three"))
+    var ops = diff_lines(a, b)
+    var equals = 0
+    var inserts = 0
+    var deletes = 0
+    for i in range(len(ops)):
+        if ops[i].kind == 0:
+            equals += 1
+        elif ops[i].kind == 1:
+            deletes += 1
+        else:
+            inserts += 1
+    assert_equal(equals, 2)
+    assert_equal(inserts, 0)
+    assert_equal(deletes, 1)
+
+
+fn test_diff_lines_replace_round_trips() raises:
+    """Applying the edit script must turn ``a`` into ``b`` exactly."""
+    var a = List[String]()
+    a.append(String("the quick brown fox"))
+    a.append(String("jumps over"))
+    a.append(String("the lazy dog"))
+    var b = List[String]()
+    b.append(String("the quick red fox"))
+    b.append(String("hops over"))
+    b.append(String("the lazy dog"))
+    b.append(String("end"))
+    var ops = diff_lines(a, b)
+    # Replay: equal/delete consume from a, insert produces from b. The
+    # produced sequence (equal lines from a, plus inserts from b in order)
+    # should match b exactly when the script is applied.
+    var produced = List[String]()
+    for i in range(len(ops)):
+        if ops[i].kind == 0:
+            produced.append(a[ops[i].a_index])
+        elif ops[i].kind == 2:
+            produced.append(b[ops[i].b_index])
+    assert_equal(len(produced), len(b))
+    for i in range(len(b)):
+        assert_equal(produced[i], b[i])
+
+
+fn test_unified_diff_renders_hunk_header_and_marks() raises:
+    """A simple replace: hunk header present, ``-old`` and ``+new`` lines
+    emitted, surrounding equals appear with a leading space."""
+    var a = String("alpha\nbeta\ngamma\n")
+    var b = String("alpha\nBETA\ngamma\n")
+    var out = unified_diff(a, b, String("old"), String("new"))
+    assert_true(out.find(String("--- old")) >= 0)
+    assert_true(out.find(String("+++ new")) >= 0)
+    assert_true(out.find(String("@@")) >= 0)
+    assert_true(out.find(String("-beta")) >= 0)
+    assert_true(out.find(String("+BETA")) >= 0)
+    assert_true(out.find(String(" alpha")) >= 0)
+    assert_true(out.find(String(" gamma")) >= 0)
+
+
+fn test_git_blame_parses_two_line_porcelain() raises:
+    """Two source lines, two distinct commits — parser must emit one
+    ``BlameLine`` per line with the right short-SHA + author. Each
+    record's first occurrence carries metadata; that author should
+    propagate to ``BlameLine.author`` for that record.
+    """
+    var text = (
+        String("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 1\n")
+        + String("author Alice\n")
+        + String("author-mail <alice@example.com>\n")
+        + String("summary first line\n")
+        + String("\thello\n")
+        + String("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 2 2 1\n")
+        + String("author Bob\n")
+        + String("author-mail <bob@example.com>\n")
+        + String("summary second line\n")
+        + String("\tworld\n")
+    )
+    var lines = parse_blame_porcelain(text)
+    assert_equal(len(lines), 2)
+    assert_equal(lines[0].commit, String("aaaaaaaa"))
+    assert_equal(lines[0].author, String("Alice"))
+    assert_equal(lines[1].commit, String("bbbbbbbb"))
+    assert_equal(lines[1].author, String("Bob"))
+
+
+fn test_git_blame_propagates_cached_author_for_repeated_sha() raises:
+    """Lines 2..N of a same-commit group only carry ``<sha> <orig> <final>``
+    + ``\\t<content>`` — no metadata. The parser must remember the
+    author from the first occurrence so the repeated lines still get
+    a real name (not "Not Committed Yet")."""
+    var sha = String("cccccccccccccccccccccccccccccccccccccccc")
+    var input = (
+        sha + String(" 1 1 2\n")
+        + String("author Carol\n")
+        + String("summary same commit, two lines\n")
+        + String("\tline one\n")
+        + sha + String(" 2 2\n")
+        + String("\tline two\n")
+    )
+    var lines = parse_blame_porcelain(input)
+    assert_equal(len(lines), 2)
+    assert_equal(lines[0].commit, String("cccccccc"))
+    assert_equal(lines[0].author, String("Carol"))
+    assert_equal(lines[1].commit, String("cccccccc"))
+    assert_equal(lines[1].author, String("Carol"))
+
+
+fn test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder() raises:
+    """Git emits a 40-char zero SHA and ``Not Committed Yet`` author
+    for lines that exist only in the worktree. The parser preserves
+    that — tests downstream rendering doesn't crash on the all-zero
+    short SHA."""
+    var text = (
+        String("0000000000000000000000000000000000000000 1 1 1\n")
+        + String("author Not Committed Yet\n")
+        + String("summary Version of foo from foo.txt\n")
+        + String("\tfresh line\n")
+    )
+    var lines = parse_blame_porcelain(text)
+    assert_equal(len(lines), 1)
+    assert_equal(lines[0].commit, String("00000000"))
+    assert_equal(lines[0].author, String("Not Committed Yet"))
+
+
+fn test_editor_blame_gutter_widens_total_gutter() raises:
+    """``set_blame`` enables the gutter; the editor's overall left
+    margin grows to make room for ``<sha> <author>`` (8+1+14+1 = 24
+    cells). Toggling off shrinks the margin back."""
+    var ed = Editor(String("alpha\nbeta\n"))
+    var bl = List[BlameLine]()
+    bl.append(BlameLine(String("12345678"), String("Anders")))
+    bl.append(BlameLine(String("12345678"), String("Anders")))
+    ed.set_blame(bl^)
+    assert_true(ed.blame_visible)
+    assert_equal(ed._blame_gutter(), 24)
+    ed.toggle_blame()
+    assert_false(ed.blame_visible)
+    assert_equal(ed._blame_gutter(), 0)
+
+
 fn main() raises:
+    test_diff_identical_inputs_have_no_hunks()
+    test_diff_lines_pure_insert()
+    test_diff_lines_pure_delete()
+    test_diff_lines_replace_round_trips()
+    test_unified_diff_renders_hunk_header_and_marks()
+    test_git_blame_parses_two_line_porcelain()
+    test_git_blame_propagates_cached_author_for_repeated_sha()
+    test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder()
+    test_editor_blame_gutter_widens_total_gutter()
     test_point_arithmetic()
     test_rect_basics()
     test_rect_helpers()
@@ -5830,6 +6065,10 @@ fn main() raises:
     test_parse_csi_modify_other_keys_ctrl_shift_f()
     test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f()
     test_parse_csi_unknown_sequence_is_consumed_whole()
+    test_parse_osc_open_path_emits_event_open_path()
+    test_parse_osc_open_path_st_terminator()
+    test_parse_osc_unknown_is_consumed_silently()
+    test_parse_osc_partial_defers()
     test_parse_csi_kitty_u_ctrl_letter()
     test_editor_rejects_modified_letter_typing()
     test_ctrl_q_modifyOtherKeys_triggers_quit_action()

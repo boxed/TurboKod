@@ -17,7 +17,8 @@ from .canvas import Canvas
 from .cell import Cell, blank_cell
 from .colors import Attr, attr_to_sgr, default_attr
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_RESIZE, EVENT_QUIT,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
+    EVENT_RESIZE, EVENT_QUIT,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
     KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
@@ -434,6 +435,8 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
         var b1 = bytes[1]
         if b1 == 0x5B:  # '['
             return _parse_csi(data)
+        if b1 == 0x5D:  # ']' — OSC
+            return _parse_osc(data)
         if b1 == 0x4F:  # 'O' — SS3, used by some terminals for F1..F4
             if len(data) < 3:
                 # Partial SS3: tail not yet read.
@@ -718,6 +721,70 @@ fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
             return (Event(), i + 1)
     # Ran off the end — partial sequence (split read). Defer to caller.
     return (Event(), 0)
+
+
+fn _parse_osc(data: String) -> Tuple[Event, Int]:
+    """Parse a complete OSC sequence: ``ESC ] Ps ; Pt ST``.
+
+    The terminator ST is either ``BEL`` (0x07) or ``ESC \\`` (0x1b 0x5c).
+    Most OSC sequences (window title, palette query, …) are sent terminal
+    → host; we don't normally see them inbound. The native turbokod
+    wrapper, however, uses a private ``OSC 2 ; __mvc_open:<path> BEL``
+    channel to forward command-line args from a second invocation, so the
+    inbound parser has to recognise it and emit an ``EVENT_OPEN_PATH``.
+    Any other OSC is consumed silently — without this branch the bytes
+    would leak as an ``Alt+]`` keypress through the generic ESC handler.
+
+    Partial-sequence convention matches ``_parse_csi``: returning
+    ``(EVENT_NONE, 0)`` defers to the caller for buffer reassembly.
+    """
+    var bytes = data.as_bytes()
+    var n = len(bytes)
+    if n < 2:
+        return (Event(), 0)
+    # Scan from index 2 for BEL or ESC \\ (the two ECMA-48 string
+    # terminators OSC accepts).
+    var i = 2
+    var term_len = 0
+    while i < n:
+        var b = bytes[i]
+        if b == 0x07:                        # BEL
+            term_len = 1
+            break
+        if b == 0x1B and i + 1 < n and bytes[i + 1] == 0x5C:  # ESC \\
+            term_len = 2
+            break
+        i += 1
+    if term_len == 0:
+        # Either we hit a bare ESC at the end (could be the start of ST,
+        # tail not yet read) or no terminator yet — defer.
+        return (Event(), 0)
+    var consumed = i + term_len
+    var body_start = 2
+    var body_end = i
+    # Recognise ``Ps;__mvc_open:<path>``. ``Ps`` is decimal digits ended
+    # by ``;``; we don't actually care which OSC code the host picked
+    # (we tolerate 2 / 0 / 9 / private codes equally), only that the
+    # text after the first ``;`` starts with the magic prefix.
+    var sep = body_start
+    while sep < body_end and bytes[sep] != 0x3B:  # ';'
+        sep += 1
+    if sep >= body_end:
+        return (Event(), consumed)
+    var pt_start = sep + 1
+    # Quick prefix match against ``__mvc_open:`` without allocating a
+    # String for the whole body.
+    var prefix = String("__mvc_open:").as_bytes()
+    if body_end - pt_start < len(prefix):
+        return (Event(), consumed)
+    var k = 0
+    while k < len(prefix):
+        if bytes[pt_start + k] != prefix[k]:
+            return (Event(), consumed)
+        k += 1
+    var path_start = pt_start + len(prefix)
+    var path = String(StringSlice(unsafe_from_utf8=bytes[path_start:body_end]))
+    return (Event.open_path_event(path^), consumed)
 
 
 fn _utf8_seq_len(b: UInt8) -> Int:

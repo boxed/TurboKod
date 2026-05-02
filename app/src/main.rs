@@ -1,7 +1,11 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::num::NonZeroU32;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
@@ -22,6 +26,9 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
+
+mod settings;
+use settings::{monitor_fingerprint, Settings, WindowState};
 
 const INIT_COLS: u32 = 80;
 const INIT_ROWS: u32 = 25;
@@ -119,6 +126,10 @@ fn blend(fg: u32, bg: u32, cov: u32) -> u32 {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Term(TermEvent),
+    // Args delivered from a second invocation via the single-instance
+    // Unix socket. Each entry is an absolute path the running primary
+    // should open (file → editor window, dir → project root).
+    OpenPaths(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -127,6 +138,115 @@ struct EventProxy(EventLoopProxy<UserEvent>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
         let _ = self.0.send_event(UserEvent::Term(event));
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Single-instance: behave like a macOS .app — running ``turbokod`` from the
+// command line a second time forwards its argv to the already-running window
+// instead of spawning a duplicate process. The wiring is a Unix domain
+// socket at a per-user path; the primary listens, secondaries connect and
+// send a length-prefixed JSON array of absolute paths and exit.
+//
+// Path resolution happens in the *secondary* (where ``cwd`` is meaningful) so
+// a relative ``turbokod foo.txt`` from a different working directory still
+// opens the right file. Length prefix is u32 BE; a 64 KiB cap rejects junk.
+// ----------------------------------------------------------------------------
+
+fn socket_path() -> PathBuf {
+    let user = std::env::var("USER").unwrap_or_else(|_| "default".into());
+    PathBuf::from(format!("/tmp/turbokod-{}.sock", user))
+}
+
+fn resolve_args(args: &[String]) -> Vec<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    args.iter()
+        .map(|a| {
+            let p = Path::new(a);
+            if p.is_absolute() {
+                a.clone()
+            } else {
+                cwd.join(p).to_string_lossy().into_owned()
+            }
+        })
+        .collect()
+}
+
+fn write_payload(s: &mut UnixStream, payload: &[u8]) -> std::io::Result<()> {
+    let len = (payload.len() as u32).to_be_bytes();
+    s.write_all(&len)?;
+    s.write_all(payload)?;
+    s.flush()
+}
+
+// Cleans up the socket file when the primary exits. On hard crash the file
+// is left behind, but ``ensure_single_instance`` self-heals: a stale socket
+// produces ``ConnectionRefused`` on connect, which we treat as "no primary,
+// remove the file and bind fresh."
+struct SingleInstanceGuard {
+    path: PathBuf,
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// Returns ``Some(guard)`` for the primary instance or ``None`` if we forwarded
+// to an existing primary (caller should exit). Panics on bind failure for
+// reasons other than a recoverable race.
+fn ensure_single_instance(
+    args: &[String],
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<SingleInstanceGuard> {
+    let path = socket_path();
+    match UnixStream::connect(&path) {
+        Ok(mut s) => {
+            // Existing primary — forward absolute argv and bow out.
+            let resolved = resolve_args(args);
+            let payload = serde_json::to_vec(&resolved).expect("serialize argv");
+            let _ = write_payload(&mut s, &payload);
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            // Stale socket file or other error — remove and try to bind.
+            // ``ConnectionRefused`` is the common case when the previous
+            // primary crashed without unlinking. Permission/etc. errors
+            // also fall through; if bind fails below the error surfaces.
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    let listener = UnixListener::bind(&path).expect("bind single-instance socket");
+    let serve_proxy = proxy.clone();
+    thread::spawn(move || serve_listener(listener, serve_proxy));
+    Some(SingleInstanceGuard { path })
+}
+
+fn serve_listener(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
+    for incoming in listener.incoming() {
+        let Ok(mut s) = incoming else { continue };
+        // Bound the read so a hung peer can't wedge the listener thread.
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+        let mut len_buf = [0u8; 4];
+        if s.read_exact(&mut len_buf).is_err() {
+            continue;
+        }
+        let len = u32::from_be_bytes(len_buf) as usize;
+        // 64 KiB is plenty for an argv list; reject anything larger so a
+        // bogus peer can't make us allocate arbitrary memory.
+        if len > 64 * 1024 {
+            continue;
+        }
+        let mut buf = vec![0u8; len];
+        if s.read_exact(&mut buf).is_err() {
+            continue;
+        }
+        let Ok(args) = serde_json::from_slice::<Vec<String>>(&buf) else {
+            continue;
+        };
+        let _ = proxy.send_event(UserEvent::OpenPaths(args));
     }
 }
 
@@ -426,6 +546,13 @@ struct App {
     mouse_col: u32,
     mouse_row: u32,
     mouse_buttons: u8, // bit 0 = left, 1 = middle, 2 = right
+    settings: Settings,
+    current_fingerprint: String,
+    // Suppress save() while we're driving size/position/scale changes
+    // ourselves (e.g. applying a saved config) — otherwise the Resized /
+    // Moved events those calls trigger would echo back into the file
+    // and overwrite the very state we just loaded.
+    applying_config: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -440,38 +567,81 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        // Open at ~2/3 of the primary monitor so the app feels like a real
-        // workspace on first launch instead of an 80x25 postage stamp.
-        // ``cell_w``/``cell_h`` and the monitor size are both physical
-        // pixels, so no logical/physical conversion is needed. Snap to a
-        // whole-cell boundary to avoid a partial trailing column at startup.
-        // The first ``Resized`` event will drive ``on_resize`` and re-grid
-        // the term, so the placeholder 80x25 it was initialised with only
-        // exists for the millisecond before the window materialises.
-        let inner = el.primary_monitor()
-            .map(|m| {
-                let s = m.size();
-                let cols = ((s.width * 2 / 3) / self.cell_w).max(MIN_COLS);
-                let rows = ((s.height * 2 / 3) / self.cell_h).max(MIN_ROWS);
-                PhysicalSize::new(cols * self.cell_w, rows * self.cell_h)
-            })
-            .unwrap_or_else(|| PhysicalSize::new(
-                self.cell_w * self.cols,
-                self.cell_h * self.rows,
-            ));
-        let attrs = WindowAttributes::default()
+        let fingerprint = monitor_fingerprint(el);
+        let saved = self.settings.get(&fingerprint);
+
+        // Apply saved scale before computing size, so the cell metrics
+        // match what the saved width/height was measured against.
+        if let Some(s) = saved {
+            self.set_scale_internal(s.scale.clamp(MIN_SCALE, MAX_SCALE));
+        }
+
+        let inner = if let Some(s) = saved {
+            // Round to whole-cell so the trailing column isn't a stripe of
+            // background, mirroring the default-launch path below.
+            let cols = (s.width / self.cell_w).max(MIN_COLS);
+            let rows = (s.height / self.cell_h).max(MIN_ROWS);
+            PhysicalSize::new(cols * self.cell_w, rows * self.cell_h)
+        } else {
+            // Open at ~2/3 of the primary monitor so the app feels like a real
+            // workspace on first launch instead of an 80x25 postage stamp.
+            // ``cell_w``/``cell_h`` and the monitor size are both physical
+            // pixels, so no logical/physical conversion is needed. Snap to a
+            // whole-cell boundary to avoid a partial trailing column at startup.
+            // The first ``Resized`` event will drive ``on_resize`` and re-grid
+            // the term, so the placeholder 80x25 it was initialised with only
+            // exists for the millisecond before the window materialises.
+            el.primary_monitor()
+                .map(|m| {
+                    let s = m.size();
+                    let cols = ((s.width * 2 / 3) / self.cell_w).max(MIN_COLS);
+                    let rows = ((s.height * 2 / 3) / self.cell_h).max(MIN_ROWS);
+                    PhysicalSize::new(cols * self.cell_w, rows * self.cell_h)
+                })
+                .unwrap_or_else(|| PhysicalSize::new(
+                    self.cell_w * self.cols,
+                    self.cell_h * self.rows,
+                ))
+        };
+        let mut attrs = WindowAttributes::default()
             .with_title("turbokod")
             .with_inner_size(inner);
+        if let Some(s) = saved {
+            attrs = attrs.with_position(PhysicalPosition::new(s.x, s.y));
+        }
         let window = Arc::new(el.create_window(attrs).unwrap());
         let context = softbuffer::Context::new(window.clone()).unwrap();
         let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
+        self.current_fingerprint = fingerprint;
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
-        let UserEvent::Term(te) = ev;
+        let te = match ev {
+            UserEvent::Term(te) => te,
+            UserEvent::OpenPaths(paths) => {
+                // Forward each path to the embedded child as a private OSC
+                // sequence — same channel turbokod uses outbound for cursor
+                // shape hints. The Mojo terminal parses ``__mvc_open:<path>``
+                // and emits an ``EVENT_OPEN_PATH`` the desktop reacts to.
+                for p in &paths {
+                    let seq = format!("\x1b]2;__mvc_open:{}\x07", p);
+                    self.notifier.notify(seq.into_bytes());
+                }
+                // Bring the window forward so the user sees their newly
+                // opened file — this is the macOS-app behavior the
+                // single-instance forwarding is meant to mimic.
+                if let Some(w) = &self.window {
+                    w.set_minimized(false);
+                    let _ = w.request_user_attention(None);
+                    w.focus_window();
+                    w.request_redraw();
+                }
+                return;
+            }
+        };
         match te {
             // turbokod (and most TUIs) detect window size by writing CSI 6 n
             // and reading the cursor-position response. Alacritty parses that
@@ -536,6 +706,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.check_monitor_change(el);
         match event {
             WindowEvent::CloseRequested => {
                 let _ = self.notifier.0.send(Msg::Shutdown);
@@ -544,6 +715,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
             WindowEvent::Resized(new_size) => self.on_resize(new_size),
+            WindowEvent::Moved(_) => self.save_window_state(),
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
@@ -594,6 +766,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        self.save_window_state();
     }
 
     fn on_key(&mut self, ev: KeyEvent) {
@@ -684,15 +857,19 @@ impl App {
         self.notifier.notify(bytes);
     }
 
+    fn set_scale_internal(&mut self, new_scale: u32) {
+        self.scale = new_scale;
+        self.cell_w = CELL_W_BASE * new_scale;
+        self.cell_h = CELL_H_BASE * new_scale;
+        self.atlas = Atlas::new(new_scale);
+    }
+
     fn change_scale(&mut self, new_scale: u32) {
         let new_scale = new_scale.clamp(MIN_SCALE, MAX_SCALE);
         if new_scale == self.scale {
             return;
         }
-        self.scale = new_scale;
-        self.cell_w = CELL_W_BASE * new_scale;
-        self.cell_h = CELL_H_BASE * new_scale;
-        self.atlas = Atlas::new(new_scale);
+        self.set_scale_internal(new_scale);
 
         let Some(window) = &self.window else { return };
         let size = window.inner_size();
@@ -713,6 +890,112 @@ impl App {
         let _ = self.notifier.0.send(Msg::Resize(win_size));
         // Synchronous push of the new size — see ``on_resize`` for the
         // reasoning. ``Cmd+=`` / ``Cmd+-`` re-grids the cell count too.
+        self.notifier.notify(format!("\x1b[8;{};{}t", rows, cols).into_bytes());
+        window.request_redraw();
+        self.save_window_state();
+    }
+
+    fn save_window_state(&mut self) {
+        if self.applying_config {
+            return;
+        }
+        let Some(window) = &self.window else { return };
+        let inner = window.inner_size();
+        let pos = window
+            .outer_position()
+            .unwrap_or_else(|_| PhysicalPosition::new(0, 0));
+        let state = WindowState {
+            scale: self.scale,
+            x: pos.x,
+            y: pos.y,
+            width: inner.width,
+            height: inner.height,
+        };
+        self.settings.put(&self.current_fingerprint, state);
+        self.settings.save();
+    }
+
+    // Re-evaluate window state when the monitor topology changes. Called
+    // at the top of every window_event, so a hot-plug (or any layout
+    // change in System Settings → Displays) is picked up on the very
+    // next event the OS routes our way — typically the Moved/Resized
+    // burst that the OS itself fires when arrangements shift.
+    fn check_monitor_change(&mut self, el: &ActiveEventLoop) {
+        let fingerprint = monitor_fingerprint(el);
+        if fingerprint == self.current_fingerprint {
+            return;
+        }
+        self.current_fingerprint = fingerprint.clone();
+        self.applying_config = true;
+        if let Some(state) = self.settings.get(&fingerprint) {
+            self.apply_saved_state(state);
+        } else {
+            self.apply_default_state(el);
+        }
+        self.applying_config = false;
+    }
+
+    fn apply_saved_state(&mut self, state: WindowState) {
+        let scale = state.scale.clamp(MIN_SCALE, MAX_SCALE);
+        if scale != self.scale {
+            self.change_scale_no_save(scale);
+        }
+        let Some(window) = self.window.clone() else { return };
+        let cols = (state.width / self.cell_w).max(MIN_COLS);
+        let rows = (state.height / self.cell_h).max(MIN_ROWS);
+        let _ = window.request_inner_size(PhysicalSize::new(
+            cols * self.cell_w,
+            rows * self.cell_h,
+        ));
+        window.set_outer_position(PhysicalPosition::new(state.x, state.y));
+    }
+
+    fn apply_default_state(&mut self, el: &ActiveEventLoop) {
+        if self.scale != DEFAULT_SCALE {
+            self.change_scale_no_save(DEFAULT_SCALE);
+        }
+        let Some(monitor) = el.primary_monitor() else { return };
+        let Some(window) = self.window.clone() else { return };
+        let s = monitor.size();
+        let cols = ((s.width * 2 / 3) / self.cell_w).max(MIN_COLS);
+        let rows = ((s.height * 2 / 3) / self.cell_h).max(MIN_ROWS);
+        let _ = window.request_inner_size(PhysicalSize::new(
+            cols * self.cell_w,
+            rows * self.cell_h,
+        ));
+        // Centre on the (now primary) monitor so the window doesn't end
+        // up off-screen if the saved coords belonged to a different
+        // arrangement that's no longer connected.
+        let pos = monitor.position();
+        let x = pos.x + ((s.width as i32 - (cols * self.cell_w) as i32) / 2);
+        let y = pos.y + ((s.height as i32 - (rows * self.cell_h) as i32) / 2);
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
+
+    // Same as change_scale but skips the persistence write — used by
+    // apply_saved_state / apply_default_state, which run with the
+    // ``applying_config`` guard already raised on the caller's side.
+    fn change_scale_no_save(&mut self, new_scale: u32) {
+        let new_scale = new_scale.clamp(MIN_SCALE, MAX_SCALE);
+        if new_scale == self.scale {
+            return;
+        }
+        self.set_scale_internal(new_scale);
+        let Some(window) = &self.window else { return };
+        let size = window.inner_size();
+        let cols = (size.width / self.cell_w).max(MIN_COLS);
+        let rows = (size.height / self.cell_h).max(MIN_ROWS);
+        self.cols = cols;
+        self.rows = rows;
+        let term_size = TermSize::new(cols as usize, rows as usize);
+        self.term.lock().resize(term_size);
+        let win_size = WindowSize {
+            num_lines: rows as u16,
+            num_cols: cols as u16,
+            cell_width: self.cell_w as u16,
+            cell_height: self.cell_h as u16,
+        };
+        let _ = self.notifier.0.send(Msg::Resize(win_size));
         self.notifier.notify(format!("\x1b[8;{};{}t", rows, cols).into_bytes());
         window.request_redraw();
     }
@@ -1042,6 +1325,16 @@ fn main() -> anyhow::Result<()> {
     let event_loop: WinitEventLoop<UserEvent> = WinitEventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
+    // Single-instance check before we spawn the PTY child: if a primary
+    // already owns the socket, forward our argv to it and exit clean.
+    // The user typed ``turbokod foo.txt`` from a shell — the existing
+    // window opens ``foo.txt`` and gets focus, no second window.
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    let _instance_guard = match ensure_single_instance(&cli_args, proxy.clone()) {
+        Some(guard) => guard,
+        None => return Ok(()),
+    };
+
     let scale = DEFAULT_SCALE;
     let cell_w = CELL_W_BASE * scale;
     let cell_h = CELL_H_BASE * scale;
@@ -1058,15 +1351,15 @@ fn main() -> anyhow::Result<()> {
         listener.clone(),
     )));
 
-    let mut argv = std::env::args().skip(1);
     // Tag the PTY environment so the Mojo runtime can detect it's
     // hosted by the native app and unlock features the alacritty
     // wrapper supports but generic terminals don't (currently: the
     // OSC-encoded mouse-pointer shape hint).
     let mut env = HashMap::new();
     env.insert("TURBOKOD_HOST".to_string(), "1".to_string());
+    let mut argv_iter = cli_args.iter().cloned();
     let pty_opts = PtyOptions {
-        shell: argv.next().map(|prog| Shell::new(prog, argv.collect())),
+        shell: argv_iter.next().map(|prog| Shell::new(prog, argv_iter.collect())),
         env,
         ..Default::default()
     };
@@ -1099,6 +1392,9 @@ fn main() -> anyhow::Result<()> {
         mouse_col: 0,
         mouse_row: 0,
         mouse_buttons: 0,
+        settings: Settings::load(),
+        current_fingerprint: String::new(),
+        applying_config: false,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

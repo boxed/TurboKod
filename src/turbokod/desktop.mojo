@@ -40,9 +40,11 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .clipboard import clipboard_copy
+from .clipboard import clipboard_copy, clipboard_paste
 from .config import TurbokodConfig, load_config, save_config
+from .diff import unified_diff
 from .file_io import basename, find_git_project, join_path, stat_file
+from .git_blame import compute_blame
 from .posix import realpath
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -118,11 +120,19 @@ comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
 comptime EDITOR_TOGGLE_SOFT_WRAP    = String("view:soft_wrap")
+# Git actions. ``EDITOR_TOGGLE_BLAME`` runs ``git blame --porcelain`` for
+# the focused editor's file the first time it's switched on, then re-uses
+# the cached attribution for subsequent toggles in the same session.
+comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
 comptime EDITOR_CUT           = String("edit:cut")
 comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
 comptime EDITOR_UNDO          = String("edit:undo")
 comptime EDITOR_REDO          = String("edit:redo")
+# "Compare selection with clipboard" — opens a read-only diff view between
+# the current selection (or the whole buffer when nothing is selected) and
+# the system clipboard's contents.
+comptime EDITOR_COMPARE_CLIPBOARD = String("edit:compare_clipboard")
 comptime PROJECT_FIND         = String("edit:project_find")
 comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
@@ -1019,6 +1029,42 @@ struct Desktop(Movable):
             return False
         return self.windows.windows[self.windows.focused].is_maximized
 
+    fn _open_compare_with_clipboard(mut self, screen: Rect):
+        """Open a read-only window with a unified diff of the focused
+        editor's selection against the system clipboard. With no selection,
+        compare the entire buffer. The "old" side (``-``) is the
+        editor/selection, the "new" side (``+``) is the clipboard, so the
+        diff reads as "what would change if I pasted the clipboard over
+        this region."
+        """
+        if self.windows.focused < 0 \
+                or not self.windows.windows[self.windows.focused].is_editor:
+            return
+        var idx = self.windows.focused
+        var ed_label = self.windows.windows[idx].title
+        var a_text: String
+        if self.windows.windows[idx].editor.has_selection():
+            a_text = self.windows.windows[idx].editor.selection_text()
+            ed_label = ed_label + String(" (selection)")
+        else:
+            a_text = self.windows.windows[idx].editor.text_snapshot()
+        var b_text = clipboard_paste()
+        var diff_text = unified_diff(
+            a_text, b_text, ed_label, String("(clipboard)"),
+        )
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        var title = String("Compare: ") + self.windows.windows[idx].title \
+            + String(" vs clipboard")
+        self.windows.add(Window.editor_window(title^, rect, diff_text^))
+        self._open_count += 1
+        var new_idx = len(self.windows.windows) - 1
+        self.windows.windows[new_idx].editor.read_only = True
+        self.windows.windows[new_idx].editor.line_numbers = False
+        if was_max:
+            self.windows.windows[new_idx].toggle_maximize(workspace)
+
     # --- dynamic Window menu -----------------------------------------------
 
     fn _rebuild_window_menu(mut self):
@@ -1789,6 +1835,31 @@ struct Desktop(Movable):
                     )
             _ = save_config(self.config)
             return Optional[String]()
+        if action == EDITOR_TOGGLE_BLAME:
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                # Lazy-load: only spawn ``git blame`` the first time
+                # the gutter is enabled per editor. Subsequent toggles
+                # flip visibility without re-spawning.
+                if self.windows.windows[idx].editor.blame_visible:
+                    self.windows.windows[idx].editor.blame_visible = False
+                else:
+                    var path = self.windows.windows[idx].editor.file_path
+                    if len(path.as_bytes()) > 0 \
+                            and len(self.windows.windows[idx].editor
+                                    .blame_lines) == 0:
+                        try:
+                            var lines = compute_blame(path)
+                            self.windows.windows[idx].editor.set_blame(
+                                lines^,
+                            )
+                        except:
+                            # Git missing or file not in a repo: leave
+                            # the toggle off rather than blowing up.
+                            pass
+                    else:
+                        self.windows.windows[idx].editor.blame_visible = True
+            return Optional[String]()
         if action == EDITOR_CUT:
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
@@ -1813,6 +1884,9 @@ struct Desktop(Movable):
                     self.windows.windows[idx].interior(),
                 )
             return Optional[String]()
+        if action == EDITOR_COMPARE_CLIPBOARD:
+            self._open_compare_with_clipboard(screen)
+            return Optional[String]()
         if action == EDITOR_UNDO:
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
@@ -1833,7 +1907,10 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_FIND:
             if self.project:
-                self.project_find.open(self.project.value())
+                if len(which(String("rg")).as_bytes()) == 0:
+                    self.windows.add(_rg_missing_window())
+                else:
+                    self.project_find.open(self.project.value())
             return Optional[String]()
         if action == PROJECT_REPLACE:
             if self.project:
@@ -3752,6 +3829,19 @@ fn _refresh_status_for(
             prefix + String("ready"),
             Attr(BLACK, LIGHT_GRAY),
         )
+
+
+fn _rg_missing_window() -> Window:
+    var content = List[String]()
+    content.append(String("Project find requires ripgrep (rg), which was not"))
+    content.append(String("found on your PATH."))
+    content.append(String(""))
+    content.append(String("Install it from https://github.com/BurntSushi/ripgrep"))
+    content.append(String("(e.g. `brew install ripgrep` or your distro's package"))
+    content.append(String("manager) and try again."))
+    return Window(
+        String("ripgrep not installed"), Rect(10, 6, 68, 15), content^,
+    )
 
 
 fn _summary_window(

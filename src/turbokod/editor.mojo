@@ -27,6 +27,7 @@ from .events import (
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
+from .git_blame import BlameLine
 from .highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension, highlight_incremental,
@@ -370,6 +371,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the user can browse rendered HTML without accidentally typing
     # into it.
     var read_only: Bool
+    # Git blame overlay. ``blame_lines[i]`` carries the short SHA and
+    # author for buffer row ``i`` when the gutter is on; the list is
+    # populated by the host (Desktop's ``EDITOR_TOGGLE_BLAME`` action
+    # runs ``git blame --porcelain`` and feeds the result through
+    # ``set_blame``). Off by default — adds a wide left gutter that
+    # would be noise for casual editing.
+    var blame_lines: List[BlameLine]
+    var blame_visible: Bool
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -414,6 +423,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
+        self.blame_lines = List[BlameLine]()
+        self.blame_visible = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -444,6 +455,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
+        self.blame_lines = List[BlameLine]()
+        self.blame_visible = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -491,6 +504,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
         self.read_only = copy.read_only
+        self.blame_lines = copy.blame_lines.copy()
+        self.blame_visible = copy.blame_visible
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -903,6 +918,27 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn toggle_line_numbers(mut self):
         self.line_numbers = not self.line_numbers
 
+    fn set_blame(mut self, var lines: List[BlameLine]):
+        """Replace the blame attribution list and turn the blame
+        gutter on. Pass an empty list to clear the cache (the gutter
+        also auto-hides when there's nothing to show)."""
+        self.blame_lines = lines^
+        self.blame_visible = True
+
+    fn toggle_blame(mut self):
+        """Show / hide the blame gutter. The host loads ``blame_lines``
+        on the same tick the user enables it; toggling off doesn't
+        discard the cache, so the next toggle-on is instant."""
+        self.blame_visible = not self.blame_visible
+
+    fn _blame_gutter(self) -> Int:
+        """Width of the blame gutter in cells: 8-char short SHA + space
+        + author truncated to 14 cells + one trailing separator. Zero
+        when blame is hidden or no data has been loaded yet."""
+        if not self.blame_visible or len(self.blame_lines) == 0:
+            return 0
+        return 8 + 1 + 14 + 1
+
     fn toggle_soft_wrap(mut self):
         self.soft_wrap = not self.soft_wrap
         if self.soft_wrap:
@@ -924,7 +960,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         return digits + 1
 
     fn _total_gutter(self) -> Int:
-        return self.gutter_width + self._line_number_gutter()
+        return self.gutter_width + self._line_number_gutter() \
+            + self._blame_gutter()
 
     fn _layout_lines(
         self, content_h: Int, text_width: Int,
@@ -1060,13 +1097,15 @@ struct Editor(ImplicitlyCopyable, Movable):
         var attr = Attr(LIGHT_GREEN, BLUE)
         var sel_attr = Attr(LIGHT_GREEN, CYAN)
         canvas.fill(view, String(" "), attr)
-        # Two stacked left gutters: the debugger gutter (breakpoint dot
-        # and exec arrow, owned by Desktop) sits at the very left, then
-        # the line-number gutter (right-aligned, one trailing space)
-        # sits between it and the text. Either or both can be zero-width.
+        # Three stacked left gutters: the debugger gutter (breakpoint
+        # dot and exec arrow, owned by Desktop) sits at the very left,
+        # then the line-number gutter (right-aligned, one trailing
+        # space), then the optional blame gutter ("<sha> <author>").
+        # Any of them can be zero-width.
         var dap_gutter = self.gutter_width
         var ln_gutter = self._line_number_gutter()
-        var total_gutter = dap_gutter + ln_gutter
+        var bl_gutter = self._blame_gutter()
+        var total_gutter = dap_gutter + ln_gutter + bl_gutter
         var text_x0 = view.a.x + total_gutter
         var content_right = view.b.x
         var content_bottom = view.b.y
@@ -1124,6 +1163,20 @@ struct Editor(ImplicitlyCopyable, Movable):
                     _ = canvas.put_text(
                         Point(sx, sy_g), num_str, ln_attr,
                         view.a.x + total_gutter,
+                    )
+                if bl_gutter > 0 and is_first_seg \
+                        and buf_row < len(self.blame_lines):
+                    var bl = self.blame_lines[buf_row]
+                    var bx = view.a.x + dap_gutter + ln_gutter
+                    var bl_right = bx + bl_gutter - 1
+                    _ = canvas.put_text(
+                        Point(bx, sy_g), bl.commit, ln_attr, bl_right,
+                    )
+                    # Author is truncated by ``put_text``'s ``max_x`` clamp
+                    # so a long name doesn't bleed into the source text.
+                    var ax = bx + 8 + 1
+                    _ = canvas.put_text(
+                        Point(ax, sy_g), bl.author, ln_attr, bl_right,
                     )
         var sel = self.selection()
         var sel_active = self.has_selection()

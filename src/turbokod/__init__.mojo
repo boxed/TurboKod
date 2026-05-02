@@ -18,7 +18,8 @@ from .colors import (
 )
 from .events import (
     Event,
-    EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_PASTE, EVENT_QUIT, EVENT_RESIZE,
+    EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH, EVENT_PASTE,
+    EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
@@ -40,11 +41,13 @@ from .desktop import (
     DEBUG_START_OR_CONTINUE, DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER,
     DEBUG_STOP, DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop,
+    EDITOR_COMPARE_CLIPBOARD,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV,
     EDITOR_GOTO, EDITOR_GOTO_SYMBOL,
     EDITOR_LOOKUP_DOCS,
     EDITOR_NEW, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE,
-    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
+    EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_UNDO,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
@@ -59,6 +62,7 @@ from .doc_config import (
 )
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
+from .diff import DiffOp, diff_lines, unified_diff
 from .editor import Editor, TextBuffer
 from .editorconfig import (
     EditorConfig, EditorConfigFile, EditorConfigSection,
@@ -109,6 +113,7 @@ from .file_io import (
     parent_path, read_file, stat_file, write_file,
 )
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
+from .git_blame import BlameLine, compute_blame, parse_blame_porcelain
 from .install_runner import InstallResult, InstallRunner
 from .project import (
     GitignoreMatcher, GitignorePattern, ProjectMatch,

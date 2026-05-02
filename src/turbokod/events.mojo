@@ -11,12 +11,18 @@ from .geometry import Point
 
 # --- Event kinds -------------------------------------------------------------
 
-comptime EVENT_NONE   = UInt8(0)
-comptime EVENT_KEY    = UInt8(1)
-comptime EVENT_MOUSE  = UInt8(2)
-comptime EVENT_RESIZE = UInt8(3)
-comptime EVENT_QUIT   = UInt8(4)
-comptime EVENT_PASTE  = UInt8(5)
+comptime EVENT_NONE      = UInt8(0)
+comptime EVENT_KEY       = UInt8(1)
+comptime EVENT_MOUSE     = UInt8(2)
+comptime EVENT_RESIZE    = UInt8(3)
+comptime EVENT_QUIT      = UInt8(4)
+comptime EVENT_PASTE     = UInt8(5)
+# A path the host wants the desktop to open. Arrives via the private
+# ``__mvc_open:`` OSC injected by the native wrapper when a second
+# command-line invocation forwards its argv to the running primary.
+# The path is carried in ``text``; the desktop stat()s it and dispatches
+# to ``open_project`` (dirs) or ``open_file`` (everything else).
+comptime EVENT_OPEN_PATH = UInt8(6)
 
 
 # --- Modifiers (bitmask) -----------------------------------------------------
@@ -153,6 +159,13 @@ struct Event(ImplicitlyCopyable, Movable):
         var e = Event()
         e.kind = EVENT_PASTE
         e.text = text^
+        return e
+
+    @staticmethod
+    fn open_path_event(var path: String) -> Event:
+        var e = Event()
+        e.kind = EVENT_OPEN_PATH
+        e.text = path^
         return e
 
     fn is_key(self, key: UInt32) -> Bool:
