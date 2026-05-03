@@ -23,12 +23,15 @@ use fontdue::{Font, FontSettings};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop as WinitEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 mod settings;
 use settings::{monitor_fingerprint, Settings, WindowState};
+
+#[cfg(target_os = "macos")]
+mod macos_url_scheme;
 
 const INIT_COLS: u32 = 80;
 const INIT_ROWS: u32 = 25;
@@ -158,17 +161,190 @@ fn socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/turbokod-{}.sock", user))
 }
 
+// Bundle layout discovery. When the rust binary lives at
+// ``turbokod.app/Contents/MacOS/turbokod-app``, the build script also
+// drops a ``turbokod-desktop`` next to it (the mojo backend) and a
+// ``Resources/launch.env`` recording the project root + pixi env. We
+// pick those up at startup so a URL-cold-launched .app can spawn the
+// mojo backend instead of ``$SHELL``, which is what makes the
+// ``__mvc_open:`` OSC actually open files.
+
+#[derive(Default)]
+struct BundleLaunchInfo {
+    /// Path to the mojo backend living next to the rust binary. ``None``
+    /// when the rust binary is being run outside a bundle (cargo run, etc.).
+    mojo_program: Option<PathBuf>,
+    /// CWD to set before spawning the mojo backend so its relative
+    /// ``src/turbokod/grammars/`` paths still resolve.
+    project_root: Option<PathBuf>,
+    /// Final ``DYLD_FALLBACK_LIBRARY_PATH`` to merge into the spawned
+    /// mojo backend's env. Built from ``<exe_dir>/../Frameworks`` (the
+    /// bundled libonig) plus any ``EXTRA_DYLD_FALLBACK`` listed in
+    /// ``launch.env`` (typically the pixi env's ``lib/`` for dev runs).
+    dyld_fallback: Option<String>,
+}
+
+fn discover_bundle_launch_info() -> BundleLaunchInfo {
+    let mut info = BundleLaunchInfo::default();
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return info,
+    };
+    let exe_dir = match exe.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return info,
+    };
+    let candidate = exe_dir.join("turbokod-desktop");
+    if candidate.is_file() {
+        info.mojo_program = Some(candidate);
+    }
+    // ``Contents/MacOS/`` is the binary dir; ``Contents/`` is its parent.
+    let contents = exe_dir.parent().map(|c| c.to_path_buf());
+    let resources = contents.as_ref().map(|c| c.join("Resources"));
+    let frameworks = contents.as_ref().map(|c| c.join("Frameworks"));
+    let mut extra_fallback: Option<String> = None;
+    if let Some(rdir) = &resources {
+        let env_path = rdir.join("launch.env");
+        if let Ok(text) = std::fs::read_to_string(&env_path) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (k, v) = match line.split_once('=') {
+                    Some(p) => p,
+                    None => continue,
+                };
+                match k {
+                    "PROJECT_ROOT" => info.project_root = Some(PathBuf::from(v)),
+                    "EXTRA_DYLD_FALLBACK" => extra_fallback = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if info.mojo_program.is_some() {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(fw) = &frameworks {
+            if fw.is_dir() {
+                parts.push(fw.to_string_lossy().into_owned());
+            }
+        }
+        if let Some(extra) = extra_fallback {
+            if !extra.is_empty() {
+                parts.push(extra);
+            }
+        }
+        if !parts.is_empty() {
+            info.dyld_fallback = Some(parts.join(":"));
+        }
+    }
+    info
+}
+
+// ``turbokod://open?file=<path>&line=<n>`` — handler for the project's
+// URL scheme. The single supported command for now is ``open``; ``file``
+// (or its alias ``path``) is the target, ``line`` is an optional 1-based
+// jump-to-line. Anything else is rejected — we don't want to silently
+// swallow URLs whose effect we haven't defined yet.
+fn parse_turbokod_url(s: &str) -> Option<(String, Option<u32>)> {
+    let rest = s.strip_prefix("turbokod://")?;
+    let (host_path, query) = match rest.split_once('?') {
+        Some((h, q)) => (h, q),
+        None => (rest, ""),
+    };
+    let cmd = host_path.trim_end_matches('/');
+    if cmd != "open" {
+        return None;
+    }
+    let mut file: Option<String> = None;
+    let mut line: Option<u32> = None;
+    for kv in query.split('&') {
+        if kv.is_empty() {
+            continue;
+        }
+        let (k, v) = match kv.split_once('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        let decoded = percent_decode(v);
+        match k {
+            "file" | "path" => file = Some(decoded),
+            "line" => line = decoded.parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+    file.map(|f| (f, line))
+}
+
+fn percent_decode(s: &str) -> String {
+    // URL-form decoding for the query value: ``%xx`` → byte and
+    // ``+`` → space. Falls back to a lossy UTF-8 conversion at the
+    // end so an invalid sequence produces a printable Replacement
+    // Character rather than panicking the URL parse.
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+// Translate one CLI / forwarded argument into the wire format the Mojo
+// layer accepts: a plain absolute path for the no-line case, or
+// ``<abspath>\x1f<line>`` when a jump-to-line was requested. The
+// ``\x1f`` (Unit Separator) byte is a valid OSC body byte and is
+// guaranteed not to appear in a real path, so the receiver can split
+// unambiguously. Returns ``None`` for ``turbokod://`` URLs whose
+// command isn't ``open`` — caller drops them.
+fn translate_open_arg(arg: &str, cwd: &Path) -> Option<String> {
+    if let Some((file, line)) = parse_turbokod_url(arg) {
+        let p = Path::new(&file);
+        let abs = if p.is_absolute() {
+            file
+        } else {
+            cwd.join(p).to_string_lossy().into_owned()
+        };
+        Some(match line {
+            Some(n) => format!("{}\x1f{}", abs, n),
+            None => abs,
+        })
+    } else if arg.starts_with("turbokod://") {
+        // Recognised scheme, unsupported command — drop rather than
+        // silently treat the URL string as a path.
+        None
+    } else {
+        let p = Path::new(arg);
+        Some(if p.is_absolute() {
+            arg.to_string()
+        } else {
+            cwd.join(p).to_string_lossy().into_owned()
+        })
+    }
+}
+
 fn resolve_args(args: &[String]) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     args.iter()
-        .map(|a| {
-            let p = Path::new(a);
-            if p.is_absolute() {
-                a.clone()
-            } else {
-                cwd.join(p).to_string_lossy().into_owned()
-            }
-        })
+        .filter_map(|a| translate_open_arg(a, &cwd))
         .collect()
 }
 
@@ -193,21 +369,33 @@ impl Drop for SingleInstanceGuard {
     }
 }
 
-// Returns ``Some(guard)`` for the primary instance or ``None`` if we forwarded
-// to an existing primary (caller should exit). Panics on bind failure for
-// reasons other than a recoverable race.
+enum InstanceRole {
+    /// We bound the socket — caller is the primary; spawn the listener
+    /// thread, run the full UI.
+    Primary(SingleInstanceGuard),
+    /// Another primary exists. We forwarded ``cli_args`` (if any), but
+    /// LaunchServices may still deliver a URL Apple Event to *this*
+    /// process (it launched us by bundle ID and won't know about the
+    /// dev primary's socket). Caller runs ``BridgeApp`` to wait briefly
+    /// for the AE to fire, then forwards the URL via the same socket
+    /// and exits.
+    Secondary,
+}
+
 fn ensure_single_instance(
     args: &[String],
     proxy: EventLoopProxy<UserEvent>,
-) -> Option<SingleInstanceGuard> {
+) -> InstanceRole {
     let path = socket_path();
     match UnixStream::connect(&path) {
         Ok(mut s) => {
-            // Existing primary — forward absolute argv and bow out.
+            // Existing primary — forward absolute argv (which may be
+            // empty for a URL-cold-launched .app, that's fine; the AE
+            // handler will follow up with a URL forward of its own).
             let resolved = resolve_args(args);
             let payload = serde_json::to_vec(&resolved).expect("serialize argv");
             let _ = write_payload(&mut s, &payload);
-            return None;
+            return InstanceRole::Secondary;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {
@@ -221,7 +409,73 @@ fn ensure_single_instance(
     let listener = UnixListener::bind(&path).expect("bind single-instance socket");
     let serve_proxy = proxy.clone();
     thread::spawn(move || serve_listener(listener, serve_proxy));
-    Some(SingleInstanceGuard { path })
+    InstanceRole::Primary(SingleInstanceGuard { path })
+}
+
+/// Forward an ``OpenPaths`` payload to the running primary via the
+/// single-instance socket. Returns ``true`` if the bytes were handed
+/// off (no guarantee the primary actually opened the file — that's
+/// the primary's job once it sees the OSC). Used both by the cli-args
+/// forward path and by the URL-AE bridge.
+fn forward_open_paths(paths: &[String]) -> bool {
+    let path = socket_path();
+    let mut s = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let payload = match serde_json::to_vec(&paths.to_vec()) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    write_payload(&mut s, &payload).is_ok()
+}
+
+/// winit ``ApplicationHandler`` for secondary processes that exist
+/// only to forward incoming URL Apple Events to the primary. We give
+/// LaunchServices ~1.5 s to deliver any pending ``GURL`` AE — long
+/// enough for cold launches where the OS is still settling, short
+/// enough that a stray double-launch doesn't leave a phantom .app
+/// process around.
+struct BridgeApp {
+    deadline: std::time::Instant,
+}
+
+impl BridgeApp {
+    fn new() -> Self {
+        Self {
+            deadline: std::time::Instant::now() + std::time::Duration::from_millis(1500),
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for BridgeApp {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        // Park on a wait until the AE either fires or we time out.
+        // No window, no PTY — bridge processes are invisible to the
+        // user except for a brief dock bounce on cold-launch.
+        el.set_control_flow(ControlFlow::WaitUntil(self.deadline));
+    }
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+        if let UserEvent::OpenPaths(paths) = ev {
+            // Forward the URL on to the primary. The handler in
+            // ``main.rs`` for the primary's ``OpenPaths`` event then
+            // emits the ``__mvc_open:`` OSC into its PTY child.
+            forward_open_paths(&paths);
+            el.exit();
+        }
+    }
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if std::time::Instant::now() >= self.deadline {
+            el.exit();
+        }
+    }
+    fn window_event(
+        &mut self,
+        _: &ActiveEventLoop,
+        _: WindowId,
+        _: WindowEvent,
+    ) {
+    }
 }
 
 fn serve_listener(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
@@ -1325,15 +1579,66 @@ fn main() -> anyhow::Result<()> {
     let event_loop: WinitEventLoop<UserEvent> = WinitEventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
+    // macOS URL-scheme handler. Must be installed before ``NSApp.run()``
+    // (i.e., before ``event_loop.run_app``) so the kAEGetURL event a
+    // cold-launched-by-URL invocation fires gets caught instead of
+    // landing on LaunchServices' default no-op.
+    #[cfg(target_os = "macos")]
+    macos_url_scheme::register(proxy.clone());
+
     // Single-instance check before we spawn the PTY child: if a primary
     // already owns the socket, forward our argv to it and exit clean.
     // The user typed ``turbokod foo.txt`` from a shell — the existing
     // window opens ``foo.txt`` and gets focus, no second window.
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    // ``turbokod://...`` URLs in argv are open-requests, never shell
+    // programs — splitting them out here keeps them off the
+    // ``Shell::new`` path (the cli_args[0]-as-program logic below) and
+    // lets us route them through ``OpenPaths`` instead, which is the
+    // same flow secondary instances use to forward args.
+    let cwd_for_args = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let url_open_args: Vec<String> = cli_args
+        .iter()
+        .filter(|a| a.starts_with("turbokod://"))
+        .filter_map(|a| translate_open_arg(a, &cwd_for_args))
+        .collect();
+    let shell_args: Vec<String> = cli_args
+        .iter()
+        .filter(|a| !a.starts_with("turbokod://"))
+        .cloned()
+        .collect();
     let _instance_guard = match ensure_single_instance(&cli_args, proxy.clone()) {
-        Some(guard) => guard,
-        None => return Ok(()),
+        InstanceRole::Primary(guard) => guard,
+        InstanceRole::Secondary => {
+            // Another primary owns the socket. We forwarded our
+            // ``cli_args`` (which may have been empty), and we may
+            // *also* have been launched specifically to receive a
+            // ``turbokod://`` URL via Apple Event. The AE only fires
+            // once we enter the event loop, so spin up a
+            // ``BridgeApp``: it waits ~1.5 s for the AE to deliver,
+            // forwards the URL through the same socket, and exits.
+            // Without this the URL gets dropped because the secondary
+            // process exits before ``NSApp.run`` ever pumps it.
+            //
+            // Anything in ``url_open_args`` came from our own argv
+            // (e.g. ``turbokod 'turbokod://...'`` from the shell),
+            // already-translated; forward it now so we don't depend
+            // on the AE round-trip for that case.
+            if !url_open_args.is_empty() {
+                forward_open_paths(&url_open_args);
+            }
+            let mut bridge = BridgeApp::new();
+            event_loop.run_app(&mut bridge)?;
+            return Ok(());
+        }
     };
+    // Primary launch with URL args: queue them up so the event loop
+    // delivers an ``OpenPaths`` once the Mojo child has come up. The
+    // OSC bytes get buffered in the PTY in the meantime, so the
+    // child sees them as soon as it starts reading input.
+    if !url_open_args.is_empty() {
+        let _ = proxy.send_event(UserEvent::OpenPaths(url_open_args));
+    }
 
     let scale = DEFAULT_SCALE;
     let cell_w = CELL_W_BASE * scale;
@@ -1357,9 +1662,44 @@ fn main() -> anyhow::Result<()> {
     // OSC-encoded mouse-pointer shape hint).
     let mut env = HashMap::new();
     env.insert("TURBOKOD_HOST".to_string(), "1".to_string());
-    let mut argv_iter = cli_args.iter().cloned();
+    // ``shell_args`` is ``cli_args`` with ``turbokod://`` URLs
+    // removed; URLs are open-requests, not shell programs. Anything
+    // remaining still follows the original "argv[0] is the program,
+    // argv[1..] are its args" convention.
+    let bundle = discover_bundle_launch_info();
+    let shell = if shell_args.is_empty() {
+        // No CLI shell program — if the bundle ships ``turbokod-desktop``
+        // next to us, default to that so a URL-cold-launched .app
+        // actually has the mojo backend running (and the
+        // ``__mvc_open:`` OSC reaches a recipient who knows what to
+        // do with it). Outside a bundle this is None and the PTY
+        // falls back to ``$SHELL``, matching the cargo-run dev flow.
+        bundle.mojo_program.clone().map(|p| {
+            Shell::new(p.to_string_lossy().into_owned(), Vec::new())
+        })
+    } else {
+        let mut iter = shell_args.iter().cloned();
+        iter.next().map(|prog| Shell::new(prog, iter.collect()))
+    };
+    let working_dir = if shell.is_some() {
+        bundle.project_root.clone()
+    } else {
+        None
+    };
+    if shell.is_some() {
+        if let Some(fallback) = &bundle.dyld_fallback {
+            // Merge with any inherited fallback path the user already
+            // had set, so we don't trash their dev-env overrides.
+            let combined = match std::env::var("DYLD_FALLBACK_LIBRARY_PATH") {
+                Ok(existing) if !existing.is_empty() => format!("{}:{}", fallback, existing),
+                _ => fallback.clone(),
+            };
+            env.insert("DYLD_FALLBACK_LIBRARY_PATH".to_string(), combined);
+        }
+    }
     let pty_opts = PtyOptions {
-        shell: argv_iter.next().map(|prog| Shell::new(prog, argv_iter.collect())),
+        shell,
+        working_directory: working_dir,
         env,
         ..Default::default()
     };
@@ -1398,6 +1738,67 @@ fn main() -> anyhow::Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn open_url_with_file_and_line() {
+        let r = parse_turbokod_url(
+            "turbokod://open?file=/Users/x/foo.py&line=42",
+        );
+        assert_eq!(r.as_ref().map(|p| p.0.as_str()), Some("/Users/x/foo.py"));
+        assert_eq!(r.and_then(|p| p.1), Some(42));
+    }
+
+    #[test]
+    fn open_url_without_line() {
+        let r = parse_turbokod_url("turbokod://open?file=/tmp/a.txt");
+        assert_eq!(r.as_ref().map(|p| p.0.as_str()), Some("/tmp/a.txt"));
+        assert_eq!(r.and_then(|p| p.1), None);
+    }
+
+    #[test]
+    fn open_url_percent_decoded_path() {
+        let r = parse_turbokod_url(
+            "turbokod://open?file=/tmp/space%20name.txt&line=7",
+        );
+        assert_eq!(r.as_ref().map(|p| p.0.as_str()), Some("/tmp/space name.txt"));
+        assert_eq!(r.and_then(|p| p.1), Some(7));
+    }
+
+    #[test]
+    fn unknown_command_rejected() {
+        assert!(parse_turbokod_url("turbokod://search?q=foo").is_none());
+    }
+
+    #[test]
+    fn translate_appends_unit_separator_for_line() {
+        let cwd = PathBuf::from("/cwd");
+        let s = translate_open_arg(
+            "turbokod://open?file=/abs/path.rs&line=99",
+            &cwd,
+        );
+        assert_eq!(s.as_deref(), Some("/abs/path.rs\x1f99"));
+    }
+
+    #[test]
+    fn translate_unknown_url_dropped() {
+        let cwd = PathBuf::from("/cwd");
+        // ``turbokod://`` recognized but ``search`` isn't ``open`` —
+        // ``filter_map`` drops the entry rather than passing the URL
+        // through as a path.
+        assert!(translate_open_arg("turbokod://search?q=x", &cwd).is_none());
+    }
+
+    #[test]
+    fn translate_relative_path_is_canonicalized() {
+        let cwd = PathBuf::from("/work/proj");
+        let s = translate_open_arg("foo.txt", &cwd);
+        assert_eq!(s.as_deref(), Some("/work/proj/foo.txt"));
+    }
 }
 
 #[cfg(test)]

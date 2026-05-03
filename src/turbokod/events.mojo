@@ -22,6 +22,10 @@ comptime EVENT_PASTE     = UInt8(5)
 # command-line invocation forwards its argv to the running primary.
 # The path is carried in ``text``; the desktop stat()s it and dispatches
 # to ``open_project`` (dirs) or ``open_file`` (everything else).
+#
+# When the host supplies a target line (``turbokod://open?...&line=N``
+# URLs are translated this way), the 1-based line number is carried in
+# ``pos.y`` and ``pos.x`` is unused. ``pos.y == 0`` means "no line".
 comptime EVENT_OPEN_PATH = UInt8(6)
 
 
@@ -162,10 +166,14 @@ struct Event(ImplicitlyCopyable, Movable):
         return e
 
     @staticmethod
-    fn open_path_event(var path: String) -> Event:
+    fn open_path_event(var path: String, line: Int = 0) -> Event:
         var e = Event()
         e.kind = EVENT_OPEN_PATH
         e.text = path^
+        # ``line`` is 1-based; 0 means "no jump". Stored in ``pos.y`` so
+        # the existing ``pos`` slot does double duty without bloating the
+        # struct.
+        e.pos = Point(0, line)
         return e
 
     fn is_key(self, key: UInt32) -> Bool:

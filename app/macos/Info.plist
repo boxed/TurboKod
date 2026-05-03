@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>turbokod-app</string>
+	<key>CFBundleIdentifier</key>
+	<string>se.dryft.turbokod</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>turbokod</string>
+	<key>CFBundleDisplayName</key>
+	<string>turbokod</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.0.1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- LaunchServices URL-type registration. Anything matching one of
+	     the listed schemes (here: turbokod://...) is dispatched to this
+	     bundle via an Apple Event of class/id 'GURL'. The handler is
+	     wired up at startup in macos_url_scheme.rs. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>se.dryft.turbokod.url</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>turbokod</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+		</dict>
+	</array>
+</dict>
+</plist>

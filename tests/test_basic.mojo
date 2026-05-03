@@ -1611,6 +1611,19 @@ fn test_parse_osc_open_path_emits_event_open_path() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
+fn test_parse_osc_open_path_with_line_suffix() raises:
+    """The wrapper appends ``\\x1f<line>`` to the path when translating
+    a ``turbokod://open?...&line=N`` URL. Path comes through clean and
+    ``ev.pos.y`` carries the 1-based line number; without the suffix
+    ``ev.pos.y`` defaults to 0 (the base case)."""
+    var s = String("\x1b]2;__mvc_open:/Users/me/foo.py\x1f277\x07")
+    var ev = parse_input(s)
+    assert_true(ev[0].kind == EVENT_OPEN_PATH)
+    assert_equal(ev[0].text, String("/Users/me/foo.py"))
+    assert_equal(ev[0].pos.y, 277)
+    assert_equal(ev[1], len(s.as_bytes()))
+
+
 fn test_parse_osc_open_path_st_terminator() raises:
     """OSC's other valid terminator is ``ESC \\``. We must accept both;
     xterm style guides recommend it for any payload that might contain a
@@ -6239,6 +6252,7 @@ fn main() raises:
     test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f()
     test_parse_csi_unknown_sequence_is_consumed_whole()
     test_parse_osc_open_path_emits_event_open_path()
+    test_parse_osc_open_path_with_line_suffix()
     test_parse_osc_open_path_st_terminator()
     test_parse_osc_unknown_is_consumed_silently()
     test_parse_osc_partial_defers()

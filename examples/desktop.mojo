@@ -68,6 +68,43 @@ fn _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
     return Menu(label^, list^)
 
 
+fn _split_open_arg_path(arg: String) -> String:
+    """Path portion of an open-arg, with the optional ``\\x1f<line>``
+    suffix stripped. The native wrapper appends ``\\x1f<line>`` when
+    translating ``turbokod://open?...&line=N`` URLs; pure paths come
+    through unchanged."""
+    var b = arg.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x1F:
+            return String(StringSlice(unsafe_from_utf8=b[:i]))
+    return arg
+
+
+fn _split_open_arg_line(arg: String) -> Int:
+    """Line portion of an open-arg (1-based), or 0 when absent /
+    malformed. Mirrors ``_split_open_arg_path`` so a single arg can be
+    interpreted with two cheap byte scans."""
+    var b = arg.as_bytes()
+    var sep = -1
+    for i in range(len(b)):
+        if b[i] == 0x1F:
+            sep = i
+            break
+    if sep < 0:
+        return 0
+    var n = 0
+    var saw = False
+    var p = sep + 1
+    while p < len(b):
+        var c = Int(b[p])
+        if c < 0x30 or c > 0x39:
+            break
+        n = n * 10 + (c - 0x30)
+        saw = True
+        p += 1
+    return n if saw else 0
+
+
 fn main() raises:
     var app = Application()
     var error_log = List[String]()        # populated in the loop, drained on quit
@@ -161,15 +198,26 @@ fn main() raises:
         # the desktop comes up empty — the user opens files via F3 or
         # the Project menu, and ``_set_project`` then arms the
         # session restore.
+        # The native wrapper translates ``turbokod://open?file=X&line=N``
+        # URLs into ``<path>\x1f<line>`` strings before passing them on,
+        # so the loop only ever sees a real filesystem path with an
+        # optional jump-line suffix.
         var args = argv()
         for i in range(1, len(args)):
-            var path = String(args[i])
+            var raw = String(args[i])
+            var path = _split_open_arg_path(raw)
+            var line = _split_open_arg_line(raw)
             var info = stat_file(path)
             if info.ok and info.is_dir():
                 desktop.open_project(path)
                 continue
             try:
-                desktop.open_file(path, app.screen())
+                if line > 0:
+                    desktop.open_file_at(
+                        path, line - 1, 0, app.screen(),
+                    )
+                else:
+                    desktop.open_file(path, app.screen())
             except e:
                 error_log.append(
                     String("open ") + path + String(": ") + String(e),
@@ -340,7 +388,10 @@ fn main() raises:
                 # Path forwarded from a second wrapper invocation. Same
                 # treatment as a startup argv entry — directory ⇒ project
                 # root, regular file ⇒ editor window, anything that
-                # doesn't stat is silently ignored.
+                # doesn't stat is silently ignored. The wrapper carries
+                # an optional jump-line in ``ev.pos.y`` (1-based) when
+                # the original argument was a ``turbokod://open?...&line=N``
+                # URL.
                 if ev.kind == EVENT_OPEN_PATH:
                     var path = ev.text
                     if len(path) > 0:
@@ -349,7 +400,13 @@ fn main() raises:
                             desktop.open_project(path)
                         else:
                             try:
-                                desktop.open_file(path, app.screen())
+                                var line = ev.pos.y
+                                if line > 0:
+                                    desktop.open_file_at(
+                                        path, line - 1, 0, app.screen(),
+                                    )
+                                else:
+                                    desktop.open_file(path, app.screen())
                             except e:
                                 error_log.append(
                                     String("open ") + path + String(": ")

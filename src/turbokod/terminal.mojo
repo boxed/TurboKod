@@ -783,8 +783,30 @@ fn _parse_osc(data: String) -> Tuple[Event, Int]:
             return (Event(), consumed)
         k += 1
     var path_start = pt_start + len(prefix)
-    var path = String(StringSlice(unsafe_from_utf8=bytes[path_start:body_end]))
-    return (Event.open_path_event(path^), consumed)
+    # The native wrapper carries an optional ``\x1f<line>`` suffix to
+    # request a jump-to-line on open (translation target for the
+    # ``turbokod://open?...&line=N`` URL scheme). Split on the first
+    # 0x1F (Unit Separator, never present in a real path); a missing
+    # suffix means "open at the file's first line".
+    var us = path_start
+    while us < body_end and bytes[us] != 0x1F:
+        us += 1
+    var path = String(StringSlice(unsafe_from_utf8=bytes[path_start:us]))
+    var line: Int = 0
+    if us < body_end:
+        var p = us + 1
+        var n = 0
+        var saw = False
+        while p < body_end:
+            var c = Int(bytes[p])
+            if c < 0x30 or c > 0x39:
+                break
+            n = n * 10 + (c - 0x30)
+            saw = True
+            p += 1
+        if saw:
+            line = n
+    return (Event.open_path_event(path^, line), consumed)
 
 
 fn _utf8_seq_len(b: UInt8) -> Int:

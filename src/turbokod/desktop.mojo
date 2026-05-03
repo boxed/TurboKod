@@ -931,6 +931,42 @@ struct Desktop(Movable):
             self.windows.windows[idx].toggle_maximize(workspace)
         self._maybe_lsp_open(len(self.windows.windows) - 1)
 
+    fn open_file_at(
+        mut self, path: String, line: Int, character: Int, screen: Rect,
+    ) raises:
+        """Open ``path`` (or focus the existing window for it) and place
+        the cursor at ``(line, character)`` (both 0-based).
+
+        Used by the URL-scheme handler so ``turbokod://open?file=X&line=N``
+        lands on the right line. Re-opens are a no-op the same way
+        ``open_file`` is — but the cursor still jumps, so a URL targeting
+        an already-open file still lands the user on the requested
+        spot.
+        """
+        var existing = self._find_window_for_path(path)
+        if existing < 0:
+            self.open_file(path, screen)
+            existing = len(self.windows.windows) - 1
+        else:
+            self.windows.focus_by_index(existing)
+        if existing < 0 or existing >= len(self.windows.windows):
+            return
+        if not self.windows.windows[existing].is_editor:
+            return
+        var lc = self.windows.windows[existing].editor.buffer.line_count()
+        var row = line
+        if row < 0:
+            row = 0
+        if lc > 0 and row >= lc:
+            row = lc - 1
+        var col = character
+        if col < 0:
+            col = 0
+        self.windows.windows[existing].editor.move_to(row, col, False, True)
+        self.windows.windows[existing].editor.reveal_cursor(
+            self.windows.windows[existing].interior(),
+        )
+
     fn new_file(mut self, screen: Rect):
         """Open a fresh, file-less editor window using the same placement
         rules as ``open_file``. The first window is titled ``Untitled``;
