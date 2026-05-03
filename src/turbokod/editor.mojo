@@ -18,6 +18,7 @@ from .colors import (
     Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
     LIGHT_YELLOW, WHITE, YELLOW,
 )
+from .diff import MergeResult, diff3_merge, unified_diff
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME,
@@ -65,6 +66,40 @@ fn _rtrim(s: String) -> String:
     if n == len(bytes):
         return s
     return _slice(s, 0, n)
+
+
+fn _lists_equal(a: List[String], b: List[String]) -> Bool:
+    """Element-wise equality for two ``List[String]``. Used after a
+    3-way merge to decide whether the merged buffer matches the
+    just-read on-disk content (clean = leaves the buffer non-dirty)."""
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+fn _split_buffer_lines(text: String) -> List[String]:
+    """Split disk bytes into the buffer's line-list shape.
+
+    Mirrors ``TextBuffer.__init__`` exactly (split on ``\\n``; a trailing
+    ``\\n`` produces a trailing empty line). Used by the 3-way merge so
+    the merge base, the buffer, and the new on-disk content line up
+    cell-for-cell — any difference in how we tokenize lines would make
+    the merge spuriously flag whole files as conflicts.
+    """
+    var out = List[String]()
+    var bytes = text.as_bytes()
+    var start = 0
+    var i = 0
+    while i < len(bytes):
+        if bytes[i] == 0x0A:
+            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:i])))
+            start = i + 1
+        i += 1
+    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:len(bytes)])))
+    return out^
 
 
 # --- UTF-8 boundary helpers -------------------------------------------------
@@ -272,6 +307,28 @@ comptime _DOUBLE_CLICK_MS = 500
 second one to be treated as a double-click."""
 
 
+# --- External-change status codes ------------------------------------------
+#
+# Returned by ``Editor.check_for_external_change`` so callers (Window /
+# Desktop) can react: clean reloads and clean merges are silent;
+# conflicts trigger a diff window.
+
+comptime EXT_CHANGE_NONE = 0
+"""No on-disk change detected (or the file vanished)."""
+
+comptime EXT_CHANGE_RELOADED = 1
+"""Buffer was clean; reloaded the new on-disk content verbatim."""
+
+comptime EXT_CHANGE_MERGED = 2
+"""Buffer was dirty; 3-way merge against the previous baseline applied
+cleanly (no conflict regions)."""
+
+comptime EXT_CHANGE_CONFLICT = 3
+"""Buffer was dirty; merge produced conflicts. The buffer now contains
+``<<<<<<< / ======= / >>>>>>>`` markers and the cursor sits on the
+first ``<<<<<<<`` line. Caller should surface a diff view."""
+
+
 @fieldwise_init
 struct Caret(ImplicitlyCopyable, Movable):
     """One caret + its anchor + remembered cell column.
@@ -377,6 +434,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     var file_size: Int64
     var file_mtime: Int64
     var dirty: Bool
+    # Last on-disk byte-content we observed for this file, used as the
+    # merge base when ``check_for_external_change`` detects a stat
+    # change while ``dirty`` is True. Updated on initial load
+    # (``from_file``), every successful ``save`` / ``save_as``, and the
+    # clean-reload branch of ``check_for_external_change``. Empty when
+    # the buffer has no backing file.
+    var disk_baseline: String
     # Resolved editorconfig settings (default-constructed when no
     # ``.editorconfig`` is found; in that case the editor falls back to
     # its pre-editorconfig behavior — 4-space tabs, ``\n`` line endings,
@@ -411,6 +475,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``DapManager.toggle_breakpoint``; the editor itself owns no DAP
     # state, so the toggle has to round-trip through Desktop.
     var pending_breakpoint_toggle: Optional[Int]
+    # Set by ``check_for_external_change`` when a 3-way merge against a
+    # changed-on-disk file produces conflicts. Holds a pre-rendered
+    # unified diff (previous on-disk content vs. current on-disk
+    # content) so the host can open a side-by-side diff view without
+    # the Editor needing to know about windows. ``consume_conflict_diff``
+    # returns and clears the slot.
+    var pending_conflict_diff: Optional[String]
     # View options. ``line_numbers`` paints a right-aligned line-number
     # gutter to the right of the debugger gutter; its width is derived
     # from ``buffer.line_count()`` at paint time. ``soft_wrap`` forces
@@ -510,6 +581,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
@@ -519,6 +591,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
@@ -560,6 +633,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
         self.dirty = False
+        self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
@@ -569,6 +643,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
@@ -600,12 +675,16 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn from_file(var path: String) raises -> Self:
         var text = read_file(path)
         var info = stat_file(path)
+        # Keep a copy of the on-disk bytes as the merge base for any
+        # later 3-way merge against an external write.
+        var baseline = text
         var ed = Editor(text^)
         ed.editorconfig = load_editorconfig_for_path(path)
         ed.file_path = path^
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
         ed.dirty = False
+        ed.disk_baseline = baseline^
         # No inline tokenization: ``_highlights_dirty`` is True
         # from ``__init__``, so the next ``flush_highlights`` call
         # from the render path will populate ``ed.highlights``.
@@ -627,6 +706,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
         self.dirty = copy.dirty
+        self.disk_baseline = copy.disk_baseline
         self.editorconfig = copy.editorconfig
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
@@ -636,6 +716,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
+        self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
         self.read_only = copy.read_only
@@ -1000,39 +1081,122 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         return row
 
-    fn check_for_external_change(mut self) raises -> Bool:
-        """Re-stat the backing file; if it changed and we have no unsaved
-        edits, reload the buffer. Returns True if a reload happened.
+    fn consume_conflict_diff(mut self) -> Optional[String]:
+        """Return any pending merge-conflict diff text and clear the
+        slot. Populated by ``check_for_external_change`` whenever it
+        returns ``EXT_CHANGE_CONFLICT``; the host wraps the text in a
+        read-only diff window so the user can see what changed
+        externally while resolving the conflict markers in the buffer.
+        """
+        var d = self.pending_conflict_diff
+        self.pending_conflict_diff = Optional[String]()
+        return d
 
-        If the file changed *and* the buffer is dirty, leaves both alone — the
-        caller can detect the conflict by comparing ``file_mtime`` to the new
-        ``stat_file`` result.
+    fn check_for_external_change(mut self) raises -> Int:
+        """Re-stat the backing file and react to any out-of-band write.
+
+        Returns one of the ``EXT_CHANGE_*`` codes:
+
+        * ``EXT_CHANGE_NONE`` — no change detected.
+        * ``EXT_CHANGE_RELOADED`` — buffer was clean; loaded the new
+          on-disk content verbatim.
+        * ``EXT_CHANGE_MERGED`` — buffer was dirty; 3-way merge against
+          ``disk_baseline`` produced a clean result and was applied.
+        * ``EXT_CHANGE_CONFLICT`` — buffer was dirty; merge produced
+          conflicts. The buffer now has standard ``<<<<<<< / ======= /
+          >>>>>>>`` markers, the cursor sits on the first marker line,
+          and the caller should surface a diff view.
+
+        After any non-``NONE`` return the stat info and ``disk_baseline``
+        are updated so the next tick won't re-trigger on the same
+        external write.
         """
         if len(self.file_path.as_bytes()) == 0:
-            return False
+            return EXT_CHANGE_NONE
         var info = stat_file(self.file_path)
         if not info.ok:
-            return False
+            return EXT_CHANGE_NONE
         if info.size == self.file_size and info.mtime_sec == self.file_mtime:
-            return False
-        if self.dirty:
-            return False
+            return EXT_CHANGE_NONE
         var text = read_file(self.file_path)
-        self.buffer = TextBuffer(text)
+        if not self.dirty:
+            # Clean reload: buffer matches the previous baseline, just
+            # adopt the new bytes.
+            var baseline = text
+            self.buffer = TextBuffer(text^)
+            self.disk_baseline = baseline^
+            self.file_size = info.size
+            self.file_mtime = info.mtime_sec
+            self.refresh_highlights()
+            self._clamp_cursor_after_reload()
+            self.anchor_row = self.cursor_row
+            self.anchor_col = self.cursor_col
+            return EXT_CHANGE_RELOADED
+        # Dirty: 3-way merge against the previous on-disk content.
+        var base_lines = _split_buffer_lines(self.disk_baseline)
+        var ours_lines = self.buffer.lines.copy()
+        var theirs_lines = _split_buffer_lines(text)
+        var merge = diff3_merge(
+            base_lines, ours_lines, theirs_lines,
+            String("local edits"), String("on disk"),
+        )
+        # Snapshot for undo before mutating — gives the user a single
+        # Ctrl+Z to back out of the merge if they don't like it.
+        self._push_undo()
+        self.buffer.lines = merge.lines.copy()
+        # Pre-render the previous-on-disk vs. current-on-disk diff
+        # *before* we overwrite ``disk_baseline`` so the host can open
+        # a diff view that shows what changed externally.
+        if merge.conflicts > 0:
+            self.pending_conflict_diff = Optional[String](unified_diff(
+                self.disk_baseline,
+                text,
+                String("on disk (previous)"),
+                String("on disk (current)"),
+            ))
+        self.disk_baseline = text^
         self.file_size = info.size
         self.file_mtime = info.mtime_sec
-        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
-        # Clamp cursor to the new buffer.
+        if merge.conflicts > 0:
+            self.cursor_row = merge.first_conflict_row
+            self.cursor_col = 0
+            self.anchor_row = self.cursor_row
+            self.anchor_col = self.cursor_col
+            self.desired_col = 0
+            self.dirty = True
+            self.refresh_highlights()
+            return EXT_CHANGE_CONFLICT
+        # Clean merge: dirty iff the merged buffer differs from what's
+        # currently on disk. (Equal happens when ``theirs`` already
+        # contained all of our local edits.)
+        var dirty_after = not _lists_equal(self.buffer.lines, theirs_lines)
+        self.dirty = dirty_after
+        self._clamp_cursor_after_reload()
+        self.anchor_row = self.cursor_row
+        self.anchor_col = self.cursor_col
+        self.refresh_highlights()
+        return EXT_CHANGE_MERGED
+
+    fn _clamp_cursor_after_reload(mut self):
+        """Pull the primary cursor back inside the new buffer bounds and
+        recompute ``desired_col``. Used after a reload or merge replaces
+        ``buffer.lines`` so a cursor that was past the previous EOL
+        doesn't end up dangling."""
         var max_row = self.buffer.line_count() - 1
-        if self.cursor_row > max_row: self.cursor_row = max_row
+        if max_row < 0:
+            max_row = 0
+        if self.cursor_row > max_row:
+            self.cursor_row = max_row
+        if self.cursor_row < 0:
+            self.cursor_row = 0
         var n = self.buffer.line_length(self.cursor_row)
-        if self.cursor_col > n: self.cursor_col = n
+        if self.cursor_col > n:
+            self.cursor_col = n
+        if self.cursor_col < 0:
+            self.cursor_col = 0
         self.desired_col = _utf8_cell_of_byte(
             self.buffer.line(self.cursor_row), self.cursor_col,
         )
-        self.anchor_row = self.cursor_row
-        self.anchor_col = self.cursor_col
-        return True
 
     # --- saving ------------------------------------------------------------
 
@@ -1107,14 +1271,17 @@ struct Editor(ImplicitlyCopyable, Movable):
         """
         if len(self.file_path.as_bytes()) == 0:
             return False
-        if not write_file(self.file_path, self._disk_text()):
+        var disk = self._disk_text()
+        if not write_file(self.file_path, disk):
             return False
         # Refresh stat info so check_for_external_change doesn't pick up our
-        # own write as an external change.
+        # own write as an external change. Adopt the just-written bytes as
+        # the new merge base.
         var info = stat_file(self.file_path)
         if info.ok:
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+        self.disk_baseline = disk^
         self.dirty = False
         return True
 
@@ -1131,7 +1298,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         var prev_config = self.editorconfig
         self.editorconfig = load_editorconfig_for_path(path)
         self.file_path = path^
-        if not write_file(self.file_path, self._disk_text()):
+        var disk = self._disk_text()
+        if not write_file(self.file_path, disk):
             self.file_path = prev_path^
             self.editorconfig = prev_config^
             return False
@@ -1139,6 +1307,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         if info.ok:
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+        self.disk_baseline = disk^
         self.dirty = False
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``); re-tokenize.
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights

@@ -15,7 +15,10 @@ from std.collections.list import List
 from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, YELLOW
-from .editor import Editor
+from .editor import (
+    EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
+    EXT_CHANGE_RELOADED, Editor,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
@@ -652,15 +655,21 @@ struct WindowManager(Movable):
             return False
         return self.windows[self.focused].is_editor
 
-    fn check_external_changes(mut self) raises -> Int:
-        """Re-stat every file-backed editor window; reload any that changed
-        and have no unsaved edits. Returns the number of windows reloaded."""
-        var reloaded = 0
+    fn check_external_changes(mut self) raises -> List[Int]:
+        """Re-stat every file-backed editor window and react to any
+        out-of-band write. Returns the list of window indices whose
+        merge produced conflicts — the host opens a diff view for
+        each. Clean reloads and clean 3-way merges happen silently and
+        are not surfaced.
+        """
+        var conflicts = List[Int]()
         for i in range(len(self.windows)):
-            if self.windows[i].is_editor:
-                if self.windows[i].editor.check_for_external_change():
-                    reloaded += 1
-        return reloaded
+            if not self.windows[i].is_editor:
+                continue
+            var status = self.windows[i].editor.check_for_external_change()
+            if status == EXT_CHANGE_CONFLICT:
+                conflicts.append(i)
+        return conflicts^
 
     fn _raise_in_z(mut self, idx: Int):
         """Move ``idx`` to the end of ``z_order`` (making it the topmost

@@ -31,7 +31,7 @@ from std.collections.optional import Optional
 from .lsp import LspProcess
 from .posix import (
     SIGTERM, alloc_zero_buffer, close_fd, kill_pid, monotonic_ms,
-    poll_stdin, read_into, waitpid_nohang,
+    poll_stdin, read_into, untrack_child, waitpid_nohang,
 )
 
 
@@ -124,6 +124,7 @@ struct RunSession(Movable):
             # poll ``tick`` next frame to harvest the exit code.
             var pair = waitpid_nohang(self.process.pid)
             if Int(pair[0]) == Int(self.process.pid):
+                untrack_child(self.process.pid)
                 self.exited = True
                 self.exit_code = (Int(pair[1]) >> 8) & 0xFF
                 self.process.alive = False
@@ -188,6 +189,7 @@ fn poll_run_exit(mut session: RunSession) -> Bool:
     var pair = waitpid_nohang(session.process.pid)
     if Int(pair[0]) != Int(session.process.pid):
         return False
+    untrack_child(session.process.pid)
     session.exited = True
     session.exit_code = (Int(pair[1]) >> 8) & 0xFF
     session.process.alive = False

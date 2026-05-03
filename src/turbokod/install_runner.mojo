@@ -28,7 +28,7 @@ from .lsp import LspProcess
 from .window import paint_drop_shadow
 from .posix import (
     alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
-    waitpid_nohang,
+    untrack_child, waitpid_nohang,
 )
 
 
@@ -121,6 +121,7 @@ struct InstallRunner(Movable):
         var pair = waitpid_nohang(self.process.pid)
         if Int(pair[0]) != Int(self.process.pid):
             return Optional[InstallResult]()
+        untrack_child(self.process.pid)
         # Child reaped. Drain once more so we don't miss the last write
         # that landed between the previous drain and the EOF.
         self._drain_fd(self.process.stdout_fd)

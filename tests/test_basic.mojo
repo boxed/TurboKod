@@ -17,8 +17,11 @@ from turbokod.colors import (
     Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
     STYLE_UNDERLINE, WHITE, YELLOW, default_attr,
 )
-from turbokod.diff import diff_lines, unified_diff
-from turbokod.editor import Editor, TextBuffer
+from turbokod.diff import MergeResult, diff3_merge, diff_lines, unified_diff
+from turbokod.editor import (
+    EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
+    EXT_CHANGE_RELOADED, Editor, TextBuffer,
+)
 from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
 )
@@ -773,8 +776,9 @@ fn test_editor_from_file() raises:
     assert_true(ed.buffer.line_count() > 5)
     assert_false(ed.dirty)
     assert_true(Int(ed.file_size) > 0)
-    # Initial check: nothing changed since open, so reload returns False.
-    assert_false(ed.check_for_external_change())
+    # Initial check: nothing changed since open, so the status code is
+    # EXT_CHANGE_NONE.
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_NONE)
 
 
 fn test_terminal_parses_alt_letter_as_letter() raises:
@@ -1083,6 +1087,218 @@ fn test_editor_save_as_adopts_path() raises:
     assert_equal(ed.file_path, path)
     assert_false(ed.dirty)
     assert_equal(read_file(path), String("alpha\nbeta\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn _lines_from(text: String) -> List[String]:
+    """Mirror ``TextBuffer.__init__`` for tests that need a plain
+    ``List[String]`` line view of a string (used by ``diff3_merge``
+    cases below)."""
+    var out = List[String]()
+    var b = text.as_bytes()
+    var start = 0
+    var i = 0
+    while i < len(b):
+        if b[i] == 0x0A:
+            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            start = i + 1
+        i += 1
+    out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    return out^
+
+
+fn test_diff3_merge_clean_when_only_ours_changed() raises:
+    """If theirs equals base, the merge takes ours unmodified."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nB\nc\n"))
+    var theirs = _lines_from(String("a\nb\nc\n"))
+    var m = diff3_merge(base, ours, theirs)
+    assert_equal(m.conflicts, 0)
+    assert_equal(m.first_conflict_row, -1)
+    assert_equal(len(m.lines), len(ours))
+    for i in range(len(ours)):
+        assert_equal(m.lines[i], ours[i])
+
+
+fn test_diff3_merge_clean_when_only_theirs_changed() raises:
+    """Symmetric: if ours equals base, the merge takes theirs."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nb\nc\n"))
+    var theirs = _lines_from(String("a\nB\nc\n"))
+    var m = diff3_merge(base, ours, theirs)
+    assert_equal(m.conflicts, 0)
+    for i in range(len(theirs)):
+        assert_equal(m.lines[i], theirs[i])
+
+
+fn test_diff3_merge_clean_when_changes_disjoint() raises:
+    """Both sides changed, but in different regions — auto-merges."""
+    var base = _lines_from(String("a\nb\nc\nd\ne\n"))
+    var ours = _lines_from(String("A\nb\nc\nd\ne\n"))
+    var theirs = _lines_from(String("a\nb\nc\nd\nE\n"))
+    var m = diff3_merge(base, ours, theirs)
+    assert_equal(m.conflicts, 0)
+    var want = _lines_from(String("A\nb\nc\nd\nE\n"))
+    assert_equal(len(m.lines), len(want))
+    for i in range(len(want)):
+        assert_equal(m.lines[i], want[i])
+
+
+fn test_diff3_merge_identical_changes_dont_conflict() raises:
+    """When both sides edit the same region to the same result, take it."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nB\nc\n"))
+    var theirs = _lines_from(String("a\nB\nc\n"))
+    var m = diff3_merge(base, ours, theirs)
+    assert_equal(m.conflicts, 0)
+    var want = _lines_from(String("a\nB\nc\n"))
+    for i in range(len(want)):
+        assert_equal(m.lines[i], want[i])
+
+
+fn test_diff3_merge_conflict_when_both_edit_same_line() raises:
+    """Same base line, two different changes → conflict markers."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nOURS\nc\n"))
+    var theirs = _lines_from(String("a\nTHEIRS\nc\n"))
+    var m = diff3_merge(base, ours, theirs,
+        String("local"), String("disk"))
+    assert_equal(m.conflicts, 1)
+    assert_true(m.first_conflict_row >= 0)
+    # The marker block must be present in order.
+    var saw_open = False
+    var saw_eq = False
+    var saw_close = False
+    var open_idx = -1
+    var eq_idx = -1
+    var close_idx = -1
+    for i in range(len(m.lines)):
+        if m.lines[i] == String("<<<<<<< local"):
+            saw_open = True
+            open_idx = i
+        elif m.lines[i] == String("======="):
+            saw_eq = True
+            eq_idx = i
+        elif m.lines[i] == String(">>>>>>> disk"):
+            saw_close = True
+            close_idx = i
+    assert_true(saw_open)
+    assert_true(saw_eq)
+    assert_true(saw_close)
+    assert_true(open_idx < eq_idx)
+    assert_true(eq_idx < close_idx)
+    assert_equal(m.first_conflict_row, open_idx)
+
+
+fn test_editor_external_change_clean_reload_when_buffer_clean() raises:
+    """Buffer is clean: an external write triggers a verbatim reload."""
+    var path = _temp_path(String("_ext_clean.txt"))
+    assert_true(write_file(path, String("alpha\nbeta\n")))
+    var ed = Editor.from_file(path)
+    assert_false(ed.dirty)
+    # Rewrite with different size so the stat-compare detects it even
+    # within the same wall-clock second.
+    assert_true(write_file(path, String("alpha\nbeta\nGAMMA\n")))
+    var status = ed.check_for_external_change()
+    assert_equal(status, EXT_CHANGE_RELOADED)
+    assert_false(ed.dirty)
+    assert_equal(ed.buffer.line_count(), 4)
+    assert_equal(ed.buffer.line(2), String("GAMMA"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_external_change_auto_merges_disjoint_edits() raises:
+    """Buffer edits and disk edits in different regions → silent merge."""
+    var path = _temp_path(String("_ext_merge.txt"))
+    assert_true(write_file(path, String("a\nb\nc\nd\ne\n")))
+    var ed = Editor.from_file(path)
+    # Local edit on the first line: type before the 'a'.
+    _ = ed.handle_key(Event.key_event(UInt32(ord("X"))), _VIEW)
+    assert_true(ed.dirty)
+    assert_equal(ed.buffer.line(0), String("Xa"))
+    # External edit on the last non-empty line.
+    assert_true(write_file(path, String("a\nb\nc\nd\nEEE\n")))
+    var status = ed.check_for_external_change()
+    assert_equal(status, EXT_CHANGE_MERGED)
+    # Both edits present, no conflict markers.
+    assert_equal(ed.buffer.line(0), String("Xa"))
+    assert_equal(ed.buffer.line(4), String("EEE"))
+    # Buffer differs from disk now (disk lacks our 'X'), so still dirty.
+    assert_true(ed.dirty)
+    # No conflict diff queued.
+    assert_false(ed.consume_conflict_diff())
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_external_change_clears_dirty_when_disk_already_has_our_edits() raises:
+    """If disk happens to already match our buffer (someone applied
+    the same edit externally), the merge resolves to clean and the
+    buffer goes back to non-dirty."""
+    var path = _temp_path(String("_ext_match.txt"))
+    assert_true(write_file(path, String("alpha\n")))
+    var ed = Editor.from_file(path)
+    _ = ed.handle_key(Event.key_event(KEY_END), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("!"))), _VIEW)
+    assert_true(ed.dirty)
+    assert_equal(ed.buffer.line(0), String("alpha!"))
+    # External writer produced the exact same content (different size
+    # from baseline so stat fires).
+    assert_true(write_file(path, String("alpha!\n")))
+    var status = ed.check_for_external_change()
+    assert_equal(status, EXT_CHANGE_MERGED)
+    assert_false(ed.dirty)
+    assert_equal(ed.buffer.line(0), String("alpha!"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_external_change_conflict_inserts_markers() raises:
+    """Both buffer and disk modified the same line → conflict markers
+    are embedded, cursor jumps to the first marker, and a pre-rendered
+    diff is queued for the host to display."""
+    var path = _temp_path(String("_ext_conflict.txt"))
+    assert_true(write_file(path, String("a\nb\nc\n")))
+    var ed = Editor.from_file(path)
+    # Local: cursor at start of "b", select line, replace with "OURS".
+    ed.move_to(1, 0, False)
+    ed.move_to(1, 1, True)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("O"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("U"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("R"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("S"))), _VIEW)
+    assert_equal(ed.buffer.line(1), String("OURS"))
+    assert_true(ed.dirty)
+    # External: same line replaced with different content; size differs
+    # so stat-compare fires.
+    assert_true(write_file(path, String("a\nTHEIRS\nc\n")))
+    var status = ed.check_for_external_change()
+    assert_equal(status, EXT_CHANGE_CONFLICT)
+    assert_true(ed.dirty)
+    # First conflict marker present and the cursor sits on it.
+    var found_open = False
+    for i in range(ed.buffer.line_count()):
+        if ed.buffer.line(i).find(String("<<<<<<<")) >= 0:
+            found_open = True
+            assert_equal(ed.cursor_row, i)
+            break
+    assert_true(found_open)
+    # Both versions appear in the buffer.
+    var saw_ours = False
+    var saw_theirs = False
+    for i in range(ed.buffer.line_count()):
+        if ed.buffer.line(i) == String("OURS"):
+            saw_ours = True
+        elif ed.buffer.line(i) == String("THEIRS"):
+            saw_theirs = True
+    assert_true(saw_ours)
+    assert_true(saw_theirs)
+    # The host-facing diff is queued (consumed on first read).
+    var diff = ed.consume_conflict_diff()
+    assert_true(diff)
+    var diff_text = diff.value()
+    # Must contain both old- and new-disk markers from unified_diff.
+    assert_true(diff_text.find(String("@@")) >= 0)
+    # consume_conflict_diff is one-shot.
+    assert_false(ed.consume_conflict_diff())
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -6842,6 +7058,15 @@ fn main() raises:
     test_write_file_round_trip()
     test_editor_save_clears_dirty()
     test_editor_save_as_adopts_path()
+    test_diff3_merge_clean_when_only_ours_changed()
+    test_diff3_merge_clean_when_only_theirs_changed()
+    test_diff3_merge_clean_when_changes_disjoint()
+    test_diff3_merge_identical_changes_dont_conflict()
+    test_diff3_merge_conflict_when_both_edit_same_line()
+    test_editor_external_change_clean_reload_when_buffer_clean()
+    test_editor_external_change_auto_merges_disjoint_edits()
+    test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
+    test_editor_external_change_conflict_inserts_markers()
     test_editor_replace_all()
     test_editorconfig_parse_basic()
     test_editorconfig_match_section()

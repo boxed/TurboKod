@@ -29,8 +29,8 @@ from .posix import (
     kill_pid, monotonic_ms, pipe_pair, poll_stdin,
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
-    posix_spawnp_call, read_into, set_nonblocking, waitpid_blocking,
-    waitpid_nohang, write_buffer,
+    posix_spawnp_call, read_into, set_nonblocking, track_child,
+    untrack_child, waitpid_blocking, waitpid_nohang, write_buffer,
 )
 
 
@@ -198,6 +198,7 @@ fn capture_command(
         _ = close_fd(stderr_r); _ = close_fd(stderr_w)
         raise Error("posix_spawnp failed")
     _ = posix_spawn_file_actions_destroy(fa)
+    track_child(pid)
     _ = close_fd(stdin_r)
     _ = close_fd(stdout_w)
     _ = close_fd(stderr_w)
@@ -220,6 +221,7 @@ fn capture_command(
     _ = close_fd(stderr_r)
 
     var status = waitpid_blocking(pid)
+    untrack_child(pid)
     return CaptureResult(out^, err^, status)
 
 
@@ -332,6 +334,9 @@ struct LspProcess(Movable):
             _ = close_fd(stderr_r); _ = close_fd(stderr_w)
             raise Error("posix_spawnp failed")
         _ = posix_spawn_file_actions_destroy(fa)
+        # Register the child so it gets SIGTERM if the parent dies on
+        # SIGHUP / SIGTERM / clean exit — see ``process_shim.c``.
+        track_child(pid)
         # Close the child sides in the parent — the kernel keeps the pipe
         # alive as long as either end is open, so leaving them open here
         # would prevent EOF when the child closes its descriptor.
@@ -503,6 +508,7 @@ struct LspProcess(Movable):
             return
         _ = kill_pid(self.pid, SIGTERM)
         _ = waitpid_blocking(self.pid)
+        untrack_child(self.pid)
         self.alive = False
         if self.stdin_fd >= 0:  _ = close_fd(self.stdin_fd);  self.stdin_fd = -1
         if self.stdout_fd >= 0: _ = close_fd(self.stdout_fd); self.stdout_fd = -1
@@ -516,6 +522,7 @@ struct LspProcess(Movable):
             return True
         var pair = waitpid_nohang(self.pid)
         if Int(pair[0]) == Int(self.pid):
+            untrack_child(self.pid)
             self.alive = False
             return True
         return False

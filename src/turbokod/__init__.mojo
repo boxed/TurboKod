@@ -67,8 +67,11 @@ from .doc_config import (
 )
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
-from .diff import DiffOp, diff_lines, unified_diff
-from .editor import Editor, TextBuffer
+from .diff import DiffOp, MergeResult, diff3_merge, diff_lines, unified_diff
+from .editor import (
+    EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
+    EXT_CHANGE_RELOADED, Editor, TextBuffer,
+)
 from .editorconfig import (
     EditorConfig, EditorConfigFile, EditorConfigSection,
     load_editorconfig_for_path, match_section, parse_editorconfig,

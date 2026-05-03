@@ -332,6 +332,27 @@ fn kill_pid(pid: Int32, sig: Int32) -> Int32:
     return external_call["kill", Int32](pid, sig)
 
 
+fn track_child(pid: Int32):
+    """Register ``pid`` with the process-shim child registry so it
+    receives SIGTERM if the parent dies on SIGHUP / SIGTERM / clean
+    exit. Idempotent and safe to call with any PID — no-ops on
+    ``pid <= 0``. Pair with ``untrack_child`` after a successful reap.
+    Implementation lives in ``process_shim.c``."""
+    if Int(pid) <= 0:
+        return
+    _ = external_call["tk_track_child_add", Int32](pid)
+
+
+fn untrack_child(pid: Int32):
+    """Drop ``pid`` from the kill-on-parent-death registry. Call
+    after a successful ``waitpid`` so the PID isn't re-signaled at
+    shutdown (potentially hitting an unrelated process that recycled
+    the same number). Idempotent."""
+    if Int(pid) <= 0:
+        return
+    _ = external_call["tk_track_child_remove", Int32](pid)
+
+
 # ``posix_spawn`` family. The opaque ``file_actions`` and ``attr`` buffers
 # are sized via the ``*_SIZE`` constants above; the actual struct layouts
 # are platform-private. We never inspect them — only pass pointers to the

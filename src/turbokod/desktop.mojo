@@ -1213,6 +1213,44 @@ struct Desktop(Movable):
         if was_max:
             self.windows.windows[new_idx].toggle_maximize(workspace)
 
+    fn process_external_changes(mut self, screen: Rect) raises:
+        """Re-stat every editor window and react to any out-of-band
+        write. Clean reloads and clean 3-way merges happen silently
+        inside the editors themselves; for every window where the
+        merge produced conflicts, open a read-only diff window
+        showing what changed externally so the user can see it
+        alongside the now-marked-up buffer they need to resolve.
+        """
+        var conflicts = self.windows.check_external_changes()
+        if len(conflicts) == 0:
+            return
+        var workspace = self.workspace_rect(screen)
+        var was_max = self._frontmost_maximized()
+        for k in range(len(conflicts)):
+            var idx = conflicts[k]
+            if idx < 0 or idx >= len(self.windows.windows):
+                continue
+            var diff_opt = \
+                self.windows.windows[idx].editor.consume_conflict_diff()
+            if not diff_opt:
+                continue
+            var src_title = self.windows.windows[idx].title
+            var rect = self._default_window_rect(workspace)
+            var title = String("Conflict: ") + src_title
+            self.windows.add(Window.editor_window(
+                title^, rect, diff_opt.value(),
+            ))
+            self._open_count += 1
+            var new_idx = len(self.windows.windows) - 1
+            self.windows.windows[new_idx].editor.read_only = True
+            self.windows.windows[new_idx].editor.line_numbers = False
+            # Synthetic .diff path so the diff TextMate grammar paints
+            # the +/-/@@ lines. Same trick as _open_compare_with_clipboard.
+            self.windows.windows[new_idx].editor.file_path = \
+                String("conflict.diff")
+            if was_max:
+                self.windows.windows[new_idx].toggle_maximize(workspace)
+
     # --- dynamic Window menu -----------------------------------------------
 
     fn _rebuild_window_menu(mut self):

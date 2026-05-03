@@ -48,14 +48,16 @@ hash="$(printf '%s' "$src" | shasum -a 256 | cut -c1-8)"
 bin=".build/$(basename -- "$src" .mojo)_${hash}"
 
 # Skip the build when the cached binary is newer than every Mojo source
-# in ``src/``, the entry point itself, and the libonig shim object
-# (linked into the binary, so a shim rebuild needs a binary rebuild).
+# in ``src/``, the entry point itself, and the C shims linked into it
+# (a shim rebuild needs a binary rebuild — they're statically linked).
 # ``find -newer`` returns the first match and we short-circuit on
 # -print -quit, so this scales fine as the package grows.
 needs_build=1
 if [ -x "$bin" ]; then
   newer=$(find src "$src" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
-  if [ -z "$newer" ] && [ ! "src/turbokod/onig_shim.c" -nt "$bin" ]; then
+  if [ -z "$newer" ] \
+     && [ ! "src/turbokod/onig_shim.c" -nt "$bin" ] \
+     && [ ! "src/turbokod/process_shim.c" -nt "$bin" ]; then
     needs_build=0
   fi
 fi
@@ -81,16 +83,31 @@ if [ -z "${env_prefix:-}" ]; then
   env_prefix="$(pwd)/.pixi/envs/default"
 fi
 
-# Compile the libonig shim (process-exit registry that batches the
-# ``onig_free`` calls we can't safely run from Mojo's per-instance
-# ``__del__``). We rebuild it only when the .c file is newer than
-# the cached object, since it's tiny and rarely changes.
-shim_src="src/turbokod/onig_shim.c"
-shim_obj=".build/onig_shim.o"
-if [ ! -f "$shim_obj" ] || [ "$shim_src" -nt "$shim_obj" ]; then
-  echo "[run.sh] compiling onig shim -> $shim_obj" >&2
-  if ! clang -c -O2 -fPIC "$shim_src" -o "$shim_obj"; then
+# Compile the C shims:
+#   * ``onig_shim``    — process-exit registry that batches the
+#                         ``onig_free`` calls we can't safely run from
+#                         Mojo's per-instance ``__del__``.
+#   * ``process_shim`` — kill-on-parent-death registry: SIGTERMs every
+#                         spawned child PID on SIGHUP / SIGTERM / clean
+#                         exit, so quitting the macOS app while a Run /
+#                         Debug session is active doesn't orphan it.
+# Each rebuilds only when its .c is newer than the cached object;
+# they're tiny and rarely change.
+onig_src="src/turbokod/onig_shim.c"
+onig_obj=".build/onig_shim.o"
+if [ ! -f "$onig_obj" ] || [ "$onig_src" -nt "$onig_obj" ]; then
+  echo "[run.sh] compiling onig shim -> $onig_obj" >&2
+  if ! clang -c -O2 -fPIC "$onig_src" -o "$onig_obj"; then
     echo "[run.sh] onig shim compilation failed; aborting (would otherwise run a stale binary)" >&2
+    exit 1
+  fi
+fi
+proc_src="src/turbokod/process_shim.c"
+proc_obj=".build/process_shim.o"
+if [ ! -f "$proc_obj" ] || [ "$proc_src" -nt "$proc_obj" ]; then
+  echo "[run.sh] compiling process shim -> $proc_obj" >&2
+  if ! clang -c -O2 -fPIC "$proc_src" -o "$proc_obj"; then
+    echo "[run.sh] process shim compilation failed; aborting (would otherwise run a stale binary)" >&2
     exit 1
   fi
 fi
@@ -101,7 +118,8 @@ if [ "$needs_build" -eq 1 ]; then
     -I src \
     -Xlinker "-L${env_prefix}/lib" \
     -Xlinker "-lonig" \
-    -Xlinker "$shim_obj" \
+    -Xlinker "$onig_obj" \
+    -Xlinker "$proc_obj" \
     -o "$bin" "$src"; then
     # Without this guard, ``exec "$bin"`` below would silently run the
     # previous successful build — making "all tests passed" mean

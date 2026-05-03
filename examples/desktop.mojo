@@ -252,7 +252,7 @@ fn main() raises:
             # cursor-position bytes in the shell.
             try:
                 try:
-                    _ = desktop.windows.check_external_changes()
+                    desktop.process_external_changes(app.screen())
                 except e:
                     error_log.append(String("reload: ") + String(e))
                 desktop.menu_bar.set_visible_by_label(
