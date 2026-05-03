@@ -2460,6 +2460,17 @@ struct Desktop(Movable):
         var cclick = self.debug_pane.consume_collapse()
         if cclick != -1:
             self.debug_pane.collapse_at(cclick)
+        # Output-log link click: ``File "<path>", line N`` parsed out of
+        # a stdout/stderr line and clicked. Open (or focus) the file
+        # and jump to the line. Failures are swallowed — opening can
+        # raise on a missing file, and stack traces from a previous
+        # run can easily reference paths that have since moved.
+        var oreq = self.debug_pane.consume_open_request()
+        if len(oreq[0].as_bytes()) > 0:
+            try:
+                self.open_file_at(oreq[0], oreq[1] - 1, 0, screen)
+            except:
+                pass
         if self.dap.has_stack():
             var frames = self.dap.take_stack()
             if len(frames) > 0:
@@ -2536,6 +2547,23 @@ struct Desktop(Movable):
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
             self.debug_pane.clear()
+        # Drain gutter clicks (one per editor) before recomputing
+        # ``gutter_width`` below — so a click that creates the very first
+        # breakpoint also makes the gutter appear on this same frame.
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var bp_row = self.windows.windows[i].editor.consume_breakpoint_toggle()
+            if not bp_row:
+                continue
+            var bp_path = self.windows.windows[i].editor.file_path
+            if len(bp_path.as_bytes()) == 0:
+                self.status_bar.set_message(
+                    String("debug: file has no path — save it first"),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+                continue
+            self.dap.toggle_breakpoint(bp_path, bp_row.value())
         # Push gutter state to every editor window. We do this every
         # frame (cheap — small lists, simple equality checks) so the
         # gutter stays in sync after window churn (open / close / focus).
