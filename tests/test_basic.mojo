@@ -9,7 +9,7 @@ Run with::
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
-from turbokod.canvas import Canvas
+from turbokod.canvas import Canvas, wrap_to_width
 from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
@@ -137,7 +137,8 @@ from turbokod.events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from turbokod.geometry import Point, Rect
-from turbokod.prompt import Prompt, wrap_to_width
+from turbokod.confirm_dialog import ConfirmDialog
+from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
 from turbokod.text_field import text_field_clipboard_key
 from turbokod.view import Fill, Frame, Label, centered
@@ -7155,6 +7156,39 @@ fn test_build_minimal_patch_drops_other_hunks() raises:
     assert_false(String("@@ -10,1") in patch)
 
 
+fn test_canvas_put_wrapped_text_paints_inside_rect_only() raises:
+    """Framework primitive: long text rendered through
+    ``put_wrapped_text`` must wrap inside the rect and never colour a
+    cell outside it. The Prompt overflow fix relies on this contract,
+    and any future popup with variable text content should too."""
+    var canvas = Canvas(40, 10)
+    canvas.clear(Attr(BLACK, BLUE))
+    var rect = Rect(5, 2, 25, 6)   # 20 cells wide, 4 rows tall
+    var text = String(
+        "Install rust LSP? 'rustup component add rust-analyzer' (y/N)"
+    )
+    var rows = canvas.put_wrapped_text(rect, text, Attr(WHITE, BLACK))
+    assert_true(rows >= 1)
+    assert_true(rows <= 4)
+    # No cell outside ``rect`` should have its background flipped from
+    # the workspace fill — that's exactly the property dialogs need.
+    for y in range(10):
+        for x in range(40):
+            var inside = (x >= 5 and x < 25 and y >= 2 and y < 6)
+            if inside:
+                continue
+            assert_equal(canvas.get(x, y).attr.bg, BLUE)
+
+
+fn test_canvas_put_wrapped_text_returns_zero_for_empty_rect() raises:
+    var canvas = Canvas(20, 5)
+    canvas.clear(Attr(BLACK, BLUE))
+    var rows = canvas.put_wrapped_text(
+        Rect(0, 0, 0, 0), String("hello"), Attr(WHITE, BLACK),
+    )
+    assert_equal(rows, 0)
+
+
 fn test_prompt_wrap_short_text_stays_on_one_line() raises:
     var lines = wrap_to_width(String("Find: "), 56)
     assert_equal(len(lines), 1)
@@ -7240,7 +7274,131 @@ fn test_prompt_paint_clamps_long_label_inside_dialog() raises:
             assert_equal(c.attr.bg, BLUE)
 
 
+fn test_confirm_dialog_y_key_resolves_yes() raises:
+    var d = ConfirmDialog()
+    d.open(String("Install rust LSP?"))
+    assert_true(d.active)
+    assert_false(d.submitted)
+    _ = d.handle_key(Event.key_event(UInt32(ord("y"))))
+    assert_true(d.submitted)
+    assert_true(d.confirmed)
+
+
+fn test_confirm_dialog_n_key_resolves_no() raises:
+    var d = ConfirmDialog()
+    d.open(String("Install rust LSP?"))
+    _ = d.handle_key(Event.key_event(UInt32(ord("n"))))
+    assert_true(d.submitted)
+    assert_false(d.confirmed)
+
+
+fn test_confirm_dialog_esc_cancels() raises:
+    var d = ConfirmDialog()
+    d.open(String("Install rust LSP?"))
+    _ = d.handle_key(Event.key_event(KEY_ESC))
+    assert_true(d.submitted)
+    assert_false(d.confirmed)
+
+
+fn test_confirm_dialog_enter_uses_focused_button() raises:
+    """Default focus is No (safer for installs); Tab toggles to Yes;
+    Enter resolves whichever side is focused."""
+    var d = ConfirmDialog()
+    d.open(String("Download docs?"))
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d.submitted)
+    assert_false(d.confirmed)   # default focus is No
+    var d2 = ConfirmDialog()
+    d2.open(String("Download docs?"))
+    _ = d2.handle_key(Event.key_event(KEY_TAB))
+    _ = d2.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d2.submitted)
+    assert_true(d2.confirmed)
+
+
+fn test_confirm_dialog_default_yes_focuses_yes() raises:
+    """Callers that want Enter to mean Yes pass ``default_yes=True``."""
+    var d = ConfirmDialog()
+    d.open(String("Save changes?"), default_yes=True)
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d.submitted)
+    assert_true(d.confirmed)
+
+
+fn test_confirm_dialog_paints_inside_dialog_rect() raises:
+    """Same overflow guarantee as the Prompt: a long install hint
+    must stay inside the centered dialog rect (plus the drop shadow)."""
+    var screen = Rect(0, 0, 80, 24)
+    var canvas = Canvas(80, 24)
+    canvas.clear(Attr(BLACK, BLUE))
+    var dialog = ConfirmDialog()
+    dialog.open(
+        String("Install rust LSP? 'rustup component add rust-analyzer'"),
+    )
+    dialog.paint(canvas, screen)
+    var dialog_w = 60
+    var dx = (80 - dialog_w) // 2
+    # The painted area covers the dialog rect itself plus the right-edge
+    # shadow column (dx + dialog_w) and the bottom-shadow row. Cells
+    # outside that band must still carry the workspace fill.
+    for y in range(24):
+        for x in range(80):
+            var c = canvas.get(x, y)
+            if c.attr.bg == BLUE:
+                continue
+            assert_true(x >= dx and x < dx + dialog_w + 2)
+
+
+fn test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
+    """Smoke-test the wiring: typing a confirm dialog into the
+    grammar-install pending action and pressing 'y' must clear the
+    dialog and leave a grammar-install language recorded on the
+    desktop. Doesn't actually run curl — the desktop's
+    ``_start_grammar_install`` records ``_grammar_install_lang`` only
+    after a successful ``InstallRunner.start``, which would normally
+    require a sub-process; checking that the pending state was
+    cleared is enough to verify the dispatch path."""
+    var d = Desktop()
+    d._pending_action = String("grammar:install")
+    d._pending_arg = String("elm")
+    d.confirm_dialog.open(String("Download Elm syntax grammar?"))
+    assert_true(d.confirm_dialog.active)
+    _ = d.handle_event(
+        Event.key_event(UInt32(ord("y"))), Rect(0, 0, 80, 24),
+    )
+    # Dialog closed and pending action cleared regardless of whether
+    # the install spawn succeeded in this test environment.
+    assert_false(d.confirm_dialog.active)
+    assert_equal(d._pending_action, String(""))
+    assert_equal(d._pending_arg, String(""))
+
+
+fn test_desktop_confirm_dialog_no_clears_pending_action() raises:
+    var d = Desktop()
+    d._pending_action = String("lsp:install")
+    d._pending_arg = String("rust")
+    d.confirm_dialog.open(String("Install rust LSP?"))
+    _ = d.handle_event(
+        Event.key_event(UInt32(ord("n"))), Rect(0, 0, 80, 24),
+    )
+    assert_false(d.confirm_dialog.active)
+    assert_equal(d._pending_action, String(""))
+    assert_equal(d._pending_arg, String(""))
+    # Install runner stays idle — user said no.
+    assert_false(d.install_runner.is_active())
+
+
 fn main() raises:
+    test_confirm_dialog_y_key_resolves_yes()
+    test_confirm_dialog_n_key_resolves_no()
+    test_confirm_dialog_esc_cancels()
+    test_confirm_dialog_enter_uses_focused_button()
+    test_confirm_dialog_default_yes_focuses_yes()
+    test_confirm_dialog_paints_inside_dialog_rect()
+    test_desktop_confirm_dialog_yes_starts_grammar_install()
+    test_desktop_confirm_dialog_no_clears_pending_action()
+    test_canvas_put_wrapped_text_paints_inside_rect_only()
+    test_canvas_put_wrapped_text_returns_zero_for_empty_rect()
     test_prompt_wrap_short_text_stays_on_one_line()
     test_prompt_wrap_breaks_at_last_space_within_budget()
     test_prompt_wrap_hard_breaks_an_unbreakable_word()

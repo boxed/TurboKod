@@ -34,6 +34,7 @@ from .buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit,
 )
 from .clipboard import clipboard_copy, clipboard_paste
+from .confirm_dialog import ConfirmDialog
 from .config import (
     TurbokodConfig, load_config, record_recent_project, save_config,
 )

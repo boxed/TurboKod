@@ -92,6 +92,7 @@ from .project_targets import (
     save_project_targets,
     write_all_targets,
 )
+from .confirm_dialog import ConfirmDialog
 from .prompt import Prompt
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
@@ -330,6 +331,7 @@ struct Desktop(Movable):
     var tab_bar: TabBar
     var file_tree: FileTree
     var prompt: Prompt
+    var confirm_dialog: ConfirmDialog
     var quick_open: QuickOpen
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
@@ -501,6 +503,7 @@ struct Desktop(Movable):
         self.tab_bar = TabBar()
         self.file_tree = FileTree()
         self.prompt = Prompt()
+        self.confirm_dialog = ConfirmDialog()
         self.quick_open = QuickOpen()
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
@@ -748,6 +751,8 @@ struct Desktop(Movable):
             if self._prompt_input_rect(screen).contains(pos):
                 return String("text")
             return String("default")
+        if self.confirm_dialog.active:
+            return String("default")
         if self.save_as_dialog.active:
             if self.save_as_dialog.is_input_at(pos, screen):
                 return String("text")
@@ -977,6 +982,7 @@ struct Desktop(Movable):
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
+        self.confirm_dialog.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
@@ -1170,7 +1176,8 @@ struct Desktop(Movable):
         # If something else is modal, defer rather than drop. First-
         # deferred wins — once a prompt is queued, opening another
         # unsupported language while still modal doesn't bump it.
-        if self.prompt.active or self.quick_open.active \
+        if self.prompt.active or self.confirm_dialog.active \
+                or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -1180,9 +1187,9 @@ struct Desktop(Movable):
         self._lsp_install_prompted.append(spec.language_id)
         self._pending_action = _PA_LSP_INSTALL
         self._pending_arg = spec.language_id
-        self.prompt.open(
+        self.confirm_dialog.open(
             String("Install ") + spec.language_id + String(" LSP? '")
-            + spec.install_hint + String("' (y/N): ")
+            + spec.install_hint + String("'")
         )
 
     fn _maybe_prompt_grammar_install(mut self, ext: String):
@@ -1207,7 +1214,8 @@ struct Desktop(Movable):
         for i in range(len(self._grammar_install_prompted)):
             if self._grammar_install_prompted[i] == spec.language_id:
                 return
-        if self.prompt.active or self.quick_open.active \
+        if self.prompt.active or self.confirm_dialog.active \
+                or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -1217,9 +1225,9 @@ struct Desktop(Movable):
         self._grammar_install_prompted.append(spec.language_id)
         self._pending_action = _PA_GRAMMAR_INSTALL
         self._pending_arg = spec.language_id
-        self.prompt.open(
+        self.confirm_dialog.open(
             String("Download ") + spec.display
-                + String(" syntax grammar? (y/N): ")
+                + String(" syntax grammar?")
         )
 
     fn _start_grammar_install(mut self, lang: String):
@@ -1949,6 +1957,14 @@ struct Desktop(Movable):
                 _ = self.prompt.handle_key(event)
                 if self.prompt.submitted:
                     return self._on_prompt_submit()
+            return Optional[String]()
+        if self.confirm_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.confirm_dialog.handle_key(event)
+            else:
+                _ = self.confirm_dialog.handle_mouse(event, screen)
+            if self.confirm_dialog.submitted:
+                return self._on_confirm_submit()
             return Optional[String]()
         if self.save_as_dialog.active:
             if event.kind == EVENT_KEY:
@@ -3960,7 +3976,8 @@ struct Desktop(Movable):
                     Attr(BLACK, LIGHT_GRAY),
                 )
                 return
-        if self.prompt.active or self.quick_open.active \
+        if self.prompt.active or self.confirm_dialog.active \
+                or self.quick_open.active \
                 or self.symbol_pick.active or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -3968,9 +3985,9 @@ struct Desktop(Movable):
         self._doc_install_prompted.append(spec.language_id)
         self._pending_action = _PA_DOC_INSTALL
         self._pending_arg = spec.language_id
-        self.prompt.open(
+        self.confirm_dialog.open(
             String("Download ") + spec.display
-                + String(" docs (~few MB)? (y/N): ")
+                + String(" docs (~few MB)?")
         )
 
     fn _start_doc_install(mut self, lang: String):
@@ -4161,45 +4178,26 @@ struct Desktop(Movable):
         if was_max:
             self.windows.windows[idx].toggle_maximize(workspace)
 
-    fn _on_prompt_submit(mut self) -> Optional[String]:
-        var text = self.prompt.input
-        self.prompt.close()
+    fn _on_confirm_submit(mut self) -> Optional[String]:
+        """Resolve the most recent ``confirm_dialog.open`` by reading
+        ``confirm_dialog.confirmed`` and dispatching the install action
+        keyed by ``_pending_action``. The dialog is closed before any
+        side effects run so install spawns can surface follow-up
+        modals without colliding with the closing dialog."""
+        var yes = self.confirm_dialog.confirmed
+        self.confirm_dialog.close()
         var pa = self._pending_action
         self._pending_action = String("")
-        if pa == EDITOR_FIND:
-            self._last_search = text
-            var idx = self._focused_editor_idx()
-            if idx >= 0:
-                if self.windows.windows[idx].editor.find_next(text):
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
-                        margin_below=10, margin_above=10,
-                    )
-            return Optional[String]()
         if pa == _PA_DOC_INSTALL:
-            # Mirrors the LSP install branch but goes through the docs
-            # spec table and drops the clipboard-fallback (curl
-            # commands aren't useful to the user in their own shell —
-            # they're very long, and the destination dir is project-
-            # internal). Yes / no parsed by first-byte initial.
             var lang = self._pending_arg
             self._pending_arg = String("")
-            var tb = text.as_bytes()
-            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
-            if said_yes:
+            if yes:
                 self._start_doc_install(lang)
             return Optional[String]()
         if pa == _PA_GRAMMAR_INSTALL:
-            # Same y/N parse as the docs branch. On accept, ``curl`` the
-            # grammar JSON into ``~/.config/turbokod/languages/<lang>/``
-            # via ``InstallRunner``; on completion the highlighter picks
-            # it up automatically because ``_grammar_path_for_ext``
-            # checks that path on every refresh.
             var lang = self._pending_arg
             self._pending_arg = String("")
-            var tb = text.as_bytes()
-            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
-            if said_yes:
+            if yes:
                 self._start_grammar_install(lang)
             return Optional[String]()
         if pa == _PA_LSP_INSTALL:
@@ -4212,9 +4210,7 @@ struct Desktop(Movable):
             # ``_pending_arg`` carries the language id for the spec lookup.
             var lang = self._pending_arg
             self._pending_arg = String("")
-            var tb = text.as_bytes()
-            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
-            if said_yes:
+            if yes:
                 var spec_idx = -1
                 for i in range(len(self.lsp_specs)):
                     if self.lsp_specs[i].language_id == lang:
@@ -4224,9 +4220,6 @@ struct Desktop(Movable):
                     var hint = self.lsp_specs[spec_idx].install_hint
                     clipboard_copy(hint)
                     if self.install_runner.is_active():
-                        # Another install is already in flight — fall back
-                        # to clipboard-only and ask the user to run this
-                        # one themselves.
                         self.status_bar.set_message(
                             String("Install busy; copied to clipboard: ")
                                 + hint,
@@ -4244,14 +4237,37 @@ struct Desktop(Movable):
                                 Attr(BLACK, LIGHT_GRAY),
                             )
                         except:
-                            # Spawn failed (e.g. ``sh`` missing) — fall
-                            # back to the original copy-and-tell flow so
-                            # the user can run it manually.
                             self.status_bar.set_message(
                                 String("Run: ") + hint
                                     + String("  (copied to clipboard)"),
                                 Attr(BLACK, LIGHT_GRAY),
                             )
+            return Optional[String]()
+        # Unknown / no pending action — nothing to do.
+        self._pending_arg = String("")
+        return Optional[String]()
+
+    fn _on_prompt_submit(mut self) -> Optional[String]:
+        var text = self.prompt.input
+        self.prompt.close()
+        var pa = self._pending_action
+        self._pending_action = String("")
+        if pa == EDITOR_FIND:
+            self._last_search = text
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
+                if self.windows.windows[idx].editor.find_next(text):
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                        margin_below=10, margin_above=10,
+                    )
+            return Optional[String]()
+        if pa == _PA_DOC_INSTALL or pa == _PA_GRAMMAR_INSTALL \
+                or pa == _PA_LSP_INSTALL:
+            # The confirm dialog is what drives these actions now —
+            # if we ever land here it means a stale pending tag
+            # leaked into a regular prompt submit. Drop it cleanly.
+            self._pending_arg = String("")
             return Optional[String]()
         if pa == EDITOR_GOTO:
             var idx = self._focused_editor_idx()

@@ -195,6 +195,123 @@ struct Canvas(Copyable, Movable):
         for i in range(length):
             self.set(p.x, p.y + i, cell)
 
+    fn put_wrapped_text(
+        mut self, rect: Rect, text: String, attr: Attr,
+    ) -> Int:
+        """Paint ``text`` inside ``rect``, soft-wrapping at spaces.
+
+        Companion to ``put_text``: same codepoint-aligned layout, but
+        the caller hands in a rectangle and the canvas does the line
+        wrapping. Words longer than the rect width hard-break.
+        Returns the number of rows actually painted (0 when ``rect``
+        has no interior, no taller than ``rect.height()``).
+
+        This is the framework's "stay inside your dialog" primitive —
+        any popup that has variable-length text content (confirm
+        prompts, hover tips, info notices) should pipe it through this
+        so the text never bleeds across the workspace.
+        """
+        var inner = rect.intersect(Rect(0, 0, self.width, self.height))
+        if inner.width() <= 0 or inner.height() <= 0:
+            return 0
+        var lines = wrap_to_width(text, inner.width())
+        var rows = len(lines)
+        if rows > inner.height():
+            rows = inner.height()
+        for i in range(rows):
+            _ = self.put_text(
+                Point(inner.a.x, inner.a.y + i),
+                lines[i], attr, inner.b.x,
+            )
+        return rows
+
+
+fn wrap_to_width(text: String, width: Int) -> List[String]:
+    """Soft-wrap ``text`` to lines of at most ``width`` codepoint cells.
+
+    Breaks at the last space inside the budget; words longer than
+    ``width`` hard-break at exactly ``width`` cells. Empty input
+    returns an empty list. Trailing whitespace on each line is
+    preserved verbatim — callers that paint a cursor or other glyph
+    immediately after a wrapped line rely on the trailing space to
+    keep their visual spacing consistent with the un-wrapped layout.
+
+    The framework primitive that lets popups and dialogs honour the
+    "don't paint outside your area" rule: a dialog can either size
+    itself to fit the wrapped output, or hand the wrapped lines to
+    ``Canvas.put_wrapped_text`` to render inside a bounded rect.
+    """
+    var lines = List[String]()
+    if width < 1:
+        return lines^
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    if n == 0:
+        return lines^
+    # Decode UTF-8 into per-codepoint glyphs so we can measure line
+    # width in cells, not bytes (multi-byte sequences would otherwise
+    # blow up the budget on the first non-ASCII character).
+    var cps = List[String]()
+    var i = 0
+    while i < n:
+        var b = Int(bytes[i])
+        var seq_len: Int
+        if b < 0x80:
+            seq_len = 1
+        elif (b & 0xE0) == 0xC0:
+            seq_len = 2
+        elif (b & 0xF0) == 0xE0:
+            seq_len = 3
+        elif (b & 0xF8) == 0xF0:
+            seq_len = 4
+        else:
+            seq_len = 1
+        if i + seq_len > n:
+            seq_len = n - i
+        cps.append(String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len])))
+        i += seq_len
+    var nc = len(cps)
+    var pos = 0
+    while pos < nc:
+        # Collapse leading spaces on every line after the first — a
+        # wrap boundary already implies the break, so leaving the
+        # space behind would push the next line one cell to the right.
+        if pos > 0:
+            while pos < nc and cps[pos] == String(" "):
+                pos += 1
+            if pos >= nc:
+                break
+        # Walk forward up to ``width`` cells; remember the last space
+        # we passed so we can fall back to a soft break.
+        var end = pos
+        var last_space = -1
+        while end < nc and end - pos < width:
+            if cps[end] == String(" "):
+                last_space = end
+            end += 1
+        if end >= nc:
+            var tail = String("")
+            for j in range(pos, nc):
+                tail = tail + cps[j]
+            lines.append(tail)
+            pos = nc
+            continue
+        var break_at: Int
+        if last_space > pos:
+            break_at = last_space
+        else:
+            # No space inside the budget — hard-break at ``width``.
+            break_at = pos + width
+        var line = String("")
+        for j in range(pos, break_at):
+            line = line + cps[j]
+        lines.append(line)
+        if break_at < nc and cps[break_at] == String(" "):
+            pos = break_at + 1
+        else:
+            pos = break_at
+    return lines^
+
 
 fn utf8_byte_to_cell(text: String) -> List[Int]:
     """Map every byte index in ``text`` to the cell column its codepoint

@@ -5,15 +5,14 @@ types into ``input``; Enter sets ``submitted=True`` (the caller reads
 ``input`` and then calls ``close()``); Esc closes without submitting.
 
 The dialog is 60 columns wide. A short ``label`` shares the line with the
-input (``Find: ▮``); a label that doesn't fit in 60 cells soft-wraps at
-spaces and the input drops onto its own line below — so confirm prompts
-that embed an install command stay inside the dialog instead of bleeding
-across the workspace.
+input (``Find: ▮``); a label that doesn't fit in 60 cells goes through
+``Canvas.put_wrapped_text`` and the input drops onto its own line below.
+Both layouts read off the same ``wrap_to_width`` framework primitive, so
+confirm prompts that embed a long install command stay inside the
+dialog instead of bleeding across the workspace.
 """
 
-from std.collections import List
-
-from .canvas import Canvas, utf8_codepoint_count
+from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .cell import Cell
 from .colors import Attr, BLACK, LIGHT_GRAY
 from .events import (
@@ -29,85 +28,6 @@ comptime _MIN_INLINE_INPUT = 10
 """Cells reserved for the input strip when the label shares its row.
 Below this we drop the input onto its own line so the user always has a
 visible place to type."""
-
-
-fn wrap_to_width(text: String, width: Int) -> List[String]:
-    """Soft-wrap ``text`` to lines of at most ``width`` codepoint cells.
-
-    Breaks at the last space inside the budget; words longer than
-    ``width`` hard-break at exactly ``width`` cells. An empty input
-    returns an empty list. Used by the modal prompt to keep long
-    confirmation labels (LSP install hints, mostly) inside the dialog.
-    """
-    var lines = List[String]()
-    if width < 1:
-        return lines^
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if n == 0:
-        return lines^
-    # Decode UTF-8 into per-codepoint glyphs so we can measure line width
-    # in cells, not bytes.
-    var cps = List[String]()
-    var i = 0
-    while i < n:
-        var b = Int(bytes[i])
-        var seq_len: Int
-        if b < 0x80:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
-        if i + seq_len > n:
-            seq_len = n - i
-        cps.append(String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len])))
-        i += seq_len
-    var nc = len(cps)
-    var pos = 0
-    while pos < nc:
-        # Collapse leading spaces on every line after the first — a wrap
-        # boundary already implies the break, so leaving the space behind
-        # would push the next line one cell to the right.
-        if pos > 0:
-            while pos < nc and cps[pos] == String(" "):
-                pos += 1
-            if pos >= nc:
-                break
-        # Walk forward up to ``width`` cells; remember the last space we
-        # passed so we can fall back to a soft break.
-        var end = pos
-        var last_space = -1
-        while end < nc and end - pos < width:
-            if cps[end] == String(" "):
-                last_space = end
-            end += 1
-        if end >= nc:
-            var tail = String("")
-            for j in range(pos, nc):
-                tail = tail + cps[j]
-            lines.append(tail)
-            pos = nc
-            continue
-        var break_at: Int
-        if last_space > pos:
-            break_at = last_space
-        else:
-            # No space inside the budget — hard-break at ``width``.
-            break_at = pos + width
-        var line = String("")
-        for j in range(pos, break_at):
-            line = line + cps[j]
-        lines.append(line)
-        if break_at < nc and cps[break_at] == String(" "):
-            pos = break_at + 1
-        else:
-            pos = break_at
-    return lines^
 
 
 struct Prompt(Movable):
@@ -137,10 +57,10 @@ struct Prompt(Movable):
     fn _layout(self, screen: Rect) -> Rect:
         """Compute the dialog rect for the current label.
 
-        Width caps at ``_DEFAULT_WIDTH`` (or whatever the screen allows);
-        height grows to fit the wrapped label. Public layout details
-        live on the paint path — kept separate so paint and the cursor
-        position computation share one source of truth.
+        Width caps at ``_DEFAULT_WIDTH`` (or whatever the screen
+        allows); height grows to fit the wrapped label. Paint reads
+        the same numbers — kept here so the cursor row and the
+        painter agree even when the label is long enough to wrap.
         """
         var width = _DEFAULT_WIDTH
         if width > screen.b.x - 4:
@@ -187,12 +107,12 @@ struct Prompt(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
         canvas.draw_box(rect, attr, False)
+        var content_x = rect.a.x + 2
+        var clip_x = rect.b.x - 1
         var text_w = rect.width() - 4
         if text_w < 1:
             text_w = 1
         var label_lines = wrap_to_width(self.label, text_w)
-        var content_x = rect.a.x + 2
-        var clip_x = rect.b.x - 1
         var inline = False
         var last_label_w = 0
         if len(label_lines) <= 1:
@@ -200,21 +120,19 @@ struct Prompt(Movable):
                 last_label_w = utf8_codepoint_count(label_lines[0])
             if last_label_w + _MIN_INLINE_INPUT <= text_w:
                 inline = True
-        # Paint each label line. Last visible label row gets the input
-        # appended when we're laying inline.
         var max_label_rows = rect.height() - 2
         if not inline:
             max_label_rows -= 1   # reserve a row for the input
         if max_label_rows < 0:
             max_label_rows = 0
-        var visible = len(label_lines)
-        if visible > max_label_rows:
-            visible = max_label_rows
-        for i in range(visible):
-            _ = canvas.put_text(
-                Point(content_x, rect.a.y + 1 + i),
-                label_lines[i], attr, clip_x,
-            )
+        # Paint the label through the canvas's wrap primitive so this
+        # path can never paint outside the dialog interior, even if
+        # ``wrap_to_width`` produces more lines than we have rows for.
+        var label_rect = Rect(
+            content_x, rect.a.y + 1,
+            clip_x, rect.a.y + 1 + max_label_rows,
+        )
+        var visible = canvas.put_wrapped_text(label_rect, self.label, attr)
         var input_y: Int
         var input_x: Int
         if inline:
