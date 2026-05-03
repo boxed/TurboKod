@@ -104,6 +104,10 @@ comptime EDITOR_NEW           = String("file:new")
 comptime EDITOR_SAVE          = String("file:save")
 comptime EDITOR_SAVE_AS       = String("file:save_as")
 comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
+# "Open Recent" — same picker as Quick Open, but populated from a list
+# of recently focused file-backed editor windows (most-recent first),
+# excluding whichever file is focused right now.
+comptime EDITOR_OPEN_RECENT   = String("file:open_recent")
 comptime EDITOR_FIND          = String("edit:find")
 comptime EDITOR_FIND_NEXT     = String("edit:find_next")
 comptime EDITOR_FIND_PREV     = String("edit:find_prev")
@@ -441,6 +445,12 @@ struct Desktop(Movable):
     var _pending_restore: Bool
     var _last_session_json: String
     var _pending_restore_refit: Optional[Session]
+    # Recently focused file-backed editor paths, most-recent first.
+    # Updated each ``paint`` from the focused window's ``file_path``;
+    # the front entry is whichever file currently has focus, so the
+    # "Open Recent" picker skips index 0 to avoid offering the user
+    # the file they're already on. Capped at ``_RECENT_FILES_MAX``.
+    var _recent_files: List[String]
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -500,6 +510,7 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        self._recent_files = List[String]()
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -515,6 +526,7 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("w"), MOD_NONE, WINDOW_CLOSE))
         self._hotkeys.append(Hotkey(ctrl_key("n"), MOD_NONE, EDITOR_NEW))
         self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_QUICK_OPEN))
+        self._hotkeys.append(Hotkey(ctrl_key("e"), MOD_NONE, EDITOR_OPEN_RECENT))
         self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
         # Ctrl/Cmd+H for replace (matches VS Code). Ctrl+R is the
@@ -807,6 +819,11 @@ struct Desktop(Movable):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
+        # Update the recents list from whichever editor is focused this
+        # frame. Cheap (one path compare against ``_recent_files[0]``)
+        # on idle frames; promotes a path to the front exactly once
+        # whenever focus actually moves.
+        self._track_recent_focus()
         # Restore the saved per-project window session before any
         # other per-frame work so newly-restored editors see the same
         # treatment (highlight flush, view-config sync, fit-into) as
@@ -1899,6 +1916,9 @@ struct Desktop(Movable):
                 self.quick_open.open(self.project.value())
                 return Optional[String]()
             return Optional[String](action)
+        if action == EDITOR_OPEN_RECENT:
+            self._open_recent_picker()
+            return Optional[String]()
         if action == EDITOR_FIND:
             self._pending_action = EDITOR_FIND
             self.prompt.open(String("Find: "))
@@ -3153,6 +3173,71 @@ struct Desktop(Movable):
             if len(canon.as_bytes()) > 0 and realpath(fp) == canon:
                 return i
         return -1
+
+    # --- recents ----------------------------------------------------------
+
+    fn _track_recent_focus(mut self):
+        """Promote the focused editor's file path to the front of
+        ``_recent_files``. Untitled / file-less buffers are skipped —
+        they have no path that ``open_file`` could later restore.
+        """
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        # Already at the front — no change.
+        if len(self._recent_files) > 0 and self._recent_files[0] == path:
+            return
+        # Remove an existing copy (anywhere in the list) before
+        # re-inserting at the front, so each path appears at most once.
+        var new_list = List[String]()
+        new_list.append(path)
+        for i in range(len(self._recent_files)):
+            if self._recent_files[i] != path:
+                new_list.append(self._recent_files[i])
+        # Cap the list so a long-running session doesn't grow unbounded.
+        var cap = 100
+        while len(new_list) > cap:
+            _ = new_list.pop(len(new_list) - 1)
+        self._recent_files = new_list^
+
+    fn _open_recent_picker(mut self):
+        """Open the QuickOpen picker over the recents list, skipping the
+        currently focused file. No-op when there's nothing to show
+        (single open file, or no file-backed editors at all)."""
+        if len(self._recent_files) <= 1:
+            return
+        # Display labels: project-relative when the file lives under the
+        # active project root, absolute otherwise. Parallel ``abs_entries``
+        # carries the absolute path used to actually open the file.
+        var root = String("")
+        if self.project:
+            root = self.project.value()
+        var rb = root.as_bytes()
+        var rel_entries = List[String]()
+        var abs_entries = List[String]()
+        # Skip index 0 — that's the file the user is currently on.
+        for i in range(1, len(self._recent_files)):
+            var p = self._recent_files[i]
+            var pb = p.as_bytes()
+            var label = p
+            if len(rb) > 0 and len(pb) > len(rb) + 1:
+                var matches_root = True
+                for k in range(len(rb)):
+                    if pb[k] != rb[k]:
+                        matches_root = False
+                        break
+                if matches_root and pb[len(rb)] == 0x2F:
+                    label = String(StringSlice(
+                        unsafe_from_utf8=pb[len(rb) + 1:],
+                    ))
+            rel_entries.append(label)
+            abs_entries.append(p)
+        if len(rel_entries) == 0:
+            return
+        self.quick_open.open_recent(root, rel_entries^, abs_entries^)
 
     # --- editor-action helpers --------------------------------------------
 

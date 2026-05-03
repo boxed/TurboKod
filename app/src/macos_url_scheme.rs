@@ -27,7 +27,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CStr};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -54,6 +54,11 @@ const fn fcc(s: &[u8; 4]) -> u32 {
 //   kAEGetURL           = 'GURL' — "Get URL" (yes, same fourcc).
 //   keyDirectObject     = '----' — the event's main argument slot.
 //   typeUTF8Text        = 'utf8' — request payload as UTF-8 bytes.
+//
+// ``kAEOpenDocuments`` (``aevt/odoc``) — the open-documents AE — is
+// deliberately *not* claimed via Carbon here; see ``register`` for why
+// we route it through ``application:openFiles:`` on the delegate
+// instead.
 const K_INTERNET_EVENT_CLASS: AEEventClass = fcc(b"GURL");
 const K_AE_GET_URL: AEEventID = fcc(b"GURL");
 const KEY_DIRECT_OBJECT: AEKeyword = fcc(b"----");
@@ -92,6 +97,32 @@ unsafe extern "C" {
     ) -> OSErr;
 }
 
+// objc runtime FFI. We only need the three primitives ``objc_getClass``,
+// ``sel_registerName`` and ``class_addMethod`` to graft an
+// ``application:openFiles:`` selector onto winit's existing
+// ``WinitApplicationDelegate`` class — implementing it from a fresh
+// custom delegate would mean fighting winit for ownership of
+// ``NSApplication.delegate``.
+type ObjcClass = c_void;
+type ObjcSel = c_void;
+type ObjcId = c_void;
+
+#[link(name = "objc", kind = "dylib")]
+unsafe extern "C" {
+    fn objc_getClass(name: *const c_char) -> *mut ObjcClass;
+    fn sel_registerName(name: *const c_char) -> *mut ObjcSel;
+    fn class_addMethod(
+        cls: *mut ObjcClass,
+        name: *mut ObjcSel,
+        imp: extern "C" fn(),
+        types: *const c_char,
+    ) -> bool;
+    // ``objc_msgSend`` is variadic at the ABI level. We cast it to a
+    // concrete fn pointer per call site so the compiler emits the right
+    // calling convention for each return-type / arg-type combination.
+    fn objc_msgSend();
+}
+
 // The Apple Event handler is a plain C function pointer with no captures
 // — it has to look up the proxy through a global slot. ``OnceLock``
 // keeps the install side-effect-free until ``register`` is called and
@@ -99,10 +130,11 @@ unsafe extern "C" {
 // in our flow, but defensive is cheap).
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
-/// Install the kAEGetURL handler. Call once at startup, before
-/// ``NSApp.run()`` (i.e., before ``EventLoop::run_app``). Subsequent
-/// calls overwrite the proxy slot but ``AEInstallEventHandler`` itself
-/// only registers the C function once with the OS.
+/// Install the kAEGetURL and kAEOpenDocuments handlers. Call once at
+/// startup, before ``NSApp.run()`` (i.e., before ``EventLoop::run_app``).
+/// Subsequent calls overwrite the proxy slot but
+/// ``AEInstallEventHandler`` itself only registers each C function once
+/// with the OS.
 pub fn register(proxy: EventLoopProxy<UserEvent>) {
     // ``set`` returns ``Err`` if already initialized — silently keep
     // the first proxy. In practice ``register`` is called from
@@ -121,6 +153,22 @@ pub fn register(proxy: EventLoopProxy<UserEvent>) {
             0,
         );
     }
+    // ``kAEOpenDocuments`` (``aevt/odoc``) is the AE LaunchServices
+    // sends for ``open -a turbokod /path``. We *can't* claim it via
+    // ``AEInstallEventHandler`` here: NSApplication installs its own
+    // ``kAEOpenDocuments`` handler later (during
+    // ``applicationDidFinishLaunching``) that routes the event to
+    // ``application:openFiles:`` / ``application:openURLs:`` on the
+    // delegate — and that registration happens *after* ours, so
+    // NSApp's wins. winit's ``WinitApplicationDelegate`` doesn't
+    // implement ``openFiles``/``openURLs``, so NSApp's default fallback
+    // shows the macOS popup ``"the document <X> could not be opened.
+    // turbokod cannot open files in the 'Folder' format"`` and silently
+    // drops the path. Instead we add ``application:openFiles:`` to
+    // winit's delegate class at runtime via the objc runtime — the
+    // standard Cocoa entry point for opening docs/folders, which then
+    // forwards into our ``OpenPaths`` channel like the URL handler does.
+    install_open_files_method();
 }
 
 unsafe extern "C" fn handle_get_url(
@@ -164,4 +212,101 @@ unsafe extern "C" fn handle_get_url(
         let _ = proxy.send_event(UserEvent::OpenPaths(vec![translated]));
     }
     0
+}
+
+// Add ``application:openFiles:`` to ``WinitApplicationDelegate`` at
+// runtime. NSApplication looks this method up on its delegate when an
+// ``aevt/odoc`` event arrives, hands it the array of paths macOS
+// resolved from the AE's file-URL list, and treats any object that
+// responds to it as a successful open — no popup. winit's delegate
+// class is named ``WinitApplicationDelegate`` and only implements
+// ``applicationDidFinishLaunching:`` / ``applicationWillTerminate:``,
+// so adding ``openFiles`` doesn't conflict with anything winit cares
+// about. No-op if the class can't be found (e.g., winit upgrade
+// renames it) — the URL scheme keeps working, only ``open -a turbokod
+// /path`` regresses, which is what we already had.
+fn install_open_files_method() {
+    unsafe {
+        let cls_name = c"WinitApplicationDelegate";
+        let cls = objc_getClass(cls_name.as_ptr());
+        if cls.is_null() {
+            return;
+        }
+        let sel = sel_registerName(c"application:openFiles:".as_ptr());
+        // ObjC type-encoding string: ``v`` (void return), ``@`` (id self),
+        // ``:`` (SEL _cmd), ``@`` (NSApplication* sender), ``@`` (NSArray*).
+        // See <https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html>.
+        class_addMethod(
+            cls,
+            sel,
+            std::mem::transmute::<
+                unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, *mut ObjcId, *mut ObjcId),
+                extern "C" fn(),
+            >(application_open_files),
+            c"v@:@@".as_ptr(),
+        );
+    }
+}
+
+// IMP for ``-[WinitApplicationDelegate application:openFiles:]``. macOS
+// hands us the resolved absolute paths as an ``NSArray<NSString*>``;
+// pull them out via raw ``objc_msgSend`` and forward through the same
+// ``OpenPaths`` channel the URL handler uses, so the rest of the app
+// can't tell whether a path arrived via ``open -a`` or
+// ``turbokod://open?file=…``.
+unsafe extern "C" fn application_open_files(
+    _self: *mut ObjcId,
+    _sel: *mut ObjcSel,
+    _sender: *mut ObjcId,
+    filenames: *mut ObjcId,
+) {
+    if filenames.is_null() {
+        return;
+    }
+    unsafe {
+        let sel_count = sel_registerName(c"count".as_ptr());
+        let sel_obj_at_index = sel_registerName(c"objectAtIndex:".as_ptr());
+        let sel_utf8 = sel_registerName(c"UTF8String".as_ptr());
+
+        // ``objc_msgSend`` is variadic at the linker level but the actual
+        // calling convention depends on the called method's return / arg
+        // types. We re-cast it per call site so each invocation uses the
+        // right ABI.
+        let count_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> usize =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let obj_at_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, usize) -> *mut ObjcId =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let utf8_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *const c_char =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+        let count = count_fn(filenames, sel_count);
+        let mut paths: Vec<String> = Vec::with_capacity(count);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        for i in 0..count {
+            let ns_string = obj_at_fn(filenames, sel_obj_at_index, i);
+            if ns_string.is_null() {
+                continue;
+            }
+            let utf8 = utf8_fn(ns_string, sel_utf8);
+            if utf8.is_null() {
+                continue;
+            }
+            let raw = match CStr::from_ptr(utf8).to_str() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // ``application:openFiles:`` already hands us a plain
+            // POSIX path (no ``file://`` prefix, no percent-encoding),
+            // so we just route it through ``translate_open_arg`` for
+            // CWD resolution / consistency with the URL path.
+            if let Some(t) = translate_open_arg(raw, &cwd) {
+                paths.push(t);
+            }
+        }
+        if !paths.is_empty() {
+            if let Some(proxy) = PROXY.get() {
+                let _ = proxy.send_event(UserEvent::OpenPaths(paths));
+            }
+        }
+    }
 }

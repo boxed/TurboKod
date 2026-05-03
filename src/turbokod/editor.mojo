@@ -267,6 +267,11 @@ think for a moment, type next sentence" produces two undo steps, slow enough
 that a single sentence rarely splits."""
 
 
+comptime _DOUBLE_CLICK_MS = 500
+"""Maximum gap between two left-button presses (at the same cell) for the
+second one to be treated as a double-click."""
+
+
 struct EditorSnapshot(ImplicitlyCopyable, Movable):
     """One reversible step. Captures everything ``undo`` needs to restore:
     the buffer contents and the caret/selection. Scroll position is excluded
@@ -416,6 +421,26 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the flag so the next character starts a fresh group.
     var _typing_active: Bool
     var _typing_last_ms: Int
+    # Multi-click tracking. ``_last_click_ms`` is the timestamp of the
+    # most recent left-button press; ``_last_click_row`` /
+    # ``_last_click_col`` were the (row, col) it landed on.
+    # ``_click_count`` counts consecutive presses at the same cell within
+    # ``_DOUBLE_CLICK_MS`` (1=single, 2=double, 3=triple, then resets).
+    # Double-click selects the word under the pointer; triple-click
+    # selects the whole line. ``_dc_active`` / ``_tc_active`` stay True
+    # until release or a press elsewhere; while set, drag-motion extends
+    # in whole-word / whole-line units anchored to the originally clicked
+    # word (``_dc_anchor_*``) or row (``_tc_anchor_row``).
+    var _last_click_ms: Int
+    var _last_click_row: Int
+    var _last_click_col: Int
+    var _click_count: Int
+    var _dc_active: Bool
+    var _dc_anchor_row: Int
+    var _dc_anchor_start: Int
+    var _dc_anchor_end: Int
+    var _tc_active: Bool
+    var _tc_anchor_row: Int
     # TextMate grammar cache. Refreshing highlights re-loads the grammar
     # via this slot; a cold load is ~100 ms for the bundled rust grammar
     # so we *really* want hits here on every keystroke. Reset on copy
@@ -460,6 +485,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
+        self._last_click_ms = 0
+        self._last_click_row = -1
+        self._last_click_col = -1
+        self._click_count = 0
+        self._dc_active = False
+        self._dc_anchor_row = 0
+        self._dc_anchor_start = 0
+        self._dc_anchor_end = 0
+        self._tc_active = False
+        self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
 
     fn __init__(out self, var text: String):
@@ -498,6 +533,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
+        self._last_click_ms = 0
+        self._last_click_row = -1
+        self._last_click_col = -1
+        self._click_count = 0
+        self._dc_active = False
+        self._dc_anchor_row = 0
+        self._dc_anchor_start = 0
+        self._dc_anchor_end = 0
+        self._tc_active = False
+        self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
 
     @staticmethod
@@ -553,6 +598,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
         self._typing_last_ms = copy._typing_last_ms
+        self._last_click_ms = copy._last_click_ms
+        self._last_click_row = copy._last_click_row
+        self._last_click_col = copy._last_click_col
+        self._click_count = copy._click_count
+        self._dc_active = copy._dc_active
+        self._dc_anchor_row = copy._dc_anchor_row
+        self._dc_anchor_start = copy._dc_anchor_start
+        self._dc_anchor_end = copy._dc_anchor_end
+        self._tc_active = copy._tc_active
+        self._tc_anchor_row = copy._tc_anchor_row
         # Don't carry the cached grammar across a copy. ``Grammar`` owns
         # ``OnigRegex`` instances whose libonig handles we share via a
         # bitwise-aliasing copy; once we add proper ``__del__`` support
@@ -940,6 +995,96 @@ struct Editor(ImplicitlyCopyable, Movable):
             sr = er; sc = ec
             er = tr; ec = tc
         return (sr, sc, er, ec)
+
+    fn _line_op_range(self) -> Tuple[Int, Int]:
+        """Inclusive ``(start_row, end_row)`` for line-level commands like
+        Tab/Shift+Tab indent. With no selection both bounds are the cursor's
+        row. With a selection that ends at column 0 of a row, that row is
+        excluded — matching the visual intuition that the trailing line
+        wasn't actually part of the selection."""
+        if not self.has_selection():
+            return (self.cursor_row, self.cursor_row)
+        var sel = self.selection()
+        var sr = sel[0]
+        var er = sel[2]
+        var ec = sel[3]
+        if er > sr and ec == 0:
+            er -= 1
+        return (sr, er)
+
+    fn _indent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
+        """Prepend one indent unit (per editorconfig) to every row in
+        ``[sr, er]``. Cursor and anchor cols on affected rows shift right
+        by the inserted byte count so the selection stays anchored to the
+        same characters."""
+        if er < sr:
+            return
+        var indent = self.editorconfig.indent_string()
+        var indent_n = len(indent.as_bytes())
+        if indent_n == 0:
+            return
+        self._push_undo()
+        for r in range(sr, er + 1):
+            self.buffer.lines[r] = indent + self.buffer.lines[r]
+        if self.cursor_row >= sr and self.cursor_row <= er:
+            self.cursor_col += indent_n
+        if self.anchor_row >= sr and self.anchor_row <= er:
+            self.anchor_col += indent_n
+        self.desired_col = _utf8_cell_of_byte(
+            self.buffer.line(self.cursor_row), self.cursor_col,
+        )
+        self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
+
+    fn _dedent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
+        """Remove up to one indent unit of leading whitespace from every
+        row in ``[sr, er]``. A leading tab counts as one unit; otherwise
+        up to ``effective_indent_size`` leading spaces are removed. Lines
+        with no leading whitespace are left alone — and if no row would
+        change, the call is a no-op (no undo entry burned)."""
+        if er < sr:
+            return
+        var width = self.editorconfig.effective_indent_size()
+        if width < 1:
+            width = 4
+        var removed = List[Int]()
+        var any_change = False
+        for r in range(sr, er + 1):
+            var line = self.buffer.line(r)
+            var lb = line.as_bytes()
+            var n = len(lb)
+            var rm = 0
+            if n > 0 and lb[0] == 0x09:  # leading tab
+                rm = 1
+            else:
+                while rm < width and rm < n and lb[rm] == 0x20:  # leading space
+                    rm += 1
+            removed.append(rm)
+            if rm > 0:
+                any_change = True
+        if not any_change:
+            return
+        self._push_undo()
+        for r in range(sr, er + 1):
+            var rm = removed[r - sr]
+            if rm > 0:
+                var line = self.buffer.line(r)
+                self.buffer.lines[r] = _slice(line, rm, len(line.as_bytes()))
+        if self.cursor_row >= sr and self.cursor_row <= er:
+            var rm_c = removed[self.cursor_row - sr]
+            var nc = self.cursor_col - rm_c
+            if nc < 0: nc = 0
+            self.cursor_col = nc
+        if self.anchor_row >= sr and self.anchor_row <= er:
+            var rm_a = removed[self.anchor_row - sr]
+            var nca = self.anchor_col - rm_a
+            if nca < 0: nca = 0
+            self.anchor_col = nca
+        self.desired_col = _utf8_cell_of_byte(
+            self.buffer.line(self.cursor_row), self.cursor_col,
+        )
+        self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
 
     fn move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
         """Place the cursor at ``(row, col)`` (``col`` is a byte offset, must
@@ -1535,24 +1680,48 @@ struct Editor(ImplicitlyCopyable, Movable):
             self._push_undo()
             if self.has_selection():
                 self._delete_selection()
+            # Compute the new line's indent before splitting so we can
+            # mirror the source line's leading whitespace (and add one
+            # extra step when the cursor sits after a brace, bracket,
+            # paren, or Python ``:``).
+            var prev_line = self.buffer.line(self.cursor_row)
+            var indent = _smart_indent_for_enter(
+                prev_line, self.cursor_col, self.editorconfig,
+            )
             var p = self.buffer.split(self.cursor_row, self.cursor_col)
             self.move_to(p[0], p[1], False)
+            if len(indent.as_bytes()) > 0:
+                self.buffer.insert(self.cursor_row, self.cursor_col, indent)
+                self.move_to(
+                    self.cursor_row,
+                    self.cursor_col + len(indent.as_bytes()),
+                    False,
+                )
             self.dirty = True
             self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_TAB:
             if self.read_only:
                 return True
-            self._push_undo()
-            if self.has_selection():
-                self._delete_selection()
-            # editorconfig drives indent width / style. Default produces
-            # the original 4-space tab when no ``.editorconfig`` was found.
-            var indent = self.editorconfig.indent_string()
-            var indent_n = len(indent.as_bytes())
-            self.buffer.insert(self.cursor_row, self.cursor_col, indent)
-            self.move_to(self.cursor_row, self.cursor_col + indent_n, False)
-            self.dirty = True
-            self._mark_hl_dirty(pre_dirty_row)
+            var shift_tab = (event.mods & MOD_SHIFT) != 0
+            if shift_tab:
+                # Shift+Tab dedents the cursor's line, or every line in
+                # the selection when one is active.
+                var rng = self._line_op_range()
+                self._dedent_rows(rng[0], rng[1], pre_dirty_row)
+            elif self.has_selection():
+                # Tab on a selection indents every line in the selection.
+                var rng = self._line_op_range()
+                self._indent_rows(rng[0], rng[1], pre_dirty_row)
+            else:
+                self._push_undo()
+                # editorconfig drives indent width / style. Default produces
+                # the original 4-space tab when no ``.editorconfig`` was found.
+                var indent = self.editorconfig.indent_string()
+                var indent_n = len(indent.as_bytes())
+                self.buffer.insert(self.cursor_row, self.cursor_col, indent)
+                self.move_to(self.cursor_row, self.cursor_col + indent_n, False)
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row)
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
             self.copy_to_clipboard()
         elif k == UInt32(0x18):    # Ctrl+X
@@ -1659,35 +1828,95 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.dirty = True
 
     fn copy_to_clipboard(self):
-        """Copy the current selection to the system clipboard. No-op when
-        nothing is selected."""
+        """Copy the current selection to the system clipboard. With no
+        selection, copy the whole current line including its trailing
+        newline — matches the behavior in VS Code/Sublime/JetBrains
+        where Ctrl+C with an empty selection grabs the cursor's line."""
         if self.has_selection():
             clipboard_copy(self.selection_text())
+        else:
+            clipboard_copy(self.buffer.line(self.cursor_row) + String("\n"))
 
     fn cut_to_clipboard(mut self):
         """Copy the selection to the clipboard, then remove it from the
-        buffer. No-op when nothing is selected — the undo stack is left
-        untouched in that case. Read-only editors fall through to a copy
-        (so Ctrl+X still grabs the selection) without mutating the buffer."""
-        if not self.has_selection():
+        buffer. With no selection, cut the whole current line (including
+        its trailing newline). Read-only editors fall through to a copy
+        without mutating the buffer."""
+        if self.has_selection():
+            if self.read_only:
+                clipboard_copy(self.selection_text())
+                return
+            var pre = self.cursor_row
+            if self.anchor_row < pre:
+                pre = self.anchor_row
+            var text = self.selection_text()
+            clipboard_copy(text)
+            self._push_undo()
+            self._delete_selection()
+            self.dirty = True
+            self._mark_hl_dirty(pre)
             return
+        # Whole-line mode.
+        var r = self.cursor_row
+        var text = self.buffer.line(r) + String("\n")
         if self.read_only:
-            clipboard_copy(self.selection_text())
+            clipboard_copy(text)
             return
-        var pre = self.cursor_row
-        if self.anchor_row < pre:
-            pre = self.anchor_row
-        var text = self.selection_text()
         clipboard_copy(text)
         self._push_undo()
-        self._delete_selection()
+        if self.buffer.line_count() == 1:
+            # Only line in the buffer — keep one (now empty) line.
+            self.buffer.lines[0] = String("")
+            self.move_to(0, 0, False)
+        else:
+            _ = self.buffer.lines.pop(r)
+            var max_row = self.buffer.line_count() - 1
+            var nr = r
+            if nr > max_row:
+                nr = max_row
+            self.move_to(nr, 0, False)
         self.dirty = True
-        self._mark_hl_dirty(pre)
+        self._mark_hl_dirty(r)
 
     fn paste_from_clipboard(mut self):
-        """Replace any selection with the system clipboard's contents."""
+        """Replace any selection with the system clipboard's contents.
+        With no selection, a clipboard whose text ends in ``\\n`` is
+        treated as a line-clipboard and inserted as new lines above the
+        current line (cursor stays on its original line, now displaced
+        down)."""
         var text = clipboard_paste()
-        self.paste_text(text)
+        var bytes = text.as_bytes()
+        var n = len(bytes)
+        var line_mode = (
+            not self.has_selection()
+            and n > 0
+            and bytes[n - 1] == 0x0A
+        )
+        if line_mode:
+            self._paste_as_line(text)
+        else:
+            self.paste_text(text)
+
+    fn _paste_as_line(mut self, text: String):
+        """Insert ``text`` (which ends in ``\\n``) above the cursor's
+        current line, leaving the cursor on its original line at the
+        same column."""
+        if self.read_only:
+            return
+        if len(text.as_bytes()) == 0:
+            return
+        self._push_undo()
+        var orig_col = self.cursor_col
+        self.move_to(self.cursor_row, 0, False)
+        self._insert_text(text)
+        # ``_insert_text`` parks the cursor at column 0 of the line that
+        # *was* the original current line. Restore the column (clamped).
+        var line_n = self.buffer.line_length(self.cursor_row)
+        var col = orig_col
+        if col > line_n:
+            col = line_n
+        self.move_to(self.cursor_row, col, False)
+        self.dirty = True
 
     # --- turbo-style editor commands --------------------------------------
 
@@ -1917,6 +2146,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         if event.button != MOUSE_BUTTON_LEFT:
             return False
         if not event.pressed:
+            # Left-button release ends any in-flight multi-click drag.
+            # We still leave ``_last_click_*`` populated so the next
+            # press within ``_DOUBLE_CLICK_MS`` can promote to a
+            # double- or triple-click.
+            if not event.motion:
+                self._dc_active = False
+                self._tc_active = False
             return False
         # The gutter (debugger + line numbers) occupies the leftmost
         # columns; clicks there land on column 0 (so a gutter click
@@ -1989,10 +2225,114 @@ struct Editor(ImplicitlyCopyable, Movable):
                     DefinitionRequest(row, col, word),
                 )
             return True
-        # Press collapses; drag-motion extends.
-        self.move_to(row, col, event.motion)
+        if event.motion:
+            # Drag-motion: extend the selection. While a multi-click
+            # gesture is in progress, snap the moving end to whole-word
+            # (double-click) or whole-line (triple-click) boundaries
+            # anchored on the originally clicked region.
+            if self._tc_active:
+                self._extend_line_drag(row)
+            elif self._dc_active:
+                self._extend_word_drag(row, col)
+            else:
+                self.move_to(row, col, True)
+            self._scroll_to_cursor(view)
+            return True
+        # Initial press. Consecutive presses at the same cell within the
+        # double-click window cycle through single → double → triple
+        # before resetting; the count drives word vs. line selection.
+        var now = monotonic_ms()
+        var same_cell = (
+            now - self._last_click_ms <= _DOUBLE_CLICK_MS
+            and row == self._last_click_row
+            and col == self._last_click_col
+        )
+        if same_cell:
+            self._click_count += 1
+            if self._click_count > 3:
+                self._click_count = 1
+        else:
+            self._click_count = 1
+        self._last_click_ms = now
+        self._last_click_row = row
+        self._last_click_col = col
+        if self._click_count == 2:
+            var wrng = _word_range_at(line, col)
+            self._dc_active = True
+            self._tc_active = False
+            self._dc_anchor_row = row
+            self._dc_anchor_start = wrng[0]
+            self._dc_anchor_end = wrng[1]
+            self.move_to(row, wrng[0], False)
+            self.move_to(row, wrng[1], True)
+        elif self._click_count == 3:
+            self._tc_active = True
+            self._dc_active = False
+            self._tc_anchor_row = row
+            var lrng = self._line_select_range(row)
+            self.move_to(lrng[0], lrng[1], False)
+            self.move_to(lrng[2], lrng[3], True)
+            # Reset so a 4th quick press starts a fresh single click
+            # instead of chaining into the cycle.
+            self._last_click_ms = 0
+            self._click_count = 0
+        else:
+            self._dc_active = False
+            self._tc_active = False
+            self.move_to(row, col, False)
         self._scroll_to_cursor(view)
         return True
+
+    fn _extend_word_drag(mut self, row: Int, col: Int):
+        """Word-snapped selection extend used while the user is
+        double-click-dragging. The originally double-clicked word stays
+        anchored; the moving end snaps to the start or end of whichever
+        word the pointer is currently over."""
+        var line = self.buffer.line(row)
+        var rng = _word_range_at(line, col)
+        var word_start = rng[0]
+        var word_end = rng[1]
+        var ar = self._dc_anchor_row
+        var a_start = self._dc_anchor_start
+        var a_end = self._dc_anchor_end
+        var backward = (row < ar) or (row == ar and word_end <= a_start)
+        if backward:
+            self.move_to(ar, a_end, False)
+            self.move_to(row, word_start, True)
+        else:
+            self.move_to(ar, a_start, False)
+            self.move_to(row, word_end, True)
+
+    fn _line_select_range(self, row: Int) -> Tuple[Int, Int, Int, Int]:
+        """Return ``(start_row, start_col, end_row, end_col)`` for
+        selecting the entire line at ``row``. Includes the trailing
+        newline by extending to col 0 of the next line; on the last line
+        we extend to end-of-line instead since there's no newline to
+        grab."""
+        var lc = self.buffer.line_count()
+        if row + 1 < lc:
+            return (row, 0, row + 1, 0)
+        return (row, 0, row, self.buffer.line_length(row))
+
+    fn _extend_line_drag(mut self, row: Int):
+        """Line-snapped selection extend used while the user is
+        triple-click-dragging. The originally triple-clicked row stays
+        anchored; the selection grows to cover whole lines from the
+        anchor row to the row under the pointer."""
+        var ar = self._tc_anchor_row
+        var lc = self.buffer.line_count()
+        if row >= ar:
+            self.move_to(ar, 0, False)
+            if row + 1 < lc:
+                self.move_to(row + 1, 0, True)
+            else:
+                self.move_to(row, self.buffer.line_length(row), True)
+        else:
+            if ar + 1 < lc:
+                self.move_to(ar + 1, 0, False)
+            else:
+                self.move_to(ar, self.buffer.line_length(ar), False)
+            self.move_to(row, 0, True)
 
     # --- buffer-level helpers ---------------------------------------------
 
@@ -2232,3 +2572,64 @@ fn _is_word_char(b: Int) -> Bool:
     if 0x61 <= b and b <= 0x7A:
         return True
     return False
+
+
+fn _char_class(b: Int) -> Int:
+    """Three-way character class used by ``_word_range_at``. Word chars
+    cluster, whitespace clusters, everything else clusters as
+    "punctuation" — so a double-click on punctuation selects the run of
+    punctuation, not just the single byte."""
+    if _is_word_char(b):
+        return 1
+    if b == 0x20 or b == 0x09:
+        return 2
+    return 3
+
+
+fn _smart_indent_for_enter(
+    line: String, split_col: Int, ec: EditorConfig,
+) -> String:
+    """Indent the new line produced by Enter inside ``line`` at byte
+    ``split_col``: copy the source line's leading whitespace, and add
+    one indent step when the prefix (right-trimmed) ends with a block
+    opener (``{``, ``(``, ``[``, ``:``).
+
+    The block-opener heuristic is intentionally simple — covers
+    C-family / JS / Rust / Go (`{`, `(`, `[`) and Python (`:`). A real
+    LSP-driven ``onTypeFormatting`` exchange would do better but isn't
+    cheap to plumb through synchronously; this captures the 80% case.
+    """
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = 0
+    while i < n and (bytes[i] == 0x20 or bytes[i] == 0x09):
+        i += 1
+    var base = _slice(line, 0, i)
+    var p = split_col
+    if p > n:
+        p = n
+    while p > 0 and (bytes[p - 1] == 0x20 or bytes[p - 1] == 0x09):
+        p -= 1
+    if p > 0:
+        var last = bytes[p - 1]
+        if last == 0x7B or last == 0x28 or last == 0x5B or last == 0x3A:
+            return base + ec.indent_string()
+    return base
+
+
+fn _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
+    """Return the (start, end) byte range of the contiguous run of the
+    same character class around ``col``. Empty range when ``col`` is at
+    or past end of line."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    if col < 0 or col >= n:
+        return (col, col)
+    var cls = _char_class(Int(bytes[col]))
+    var start = col
+    while start > 0 and _char_class(Int(bytes[start - 1])) == cls:
+        start -= 1
+    var end = col
+    while end < n and _char_class(Int(bytes[end])) == cls:
+        end += 1
+    return (start, end)

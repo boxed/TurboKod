@@ -308,3 +308,368 @@ fn compute_local_changes(project_root: String) raises -> String:
     argv.append(String("--no-color"))
     var result = capture_command(argv)
     return result.stdout
+
+
+fn compute_staged_diff(project_root: String) -> String:
+    """``git diff --cached --no-color`` — the index versus HEAD. Empty
+    string on failure (no commits, not a repo, git missing)."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("diff"))
+    argv.append(String("--cached"))
+    argv.append(String("--no-color"))
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return String("")
+        return result.stdout
+    except:
+        return String("")
+
+
+fn compute_unstaged_diff(project_root: String) -> String:
+    """``git diff --no-color`` — worktree versus index. Empty on failure."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("diff"))
+    argv.append(String("--no-color"))
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return String("")
+        return result.stdout
+    except:
+        return String("")
+
+
+@fieldwise_init
+struct GitFileStatus(ImplicitlyCopyable, Movable):
+    """One row of ``git status --porcelain=v1 -z``. ``staged`` (X) and
+    ``worktree`` (Y) are single-byte status codes — space (0x20) means
+    "no change in this column"; ``M``/``A``/``D``/``R``/``C`` are the
+    common cases; ``?`` shows in both columns for untracked entries.
+    ``orig_path`` is empty unless this is a rename or copy (X is ``R``
+    or ``C``), in which case it carries the source path."""
+    var path: String
+    var staged: UInt8
+    var worktree: UInt8
+    var orig_path: String
+
+
+fn fetch_git_status(project_root: String) -> List[GitFileStatus]:
+    """Run ``git status --porcelain=v1 -z`` and parse one entry per row.
+
+    The ``-z`` framing keeps paths unquoted and NUL-terminated, so a
+    filename containing whitespace or a ``\\n`` survives intact. Renames
+    and copies append a second NUL-terminated source path; we capture it
+    in ``orig_path``. Empty list when git exits non-zero (not a repo,
+    git missing, etc.).
+    """
+    var out = List[GitFileStatus]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("status"))
+    argv.append(String("--porcelain=v1"))
+    argv.append(String("-z"))
+    var stdout: String
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return out^
+        stdout = result.stdout
+    except:
+        return out^
+    var b = stdout.as_bytes()
+    var i = 0
+    while i + 3 <= len(b):
+        var x = b[i]
+        var y = b[i + 1]
+        # Third byte is the separator space (0x20) before the path.
+        i += 3
+        var s = i
+        while i < len(b) and b[i] != 0x00:
+            i += 1
+        var path = String(StringSlice(unsafe_from_utf8=b[s:i]))
+        if i < len(b):
+            i += 1   # consume the path's trailing NUL
+        var orig = String("")
+        if Int(x) == 0x52 or Int(x) == 0x43:    # 'R' (rename) or 'C' (copy)
+            var os = i
+            while i < len(b) and b[i] != 0x00:
+                i += 1
+            orig = String(StringSlice(unsafe_from_utf8=b[os:i]))
+            if i < len(b):
+                i += 1
+        out.append(GitFileStatus(path^, x, y, orig^))
+    return out^
+
+
+fn stage_file(project_root: String, path: String) -> Bool:
+    """``git add -- <path>``. Returns False when git is unavailable, the
+    path is empty, or git exited non-zero. ``path`` is taken as-is —
+    callers should pass repo-relative paths (the same shape ``git
+    status`` produces)."""
+    if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
+        return False
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("add"))
+    argv.append(String("--"))
+    argv.append(path)
+    try:
+        var r = capture_command(argv)
+        return Int(r.status) == 0
+    except:
+        return False
+
+
+fn unstage_file(project_root: String, path: String) -> Bool:
+    """``git restore --staged -- <path>`` (git ≥ 2.23). For pre-existing
+    repos this restores the index entry to its HEAD content without
+    touching the worktree. Returns False on failure."""
+    if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
+        return False
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("restore"))
+    argv.append(String("--staged"))
+    argv.append(String("--"))
+    argv.append(path)
+    try:
+        var r = capture_command(argv)
+        return Int(r.status) == 0
+    except:
+        return False
+
+
+fn apply_patch_to_index(
+    project_root: String, patch: String, reverse: Bool = False,
+) -> Bool:
+    """Pipe ``patch`` to ``git apply --cached --recount`` (with
+    ``--reverse`` when unstaging). ``--recount`` lets us hand-roll
+    minimal hunks without bookkeeping the @@ counts exactly — git fixes
+    them up. Returns False on any non-zero exit; we don't surface the
+    stderr because the only legitimate failures are "patch doesn't
+    apply" (already handled by the caller's refresh) and "git missing"
+    (already handled by the surrounding repo gate)."""
+    if len(project_root.as_bytes()) == 0 or len(patch.as_bytes()) == 0:
+        return False
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("apply"))
+    argv.append(String("--cached"))
+    argv.append(String("--recount"))
+    if reverse:
+        argv.append(String("--reverse"))
+    argv.append(String("-"))
+    try:
+        var r = capture_command(argv, patch)
+        return Int(r.status) == 0
+    except:
+        return False
+
+
+@fieldwise_init
+struct GitBranch(ImplicitlyCopyable, Movable):
+    """One row of ``git for-each-ref refs/heads``: branch ``name``, the
+    short sha its tip points at, the tip commit's subject, and whether
+    this is the currently checked-out branch (``HEAD``)."""
+    var name: String
+    var short_sha: String
+    var subject: String
+    var is_current: Bool
+
+
+@fieldwise_init
+struct GitCommit(ImplicitlyCopyable, Movable):
+    """One row of ``git log --pretty=format``. ``date`` is YYYY-MM-DD."""
+    var short_sha: String
+    var author: String
+    var date: String
+    var subject: String
+
+
+fn _split_lines_keep_empty(text: String) -> List[String]:
+    """Split on ``\\n``, dropping a trailing-newline-only empty line. The
+    line-oriented git outputs we feed in here always end in ``\\n`` and
+    we don't want a phantom blank entry at the end."""
+    var out = List[String]()
+    var b = text.as_bytes()
+    var s = 0
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            s = i + 1
+    if s < len(b):
+        out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+    return out^
+
+
+fn _split_tab_fields(line: String, n: Int) -> List[String]:
+    """Split ``line`` on ``\\t`` into at most ``n`` fields. The last
+    field absorbs any further tabs verbatim, so a commit subject that
+    happens to include a tab survives unmangled. Output is padded to
+    length ``n`` with empty strings if the line had fewer separators."""
+    var out = List[String]()
+    var b = line.as_bytes()
+    var s = 0
+    var produced = 0
+    for i in range(len(b)):
+        if produced + 1 >= n:
+            break
+        if b[i] == 0x09:
+            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            s = i + 1
+            produced += 1
+    out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+    while len(out) < n:
+        out.append(String(""))
+    return out^
+
+
+fn fetch_git_branches(project_root: String) -> List[GitBranch]:
+    """Run ``git for-each-ref refs/heads`` and parse the output.
+
+    Branches are returned sorted by most recent commit date first. Empty
+    list when git is unavailable or the repo has no local branches yet
+    (fresh ``git init``)."""
+    var out = List[GitBranch]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("for-each-ref"))
+    argv.append(String("--sort=-committerdate"))
+    argv.append(
+        String("--format=%(HEAD)%09%(refname:short)%09%(objectname:short)%09%(subject)"),
+    )
+    argv.append(String("refs/heads"))
+    var stdout: String
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return out^
+        stdout = result.stdout
+    except:
+        return out^
+    var lines = _split_lines_keep_empty(stdout)
+    for li in range(len(lines)):
+        var line = lines[li]
+        if len(line.as_bytes()) == 0:
+            continue
+        var fields = _split_tab_fields(line, 4)
+        var marker = fields[0]
+        var is_cur = (len(marker.as_bytes()) > 0
+                      and marker.as_bytes()[0] == 0x2A)
+        out.append(GitBranch(fields[1], fields[2], fields[3], is_cur))
+    return out^
+
+
+fn fetch_git_commits(
+    project_root: String, limit: Int = 50,
+) -> List[GitCommit]:
+    """Run ``git log -<limit> --pretty=format``. The newest commit is
+    first. Empty list on failure."""
+    var out = List[GitCommit]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("log"))
+    argv.append(String("-") + String(limit))
+    argv.append(String("--no-color"))
+    argv.append(String("--date=short"))
+    argv.append(String("--pretty=format:%h%x09%an%x09%ad%x09%s"))
+    var stdout: String
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return out^
+        stdout = result.stdout
+    except:
+        return out^
+    var lines = _split_lines_keep_empty(stdout)
+    for li in range(len(lines)):
+        var line = lines[li]
+        if len(line.as_bytes()) == 0:
+            continue
+        var fields = _split_tab_fields(line, 4)
+        out.append(
+            GitCommit(fields[0], fields[1], fields[2], fields[3]),
+        )
+    return out^
+
+
+fn fetch_commit_show(project_root: String, sha: String) -> String:
+    """Run ``git show <sha> --no-color`` and return its full output
+    (header + unified diff). Used as the right-pane content when the
+    user focuses a commit in the local-changes view."""
+    if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
+        return String("")
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("show"))
+    argv.append(String("--no-color"))
+    argv.append(sha)
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return String("")
+        return result.stdout
+    except:
+        return String("")
+
+
+fn fetch_branch_log(
+    project_root: String, branch: String, limit: Int = 30,
+) -> String:
+    """Run ``git log -<limit> --no-color <branch>`` and return stdout.
+
+    Used as the right-pane content when a branch is focused. We render
+    the raw ``git log`` output so the user gets author / date / subject
+    in one paint, the same shape they'd see at the shell."""
+    if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
+        return String("")
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("log"))
+    argv.append(String("-") + String(limit))
+    argv.append(String("--no-color"))
+    argv.append(String("--date=short"))
+    argv.append(
+        String("--pretty=format:%h  %ad  %an%n    %s%n"),
+    )
+    argv.append(branch)
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return String("")
+        return result.stdout
+    except:
+        return String("")

@@ -48,7 +48,8 @@ from turbokod import (
     EDITOR_COMPARE_CLIPBOARD,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
-    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_PASTE,
+    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN_RECENT,
+    EDITOR_PASTE,
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
@@ -125,6 +126,7 @@ fn main() raises:
             (String("New"), EDITOR_NEW),
             (String("Open..."), String("file:open")),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
+            (String("Open recent..."), EDITOR_OPEN_RECENT),
             (String("Close"), WINDOW_CLOSE),
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),
@@ -222,13 +224,6 @@ fn main() raises:
                 error_log.append(
                     String("open ") + path + String(": ") + String(e),
                 )
-
-        desktop.status_bar.add(String("F1"),  String("Help"))
-        desktop.status_bar.add(String("F2"),  String("Save"))
-        desktop.status_bar.add(String("F3"),  String("Open"))
-        desktop.status_bar.add(String("F9"),  String("Make"))
-        desktop.status_bar.add(String("F10"), String("Menu"))
-        desktop.status_bar.add(String("Ctrl+Q"), String("Quit"))
 
         var iter_n = 0
         while app.running:

@@ -30,6 +30,21 @@ pixi run hello
 pixi run test
 ```
 
+To build the macOS app bundle and register it with LaunchServices:
+
+```sh
+make build
+```
+
+This wraps `./build.sh`, which assembles the `.app` and re-registers it via `lsregister -f` so `Info.plist` changes (URL scheme, document types) take effect immediately — without that step macOS keeps using the cached registration.
+
+The bundle lives at `./app/target/release/turbokod.app`. After that, launch it on a project (or single file) by name from anywhere:
+
+```sh
+open -a "turbokod" /path/to/project
+open -a "turbokod" /path/to/file.py
+```
+
 ## Layout
 
 ```

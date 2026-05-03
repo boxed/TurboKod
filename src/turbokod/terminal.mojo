@@ -577,6 +577,9 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         if final == 0x44: return (Event.key_event(KEY_LEFT), consumed)
         if final == 0x48: return (Event.key_event(KEY_HOME), consumed)
         if final == 0x46: return (Event.key_event(KEY_END), consumed)
+        # CSI Z = backtab (Shift+Tab). Surface as KEY_TAB + MOD_SHIFT
+        # so consumers can treat it as the inverse of plain Tab.
+        if final == 0x5A: return (Event.key_event(KEY_TAB, MOD_SHIFT), consumed)
         return (Event(), consumed)
 
     # Parse parameters as ``;``-separated decimal numbers. Anything else in
@@ -639,6 +642,8 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         if final == 0x44: return (Event.key_event(KEY_LEFT, mods), consumed)
         if final == 0x48: return (Event.key_event(KEY_HOME, mods), consumed)
         if final == 0x46: return (Event.key_event(KEY_END, mods), consumed)
+        # CSI 1 ; <mod> Z — Shift+Tab on terminals that report modifiers.
+        if final == 0x5A: return (Event.key_event(KEY_TAB, mods), consumed)
         if final == 0x75:  # 'u' — kitty kbd protocol
             var nk = _normalize_ctrl_letter(num1, mods)
             return (Event.key_event(nk[0], nk[1]), consumed)

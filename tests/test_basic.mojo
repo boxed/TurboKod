@@ -49,7 +49,7 @@ from turbokod.git_changes import (
     ChangedFile, GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
     diff_buffer_against_head, parse_unified_diff_files,
 )
-from turbokod.local_changes import LocalChanges
+from turbokod.local_changes import LocalChanges, build_minimal_patch
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
@@ -84,7 +84,12 @@ from turbokod.json import (
 )
 from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
-    _drop_prefix, _find_double_crlf, _parse_content_length, classify_message,
+    _drop_prefix, _find_double_crlf, _parse_content_length, capture_command,
+    classify_message,
+)
+from turbokod.git_changes import (
+    apply_patch_to_index, compute_staged_diff, compute_unstaged_diff,
+    fetch_git_status, stage_file, unstage_file,
 )
 from turbokod.dap import (
     DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
@@ -443,6 +448,149 @@ fn test_editor_mouse_click_clamps_to_line() raises:
     assert_equal(ed.cursor_col, 2)
 
 
+fn test_editor_double_click_selects_word() raises:
+    var ed = Editor(String("hello world foo"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    assert_true(ed.has_selection())
+    assert_equal(ed.selection_text(), String("world"))
+
+
+fn test_editor_double_click_drag_extends_by_word_forward() raises:
+    var ed = Editor(String("hello world foo bar"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(17, 0), MOUSE_BUTTON_LEFT, True, True),
+        _VIEW,
+    )
+    assert_equal(ed.selection_text(), String("world foo bar"))
+
+
+fn test_editor_double_click_drag_extends_by_word_backward() raises:
+    var ed = Editor(String("hello world foo bar"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(13, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(13, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 0), MOUSE_BUTTON_LEFT, True, True),
+        _VIEW,
+    )
+    assert_equal(ed.selection_text(), String("hello world foo"))
+
+
+fn test_editor_triple_click_selects_line() raises:
+    var ed = Editor(String("first line\nsecond line\nthird line"))
+    # Three quick presses on row 1, col 4.
+    for _ in range(3):
+        _ = ed.handle_mouse(
+            Event.mouse_event(Point(4, 1), MOUSE_BUTTON_LEFT, True, False),
+            _VIEW,
+        )
+    # Whole line + trailing newline (since this isn't the last line).
+    assert_equal(ed.selection_text(), String("second line\n"))
+
+
+fn test_editor_triple_click_last_line_no_newline() raises:
+    var ed = Editor(String("first\nlast"))
+    for _ in range(3):
+        _ = ed.handle_mouse(
+            Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, True, False),
+            _VIEW,
+        )
+    # Last line: no trailing newline available.
+    assert_equal(ed.selection_text(), String("last"))
+
+
+fn test_editor_triple_click_drag_extends_by_line_forward() raises:
+    var ed = Editor(String("alpha\nbeta\ngamma\ndelta"))
+    for _ in range(3):
+        _ = ed.handle_mouse(
+            Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, True, False),
+            _VIEW,
+        )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 2), MOUSE_BUTTON_LEFT, True, True),
+        _VIEW,
+    )
+    assert_equal(ed.selection_text(), String("beta\ngamma\n"))
+
+
+fn test_editor_triple_click_drag_extends_by_line_backward() raises:
+    var ed = Editor(String("alpha\nbeta\ngamma\ndelta"))
+    for _ in range(3):
+        _ = ed.handle_mouse(
+            Event.mouse_event(Point(2, 2), MOUSE_BUTTON_LEFT, True, False),
+            _VIEW,
+        )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 0), MOUSE_BUTTON_LEFT, True, True),
+        _VIEW,
+    )
+    assert_equal(ed.selection_text(), String("alpha\nbeta\ngamma\n"))
+
+
+fn test_editor_cut_whole_line_when_no_selection() raises:
+    var ed = Editor(String("first\nsecond\nthird"))
+    ed.move_to(1, 3, False)
+    ed.cut_to_clipboard()
+    assert_equal(ed.buffer.line_count(), 2)
+    assert_equal(ed.buffer.line(0), String("first"))
+    assert_equal(ed.buffer.line(1), String("third"))
+    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_cut_whole_line_only_line() raises:
+    var ed = Editor(String("only line"))
+    ed.move_to(0, 4, False)
+    ed.cut_to_clipboard()
+    assert_equal(ed.buffer.line_count(), 1)
+    assert_equal(ed.buffer.line(0), String(""))
+    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_smart_indent_mirrors_previous_line() raises:
+    var ed = Editor(String("    hello"))
+    ed.move_to(0, 9, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    assert_equal(ed.buffer.line_count(), 2)
+    assert_equal(ed.buffer.line(1), String("    "))
+    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 4)
+
+
+fn test_editor_smart_indent_after_open_brace() raises:
+    var ed = Editor(String("if (x) {"))
+    ed.move_to(0, 8, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    assert_equal(ed.buffer.line(1), String("    "))
+    assert_equal(ed.cursor_col, 4)
+
+
+fn test_editor_smart_indent_after_colon() raises:
+    var ed = Editor(String("    def foo():"))
+    ed.move_to(0, 14, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    assert_equal(ed.buffer.line(1), String("        "))
+    assert_equal(ed.cursor_col, 8)
+
+
 fn test_terminal_parses_modified_arrows() raises:
     """The CSI ``ESC[1;<mod><letter>`` form gives us shift/ctrl on arrows."""
     var shift_right = parse_input(String("\x1b[1;2C"))
@@ -472,6 +620,21 @@ fn test_terminal_parses_modified_arrows() raises:
     assert_true(both_right[0].key == KEY_RIGHT)
     assert_true((both_right[0].mods & MOD_SHIFT) != 0)
     assert_true((both_right[0].mods & MOD_CTRL) != 0)
+
+
+fn test_terminal_parses_shift_tab() raises:
+    """Backtab (CSI Z) and the modifier-reporting form (CSI 1;2 Z) both
+    arrive as KEY_TAB with MOD_SHIFT so the editor can treat Shift+Tab
+    as the inverse of Tab."""
+    var bare = parse_input(String("\x1b[Z"))
+    assert_true(bare[0].kind == EVENT_KEY)
+    assert_true(bare[0].key == KEY_TAB)
+    assert_true((bare[0].mods & MOD_SHIFT) != 0)
+    assert_equal(bare[1], 3)
+
+    var modreport = parse_input(String("\x1b[1;2Z"))
+    assert_true(modreport[0].key == KEY_TAB)
+    assert_true((modreport[0].mods & MOD_SHIFT) != 0)
 
 
 fn test_editor_selection_text() raises:
@@ -1023,6 +1186,58 @@ fn test_editor_uses_editorconfig_indent() raises:
     _ = ed.handle_key(_key(KEY_TAB), _VIEW)
     assert_equal(ed.buffer.line(0), String("\t"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_tab_indents_selected_lines() raises:
+    """With a selection, Tab prepends one indent unit to every spanned
+    line. A selection ending at column 0 of the next line excludes that
+    trailing line — only the visibly-selected rows are touched."""
+    var ed = Editor(String("alpha\nbeta\ngamma"))
+    # Select from (0, 0) → (2, 0): rows 0 and 1, but not row 2.
+    ed.move_to(0, 0, False)
+    ed.move_to(2, 0, True)
+    _ = ed.handle_key(_key(KEY_TAB), _VIEW)
+    assert_equal(ed.buffer.line(0), String("    alpha"))
+    assert_equal(ed.buffer.line(1), String("    beta"))
+    assert_equal(ed.buffer.line(2), String("gamma"))
+
+
+fn test_editor_shift_tab_dedents_selected_lines() raises:
+    """Shift+Tab on a selection removes one indent unit from each row.
+    Lines without leading whitespace are left alone. The selection's
+    cursor and anchor cols shrink by the bytes removed on their row."""
+    var ed = Editor(String("    alpha\n  beta\ngamma"))
+    ed.move_to(0, 4, False)        # cursor after the 4 leading spaces of row 0
+    ed.move_to(2, 0, True)         # extend through row 2 (excluded by ec==0)
+    _ = ed.handle_key(_key(KEY_TAB, MOD_SHIFT), _VIEW)
+    assert_equal(ed.buffer.line(0), String("alpha"))
+    assert_equal(ed.buffer.line(1), String("beta"))
+    assert_equal(ed.buffer.line(2), String("gamma"))
+    # Cursor was at col 4 on row 0; 4 spaces removed → col 0.
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 0)
+
+
+fn test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
+    """Shift+Tab with no selection dedents only the cursor's line."""
+    var ed = Editor(String("    alpha\n    beta"))
+    ed.move_to(1, 6, False)         # row 1, somewhere inside "beta"
+    _ = ed.handle_key(_key(KEY_TAB, MOD_SHIFT), _VIEW)
+    assert_equal(ed.buffer.line(0), String("    alpha"))
+    assert_equal(ed.buffer.line(1), String("beta"))
+    assert_equal(ed.cursor_col, 2)
+
+
+fn test_editor_shift_tab_no_indent_is_noop() raises:
+    """Shift+Tab on lines with no leading whitespace must not push an
+    undo entry — otherwise undo would step through dead-no-op states."""
+    var ed = Editor(String("alpha\nbeta"))
+    ed.move_to(0, 0, False)
+    ed.move_to(1, 4, True)
+    var before = ed.buffer.line(0) + String("|") + ed.buffer.line(1)
+    _ = ed.handle_key(_key(KEY_TAB, MOD_SHIFT), _VIEW)
+    var after = ed.buffer.line(0) + String("|") + ed.buffer.line(1)
+    assert_equal(before, after)
 
 
 fn test_editor_save_applies_editorconfig_transforms() raises:
@@ -6090,6 +6305,273 @@ fn test_local_changes_open_records_status_when_clean() raises:
     assert_false(lc.active)
 
 
+fn test_build_minimal_patch_keeps_only_target_plus_line() raises:
+    """A pure-add hunk with two ``+`` lines: targeting one of them
+    must produce a patch with just that one as ``+`` and the other
+    dropped, leaving context lines intact. ``--recount`` will fix the
+    @@ counts so we don't assert on those."""
+    var diff = String(
+        "diff --git a/x b/x\n"
+        + "--- a/x\n"
+        + "+++ b/x\n"
+        + "@@ -1,2 +1,4 @@\n"
+        + " ctx_before\n"
+        + "+added_one\n"
+        + "+added_two\n"
+        + " ctx_after\n"
+    )
+    # Lines (0-indexed after _split_lines):
+    # 0: diff --git a/x b/x
+    # 1: --- a/x
+    # 2: +++ b/x
+    # 3: @@ -1,2 +1,4 @@
+    # 4:  ctx_before
+    # 5: +added_one
+    # 6: +added_two
+    # 7:  ctx_after
+    var patch = build_minimal_patch(diff, 6, False)
+    # Must contain the target +added_two but NOT +added_one.
+    assert_true(String("+added_two") in patch)
+    assert_false(String("+added_one") in patch)
+    # Context preserved.
+    assert_true(String(" ctx_before") in patch)
+    assert_true(String(" ctx_after") in patch)
+    # File header preserved.
+    assert_true(String("--- a/x") in patch)
+    assert_true(String("+++ b/x") in patch)
+
+
+fn test_build_minimal_patch_demotes_paired_minus_to_context() raises:
+    """A replacement hunk (``-`` paired with ``+``): targeting the
+    ``+`` line forward (staging) must convert the ``-`` line into
+    context so the LEFT side still matches the index. Otherwise the
+    patch would refuse to apply because the context wouldn't line up."""
+    var diff = String(
+        "diff --git a/x b/x\n"
+        + "--- a/x\n"
+        + "+++ b/x\n"
+        + "@@ -1,3 +1,3 @@\n"
+        + " ctx\n"
+        + "-old_line\n"
+        + "+new_line\n"
+        + " more_ctx\n"
+    )
+    # Line indices: 4= ctx, 5=-old_line, 6=+new_line, 7= more_ctx.
+    var patch = build_minimal_patch(diff, 6, False)
+    # The +new_line stays; -old_line becomes context (gets a leading space).
+    assert_true(String("+new_line") in patch)
+    assert_false(String("-old_line") in patch)
+    assert_true(String(" old_line") in patch)
+
+
+fn test_build_minimal_patch_reverse_drops_paired_minus() raises:
+    """In the staged section we use --reverse. Targeting a ``+`` line
+    must convert other ``+`` lines to context (so the RIGHT side still
+    matches the index) and drop other ``-`` lines (their would-be
+    presence in the LEFT side has nothing to do with the index that
+    we're patching)."""
+    var diff = String(
+        "diff --git a/x b/x\n"
+        + "--- a/x\n"
+        + "+++ b/x\n"
+        + "@@ -1,3 +1,3 @@\n"
+        + " ctx\n"
+        + "-old_line\n"
+        + "+new_line\n"
+        + " more_ctx\n"
+    )
+    var patch = build_minimal_patch(diff, 6, True)
+    assert_true(String("+new_line") in patch)
+    # Reverse: the unselected ``-`` is dropped entirely (not converted).
+    assert_false(String("-old_line") in patch)
+    assert_false(String(" old_line") in patch)
+
+
+fn test_build_minimal_patch_returns_empty_for_non_pm_lines() raises:
+    """Cursor on a context / header line: nothing to stage, return
+    empty so the caller can no-op cleanly."""
+    var diff = String(
+        "diff --git a/x b/x\n"
+        + "--- a/x\n"
+        + "+++ b/x\n"
+        + "@@ -1,2 +1,3 @@\n"
+        + " ctx\n"
+        + "+added\n"
+        + " more\n"
+    )
+    # Index 4 is " ctx" (context line) — not toggleable.
+    assert_equal(len(build_minimal_patch(diff, 4, False).as_bytes()), 0)
+    # Index 3 is the @@ header.
+    assert_equal(len(build_minimal_patch(diff, 3, False).as_bytes()), 0)
+    # Index 0 is the file header.
+    assert_equal(len(build_minimal_patch(diff, 0, False).as_bytes()), 0)
+
+
+fn _run_git(root: String, var args: List[String]) raises -> Int:
+    """Wrapper around ``capture_command`` for the staging integration
+    test below. Returns the exit status. We rebuild the argv with
+    ``git -C <root>`` in front so the test doesn't have to repeat it."""
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(root)
+    for i in range(len(args)):
+        argv.append(args[i])
+    var r = capture_command(argv)
+    return Int(r.status)
+
+
+fn _ensure_dir(path: String) raises:
+    var argv = List[String]()
+    argv.append(String("mkdir"))
+    argv.append(String("-p"))
+    argv.append(path)
+    _ = capture_command(argv)
+
+
+fn _rm_rf(path: String) raises:
+    var argv = List[String]()
+    argv.append(String("rm"))
+    argv.append(String("-rf"))
+    argv.append(path)
+    _ = capture_command(argv)
+
+
+fn test_stage_unstage_round_trip_against_real_git() raises:
+    """End-to-end: spin up a throwaway git repo, modify a file, walk it
+    through stage_file → fetch_git_status → unstage_file. Asserts the
+    porcelain X/Y columns flip the way we expect, which is the contract
+    the LocalChanges UI is built on. Skipped silently when ``git`` is
+    missing or ``git init`` fails (e.g., a build environment without
+    git on PATH)."""
+    var dir = _temp_path(String("_stage_int"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    # ``git init -q`` so we don't pollute test output. Pass ``-b main``
+    # to avoid the default-branch warning that newer git emits — we
+    # don't care which branch, just that the call succeeds.
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    var rc = _run_git(dir, init_args^)
+    if rc != 0:
+        # No git available — skip silently.
+        _rm_rf(dir)
+        return
+    # Configure user so commit doesn't fail; ``-c`` per-invocation would
+    # be cleaner but we'd have to plumb it through every helper call.
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    # Initial commit of a known-content file.
+    var f = join_path(dir, String("a.txt"))
+    assert_true(write_file(f, String("alpha\nbeta\ngamma\n")))
+    var add_initial = List[String]()
+    add_initial.append(String("add"))
+    add_initial.append(String("a.txt"))
+    _ = _run_git(dir, add_initial^)
+    var commit_args = List[String]()
+    commit_args.append(String("commit"))
+    commit_args.append(String("-q"))
+    commit_args.append(String("-m"))
+    commit_args.append(String("init"))
+    _ = _run_git(dir, commit_args^)
+    # Modify the file.
+    assert_true(write_file(f, String("alpha\nbeta-modified\ngamma\n")))
+    # Status should show ' M a.txt'.
+    var statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 1)
+    assert_equal(Int(statuses[0].staged), 0x20)
+    assert_equal(Int(statuses[0].worktree), 0x4D)    # 'M'
+    assert_equal(statuses[0].path, String("a.txt"))
+    # Stage the whole file.
+    assert_true(stage_file(dir, String("a.txt")))
+    statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 1)
+    assert_equal(Int(statuses[0].staged), 0x4D)      # 'M'
+    assert_equal(Int(statuses[0].worktree), 0x20)
+    # Unstage and verify it bounces back.
+    assert_true(unstage_file(dir, String("a.txt")))
+    statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 1)
+    assert_equal(Int(statuses[0].staged), 0x20)
+    assert_equal(Int(statuses[0].worktree), 0x4D)
+    # Build a minimal patch from the unstaged diff and apply it: that
+    # exercises the line-staging path end-to-end. The hunk has one ``-``
+    # / one ``+`` pair, so targeting the ``+`` line stages the change
+    # while demoting the ``-`` to context (algorithm tested above).
+    var unstaged = compute_unstaged_diff(dir)
+    assert_true(len(unstaged.as_bytes()) > 0)
+    var per_file = parse_unified_diff_files(unstaged)
+    assert_equal(len(per_file), 1)
+    var lines = List[String]()
+    var b = per_file[0].diff.as_bytes()
+    var s = 0
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            lines.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            s = i + 1
+    if s < len(b):
+        lines.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+    # Find the ``+beta-modified`` line index.
+    var plus_idx = -1
+    for i in range(len(lines)):
+        var lb = lines[i].as_bytes()
+        if len(lb) > 0 and Int(lb[0]) == 0x2B \
+                and lines[i] != String("+++ b/a.txt"):
+            plus_idx = i
+            break
+    assert_true(plus_idx > 0)
+    var patch = build_minimal_patch(per_file[0].diff, plus_idx, False)
+    assert_true(len(patch.as_bytes()) > 0)
+    assert_true(apply_patch_to_index(dir, patch, False))
+    # After applying: the staged side should now have a modification.
+    # Worktree column stays modified because we only staged the ``+`` half
+    # of the replacement (``-beta`` was demoted to context, so removing
+    # ``beta`` is still pending) — that's the correct line-staging
+    # semantics, just an awkward end-state. The point of the assertion
+    # is that staging didn't no-op.
+    var staged_after = compute_staged_diff(dir)
+    assert_true(len(staged_after.as_bytes()) > 0)
+    statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 1)
+    assert_equal(Int(statuses[0].staged), 0x4D)
+    assert_equal(Int(statuses[0].worktree), 0x4D)
+    _rm_rf(dir)
+
+
+fn test_build_minimal_patch_drops_other_hunks() raises:
+    """A diff with two hunks: targeting a line in the first must produce
+    output containing only that hunk; the second hunk's lines must not
+    appear at all (otherwise we'd accidentally stage other changes)."""
+    var diff = String(
+        "diff --git a/x b/x\n"
+        + "--- a/x\n"
+        + "+++ b/x\n"
+        + "@@ -1,2 +1,3 @@\n"
+        + " a\n"
+        + "+added_in_hunk1\n"
+        + " b\n"
+        + "@@ -10,1 +11,2 @@\n"
+        + " c\n"
+        + "+added_in_hunk2\n"
+    )
+    var patch = build_minimal_patch(diff, 5, False)
+    assert_true(String("+added_in_hunk1") in patch)
+    assert_false(String("+added_in_hunk2") in patch)
+    # Second hunk header dropped too.
+    assert_false(String("@@ -10,1") in patch)
+
+
 fn main() raises:
     test_diff_grammar_paints_inserted_deleted_and_hunk_header()
     test_diff_identical_inputs_have_no_hunks()
@@ -6106,6 +6588,12 @@ fn main() raises:
     test_diff_buffer_against_head_marks_added_and_modified()
     test_editor_git_changes_gutter_widens_total_gutter()
     test_local_changes_open_records_status_when_clean()
+    test_build_minimal_patch_keeps_only_target_plus_line()
+    test_build_minimal_patch_demotes_paired_minus_to_context()
+    test_build_minimal_patch_reverse_drops_paired_minus()
+    test_build_minimal_patch_returns_empty_for_non_pm_lines()
+    test_build_minimal_patch_drops_other_hunks()
+    test_stage_unstage_round_trip_against_real_git()
     test_point_arithmetic()
     test_rect_basics()
     test_rect_helpers()
@@ -6129,6 +6617,18 @@ fn main() raises:
     test_editor_mouse_click_sets_cursor()
     test_editor_mouse_drag_extends_selection()
     test_editor_mouse_click_clamps_to_line()
+    test_editor_double_click_selects_word()
+    test_editor_double_click_drag_extends_by_word_forward()
+    test_editor_double_click_drag_extends_by_word_backward()
+    test_editor_triple_click_selects_line()
+    test_editor_triple_click_last_line_no_newline()
+    test_editor_triple_click_drag_extends_by_line_forward()
+    test_editor_triple_click_drag_extends_by_line_backward()
+    test_editor_cut_whole_line_when_no_selection()
+    test_editor_cut_whole_line_only_line()
+    test_editor_smart_indent_mirrors_previous_line()
+    test_editor_smart_indent_after_open_brace()
+    test_editor_smart_indent_after_colon()
     test_terminal_parses_modified_arrows()
     test_editor_selection_text()
     test_editor_cut_selection()

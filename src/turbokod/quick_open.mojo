@@ -22,7 +22,6 @@ from .events import (
     KEY_UP, MOD_ALT, MOD_CTRL,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .file_io import join_path
 from .geometry import Point, Rect
 from .project import walk_project_files
 from .text_field import text_field_clipboard_key
@@ -35,13 +34,17 @@ struct QuickOpen(Movable):
     var root: String
     var query: String
     var selected_path: String
-    # Candidate paths kept relative to the project root for display; we
-    # join with ``root`` only when the user submits.
+    # Display labels (project-relative when possible). Each entry has a
+    # parallel absolute path in ``entries_abs`` used as the submit target.
     var entries: List[String]
+    var entries_abs: List[String]
     # Indices into ``entries`` that match the current query.
     var matched: List[Int]
     var selected: Int
     var scroll: Int
+    # Dialog title — "Quick Open" by default, "Open Recent" for the
+    # recents-mode entry point.
+    var title: String
 
     fn __init__(out self):
         self.active = False
@@ -50,9 +53,11 @@ struct QuickOpen(Movable):
         self.query = String("")
         self.selected_path = String("")
         self.entries = List[String]()
+        self.entries_abs = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self.title = String(" Quick Open ")
 
     fn open(mut self, var root: String):
         self.root = root^
@@ -62,9 +67,11 @@ struct QuickOpen(Movable):
         self.selected_path = String("")
         self.selected = 0
         self.scroll = 0
+        self.title = String(" Quick Open ")
         # Load candidate set from disk. Paths come back absolute; strip the
         # root prefix so the picker shows the project-relative form.
         self.entries = List[String]()
+        self.entries_abs = List[String]()
         var paths = walk_project_files(self.root)
         var rb = self.root.as_bytes()
         for i in range(len(paths)):
@@ -79,8 +86,33 @@ struct QuickOpen(Movable):
                     self.entries.append(String(StringSlice(
                         unsafe_from_utf8=fb[len(rb) + 1:],
                     )))
+                    self.entries_abs.append(paths[i])
                     continue
             self.entries.append(paths[i])
+            self.entries_abs.append(paths[i])
+        self._refilter()
+
+    fn open_recent(
+        mut self, var root: String, var entries: List[String],
+        var entries_abs: List[String],
+    ):
+        """Open with a caller-supplied list of paths (display + absolute).
+
+        Order is preserved verbatim — used for the "Open Recent" entry
+        point so the most-recently-focused file is at the top. Entries
+        are not re-sorted by the matcher; the empty-query view shows
+        them in the order passed.
+        """
+        self.root = root^
+        self.query = String("")
+        self.active = True
+        self.submitted = False
+        self.selected_path = String("")
+        self.selected = 0
+        self.scroll = 0
+        self.title = String(" Open Recent ")
+        self.entries = entries^
+        self.entries_abs = entries_abs^
         self._refilter()
 
     fn close(mut self):
@@ -90,9 +122,11 @@ struct QuickOpen(Movable):
         self.query = String("")
         self.selected_path = String("")
         self.entries = List[String]()
+        self.entries_abs = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self.title = String(" Quick Open ")
 
     # --- filtering --------------------------------------------------------
 
@@ -148,9 +182,8 @@ struct QuickOpen(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var title = String(" Quick Open ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        var tx = rect.a.x + (rect.width() - len(self.title.as_bytes())) // 2
+        _ = canvas.put_text(Point(tx, rect.a.y), self.title, title_attr)
         # Search line: ``Find: <query>_``
         var label = String(" Find: ")
         _ = canvas.put_text(
@@ -201,8 +234,7 @@ struct QuickOpen(Movable):
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.matched):
                 return True
-            var rel = self.entries[self.matched[self.selected]]
-            self.selected_path = join_path(self.root, rel)
+            self.selected_path = self.entries_abs[self.matched[self.selected]]
             self.submitted = True
             return True
         if k == KEY_UP:
@@ -292,8 +324,7 @@ struct QuickOpen(Movable):
         if idx < 0 or idx >= len(self.matched):
             return True
         if idx == self.selected:
-            var rel = self.entries[self.matched[idx]]
-            self.selected_path = join_path(self.root, rel)
+            self.selected_path = self.entries_abs[self.matched[idx]]
             self.submitted = True
             return True
         self.selected = idx
