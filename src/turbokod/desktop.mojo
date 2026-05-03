@@ -1428,16 +1428,16 @@ struct Desktop(Movable):
 
     fn _save_session_if_changed(mut self):
         """Re-encode the current session and write it to disk only when
-        the encoding differs from the previously-written one. Two
-        deliberate skip cases: no project is open (nowhere to write),
-        or no file-backed windows are showing (we want the prior
-        session to survive a "close all windows" cycle so reopening
-        the project later restores them)."""
+        the encoding differs from the previously-written one. Skipped
+        when no project is open — nowhere to write. Closing the last
+        window writes an empty session so the next ``open_project``
+        starts clean rather than restoring a stale window. The
+        ``close_project`` flow clears ``self.project`` *before*
+        dropping its editor windows, so the project guard here keeps
+        the on-disk session intact for restore on reopen."""
         if not self.project:
             return
         var session = self._snapshot_session()
-        if len(session.windows) == 0:
-            return
         var encoded = encode_session(session)
         if encoded == self._last_session_json:
             return
