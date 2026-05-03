@@ -52,8 +52,8 @@ from std.collections.list import List
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
-    WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
+    STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
@@ -96,6 +96,23 @@ comptime PANE_OUT_CONSOLE    = UInt8(2)
 
 comptime PANE_MODE_DEBUG     = UInt8(0)
 comptime PANE_MODE_RUN       = UInt8(1)
+
+
+@fieldwise_init
+struct OutputLink(ImplicitlyCopyable, Movable):
+    """One clickable file:line span painted into the Output log.
+
+    Populated by ``paint`` whenever a recognized pattern (currently
+    Python's ``File "<path>", line <N>``) appears in a visible output
+    line, and consumed by ``handle_mouse`` to map a click back to a
+    file-open intent. The rect is in absolute screen coordinates so
+    the click test doesn't need to know about the pane's own origin.
+    """
+    var y: Int
+    var x_start: Int
+    var x_end: Int     # exclusive
+    var path: String
+    var line: Int      # 1-based; matches Python traceback convention
 
 
 @fieldwise_init
@@ -177,6 +194,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var pending_expand_row: Int         # row index of the parent variable
     var pending_expand_depth: Int       # children's indent level
     var pending_collapse_row: Int       # row index for a collapse (no DAP traffic needed)
+    # Output-log link click. Empty string = none.
+    var pending_open_path: String
+    var pending_open_line: Int          # 1-based; 0 with empty path = none
 
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
@@ -194,6 +214,11 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     """True while the user holds the left button after pressing on
     the pane's top border. Mouse motion in this state updates
     ``preferred_height``; the next non-pressed event clears it."""
+    var _last_links: List[OutputLink]
+    """Clickable file:line spans painted by the last ``paint`` call,
+    in absolute screen coordinates. Rebuilt on every paint so the
+    set always reflects what the user can currently see — scrolled-off
+    lines drop out automatically."""
 
     fn __init__(out self):
         self.visible = False
@@ -215,6 +240,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_expand_row = -1
         self.pending_expand_depth = 0
         self.pending_collapse_row = -1
+        self.pending_open_path = String("")
+        self.pending_open_line = 0
         self._last_inspect_y0 = 0
         self._last_output_y0 = 0
         self._last_divider_x = 0
@@ -222,6 +249,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
         self._resizing = False
+        self._last_links = List[OutputLink]()
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
@@ -243,6 +271,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_expand_row = copy.pending_expand_row
         self.pending_expand_depth = copy.pending_expand_depth
         self.pending_collapse_row = copy.pending_collapse_row
+        self.pending_open_path = copy.pending_open_path
+        self.pending_open_line = copy.pending_open_line
         self._last_inspect_y0 = copy._last_inspect_y0
         self._last_output_y0 = copy._last_output_y0
         self._last_divider_x = copy._last_divider_x
@@ -250,6 +280,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._left_indices = copy._left_indices.copy()
         self._right_indices = copy._right_indices.copy()
         self._resizing = copy._resizing
+        self._last_links = copy._last_links.copy()
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -462,6 +493,18 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_collapse_row = -1
         return row
 
+    fn consume_open_request(mut self) -> Tuple[String, Int]:
+        """Returns ``(path, line)`` (1-based) for a freshly clicked
+        output-log link, or ``("", 0)`` when nothing is pending. The
+        host calls ``open_file_at`` with ``line - 1`` since
+        ``open_file_at`` works in 0-based rows.
+        """
+        var path = self.pending_open_path
+        var line = self.pending_open_line
+        self.pending_open_path = String("")
+        self.pending_open_line = 0
+        return (path^, line)
+
     # --- paint -----------------------------------------------------------
 
     fn paint(mut self, mut canvas: Canvas, panel: Rect):
@@ -477,6 +520,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var current = Attr(BLACK, LIGHT_YELLOW)
         var dim = Attr(LIGHT_GRAY, BLACK)
         var stderr_attr = Attr(LIGHT_RED, BLACK)
+        var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
+        # Reset visible-link rects each paint — only what's currently
+        # on screen counts for click hit-testing.
+        self._last_links = List[OutputLink]()
         canvas.fill(panel, String(" "), bg)
         self._last_panel_top = panel.a.y
         # Top border with title. Focus is shown via line weight (single →
@@ -655,10 +702,33 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 attr = stderr_attr
             elif self.output_categories[idx] == PANE_OUT_CONSOLE:
                 attr = dim
+            var line_x0 = panel.a.x + 2
+            var line_y = out_top + k
+            var line_x_max = panel.b.x - 1
             _ = canvas.put_text(
-                Point(panel.a.x + 2, out_top + k), line, attr,
-                panel.b.x - 1,
+                Point(line_x0, line_y), line, attr, line_x_max,
             )
+            # Overlay clickable file:line links — Python's
+            # ``File "<path>", line N`` traceback frames. Done as a
+            # post-pass via ``set_attr`` so the line keeps its glyphs
+            # but the link cells get an underline + blue color the
+            # eye reads as "this is clickable".
+            var hits = _extract_python_traceback_links(line)
+            for h in range(len(hits)):
+                var hit = hits[h]
+                var x0 = line_x0 + hit.cell_start
+                var x1 = line_x0 + hit.cell_end
+                if x0 >= line_x_max:
+                    continue
+                if x1 > line_x_max:
+                    x1 = line_x_max
+                if x1 <= x0:
+                    continue
+                for x in range(x0, x1):
+                    canvas.set_attr(x, line_y, link_attr)
+                self._last_links.append(OutputLink(
+                    line_y, x0, x1, hit.path, hit.line,
+                ))
 
     # --- input -----------------------------------------------------------
 
@@ -738,6 +808,17 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # without lines sliding out from under them. Click again at
         # the bottom row to re-engage autoscroll.
         elif event.pos.y >= self._last_output_y0:
+            # File:line link hit-test runs first — clicking on a
+            # ``File "x", line N`` span should open the file rather
+            # than toggle the autoscroll mode.
+            for li in range(len(self._last_links)):
+                var link = self._last_links[li]
+                if event.pos.y == link.y \
+                        and event.pos.x >= link.x_start \
+                        and event.pos.x < link.x_end:
+                    self.pending_open_path = link.path
+                    self.pending_open_line = link.line
+                    return True
             var visible = panel.b.y - self._last_output_y0
             var clicked = self.output_scroll - visible + 1 \
                 + (event.pos.y - self._last_output_y0)
@@ -913,6 +994,129 @@ fn _pad_right(s: String, width: Int) -> String:
     var out = s
     for _ in range(width - n):
         out = out + String(" ")
+    return out^
+
+
+# --- output-link parser ---------------------------------------------------
+
+
+@fieldwise_init
+struct _LinkHit(ImplicitlyCopyable, Movable):
+    """Bytes-resolved match for a single ``File "<path>", line N``
+    occurrence. ``cell_start`` / ``cell_end`` are codepoint counts
+    from the start of the line, matching how ``Canvas.put_text``
+    advances columns — so callers can convert directly to screen X
+    without redoing the UTF-8 walk."""
+    var cell_start: Int
+    var cell_end: Int    # exclusive
+    var path: String
+    var line: Int        # 1-based
+
+
+fn _extract_python_traceback_links(line: String) -> List[_LinkHit]:
+    """Find every ``File "<path>", line <N>`` span in ``line``.
+
+    Matches Python's traceback format. The trailing ``, in <name>`` is
+    optional — the link covers ``File "<path>", line <N>`` itself,
+    leaving any ``in module`` suffix unhighlighted so the visual focus
+    is on the navigable part. Quoted paths only (no shell-escape
+    handling); a literal ``"`` in a path would terminate the match
+    early, which is fine for ~all real-world paths.
+    """
+    var out = List[_LinkHit]()
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    # Walk byte-by-byte, tracking the parallel codepoint count so we
+    # can hand callers cell offsets directly. Continuation bytes
+    # (10xx_xxxx) don't bump the cell counter.
+    var i = 0
+    var cell = 0
+    while i < n:
+        var b = Int(bytes[i])
+        # Probe for the literal ``File "`` prefix on a codepoint
+        # boundary. Always ASCII, so a byte compare is correct here.
+        if b == 0x46 and i + 6 <= n \
+                and bytes[i + 1] == 0x69 \
+                and bytes[i + 2] == 0x6C \
+                and bytes[i + 3] == 0x65 \
+                and bytes[i + 4] == 0x20 \
+                and bytes[i + 5] == 0x22:
+            var match_start_cell = cell
+            var p = i + 6
+            var path_byte_start = p
+            # Path runs until the next ``"``. Track cells alongside
+            # bytes so the closing quote's cell offset is correct
+            # even when the path contains multibyte characters.
+            var path_cell_count = 0
+            var found_quote = False
+            while p < n:
+                var pb = Int(bytes[p])
+                if pb == 0x22:
+                    found_quote = True
+                    break
+                if (pb & 0xC0) != 0x80:
+                    path_cell_count += 1
+                p += 1
+            if not found_quote:
+                # Drop out — no recognizable link starts here.
+                cell += 1
+                i += 1
+                continue
+            var path_byte_end = p
+            # Past the closing quote.
+            p += 1
+            # Need exactly ``, line ``.
+            if p + 7 > n \
+                    or bytes[p] != 0x2C \
+                    or bytes[p + 1] != 0x20 \
+                    or bytes[p + 2] != 0x6C \
+                    or bytes[p + 3] != 0x69 \
+                    or bytes[p + 4] != 0x6E \
+                    or bytes[p + 5] != 0x65 \
+                    or bytes[p + 6] != 0x20:
+                cell += 1
+                i += 1
+                continue
+            p += 7
+            # One or more ASCII digits — the line number.
+            var digit_start = p
+            var line_no = 0
+            while p < n:
+                var db = Int(bytes[p])
+                if db >= 0x30 and db <= 0x39:
+                    line_no = line_no * 10 + (db - 0x30)
+                    p += 1
+                else:
+                    break
+            if p == digit_start:
+                cell += 1
+                i += 1
+                continue
+            # Slice the path text out without re-decoding.
+            var path = String(StringSlice(
+                ptr=bytes.unsafe_ptr() + path_byte_start,
+                length=path_byte_end - path_byte_start,
+            ))
+            # Cell offsets: prefix ``File "`` is 6 cells (all ASCII),
+            # then the path, the closing ``"``, then ``, line `` (7
+            # cells), then digit_count cells.
+            var digit_count = p - digit_start
+            var span_cells = 6 + path_cell_count + 1 + 7 + digit_count
+            out.append(_LinkHit(
+                match_start_cell, match_start_cell + span_cells,
+                path, line_no,
+            ))
+            # Advance past the matched span. We've already moved ``p``
+            # to the byte after the last digit; sync ``cell`` to the
+            # span end (every byte we consumed in the suffix was ASCII
+            # except the path body, whose cell count we tracked).
+            cell = match_start_cell + span_cells
+            i = p
+            continue
+        # Default codepoint advance: one cell per UTF-8 leader byte.
+        if (b & 0xC0) != 0x80:
+            cell += 1
+        i += 1
     return out^
 
 

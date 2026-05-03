@@ -1858,6 +1858,14 @@ struct Desktop(Movable):
                 # here regardless of whether the pane has focus.
                 self._run_output_held = False
                 self.debug_pane.focused = False
+            elif self.windows.focused_is_editor() \
+                    and self.windows.windows[self.windows.focused] \
+                        .editor.has_extra_carets():
+                # Multi-cursor escape hatch: drop back to the primary
+                # caret. Same intent as plain mouse click; but reachable
+                # without taking your hands off the keyboard.
+                self.windows.windows[self.windows.focused] \
+                    .editor.clear_extra_carets()
             else:
                 self._esc_armed = True
             return Optional[String]()

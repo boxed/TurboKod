@@ -14,8 +14,8 @@ from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_GREEN,
-    WHITE, YELLOW, default_attr,
+    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
+    STYLE_UNDERLINE, WHITE, YELLOW, default_attr,
 )
 from turbokod.diff import diff_lines, unified_diff
 from turbokod.editor import Editor, TextBuffer
@@ -3011,6 +3011,66 @@ fn test_editor_alt_click_outside_identifier_is_silent() raises:
     assert_false(Bool(req))
 
 
+fn test_editor_gutter_click_emits_breakpoint_toggle() raises:
+    # Line-number gutter on → 2 cells of gutter at the left edge. A
+    # left-click there must surface as a pending breakpoint toggle for
+    # the corresponding buffer row, without moving the cursor.
+    var ed = Editor(String("alpha\nbeta\ngamma"))
+    ed.line_numbers = True
+    var ev = Event.mouse_event(
+        Point(0, 1), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=0,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_breakpoint_toggle()
+    assert_true(Bool(req))
+    assert_equal(req.value(), 1)
+    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.cursor_col, 0)
+    # Slot is one-shot.
+    assert_false(Bool(ed.consume_breakpoint_toggle()))
+
+
+fn test_editor_text_click_does_not_toggle_breakpoint() raises:
+    # Click past the gutter — normal cursor placement, no toggle.
+    var ed = Editor(String("alpha\nbeta\ngamma"))
+    ed.line_numbers = True
+    var ev = Event.mouse_event(
+        Point(5, 1), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=0,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    assert_false(Bool(ed.consume_breakpoint_toggle()))
+    assert_equal(ed.cursor_row, 1)
+
+
+fn test_editor_gutter_click_below_eof_is_ignored() raises:
+    # Click in the gutter on a screen row past the last buffer line —
+    # no breakpoint should be toggled (matches "click on empty space"
+    # being a no-op for cursor placement, just without the cursor side
+    # effect).
+    var ed = Editor(String("alpha\nbeta"))
+    ed.line_numbers = True
+    var ev = Event.mouse_event(
+        Point(0, 4), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=0,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 6))
+    assert_false(Bool(ed.consume_breakpoint_toggle()))
+
+
+fn test_editor_gutter_drag_motion_does_not_toggle() raises:
+    # Drag motion through the gutter must not flood pending toggles.
+    var ed = Editor(String("alpha\nbeta\ngamma"))
+    ed.line_numbers = True
+    var ev = Event.mouse_event(
+        Point(0, 1), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=True, mods=0,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    assert_false(Bool(ed.consume_breakpoint_toggle()))
+
+
 fn test_quick_open_match_rules() raises:
     """Locked-in spec: the query is split on spaces into tokens, and each
     token is then split around every ``/`` (with ``/`` kept as its own
@@ -4816,6 +4876,127 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
                 and c.get(5, y).glyph == String("t"):
             found = True
     assert_true(found)
+
+
+fn _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
+    """Locate the first column at row ``y`` whose glyph matches
+    ``glyph``. Returns -1 when not found."""
+    for x in range(c.width):
+        if c.get(x, y).glyph == glyph:
+            return x
+    return -1
+
+
+fn test_debug_pane_traceback_link_underlines_span() raises:
+    """A Python-style ``File "<path>", line N`` entry in the output log
+    must paint with an underline + LIGHT_BLUE foreground over the whole
+    ``File "..." , line N`` span so users see it as a clickable link."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String('  File "/tmp/foo.py", line 42, in main'))
+    var c = Canvas(60, 8)
+    pane.paint(c, Rect(0, 0, 60, 8))
+    # Find ``F`` of ``File`` on whichever row Output painted to.
+    var link_y = -1
+    var link_x = -1
+    for y in range(2, 8):
+        var x = _find_glyph_x(c, y, String("F"))
+        if x >= 0 and c.get(x + 1, y).glyph == String("i"):
+            link_y = y
+            link_x = x
+            break
+    assert_true(link_y >= 0)
+    # The first cell of ``File`` must carry the link styling.
+    var head = c.get(link_x, link_y)
+    assert_equal(head.attr.fg, LIGHT_BLUE)
+    assert_true((head.attr.style & STYLE_UNDERLINE) != 0)
+    # The closing digit ``2`` of ``42`` is the last cell of the span;
+    # no need to recompute the offset, just walk forward until we find
+    # ``2`` followed by ``,``.
+    var two_x = -1
+    for x in range(link_x, c.width - 1):
+        if c.get(x, link_y).glyph == String("2") \
+                and c.get(x + 1, link_y).glyph == String(","):
+            two_x = x
+            break
+    assert_true(two_x >= 0)
+    var tail = c.get(two_x, link_y)
+    assert_equal(tail.attr.fg, LIGHT_BLUE)
+    assert_true((tail.attr.style & STYLE_UNDERLINE) != 0)
+    # The trailing comma after the digits is *not* part of the link.
+    var after = c.get(two_x + 1, link_y)
+    assert_equal(after.attr.fg, WHITE)
+    assert_true((after.attr.style & STYLE_UNDERLINE) == 0)
+
+
+fn test_debug_pane_plain_output_has_no_link_styling() raises:
+    """A line that doesn't match the traceback pattern is painted with
+    the normal output attribute — no underline, default foreground."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("just some output"))
+    var c = Canvas(40, 8)
+    pane.paint(c, Rect(0, 0, 40, 8))
+    # Walk every cell that ended up with ``j`` of ``just`` and verify
+    # neither styling artifact is present.
+    for y in range(2, 8):
+        var x = _find_glyph_x(c, y, String("j"))
+        if x < 0:
+            continue
+        var cell = c.get(x, y)
+        assert_equal(cell.attr.fg, WHITE)
+        assert_true((cell.attr.style & STYLE_UNDERLINE) == 0)
+
+
+fn test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
+    """Clicking inside the link span stores ``(path, line)`` for the
+    host to consume. The trailing ``in main`` text is *not* part of the
+    span, so a click on ``in`` falls through to the autoscroll-toggle
+    path and leaves no pending request."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String('  File "/tmp/foo.py", line 42, in main'))
+    var panel = Rect(0, 0, 60, 8)
+    var c = Canvas(60, 8)
+    pane.paint(c, panel)
+    # Find ``F`` so we click on a known cell inside the link.
+    var link_y = -1
+    var link_x = -1
+    for y in range(2, 8):
+        var x = _find_glyph_x(c, y, String("F"))
+        if x >= 0 and c.get(x + 1, y).glyph == String("i"):
+            link_y = y
+            link_x = x
+            break
+    assert_true(link_y >= 0)
+    var hit = pane.handle_mouse(
+        Event.mouse_event(
+            Point(link_x + 2, link_y), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        panel,
+    )
+    assert_true(hit)
+    var req = pane.consume_open_request()
+    assert_equal(req[0], String("/tmp/foo.py"))
+    assert_equal(req[1], 42)
+    # Second consume returns the cleared sentinel.
+    var req2 = pane.consume_open_request()
+    assert_equal(req2[0], String(""))
+    assert_equal(req2[1], 0)
+    # A click outside the link span (well past the digits) must NOT
+    # set a pending open request — that path's reserved for the
+    # autoscroll-toggle behaviour.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(50, link_y), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        panel,
+    )
+    var req3 = pane.consume_open_request()
+    assert_equal(req3[0], String(""))
 
 
 fn test_targets_dialog_edit_and_submit() raises:
@@ -6699,6 +6880,10 @@ fn main() raises:
     test_editor_paint_overlays_highlight_attr()
     test_editor_alt_click_emits_definition_request()
     test_editor_alt_click_outside_identifier_is_silent()
+    test_editor_gutter_click_emits_breakpoint_toggle()
+    test_editor_text_click_does_not_toggle_breakpoint()
+    test_editor_gutter_click_below_eof_is_ignored()
+    test_editor_gutter_drag_motion_does_not_toggle()
     test_install_runner_last_lines_picks_tail_skipping_blanks()
     test_install_runner_runs_sh_command_to_completion()
     test_install_runner_failure_carries_nonzero_exit()
@@ -6850,6 +7035,9 @@ fn main() raises:
     test_debug_pane_run_mode_hides_inspect_divider()
     test_debug_pane_run_mode_uses_full_height_for_output()
     test_debug_pane_debug_mode_keeps_output_divider()
+    test_debug_pane_traceback_link_underlines_span()
+    test_debug_pane_plain_output_has_no_link_styling()
+    test_debug_pane_click_on_traceback_link_sets_pending_open()
     test_targets_dialog_edit_and_submit()
     test_targets_dialog_add_and_remove()
     test_targets_dialog_save_button_submits()

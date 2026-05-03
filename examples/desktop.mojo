@@ -436,6 +436,17 @@ fn main() raises:
                         desktop.dap.client.process.trace(
                             String("APP_QUIT_ACTION fired"),
                         )
+                        # Stop any debug / run session before we leave the
+                        # loop so the child gets SIGTERM (and, for DAP, the
+                        # adapter's ``disconnect`` with ``terminateDebuggee``)
+                        # while we still have its pid in hand. Cleanup below
+                        # is a defensive backstop; this is the path the user
+                        # actually triggers. We don't bother clearing the
+                        # gutter exec marker — the screen is about to go.
+                        if desktop.dap.is_active():
+                            desktop.dap.shutdown()
+                        if desktop.run_session.is_active():
+                            desktop.run_session.terminate()
                         app.quit()
                     elif action == String("file:open"):
                         var start = desktop.project.value() \
@@ -458,12 +469,16 @@ fn main() raises:
                 error_log.append(msg)
                 if desktop.dap.is_active():
                     desktop.dap.client.process.trace(msg)
-        # Reap the LSP child before we leave the try block — ``desktop`` isn't
-        # in scope from the outer ``finally``, and we'd rather not orphan the
-        # subprocess if the loop exits cleanly via Ctrl+Q.
+        # Reap any spawned children before we leave the try block —
+        # ``desktop`` isn't in scope from the outer ``finally``, and we'd
+        # rather not orphan a subprocess if the loop exits cleanly via
+        # Ctrl+Q. The action handler above already stops dap / run on the
+        # quit path; these calls are idempotent backstops for any other
+        # path out of the loop.
         for i in range(len(desktop.lsp_managers)):
             desktop.lsp_managers[i].shutdown()
         desktop.dap.shutdown()
+        desktop.run_session.terminate()
         app.stop()
         for i in range(len(error_log)):
             print(error_log[i])

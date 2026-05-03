@@ -272,6 +272,25 @@ comptime _DOUBLE_CLICK_MS = 500
 second one to be treated as a double-click."""
 
 
+@fieldwise_init
+struct Caret(ImplicitlyCopyable, Movable):
+    """One caret + its anchor + remembered cell column.
+
+    The editor's primary caret lives in ``Editor.cursor_*``/``anchor_*`` /
+    ``desired_col``; this struct mirrors the same five fields so any
+    operation can be expressed as "set the primary to this caret, run
+    the existing single-caret code, capture the result". Additional
+    carets sit in ``Editor.extra_carets``; the empty-list case is the
+    common one and reduces to the original single-caret model with no
+    per-keystroke overhead.
+    """
+    var row: Int
+    var col: Int
+    var desired_col: Int
+    var anchor_row: Int
+    var anchor_col: Int
+
+
 struct EditorSnapshot(ImplicitlyCopyable, Movable):
     """One reversible step. Captures everything ``undo`` needs to restore:
     the buffer contents and the caret/selection. Scroll position is excluded
@@ -282,6 +301,10 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
     var cursor_col: Int
     var anchor_row: Int
     var anchor_col: Int
+    # Multi-cursor: the extra carets present at the time of the snapshot.
+    # Restoring a snapshot rebuilds the full caret set so undo / redo
+    # round-trips multi-caret state.
+    var extra_carets: List[Caret]
 
     fn __init__(
         out self,
@@ -290,12 +313,14 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
         cursor_col: Int,
         anchor_row: Int,
         anchor_col: Int,
+        var extra_carets: List[Caret],
     ):
         self.lines = lines^
         self.cursor_row = cursor_row
         self.cursor_col = cursor_col
         self.anchor_row = anchor_row
         self.anchor_col = anchor_col
+        self.extra_carets = extra_carets^
 
     fn __copyinit__(out self, copy: Self):
         self.lines = copy.lines.copy()
@@ -303,6 +328,7 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
         self.cursor_col = copy.cursor_col
         self.anchor_row = copy.anchor_row
         self.anchor_col = copy.anchor_col
+        self.extra_carets = copy.extra_carets.copy()
 
 
 # --- Editor widget ----------------------------------------------------------
@@ -311,12 +337,21 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
 struct Editor(ImplicitlyCopyable, Movable):
     """Pure-Mojo text editor widget.
 
-    Cursor model: a single cursor at ``(cursor_row, cursor_col)`` plus an
+    Cursor model: a *primary* cursor at ``(cursor_row, cursor_col)`` plus an
     ``anchor`` at the same coordinates when there is no selection. Any movement
     can be performed *with* or *without* the Shift modifier; with Shift we keep
     the anchor fixed (extending the selection), without Shift we collapse the
     anchor to the new cursor position. Word movement (Ctrl) and selection
     (Shift) are independent dimensions that compose cleanly.
+
+    Multiple cursors live in ``extra_carets``. Most edit / movement ops
+    iterate every caret (primary + extras) and run the single-caret code
+    once per caret — so the empty-extras path is identical to the
+    pre-multi-cursor code. Bindings: Ctrl+click adds a caret, Ctrl+Alt+
+    Up/Down stamps a caret one row above the topmost / below the
+    bottommost existing caret, plain click drops back to a single caret.
+    Edits that don't generalise cleanly across rows (Enter, paste, cut,
+    comment toggle, replace-all, …) collapse the extras first.
     """
     var buffer: TextBuffer
     var cursor_row: Int
@@ -329,6 +364,12 @@ struct Editor(ImplicitlyCopyable, Movable):
     var desired_col: Int
     var anchor_row: Int
     var anchor_col: Int
+    # Additional carets beyond the primary. Empty in the common case.
+    # Order is not significant for correctness — every iteration helper
+    # sorts the union of {primary, *extras} on demand. The list omits
+    # the primary so callers can keep using the existing fields without
+    # round-tripping through a list lookup.
+    var extra_carets: List[Caret]
     var scroll_y: Int
     var scroll_x: Int
     # File-backing (empty file_path means buffer is not file-backed):
@@ -364,6 +405,12 @@ struct Editor(ImplicitlyCopyable, Movable):
     var gutter_width: Int
     var breakpoint_lines: List[Int]
     var exec_line: Int
+    # Set by ``handle_mouse`` when the user left-clicks anywhere in the
+    # gutter (debugger / line-number / change / blame strip). The host
+    # polls ``consume_breakpoint_toggle`` and forwards the row to its
+    # ``DapManager.toggle_breakpoint``; the editor itself owns no DAP
+    # state, so the toggle has to round-trip through Desktop.
+    var pending_breakpoint_toggle: Optional[Int]
     # View options. ``line_numbers`` paints a right-aligned line-number
     # gutter to the right of the debugger gutter; its width is derived
     # from ``buffer.line_count()`` at paint time. ``soft_wrap`` forces
@@ -456,6 +503,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.desired_col = 0
         self.anchor_row = 0
         self.anchor_col = 0
+        self.extra_carets = List[Caret]()
         self.scroll_y = 0
         self.scroll_x = 0
         self.file_path = String("")
@@ -470,6 +518,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self.pending_breakpoint_toggle = Optional[Int]()
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
@@ -504,6 +553,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.desired_col = 0
         self.anchor_row = 0
         self.anchor_col = 0
+        self.extra_carets = List[Caret]()
         self.scroll_y = 0
         self.scroll_x = 0
         self.file_path = String("")
@@ -518,6 +568,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
+        self.pending_breakpoint_toggle = Optional[Int]()
         self.line_numbers = False
         self.soft_wrap = False
         self.read_only = False
@@ -569,6 +620,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.desired_col = copy.desired_col
         self.anchor_row = copy.anchor_row
         self.anchor_col = copy.anchor_col
+        self.extra_carets = copy.extra_carets.copy()
         self.scroll_y = copy.scroll_y
         self.scroll_x = copy.scroll_x
         self.file_path = copy.file_path
@@ -583,6 +635,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.exec_line = copy.exec_line
+        self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
         self.read_only = copy.read_only
@@ -681,6 +734,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.buffer.lines.copy(),
             self.cursor_row, self.cursor_col,
             self.anchor_row, self.anchor_col,
+            self.extra_carets.copy(),
         )
 
     fn _push_undo(mut self):
@@ -718,6 +772,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         )
         self.anchor_row = snap.anchor_row
         self.anchor_col = snap.anchor_col
+        self.extra_carets = snap.extra_carets.copy()
         self.dirty = True
         # Undo/redo restores the entire buffer; we don't know which
         # rows differ from the post-state we last tokenized, so we
@@ -730,6 +785,182 @@ struct Editor(ImplicitlyCopyable, Movable):
         # new group rather than extend whatever was running before.
         self._typing_active = False
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
+
+    # --- multi-cursor helpers --------------------------------------------
+    #
+    # The primary caret stays in ``cursor_*``/``anchor_*``/``desired_col``;
+    # ``extra_carets`` carries any additional carets. ``has_extra_carets``
+    # is the cheap "is multi-cursor in flight?" check. ``primary_caret`` /
+    # ``_apply_caret`` round-trip primary state to/from a ``Caret`` value
+    # so iteration helpers can run the existing single-caret code once
+    # per caret (set primary, run op, capture result).
+
+    fn has_extra_carets(self) -> Bool:
+        return len(self.extra_carets) > 0
+
+    fn caret_count(self) -> Int:
+        return 1 + len(self.extra_carets)
+
+    fn primary_caret(self) -> Caret:
+        return Caret(
+            self.cursor_row, self.cursor_col, self.desired_col,
+            self.anchor_row, self.anchor_col,
+        )
+
+    fn _apply_caret(mut self, c: Caret):
+        self.cursor_row = c.row
+        self.cursor_col = c.col
+        self.desired_col = c.desired_col
+        self.anchor_row = c.anchor_row
+        self.anchor_col = c.anchor_col
+
+    fn clear_extra_carets(mut self):
+        """Drop every extra caret. The primary caret keeps its position
+        and selection. Called on plain mouse click, on collapsing
+        operations (Enter, paste, comment toggle, …), and from the host
+        when the user presses Esc with no modal open."""
+        self.extra_carets = List[Caret]()
+
+    fn _collapse_extras_with_undo(mut self):
+        """When extras are present, push an undo snapshot capturing
+        them and then drop them — so undo restores the multi-caret
+        state. Used by ops that don't generalise to multi-caret
+        (Enter, paste, cut, comment toggle, …): each falls through
+        to the original single-caret code paths after this call,
+        and those may push their own further undo steps. The user
+        then walks back through both via repeated undo."""
+        if self.has_extra_carets():
+            self._push_undo()
+            self.extra_carets = List[Caret]()
+
+    fn _all_carets_asc(self) -> List[Caret]:
+        """Return primary + extras sorted ascending by ``(row, col)``.
+        Used by every multi-caret iteration; sort is stable, ties on
+        identical positions are dropped by the dedupe in
+        ``_install_carets``."""
+        var out = List[Caret]()
+        out.append(self.primary_caret())
+        for i in range(len(self.extra_carets)):
+            out.append(self.extra_carets[i])
+        # Insertion sort — typical caret count is 2..10, plenty fast.
+        var n = len(out)
+        for i in range(1, n):
+            var j = i
+            while j > 0 and _caret_less(out[j], out[j - 1]):
+                var tmp = out[j]
+                out[j] = out[j - 1]
+                out[j - 1] = tmp
+                j -= 1
+        return out^
+
+    fn _install_carets(mut self, var carets: List[Caret]):
+        """Promote ``carets[0]`` to primary, the rest to ``extra_carets``,
+        after deduping carets that landed on the same ``(row, col)`` —
+        merging is what the user expects when two carets walk into each
+        other (e.g. ten carets all running ``Home``).
+
+        Ties on the caret position keep the entry whose anchor is
+        farther from the cursor — that's the one carrying a real
+        selection if any of them did."""
+        if len(carets) == 0:
+            return
+        # Sort ascending by (row, col).
+        var n = len(carets)
+        for i in range(1, n):
+            var j = i
+            while j > 0 and _caret_less(carets[j], carets[j - 1]):
+                var tmp = carets[j]
+                carets[j] = carets[j - 1]
+                carets[j - 1] = tmp
+                j -= 1
+        # Dedupe: collapse runs of carets at the same (row, col).
+        var deduped = List[Caret]()
+        for i in range(len(carets)):
+            var c = carets[i]
+            if len(deduped) > 0:
+                var prev = deduped[len(deduped) - 1]
+                if prev.row == c.row and prev.col == c.col:
+                    # Keep whichever has the larger selection span;
+                    # equal-span ties break in favor of the existing
+                    # entry (insertion order = ``carets`` order).
+                    var prev_span = _caret_anchor_span(prev)
+                    var cur_span = _caret_anchor_span(c)
+                    if cur_span > prev_span:
+                        deduped[len(deduped) - 1] = c
+                    continue
+            deduped.append(c)
+        self._apply_caret(deduped[0])
+        var extras = List[Caret]()
+        for i in range(1, len(deduped)):
+            extras.append(deduped[i])
+        self.extra_carets = extras^
+
+    fn _add_caret(mut self, c: Caret):
+        """Append a caret and renormalise. Public-facing convenience for
+        the host (Ctrl+click, Ctrl+Alt+Up/Down, …)."""
+        var all_c = self._all_carets_asc()
+        all_c.append(c)
+        self._install_carets(all_c^)
+
+    fn add_caret_above(mut self):
+        """Stamp a new caret one row above the topmost existing caret,
+        column-cell-aligned to the primary caret's ``desired_col``. Bound
+        to Ctrl+Alt+Up. No-op when the topmost caret is already on row 0
+        — there's nowhere above to stamp."""
+        var all_c = self._all_carets_asc()
+        var top = all_c[0]
+        if top.row <= 0:
+            return
+        var nr = top.row - 1
+        var line = self.buffer.line(nr)
+        var nc = _utf8_byte_of_cell(line, self.desired_col)
+        self._add_caret(Caret(nr, nc, self.desired_col, nr, nc))
+
+    fn add_caret_below(mut self):
+        """Stamp a new caret one row below the bottommost existing caret.
+        Bound to Ctrl+Alt+Down. No-op when there's no row below."""
+        var all_c = self._all_carets_asc()
+        var bot = all_c[len(all_c) - 1]
+        if bot.row + 1 >= self.buffer.line_count():
+            return
+        var nr = bot.row + 1
+        var line = self.buffer.line(nr)
+        var nc = _utf8_byte_of_cell(line, self.desired_col)
+        self._add_caret(Caret(nr, nc, self.desired_col, nr, nc))
+
+    fn _any_caret_has_selection(self) -> Bool:
+        if self.has_selection():
+            return True
+        for i in range(len(self.extra_carets)):
+            var c = self.extra_carets[i]
+            if c.row != c.anchor_row or c.col != c.anchor_col:
+                return True
+        return False
+
+    fn _all_carets_inline_safe(
+        self, op: Int,
+    ) -> Bool:
+        """``op``: 0 = inline insert, 1 = backspace, 2 = delete.
+        Returns True iff every caret can perform the op without crossing
+        a row boundary. Used by the keystroke handler to decide whether
+        to take the multi-caret fast path or to collapse to primary
+        first. ``has_selection`` on any caret also collapses (multi-
+        caret + selection edits aren't supported in the MVP)."""
+        if self._any_caret_has_selection():
+            return False
+        if op == 0:
+            return True
+        var carets = self._all_carets_asc()
+        for i in range(len(carets)):
+            var c = carets[i]
+            if op == 1:
+                if c.col == 0:
+                    return False
+            elif op == 2:
+                var n = self.buffer.line_length(c.row)
+                if c.col >= n:
+                    return False
+        return True
 
     fn undo(mut self) -> Bool:
         """Roll back the last mutation. Returns False when the stack is empty.
@@ -762,6 +993,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         var req = self.pending_definition
         self.pending_definition = Optional[DefinitionRequest]()
         return req
+
+    fn consume_breakpoint_toggle(mut self) -> Optional[Int]:
+        """Return any pending gutter-click row and clear the slot."""
+        var row = self.pending_breakpoint_toggle
+        self.pending_breakpoint_toggle = Optional[Int]()
+        return row
 
     fn check_for_external_change(mut self) raises -> Bool:
         """Re-stat the backing file; if it changed and we have no unsaved
@@ -1295,30 +1532,81 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _cursor_screen_row(
         self, layout: List[Tuple[Int, Int, Int, Int]],
     ) -> Int:
-        """Index into ``layout`` of the screen row that hosts the cursor,
-        or -1 if the cursor lies outside the painted layout. The cursor
-        sits on a buffer-row segment when its byte column falls in the
-        segment's range; ties at the segment boundary go to the *next*
-        segment (so a cursor parked at a wrap point shows up at the
-        start of the next visual line, matching most editors)."""
+        """Convenience wrapper around ``_screen_row_for`` that uses the
+        primary caret. Kept as a separate symbol because it's also
+        called from ``_scroll_to_cursor`` and ``reveal_cursor``."""
+        return self._screen_row_for(layout, self.cursor_row, self.cursor_col)
+
+    fn _paint_one_caret(
+        self, mut canvas: Canvas, view: Rect,
+        layout: List[Tuple[Int, Int, Int, Int]],
+        text_x0: Int, content_right: Int, content_bottom: Int,
+        row: Int, col: Int,
+    ):
+        """Paint a single caret block at buffer position ``(row, col)``.
+        Identical visual to the original primary-caret block; called
+        once per caret from ``paint``. Out-of-view carets are skipped."""
+        var sr = self._screen_row_for(layout, row, col)
+        if sr < 0:
+            return
+        var seg_start = layout[sr][1]
+        var seg_end = layout[sr][2]
+        var indent = layout[sr][3]
+        var seg_x0 = text_x0 + indent
+        var line = self.buffer.line(row)
+        var line_byte_count = len(line.as_bytes())
+        var visible_str: String
+        if seg_start >= line_byte_count:
+            visible_str = String("")
+        else:
+            visible_str = _slice(line, seg_start, seg_end)
+        var cursor_cell_map = utf8_byte_to_cell(visible_str)
+        var cursor_cell_count = utf8_codepoint_count(visible_str)
+        var visible_byte_count = len(visible_str.as_bytes())
+        var cursor_byte = col - seg_start
+        var cell_offset: Int
+        if cursor_byte < 0:
+            cell_offset = 0
+        elif cursor_byte < visible_byte_count:
+            cell_offset = cursor_cell_map[cursor_byte]
+        else:
+            cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
+        var sx = seg_x0 + cell_offset
+        var sy = view.a.y + sr
+        if not (seg_x0 <= sx and sx < content_right
+                and view.a.y <= sy and sy < content_bottom):
+            return
+        if col < line_byte_count:
+            canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
+        else:
+            canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
+
+    fn _screen_row_for(
+        self, layout: List[Tuple[Int, Int, Int, Int]],
+        row: Int, col: Int,
+    ) -> Int:
+        """Index into ``layout`` of the screen row that hosts the caret
+        at ``(row, col)``, or -1 if it lies outside the painted layout.
+        The caret sits on a buffer-row segment when its byte column
+        falls in the segment's range; ties at the segment boundary go
+        to the *next* segment (so a caret parked at a wrap point shows
+        up at the start of the next visual line, matching most
+        editors)."""
         for sr in range(len(layout)):
             var br = layout[sr][0]
-            if br != self.cursor_row:
+            if br != row:
                 continue
             var sb = layout[sr][1]
             var eb = layout[sr][2]
-            # Last segment of this buffer row in the layout?
             var is_last = (sr + 1 >= len(layout)) or (
-                layout[sr + 1][0] != self.cursor_row
+                layout[sr + 1][0] != row
             )
-            if self.cursor_col < sb:
+            if col < sb:
                 continue
-            if self.cursor_col < eb:
+            if col < eb:
                 return sr
             if is_last:
                 return sr
-            # Cursor sits exactly at the wrap point — let the next
-            # segment claim it.
         return -1
 
     # --- painting ----------------------------------------------------------
@@ -1430,10 +1718,24 @@ struct Editor(ImplicitlyCopyable, Movable):
                     _ = canvas.put_text(
                         Point(ax, sy_g), bl.author, ln_attr, bl_right,
                     )
-        var sel = self.selection()
-        var sel_active = self.has_selection()
-        var sel_sr = sel[0]; var sel_sc = sel[1]
-        var sel_er = sel[2]; var sel_ec = sel[3]
+        # Collect every caret's normalised selection range up front so
+        # the per-screen-row overlay loop only has to iterate the list
+        # — saves recomputing on every row. Empty-selection carets are
+        # filtered here so the inner loop doesn't have to re-check.
+        # Tuple layout: (sr, sc, er, ec).
+        var caret_sels = List[Tuple[Int, Int, Int, Int]]()
+        var all_carets_paint = self._all_carets_asc()
+        for ci in range(len(all_carets_paint)):
+            var c = all_carets_paint[ci]
+            if c.row == c.anchor_row and c.col == c.anchor_col:
+                continue
+            var sr = c.anchor_row; var sc = c.anchor_col
+            var er = c.row; var ec = c.col
+            if (sr > er) or (sr == er and sc > ec):
+                var tr = sr; var tc = sc
+                sr = er; sc = ec
+                er = tr; ec = tc
+            caret_sels.append((sr, sc, er, ec))
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row][0]
             var start_byte = layout[screen_row][1]
@@ -1495,16 +1797,23 @@ struct Editor(ImplicitlyCopyable, Movable):
                     if sx_hl >= content_right:
                         break
                     canvas.set_attr(sx_hl, sy_hl, hl.attr)
-            # Overlay selection highlight on this row, if any.
-            if sel_active and sel_sr <= buf_row and buf_row <= sel_er:
+            # Overlay each caret's selection on this row, if any. Per-
+            # caret iteration so overlapping selections still paint
+            # (the second one re-stamps the same attr — visually no
+            # change, but cheap to allow). The inner body is the same
+            # logic as the original single-caret overlay; only the
+            # source of ``sel_sr/sc/er/ec`` differs.
+            for csi in range(len(caret_sels)):
+                var sel_sr = caret_sels[csi][0]
+                var sel_sc = caret_sels[csi][1]
+                var sel_er = caret_sels[csi][2]
+                var sel_ec = caret_sels[csi][3]
+                if not (sel_sr <= buf_row and buf_row <= sel_er):
+                    continue
                 var row_start = 0 if buf_row > sel_sr else sel_sc
                 var row_end = n if buf_row < sel_er else sel_ec
-                # Selection past EOL: highlight one trailing cell so empty-
-                # line selections are still visible. Only meaningful on the
-                # last visual segment of the wrapped buffer row.
                 if buf_row < sel_er and row_end == row_start and is_last_seg:
                     row_end = row_start + 1
-                # Clip to the visible segment.
                 var seg_lo = row_start if row_start > start_byte else start_byte
                 var seg_hi = row_end
                 if not is_last_seg and seg_hi > end_byte:
@@ -1514,9 +1823,6 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var sel_byte_start = seg_lo - start_byte
                 var sel_byte_end = seg_hi - start_byte
                 if sel_byte_start < 0: sel_byte_start = 0
-                # Map each end of the byte range to a cell. Past-EOL
-                # extensions get one cell per virtual byte so empty-line
-                # and trailing-space selections stay visible.
                 var sel_cell_start: Int
                 if sel_byte_start < visible_byte_count:
                     sel_cell_start = visible_cell_map[sel_byte_start]
@@ -1538,46 +1844,177 @@ struct Editor(ImplicitlyCopyable, Movable):
                     if cell_off < visible_cell_count:
                         canvas.set_attr(x, sy, sel_attr)
                     else:
-                        # Past EOL — paint an explicit space so the
-                        # selection extends visibly past the line's
-                        # final character.
                         canvas.set(x, sy, Cell(String(" "), sel_attr, 1))
-        # Cursor: a reverse-video cell when focused (only inside content area).
+        # Cursor block: a reverse-video cell on every caret position
+        # when the editor is focused. The primary and any extras paint
+        # identically — the user reads "this line is the focus" from
+        # the cursor's color, not from any difference between primary
+        # and secondary carets.
         if focused:
-            var sr = self._cursor_screen_row(layout)
-            if sr >= 0:
-                var seg_start = layout[sr][1]
-                var seg_end = layout[sr][2]
-                var indent = layout[sr][3]
-                var seg_x0 = text_x0 + indent
-                var line = self.buffer.line(self.cursor_row)
-                var line_byte_count = len(line.as_bytes())
-                var visible_str: String
-                if seg_start >= line_byte_count:
-                    visible_str = String("")
-                else:
-                    visible_str = _slice(line, seg_start, seg_end)
-                var cursor_cell_map = utf8_byte_to_cell(visible_str)
-                var cursor_cell_count = utf8_codepoint_count(visible_str)
-                var visible_byte_count = len(visible_str.as_bytes())
-                var cursor_byte = self.cursor_col - seg_start
-                var cell_offset: Int
-                if cursor_byte < 0:
-                    cell_offset = 0
-                elif cursor_byte < visible_byte_count:
-                    cell_offset = cursor_cell_map[cursor_byte]
-                else:
-                    cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
-                var sx = seg_x0 + cell_offset
-                var sy = view.a.y + sr
-                if seg_x0 <= sx and sx < content_right \
-                   and view.a.y <= sy and sy < content_bottom:
-                    if self.cursor_col < line_byte_count:
-                        canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
-                    else:
-                        # Cursor is past EOL — paint a visible block so the
-                        # caret is still visible.
-                        canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
+            for ci in range(len(all_carets_paint)):
+                var c = all_carets_paint[ci]
+                self._paint_one_caret(
+                    canvas, view, layout, text_x0,
+                    content_right, content_bottom,
+                    c.row, c.col,
+                )
+
+    # --- multi-caret movement / inline-edit dispatchers -------------------
+
+    fn _dispatch_move_one(
+        mut self, kind: Int, extend: Bool, page_height: Int,
+    ):
+        """Single-caret movement step. ``kind`` selects the operation;
+        the existing ``_move_*`` / ``move_to`` helpers each operate on
+        the primary caret, so the multi-caret iterator can call this
+        once per caret with the primary already swapped in."""
+        if kind == 0:
+            self._move_left(extend)
+        elif kind == 1:
+            self._move_right(extend)
+        elif kind == 2:
+            self._move_word_left(extend)
+        elif kind == 3:
+            self._move_word_right(extend)
+        elif kind == 4:
+            self._move_up(extend)
+        elif kind == 5:
+            self._move_down(extend)
+        elif kind == 6:
+            self.move_to(self.cursor_row, 0, extend)
+        elif kind == 7:
+            self.move_to(
+                self.cursor_row,
+                self.buffer.line_length(self.cursor_row),
+                extend,
+            )
+        elif kind == 8:
+            var nr = self.cursor_row - page_height
+            if nr < 0:
+                nr = 0
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
+            self.move_to(nr, nc, extend, False)
+        elif kind == 9:
+            var nr = self.cursor_row + page_height
+            var max_row = self.buffer.line_count() - 1
+            if nr > max_row:
+                nr = max_row
+            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
+            self.move_to(nr, nc, extend, False)
+
+    fn _multi_move(
+        mut self, kind: Int, extend: Bool, page_height: Int,
+    ):
+        """Apply a movement to every caret. With no extras the primary
+        is moved in place (no list churn). The two-pass design — collect
+        carets, run the op once per caret, install the merged result —
+        keeps the existing single-caret movement code as the only
+        source of truth for what each direction does."""
+        if not self.has_extra_carets():
+            self._dispatch_move_one(kind, extend, page_height)
+            return
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        for i in range(len(carets)):
+            self._apply_caret(carets[i])
+            self._dispatch_move_one(kind, extend, page_height)
+            new_carets.append(self.primary_caret())
+        self._install_carets(new_carets^)
+
+    fn _multi_insert_inline(mut self, ch: String):
+        """Insert ``ch`` at every caret. Pre-condition checked by the
+        caller: no caret has a selection, every caret position is
+        valid for an inline insert.
+
+        The cumulative shift on the same row is the only subtlety —
+        carets are processed left-to-right, and each insert pushes
+        every later same-row caret right by ``len(ch)`` bytes. Cross-
+        row carets are independent."""
+        var n = len(ch.as_bytes())
+        if n == 0:
+            return
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        var prev_row = -1
+        var row_shift = 0
+        for i in range(len(carets)):
+            var c = carets[i]
+            if c.row != prev_row:
+                row_shift = 0
+                prev_row = c.row
+            var actual_col = c.col + row_shift
+            self.buffer.insert(c.row, actual_col, ch)
+            var new_col = actual_col + n
+            var new_desired = _utf8_cell_of_byte(
+                self.buffer.line(c.row), new_col,
+            )
+            new_carets.append(
+                Caret(c.row, new_col, new_desired, c.row, new_col),
+            )
+            row_shift += n
+        self._install_carets(new_carets^)
+
+    fn _multi_backspace_inline(mut self):
+        """Same-row backspace at every caret. Caller guarantees every
+        caret has ``col > 0`` (so no row joins) and no selection."""
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        var prev_row = -1
+        var row_shift = 0
+        for i in range(len(carets)):
+            var c = carets[i]
+            if c.row != prev_row:
+                row_shift = 0
+                prev_row = c.row
+            var actual_col = c.col + row_shift
+            var line = self.buffer.line(c.row)
+            var prev_col = _utf8_step_backward(line, actual_col)
+            var byte_removed = actual_col - prev_col
+            var n_line = len(line.as_bytes())
+            self.buffer.lines[c.row] = _slice(line, 0, prev_col) \
+                + _slice(line, actual_col, n_line)
+            var new_col = prev_col
+            var new_desired = _utf8_cell_of_byte(
+                self.buffer.line(c.row), new_col,
+            )
+            new_carets.append(
+                Caret(c.row, new_col, new_desired, c.row, new_col),
+            )
+            row_shift -= byte_removed
+        self._install_carets(new_carets^)
+
+    fn _multi_delete_inline(mut self):
+        """Same-row Delete at every caret. Caller guarantees every
+        caret has ``col < line_length`` (so no row joins) and no
+        selection."""
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        var prev_row = -1
+        var row_shift = 0
+        for i in range(len(carets)):
+            var c = carets[i]
+            if c.row != prev_row:
+                row_shift = 0
+                prev_row = c.row
+            var actual_col = c.col + row_shift
+            var line = self.buffer.line(c.row)
+            var nxt = _utf8_step_forward(line, actual_col)
+            var byte_removed = nxt - actual_col
+            var n_line = len(line.as_bytes())
+            self.buffer.lines[c.row] = _slice(line, 0, actual_col) \
+                + _slice(line, nxt, n_line)
+            # Caret stays at actual_col; col doesn't change for Delete.
+            var new_desired = _utf8_cell_of_byte(
+                self.buffer.line(c.row), actual_col,
+            )
+            new_carets.append(
+                Caret(
+                    c.row, actual_col, new_desired,
+                    c.row, actual_col,
+                ),
+            )
+            row_shift -= byte_removed
+        self._install_carets(new_carets^)
 
     # --- event handling ----------------------------------------------------
 
@@ -1611,73 +2048,122 @@ struct Editor(ImplicitlyCopyable, Movable):
         # sequences, which the terminal parser translates to KEY_RIGHT/LEFT +
         # MOD_ALT).
         var word = (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0
+        # Multi-cursor stamp bindings — Ctrl+Alt+Up/Down adds a caret one
+        # row above the topmost / below the bottommost existing caret.
+        # Both modifiers required so this doesn't collide with the
+        # word-jump bindings above (which fire on Ctrl OR Alt, not both).
+        var has_ctrl = (event.mods & MOD_CTRL) != 0
+        var has_alt = (event.mods & MOD_ALT) != 0
+        if has_ctrl and has_alt and k == KEY_UP:
+            self.add_caret_above()
+            self._scroll_to_cursor(view)
+            return True
+        if has_ctrl and has_alt and k == KEY_DOWN:
+            self.add_caret_below()
+            self._scroll_to_cursor(view)
+            return True
+        # Pre-edit floor for the highlight dirty-row marker — has to be
+        # the lowest row any caret could affect, so look across the
+        # primary's cursor + anchor *and* every extra caret.
+        var pre_dirty_row_multi = self.cursor_row
+        if self.anchor_row < pre_dirty_row_multi:
+            pre_dirty_row_multi = self.anchor_row
+        for i in range(len(self.extra_carets)):
+            var c = self.extra_carets[i]
+            if c.row < pre_dirty_row_multi:
+                pre_dirty_row_multi = c.row
+            if c.anchor_row < pre_dirty_row_multi:
+                pre_dirty_row_multi = c.anchor_row
         if k == KEY_LEFT:
             if word:
-                self._move_word_left(extend)
+                self._multi_move(2, extend, view.height())
             else:
-                self._move_left(extend)
+                self._multi_move(0, extend, view.height())
         elif k == KEY_RIGHT:
             if word:
-                self._move_word_right(extend)
+                self._multi_move(3, extend, view.height())
             else:
-                self._move_right(extend)
+                self._multi_move(1, extend, view.height())
         elif k == KEY_UP:
-            self._move_up(extend)
+            self._multi_move(4, extend, view.height())
         elif k == KEY_DOWN:
-            self._move_down(extend)
+            self._multi_move(5, extend, view.height())
         elif k == KEY_HOME:
-            self.move_to(self.cursor_row, 0, extend)
+            self._multi_move(6, extend, view.height())
         elif k == KEY_END:
-            self.move_to(self.cursor_row, self.buffer.line_length(self.cursor_row), extend)
+            self._multi_move(7, extend, view.height())
         elif k == KEY_PAGEUP:
-            var step = view.height()
-            var nr = self.cursor_row - step
-            if nr < 0: nr = 0
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
-            self.move_to(nr, nc, extend, False)
+            self._multi_move(8, extend, view.height())
         elif k == KEY_PAGEDOWN:
-            var step = view.height()
-            var nr = self.cursor_row + step
-            var max_row = self.buffer.line_count() - 1
-            if nr > max_row: nr = max_row
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
-            self.move_to(nr, nc, extend, False)
+            self._multi_move(9, extend, view.height())
         elif k == KEY_BACKSPACE:
             if self.read_only:
                 return True
-            # Skip the snapshot when the keystroke can't actually change
-            # anything (cursor at (0, 0) with no selection) — otherwise
-            # repeated backspaces at the buffer head would clobber redo.
-            if self.has_selection() \
-                    or self.cursor_col > 0 or self.cursor_row > 0:
+            # Multi-caret fast path: every caret is mid-line with no
+            # selection → process them all bottom-up with cumulative
+            # row shift. Anything else (selection, col == 0) collapses
+            # to the primary and runs the original single-caret path.
+            if self.has_extra_carets() \
+                    and self._all_carets_inline_safe(1):
                 self._push_undo()
-            if self.has_selection():
-                self._delete_selection()
+                self._multi_backspace_inline()
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row_multi)
             else:
-                var p = self.buffer.delete_before(self.cursor_row, self.cursor_col)
-                self.move_to(p[0], p[1], False)
-            self.dirty = True
-            self._mark_hl_dirty(pre_dirty_row)
+                # Single-caret fallback. Push once, capturing extras
+                # if any, so a single undo restores the multi-caret
+                # state. The original "no-op when nothing to delete"
+                # guard becomes "no-op when nothing to delete AND no
+                # extras" — collapsing extras is itself state worth
+                # rolling back.
+                if self.has_extra_carets() or self.has_selection() \
+                        or self.cursor_col > 0 or self.cursor_row > 0:
+                    self._push_undo()
+                self.clear_extra_carets()
+                if self.has_selection():
+                    self._delete_selection()
+                else:
+                    var p = self.buffer.delete_before(
+                        self.cursor_row, self.cursor_col,
+                    )
+                    self.move_to(p[0], p[1], False)
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_DELETE:
             if self.read_only:
                 return True
-            # Same no-op guard: at end-of-buffer with no selection, Delete
-            # is a no-op and shouldn't burn an undo entry.
-            var at_end = self.cursor_col \
-                    >= self.buffer.line_length(self.cursor_row) \
-                and self.cursor_row + 1 >= self.buffer.line_count()
-            if self.has_selection() or not at_end:
+            if self.has_extra_carets() \
+                    and self._all_carets_inline_safe(2):
                 self._push_undo()
-            if self.has_selection():
-                self._delete_selection()
+                self._multi_delete_inline()
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row_multi)
             else:
-                self.buffer.delete_at(self.cursor_row, self.cursor_col)
-            self.dirty = True
-            self._mark_hl_dirty(pre_dirty_row)
+                # Single-caret fallback. As with backspace, push once
+                # capturing extras so a single undo walks back to the
+                # multi-caret state.
+                var at_end = self.cursor_col \
+                        >= self.buffer.line_length(self.cursor_row) \
+                    and self.cursor_row + 1 >= self.buffer.line_count()
+                if self.has_extra_carets() or self.has_selection() \
+                        or not at_end:
+                    self._push_undo()
+                self.clear_extra_carets()
+                if self.has_selection():
+                    self._delete_selection()
+                else:
+                    self.buffer.delete_at(self.cursor_row, self.cursor_col)
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_ENTER:
             if self.read_only:
                 return True
+            # Enter splits a row, which would shift every caret below;
+            # multi-caret Enter isn't supported in this MVP. Push once
+            # before clearing extras so a single undo restores the
+            # multi-caret state.
             self._push_undo()
+            self.clear_extra_carets()
             if self.has_selection():
                 self._delete_selection()
             # Compute the new line's indent before splitting so we can
@@ -1704,34 +2190,48 @@ struct Editor(ImplicitlyCopyable, Movable):
                 return True
             var shift_tab = (event.mods & MOD_SHIFT) != 0
             if shift_tab:
+                self._collapse_extras_with_undo()
                 # Shift+Tab dedents the cursor's line, or every line in
                 # the selection when one is active.
                 var rng = self._line_op_range()
                 self._dedent_rows(rng[0], rng[1], pre_dirty_row)
             elif self.has_selection():
+                self._collapse_extras_with_undo()
                 # Tab on a selection indents every line in the selection.
                 var rng = self._line_op_range()
                 self._indent_rows(rng[0], rng[1], pre_dirty_row)
             else:
+                # No selection: Tab is an inline insert of the indent
+                # string, which the multi-caret path handles cleanly.
                 self._push_undo()
-                # editorconfig drives indent width / style. Default produces
-                # the original 4-space tab when no ``.editorconfig`` was found.
                 var indent = self.editorconfig.indent_string()
-                var indent_n = len(indent.as_bytes())
-                self.buffer.insert(self.cursor_row, self.cursor_col, indent)
-                self.move_to(self.cursor_row, self.cursor_col + indent_n, False)
+                if self.has_extra_carets():
+                    self._multi_insert_inline(indent)
+                else:
+                    var indent_n = len(indent.as_bytes())
+                    self.buffer.insert(
+                        self.cursor_row, self.cursor_col, indent,
+                    )
+                    self.move_to(
+                        self.cursor_row, self.cursor_col + indent_n, False,
+                    )
                 self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row)
+                self._mark_hl_dirty(pre_dirty_row_multi)
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
+            # Copy doesn't change the buffer, so there's nothing for
+            # undo to walk back to. Drop extras without snapshotting.
+            self.clear_extra_carets()
             self.copy_to_clipboard()
         elif k == UInt32(0x18):    # Ctrl+X
             if self.read_only:
                 return True
+            self._collapse_extras_with_undo()
             self.cut_to_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif k == UInt32(0x16):    # Ctrl+V
             if self.read_only:
                 return True
+            self._collapse_extras_with_undo()
             self.paste_from_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif UInt32(0x20) <= k and k < UInt32(0x7F):
@@ -1744,27 +2244,48 @@ struct Editor(ImplicitlyCopyable, Movable):
                 return False
             if self.read_only:
                 return True
-            # Group consecutive printable inserts into a single undo step.
-            # Boundaries: a typing pause longer than ``_TYPING_DEBOUNCE_MS``,
-            # an active selection (typing-into-selection is a destructive
-            # replace, not a continuation), or anything that already cleared
-            # ``was_typing`` (cursor move, edit, paste, mouse, …). Spaces
-            # don't break the run on their own — that's what the debounce
-            # is for, and pausing between sentences naturally yields a
-            # boundary while a fast-typed line stays one step.
             var now = monotonic_ms()
-            var extend_group = was_typing and not self.has_selection() \
-                and now - prev_typing_ms <= _TYPING_DEBOUNCE_MS
-            if not extend_group:
+            # Multi-caret typing: collapse to a fresh undo step (the
+            # debounce-extension logic would interact awkwardly with
+            # carets coming and going) and broadcast via the inline
+            # helper. Selections-into-typing on multi-caret aren't
+            # supported in this MVP — the caller-visible behavior is
+            # "carets typed at their cursor positions, selections kept".
+            if self.has_extra_carets() and not self._any_caret_has_selection():
                 self._push_undo()
-            if self.has_selection():
-                self._delete_selection()
-            self.buffer.insert(self.cursor_row, self.cursor_col, chr(Int(k)))
-            self.move_to(self.cursor_row, self.cursor_col + 1, False)
-            self._typing_active = True
-            self._typing_last_ms = now
-            self.dirty = True
-            self._mark_hl_dirty(pre_dirty_row)
+                self._multi_insert_inline(chr(Int(k)))
+                self._typing_active = True
+                self._typing_last_ms = now
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row_multi)
+            else:
+                # Selections + multi-caret typing isn't supported;
+                # snapshot the multi-state so undo can restore it,
+                # then collapse so the destructive replace below
+                # only runs on the primary.
+                self._collapse_extras_with_undo()
+                # Group consecutive printable inserts into a single undo
+                # step. Boundaries: a typing pause longer than
+                # ``_TYPING_DEBOUNCE_MS``, an active selection (typing-
+                # into-selection is a destructive replace, not a
+                # continuation), or anything that already cleared
+                # ``was_typing`` (cursor move, edit, paste, mouse, …).
+                var extend_group = was_typing and not self.has_selection() \
+                    and now - prev_typing_ms <= _TYPING_DEBOUNCE_MS
+                if not extend_group:
+                    self._push_undo()
+                if self.has_selection():
+                    self._delete_selection()
+                self.buffer.insert(
+                    self.cursor_row, self.cursor_col, chr(Int(k)),
+                )
+                self.move_to(
+                    self.cursor_row, self.cursor_col + 1, False,
+                )
+                self._typing_active = True
+                self._typing_last_ms = now
+                self.dirty = True
+                self._mark_hl_dirty(pre_dirty_row)
         else:
             return False
         self._scroll_to_cursor(view)
@@ -2154,14 +2675,15 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self._dc_active = False
                 self._tc_active = False
             return False
-        # The gutter (debugger + line numbers) occupies the leftmost
-        # columns; clicks there land on column 0 (so a gutter click
-        # still picks the corresponding line, just like clicking the
-        # line number in most editors). The actual breakpoint toggle is
-        # on F9 — handled by Desktop, since only it knows the active
-        # DapManager.
+        # The gutter (debugger + line numbers + change bar + blame)
+        # occupies the leftmost columns. A click there is a breakpoint
+        # toggle on the corresponding buffer row — same effect as F9 on
+        # that line. We stash the row and let Desktop forward to the
+        # active DapManager (the editor itself owns no DAP state).
         var total_gutter = self._total_gutter()
-        var cell_x = event.pos.x - view.a.x - total_gutter
+        var rel_x = event.pos.x - view.a.x
+        var in_gutter = total_gutter > 0 and rel_x >= 0 and rel_x < total_gutter
+        var cell_x = rel_x - total_gutter
         if cell_x < 0: cell_x = 0
         # Map the click's screen row through the same layout used by
         # paint, so soft-wrapped buffer rows resolve to their wrapped
@@ -2178,6 +2700,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         var seg_start: Int
         var seg_end: Int
         var seg_indent: Int
+        var on_real_row = False
         if len(layout) == 0:
             row = 0
             seg_start = 0
@@ -2194,6 +2717,14 @@ struct Editor(ImplicitlyCopyable, Movable):
             seg_start = layout[screen_row][1]
             seg_end = layout[screen_row][2]
             seg_indent = layout[screen_row][3]
+            on_real_row = True
+        if in_gutter:
+            # Drag-motion that started in the gutter is ignored — no
+            # selection extend, no toggle. Initial-press only, on a row
+            # that actually maps to buffer content.
+            if not event.motion and on_real_row:
+                self.pending_breakpoint_toggle = Optional[Int](row)
+            return True
         # Continuation segments paint their text shifted right by the
         # hanging indent; subtract that here so a click on the indent
         # area lands at the segment start.
@@ -2225,6 +2756,16 @@ struct Editor(ImplicitlyCopyable, Movable):
                     DefinitionRequest(row, col, word),
                 )
             return True
+        # Ctrl+click: stamp an extra caret at the click point without
+        # disturbing the primary or any existing extras. Drag-motion
+        # carries no MOD_CTRL bit (the mods are sampled on press), so
+        # this fires only on the initial press. Skip the multi-click
+        # cycle bookkeeping — Ctrl+click is a separate gesture and
+        # shouldn't promote into double-click word selection.
+        if (event.mods & MOD_CTRL) != 0 and not event.motion:
+            self._add_caret(Caret(row, col, _utf8_cell_of_byte(line, col),
+                                   row, col))
+            return True
         if event.motion:
             # Drag-motion: extend the selection. While a multi-click
             # gesture is in progress, snap the moving end to whole-word
@@ -2238,9 +2779,13 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self.move_to(row, col, True)
             self._scroll_to_cursor(view)
             return True
-        # Initial press. Consecutive presses at the same cell within the
-        # double-click window cycle through single → double → triple
-        # before resetting; the count drives word vs. line selection.
+        # Initial plain press. Drop any extra carets that an earlier
+        # Ctrl+click / Ctrl+Alt+Up/Down had stamped — the user has
+        # picked a single position and that becomes the new primary.
+        self.clear_extra_carets()
+        # Consecutive presses at the same cell within the double-click
+        # window cycle through single → double → triple before
+        # resetting; the count drives word vs. line selection.
         var now = monotonic_ms()
         var same_cell = (
             now - self._last_click_ms <= _DOUBLE_CLICK_MS
@@ -2545,6 +3090,27 @@ struct Editor(ImplicitlyCopyable, Movable):
         elif cur_cell >= scroll_cell + w:
             scroll_cell = cur_cell - w + 1
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
+
+
+fn _caret_less(a: Caret, b: Caret) -> Bool:
+    """Strict ``<`` ordering on (row, col). Used by the caret-iteration
+    helpers; ties on position are broken by the dedupe step that
+    follows."""
+    if a.row != b.row:
+        return a.row < b.row
+    return a.col < b.col
+
+
+fn _caret_anchor_span(c: Caret) -> Int:
+    """Cheap "is this caret carrying a selection?" measure used when
+    deduping two carets that landed on the same ``(row, col)``. The
+    caret with the longer selection span wins so a real selection
+    isn't silently dropped on top of an empty one."""
+    if c.row == c.anchor_row:
+        var d = c.col - c.anchor_col
+        return d if d >= 0 else -d
+    var d = c.row - c.anchor_row
+    return d if d >= 0 else -d
 
 
 fn _leading_indent_cells(line: String) -> Int:
