@@ -66,6 +66,13 @@ from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
     find_docset_by_language, find_docset_for_extension,
 )
+from .grammar_install import (
+    DownloadableGrammar, built_in_downloadable_grammars,
+    find_downloadable_grammar_by_language,
+    find_downloadable_grammar_for_extension,
+    grammar_install_command, user_grammar_dir, user_grammar_installed,
+    user_grammar_path, user_grammar_path_for_ext, user_grammar_root,
+)
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
 from .diff import DiffOp, MergeResult, diff3_merge, diff_lines, unified_diff

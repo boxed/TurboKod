@@ -85,6 +85,9 @@ from turbokod.json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
 )
+from turbokod.language_config import (
+    built_in_servers, find_language_by_id, find_language_for_extension,
+)
 from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     _drop_prefix, _find_double_crlf, _parse_content_length, capture_command,
@@ -114,6 +117,12 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
+from turbokod.grammar_install import (
+    built_in_downloadable_grammars,
+    find_downloadable_grammar_by_language,
+    find_downloadable_grammar_for_extension,
+    grammar_install_command, user_grammar_path, user_grammar_path_for_ext,
+)
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
@@ -128,6 +137,7 @@ from turbokod.events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from turbokod.geometry import Point, Rect
+from turbokod.prompt import Prompt, wrap_to_width
 from turbokod.terminal import parse_input
 from turbokod.text_field import text_field_clipboard_key
 from turbokod.view import Fill, Frame, Label, centered
@@ -1207,6 +1217,46 @@ fn test_editor_external_change_clean_reload_when_buffer_clean() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+fn test_editor_external_change_refreshes_highlights() raises:
+    """Reload from disk must produce highlights matching the new
+    content — not stale entries pointing into the previous buffer.
+    Exercises a scope-changing case (block comment over multiple
+    lines, then erased) so the cache's per-line post-stack actually
+    matters.
+    """
+    var path = _temp_path(String("_ext_hl.rs"))
+    assert_true(write_file(
+        path,
+        String("/* block start\nstill in block\nstill in block 2\n*/ end\n"),
+    ))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry)
+    assert_true(len(ed.highlights) > 0)
+    # Same path, but the block comment is gone — the new buffer's
+    # post-stacks differ from the cached ones at every row.
+    assert_true(write_file(
+        path,
+        String("fn two() {}\nfn three() {}\n"),
+    ))
+    var status = ed.check_for_external_change()
+    assert_equal(status, EXT_CHANGE_RELOADED)
+    ed.flush_highlights(registry)
+    var post = ed.highlights.copy()
+    var expected = highlight_for_extension(String("rs"), ed.buffer.lines)
+    # Same shape as a full retokenize against the new buffer.
+    assert_equal(len(post), len(expected))
+    for i in range(len(post)):
+        assert_equal(post[i].row, expected[i].row)
+        assert_equal(post[i].col_start, expected[i].col_start)
+        assert_equal(post[i].col_end, expected[i].col_end)
+    # No highlight may point at a row past the new buffer's end.
+    var max_row = ed.buffer.line_count() - 1
+    for i in range(len(post)):
+        assert_true(post[i].row <= max_row)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 fn test_editor_external_change_auto_merges_disjoint_edits() raises:
     """Buffer edits and disk edits in different regions → silent merge."""
     var path = _temp_path(String("_ext_merge.txt"))
@@ -1862,6 +1912,45 @@ fn test_focus_changes_keep_window_list_order_stable() raises:
     assert_equal(wm.z_order[len(wm.z_order) - 1], 0)
 
 
+fn test_window_manager_rotate_focus_cycles_in_stable_order() raises:
+    """Cmd+` rotation walks the windows in insertion order and wraps
+    past the end. Reverse rotation walks the same sequence backwards."""
+    var wm = WindowManager()
+    wm.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
+    wm.add(Window(String("c"), Rect(0, 1, 20, 5), List[String]()))
+    wm.focus_by_index(0)
+    wm.rotate_focus(True)
+    assert_equal(wm.focused, 1)
+    wm.rotate_focus(True)
+    assert_equal(wm.focused, 2)
+    # Wrap past the end.
+    wm.rotate_focus(True)
+    assert_equal(wm.focused, 0)
+    # Reverse rotation wraps before the start.
+    wm.rotate_focus(False)
+    assert_equal(wm.focused, 2)
+    wm.rotate_focus(False)
+    assert_equal(wm.focused, 1)
+    # Rotation also raises the new window to the top of z-order so a
+    # subsequent click-through sees the same window the user is editing.
+    assert_equal(wm.z_order[len(wm.z_order) - 1], 1)
+
+
+fn test_window_manager_rotate_focus_noop_when_fewer_than_two_windows() raises:
+    """Rotation must do nothing when there's nothing to rotate to —
+    no crash, no spurious focus change."""
+    var wm0 = WindowManager()
+    wm0.rotate_focus(True)  # zero windows: just don't crash
+    assert_equal(wm0.focused, -1)
+    var wm1 = WindowManager()
+    wm1.add(Window(String("only"), Rect(0, 1, 20, 5), List[String]()))
+    wm1.rotate_focus(True)
+    assert_equal(wm1.focused, 0)
+    wm1.rotate_focus(False)
+    assert_equal(wm1.focused, 0)
+
+
 fn test_window_menu_items_show_ctrl_n_shortcut() raises:
     """The Window menu items (rebuilt every paint) carry the matching
     Ctrl+N shortcut for the first nine windows."""
@@ -2095,6 +2184,19 @@ fn test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form() raises:
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), 0x13)
     assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+
+
+fn test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
+    """Cmd+\\` arrives as ``ESC[27;9;96~`` (mod=9 → meta-only, cp=0x60).
+    Backtick is *not* a letter, so the Ctrl+letter→control-byte fold
+    must skip it — otherwise it would collapse to ``(0, MOD_NONE)``,
+    indistinguishable from KEY_NONE. The event must keep its 0x60 key
+    code with the META→CTRL fold preserved on ``mods`` so hotkey
+    tables can bind to ``(ord('\\`'), MOD_CTRL)``."""
+    var ev = parse_input(String("\x1b[27;9;96~"))
+    assert_true(ev[0].kind == EVENT_KEY)
+    assert_equal(Int(ev[0].key), 0x60)
+    assert_equal(Int(ev[0].mods), Int(MOD_CTRL))
 
 
 fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
@@ -2419,6 +2521,66 @@ fn _hl_lines(*texts: String) -> List[String]:
     for t in texts:
         out.append(String(t))
     return out^
+
+
+fn test_downloadable_grammar_registry_has_elm() raises:
+    """The seed entry — opening a ``.elm`` file is what triggers the
+    download prompt in ``Desktop._maybe_prompt_grammar_install``."""
+    var specs = built_in_downloadable_grammars()
+    var idx = find_downloadable_grammar_for_extension(specs, String("elm"))
+    assert_true(idx >= 0)
+    assert_equal(specs[idx].language_id, String("elm"))
+    assert_equal(specs[idx].display, String("Elm"))
+    var by_lang = find_downloadable_grammar_by_language(specs, String("elm"))
+    assert_equal(by_lang, idx)
+
+
+fn test_downloadable_grammar_registry_misses_unknown() raises:
+    """``txt`` shouldn't trigger a grammar prompt — keeps the prompt
+    machinery from firing on every file the user opens."""
+    var specs = built_in_downloadable_grammars()
+    var idx = find_downloadable_grammar_for_extension(specs, String("txt"))
+    assert_equal(idx, -1)
+
+
+fn test_grammar_install_command_targets_user_config() raises:
+    """The shell command must mkdir the per-language dir and curl the
+    grammar JSON to the path the highlighter probes
+    (``user_grammar_path_for_ext``). Verified by string-match because
+    the runner is a shell pipeline; the alternative is end-to-end with
+    a fake server, which adds infrastructure with no payoff."""
+    var specs = built_in_downloadable_grammars()
+    var idx = find_downloadable_grammar_by_language(specs, String("elm"))
+    assert_true(idx >= 0)
+    var cmd = grammar_install_command(String("elm"), specs[idx].url)
+    var dest = user_grammar_path(String("elm"))
+    # If $HOME is set the destination path will be embedded; if not,
+    # the helper produces an empty path and we just check ``mkdir -p``
+    # still appears (the runner would fail in that case, which is the
+    # correct end state for a sandboxed process with no $HOME).
+    assert_true(_contains(cmd, String("mkdir -p")))
+    assert_true(_contains(cmd, String("curl ")))
+    if len(dest.as_bytes()) > 0:
+        assert_true(_contains(cmd, dest))
+
+
+fn test_user_grammar_path_for_ext_misses_when_not_installed() raises:
+    """When no user grammar is on disk, the helper returns empty so
+    ``_grammar_path_for_ext`` falls through to the generic per-language
+    fallback rather than handing the loader a non-existent path."""
+    # Elm has a registry entry, but unless the test environment
+    # happens to have ~/.config/turbokod/languages/elm/elm.tmLanguage.json
+    # already (vanishingly unlikely on CI), the helper must report it
+    # as not installed.
+    var path = user_grammar_path(String("elm"))
+    if len(path.as_bytes()) > 0 and stat_file(path).ok:
+        # Test environment already has Elm installed — the helper must
+        # at least return a non-empty path.
+        assert_true(len(user_grammar_path_for_ext(String("elm")).as_bytes()) > 0)
+    else:
+        assert_equal(user_grammar_path_for_ext(String("elm")), String(""))
+    # Unknown extensions always return empty regardless of disk state.
+    assert_equal(user_grammar_path_for_ext(String("zzz")), String(""))
 
 
 fn test_extension_of_helper() raises:
@@ -4220,6 +4382,30 @@ fn test_json_floats_round_trip_as_text() raises:
     var v = parse_json(String("3.14"))
     assert_true(v.is_float())
     assert_equal(encode_json(v), String("3.14"))
+
+
+fn test_language_registry_loads_from_bundled_json() raises:
+    """The catalog imported from Helix's languages.toml should load cleanly
+    and contain at least the long-tail languages we now expect."""
+    var specs = built_in_servers()
+    # Catalog isn't tiny — sanity-check the lower bound rather than a
+    # specific count so refreshes don't break this test.
+    assert_true(len(specs) > 50)
+
+    # Elm regression: pre-import the registry didn't contain Elm at all.
+    var elm_idx = find_language_by_id(specs, String("elm"))
+    assert_true(elm_idx >= 0)
+    assert_true(len(specs[elm_idx].candidates) > 0)
+    assert_equal(
+        specs[elm_idx].candidates[0].argv[0],
+        String("elm-language-server"),
+    )
+
+    # Extension routing for one of the curated entries with an install hint.
+    var py_idx = find_language_for_extension(specs, String("py"))
+    assert_true(py_idx >= 0)
+    assert_equal(specs[py_idx].language_id, String("python"))
+    assert_true(len(specs[py_idx].install_hint.as_bytes()) > 0)
 
 
 fn test_lsp_framer_finds_double_crlf() raises:
@@ -6969,7 +7155,97 @@ fn test_build_minimal_patch_drops_other_hunks() raises:
     assert_false(String("@@ -10,1") in patch)
 
 
+fn test_prompt_wrap_short_text_stays_on_one_line() raises:
+    var lines = wrap_to_width(String("Find: "), 56)
+    assert_equal(len(lines), 1)
+    assert_equal(lines[0], String("Find: "))
+
+
+fn test_prompt_wrap_breaks_at_last_space_within_budget() raises:
+    var lines = wrap_to_width(
+        String("Install rust LSP? 'rustup component add rust-analyzer' (y/N): "),
+        20,
+    )
+    # Every line must fit the 20-cell budget; rejoining yields a string
+    # that — modulo the soft-break spaces — recovers the original tokens.
+    for i in range(len(lines)):
+        assert_true(len(lines[i].as_bytes()) <= 20)
+    var joined = String("")
+    for i in range(len(lines)):
+        if i > 0: joined = joined + String(" ")
+        joined = joined + lines[i]
+    # Trailing space on the original is preserved on the final line —
+    # the prompt renders the input strip after that space, so leaving
+    # it in the wrap output keeps inline and wrapped layouts visually
+    # consistent around the input.
+    assert_equal(
+        joined,
+        String("Install rust LSP? 'rustup component add rust-analyzer' (y/N): "),
+    )
+
+
+fn test_prompt_wrap_hard_breaks_an_unbreakable_word() raises:
+    # No spaces — the wrapper must still chop the input into width-sized
+    # chunks rather than emit one giant overflowing line.
+    var lines = wrap_to_width(String("aaaaaaaaaaaaaaaaaaaa"), 6)
+    assert_equal(len(lines), 4)
+    assert_equal(lines[0], String("aaaaaa"))
+    assert_equal(lines[1], String("aaaaaa"))
+    assert_equal(lines[2], String("aaaaaa"))
+    assert_equal(lines[3], String("aa"))
+
+
+fn test_prompt_wrap_empty_returns_empty_list() raises:
+    var lines = wrap_to_width(String(""), 60)
+    assert_equal(len(lines), 0)
+
+
+fn test_prompt_paint_clamps_long_label_inside_dialog() raises:
+    """The painted cells of a long-label prompt must all live inside
+    the prompt's dialog rect — nothing leaks into the surrounding
+    workspace cells the way the un-clamped ``put_text`` used to."""
+    var screen = Rect(0, 0, 80, 24)
+    var canvas = Canvas(80, 24)
+    canvas.clear(Attr(BLACK, BLUE))
+    var prompt = Prompt()
+    prompt.open(
+        String("Install rust LSP? 'rustup component add rust-analyzer' (y/N): "),
+    )
+    prompt.paint(canvas, screen)
+    # The dialog centers itself; the only cells whose attr changed
+    # from the (BLACK, BLUE) workspace fill are inside the dialog rect
+    # *or* inside the drop-shadow strip directly to its right and
+    # below. Anything else is a paint leak.
+    var dialog_w = 60
+    var dx = (80 - dialog_w) // 2
+    # Walk a generous outer band around the dialog and shadow and
+    # confirm the workspace fill is intact: cells outside the dialog
+    # rect (and outside the 2-cell right shadow / 1-row bottom shadow)
+    # must still carry the original blue background.
+    for y in range(24):
+        for x in range(80):
+            var inside_dialog = (
+                x >= dx and x < dx + dialog_w and y >= 8 and y < 16
+            )
+            var in_right_shadow = (
+                x >= dx + dialog_w and x < dx + dialog_w + 2
+                and y >= 9 and y < 16
+            )
+            var in_bottom_shadow = (
+                x >= dx + 2 and x < dx + dialog_w + 2 and y == 16
+            )
+            if inside_dialog or in_right_shadow or in_bottom_shadow:
+                continue
+            var c = canvas.get(x, y)
+            assert_equal(c.attr.bg, BLUE)
+
+
 fn main() raises:
+    test_prompt_wrap_short_text_stays_on_one_line()
+    test_prompt_wrap_breaks_at_last_space_within_budget()
+    test_prompt_wrap_hard_breaks_an_unbreakable_word()
+    test_prompt_wrap_empty_returns_empty_list()
+    test_prompt_paint_clamps_long_label_inside_dialog()
     test_diff_grammar_paints_inserted_deleted_and_hunk_header()
     test_diff_identical_inputs_have_no_hunks()
     test_diff_lines_pure_insert()
@@ -7064,6 +7340,7 @@ fn main() raises:
     test_diff3_merge_identical_changes_dont_conflict()
     test_diff3_merge_conflict_when_both_edit_same_line()
     test_editor_external_change_clean_reload_when_buffer_clean()
+    test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
     test_editor_external_change_conflict_inserts_markers()
@@ -7079,6 +7356,10 @@ fn main() raises:
     test_gitignore_matches_directory_pattern()
     test_gitignore_matches_glob_and_negate()
     test_walk_project_files_respects_gitignore()
+    test_downloadable_grammar_registry_has_elm()
+    test_downloadable_grammar_registry_misses_unknown()
+    test_grammar_install_command_targets_user_config()
+    test_user_grammar_path_for_ext_misses_when_not_installed()
     test_extension_of_helper()
     test_word_at_helper()
     test_highlight_for_extension_recognizes_mojo()
@@ -7149,6 +7430,8 @@ fn main() raises:
     test_window_manager_close_focused()
     test_ctrl_n_focuses_window_by_number()
     test_focus_changes_keep_window_list_order_stable()
+    test_window_manager_rotate_focus_cycles_in_stable_order()
+    test_window_manager_rotate_focus_noop_when_fewer_than_two_windows()
     test_window_menu_items_show_ctrl_n_shortcut()
     test_ctrl_w_closes_focused_window()
     test_format_hotkey_renders_combinations()
@@ -7157,6 +7440,7 @@ fn main() raises:
     test_dropdown_reserves_indent_for_checkable_items()
     test_parse_csi_modify_other_keys_normalizes_ctrl_q()
     test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form()
+    test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact()
     test_cmd_s_via_modify_other_keys_triggers_save_hotkey()
     test_parse_csi_modify_other_keys_ctrl_shift_f()
     test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f()
@@ -7224,6 +7508,7 @@ fn main() raises:
     test_json_string_escapes()
     test_json_parse_errors_raise()
     test_json_floats_round_trip_as_text()
+    test_language_registry_loads_from_bundled_json()
     test_lsp_framer_finds_double_crlf()
     test_lsp_framer_parses_content_length()
     test_lsp_framer_extract_one_message()

@@ -20,6 +20,7 @@ from .colors import (
     Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_YELLOW,
     RED, WHITE, STYLE_NONE,
 )
+from .grammar_install import user_grammar_path_for_ext
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
     Frame, copy_stack, stack_eq,
@@ -138,7 +139,14 @@ fn _grammar_path_for_ext(ext: String) -> String:
     # actually produces nothing for ``.md`` today; keeping the
     # grammar bundled but unmapped lets a follow-up wire it up once
     # we grow ``while`` support.
-    return String("")
+    #
+    # Final fallback: a downloadable grammar the user already
+    # accepted the install prompt for, sitting at
+    # ``~/.config/turbokod/languages/<lang>/<lang>.tmLanguage.json``.
+    # Returns empty if the registry doesn't know this extension or
+    # the file isn't on disk yet, in which case the highlighter
+    # degrades to its generic per-language fallback.
+    return user_grammar_path_for_ext(ext)
 
 
 struct GrammarRegistry(Movable):

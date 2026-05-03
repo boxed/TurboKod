@@ -58,6 +58,12 @@ from .geometry import Point, Rect
 from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
+from .grammar_install import (
+    DownloadableGrammar, built_in_downloadable_grammars,
+    find_downloadable_grammar_by_language,
+    find_downloadable_grammar_for_extension,
+    grammar_install_command, user_grammar_installed,
+)
 from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
     find_docset_by_language, find_docset_for_extension,
@@ -126,6 +132,11 @@ comptime _PA_LSP_INSTALL      = String("lsp:install")
 comptime EDITOR_LOOKUP_DOCS   = String("docs:lookup")
 # Internal pending-action tag for the "Download docs?" prompt.
 comptime _PA_DOC_INSTALL      = String("docs:install")
+# Internal pending-action tag for the "Install <lang> grammar?" prompt.
+# Triggered programmatically from ``_maybe_lsp_open`` when a file's
+# extension has no bundled TextMate grammar but is in the downloadable-
+# grammar registry.
+comptime _PA_GRAMMAR_INSTALL  = String("grammar:install")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
@@ -204,6 +215,8 @@ comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
 comptime WINDOW_MAXIMIZE_ALL  = String("window:maximize_all")
 comptime WINDOW_RESTORE_ALL   = String("window:restore_all")
 comptime WINDOW_CLOSE         = String("window:close")
+comptime WINDOW_ROTATE_NEXT   = String("window:rotate_next")
+comptime WINDOW_ROTATE_PREV   = String("window:rotate_prev")
 comptime _WINDOW_MENU_LABEL   = String("Window")
 
 # When ESC fires at the top level (no menu open, no prompt active), the
@@ -379,6 +392,11 @@ struct Desktop(Movable):
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
     var _lsp_install_prompted: List[String]
+    # Extension of a deferred install prompt: a file was opened while
+    # another modal was active, so the prompt couldn't fire then. Drained
+    # at the top of ``paint`` whenever no modal is in the way. Empty
+    # string = nothing pending.
+    var _pending_lsp_prompt_ext: String
     # Background ``sh -c <hint>`` runner for the LSP install prompt. One
     # in-flight install at a time; subsequent prompts fall back to the
     # clipboard-only path while ``install_runner`` is busy.
@@ -388,6 +406,16 @@ struct Desktop(Movable):
     # editor windows of that language without the user having to close
     # and re-open the file.
     var _install_lang: String
+    # Grammar-download bookkeeping (mirrors the LSP install fields above).
+    # ``_grammar_install_prompted`` is the one-nag-per-language cap;
+    # ``_pending_grammar_prompt_ext`` carries a deferred prompt past a
+    # blocking modal; ``_grammar_install_lang`` is the language id whose
+    # grammar curl is currently in flight, so the install-complete hook
+    # can clear the highlight cache on every open editor of that
+    # extension and the colors light up immediately.
+    var _grammar_install_prompted: List[String]
+    var _pending_grammar_prompt_ext: String
+    var _grammar_install_lang: String
     # Debugger state. One ``DapManager`` per Desktop (single concurrent
     # session) — multi-session debugging would need a list keyed by
     # something (language? session id?), and we don't have a use case
@@ -503,8 +531,12 @@ struct Desktop(Movable):
         self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
         self._lsp_install_prompted = List[String]()
+        self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
         self._install_lang = String("")
+        self._grammar_install_prompted = List[String]()
+        self._pending_grammar_prompt_ext = String("")
+        self._grammar_install_lang = String("")
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
@@ -629,6 +661,21 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, TARGET_RUN))
         self._hotkeys.append(Hotkey(ctrl_key("d"), MOD_NONE, TARGET_DEBUG))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, TARGET_TEST))
+        # Cmd+` / Cmd+Shift+` — cycle through windows forward / backward
+        # in stable insertion order. Cmd+letter folds onto Ctrl+letter
+        # via MOD_META, but backtick isn't a letter, so it keeps its
+        # MOD_CTRL flag here. Shift+` produces ``~`` on US layouts; we
+        # bind both glyphs so the reverse rotation works regardless of
+        # whether the terminal reports the shifted or unshifted codepoint.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("`")), MOD_CTRL, WINDOW_ROTATE_NEXT,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("`")), MOD_CTRL | MOD_SHIFT, WINDOW_ROTATE_PREV,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("~")), MOD_CTRL | MOD_SHIFT, WINDOW_ROTATE_PREV,
+        ))
 
     fn _bottom_chrome_height(self, screen: Rect) -> Int:
         """Rows the bottom chrome (status bar + optional tab bar) eats
@@ -872,6 +919,21 @@ struct Desktop(Movable):
         if self._pending_restore:
             self._pending_restore = False
             self._restore_session(screen)
+        # If a file-open earlier deferred the install prompt because some
+        # other modal was up, retry now. ``_maybe_prompt_lsp_install``
+        # re-defers on a fresh `pending_*` field if a modal is *still*
+        # in the way, so this is safe to call unconditionally.
+        if len(self._pending_lsp_prompt_ext.as_bytes()) > 0:
+            var deferred_ext = self._pending_lsp_prompt_ext
+            self._pending_lsp_prompt_ext = String("")
+            self._maybe_prompt_lsp_install(deferred_ext)
+        # Same one-shot drain for the grammar-download prompt. Independent
+        # from the LSP one — opening an Elm file when no Elm LSP install
+        # spec exists still wants the grammar prompt to fire.
+        if len(self._pending_grammar_prompt_ext.as_bytes()) > 0:
+            var deferred_ext = self._pending_grammar_prompt_ext
+            self._pending_grammar_prompt_ext = String("")
+            self._maybe_prompt_grammar_install(deferred_ext)
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
@@ -1063,6 +1125,11 @@ struct Desktop(Movable):
         if len(path.as_bytes()) == 0:
             return
         var ext = extension_of(path)
+        # Grammar-download is independent from LSP install — a language
+        # might have either, both, or neither. Try the grammar prompt
+        # unconditionally; the helper bails fast when there's nothing
+        # to ask about.
+        self._maybe_prompt_grammar_install(ext)
         var lsp_idx = self._ensure_lsp_for_extension(ext)
         if lsp_idx < 0:
             self._maybe_prompt_lsp_install(ext)
@@ -1072,9 +1139,16 @@ struct Desktop(Movable):
 
     fn _maybe_prompt_lsp_install(mut self, ext: String):
         """Open the install prompt when ``ext`` belongs to a known language
-        whose binary isn't on ``$PATH``. Skipped when: we have no install
-        hint to suggest, the user has already been prompted for this
-        language this session, or another modal/prompt is already open."""
+        whose binary isn't on ``$PATH``.
+
+        Bails permanently when: the extension isn't in our catalog, the
+        spec has no install hint, the user has already been prompted for
+        this language this session, or one of the candidate binaries is
+        already installed. When the only blocker is an active modal
+        (file picker, quick-open, etc.), we *defer* via
+        ``_pending_lsp_prompt_ext`` and ``paint`` drains it on a later
+        frame — otherwise opening a file from a dialog would silently
+        eat the install prompt for that language."""
         var spec_idx = find_language_for_extension(self.lsp_specs, ext)
         if spec_idx < 0:
             return
@@ -1085,20 +1159,24 @@ struct Desktop(Movable):
         for i in range(len(self._lsp_install_prompted)):
             if self._lsp_install_prompted[i] == spec.language_id:
                 return
-        # Don't pile prompts on top of an open dialog/prompt.
-        if self.prompt.active or self.quick_open.active \
-                or self.symbol_pick.active or self.project_find.active \
-                or self.local_changes.active \
-                or self.save_as_dialog.active or self.doc_pick.active:
-            return
-        # Re-check that no candidate is on PATH. ``_ensure_lsp_for_extension``
-        # only returns -1-with-known-extension when this is true, so this
-        # is belt-and-suspenders against future refactors.
+        # Belt-and-suspenders: re-check that no candidate is on PATH.
+        # ``_ensure_lsp_for_extension`` only returns -1-with-known-extension
+        # when this is true, so this guards against future refactors.
         for c in range(len(spec.candidates)):
             var cand = spec.candidates[c]
             if len(cand.argv) > 0 \
                     and len(which(cand.argv[0]).as_bytes()) > 0:
                 return
+        # If something else is modal, defer rather than drop. First-
+        # deferred wins — once a prompt is queued, opening another
+        # unsupported language while still modal doesn't bump it.
+        if self.prompt.active or self.quick_open.active \
+                or self.symbol_pick.active or self.project_find.active \
+                or self.local_changes.active \
+                or self.save_as_dialog.active or self.doc_pick.active:
+            if len(self._pending_lsp_prompt_ext.as_bytes()) == 0:
+                self._pending_lsp_prompt_ext = ext
+            return
         self._lsp_install_prompted.append(spec.language_id)
         self._pending_action = _PA_LSP_INSTALL
         self._pending_arg = spec.language_id
@@ -1106,6 +1184,135 @@ struct Desktop(Movable):
             String("Install ") + spec.language_id + String(" LSP? '")
             + spec.install_hint + String("' (y/N): ")
         )
+
+    fn _maybe_prompt_grammar_install(mut self, ext: String):
+        """Open the "Install <lang> grammar?" prompt when ``ext`` belongs
+        to a language in the downloadable-grammar registry and isn't
+        already installed under ``~/.config/turbokod/languages/``.
+
+        Mirrors ``_maybe_prompt_lsp_install`` exactly: one-nag-per-
+        language-per-session, deferred via ``_pending_grammar_prompt_ext``
+        when another modal owns the screen, silent no-op otherwise.
+        Independent from the LSP prompt — both can fire on the same
+        file open (in sequence), since neither is a substitute for
+        the other.
+        """
+        var specs = built_in_downloadable_grammars()
+        var spec_idx = find_downloadable_grammar_for_extension(specs, ext)
+        if spec_idx < 0:
+            return
+        var spec = specs[spec_idx]
+        if user_grammar_installed(spec.language_id):
+            return
+        for i in range(len(self._grammar_install_prompted)):
+            if self._grammar_install_prompted[i] == spec.language_id:
+                return
+        if self.prompt.active or self.quick_open.active \
+                or self.symbol_pick.active or self.project_find.active \
+                or self.local_changes.active \
+                or self.save_as_dialog.active or self.doc_pick.active:
+            if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
+                self._pending_grammar_prompt_ext = ext
+            return
+        self._grammar_install_prompted.append(spec.language_id)
+        self._pending_action = _PA_GRAMMAR_INSTALL
+        self._pending_arg = spec.language_id
+        self.prompt.open(
+            String("Download ") + spec.display
+                + String(" syntax grammar? (y/N): ")
+        )
+
+    fn _start_grammar_install(mut self, lang: String):
+        """Spawn the curl that drops the grammar JSON into the user
+        config dir. Single-slot ``InstallRunner`` — if an LSP or docs
+        install is already running, surface the conflict on the status
+        bar rather than queue, since the popup only renders one at a
+        time."""
+        var specs = built_in_downloadable_grammars()
+        var spec_idx = find_downloadable_grammar_by_language(specs, lang)
+        if spec_idx < 0:
+            return
+        var spec = specs[spec_idx]
+        var cmd = grammar_install_command(spec.language_id, spec.url)
+        if self.install_runner.is_active():
+            self.status_bar.set_message(
+                String("Install busy; try ") + spec.display
+                    + String(" grammar again in a moment"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        try:
+            self.install_runner.start(
+                spec.display + String(" grammar"), cmd,
+            )
+            self._grammar_install_lang = lang
+            self.status_bar.set_message(
+                String("Downloading ") + spec.display + String(" grammar..."),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except:
+            self.status_bar.set_message(
+                String("Failed to start grammar download"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _on_grammar_install_complete(
+        mut self, result: InstallResult, screen: Rect,
+    ):
+        """React to a grammar-download finishing. Success: invalidate
+        the highlight cache for any open editor whose extension matches
+        this language so the new grammar takes effect on the next paint
+        without needing the user to close+reopen the file. Failure:
+        same shape as the LSP install path — pop the curl output into a
+        new editor window."""
+        var lang = self._grammar_install_lang
+        self._grammar_install_lang = String("")
+        if result.ok():
+            self.status_bar.set_message(
+                String("Installed ") + result.label,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            # Drop the cached compile of any prior in-process state for
+            # this language, then mark every editor's per-buffer cache
+            # dirty so the next refresh tokenizes from row 0 against the
+            # freshly-downloaded grammar.
+            var specs = built_in_downloadable_grammars()
+            var spec_idx = find_downloadable_grammar_by_language(specs, lang)
+            if spec_idx < 0:
+                return
+            var spec = specs[spec_idx]
+            for i in range(len(self.windows.windows)):
+                if not self.windows.windows[i].is_editor:
+                    continue
+                var path = self.windows.windows[i].editor.file_path
+                if len(path.as_bytes()) == 0:
+                    continue
+                var ext = extension_of(path)
+                var matched = False
+                for k in range(len(spec.file_types)):
+                    if spec.file_types[k] == ext:
+                        matched = True
+                        break
+                if matched:
+                    self.windows.windows[i].editor.invalidate_highlight_cache()
+        else:
+            var title = String("Grammar install failed: ") + result.label \
+                + String(" (exit ") + String(result.exit_code()) + String(")")
+            var workspace = self.workspace_rect(screen)
+            var rect = self._default_window_rect(workspace)
+            var was_max = self._frontmost_maximized()
+            var body = String("$ ") + result.command + String("\n\n") \
+                + result.output
+            self.windows.add(Window.editor_window(title^, rect, body^))
+            self._open_count += 1
+            if was_max:
+                var win_idx = len(self.windows.windows) - 1
+                self.windows.windows[win_idx].toggle_maximize(workspace)
+            self.status_bar.set_message(
+                String("Grammar install failed (exit ")
+                    + String(result.exit_code()) + String(") — see new window"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
 
     fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
         """Spawn (or look up) an LSP manager for files with extension
@@ -2262,6 +2469,16 @@ struct Desktop(Movable):
             self.debug_pane.focused = False
             self.file_tree.focused = False
             return Optional[String]()
+        if action == WINDOW_ROTATE_NEXT:
+            self.windows.rotate_focus(True)
+            self.debug_pane.focused = False
+            self.file_tree.focused = False
+            return Optional[String]()
+        if action == WINDOW_ROTATE_PREV:
+            self.windows.rotate_focus(False)
+            self.debug_pane.focused = False
+            self.file_tree.focused = False
+            return Optional[String]()
         if action == DEBUG_TOGGLE_BREAKPOINT:
             self._debug_toggle_breakpoint()
             return Optional[String]()
@@ -2394,6 +2611,9 @@ struct Desktop(Movable):
         time, and only one of these fields is non-empty)."""
         if len(self._doc_install_lang.as_bytes()) > 0:
             self._on_doc_install_complete(result, screen)
+            return
+        if len(self._grammar_install_lang.as_bytes()) > 0:
+            self._on_grammar_install_complete(result, screen)
             return
         var lang = self._install_lang
         self._install_lang = String("")
@@ -3968,6 +4188,19 @@ struct Desktop(Movable):
             var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
             if said_yes:
                 self._start_doc_install(lang)
+            return Optional[String]()
+        if pa == _PA_GRAMMAR_INSTALL:
+            # Same y/N parse as the docs branch. On accept, ``curl`` the
+            # grammar JSON into ``~/.config/turbokod/languages/<lang>/``
+            # via ``InstallRunner``; on completion the highlighter picks
+            # it up automatically because ``_grammar_path_for_ext``
+            # checks that path on every refresh.
+            var lang = self._pending_arg
+            self._pending_arg = String("")
+            var tb = text.as_bytes()
+            var said_yes = (len(tb) > 0 and (tb[0] == 0x79 or tb[0] == 0x59))
+            if said_yes:
+                self._start_grammar_install(lang)
             return Optional[String]()
         if pa == _PA_LSP_INSTALL:
             # Yes → run the install command as ``sh -c <hint>`` and show

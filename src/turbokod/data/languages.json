@@ -1,0 +1,2712 @@
+[
+  {
+    "language_id": "ada",
+    "file_types": [
+      "adb",
+      "ads"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ada_language_server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "amber",
+    "file_types": [
+      "ab"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "amber-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "astro",
+    "file_types": [
+      "astro"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "astro-ls",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g @astrojs/language-server"
+  },
+  {
+    "language_id": "awk",
+    "file_types": [
+      "awk",
+      "gawk",
+      "nawk",
+      "mawk"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "awk-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "bash",
+    "file_types": [
+      "sh",
+      "bash",
+      "ash",
+      "dash",
+      "ksh",
+      "mksh",
+      "zsh",
+      "zshenv",
+      "zlogin",
+      "zlogout",
+      "zprofile",
+      "zshrc",
+      "eclass",
+      "ebuild",
+      "bazelrc",
+      "Renviron",
+      "zsh-theme",
+      "cshrc",
+      "tcshrc",
+      "bashrc_Apple_Terminal",
+      "zshrc_Apple_Terminal"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "bash-language-server",
+          "start"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g bash-language-server"
+  },
+  {
+    "language_id": "bass",
+    "file_types": [
+      "bass"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "bass",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "beancount",
+    "file_types": [
+      "beancount",
+      "bean"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "beancount-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "bibtex",
+    "file_types": [
+      "bib"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "texlab"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "bicep",
+    "file_types": [
+      "bicep",
+      "bicepparam"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "bicep-langserver"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "bitbake",
+    "file_types": [
+      "bb",
+      "bbappend",
+      "bbclass"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "bitbake-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "blueprint",
+    "file_types": [
+      "blp"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "blueprint-compiler",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "c",
+    "file_types": [
+      "c"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "clangd"
+        ]
+      }
+    ],
+    "install_hint": "brew install llvm  # or apt install clangd"
+  },
+  {
+    "language_id": "c-sharp",
+    "file_types": [
+      "cs",
+      "csx",
+      "cake"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "roslyn-language-server",
+          "--stdio",
+          "--autoLoadProjects"
+        ]
+      },
+      {
+        "argv": [
+          "OmniSharp",
+          "--languageserver"
+        ]
+      },
+      {
+        "argv": [
+          "csharp-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "c3",
+    "file_types": [
+      "c3",
+      "c3i",
+      "c3t"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "c3-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "cabal",
+    "file_types": [
+      "cabal"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "haskell-language-server-wrapper",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "cairo",
+    "file_types": [
+      "cairo"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "cairo-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "circom",
+    "file_types": [
+      "circom"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "circom-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "clarity",
+    "file_types": [
+      "clar"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "clarinet",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "clojure",
+    "file_types": [
+      "clj",
+      "cljs",
+      "cljc",
+      "clje",
+      "cljr",
+      "cljx",
+      "edn",
+      "boot"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "clojure-lsp"
+        ]
+      }
+    ],
+    "install_hint": "brew install clojure-lsp/brew/clojure-lsp-native"
+  },
+  {
+    "language_id": "cmake",
+    "file_types": [
+      "cmake"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "neocmakelsp",
+          "stdio"
+        ]
+      },
+      {
+        "argv": [
+          "cmake-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "codeql",
+    "file_types": [
+      "ql",
+      "qll"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "codeql",
+          "execute",
+          "language-server",
+          "--check-errors=ON_CHANGE"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "common-lisp",
+    "file_types": [
+      "lisp",
+      "asd",
+      "cl",
+      "l",
+      "lsp",
+      "ny",
+      "podsl",
+      "ros",
+      "sexp"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "cl-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "cpp",
+    "file_types": [
+      "cc",
+      "hh",
+      "c++",
+      "cpp",
+      "hpp",
+      "h",
+      "ipp",
+      "tpp",
+      "cxx",
+      "hxx",
+      "ixx",
+      "txx",
+      "ino",
+      "C",
+      "H",
+      "cu",
+      "cuh",
+      "cppm",
+      "h++",
+      "ii",
+      "inl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "clangd"
+        ]
+      }
+    ],
+    "install_hint": "brew install llvm  # or apt install clangd"
+  },
+  {
+    "language_id": "crystal",
+    "file_types": [
+      "cr"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "crystalline",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "ameba-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "css",
+    "file_types": [
+      "css"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-css-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g vscode-langservers-extracted"
+  },
+  {
+    "language_id": "cue",
+    "file_types": [
+      "cue"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "cue",
+          "lsp",
+          "serve"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "d",
+    "file_types": [
+      "d",
+      "dd"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "serve-d"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "dart",
+    "file_types": [
+      "dart"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "dart",
+          "language-server",
+          "--client-id=helix"
+        ]
+      }
+    ],
+    "install_hint": "ships with the Dart SDK"
+  },
+  {
+    "language_id": "devicetree",
+    "file_types": [
+      "dts",
+      "dtsi"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "dts-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "dhall",
+    "file_types": [
+      "dhall"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "dhall-lsp-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "dockerfile",
+    "file_types": [
+      "Dockerfile",
+      "dockerfile",
+      "Containerfile",
+      "containerfile"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "docker-langserver",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "docker-language-server",
+          "start",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g dockerfile-language-server-nodejs"
+  },
+  {
+    "language_id": "dot",
+    "file_types": [
+      "dot"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "dot-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "drools",
+    "file_types": [
+      "drl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "drools-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ebnf",
+    "file_types": [
+      "ebnf"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ebnfer"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "eiffel",
+    "file_types": [
+      "e"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "eiffel-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "elixir",
+    "file_types": [
+      "ex",
+      "exs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "elixir-ls"
+        ]
+      },
+      {
+        "argv": [
+          "expert",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "mix escript.install hex elixir_ls  # or see github.com/elixir-lsp/elixir-ls"
+  },
+  {
+    "language_id": "elm",
+    "file_types": [
+      "elm"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "elm-language-server"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g @elm-tooling/elm-language-server"
+  },
+  {
+    "language_id": "elvish",
+    "file_types": [
+      "elv"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "elvish",
+          "-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "erlang",
+    "file_types": [
+      "erl",
+      "hrl",
+      "app"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "erlang_ls"
+        ]
+      },
+      {
+        "argv": [
+          "elp",
+          "server"
+        ]
+      }
+    ],
+    "install_hint": "see https://github.com/erlang-ls/erlang_ls"
+  },
+  {
+    "language_id": "fennel",
+    "file_types": [
+      "fnl",
+      "fnlm"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "fennel-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "fish",
+    "file_types": [
+      "fish"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "fish-lsp",
+          "start"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "forth",
+    "file_types": [
+      "fs",
+      "forth",
+      "fth",
+      "4th"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "forth-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "fortran",
+    "file_types": [
+      "f",
+      "for",
+      "f90",
+      "f95",
+      "f03",
+      "F",
+      "F90",
+      "F95",
+      "F03"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "fortls",
+          "--lowercase_intrinsics"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "fsharp",
+    "file_types": [
+      "fs",
+      "fsx",
+      "fsi",
+      "fsscript"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "fsautocomplete"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "gas",
+    "file_types": [
+      "s"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "asm-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "gjs",
+    "file_types": [
+      "gjs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "vscode-eslint-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "ember-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "gleam",
+    "file_types": [
+      "gleam"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "gleam",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "glsl",
+    "file_types": [
+      "glsl",
+      "vert",
+      "tesc",
+      "tese",
+      "geom",
+      "frag",
+      "comp"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "glsl_analyzer"
+        ]
+      },
+      {
+        "argv": [
+          "glsld",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "go",
+    "file_types": [
+      "go"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "gopls"
+        ]
+      },
+      {
+        "argv": [
+          "golangci-lint-langserver"
+        ]
+      }
+    ],
+    "install_hint": "go install golang.org/x/tools/gopls@latest"
+  },
+  {
+    "language_id": "gotmpl",
+    "file_types": [
+      "gotmpl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "gopls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "gpr",
+    "file_types": [
+      "gpr"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ada_language_server",
+          "--language-gpr"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "graphql",
+    "file_types": [
+      "gql",
+      "graphql",
+      "graphqls"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "graphql-lsp",
+          "server",
+          "-m",
+          "stream"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g graphql-language-service-cli"
+  },
+  {
+    "language_id": "gts",
+    "file_types": [
+      "gts"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "vscode-eslint-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "ember-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "hare",
+    "file_types": [
+      "ha"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "hare-lsp",
+          "-S"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "haskell",
+    "file_types": [
+      "hs",
+      "hs-boot",
+      "hsc"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "haskell-language-server-wrapper",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": "ghcup install hls"
+  },
+  {
+    "language_id": "haskell-literate",
+    "file_types": [
+      "lhs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "haskell-language-server-wrapper",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "hcl",
+    "file_types": [
+      "hcl",
+      "tf",
+      "nomad"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "terraform-ls",
+          "serve"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "hdl",
+    "file_types": [
+      "hdl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "hdls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "heex",
+    "file_types": [
+      "heex"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "elixir-ls"
+        ]
+      },
+      {
+        "argv": [
+          "expert",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "html",
+    "file_types": [
+      "html",
+      "htm",
+      "shtml",
+      "xhtml",
+      "xht",
+      "jsp",
+      "asp",
+      "aspx",
+      "jshtm",
+      "volt",
+      "rhtml",
+      "cshtml"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-html-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "superhtml",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g vscode-langservers-extracted"
+  },
+  {
+    "language_id": "hy",
+    "file_types": [
+      "hy"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "hyuga"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "idris",
+    "file_types": [
+      "idr"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "idris2-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "java",
+    "file_types": [
+      "java",
+      "jav",
+      "pde"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "jdtls"
+        ]
+      }
+    ],
+    "install_hint": "see https://github.com/eclipse-jdtls/eclipse.jdt.ls"
+  },
+  {
+    "language_id": "javascript",
+    "file_types": [
+      "js",
+      "mjs",
+      "cjs",
+      "rules",
+      "es6",
+      "pac",
+      "gs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g typescript-language-server typescript"
+  },
+  {
+    "language_id": "jq",
+    "file_types": [
+      "jq"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "jq-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "json",
+    "file_types": [
+      "json",
+      "arb",
+      "ipynb",
+      "geojson",
+      "gltf",
+      "webmanifest",
+      "js.map",
+      "ts.map",
+      "css.map",
+      "jsonl",
+      "avsc",
+      "ldtk",
+      "ldtkl",
+      "sublime-build",
+      "sublime-color-scheme",
+      "sublime-commands",
+      "sublime-completions",
+      "sublime-keymap",
+      "sublime-macro",
+      "sublime-menu",
+      "sublime-mousemap",
+      "sublime-project",
+      "sublime-settings",
+      "sublime-theme",
+      "sublime-workspace",
+      "code-workspace"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-json-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g vscode-langservers-extracted"
+  },
+  {
+    "language_id": "json-ld",
+    "file_types": [
+      "jsonld"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-json-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "jsonc",
+    "file_types": [
+      "jsonc"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-json-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "jsonnet",
+    "file_types": [
+      "libsonnet",
+      "jsonnet"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "jsonnet-language-server",
+          "-t",
+          "--lint"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "jsx",
+    "file_types": [
+      "jsx"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g typescript-language-server typescript"
+  },
+  {
+    "language_id": "julia",
+    "file_types": [
+      "jl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "julia",
+          "--startup-file=no",
+          "--history-file=no",
+          "--quiet",
+          "-e",
+          "using LanguageServer; runserver()"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "just",
+    "file_types": [
+      "just"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "just-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "kcl",
+    "file_types": [
+      "kcl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "kcl-language-server",
+          "server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "koka",
+    "file_types": [
+      "kk"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "koka",
+          "--language-server",
+          "--lsstdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "kotlin",
+    "file_types": [
+      "kt",
+      "kts"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "kotlin-language-server"
+        ]
+      }
+    ],
+    "install_hint": "brew install kotlin-language-server"
+  },
+  {
+    "language_id": "koto",
+    "file_types": [
+      "koto"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "koto-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "latex",
+    "file_types": [
+      "tex",
+      "dtx",
+      "ins",
+      "sty",
+      "cls",
+      "Rd",
+      "bbx",
+      "cbx"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "texlab"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "lean",
+    "file_types": [
+      "lean"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "lake",
+          "serve"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "less",
+    "file_types": [
+      "less"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-css-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "lua",
+    "file_types": [
+      "lua",
+      "rockspec"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "lua-language-server"
+        ]
+      }
+    ],
+    "install_hint": "brew install lua-language-server"
+  },
+  {
+    "language_id": "luau",
+    "file_types": [
+      "luau"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "luau-lsp",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "markdoc",
+    "file_types": [
+      "mdoc"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "markdoc-ls",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "markdown",
+    "file_types": [
+      "md",
+      "livemd",
+      "markdown",
+      "mdx",
+      "mkd",
+      "mkdn",
+      "mdwn",
+      "mdown",
+      "markdn",
+      "mdtxt",
+      "mdtext",
+      "workbook"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "marksman",
+          "server"
+        ]
+      },
+      {
+        "argv": [
+          "markdown-oxide"
+        ]
+      },
+      {
+        "argv": [
+          "rumdl",
+          "server"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g marksman  # or see github.com/artempyanykh/marksman"
+  },
+  {
+    "language_id": "mint",
+    "file_types": [
+      "mint"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "mint",
+          "tool",
+          "ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "mojo",
+    "file_types": [
+      "mojo",
+      "🔥"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pixi",
+          "run",
+          "mojo-lsp-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "nasm",
+    "file_types": [
+      "asm",
+      "S",
+      "nasm"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "asm-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "nickel",
+    "file_types": [
+      "ncl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "nls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "nim",
+    "file_types": [
+      "nim",
+      "nims",
+      "nimble"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "nimlangserver"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "nix",
+    "file_types": [
+      "nix"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "nil"
+        ]
+      },
+      {
+        "argv": [
+          "nixd"
+        ]
+      }
+    ],
+    "install_hint": "nix-env -iA nixpkgs.nil  # or nixd"
+  },
+  {
+    "language_id": "nu",
+    "file_types": [
+      "nu",
+      "nuon"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "nu",
+          "--lsp"
+        ]
+      },
+      {
+        "argv": [
+          "nu-lint",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ocaml",
+    "file_types": [
+      "ml"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ocamllsp"
+        ]
+      }
+    ],
+    "install_hint": "opam install ocaml-lsp-server"
+  },
+  {
+    "language_id": "ocaml-interface",
+    "file_types": [
+      "mli"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ocamllsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "odin",
+    "file_types": [
+      "odin"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ols"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "opencl",
+    "file_types": [
+      "cl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "clangd"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "openscad",
+    "file_types": [
+      "scad"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "openscad-lsp",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "pascal",
+    "file_types": [
+      "pas",
+      "pp",
+      "inc",
+      "lpr",
+      "lfm"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pasls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "perl",
+    "file_types": [
+      "pl",
+      "pm",
+      "t",
+      "psgi",
+      "raku",
+      "rakumod",
+      "rakutest",
+      "rakudoc",
+      "nqp",
+      "p6",
+      "pl6",
+      "pm6"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "perlnavigator",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "pest",
+    "file_types": [
+      "pest"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pest-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "php",
+    "file_types": [
+      "php",
+      "inc",
+      "php4",
+      "php5",
+      "phtml",
+      "ctp"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "intelephense",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g intelephense"
+  },
+  {
+    "language_id": "pkl",
+    "file_types": [
+      "pkl",
+      "pcf"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pkl-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ponylang",
+    "file_types": [
+      "pony"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pony-lsp",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "prisma",
+    "file_types": [
+      "prisma"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "prisma-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "prolog",
+    "file_types": [
+      "pl",
+      "prolog"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "swipl",
+          "-g",
+          "use_module(library(lsp_server))",
+          "-g",
+          "lsp_server:main",
+          "-t",
+          "halt",
+          "--",
+          "stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "protobuf",
+    "file_types": [
+      "proto"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "buf",
+          "lsp",
+          "serve",
+          "--timeout",
+          "0"
+        ]
+      },
+      {
+        "argv": [
+          "pb",
+          "lsp"
+        ]
+      },
+      {
+        "argv": [
+          "protols"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "purescript",
+    "file_types": [
+      "purs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "purescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "python",
+    "file_types": [
+      "py",
+      "pyi",
+      "py3",
+      "pyw",
+      "ptl",
+      "rpy",
+      "cpy",
+      "ipy",
+      "pyt"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ty",
+          "server"
+        ]
+      },
+      {
+        "argv": [
+          "ruff",
+          "server"
+        ]
+      },
+      {
+        "argv": [
+          "jedi-language-server"
+        ]
+      },
+      {
+        "argv": [
+          "pylsp"
+        ]
+      }
+    ],
+    "install_hint": "pip install pyright"
+  },
+  {
+    "language_id": "qml",
+    "file_types": [
+      "qml"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "qmlls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "quint",
+    "file_types": [
+      "qnt"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "quint-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "r",
+    "file_types": [
+      "r",
+      "R"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "R",
+          "--no-echo",
+          "-e",
+          "languageserver::run()"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "racket",
+    "file_types": [
+      "rkt",
+      "rktd",
+      "rktl",
+      "scrbl",
+      "zuo"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "racket",
+          "-l",
+          "racket-langserver"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "rego",
+    "file_types": [
+      "rego"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "regols"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "rescript",
+    "file_types": [
+      "res"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "rescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ripple",
+    "file_types": [
+      "ripple"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ripple-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "rmarkdown",
+    "file_types": [
+      "rmd",
+      "Rmd"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "R",
+          "--no-echo",
+          "-e",
+          "languageserver::run()"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "robot",
+    "file_types": [
+      "robot",
+      "resource"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "robotcode",
+          "language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "robotframework_ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ron",
+    "file_types": [
+      "ron"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ron-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "ruby",
+    "file_types": [
+      "rb",
+      "rake",
+      "irb",
+      "gemspec",
+      "rabl",
+      "jbuilder",
+      "jb",
+      "podspec",
+      "rjs",
+      "rbi",
+      "rbs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "ruby-lsp"
+        ]
+      },
+      {
+        "argv": [
+          "solargraph",
+          "stdio"
+        ]
+      }
+    ],
+    "install_hint": "gem install solargraph"
+  },
+  {
+    "language_id": "rust",
+    "file_types": [
+      "rs"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "rust-analyzer"
+        ]
+      }
+    ],
+    "install_hint": "rustup component add rust-analyzer"
+  },
+  {
+    "language_id": "scala",
+    "file_types": [
+      "scala",
+      "sbt",
+      "sc"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "metals"
+        ]
+      }
+    ],
+    "install_hint": "coursier install metals"
+  },
+  {
+    "language_id": "scss",
+    "file_types": [
+      "scss"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vscode-css-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "slang",
+    "file_types": [
+      "slang"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "slangd"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "slint",
+    "file_types": [
+      "slint"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "slint-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "smali",
+    "file_types": [
+      "smali"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "smalisp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "smithy",
+    "file_types": [
+      "smithy"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "cs",
+          "launch",
+          "--contrib",
+          "smithy-language-server",
+          "--",
+          "0"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "snakemake",
+    "file_types": [
+      "smk"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "pylsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "solidity",
+    "file_types": [
+      "sol"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "solc",
+          "--lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "sourcepawn",
+    "file_types": [
+      "sp",
+      "inc"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "sourcepawn-studio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "spade",
+    "file_types": [
+      "spade"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "spade-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "starlark",
+    "file_types": [
+      "bzl",
+      "bazel",
+      "star"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "starpls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "styx",
+    "file_types": [
+      "styx"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "styx",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "svelte",
+    "file_types": [
+      "svelte"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "svelteserver",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g svelte-language-server"
+  },
+  {
+    "language_id": "sway",
+    "file_types": [
+      "sw"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "forc",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "swift",
+    "file_types": [
+      "swift",
+      "swiftinterface"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "sourcekit-lsp"
+        ]
+      }
+    ],
+    "install_hint": "ships with the Swift toolchain (sourcekit-lsp)"
+  },
+  {
+    "language_id": "systemd",
+    "file_types": [
+      "service",
+      "automount",
+      "device",
+      "mount",
+      "nspawn",
+      "path",
+      "scope",
+      "slice",
+      "socket",
+      "swap",
+      "target",
+      "timer",
+      "container",
+      "kube",
+      "network",
+      "volume",
+      "build",
+      "image"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "systemd-lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "systemverilog",
+    "file_types": [
+      "sv",
+      "svh"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "svlangserver"
+        ]
+      },
+      {
+        "argv": [
+          "verible-verilog-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "teal",
+    "file_types": [
+      "tl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "teal-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "templ",
+    "file_types": [
+      "templ"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "templ",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "tfvars",
+    "file_types": [
+      "tfvars"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "terraform-ls",
+          "serve"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "tilt",
+    "file_types": [
+      "tiltfile"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "tilt",
+          "lsp",
+          "start"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "toml",
+    "file_types": [
+      "toml"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "taplo",
+          "lsp",
+          "stdio"
+        ]
+      },
+      {
+        "argv": [
+          "tombi",
+          "lsp"
+        ]
+      }
+    ],
+    "install_hint": "cargo install taplo-cli --features lsp"
+  },
+  {
+    "language_id": "tsx",
+    "file_types": [
+      "tsx"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g typescript-language-server typescript"
+  },
+  {
+    "language_id": "typescript",
+    "file_types": [
+      "ts",
+      "mts",
+      "cts"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g typescript-language-server typescript"
+  },
+  {
+    "language_id": "typespec",
+    "file_types": [
+      "tsp"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "tsp-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "typst",
+    "file_types": [
+      "typst",
+      "typ"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "tinymist"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "v",
+    "file_types": [
+      "v",
+      "vv",
+      "vsh"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "v-analyzer"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "vala",
+    "file_types": [
+      "vala",
+      "vapi"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vala-language-server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "verilog",
+    "file_types": [
+      "v",
+      "vh"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "verible-verilog-ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "vhdl",
+    "file_types": [
+      "vhd",
+      "vhdl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vhdl_ls"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "vue",
+    "file_types": [
+      "vue"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "vue-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g @vue/language-server"
+  },
+  {
+    "language_id": "wat",
+    "file_types": [
+      "wat"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "wat_server"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "wgsl",
+    "file_types": [
+      "wgsl"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "wgsl-analyzer"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "wikitext",
+    "file_types": [
+      "wikimedia",
+      "mediawiki",
+      "wikitext"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "wikitext-lsp",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "yaml",
+    "file_types": [
+      "yml",
+      "yaml",
+      "sublime-syntax",
+      "bu"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "yaml-language-server",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "ansible-language-server",
+          "--stdio"
+        ]
+      }
+    ],
+    "install_hint": "npm install -g yaml-language-server"
+  },
+  {
+    "language_id": "yara",
+    "file_types": [
+      "yara",
+      "yar"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "yls",
+          "-vv"
+        ]
+      }
+    ],
+    "install_hint": ""
+  },
+  {
+    "language_id": "zig",
+    "file_types": [
+      "zig",
+      "zon"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "zls"
+        ]
+      }
+    ],
+    "install_hint": "brew install zls  # or see https://github.com/zigtools/zls"
+  }
+]

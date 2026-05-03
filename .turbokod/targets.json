@@ -1,0 +1,14 @@
+{
+  "active": "tests",
+  "targets": [
+    { "name":    "tests",
+      "program": "./run.sh",
+      "args":    ["tests/test_basic.mojo"] },
+    { "name":    "desktop",
+      "program": "./run.sh",
+      "args":    ["examples/desktop.mojo"] },
+    { "name":    "hello",
+      "program": "./run.sh",
+      "args":    ["examples/hello.mojo"] }
+  ]
+}

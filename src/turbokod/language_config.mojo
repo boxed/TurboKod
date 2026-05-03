@@ -1,15 +1,16 @@
 """Language-server registry, modeled on Helix's ``languages.toml``.
 
-A built-in catalog of common LSP servers keyed by language id, with the
-file extensions that route to each language and an ordered list of
-candidate binaries (with argv) so we can pick the first one the user
-actually has installed.
+The static catalog lives in ``src/turbokod/data/languages.json``, regenerated
+from upstream Helix by ``scripts/refresh_languages.py`` (run via
+``make update-lsp-list``). We load + parse that JSON at startup rather than
+hardcoding the data in Mojo: the upstream list runs to ~150 languages and
+churns frequently, so keeping it as a build resource is the difference
+between a one-line refresh and a tedious manual port every release.
 
-The data is hardcoded for now — Mojo doesn't ship a TOML parser and
-shelling out to one would be silly. A future extension could merge
-entries from ``~/.config/turbokod/languages.toml`` (or similar) with
-JSON since we already have a parser; the structure here is shaped to
-make that mechanical.
+Why JSON and not TOML directly: Mojo has no TOML parser, but it has the
+hand-rolled ``json.mojo`` we use for LSP traffic. The refresh script does
+the TOML→JSON flattening once (server table lookup, candidate list
+resolution, file-type filtering) so the runtime doesn't have to.
 
 Why this shape:
 * Multiple ``argvs`` per language captures Python's reality (pyright,
@@ -22,6 +23,12 @@ Why this shape:
 
 from std.collections.list import List
 from std.collections.optional import Optional
+
+from .file_io import read_file
+from .json import JsonValue, parse_json
+
+
+comptime LANGUAGES_JSON_PATH = String("src/turbokod/data/languages.json")
 
 
 struct ServerCandidate(ImplicitlyCopyable, Movable):
@@ -69,149 +76,85 @@ struct LanguageSpec(ImplicitlyCopyable, Movable):
         self.install_hint = copy.install_hint
 
 
-fn _argv1(a: String) -> ServerCandidate:
-    var v = List[String]()
-    v.append(a)
-    return ServerCandidate(v^)
-
-
-fn _argv2(a: String, b: String) -> ServerCandidate:
-    var v = List[String]()
-    v.append(a)
-    v.append(b)
-    return ServerCandidate(v^)
-
-
-fn _exts(*items: String) -> List[String]:
+fn _string_array(v: JsonValue) -> List[String]:
+    """Pull a JSON array of strings into a Mojo List, dropping non-string
+    entries silently — the refresh script only emits strings here, but
+    tolerating noise keeps a malformed catalog from crashing startup."""
     var out = List[String]()
-    for x in items:
-        out.append(String(x))
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var elem = v.array_at(i)
+        if elem.is_string():
+            out.append(elem.as_str())
     return out^
 
 
-fn built_in_servers() -> List[LanguageSpec]:
-    """Curated list of well-known LSP servers + extensions.
+fn _candidate_from_json(v: JsonValue) -> ServerCandidate:
+    var argv = List[String]()
+    if v.is_object():
+        var argv_v = v.object_get(String("argv"))
+        if argv_v:
+            argv = _string_array(argv_v.value())
+    return ServerCandidate(argv^)
 
-    Order within ``candidates`` is the spawn-priority order: pyright →
-    basedpyright → pylsp for Python, etc. Add to this list to teach
-    turbokod about a new language. Entries that don't apply (because
-    their binary isn't on ``$PATH``) are silently skipped at spawn time.
+
+fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
+    """Translate one JSON catalog entry into a LanguageSpec. Returns
+    None when required fields are missing — corrupt entries are skipped
+    rather than aborting the whole load."""
+    if not v.is_object():
+        return Optional[LanguageSpec]()
+
+    var lang_v = v.object_get(String("language_id"))
+    if not lang_v or not lang_v.value().is_string():
+        return Optional[LanguageSpec]()
+    var language_id = lang_v.value().as_str()
+
+    var file_types = List[String]()
+    var ft_v = v.object_get(String("file_types"))
+    if ft_v:
+        file_types = _string_array(ft_v.value())
+
+    var candidates = List[ServerCandidate]()
+    var cands_v = v.object_get(String("candidates"))
+    if cands_v and cands_v.value().is_array():
+        var arr = cands_v.value()
+        for i in range(arr.array_len()):
+            candidates.append(_candidate_from_json(arr.array_at(i)))
+
+    var install_hint = String("")
+    var hint_v = v.object_get(String("install_hint"))
+    if hint_v and hint_v.value().is_string():
+        install_hint = hint_v.value().as_str()
+
+    return Optional[LanguageSpec](LanguageSpec(
+        language_id^, file_types^, candidates^, install_hint^,
+    ))
+
+
+fn built_in_servers() -> List[LanguageSpec]:
+    """Load the curated language-server catalog from the bundled JSON.
+
+    Returns an empty list if the file is missing or malformed — every
+    consumer treats an empty catalog as "no built-in routing," which is
+    the correct degraded behavior. Run ``make update-lsp-list`` to
+    regenerate the catalog from upstream Helix.
     """
     var out = List[LanguageSpec]()
-
-    # --- Mojo ---------------------------------------------------------
-    # Note: ``mojo-lsp-server`` needs ``-I`` paths injected per-project
-    # to resolve internal imports. The Desktop layer adds those before
-    # spawning, so the candidate here is just the bare binary.
-    var mojo_cands = List[ServerCandidate]()
-    mojo_cands.append(_argv1(String("mojo-lsp-server")))
-    out.append(LanguageSpec(
-        String("mojo"),
-        _exts(String("mojo"), String("🔥")),
-        mojo_cands^,
-    ))
-
-    # --- Python -------------------------------------------------------
-    var py_cands = List[ServerCandidate]()
-    py_cands.append(_argv2(String("pyright-langserver"), String("--stdio")))
-    py_cands.append(_argv2(String("basedpyright-langserver"), String("--stdio")))
-    py_cands.append(_argv1(String("pylsp")))
-    out.append(LanguageSpec(
-        String("python"),
-        _exts(String("py"), String("pyi"), String("pyw")),
-        py_cands^,
-        String("pip install pyright"),
-    ))
-
-    # --- Rust ---------------------------------------------------------
-    var rs_cands = List[ServerCandidate]()
-    rs_cands.append(_argv1(String("rust-analyzer")))
-    out.append(LanguageSpec(
-        String("rust"), _exts(String("rs")), rs_cands^,
-        String("rustup component add rust-analyzer"),
-    ))
-
-    # --- Go -----------------------------------------------------------
-    var go_cands = List[ServerCandidate]()
-    go_cands.append(_argv1(String("gopls")))
-    out.append(LanguageSpec(
-        String("go"), _exts(String("go")), go_cands^,
-        String("go install golang.org/x/tools/gopls@latest"),
-    ))
-
-    # --- TypeScript / JavaScript -------------------------------------
-    var ts_cands = List[ServerCandidate]()
-    ts_cands.append(_argv2(String("typescript-language-server"), String("--stdio")))
-    out.append(LanguageSpec(
-        String("typescript"),
-        _exts(
-            String("ts"), String("tsx"), String("js"), String("jsx"),
-            String("mjs"), String("cjs"),
-        ),
-        ts_cands^,
-        String("npm install -g typescript-language-server typescript"),
-    ))
-
-    # --- C / C++ ------------------------------------------------------
-    var c_cands = List[ServerCandidate]()
-    c_cands.append(_argv1(String("clangd")))
-    out.append(LanguageSpec(
-        String("cpp"),
-        _exts(
-            String("c"), String("h"), String("cc"), String("cpp"),
-            String("cxx"), String("hpp"), String("hh"), String("hxx"),
-        ),
-        c_cands^,
-        String("brew install llvm  # or apt install clangd"),
-    ))
-
-    # --- Zig ----------------------------------------------------------
-    var zig_cands = List[ServerCandidate]()
-    zig_cands.append(_argv1(String("zls")))
-    out.append(LanguageSpec(
-        String("zig"), _exts(String("zig")), zig_cands^,
-        String("brew install zls  # or see https://github.com/zigtools/zls"),
-    ))
-
-    # --- Ruby ---------------------------------------------------------
-    var rb_cands = List[ServerCandidate]()
-    rb_cands.append(_argv1(String("solargraph")))
-    rb_cands.append(_argv2(String("ruby-lsp"), String("stdio")))
-    out.append(LanguageSpec(
-        String("ruby"), _exts(String("rb")), rb_cands^,
-        String("gem install solargraph"),
-    ))
-
-    # --- JSON ---------------------------------------------------------
-    var json_cands = List[ServerCandidate]()
-    json_cands.append(_argv2(String("vscode-json-language-server"), String("--stdio")))
-    out.append(LanguageSpec(
-        String("json"),
-        _exts(String("json"), String("jsonc")),
-        json_cands^,
-        String("npm install -g vscode-langservers-extracted"),
-    ))
-
-    # --- YAML ---------------------------------------------------------
-    var yaml_cands = List[ServerCandidate]()
-    yaml_cands.append(_argv2(String("yaml-language-server"), String("--stdio")))
-    out.append(LanguageSpec(
-        String("yaml"),
-        _exts(String("yaml"), String("yml")),
-        yaml_cands^,
-        String("npm install -g yaml-language-server"),
-    ))
-
-    # --- Bash ---------------------------------------------------------
-    var sh_cands = List[ServerCandidate]()
-    sh_cands.append(_argv2(String("bash-language-server"), String("start")))
-    out.append(LanguageSpec(
-        String("bash"),
-        _exts(String("sh"), String("bash")),
-        sh_cands^,
-        String("npm install -g bash-language-server"),
-    ))
-
+    try:
+        var text = read_file(LANGUAGES_JSON_PATH)
+        if len(text.as_bytes()) == 0:
+            return out^
+        var root = parse_json(text)
+        if not root.is_array():
+            return out^
+        for i in range(root.array_len()):
+            var spec = _spec_from_json(root.array_at(i))
+            if spec:
+                out.append(spec.value())
+    except:
+        pass
     return out^
 
 
@@ -220,9 +163,9 @@ fn find_language_for_extension(
 ) -> Int:
     """Index of the spec whose ``file_types`` contains ``ext``, or -1.
 
-    Linear scan — the spec list is small (a couple of dozen entries
-    even fully populated) and this only fires once per file open, so
-    a hash table would be over-engineering.
+    Linear scan — the spec list is small (a couple hundred entries even
+    fully populated) and this only fires once per file open, so a hash
+    table would be over-engineering.
     """
     if len(ext.as_bytes()) == 0:
         return -1

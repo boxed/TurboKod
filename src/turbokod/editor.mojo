@@ -773,6 +773,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         # bring it back to a real row via ``_mark_hl_dirty``.
         self._hl_dirty_row = self.buffer.line_count()
 
+    fn invalidate_highlight_cache(mut self):
+        """Drop the per-buffer tokenizer state and force a full
+        retokenize on the next ``flush_highlights``. Used after a
+        grammar download lands so the editor immediately picks up the
+        newly-installed ``.tmLanguage.json`` instead of continuing to
+        paint stale (or empty) highlights from before the download."""
+        self._hl_cache = HighlightCache()
+        self._highlights_dirty = True
+        self._hl_dirty_row = 0
+
     fn _mark_hl_dirty(mut self, row: Int):
         """Note that ``row`` (and possibly later rows) need
         re-tokenizing. The dirty pointer only ever moves *up*

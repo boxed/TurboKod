@@ -33,6 +33,9 @@ use settings::{monitor_fingerprint, Settings, WindowState};
 #[cfg(target_os = "macos")]
 mod macos_url_scheme;
 
+#[cfg(target_os = "macos")]
+mod macos_key_monitor;
+
 const INIT_COLS: u32 = 80;
 const INIT_ROWS: u32 = 25;
 const MIN_COLS: u32 = 20;
@@ -1789,6 +1792,12 @@ fn main() -> anyhow::Result<()> {
 
     let pty_loop = PtyEventLoop::new(term.clone(), listener, pty, false, false)?;
     let notifier = Notifier(pty_loop.channel());
+    // AppKit swallows Cmd+` for "Cycle through windows" before keyDown:
+    // ever fires. Install a local NSEvent monitor that consumes the
+    // event and forwards a synthetic xterm modifyOtherKeys envelope to
+    // the PTY, so the embedded app can bind it.
+    #[cfg(target_os = "macos")]
+    macos_key_monitor::install(pty_loop.channel());
     let _ = pty_loop.spawn();
 
     let mut app = App {

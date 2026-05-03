@@ -97,11 +97,11 @@ struct StatusBar(Movable):
             _ = canvas.put_text(Point(x, y), d, desc_attr)
             x += len(d.as_bytes()) + 2
         # Target tabs: painted in the gap between F-key shortcuts and
-        # the right-aligned status message. Each tab is ``[ name ]`` —
-        # the active one is reverse-video so the user can see at a
-        # glance which target Cmd+R will run. We capture per-tab
-        # bounds in ``_tab_hits`` so the click handler can route hits
-        # without recomputing the layout.
+        # the right-aligned status message. The active tab is
+        # reverse-video so the user can see at a glance which target
+        # Cmd+R will run. We capture per-tab bounds in ``_tab_hits`` so
+        # the click handler can route hits without recomputing the
+        # layout.
         self._tab_hits = List[_TabHit]()
         if len(self.tabs) > 0:
             x += 1
@@ -114,7 +114,7 @@ struct StatusBar(Movable):
                     label = String("● ") + label
                 elif tab.debugging:
                     label = String("◆ ") + label
-                var rendered = String("[ ") + label + String(" ]")
+                var rendered = String(" ") + label + String(" ")
                 var w = len(rendered.as_bytes())
                 var attr: Attr
                 if i == self.active_tab:

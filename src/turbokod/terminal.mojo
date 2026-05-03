@@ -515,8 +515,8 @@ fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
     if cp < 0x40 or cp > 0x7E:
         return (UInt32(cp), folded)
     var letter = cp
-    if letter >= 0x60:
-        letter = letter - 0x20  # to upper
+    if 0x61 <= letter and letter <= 0x7A:
+        letter = letter - 0x20  # lowercase a..z → uppercase A..Z
     if letter < 0x40 or letter > 0x5F:
         return (UInt32(cp), folded)
     return (UInt32(letter - 0x40), MOD_NONE)

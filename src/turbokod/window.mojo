@@ -610,6 +610,22 @@ struct WindowManager(Movable):
         self.focused = idx
         self._raise_in_z(idx)
 
+    fn rotate_focus(mut self, forward: Bool):
+        """Cycle focus to the next (forward) or previous window in the
+        stable insertion order. No-op when there are 0 or 1 windows.
+        Stable order — not z-order — keeps rotation predictable: the
+        sequence is always the same as the numbered window labels."""
+        var n = len(self.windows)
+        if n <= 1:
+            return
+        var cur = self.focused
+        if cur < 0 or cur >= n:
+            cur = 0
+        var step = 1 if forward else n - 1
+        var nxt = (cur + step) % n
+        self.focused = nxt
+        self._raise_in_z(nxt)
+
     fn close_focused(mut self) -> Bool:
         """Close the focused window. Focus moves to whichever window was
         next-most-recently focused (the new top of ``z_order``); ``-1`` when
