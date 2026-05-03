@@ -13,24 +13,31 @@ The left sidebar stacks three panels:
 * **Commits** — the last 50 commits on whichever ref is reachable from
   ``HEAD``.
 
-A single right pane renders content for the focused row of the focused
-panel:
+The right side is split: when a file is selected it shows two stacked
+panels — **Unstaged** on top, **Staged** below — each scrolling
+independently with its own cursor. For a branch / commit selection it
+collapses to a single info panel showing the log / show output. Right-
+arrow enters the right side (lands on Unstaged for files); Tab cycles
+between Unstaged and Staged when both are visible. Within a right
+panel, Up/Down moves the line cursor and Space stages / unstages the
+single ``+`` / ``-`` line under the cursor (forward from Unstaged,
+``--reverse`` from Staged).
 
-* file row → two sections, "── STAGED ──" (``git diff --cached <file>``)
-  and "── UNSTAGED ──" (``git diff <file>``). Right-arrow moves focus
-  into the right pane; Up/Down moves a line cursor; Space stages /
-  unstages the cursor's single ``+`` or ``-`` line by piping a minimal
-  hand-rolled patch to ``git apply --cached`` (with ``--reverse`` when
-  the cursor is in the staged section).
-* branch row → ``git log -30`` against the branch
-* commit row → ``git show <sha>`` (header + diff)
+Tab / Shift+Tab cycle focus between the three sidebar panels, or
+between the two right-side panels when focus is on the right.
+Up/Down/PgUp/PgDn, Home/End operate on the focused panel; Left-arrow
+returns focus from the right side to whichever sidebar panel was last
+active.
 
-Tab / Shift+Tab cycle focus between sidebar panels. Up/Down/PgUp/PgDn,
-Home/End operate on the focused panel; in the right pane the same keys
-move the line cursor (Home/End jump to first/last line; PgUp/PgDn
-scroll a page and bring the cursor along). Left-arrow returns focus
-from the right pane to whichever sidebar panel was last active.
+All three sidebar splitters and the right-side splitter are
+**draggable** — click on a splitter row (the thin ``─`` bar between
+panels, or the ``│`` column between sidebar and right) and drag to
+resize. The vertical separator resizes sidebar / right; horizontal
+splitters resize the panels above / below. Sizes are remembered until
+the modal closes.
 """
+
+from collections import Optional
 
 from std.collections.list import List
 
@@ -42,39 +49,56 @@ from .colors import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_PAGEDOWN,
-    KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
+    KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
+    KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .git_changes import (
-    ChangedFile, GitBranch, GitCommit, GitFileStatus,
+    ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index,
     compute_staged_diff, compute_unstaged_diff,
     fetch_branch_log, fetch_commit_show, fetch_git_branches,
     fetch_git_commits, fetch_git_status, parse_unified_diff_files,
+    git_amend_no_edit, git_commit, git_pull, git_push, git_revert_file,
     stage_file, unstage_file,
 )
+from .text_field import text_field_clipboard_key
+from .window import paint_drop_shadow
 
 
 comptime _SIDEBAR_MIN: Int = 28
 comptime _SIDEBAR_MAX: Int = 56
 
-comptime _PANE_FILES:    Int = 0
-comptime _PANE_BRANCHES: Int = 1
-comptime _PANE_COMMITS:  Int = 2
-# Right pane is the fourth focusable area; reached with Right arrow from
-# the sidebar, returns with Left arrow. Tab cycling stays on the three
-# sidebar panels — landing in the right pane via Tab would be surprising
-# when most rows there can't actually be acted on.
-comptime _PANE_RIGHT:    Int = 3
+comptime _PANE_FILES:           Int = 0
+comptime _PANE_BRANCHES:        Int = 1
+comptime _PANE_COMMITS:         Int = 2
+# Right side. Splits into UNSTAGED (top) + STAGED (bottom) for file
+# selections; collapses to a single INFO panel for branch / commit
+# selections (where there's no concept of staging).
+comptime _PANE_RIGHT_UNSTAGED:  Int = 3
+comptime _PANE_RIGHT_STAGED:    Int = 4
+comptime _PANE_RIGHT_INFO:      Int = 5
 
-# Which subsection a right-pane line belongs to. Drives both the section
-# header rendering and the patch-construction logic in space-to-toggle.
-comptime _SECTION_NONE:     Int = 0
-comptime _SECTION_STAGED:   Int = 1
-comptime _SECTION_UNSTAGED: Int = 2
+# Drag identifiers — which splitter is currently being dragged.
+comptime _DRAG_NONE:        Int = 0
+comptime _DRAG_SIDEBAR:     Int = 1   # vertical: sidebar / right
+comptime _DRAG_SPLIT_FB:    Int = 2   # horizontal: files / branches
+comptime _DRAG_SPLIT_BC:    Int = 3   # horizontal: branches / commits
+comptime _DRAG_SPLIT_US:    Int = 4   # horizontal: unstaged / staged
+
+# Minimum body rows for any panel (header is one row on top of this).
+comptime _PANEL_MIN_BODY:   Int = 1
+
+# Overlay modes — when non-zero, an inline modal (commit prompt /
+# confirmation / status flash) is on top of the normal LocalChanges UI
+# and intercepts key events.
+comptime _OVERLAY_NONE:           Int = 0
+comptime _OVERLAY_COMMIT:         Int = 1   # type a commit message
+comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
+comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
+comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 
 
 @fieldwise_init
@@ -92,6 +116,32 @@ struct FileEntry(ImplicitlyCopyable, Movable):
     var worktree: UInt8
     var staged_diff: String
     var unstaged_diff: String
+
+
+struct RightPanel(Movable):
+    """One scrollable subpane on the right side. ``diff_line`` parallels
+    ``lines``: the index into the source per-file diff text for body
+    rows that can be staged / unstaged, and ``-1`` for synthetic lines
+    (placeholder messages) that aren't part of any patch."""
+    var lines: List[String]
+    var diff_line: List[Int]
+    var scroll: Int
+    var scroll_x: Int
+    var cursor: Int
+
+    fn __init__(out self):
+        self.lines = List[String]()
+        self.diff_line = List[Int]()
+        self.scroll = 0
+        self.scroll_x = 0
+        self.cursor = 0
+
+    fn reset(mut self):
+        self.lines = List[String]()
+        self.diff_line = List[Int]()
+        self.scroll = 0
+        self.scroll_x = 0
+        self.cursor = 0
 
 
 fn _split_lines(text: String) -> List[String]:
@@ -380,6 +430,44 @@ fn _line_attr(line: String, default: Attr, add: Attr, rem: Attr,
     return default
 
 
+fn _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
+    """Free-function scroller: avoids Mojo's mut-self / mut-self.field
+    aliasing rejection. Caller passes the focused panel's body height."""
+    var n = len(panel.lines)
+    var h = h_in
+    if h < 1: h = 1
+    var max_scroll = n - h
+    if max_scroll < 0: max_scroll = 0
+    var s = panel.scroll + delta
+    if s < 0: s = 0
+    if s > max_scroll: s = max_scroll
+    panel.scroll = s
+    if panel.cursor < panel.scroll:
+        panel.cursor = panel.scroll
+    var bottom = panel.scroll + h - 1
+    if bottom >= n: bottom = n - 1
+    if panel.cursor > bottom and bottom >= 0:
+        panel.cursor = bottom
+
+
+fn _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
+    var n = len(panel.lines)
+    if n == 0:
+        return
+    var c = panel.cursor + delta
+    if c < 0: c = 0
+    if c >= n: c = n - 1
+    panel.cursor = c
+    var h = h_in
+    if h < 1: h = 1
+    if panel.cursor < panel.scroll:
+        panel.scroll = panel.cursor
+    elif panel.cursor >= panel.scroll + h:
+        panel.scroll = panel.cursor - h + 1
+    if panel.scroll < 0:
+        panel.scroll = 0
+
+
 struct LocalChanges(Movable):
     var active: Bool
     var submitted: Bool
@@ -388,37 +476,40 @@ struct LocalChanges(Movable):
     var files: List[FileEntry]
     var branches: List[GitBranch]
     var commits: List[GitCommit]
-    # Currently-focused sidebar panel: _PANE_FILES / _BRANCHES / _COMMITS
-    # / _PANE_RIGHT. ``last_sidebar_focus`` remembers which sidebar pane
-    # to return to when the user presses Left from the right pane.
+    # Currently-focused pane (one of the six _PANE_* values).
+    # ``last_sidebar_focus`` remembers which sidebar pane to return to
+    # when the user presses Left from the right side.
     var focus: Int
     var last_sidebar_focus: Int
-    # Selection + scroll state, per panel.
+    # Selection + scroll state, per sidebar panel.
     var sel_file: Int
     var sel_branch: Int
     var sel_commit: Int
     var scroll_files: Int
     var scroll_branches: Int
     var scroll_commits: Int
-    # Right-pane content cache. ``_right_key`` is "f:<idx>" / "b:<idx>"
-    # / "c:<idx>" so we know when the focused selection changed and we
-    # need to recompute / re-split. Storing both the raw text *and* the
-    # split lines means scrolling doesn't pay the split cost.
-    var _right_lines: List[String]
-    # Per-line metadata for the right pane (parallel to _right_lines):
-    #   _right_section[i]   ∈ {_SECTION_NONE / _STAGED / _UNSTAGED}
-    #   _right_diff_line[i] = line index into the source per-file diff
-    #                         text for that section, or -1 for headings
-    #                         and other synthetic lines that aren't part
-    #                         of any patch.
-    # Used by space-to-toggle to map a cursor row back to the patch line
-    # it represents so we can build a minimal patch from it.
-    var _right_section: List[UInt8]
-    var _right_diff_line: List[Int]
+    # Three right-side panel buckets. ``unstaged`` and ``staged`` are
+    # populated for file selections; ``info`` is populated for branch /
+    # commit selections (and shown as a single panel that takes the
+    # full right side).
+    var unstaged: RightPanel
+    var staged: RightPanel
+    var info: RightPanel
+    # Cache key for the right-side content. ``"f:N"`` / ``"b:N"`` /
+    # ``"c:N"`` — when the driving sidebar selection changes, all three
+    # right panels are rebuilt.
     var _right_key: String
-    var right_scroll: Int
-    var right_scroll_x: Int
-    var right_cursor: Int
+    # Splitter overrides. ``-1`` means "use the auto-computed default";
+    # any positive value is the user's dragged setpoint and gets
+    # clamped to the available space on each frame so resizing the
+    # terminal doesn't break the layout.
+    var sidebar_width_user: Int
+    var files_height_user: Int
+    var branches_height_user: Int
+    var unstaged_height_user: Int
+    # Which splitter (if any) the mouse is currently dragging. Cleared
+    # on release. Drives the mouse-motion path in ``handle_mouse``.
+    var _drag_kind: Int
     # Submission contract — same shape as the previous file-only
     # version: ``selected_path`` carries the project-relative file path
     # when a file row was Enter'd, ``selected_line`` is 0 ("no jump").
@@ -428,6 +519,16 @@ struct LocalChanges(Movable):
     # "render normally" (per-panel placeholders take over inside each
     # section if its data list is empty).
     var status_message: String
+    # Inline modal overlay state. When ``overlay != _OVERLAY_NONE`` the
+    # overlay intercepts key events. ``overlay_input`` is the typed
+    # commit message; ``overlay_message`` is the static body text shown
+    # for confirmations / status flashes; ``overlay_ok`` carries the
+    # success/failure of a finished git op so the status flash can be
+    # colored accordingly.
+    var overlay: Int
+    var overlay_input: String
+    var overlay_message: String
+    var overlay_ok: Bool
 
     fn __init__(out self):
         self.active = False
@@ -444,16 +545,22 @@ struct LocalChanges(Movable):
         self.scroll_files = 0
         self.scroll_branches = 0
         self.scroll_commits = 0
-        self._right_lines = List[String]()
-        self._right_section = List[UInt8]()
-        self._right_diff_line = List[Int]()
+        self.unstaged = RightPanel()
+        self.staged = RightPanel()
+        self.info = RightPanel()
         self._right_key = String("")
-        self.right_scroll = 0
-        self.right_scroll_x = 0
-        self.right_cursor = 0
+        self.sidebar_width_user = -1
+        self.files_height_user = -1
+        self.branches_height_user = -1
+        self.unstaged_height_user = -1
+        self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
         self.status_message = String("")
+        self.overlay = _OVERLAY_NONE
+        self.overlay_input = String("")
+        self.overlay_message = String("")
+        self.overlay_ok = False
 
     fn open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -471,16 +578,22 @@ struct LocalChanges(Movable):
         self.scroll_files = 0
         self.scroll_branches = 0
         self.scroll_commits = 0
-        self._right_lines = List[String]()
-        self._right_section = List[UInt8]()
-        self._right_diff_line = List[Int]()
+        self.unstaged.reset()
+        self.staged.reset()
+        self.info.reset()
         self._right_key = String("")
-        self.right_scroll = 0
-        self.right_scroll_x = 0
-        self.right_cursor = 0
+        self.sidebar_width_user = -1
+        self.files_height_user = -1
+        self.branches_height_user = -1
+        self.unstaged_height_user = -1
+        self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
         self.status_message = String("")
+        self.overlay = _OVERLAY_NONE
+        self.overlay_input = String("")
+        self.overlay_message = String("")
+        self.overlay_ok = False
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -537,28 +650,40 @@ struct LocalChanges(Movable):
         self.scroll_files = 0
         self.scroll_branches = 0
         self.scroll_commits = 0
-        self._right_lines = List[String]()
-        self._right_section = List[UInt8]()
-        self._right_diff_line = List[Int]()
+        self.unstaged.reset()
+        self.staged.reset()
+        self.info.reset()
         self._right_key = String("")
-        self.right_scroll = 0
-        self.right_scroll_x = 0
-        self.right_cursor = 0
+        self.sidebar_width_user = -1
+        self.files_height_user = -1
+        self.branches_height_user = -1
+        self.unstaged_height_user = -1
+        self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
         self.status_message = String("")
+        self.overlay = _OVERLAY_NONE
+        self.overlay_input = String("")
+        self.overlay_message = String("")
+        self.overlay_ok = False
 
     # --- geometry ---------------------------------------------------------
 
     fn _sidebar_width(self, screen: Rect) -> Int:
-        var w = screen.width() // 3
-        if w < _SIDEBAR_MIN: w = _SIDEBAR_MIN
-        if w > _SIDEBAR_MAX: w = _SIDEBAR_MAX
-        # Don't eat more than half the screen on a narrow terminal.
-        if w > screen.width() // 2:
-            w = screen.width() // 2
-        if w < 16:
-            w = 16
+        var max_w = screen.width() // 2
+        if max_w > _SIDEBAR_MAX:
+            max_w = _SIDEBAR_MAX
+        if max_w < 16:
+            max_w = 16
+        var w: Int
+        if self.sidebar_width_user > 0:
+            w = self.sidebar_width_user
+        else:
+            w = screen.width() // 3
+            if w < _SIDEBAR_MIN: w = _SIDEBAR_MIN
+            if w > _SIDEBAR_MAX: w = _SIDEBAR_MAX
+        if w < 16: w = 16
+        if w > max_w: w = max_w
         return w
 
     fn _list_top(self, screen: Rect) -> Int:
@@ -586,27 +711,96 @@ struct LocalChanges(Movable):
 
     fn _pane_rows(self, screen: Rect) -> List[Int]:
         """Return the y-row layout for the three sidebar panels:
-        ``[files_top, files_height, branches_top, branches_height,
-        commits_top, commits_height]``. Each panel reserves its first
-        row for a section heading; the body rows host the list.
-        Splitting by thirds with the remainder going to the last panel
-        keeps things predictable on small terminals."""
+        ``[files_top, files_h, branches_top, branches_h, commits_top,
+        commits_h]``. Each panel's first row is a section heading; the
+        body fills the rest. Two splitter rows (``─``) sit between the
+        three panels and are not counted in any panel's height — caller
+        renders them at ``files_top + files_h`` and
+        ``branches_top + branches_h``.
+
+        Honors ``files_height_user`` / ``branches_height_user`` when
+        they're set, clamping so every panel keeps at least one body
+        row (``_min_h = 2``)."""
         var top = self._list_top(screen)
         var bottom = self._list_bottom(screen)
         var total = bottom - top
         if total < 6:
             total = 6
-        var third = total // 3
-        var f_h = third
-        var b_h = third
-        var c_h = total - f_h - b_h
+        var splitters = 2  # two horizontal splitters between three panels
+        var content = total - splitters
+        if content < 6:
+            content = 6
+        var min_h = 1 + _PANEL_MIN_BODY  # header row + body row
+        var f_h: Int
+        var b_h: Int
+        if self.files_height_user > 0:
+            f_h = self.files_height_user
+        else:
+            f_h = content // 3
+        if self.branches_height_user > 0:
+            b_h = self.branches_height_user
+        else:
+            b_h = content // 3
+        if f_h < min_h: f_h = min_h
+        if b_h < min_h: b_h = min_h
+        # Make sure commits panel keeps at least min_h rows.
+        if f_h + b_h > content - min_h:
+            # Trim branches first (most recently sized), then files.
+            var over = f_h + b_h - (content - min_h)
+            var b_trim = b_h - min_h
+            if over <= b_trim:
+                b_h -= over
+                _ = over
+            else:
+                over -= b_trim
+                b_h = min_h
+                var f_trim = f_h - min_h
+                if over <= f_trim:
+                    f_h -= over
+                else:
+                    f_h = min_h
+        var c_h = content - f_h - b_h
+        if c_h < min_h: c_h = min_h
         var out = List[Int]()
         out.append(top)
         out.append(f_h)
-        out.append(top + f_h)
+        out.append(top + f_h + 1)            # +1 for splitter row
         out.append(b_h)
-        out.append(top + f_h + b_h)
+        out.append(top + f_h + 1 + b_h + 1)  # +1 for second splitter row
         out.append(c_h)
+        return out^
+
+    fn _right_panes(self, screen: Rect) -> List[Int]:
+        """Returns ``[unstaged_top, unstaged_h, staged_top, staged_h]``
+        when the right side is split for a file selection. Same min-
+        height clamping logic as ``_pane_rows`` so dragging never
+        squashes a panel below one body row. Honors
+        ``unstaged_height_user`` when set."""
+        var top = self._list_top(screen)
+        var bottom = self._list_bottom(screen)
+        var total = bottom - top
+        if total < 4:
+            total = 4
+        var splitters = 1  # one splitter between two panels
+        var content = total - splitters
+        if content < 4:
+            content = 4
+        var min_h = 1 + _PANEL_MIN_BODY
+        var u_h: Int
+        if self.unstaged_height_user > 0:
+            u_h = self.unstaged_height_user
+        else:
+            u_h = content // 2
+        if u_h < min_h: u_h = min_h
+        if u_h > content - min_h: u_h = content - min_h
+        if u_h < min_h: u_h = min_h
+        var s_h = content - u_h
+        if s_h < min_h: s_h = min_h
+        var out = List[Int]()
+        out.append(top)
+        out.append(u_h)
+        out.append(top + u_h + 1)   # +1 for splitter row
+        out.append(s_h)
         return out^
 
     fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
@@ -615,59 +809,57 @@ struct LocalChanges(Movable):
     # --- right-pane refresh ----------------------------------------------
 
     fn _focus_key(self) -> String:
-        var driving: Int
-        if self.focus == _PANE_RIGHT:
-            driving = self.last_sidebar_focus
-        else:
-            driving = self.focus
+        var driving = self._driving_pane()
         if driving == _PANE_FILES:
             return String("f:") + String(self.sel_file)
         if driving == _PANE_BRANCHES:
             return String("b:") + String(self.sel_branch)
         return String("c:") + String(self.sel_commit)
 
-    fn _focus_pane_key(self) -> Int:
-        """For ``_focus_key``: when focus is on the right pane, the key
-        still depends on whichever sidebar selection drove the right-pane
-        content (so the cache hits when the user only flipped focus
-        between sidebar and right pane)."""
-        if self.focus == _PANE_RIGHT:
+    fn _driving_pane(self) -> Int:
+        """Which sidebar selection drives what shows on the right side.
+        When focus is on a right-pane subpane, ``last_sidebar_focus``
+        carries it; otherwise it's the focused pane itself."""
+        if self.focus == _PANE_RIGHT_UNSTAGED \
+                or self.focus == _PANE_RIGHT_STAGED \
+                or self.focus == _PANE_RIGHT_INFO:
             return self.last_sidebar_focus
         return self.focus
 
-    fn _ensure_right_lines(mut self):
-        """Recompute the right-pane line cache when the focus or the
-        focused-panel selection changed. For files we synthesize a
-        two-section view (STAGED then UNSTAGED) so per-line space
-        toggling has unambiguous semantics; the per-line section +
-        source-diff-line metadata is what ``_toggle_right_line`` uses to
-        rebuild a minimal patch. The keying is by *index*, not by
-        content, so re-opening on a fresh tree pulls fresh data."""
+    fn _is_right_focus(self) -> Bool:
+        return self.focus == _PANE_RIGHT_UNSTAGED \
+            or self.focus == _PANE_RIGHT_STAGED \
+            or self.focus == _PANE_RIGHT_INFO
+
+    fn _ensure_right_panels(mut self):
+        """Recompute the three right-side panel caches when the driving
+        sidebar selection changed. Keying by index (not content) means
+        re-opening on a fresh tree pulls fresh data; staging mutations
+        explicitly reset ``_right_key`` to force a rebuild."""
         var key = self._focus_key()
-        if key == self._right_key and len(self._right_lines) > 0:
+        if key == self._right_key \
+                and (len(self.unstaged.lines) > 0
+                     or len(self.staged.lines) > 0
+                     or len(self.info.lines) > 0):
             return
         self._right_key = key
-        self._right_lines = List[String]()
-        self._right_section = List[UInt8]()
-        self._right_diff_line = List[Int]()
-        self.right_scroll = 0
-        self.right_scroll_x = 0
-        self.right_cursor = 0
-        var driving_pane = self._focus_pane_key()
-        if driving_pane == _PANE_FILES:
+        self.unstaged.reset()
+        self.staged.reset()
+        self.info.reset()
+        var driving = self._driving_pane()
+        if driving == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
-                self._build_files_right_pane()
+                self._build_files_right_panels()
             return
-        if driving_pane == _PANE_BRANCHES:
+        if driving == _PANE_BRANCHES:
             if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
                 var b_name = self.branches[self.sel_branch].name
                 var lines = _split_lines(
                     fetch_branch_log(self.root, b_name, 30),
                 )
                 for li in range(len(lines)):
-                    self._right_lines.append(lines[li])
-                    self._right_section.append(UInt8(_SECTION_NONE))
-                    self._right_diff_line.append(-1)
+                    self.info.lines.append(lines[li])
+                    self.info.diff_line.append(-1)
             return
         # commits
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
@@ -676,59 +868,38 @@ struct LocalChanges(Movable):
                 fetch_commit_show(self.root, sha),
             )
             for li in range(len(lines)):
-                self._right_lines.append(lines[li])
-                self._right_section.append(UInt8(_SECTION_NONE))
-                self._right_diff_line.append(-1)
+                self.info.lines.append(lines[li])
+                self.info.diff_line.append(-1)
 
-    fn _build_files_right_pane(mut self):
-        """Lay out the file-focus right pane: two section banners
-        ("── STAGED ──" / "── UNSTAGED ──"), each followed by the
-        relevant per-file diff lines. Empty sections still get a banner
-        so the user can tell at a glance whether the staging operation
-        moved a line into the other side."""
+    fn _build_files_right_panels(mut self):
+        """Populate the unstaged + staged panels from the focused file's
+        diffs. Untracked files (XY == ``"??"``) get a hint in the
+        unstaged panel so the user knows to press Space on the file row
+        to start tracking them."""
         var fe = self.files[self.sel_file]
-        # Staged section
-        self._append_section_banner(String("── STAGED ──"))
-        self._append_section_lines(fe.staged_diff, _SECTION_STAGED)
-        if len(fe.staged_diff.as_bytes()) == 0:
-            self._right_lines.append(String("    (no staged changes)"))
-            self._right_section.append(UInt8(_SECTION_NONE))
-            self._right_diff_line.append(-1)
-        # Spacer
-        self._right_lines.append(String(""))
-        self._right_section.append(UInt8(_SECTION_NONE))
-        self._right_diff_line.append(-1)
-        # Unstaged section
-        self._append_section_banner(String("── UNSTAGED ──"))
-        self._append_section_lines(fe.unstaged_diff, _SECTION_UNSTAGED)
-        if len(fe.unstaged_diff.as_bytes()) == 0:
-            # Untracked files (XY == "??") have no diff because git diff
-            # ignores them; nudge the user toward Space-on-the-file-row.
+        # Unstaged panel.
+        if len(fe.unstaged_diff.as_bytes()) > 0:
+            var u_lines = _split_lines(fe.unstaged_diff)
+            for li in range(len(u_lines)):
+                self.unstaged.lines.append(u_lines[li])
+                self.unstaged.diff_line.append(li)
+        else:
             if Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F:
-                self._right_lines.append(
-                    String("    (untracked — press Space on the file to stage it)"),
+                self.unstaged.lines.append(
+                    String(" (untracked — press Space on the file to stage it)"),
                 )
             else:
-                self._right_lines.append(String("    (no unstaged changes)"))
-            self._right_section.append(UInt8(_SECTION_NONE))
-            self._right_diff_line.append(-1)
-
-    fn _append_section_banner(mut self, title: String):
-        self._right_lines.append(title)
-        self._right_section.append(UInt8(_SECTION_NONE))
-        self._right_diff_line.append(-1)
-
-    fn _append_section_lines(mut self, diff_text: String, section: Int):
-        """Split ``diff_text`` and tag each line with ``section`` plus
-        its index inside ``diff_text`` (so we can later locate it for
-        patch construction). Empty input contributes nothing."""
-        if len(diff_text.as_bytes()) == 0:
-            return
-        var lines = _split_lines(diff_text)
-        for li in range(len(lines)):
-            self._right_lines.append(lines[li])
-            self._right_section.append(UInt8(section))
-            self._right_diff_line.append(li)
+                self.unstaged.lines.append(String(" (no unstaged changes)"))
+            self.unstaged.diff_line.append(-1)
+        # Staged panel.
+        if len(fe.staged_diff.as_bytes()) > 0:
+            var s_lines = _split_lines(fe.staged_diff)
+            for li in range(len(s_lines)):
+                self.staged.lines.append(s_lines[li])
+                self.staged.diff_line.append(li)
+        else:
+            self.staged.lines.append(String(" (no staged changes)"))
+            self.staged.diff_line.append(-1)
 
     # --- paint ------------------------------------------------------------
 
@@ -745,6 +916,7 @@ struct LocalChanges(Movable):
         var sel_attr    = Attr(BLACK,  YELLOW)
         var sel_inactive = Attr(BLACK, LIGHT_GRAY)
         var section_attr = Attr(WHITE, DARK_GRAY)
+        var splitter_attr = Attr(LIGHT_GRAY, BLUE)
         var ctx_attr    = Attr(LIGHT_GRAY, BLUE)
         var add_attr    = Attr(LIGHT_GREEN, BLUE)
         var rem_attr    = Attr(LIGHT_RED,   BLUE)
@@ -766,12 +938,12 @@ struct LocalChanges(Movable):
         _ = canvas.put_text(
             Point(screen.a.x + 1, sub_y), sub, list_dim, screen.b.x - 1,
         )
-        # Vertical separator between sidebar and right pane.
+        # Vertical separator (also the sidebar/right splitter target).
         var sw = self._sidebar_width(screen)
         var sep_x = screen.a.x + sw
         for y in range(self._list_top(screen), self._list_bottom(screen)):
             canvas.set(sep_x, y, Cell(String("│"), sep_attr, 1))
-        # Sidebar: three stacked panels.
+        # Sidebar: three stacked panels with horizontal splitters between.
         var rows = self._pane_rows(screen)
         var left = screen.a.x + 1
         var right = screen.a.x + sw - 1
@@ -780,27 +952,38 @@ struct LocalChanges(Movable):
             String("Modified files"), _PANE_FILES,
             section_attr, list_attr, sel_attr, sel_inactive, list_dim,
         )
+        self._paint_horizontal_splitter(
+            canvas, left, right, rows[0] + rows[1], splitter_attr,
+        )
         self._paint_section(
             canvas, left, right, rows[2], rows[3],
             String("Branches"), _PANE_BRANCHES,
             section_attr, list_attr, sel_attr, sel_inactive, list_dim,
+        )
+        self._paint_horizontal_splitter(
+            canvas, left, right, rows[2] + rows[3], splitter_attr,
         )
         self._paint_section(
             canvas, left, right, rows[4], rows[5],
             String("Commits"), _PANE_COMMITS,
             section_attr, list_attr, sel_attr, sel_inactive, list_dim,
         )
-        # Right pane.
-        self._ensure_right_lines()
-        self._paint_right(
+        # Right side: split (file mode) or single info panel.
+        self._ensure_right_panels()
+        self._paint_right_side(
             canvas, screen,
+            section_attr, splitter_attr,
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
         # Bottom hint.
         var hint: String
-        if self.focus == _PANE_RIGHT:
+        if self._is_right_focus():
             hint = String(
-                " Up/Down: line  Space: stage/unstage  Left: back  ESC: close ",
+                " Up/Down: line  Tab: panel  Space: stage/unstage  Left: back  ESC: close ",
+            )
+        elif self.focus == _PANE_FILES:
+            hint = String(
+                " c:commit A:amend d:revert p:pull P:push  Space:stage  Enter:open  ESC:close ",
             )
         else:
             hint = String(
@@ -810,6 +993,102 @@ struct LocalChanges(Movable):
         if hx < screen.a.x + 1:
             hx = screen.a.x + 1
         _ = canvas.put_text(Point(hx, screen.b.y - 1), hint, hint_attr)
+        # Overlay last so it sits on top of everything else.
+        if self.overlay != _OVERLAY_NONE:
+            self._paint_overlay(canvas, screen)
+
+    fn _paint_overlay(self, mut canvas: Canvas, screen: Rect):
+        """Render the active overlay (commit prompt / confirmation /
+        status flash) as a small drop-shadowed box centered on the
+        modal area."""
+        var border = Attr(BLACK, LIGHT_GRAY)
+        var body   = Attr(BLACK, LIGHT_GRAY)
+        var input_attr = Attr(BLACK, LIGHT_GRAY)
+        var ok_attr   = Attr(WHITE, LIGHT_GREEN)
+        var err_attr  = Attr(WHITE, LIGHT_RED)
+        # Box geometry — 60 cols wide, 5 rows tall by default; clamps
+        # to the modal area on tiny terminals.
+        var max_w = screen.width() - 4
+        var box_w = 64 if max_w >= 64 else max_w
+        if box_w < 24:
+            box_w = 24
+        var box_h = 5
+        var bx = screen.a.x + (screen.width() - box_w) // 2
+        var by = screen.a.y + (screen.height() - box_h) // 2
+        var rect = Rect(bx, by, bx + box_w, by + box_h)
+        paint_drop_shadow(canvas, rect)
+        canvas.fill(rect, String(" "), body)
+        canvas.draw_box(rect, border, False)
+        var title: String
+        var prompt_text: String
+        if self.overlay == _OVERLAY_COMMIT:
+            title = String(" Commit ")
+            prompt_text = String("message: ")
+        elif self.overlay == _OVERLAY_AMEND_CONFIRM:
+            title = String(" Amend ")
+            prompt_text = String("")
+        elif self.overlay == _OVERLAY_REVERT_CONFIRM:
+            title = String(" Revert ")
+            prompt_text = String("")
+        else:
+            title = String(" Status ")
+            prompt_text = String("")
+        var tx = bx + 2
+        _ = canvas.put_text(Point(tx, by), title, border)
+        if self.overlay == _OVERLAY_COMMIT:
+            var label_x = bx + 2
+            _ = canvas.put_text(
+                Point(label_x, by + 2), prompt_text, body, bx + box_w - 1,
+            )
+            var input_x = label_x + len(prompt_text.as_bytes())
+            _ = canvas.put_text(
+                Point(input_x, by + 2), self.overlay_input, input_attr,
+                bx + box_w - 1,
+            )
+            var cur_x = input_x + len(self.overlay_input.as_bytes())
+            if cur_x < bx + box_w - 1:
+                canvas.set(
+                    cur_x, by + 2,
+                    Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1),
+                )
+            var hint = String("Enter: commit   ESC: cancel")
+            _ = canvas.put_text(
+                Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+            )
+            return
+        if self.overlay == _OVERLAY_STATUS:
+            var attr = ok_attr if self.overlay_ok else err_attr
+            canvas.fill(
+                Rect(bx + 1, by + 2, bx + box_w - 1, by + 3),
+                String(" "), attr,
+            )
+            _ = canvas.put_text(
+                Point(bx + 2, by + 2), self.overlay_message, attr,
+                bx + box_w - 1,
+            )
+            var hint = String("Press any key to dismiss")
+            _ = canvas.put_text(
+                Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+            )
+            return
+        # Confirmation overlays.
+        _ = canvas.put_text(
+            Point(bx + 2, by + 1), self.overlay_message, body,
+            bx + box_w - 1,
+        )
+        var hint = String("[y] confirm   [n] / ESC: cancel")
+        _ = canvas.put_text(
+            Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+        )
+
+    fn _paint_horizontal_splitter(
+        self, mut canvas: Canvas, left: Int, right: Int, y: Int,
+        attr: Attr,
+    ):
+        if right < left:
+            return
+        for x in range(left, right + 1):
+            canvas.set(x, y, Cell(String("─"), attr, 1))
 
     fn _paint_section(
         self, mut canvas: Canvas,
@@ -1024,46 +1303,103 @@ struct LocalChanges(Movable):
                 Point(x, y), co.subject, seg_subj, stop,
             )
 
-    fn _paint_right(
-        self, mut canvas: Canvas, screen: Rect,
+    fn _paint_right_side(
+        mut self, mut canvas: Canvas, screen: Rect,
+        section_attr: Attr, splitter_attr: Attr,
         ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
         hunk_attr: Attr, header_attr: Attr,
     ):
         var top = self._list_top(screen)
-        var height = self._diff_height(screen)
+        var bottom = self._list_bottom(screen)
         var left = self._diff_left(screen)
         var right = self._diff_right(screen)
         if right <= left:
             return
-        if len(self._right_lines) == 0:
-            var msg: String
-            var driving = self._focus_pane_key()
-            if driving == _PANE_FILES:
-                msg = String(" (select a file to see its diff)")
-            elif driving == _PANE_BRANCHES:
-                msg = String(" (select a branch to see its log)")
-            else:
-                msg = String(" (select a commit to see its details)")
-            _ = canvas.put_text(Point(left, top), msg, ctx_attr, right)
+        var driving = self._driving_pane()
+        if driving == _PANE_FILES:
+            var rp = self._right_panes(screen)
+            self._paint_panel_with_header(
+                canvas, left, right, rp[0], rp[1],
+                String("Unstaged"), _PANE_RIGHT_UNSTAGED,
+                self.unstaged,
+                section_attr,
+                ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+            )
+            self._paint_horizontal_splitter(
+                canvas, left, right, rp[0] + rp[1], splitter_attr,
+            )
+            self._paint_panel_with_header(
+                canvas, left, right, rp[2], rp[3],
+                String("Staged"), _PANE_RIGHT_STAGED,
+                self.staged,
+                section_attr,
+                ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+            )
             return
-        var section_banner_attr = Attr(WHITE, DARK_GRAY)
+        # Branch / commit info — single panel filling the right side.
+        var info_title: String
+        if driving == _PANE_BRANCHES:
+            info_title = String("Branch log")
+        else:
+            info_title = String("Commit details")
+        self._paint_panel_with_header(
+            canvas, left, right, top, bottom - top,
+            info_title, _PANE_RIGHT_INFO,
+            self.info,
+            section_attr,
+            ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+        )
+
+    fn _paint_panel_with_header(
+        self, mut canvas: Canvas,
+        left: Int, right: Int, top: Int, height: Int,
+        title: String, pane: Int,
+        panel: RightPanel,
+        section_attr: Attr,
+        ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
+        hunk_attr: Attr, header_attr: Attr,
+    ):
+        if right <= left or height <= 1:
+            return
+        # Header bar.
+        canvas.fill(
+            Rect(left, top, right + 1, top + 1), String(" "), section_attr,
+        )
+        var marker = String("> ") if self.focus == pane else String("  ")
+        _ = canvas.put_text(
+            Point(left, top), marker + title, section_attr, right + 1,
+        )
+        var body_top = top + 1
+        var body_h = height - 1
+        if body_h <= 0:
+            return
+        self._paint_panel_body(
+            canvas, left, right, body_top, body_h, pane, panel,
+            ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+        )
+
+    fn _paint_panel_body(
+        self, mut canvas: Canvas,
+        left: Int, right: Int, top: Int, height: Int,
+        pane: Int, panel: RightPanel,
+        ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
+        hunk_attr: Attr, header_attr: Attr,
+    ):
+        if len(panel.lines) == 0:
+            return
         var cursor_active = Attr(BLACK, YELLOW)
         var cursor_inactive = Attr(BLACK, LIGHT_GRAY)
-        var pane_focused = (self.focus == _PANE_RIGHT)
+        var pane_focused = (self.focus == pane)
         for i in range(height):
-            var idx = self.right_scroll + i
-            if idx >= len(self._right_lines):
+            var idx = panel.scroll + i
+            if idx >= len(panel.lines):
                 break
             var y = top + i
-            var line = self._right_lines[idx]
-            var section = Int(self._right_section[idx])
-            var is_cursor = (idx == self.right_cursor and pane_focused)
+            var line = panel.lines[idx]
+            var is_cursor = (idx == panel.cursor and pane_focused)
             var attr: Attr
             if is_cursor:
                 attr = cursor_active
-            elif section == _SECTION_NONE \
-                    and self._looks_like_section_banner(line):
-                attr = section_banner_attr
             else:
                 attr = _line_attr(
                     line, ctx_attr, add_attr, rem_attr,
@@ -1074,45 +1410,31 @@ struct LocalChanges(Movable):
             # selection bar, matching the file-list behavior.
             if is_cursor:
                 canvas.fill(
-                    Rect(left, y, right, y + 1), String(" "), attr,
+                    Rect(left, y, right + 1, y + 1), String(" "), attr,
                 )
             var bytes = line.as_bytes()
-            var start = self.right_scroll_x
+            var start = panel.scroll_x
             if start >= len(bytes):
                 continue
             var visible = String(StringSlice(
                 unsafe_from_utf8=bytes[start:len(bytes)],
             ))
-            _ = canvas.put_text(Point(left, y), visible, attr, right)
+            _ = canvas.put_text(Point(left, y), visible, attr, right + 1)
         _ = cursor_inactive   # reserved for future "cursor while focus elsewhere"
-
-    fn _looks_like_section_banner(self, line: String) -> Bool:
-        """Cheap detector for the synthetic ``── STAGED ──`` /
-        ``── UNSTAGED ──`` banners. Splits the painting code from the
-        builder by checking the prefix instead of carrying a richer per-
-        line tag — works because the banner glyph is unmistakable."""
-        var b = line.as_bytes()
-        if len(b) < 3:
-            return False
-        # ``─`` (U+2500) encodes as 0xE2 0x94 0x80 in UTF-8.
-        return Int(b[0]) == 0xE2 and Int(b[1]) == 0x94 and Int(b[2]) == 0x80
 
     # --- events -----------------------------------------------------------
 
     fn _focused_count(self) -> Int:
         if self.focus == _PANE_FILES: return len(self.files)
         if self.focus == _PANE_BRANCHES: return len(self.branches)
-        return len(self.commits)
+        if self.focus == _PANE_COMMITS: return len(self.commits)
+        return 0
 
     fn _focused_selection(self) -> Int:
         if self.focus == _PANE_FILES: return self.sel_file
         if self.focus == _PANE_BRANCHES: return self.sel_branch
-        return self.sel_commit
-
-    fn _focused_scroll(self) -> Int:
-        if self.focus == _PANE_FILES: return self.scroll_files
-        if self.focus == _PANE_BRANCHES: return self.scroll_branches
-        return self.scroll_commits
+        if self.focus == _PANE_COMMITS: return self.sel_commit
+        return 0
 
     fn _focused_panel_height(self, screen: Rect) -> Int:
         var rows = self._pane_rows(screen)
@@ -1121,8 +1443,10 @@ struct LocalChanges(Movable):
             h = rows[1] - 1
         elif self.focus == _PANE_BRANCHES:
             h = rows[3] - 1
-        else:
+        elif self.focus == _PANE_COMMITS:
             h = rows[5] - 1
+        else:
+            h = 0
         return 0 if h < 0 else h
 
     fn _set_focused_selection(mut self, new_idx: Int, screen: Rect):
@@ -1148,7 +1472,7 @@ struct LocalChanges(Movable):
             elif self.sel_branch >= self.scroll_branches + h:
                 self.scroll_branches = self.sel_branch - h + 1
             if self.scroll_branches < 0: self.scroll_branches = 0
-        else:
+        elif self.focus == _PANE_COMMITS:
             self.sel_commit = new
             if self.sel_commit < self.scroll_commits:
                 self.scroll_commits = self.sel_commit
@@ -1157,109 +1481,128 @@ struct LocalChanges(Movable):
             if self.scroll_commits < 0: self.scroll_commits = 0
 
     fn _cycle_focus(mut self, direction: Int):
-        """Move focus by ``direction`` (+1 / -1) within the sidebar
-        (0..2), wrapping. From the right pane, snap back to whichever
-        sidebar pane was active last and *then* advance — the right
-        pane isn't part of the Tab cycle because most rows there can't
-        be acted on, so landing there via Tab would be surprising."""
-        var base: Int
-        if self.focus == _PANE_RIGHT:
-            base = self.last_sidebar_focus
-        else:
-            base = self.focus
-        var f = base + direction
+        """Tab / Shift+Tab. In the sidebar (files/branches/commits)
+        cycles through the three sidebar panels. In the right side
+        cycles between Unstaged and Staged when both are visible (file
+        mode); a no-op when on the single Info panel."""
+        if self._is_right_focus():
+            if self.focus == _PANE_RIGHT_INFO:
+                return
+            if self.focus == _PANE_RIGHT_UNSTAGED:
+                self.focus = _PANE_RIGHT_STAGED
+            else:
+                self.focus = _PANE_RIGHT_UNSTAGED
+            return
+        var f = self.focus + direction
         if f < 0: f = 2
         if f > 2: f = 0
         self.focus = f
         self.last_sidebar_focus = f
 
-    fn _scroll_right(mut self, delta: Int, screen: Rect):
-        var n = len(self._right_lines)
-        var h = self._diff_height(screen)
-        var max_scroll = n - h
-        if max_scroll < 0: max_scroll = 0
-        var s = self.right_scroll + delta
-        if s < 0: s = 0
-        if s > max_scroll: s = max_scroll
-        self.right_scroll = s
-        # Drag the cursor along so it stays inside the visible window;
-        # otherwise PgDn would orphan the highlight off-screen.
-        self._clamp_cursor_to_view(screen)
+    fn _focused_right_panel_height(self, screen: Rect) -> Int:
+        if self.focus == _PANE_RIGHT_INFO:
+            return self._diff_height(screen) - 1
+        var rp = self._right_panes(screen)
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            return rp[1] - 1
+        return rp[3] - 1
 
-    fn _clamp_cursor_to_view(mut self, screen: Rect):
-        var h = self._diff_height(screen)
-        var n = len(self._right_lines)
-        if n == 0:
-            self.right_cursor = 0
-            return
-        if self.right_cursor < self.right_scroll:
-            self.right_cursor = self.right_scroll
-        var bottom = self.right_scroll + h - 1
-        if bottom >= n:
-            bottom = n - 1
-        if self.right_cursor > bottom:
-            self.right_cursor = bottom
+    fn _scroll_focused_right(mut self, delta: Int, screen: Rect):
+        """Scroll the focused right panel and clamp its cursor.
 
-    fn _move_right_cursor(mut self, delta: Int, screen: Rect):
-        var n = len(self._right_lines)
-        if n == 0:
-            return
-        var c = self.right_cursor + delta
-        if c < 0: c = 0
-        if c >= n: c = n - 1
-        self.right_cursor = c
-        # Auto-scroll so cursor stays visible.
-        var h = self._diff_height(screen)
-        if h < 1: h = 1
-        if self.right_cursor < self.right_scroll:
-            self.right_scroll = self.right_cursor
-        elif self.right_cursor >= self.right_scroll + h:
-            self.right_scroll = self.right_cursor - h + 1
-        if self.right_scroll < 0:
-            self.right_scroll = 0
+        Dispatches to a free function (rather than a method) because
+        Mojo's borrow checker rejects passing ``self.unstaged`` as a
+        ``mut`` arg from a method that already holds ``mut self``."""
+        var h = self._focused_right_panel_height(screen)
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            _scroll_panel(self.unstaged, delta, h)
+        elif self.focus == _PANE_RIGHT_STAGED:
+            _scroll_panel(self.staged, delta, h)
+        elif self.focus == _PANE_RIGHT_INFO:
+            _scroll_panel(self.info, delta, h)
+
+    fn _move_focused_right_cursor(mut self, delta: Int, screen: Rect):
+        var h = self._focused_right_panel_height(screen)
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            _move_panel_cursor(self.unstaged, delta, h)
+        elif self.focus == _PANE_RIGHT_STAGED:
+            _move_panel_cursor(self.staged, delta, h)
+        elif self.focus == _PANE_RIGHT_INFO:
+            _move_panel_cursor(self.info, delta, h)
 
     fn _enter_right_pane(mut self, screen: Rect):
-        """Move focus from sidebar → right pane. Snap the cursor to the
-        first line that's actually part of a stageable diff section
-        (skipping the synthetic banners) so a single ``Space`` after
-        ``Right`` does something useful instead of landing on a header."""
-        if self.focus == _PANE_RIGHT:
+        """Move focus from sidebar → right side. For file selections we
+        land on Unstaged and snap the cursor to the first stageable
+        ``+``/``-`` line so a single Space after Right does something
+        useful. For branch/commit selections we land on Info."""
+        if self._is_right_focus():
             return
         self.last_sidebar_focus = self.focus
-        self.focus = _PANE_RIGHT
-        self._ensure_right_lines()
-        # Find the first line that's part of a real diff section.
-        var found = -1
-        for i in range(len(self._right_lines)):
-            if Int(self._right_section[i]) != _SECTION_NONE:
-                found = i
-                break
-        if found < 0:
-            self.right_cursor = 0
-        else:
-            self.right_cursor = found
-        # Scroll so it's visible.
-        var h = self._diff_height(screen)
-        if h < 1: h = 1
-        if self.right_cursor < self.right_scroll:
-            self.right_scroll = self.right_cursor
-        elif self.right_cursor >= self.right_scroll + h:
-            self.right_scroll = self.right_cursor - h + 1
-        if self.right_scroll < 0:
-            self.right_scroll = 0
+        self._ensure_right_panels()
+        var driving = self.last_sidebar_focus
+        if driving == _PANE_FILES:
+            self.focus = _PANE_RIGHT_UNSTAGED
+            # Find first stageable line in unstaged; fall back to 0.
+            var found = -1
+            for i in range(len(self.unstaged.lines)):
+                if self.unstaged.diff_line[i] >= 0:
+                    var lb = self.unstaged.lines[i].as_bytes()
+                    if len(lb) > 0:
+                        var c0 = Int(lb[0])
+                        if c0 == 0x2B or c0 == 0x2D:
+                            found = i
+                            break
+            if found < 0:
+                self.unstaged.cursor = 0
+            else:
+                self.unstaged.cursor = found
+            var h = self._focused_right_panel_height(screen)
+            if h < 1: h = 1
+            if self.unstaged.cursor < self.unstaged.scroll:
+                self.unstaged.scroll = self.unstaged.cursor
+            elif self.unstaged.cursor >= self.unstaged.scroll + h:
+                self.unstaged.scroll = self.unstaged.cursor - h + 1
+            if self.unstaged.scroll < 0:
+                self.unstaged.scroll = 0
+            return
+        # Branch / commit selection → single info panel.
+        self.focus = _PANE_RIGHT_INFO
 
     fn _leave_right_pane(mut self):
-        if self.focus != _PANE_RIGHT:
+        if not self._is_right_focus():
             return
         self.focus = self.last_sidebar_focus
 
     fn handle_key(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active or event.kind != EVENT_KEY:
             return False
+        if self.overlay != _OVERLAY_NONE:
+            return self._handle_overlay_key(event)
         var k = event.key
         if k == KEY_ESC:
             self.close()
             return True
+        # File-pane git operations: c / A / d / p / P. These are
+        # repo-level (or selected-file-level) actions that only make
+        # sense when the user is browsing the modified-files list, so
+        # gate on focus to avoid surprising the user when typing through
+        # branches / commits / right-pane scrolling.
+        if self.focus == _PANE_FILES:
+            if k == UInt32(0x63):       # 'c' → commit
+                self._open_commit_prompt()
+                return True
+            if k == UInt32(0x41):       # 'A' → amend
+                self._open_amend_confirm()
+                return True
+            if k == UInt32(0x64):       # 'd' → revert (discard) selected
+                self._open_revert_confirm()
+                return True
+            if k == UInt32(0x70):       # 'p' → pull
+                self._run_pull()
+                return True
+            if k == UInt32(0x50):       # 'P' → push
+                self._run_push()
+                return True
         if k == KEY_TAB:
             if (event.mods & MOD_SHIFT) != 0:
                 self._cycle_focus(-1)
@@ -1275,26 +1618,28 @@ struct LocalChanges(Movable):
         if k == KEY_SPACE:
             self._handle_space(screen)
             return True
-        if self.focus == _PANE_RIGHT:
+        if self._is_right_focus():
             if k == KEY_UP:
-                self._move_right_cursor(-1, screen)
+                self._move_focused_right_cursor(-1, screen)
                 return True
             if k == KEY_DOWN:
-                self._move_right_cursor(1, screen)
+                self._move_focused_right_cursor(1, screen)
                 return True
             if k == KEY_HOME:
-                self._move_right_cursor(-len(self._right_lines), screen)
+                self._move_focused_right_cursor(-100000, screen)
                 return True
             if k == KEY_END:
-                self._move_right_cursor(len(self._right_lines), screen)
+                self._move_focused_right_cursor(100000, screen)
                 return True
             if k == KEY_PAGEUP:
-                self._scroll_right(-self._diff_height(screen), screen)
-                self._move_right_cursor(-self._diff_height(screen), screen)
+                var h = self._focused_right_panel_height(screen)
+                self._scroll_focused_right(-h, screen)
+                self._move_focused_right_cursor(-h, screen)
                 return True
             if k == KEY_PAGEDOWN:
-                self._scroll_right(self._diff_height(screen), screen)
-                self._move_right_cursor(self._diff_height(screen), screen)
+                var h = self._focused_right_panel_height(screen)
+                self._scroll_focused_right(h, screen)
+                self._move_focused_right_cursor(h, screen)
                 return True
             return False
         if k == KEY_UP:
@@ -1310,10 +1655,16 @@ struct LocalChanges(Movable):
             self._set_focused_selection(self._focused_count() - 1, screen)
             return True
         if k == KEY_PAGEUP:
-            self._scroll_right(-self._diff_height(screen), screen)
+            self._set_focused_selection(
+                self._focused_selection() - self._focused_panel_height(screen),
+                screen,
+            )
             return True
         if k == KEY_PAGEDOWN:
-            self._scroll_right(self._diff_height(screen), screen)
+            self._set_focused_selection(
+                self._focused_selection() + self._focused_panel_height(screen),
+                screen,
+            )
             return True
         if k == KEY_ENTER:
             # Enter only does something for file rows — open the file.
@@ -1337,20 +1688,31 @@ struct LocalChanges(Movable):
           staged column does. (For an entry with both, prefer staging
           the rest of the worktree changes; the user can press Space
           again to unstage.)
-        * On the right pane: build a minimal patch from the cursor's
-          single line and apply it (forward to stage from the unstaged
-          section, ``--reverse`` to unstage from the staged section).
+        * On Unstaged / Staged right panels: build a minimal patch from
+          the cursor's single line and apply it (forward to stage from
+          Unstaged, ``--reverse`` to unstage from Staged).
 
-        Anywhere else (branches / commits or a non-actionable line) it's
-        a no-op rather than an error so the keystroke doesn't grab
+        Anywhere else (branches / commits / info / non-actionable line)
+        it's a no-op rather than an error so the keystroke doesn't grab
         focus from a future binding.
         """
         if self.focus == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
                 self._toggle_file_at(self.sel_file)
             return
-        if self.focus == _PANE_RIGHT:
-            self._toggle_right_line()
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            var cursor = self.unstaged.cursor
+            var n = len(self.unstaged.lines)
+            if 0 <= cursor and cursor < n:
+                var diff_idx = self.unstaged.diff_line[cursor]
+                self._toggle_diff_line(diff_idx, False)
+            return
+        if self.focus == _PANE_RIGHT_STAGED:
+            var cursor = self.staged.cursor
+            var n = len(self.staged.lines)
+            if 0 <= cursor and cursor < n:
+                var diff_idx = self.staged.diff_line[cursor]
+                self._toggle_diff_line(diff_idx, True)
             return
 
     fn _toggle_file_at(mut self, idx: Int):
@@ -1371,32 +1733,25 @@ struct LocalChanges(Movable):
             return
         self._refresh_after_mutation(path)
 
-    fn _toggle_right_line(mut self):
-        """Cursor is on a single line of the staged or unstaged section.
-        Build a minimal patch and pipe it to ``git apply --cached``;
-        ``--reverse`` for staged-section lines so applying it removes
-        them from the index. No-op when cursor is on a banner / context
-        line / heading where there's nothing to toggle."""
-        if self.right_cursor < 0 \
-                or self.right_cursor >= len(self._right_lines):
-            return
-        var section = Int(self._right_section[self.right_cursor])
-        if section == _SECTION_NONE:
-            return
-        var diff_line_idx = self._right_diff_line[self.right_cursor]
+    fn _toggle_diff_line(
+        mut self, diff_line_idx: Int, reverse: Bool,
+    ):
+        """Build a minimal patch for ``diff_line_idx`` in the focused
+        file's diff (staged when ``reverse``, unstaged otherwise) and
+        pipe it to ``git apply --cached``. No-op when the index points
+        at a placeholder / context line where there's nothing to
+        toggle. Caller resolves the cursor → diff_line mapping; this
+        keeps borrow-checker scope minimal."""
         if diff_line_idx < 0:
             return
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             return
         var fe = self.files[self.sel_file]
         var source_diff: String
-        var reverse: Bool
-        if section == _SECTION_STAGED:
+        if reverse:
             source_diff = fe.staged_diff
-            reverse = True
         else:
             source_diff = fe.unstaged_diff
-            reverse = False
         var patch = build_minimal_patch(source_diff, diff_line_idx, reverse)
         if len(patch.as_bytes()) == 0:
             return
@@ -1428,15 +1783,264 @@ struct LocalChanges(Movable):
             self.scroll_files = self.sel_file
         # Force right-pane recompute next paint.
         self._right_key = String("")
-        self._right_lines = List[String]()
-        self._right_section = List[UInt8]()
-        self._right_diff_line = List[Int]()
-        self.right_scroll = 0
-        self.right_cursor = 0
+        self.unstaged.reset()
+        self.staged.reset()
+        self.info.reset()
+
+    fn _refresh_full(mut self):
+        """Reload everything (files + branches + commits) and clear the
+        right-pane cache. Used after commit / amend / pull / push since
+        any of those can shuffle every list."""
+        self._reload_files()
+        self.branches = fetch_git_branches(self.root)
+        self.commits = fetch_git_commits(self.root, 50)
+        if self.sel_file >= len(self.files):
+            self.sel_file = len(self.files) - 1
+        if self.sel_file < 0:
+            self.sel_file = 0
+        if self.scroll_files > self.sel_file:
+            self.scroll_files = self.sel_file
+        if self.sel_branch >= len(self.branches):
+            self.sel_branch = len(self.branches) - 1
+        if self.sel_branch < 0:
+            self.sel_branch = 0
+        if self.sel_commit >= len(self.commits):
+            self.sel_commit = len(self.commits) - 1
+        if self.sel_commit < 0:
+            self.sel_commit = 0
+        self._right_key = String("")
+        self.unstaged.reset()
+        self.staged.reset()
+        self.info.reset()
+
+    # --- overlay (commit / confirm / status) ------------------------------
+
+    fn _open_commit_prompt(mut self):
+        """Pop the commit-message input. Pre-checks that *something* is
+        actually staged so we don't pop a prompt that git will refuse."""
+        var have_staged = False
+        for i in range(len(self.files)):
+            if Int(self.files[i].staged) != 0x20 \
+                    and Int(self.files[i].staged) != 0x3F:
+                have_staged = True
+                break
+        if not have_staged:
+            self._show_status(
+                String("Nothing staged — press Space on a file first."),
+                False,
+            )
+            return
+        self.overlay = _OVERLAY_COMMIT
+        self.overlay_input = String("")
+        self.overlay_message = String("")
+
+    fn _open_amend_confirm(mut self):
+        self.overlay = _OVERLAY_AMEND_CONFIRM
+        self.overlay_input = String("")
+        self.overlay_message = \
+            String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
+
+    fn _open_revert_confirm(mut self):
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            self._show_status(String("No file selected."), False)
+            return
+        var fe = self.files[self.sel_file]
+        self.overlay = _OVERLAY_REVERT_CONFIRM
+        self.overlay_input = String("")
+        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
+        if untracked:
+            self.overlay_message = \
+                String("Delete untracked file ") + fe.path + String("?")
+        else:
+            self.overlay_message = \
+                String("Discard ALL local changes for ") + fe.path \
+                + String(" (staged + worktree)?")
+
+    fn _show_status(mut self, var msg: String, ok: Bool):
+        """Flash a one-shot status line. Dismissed by any keystroke."""
+        self.overlay = _OVERLAY_STATUS
+        self.overlay_message = msg^
+        self.overlay_ok = ok
+        self.overlay_input = String("")
+
+    fn _close_overlay(mut self):
+        self.overlay = _OVERLAY_NONE
+        self.overlay_input = String("")
+        self.overlay_message = String("")
+        self.overlay_ok = False
+
+    fn _run_pull(mut self):
+        var r = git_pull(self.root)
+        if r.ok:
+            self._refresh_full()
+        self._show_status(r.message, r.ok)
+
+    fn _run_push(mut self):
+        var r = git_push(self.root)
+        if r.ok:
+            self._refresh_full()
+        self._show_status(r.message, r.ok)
+
+    fn _submit_commit(mut self):
+        var msg = self.overlay_input
+        if len(msg.as_bytes()) == 0:
+            self._show_status(String("Empty commit message."), False)
+            return
+        var r = git_commit(self.root, msg)
+        if r.ok:
+            self._refresh_full()
+        self._show_status(r.message, r.ok)
+
+    fn _confirm_amend(mut self):
+        var r = git_amend_no_edit(self.root)
+        if r.ok:
+            self._refresh_full()
+        self._show_status(r.message, r.ok)
+
+    fn _confirm_revert(mut self):
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            self._close_overlay()
+            return
+        var fe = self.files[self.sel_file]
+        var r = git_revert_file(self.root, fe.path, fe.staged, fe.worktree)
+        if r.ok:
+            self._refresh_full()
+        self._show_status(r.message, r.ok)
+
+    fn _handle_overlay_key(mut self, event: Event) -> Bool:
+        """Route key events while an overlay is active. Returns True to
+        keep events from leaking to the underlying view."""
+        var k = event.key
+        if self.overlay == _OVERLAY_STATUS:
+            # Any key dismisses the status flash. Pressing ESC again
+            # afterwards closes the modal (normal handler runs next
+            # frame).
+            self._close_overlay()
+            return True
+        if k == KEY_ESC:
+            self._close_overlay()
+            return True
+        if self.overlay == _OVERLAY_COMMIT:
+            if k == KEY_ENTER:
+                self._submit_commit()
+                return True
+            var clip = text_field_clipboard_key(event, self.overlay_input)
+            if clip.consumed:
+                return True
+            if k == KEY_BACKSPACE:
+                var bytes = self.overlay_input.as_bytes()
+                if len(bytes) > 0:
+                    self.overlay_input = String(StringSlice(
+                        unsafe_from_utf8=bytes[:len(bytes) - 1]
+                    ))
+                return True
+            if UInt32(0x20) <= k and k < UInt32(0x7F):
+                self.overlay_input = self.overlay_input + chr(Int(k))
+                return True
+            return True
+        # Confirmation overlays.
+        if k == UInt32(0x79) or k == UInt32(0x59):    # y / Y
+            if self.overlay == _OVERLAY_AMEND_CONFIRM:
+                self._confirm_amend()
+            elif self.overlay == _OVERLAY_REVERT_CONFIRM:
+                self._confirm_revert()
+            return True
+        if k == UInt32(0x6E) or k == UInt32(0x4E):    # n / N
+            self._close_overlay()
+            return True
+        return True
+
+    # --- mouse / drag helpers ---------------------------------------------
+
+    fn _hit_splitter(self, pos: Point, screen: Rect) -> Int:
+        """Return ``_DRAG_*`` for the splitter at ``pos`` (1-cell hit
+        zone), or ``_DRAG_NONE`` if the position isn't on any splitter.
+        Vertical splitter is the ``│`` column at ``sep_x``; horizontal
+        splitters are the ``─`` rows between sidebar/right sub-panels."""
+        var top = self._list_top(screen)
+        var bottom = self._list_bottom(screen)
+        if pos.y < top or pos.y >= bottom:
+            return _DRAG_NONE
+        var sw = self._sidebar_width(screen)
+        var sep_x = screen.a.x + sw
+        # Vertical sidebar/right splitter.
+        if pos.x == sep_x:
+            return _DRAG_SIDEBAR
+        var rows = self._pane_rows(screen)
+        var split1_y = rows[0] + rows[1]
+        var split2_y = rows[2] + rows[3]
+        # Sidebar horizontal splitters span [screen.a.x, sep_x - 1].
+        if pos.x >= screen.a.x and pos.x < sep_x:
+            if pos.y == split1_y:
+                return _DRAG_SPLIT_FB
+            if pos.y == split2_y:
+                return _DRAG_SPLIT_BC
+        # Right-side horizontal splitter (file mode only).
+        if self._driving_pane() == _PANE_FILES \
+                and pos.x > sep_x and pos.x <= screen.b.x - 1:
+            var rp = self._right_panes(screen)
+            var split3_y = rp[0] + rp[1]
+            if pos.y == split3_y:
+                return _DRAG_SPLIT_US
+        return _DRAG_NONE
+
+    fn _apply_drag(mut self, pos: Point, screen: Rect):
+        """Continue a drag: update the relevant override based on
+        ``pos.y`` (or ``pos.x`` for the vertical splitter). The
+        geometry helpers clamp on read, so we just store the raw value."""
+        var top = self._list_top(screen)
+        var bottom = self._list_bottom(screen)
+        if self._drag_kind == _DRAG_SIDEBAR:
+            var w = pos.x - screen.a.x
+            if w < 16: w = 16
+            var max_w = screen.width() // 2
+            if max_w > _SIDEBAR_MAX: max_w = _SIDEBAR_MAX
+            if w > max_w: w = max_w
+            self.sidebar_width_user = w
+            return
+        if self._drag_kind == _DRAG_SPLIT_FB:
+            # New files panel height = pos.y - top.
+            var h = pos.y - top
+            var min_h = 1 + _PANEL_MIN_BODY
+            if h < min_h: h = min_h
+            # Ensure at least min_h for branches + commits combined +
+            # the second splitter row.
+            var max_h = (bottom - top) - (2 * min_h) - 2
+            if h > max_h: h = max_h
+            if h < min_h: h = min_h
+            self.files_height_user = h
+            # When dragging files/branches splitter, leave branches in
+            # auto unless user has explicitly sized it; geometry will
+            # clamp.
+            return
+        if self._drag_kind == _DRAG_SPLIT_BC:
+            # pos.y is the new branches-bottom; subtract files_top + f_h + 1
+            # (splitter row) to get branches height.
+            var rows = self._pane_rows(screen)
+            var b_top = rows[2]
+            var h = pos.y - b_top
+            var min_h = 1 + _PANEL_MIN_BODY
+            if h < min_h: h = min_h
+            # Ensure commits keeps min_h: pos.y must leave at least
+            # min_h rows below before list_bottom.
+            var max_h = bottom - b_top - min_h - 1  # -1 for splitter row
+            if h > max_h: h = max_h
+            if h < min_h: h = min_h
+            self.branches_height_user = h
+            return
+        if self._drag_kind == _DRAG_SPLIT_US:
+            var h = pos.y - top
+            var min_h = 1 + _PANEL_MIN_BODY
+            if h < min_h: h = min_h
+            var max_h = bottom - top - min_h - 1  # -1 for splitter row
+            if h > max_h: h = max_h
+            if h < min_h: h = min_h
+            self.unstaged_height_user = h
+            return
 
     fn _pane_at(self, pos: Point, screen: Rect) -> Int:
-        """Return which sidebar pane (or -1 for "right pane / outside")
-        the cursor position falls in."""
+        """Return which sidebar pane (or -1 for "right pane / outside /
+        on a splitter row") the cursor position falls in."""
         var sw = self._sidebar_width(screen)
         var sidebar_right = screen.a.x + sw
         if pos.x >= sidebar_right or pos.x < screen.a.x:
@@ -1450,48 +2054,116 @@ struct LocalChanges(Movable):
             return _PANE_COMMITS
         return -1
 
+    fn _right_pane_at(self, pos: Point, screen: Rect) -> Int:
+        """Return _PANE_RIGHT_UNSTAGED / _PANE_RIGHT_STAGED /
+        _PANE_RIGHT_INFO based on which sub-panel ``pos`` falls in. -1
+        when ``pos`` is outside the right side or on the splitter row."""
+        var sw = self._sidebar_width(screen)
+        var sep_x = screen.a.x + sw
+        if pos.x <= sep_x or pos.x > screen.b.x - 1:
+            return -1
+        var top = self._list_top(screen)
+        var bottom = self._list_bottom(screen)
+        if pos.y < top or pos.y >= bottom:
+            return -1
+        if self._driving_pane() != _PANE_FILES:
+            return _PANE_RIGHT_INFO
+        var rp = self._right_panes(screen)
+        if pos.y >= rp[0] and pos.y < rp[0] + rp[1]:
+            return _PANE_RIGHT_UNSTAGED
+        if pos.y >= rp[2] and pos.y < rp[2] + rp[3]:
+            return _PANE_RIGHT_STAGED
+        return -1
+
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active or event.kind != EVENT_MOUSE:
             return False
+        # Modal overlay — swallow all mouse so clicks don't sneak under.
+        if self.overlay != _OVERLAY_NONE:
+            return True
         var pos = event.pos
+        # --- in-progress splitter drag -----------------------------------
+        # Resolved before any other handling so a click that *starts* on
+        # a splitter never also triggers list-row behaviour even if the
+        # cursor crosses into a panel mid-drag.
+        if self._drag_kind != _DRAG_NONE:
+            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                    and event.motion:
+                self._apply_drag(pos, screen)
+                return True
+            if not event.pressed:
+                self._drag_kind = _DRAG_NONE
+                return True
+            return True
         var sw = self._sidebar_width(screen)
         var sidebar_right = screen.a.x + sw
-        # Wheel: forward to whichever pane the cursor sits over. In the
-        # sidebar, scroll the focused list that's under the cursor; in
-        # the right pane, scroll the diff body.
+        # Wheel: forward to whichever pane the cursor sits over.
         if event.button == MOUSE_WHEEL_UP \
                 or event.button == MOUSE_WHEEL_DOWN:
             var dy = -1 if event.button == MOUSE_WHEEL_UP else 1
-            if pos.x >= sidebar_right:
-                self._scroll_right(3 * dy, screen)
+            if pos.x > sidebar_right:
+                # Right side — scroll the sub-panel under the cursor.
+                var rpane = self._right_pane_at(pos, screen)
+                if rpane < 0:
+                    return True
+                if self.focus != rpane:
+                    if not self._is_right_focus():
+                        self.last_sidebar_focus = self.focus
+                    self.focus = rpane
+                self._scroll_focused_right(3 * dy, screen)
                 return True
             var pane = self._pane_at(pos, screen)
             if pane < 0:
                 return True
-            # Scroll the list rows under the cursor regardless of focus,
-            # but bring focus along so the right pane updates accordingly.
             self.focus = pane
             self.last_sidebar_focus = pane
             self._set_focused_selection(
                 self._focused_selection() + dy, screen,
             )
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed:
-            # Right-pane click: jump the line cursor and focus the
-            # right pane so the next Space stages/unstages that line.
-            if pos.x >= sidebar_right:
-                var top = self._list_top(screen)
-                var bottom = self._list_bottom(screen)
-                if pos.y < top or pos.y >= bottom:
-                    return True
-                if self.focus != _PANE_RIGHT:
-                    self.last_sidebar_focus = self.focus
-                    self.focus = _PANE_RIGHT
-                self._ensure_right_lines()
-                var line_idx = self.right_scroll + (pos.y - top)
-                if 0 <= line_idx and line_idx < len(self._right_lines):
-                    self.right_cursor = line_idx
+        # --- left-button press: drag-start, focus or selection ----------
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion:
+            # Splitter hit?
+            var splitter = self._hit_splitter(pos, screen)
+            if splitter != _DRAG_NONE:
+                self._drag_kind = splitter
                 return True
+            # Right-side click: focus the sub-panel and jump line cursor.
+            if pos.x > sidebar_right:
+                var rpane = self._right_pane_at(pos, screen)
+                if rpane < 0:
+                    return True
+                if not self._is_right_focus():
+                    self.last_sidebar_focus = self.focus
+                self.focus = rpane
+                self._ensure_right_panels()
+                # Determine which panel + its top to jump cursor.
+                if rpane == _PANE_RIGHT_INFO:
+                    var top = self._list_top(screen)
+                    # Header is one row; clicking on header is a no-op.
+                    if pos.y == top:
+                        return True
+                    var li = self.info.scroll + (pos.y - top - 1)
+                    if 0 <= li and li < len(self.info.lines):
+                        self.info.cursor = li
+                    return True
+                var rp = self._right_panes(screen)
+                if rpane == _PANE_RIGHT_UNSTAGED:
+                    if pos.y == rp[0]:
+                        return True
+                    var li = self.unstaged.scroll + (pos.y - rp[0] - 1)
+                    if 0 <= li and li < len(self.unstaged.lines):
+                        self.unstaged.cursor = li
+                    return True
+                # Staged.
+                if pos.y == rp[2]:
+                    return True
+                var li = self.staged.scroll + (pos.y - rp[2] - 1)
+                if 0 <= li and li < len(self.staged.lines):
+                    self.staged.cursor = li
+                return True
+            # Sidebar click.
             var pane = self._pane_at(pos, screen)
             if pane < 0:
                 return True
@@ -1507,7 +2179,6 @@ struct LocalChanges(Movable):
             else:
                 top = rows[4]
                 height = rows[5]
-            # Click on the section header row just shifts focus.
             self.focus = pane
             self.last_sidebar_focus = pane
             if pos.y == top:

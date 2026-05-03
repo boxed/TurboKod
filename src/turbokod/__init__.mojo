@@ -34,7 +34,9 @@ from .buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit,
 )
 from .clipboard import clipboard_copy, clipboard_paste
-from .config import TurbokodConfig, load_config, save_config
+from .config import (
+    TurbokodConfig, load_config, record_recent_project, save_config,
+)
 from .desktop import (
     APP_QUIT_ACTION,
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
@@ -54,7 +56,7 @@ from .desktop import (
     EDITOR_UNDO,
     GIT_LOCAL_CHANGES,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
-    PROJECT_FIND, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    PROJECT_FIND, PROJECT_OPEN_RECENT, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX, TARGET_TEST,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX, WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
     ctrl_key, format_hotkey,

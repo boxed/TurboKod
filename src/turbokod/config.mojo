@@ -14,9 +14,16 @@ from std.ffi import external_call
 
 from .file_io import read_file, stat_file, write_file
 from .json import (
-    JsonValue, encode_json, json_bool, json_object, parse_json,
+    JsonValue, encode_json, json_array, json_bool, json_object, json_str,
+    parse_json,
 )
 from .posix import getenv_value
+
+
+# Most-recently-opened project paths kept in the config. Anything past
+# this is dropped when ``_set_project`` records a new entry, so the
+# "Open recent project..." picker stays a manageable list.
+comptime _RECENT_PROJECTS_MAX = 20
 
 
 fn _config_dir() -> String:
@@ -52,11 +59,42 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     var line_numbers: Bool
     var soft_wrap: Bool
     var git_changes: Bool
+    # Canonical absolute paths of recently opened projects, most-recent
+    # first. Updated by ``Desktop._set_project`` and surfaced via the
+    # File ▸ "Open recent project..." picker.
+    var recent_projects: List[String]
 
     fn __init__(out self):
         self.line_numbers = False
         self.soft_wrap = False
         self.git_changes = False
+        self.recent_projects = List[String]()
+
+    fn __copyinit__(out self, copy: Self):
+        # ``List[String]`` isn't implicitly copyable, so the synthesized
+        # copy constructor refuses — spell it out using ``List.copy``.
+        self.line_numbers = copy.line_numbers
+        self.soft_wrap = copy.soft_wrap
+        self.git_changes = copy.git_changes
+        self.recent_projects = copy.recent_projects.copy()
+
+
+fn record_recent_project(
+    mut config: TurbokodConfig, var path: String,
+):
+    """Promote ``path`` to the front of ``config.recent_projects``,
+    dedup any existing entry, and cap the list at
+    ``_RECENT_PROJECTS_MAX``. Empty paths are ignored."""
+    if len(path.as_bytes()) == 0:
+        return
+    var new_list = List[String]()
+    new_list.append(path)
+    for i in range(len(config.recent_projects)):
+        if config.recent_projects[i] != path:
+            new_list.append(config.recent_projects[i])
+    while len(new_list) > _RECENT_PROJECTS_MAX:
+        _ = new_list.pop(len(new_list) - 1)
+    config.recent_projects = new_list^
 
 
 fn load_config() -> TurbokodConfig:
@@ -82,6 +120,13 @@ fn load_config() -> TurbokodConfig:
         var gc = root.object_get(String("git_changes"))
         if gc and gc.value().is_bool():
             cfg.git_changes = gc.value().as_bool()
+        var rp = root.object_get(String("recent_projects"))
+        if rp and rp.value().is_array():
+            var arr = rp.value()
+            for i in range(arr.array_len()):
+                var item = arr.array_at(i)
+                if item.is_string():
+                    cfg.recent_projects.append(item.as_str())
     except:
         pass
     return cfg
@@ -102,4 +147,8 @@ fn save_config(config: TurbokodConfig) -> Bool:
     root.put(String("line_numbers"), json_bool(config.line_numbers))
     root.put(String("soft_wrap"), json_bool(config.soft_wrap))
     root.put(String("git_changes"), json_bool(config.git_changes))
+    var rp = json_array()
+    for i in range(len(config.recent_projects)):
+        rp.append(json_str(config.recent_projects[i]))
+    root.put(String("recent_projects"), rp^)
     return write_file(path, encode_json(root) + String("\n"))

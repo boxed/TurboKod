@@ -45,6 +45,10 @@ struct QuickOpen(Movable):
     # Dialog title — "Quick Open" by default, "Open Recent" for the
     # recents-mode entry point.
     var title: String
+    # True when the picker is showing project roots rather than files.
+    # Desktop reads this on submit to decide between ``open_project``
+    # and ``open_file``. Reset on every ``open*`` / ``close``.
+    var picks_project: Bool
 
     fn __init__(out self):
         self.active = False
@@ -58,6 +62,7 @@ struct QuickOpen(Movable):
         self.selected = 0
         self.scroll = 0
         self.title = String(" Quick Open ")
+        self.picks_project = False
 
     fn open(mut self, var root: String):
         self.root = root^
@@ -68,6 +73,7 @@ struct QuickOpen(Movable):
         self.selected = 0
         self.scroll = 0
         self.title = String(" Quick Open ")
+        self.picks_project = False
         # Load candidate set from disk. Paths come back absolute; strip the
         # root prefix so the picker shows the project-relative form.
         self.entries = List[String]()
@@ -94,7 +100,7 @@ struct QuickOpen(Movable):
 
     fn open_recent(
         mut self, var root: String, var entries: List[String],
-        var entries_abs: List[String],
+        var entries_abs: List[String], picks_project: Bool = False,
     ):
         """Open with a caller-supplied list of paths (display + absolute).
 
@@ -102,6 +108,10 @@ struct QuickOpen(Movable):
         point so the most-recently-focused file is at the top. Entries
         are not re-sorted by the matcher; the empty-query view shows
         them in the order passed.
+
+        ``picks_project`` flips the dialog into project-root mode: title
+        changes to "Open Recent Project" and Desktop routes the submitted
+        path through ``open_project`` instead of ``open_file``.
         """
         self.root = root^
         self.query = String("")
@@ -110,9 +120,12 @@ struct QuickOpen(Movable):
         self.selected_path = String("")
         self.selected = 0
         self.scroll = 0
-        self.title = String(" Open Recent ")
+        self.title = String(
+            " Open Recent Project " if picks_project else " Open Recent "
+        )
         self.entries = entries^
         self.entries_abs = entries_abs^
+        self.picks_project = picks_project
         self._refilter()
 
     fn close(mut self):
@@ -127,6 +140,7 @@ struct QuickOpen(Movable):
         self.selected = 0
         self.scroll = 0
         self.title = String(" Quick Open ")
+        self.picks_project = False
 
     # --- filtering --------------------------------------------------------
 

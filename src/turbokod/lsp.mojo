@@ -130,8 +130,12 @@ fn _build_argv_buffer(args: List[String]) -> ArgvBuffer:
 @fieldwise_init
 struct CaptureResult(Movable):
     """Output of a synchronous child run. ``status`` is the raw waitpid
-    value; the exit code is ``(status >> 8) & 0xFF`` on POSIX."""
+    value; the exit code is ``(status >> 8) & 0xFF`` on POSIX. ``stderr``
+    is captured separately so callers that care about distinguishing
+    progress text from the actual result (``git push`` is the canonical
+    example — pushes the result summary to stderr) can see it."""
     var stdout: String
+    var stderr: String
     var status: Int32
 
 
@@ -206,16 +210,17 @@ fn capture_command(
         write_buffer(stdin_w, sb)
     _ = close_fd(stdin_w)
 
-    # Drain stdout to EOF (blocking reads). We also drain stderr so the
-    # child doesn't block on a full pipe; the captured stderr is
-    # discarded since callers seldom want it for grep-style tools.
+    # Drain stdout + stderr to EOF (blocking reads). Capturing both —
+    # rather than discarding stderr — costs nothing since the drain has
+    # to happen anyway to keep the child from blocking on a full pipe,
+    # and lets git callers surface useful failure messages.
     var out = _drain_to_eof(stdout_r)
-    _ = _drain_to_eof(stderr_r)
+    var err = _drain_to_eof(stderr_r)
     _ = close_fd(stdout_r)
     _ = close_fd(stderr_r)
 
     var status = waitpid_blocking(pid)
-    return CaptureResult(out^, status)
+    return CaptureResult(out^, err^, status)
 
 
 fn _drain_to_eof(fd: Int32) -> String:

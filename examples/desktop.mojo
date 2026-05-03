@@ -57,7 +57,8 @@ from turbokod import (
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES,
-    PROJECT_FIND, PROJECT_REPLACE, TARGET_RUN, WINDOW_CLOSE,
+    PROJECT_FIND, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
+    TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
 
@@ -127,6 +128,7 @@ fn main() raises:
             (String("Open..."), String("file:open")),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
             (String("Open recent..."), EDITOR_OPEN_RECENT),
+            (String("Open recent project..."), PROJECT_OPEN_RECENT),
             (String("Close"), WINDOW_CLOSE),
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),

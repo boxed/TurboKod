@@ -41,9 +41,13 @@ from .events import (
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .clipboard import clipboard_copy, clipboard_paste
-from .config import TurbokodConfig, load_config, save_config
+from .config import (
+    TurbokodConfig, load_config, record_recent_project, save_config,
+)
 from .diff import unified_diff
-from .file_io import basename, find_git_project, join_path, stat_file
+from .file_io import (
+    basename, find_git_project, join_path, parent_path, stat_file,
+)
 from .git_blame import compute_blame
 from .git_changes import (
     diff_buffer_against_head, fetch_head_text, project_is_git_repo,
@@ -155,6 +159,10 @@ comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
+# "Open recent project..." — same QuickOpen-style picker as Open Recent
+# files, but populated from ``self.config.recent_projects`` and routed
+# through ``open_project`` on submit instead of ``open_file``.
+comptime PROJECT_OPEN_RECENT  = String("project:open_recent")
 # Debugger actions. ``DEBUG_START_OR_CONTINUE`` is a single F5-style
 # binding: starts the session if none is active, continues if stopped.
 comptime DEBUG_START_OR_CONTINUE = String("debug:start_or_continue")
@@ -1278,6 +1286,38 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        # Close any open editor windows last — after self.project has
+        # been cleared so _save_session_if_changed bails on its first
+        # guard and leaves the on-disk session.json intact. Reopening
+        # the project then restores exactly these files.
+        self._close_all_editor_windows()
+
+    fn _close_all_editor_windows(mut self):
+        """Drop every editor window from the manager, leaving non-editor
+        windows (host-added panels / demo content) alone. Rebuilds
+        ``z_order`` and ``focused`` against the surviving windows."""
+        var kept = List[Window]()
+        var remap = List[Int]()
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                remap.append(-1)
+            else:
+                remap.append(len(kept))
+                kept.append(self.windows.windows[i])
+        self.windows.windows = kept^
+        var new_z = List[Int]()
+        for k in range(len(self.windows.z_order)):
+            var v = self.windows.z_order[k]
+            if v >= 0 and v < len(remap) and remap[v] >= 0:
+                new_z.append(remap[v])
+        self.windows.z_order = new_z^
+        if len(self.windows.z_order) > 0:
+            self.windows.focused = self.windows.z_order[len(self.windows.z_order) - 1]
+        else:
+            self.windows.focused = -1
+        # Reset the cascade counter so the next project's first opens
+        # land at the workspace origin instead of inheriting an offset.
+        self._open_count = 0
 
     fn _set_project(mut self, path: String):
         # Resolve so a label like ``.`` becomes the actual directory name,
@@ -1286,6 +1326,11 @@ struct Desktop(Movable):
         var resolved = realpath(path)
         var canonical = resolved if len(resolved.as_bytes()) > 0 else path
         self.project = Optional[String](canonical)
+        # Record this project at the front of the persistent recents list
+        # before any later step might raise — failing to save the config
+        # is a non-fatal best-effort, just like the View-menu toggles.
+        record_recent_project(self.config, canonical)
+        _ = save_config(self.config)
         var label = basename(canonical)
         if self._project_menu_idx < 0:
             var items = List[MenuItem]()
@@ -1649,11 +1694,20 @@ struct Desktop(Movable):
                 _ = self.quick_open.handle_mouse(event, screen)
             if self.quick_open.submitted:
                 var path = self.quick_open.selected_path
+                var to_project = self.quick_open.picks_project
                 self.quick_open.close()
-                try:
-                    self.open_file(path, screen)
-                except:
-                    pass
+                if to_project:
+                    # Project switch: close any current project so
+                    # ``open_project``'s "no-op when one is set" guard
+                    # doesn't swallow the request, then re-arm.
+                    if self.project:
+                        self.close_project()
+                    self.open_project(path)
+                else:
+                    try:
+                        self.open_file(path, screen)
+                    except:
+                        pass
             return Optional[String]()
         if self.symbol_pick.active:
             if event.kind == EVENT_KEY:
@@ -1918,6 +1972,9 @@ struct Desktop(Movable):
             return Optional[String](action)
         if action == EDITOR_OPEN_RECENT:
             self._open_recent_picker()
+            return Optional[String]()
+        if action == PROJECT_OPEN_RECENT:
+            self._open_recent_projects_picker()
             return Optional[String]()
         if action == EDITOR_FIND:
             self._pending_action = EDITOR_FIND
@@ -3238,6 +3295,44 @@ struct Desktop(Movable):
         if len(rel_entries) == 0:
             return
         self.quick_open.open_recent(root, rel_entries^, abs_entries^)
+
+    fn _open_recent_projects_picker(mut self):
+        """Open the QuickOpen picker over ``self.config.recent_projects``.
+
+        Skips the currently active project (if any), and silently drops
+        entries whose path no longer stats — a project that was moved
+        or deleted shouldn't dead-end the dialog. No-op when nothing
+        survives the filter.
+        """
+        if len(self.config.recent_projects) == 0:
+            return
+        var current = String("")
+        if self.project:
+            current = self.project.value()
+        # Display labels: basename + " — " + parent for disambiguation
+        # ("turbokod — /Users/boxed/Projects" reads better than the full
+        # path), with parallel absolute paths for the actual open.
+        var labels = List[String]()
+        var abs_entries = List[String]()
+        for i in range(len(self.config.recent_projects)):
+            var p = self.config.recent_projects[i]
+            if p == current:
+                continue
+            var info = stat_file(p)
+            if not info.ok or not info.is_dir():
+                continue
+            var name = basename(p)
+            var parent = parent_path(p)
+            var label = name
+            if len(name.as_bytes()) > 0 and len(parent.as_bytes()) > 0:
+                label = name + String(" — ") + parent
+            labels.append(label)
+            abs_entries.append(p)
+        if len(labels) == 0:
+            return
+        self.quick_open.open_recent(
+            String(""), labels^, abs_entries^, picks_project=True,
+        )
 
     # --- editor-action helpers --------------------------------------------
 
