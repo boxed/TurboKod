@@ -28,12 +28,28 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::{c_char, c_void, CStr};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use winit::event_loop::EventLoopProxy;
 
 use crate::{translate_open_arg, UserEvent};
+
+// Cold-launch debugging: every step that contributes to opening a path
+// from ``open -a turbokod /path`` writes a line to this log so a failure
+// to deliver leaves a trail. Cheap (one open+write per event), opt-out
+// by removing the file (it'll be recreated on next launch).
+fn dlog(msg: &str) {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/turbokod-debug.log")
+    {
+        let _ = writeln!(f, "[{}] url-scheme: {}", std::process::id(), msg);
+    }
+}
 
 // FourCharCode constants. These are big-endian-packed ASCII tetragrams
 // that Carbon uses for event class / event ID / type tags.
@@ -136,6 +152,10 @@ static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 /// ``AEInstallEventHandler`` itself only registers each C function once
 /// with the OS.
 pub fn register(proxy: EventLoopProxy<UserEvent>) {
+    dlog(&format!(
+        "register called; argv={:?}",
+        std::env::args().collect::<Vec<_>>(),
+    ));
     // ``set`` returns ``Err`` if already initialized — silently keep
     // the first proxy. In practice ``register`` is called from
     // ``main`` exactly once.
@@ -214,37 +234,61 @@ unsafe extern "C" fn handle_get_url(
     0
 }
 
-// Add ``application:openFiles:`` to ``WinitApplicationDelegate`` at
-// runtime. NSApplication looks this method up on its delegate when an
-// ``aevt/odoc`` event arrives, hands it the array of paths macOS
-// resolved from the AE's file-URL list, and treats any object that
-// responds to it as a successful open — no popup. winit's delegate
-// class is named ``WinitApplicationDelegate`` and only implements
+// Add ``application:openFiles:`` AND ``application:openURLs:`` to
+// ``WinitApplicationDelegate`` at runtime. NSApplication routes the
+// ``aevt/odoc`` AE to ``application:openURLs:`` first when the delegate
+// responds to it (modern Cocoa, 10.13+), falling back to
+// ``application:openFiles:``. We install both so the path lands the
+// same way regardless of which selector NSApplication picks for this
+// macOS version. winit's delegate class is named
+// ``WinitApplicationDelegate`` and only implements
 // ``applicationDidFinishLaunching:`` / ``applicationWillTerminate:``,
-// so adding ``openFiles`` doesn't conflict with anything winit cares
-// about. No-op if the class can't be found (e.g., winit upgrade
-// renames it) — the URL scheme keeps working, only ``open -a turbokod
-// /path`` regresses, which is what we already had.
+// so neither addition collides with anything winit cares about.
+//
+// Returns the install status so the caller can log it. Cold-launch
+// regressions on this path are silent otherwise — the OS just shows
+// the "cannot open files in the 'Folder' format" popup and drops the
+// path.
 fn install_open_files_method() {
     unsafe {
         let cls_name = c"WinitApplicationDelegate";
         let cls = objc_getClass(cls_name.as_ptr());
         if cls.is_null() {
+            dlog("install: WinitApplicationDelegate class not found — both openFiles and openURLs handlers skipped");
             return;
         }
-        let sel = sel_registerName(c"application:openFiles:".as_ptr());
         // ObjC type-encoding string: ``v`` (void return), ``@`` (id self),
         // ``:`` (SEL _cmd), ``@`` (NSApplication* sender), ``@`` (NSArray*).
         // See <https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html>.
-        class_addMethod(
+        let files_sel = sel_registerName(c"application:openFiles:".as_ptr());
+        let files_ok = class_addMethod(
             cls,
-            sel,
+            files_sel,
             std::mem::transmute::<
                 unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, *mut ObjcId, *mut ObjcId),
                 extern "C" fn(),
             >(application_open_files),
             c"v@:@@".as_ptr(),
         );
+        // ``application:openURLs:`` (NSApplicationDelegate, 10.13+) is the
+        // method NSApplication prefers on modern macOS — when the
+        // delegate responds to it, the openFiles fallback is never
+        // called. Same signature as openFiles (NSArray of NSURL instead
+        // of NSString); we extract ``-[NSURL path]`` for each entry.
+        let urls_sel = sel_registerName(c"application:openURLs:".as_ptr());
+        let urls_ok = class_addMethod(
+            cls,
+            urls_sel,
+            std::mem::transmute::<
+                unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, *mut ObjcId, *mut ObjcId),
+                extern "C" fn(),
+            >(application_open_urls),
+            c"v@:@@".as_ptr(),
+        );
+        dlog(&format!(
+            "install: openFiles={} openURLs={}",
+            files_ok, urls_ok,
+        ));
     }
 }
 
@@ -260,7 +304,9 @@ unsafe extern "C" fn application_open_files(
     _sender: *mut ObjcId,
     filenames: *mut ObjcId,
 ) {
+    dlog("application:openFiles: invoked");
     if filenames.is_null() {
+        dlog("application:openFiles: filenames is null");
         return;
     }
     unsafe {
@@ -280,6 +326,7 @@ unsafe extern "C" fn application_open_files(
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
 
         let count = count_fn(filenames, sel_count);
+        dlog(&format!("application:openFiles: count={}", count));
         let mut paths: Vec<String> = Vec::with_capacity(count);
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         for i in 0..count {
@@ -303,9 +350,83 @@ unsafe extern "C" fn application_open_files(
                 paths.push(t);
             }
         }
+        dlog(&format!("application:openFiles: forwarding {:?}", paths));
         if !paths.is_empty() {
             if let Some(proxy) = PROXY.get() {
-                let _ = proxy.send_event(UserEvent::OpenPaths(paths));
+                let res = proxy.send_event(UserEvent::OpenPaths(paths));
+                dlog(&format!("application:openFiles: send_event ok={}", res.is_ok()));
+            } else {
+                dlog("application:openFiles: PROXY not set");
+            }
+        }
+    }
+}
+
+// IMP for ``-[WinitApplicationDelegate application:openURLs:]``. Same
+// shape as openFiles but the array members are NSURL, not NSString.
+// We ask each NSURL for ``-[NSURL path]`` to get the POSIX path back,
+// then route it through the same ``OpenPaths`` channel as everything
+// else. NSApplication on 10.13+ prefers this selector over openFiles
+// when both exist, so for cold-launch ``open -a turbokod /path`` this
+// is the entry point that actually fires.
+unsafe extern "C" fn application_open_urls(
+    _self: *mut ObjcId,
+    _sel: *mut ObjcSel,
+    _sender: *mut ObjcId,
+    urls: *mut ObjcId,
+) {
+    dlog("application:openURLs: invoked");
+    if urls.is_null() {
+        dlog("application:openURLs: urls is null");
+        return;
+    }
+    unsafe {
+        let sel_count = sel_registerName(c"count".as_ptr());
+        let sel_obj_at_index = sel_registerName(c"objectAtIndex:".as_ptr());
+        let sel_path = sel_registerName(c"path".as_ptr());
+        let sel_utf8 = sel_registerName(c"UTF8String".as_ptr());
+
+        let count_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> usize =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let obj_at_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, usize) -> *mut ObjcId =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let url_path_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *mut ObjcId =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let utf8_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *const c_char =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+        let count = count_fn(urls, sel_count);
+        dlog(&format!("application:openURLs: count={}", count));
+        let mut paths: Vec<String> = Vec::with_capacity(count);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        for i in 0..count {
+            let url = obj_at_fn(urls, sel_obj_at_index, i);
+            if url.is_null() {
+                continue;
+            }
+            let ns_path = url_path_fn(url, sel_path);
+            if ns_path.is_null() {
+                continue;
+            }
+            let utf8 = utf8_fn(ns_path, sel_utf8);
+            if utf8.is_null() {
+                continue;
+            }
+            let raw = match CStr::from_ptr(utf8).to_str() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(t) = translate_open_arg(raw, &cwd) {
+                paths.push(t);
+            }
+        }
+        dlog(&format!("application:openURLs: forwarding {:?}", paths));
+        if !paths.is_empty() {
+            if let Some(proxy) = PROXY.get() {
+                let res = proxy.send_event(UserEvent::OpenPaths(paths));
+                dlog(&format!("application:openURLs: send_event ok={}", res.is_ok()));
+            } else {
+                dlog("application:openURLs: PROXY not set");
             }
         }
     }

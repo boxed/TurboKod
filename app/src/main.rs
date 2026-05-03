@@ -883,6 +883,23 @@ impl ApplicationHandler<UserEvent> for App {
         let te = match ev {
             UserEvent::Term(te) => te,
             UserEvent::OpenPaths(paths) => {
+                #[cfg(target_os = "macos")]
+                {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/turbokod-debug.log")
+                    {
+                        let _ = writeln!(
+                            f,
+                            "[{}] App::user_event OpenPaths: {:?} window={}",
+                            std::process::id(),
+                            paths,
+                            self.window.is_some(),
+                        );
+                    }
+                }
                 // Forward each path to the embedded child as a private OSC
                 // sequence — same channel turbokod uses outbound for cursor
                 // shape hints. The Mojo terminal parses ``__mvc_open:<path>``
