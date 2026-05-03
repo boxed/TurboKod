@@ -53,6 +53,7 @@ from .desktop import (
     EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
+    EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     GIT_LOCAL_CHANGES,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
@@ -149,6 +150,7 @@ from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .painter import Painter
 from .prompt import Prompt
 from .status import StatusBar, StatusItem, StatusTab
+from .tab_bar import TabBar, TabBarItem
 from .terminal import Terminal
 from .text_field import TextFieldKeyResult, text_field_clipboard_key
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered

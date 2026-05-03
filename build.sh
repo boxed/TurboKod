@@ -60,10 +60,12 @@ if [ -z "${env_prefix:-}" ]; then
   env_prefix="${project_root}/.pixi/envs/default"
 fi
 
-# 2. Compile the libonig shim (process-exit registry that batches the
-#    ``onig_free`` calls we can't safely run from Mojo's per-instance
-#    ``__del__``). Rebuild only when the .c file is newer than the
-#    cached object, since it's tiny and rarely changes.
+# 2. Compile the C shims (mirror what run.sh links in for dev builds):
+#    * onig_shim    — process-exit registry batching ``onig_free`` calls.
+#    * process_shim — kill-on-parent-death registry: SIGTERMs spawned
+#                     child PIDs on SIGHUP / SIGTERM / clean exit so the
+#                     macOS app doesn't orphan run / debug subprocesses.
+#    Each rebuilds only when its .c is newer than the cached object.
 mkdir -p "${project_root}/.build"
 shim_src="${project_root}/src/turbokod/onig_shim.c"
 shim_obj="${project_root}/.build/onig_shim.o"
@@ -71,9 +73,15 @@ if [ ! -f "$shim_obj" ] || [ "$shim_src" -nt "$shim_obj" ]; then
   echo "[build] compiling onig shim -> ${shim_obj}" >&2
   clang -c -O2 -fPIC "$shim_src" -o "$shim_obj"
 fi
+proc_src="${project_root}/src/turbokod/process_shim.c"
+proc_obj="${project_root}/.build/process_shim.o"
+if [ ! -f "$proc_obj" ] || [ "$proc_src" -nt "$proc_obj" ]; then
+  echo "[build] compiling process shim -> ${proc_obj}" >&2
+  clang -c -O2 -fPIC "$proc_src" -o "$proc_obj"
+fi
 
 # 3. Build the mojo backend. Mirror the flags ``run.sh`` uses so the
-#    binary links to libonig and has the onig-cleanup shim bundled in.
+#    binary links to libonig and has both C shims bundled in.
 desktop_bin="${project_root}/.build/turbokod-desktop"
 echo "[build] mojo build (release) examples/desktop.mojo -> ${desktop_bin}" >&2
 pixi run mojo build \
@@ -82,6 +90,7 @@ pixi run mojo build \
   -Xlinker "-L${env_prefix}/lib" \
   -Xlinker "-lonig" \
   -Xlinker "$shim_obj" \
+  -Xlinker "$proc_obj" \
   -o "$desktop_bin" examples/desktop.mojo
 
 # 4. Build the rust front-end (release). Bail on failure so we don't

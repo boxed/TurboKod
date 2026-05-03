@@ -95,6 +95,7 @@ from .session_store import (
     encode_session, load_session, save_session,
 )
 from .status import StatusBar, StatusTab
+from .tab_bar import TabBar, TabBarItem
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
@@ -132,6 +133,10 @@ comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
 comptime EDITOR_TOGGLE_SOFT_WRAP    = String("view:soft_wrap")
+# View-menu toggle for the per-window tab strip rendered above the
+# status bar. Like the other view toggles, the flag lives on
+# ``TurbokodConfig`` so it survives across sessions.
+comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
 # lives on ``TurbokodConfig`` so it survives across sessions; the
 # column itself only paints when a ``.git`` is reachable from the
@@ -309,6 +314,7 @@ struct Desktop(Movable):
     var menu_bar: MenuBar
     var windows: WindowManager
     var status_bar: StatusBar
+    var tab_bar: TabBar
     var file_tree: FileTree
     var prompt: Prompt
     var quick_open: QuickOpen
@@ -464,6 +470,7 @@ struct Desktop(Movable):
         self.menu_bar = MenuBar()
         self.windows = WindowManager()
         self.status_bar = StatusBar()
+        self.tab_bar = TabBar()
         self.file_tree = FileTree()
         self.prompt = Prompt()
         self.quick_open = QuickOpen()
@@ -623,6 +630,16 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("d"), MOD_NONE, TARGET_DEBUG))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, TARGET_TEST))
 
+    fn _bottom_chrome_height(self, screen: Rect) -> Int:
+        """Rows the bottom chrome (status bar + optional tab bar) eats
+        from the workspace. The status bar is always one row; the
+        tab bar adds another when the View toggle is on, but only
+        if the screen is tall enough to host both rows above the
+        menu bar."""
+        if self.config.tab_bar and screen.b.y - 2 >= 1:
+            return 2
+        return 1
+
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
         widgets. The file tree, when visible, eats space on the right; the
@@ -632,7 +649,7 @@ struct Desktop(Movable):
             right -= self.file_tree.width
             if right < 0:
                 right = 0
-        var bottom = screen.b.y - 1
+        var bottom = screen.b.y - self._bottom_chrome_height(screen)
         if self.debug_pane.visible:
             bottom -= self.debug_pane.preferred_height
             if bottom < 1:
@@ -641,13 +658,25 @@ struct Desktop(Movable):
 
     fn debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked debug pane lives — above the status
-        bar (which is always one row tall at ``screen.b.y - 1``)."""
+        bar (and the tab bar, when visible) which together always
+        sit at the screen's bottom edge."""
         if not self.debug_pane.visible:
             return Rect.empty()
-        var top = screen.b.y - 1 - self.debug_pane.preferred_height
+        var chrome = self._bottom_chrome_height(screen)
+        var top = screen.b.y - chrome - self.debug_pane.preferred_height
         if top < 1:
             top = 1
-        return Rect(0, top, screen.b.x, screen.b.y - 1)
+        return Rect(0, top, screen.b.x, screen.b.y - chrome)
+
+    fn tab_bar_rect(self, screen: Rect) -> Rect:
+        """Single-row strip directly above the status bar holding one
+        tab per open window. Empty when the View toggle is off."""
+        if not self.config.tab_bar:
+            return Rect.empty()
+        var y = screen.b.y - 2
+        if y < 1:
+            return Rect.empty()
+        return Rect(0, y, screen.b.x, y + 1)
 
     fn pointer_shape_at(self, pos: Point, screen: Rect) -> String:
         """Mouse-pointer icon the host should display at ``pos``.
@@ -759,6 +788,9 @@ struct Desktop(Movable):
         )
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_GIT_CHANGES, self.config.git_changes,
+        )
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
         )
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
@@ -873,6 +905,7 @@ struct Desktop(Movable):
         self.file_tree.paint(canvas, screen)
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         self.menu_bar.paint(canvas, screen)
+        self._paint_tab_bar(canvas, screen)
         self.status_bar.paint(canvas, screen)
         # Non-modal install-progress popup. Sits between the workspace and
         # the modal dialogs — visible while the user keeps editing, but
@@ -1858,6 +1891,15 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 TARGET_SELECT_PREFIX + String(tab_idx), screen,
             )
+        # Window tab bar (one row above status bar). Same rationale as
+        # the status-bar tabs: route the click to the named window
+        # before the workspace gets a shot at it.
+        var win_tab_rect = self.tab_bar_rect(screen)
+        var win_tab = self.tab_bar.handle_mouse(event, win_tab_rect)
+        if win_tab >= 0:
+            return self.dispatch_action(
+                WINDOW_FOCUS_PREFIX + String(win_tab), screen,
+            )
         if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
             return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
@@ -2108,6 +2150,11 @@ struct Desktop(Movable):
             for i in range(len(self.windows.windows)):
                 if self.windows.windows[i].is_editor:
                     self.windows.windows[i].editor.invalidate_git_changes()
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_TAB_BAR:
+            self.config.tab_bar = not self.config.tab_bar
             self._apply_view_config()
             _ = save_config(self.config)
             return Optional[String]()
@@ -3250,6 +3297,18 @@ struct Desktop(Movable):
             # otherwise the exit message and any tail output flash off
             # screen as ``run_session.is_active()`` flips to False.
             self._run_output_held = True
+
+    fn _paint_tab_bar(mut self, mut canvas: Canvas, screen: Rect):
+        """Render one tab per open window directly above the status
+        bar when ``config.tab_bar`` is on. Hidden when no rect is
+        carved out (toggle off, or terminal too short)."""
+        var rect = self.tab_bar_rect(screen)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        var items = List[TabBarItem]()
+        for i in range(len(self.windows.windows)):
+            items.append(TabBarItem(self.windows.windows[i].title, i))
+        self.tab_bar.paint(canvas, rect, items, self.windows.focused)
 
     fn _refresh_target_tabs(mut self):
         """Push the current target list + active selection into the

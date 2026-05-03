@@ -54,7 +54,9 @@ from turbokod import (
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_GIT_CHANGES,
-    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP, EDITOR_UNDO,
+    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
+    EDITOR_TOGGLE_TAB_BAR,
+    EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES,
     PROJECT_FIND, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
@@ -173,6 +175,10 @@ fn main() raises:
         ))
         view_items.append(MenuItem(
             String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES,
+            checkable=True,
+        ))
+        view_items.append(MenuItem(
+            String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR,
             checkable=True,
         ))
         desktop.menu_bar.add(Menu(String("View"), view_items^))

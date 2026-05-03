@@ -59,6 +59,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     var line_numbers: Bool
     var soft_wrap: Bool
     var git_changes: Bool
+    var tab_bar: Bool
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -68,6 +69,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.line_numbers = False
         self.soft_wrap = False
         self.git_changes = False
+        self.tab_bar = False
         self.recent_projects = List[String]()
 
     fn __copyinit__(out self, copy: Self):
@@ -76,6 +78,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
         self.git_changes = copy.git_changes
+        self.tab_bar = copy.tab_bar
         self.recent_projects = copy.recent_projects.copy()
 
 
@@ -120,6 +123,9 @@ fn load_config() -> TurbokodConfig:
         var gc = root.object_get(String("git_changes"))
         if gc and gc.value().is_bool():
             cfg.git_changes = gc.value().as_bool()
+        var tb = root.object_get(String("tab_bar"))
+        if tb and tb.value().is_bool():
+            cfg.tab_bar = tb.value().as_bool()
         var rp = root.object_get(String("recent_projects"))
         if rp and rp.value().is_array():
             var arr = rp.value()
@@ -147,6 +153,7 @@ fn save_config(config: TurbokodConfig) -> Bool:
     root.put(String("line_numbers"), json_bool(config.line_numbers))
     root.put(String("soft_wrap"), json_bool(config.soft_wrap))
     root.put(String("git_changes"), json_bool(config.git_changes))
+    root.put(String("tab_bar"), json_bool(config.tab_bar))
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))
