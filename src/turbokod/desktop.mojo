@@ -75,7 +75,7 @@ from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
-from .lsp_dispatch import DefinitionResolved, LspManager
+from .lsp_dispatch import DefinitionResolved, LspManager, WorkspaceSymbolItem
 from .dap_dispatch import DapManager, DapStackFrame, DapVariable
 from .debug_pane import (
     DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
@@ -110,6 +110,7 @@ from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
+from .find_symbol import FindSymbol
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 
 
@@ -150,6 +151,10 @@ comptime APP_SETTINGS         = String("app:settings")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
+# Workspace-wide "find symbol" picker. Backed by ``workspace/symbol``
+# on the focused editor's LSP — type-as-you-go, results include the
+# file path so the user can jump across the project.
+comptime EDITOR_FIND_SYMBOL   = String("edit:find_symbol")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
@@ -229,6 +234,27 @@ comptime WINDOW_ROTATE_NEXT   = String("window:rotate_next")
 comptime WINDOW_ROTATE_PREV   = String("window:rotate_prev")
 comptime _WINDOW_MENU_LABEL   = String("Window")
 
+# Navigation history (Cmd+[ / Cmd+]). Records cursor positions across
+# files and lets the user step back through visited locations the same
+# way browsers do. The actions are framework-recognized so a host that
+# only forwards events through ``handle_event`` gets the bindings for
+# free.
+comptime EDITOR_NAV_BACK      = String("nav:back")
+comptime EDITOR_NAV_FORWARD   = String("nav:forward")
+
+# Movement below this row delta (within the same file) doesn't add a
+# nav point — small arrow-key drifting and short clicks get coalesced
+# the same way the editor coalesces undo runs. Set above the user's
+# stated "5 lines" threshold so casual movement never pushes.
+comptime _NAV_ROW_THRESHOLD = 10
+# Same idea for column motion within a row. Generous: most lateral
+# motion happens inside one line, and we don't want every word jump
+# producing a nav point.
+comptime _NAV_COL_THRESHOLD = 100
+# Cap on how many entries we keep — purely a memory bound; older
+# entries fall off the back when the cap is hit.
+comptime _NAV_STACK_CAP = 100
+
 # When ESC fires at the top level (no menu open, no prompt active), the
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
 comptime APP_QUIT_ACTION      = String("quit")
@@ -274,6 +300,20 @@ struct Hotkey(ImplicitlyCopyable, Movable):
     var key: UInt32
     var mods: UInt8
     var action: String
+
+
+@fieldwise_init
+struct NavPoint(ImplicitlyCopyable, Movable):
+    """One position in the cross-file navigation history.
+
+    Stored as path + (row, col) rather than a window reference so the
+    entry survives the window being closed and reopened — going back to
+    a closed file simply re-opens it via ``open_file`` and lands the
+    cursor at ``(row, col)``.
+    """
+    var file_path: String
+    var row: Int
+    var col: Int
 
 
 fn format_hotkey(key: UInt32, mods: UInt8) -> String:
@@ -344,6 +384,13 @@ struct Desktop(Movable):
     var quick_open: QuickOpen
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
+    var find_symbol: FindSymbol
+    # Tracks which LSP manager owns the most recent ``workspace/symbol``
+    # request and the query that produced it, so the tick consumer can
+    # drop responses for stale queries (the user has typed past them).
+    # ``-1`` means "no in-flight request".
+    var _find_symbol_lsp_idx: Int
+    var _find_symbol_query: String
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
@@ -510,6 +557,18 @@ struct Desktop(Movable):
     # "Open Recent" picker skips index 0 to avoid offering the user
     # the file they're already on. Capped at ``_RECENT_FILES_MAX``.
     var _recent_files: List[String]
+    # Cross-file navigation history. ``_nav_stack`` is a chronological
+    # list of visited (file, row, col) positions; ``_nav_pos`` indexes
+    # the *current* entry — Cmd+[ steps back through earlier entries,
+    # Cmd+] forward through later ones. Recording happens implicitly
+    # in ``_track_nav_position`` whenever the focused editor's cursor
+    # has moved more than ``_NAV_ROW_THRESHOLD`` rows / columns from
+    # the last recorded position (or to a different file altogether),
+    # so small drift from arrow-key / mouse motion doesn't pollute
+    # the stack. Branching truncates the forward portion the same way
+    # a fresh edit truncates redo.
+    var _nav_stack: List[NavPoint]
+    var _nav_pos: Int
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -522,6 +581,9 @@ struct Desktop(Movable):
         self.quick_open = QuickOpen()
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
+        self.find_symbol = FindSymbol()
+        self._find_symbol_lsp_idx = -1
+        self._find_symbol_query = String("")
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
@@ -577,6 +639,8 @@ struct Desktop(Movable):
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
         self._recent_files = List[String]()
+        self._nav_stack = List[NavPoint]()
+        self._nav_pos = -1
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -603,6 +667,19 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("l"), MOD_NONE, EDITOR_GOTO))
         self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
         self._hotkeys.append(Hotkey(ctrl_key("k"), MOD_NONE, EDITOR_LOOKUP_DOCS))
+        # Cmd+Option+O — workspace-wide "Find Symbol". On macOS terminals
+        # ``Cmd`` is intercepted (or folded onto ``MOD_CTRL`` by the
+        # native bundle), so the actual delivery is one of two shapes:
+        # plain ``Option+O`` (``MOD_ALT``) when the terminal swallows
+        # ``Cmd``, or ``Ctrl+Option+O`` (``MOD_CTRL | MOD_ALT``) when it
+        # propagates the ``Meta`` bit through ``_normalize_ctrl_letter``.
+        # Register both so the binding fires either way.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_ALT, EDITOR_FIND_SYMBOL,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_CTRL | MOD_ALT, EDITOR_FIND_SYMBOL,
+        ))
         # Clipboard + undo/redo. Registering Ctrl+X/C/V at the desktop layer
         # serves two purposes: the menu items get auto-populated shortcut
         # text via ``_shortcut_for_action``, and the dispatch path is
@@ -694,6 +771,30 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("~")), MOD_CTRL | MOD_SHIFT, WINDOW_ROTATE_PREV,
+        ))
+        # Cmd+Shift+Right / Cmd+Shift+Left — switch tabs forward / backward.
+        # Arrows go through the bare CSI path in the terminal parser, which
+        # preserves MOD_META (no letter-fold to MOD_CTRL), so these bind to
+        # the meta bit directly. Emitted by the bundled native app; terminals
+        # that don't report meta on arrows simply won't trigger this.
+        self._hotkeys.append(Hotkey(
+            KEY_RIGHT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_LEFT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
+        ))
+        # Cmd+[ / Cmd+] — back / forward through the navigation history.
+        # Brackets aren't letters, so the terminal parser folds the META
+        # bit onto MOD_CTRL but stops short of collapsing them to the
+        # ESC / GS control bytes (which would make Cmd+[ collide with
+        # the Esc key). The hotkeys land as ``(0x5B|0x5D, MOD_CTRL)``
+        # — we register both modifier-flavors so Ctrl+[ on a terminal
+        # that reports modifiers also works.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("[")), MOD_CTRL, EDITOR_NAV_BACK,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("]")), MOD_CTRL, EDITOR_NAV_FORWARD,
         ))
 
     fn _bottom_chrome_height(self, screen: Rect) -> Int:
@@ -947,6 +1048,11 @@ struct Desktop(Movable):
         # on idle frames; promotes a path to the front exactly once
         # whenever focus actually moves.
         self._track_recent_focus()
+        # Same hook for the cross-file navigation history — record a
+        # nav point whenever the focused cursor has moved far enough
+        # from the last recorded one (or to a different file). Cheap:
+        # one (path, row, col) compare per frame.
+        self._track_nav_position()
         # Restore the saved per-project window session before any
         # other per-frame work so newly-restored editors see the same
         # treatment (highlight flush, view-config sync, fit-into) as
@@ -1017,6 +1123,7 @@ struct Desktop(Movable):
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
+        self.find_symbol.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen)
@@ -1218,7 +1325,8 @@ struct Desktop(Movable):
         # unsupported language while still modal doesn't bump it.
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.project_find.active \
+                or self.symbol_pick.active or self.find_symbol.active \
+                or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_lsp_prompt_ext.as_bytes()) == 0:
@@ -1256,7 +1364,8 @@ struct Desktop(Movable):
                 return
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.project_find.active \
+                or self.symbol_pick.active or self.find_symbol.active \
+                or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
@@ -2057,6 +2166,31 @@ struct Desktop(Movable):
                     DefinitionResolved(path, line, character), screen,
                 )
             return Optional[String]()
+        if self.find_symbol.active:
+            var prev_query = self.find_symbol.query
+            if event.kind == EVENT_KEY:
+                _ = self.find_symbol.handle_key(event)
+            else:
+                _ = self.find_symbol.handle_mouse(event, screen)
+            if not self.find_symbol.active:
+                # ESC during handle_key.
+                self._find_symbol_lsp_idx = -1
+                self._find_symbol_query = String("")
+                return Optional[String]()
+            if self.find_symbol.submitted:
+                var path = self.find_symbol.selected_path
+                var line = self.find_symbol.selected_line
+                var character = self.find_symbol.selected_character
+                self.find_symbol.close()
+                self._find_symbol_lsp_idx = -1
+                self._find_symbol_query = String("")
+                self._jump_to(
+                    DefinitionResolved(path, line, character), screen,
+                )
+                return Optional[String]()
+            if self.find_symbol.query != prev_query:
+                self._fire_find_symbol_query()
+            return Optional[String]()
         if self.doc_pick.active:
             if event.kind == EVENT_KEY:
                 _ = self.doc_pick.handle_key(event)
@@ -2383,6 +2517,9 @@ struct Desktop(Movable):
         if action == EDITOR_GOTO_SYMBOL:
             self._open_symbol_pick()
             return Optional[String]()
+        if action == EDITOR_FIND_SYMBOL:
+            self._open_find_symbol()
+            return Optional[String]()
         if action == EDITOR_LOOKUP_DOCS:
             self._open_doc_pick(screen)
             return Optional[String]()
@@ -2544,6 +2681,12 @@ struct Desktop(Movable):
             self.debug_pane.focused = False
             self.file_tree.focused = False
             return Optional[String]()
+        if action == EDITOR_NAV_BACK:
+            self.navigate_back(screen)
+            return Optional[String]()
+        if action == EDITOR_NAV_FORWARD:
+            self.navigate_forward(screen)
+            return Optional[String]()
         if action == DEBUG_TOGGLE_BREAKPOINT:
             self._debug_toggle_breakpoint()
             return Optional[String]()
@@ -2652,6 +2795,13 @@ struct Desktop(Movable):
                     and self.lsp_managers[i].has_pending_symbols():
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
+                )
+            if self.find_symbol.active \
+                    and i == self._find_symbol_lsp_idx \
+                    and self.lsp_managers[i].has_pending_workspace_symbols():
+                self.find_symbol.set_entries(
+                    self.lsp_managers[i].take_workspace_symbols(),
+                    self._find_symbol_query,
                 )
         # Drive the background LSP-install runner from the same per-frame
         # tick. When the install completes we either flash a status-bar
@@ -3679,6 +3829,121 @@ struct Desktop(Movable):
             _ = new_list.pop(len(new_list) - 1)
         self._recent_files = new_list^
 
+    # --- navigation history ---------------------------------------------
+
+    fn _track_nav_position(mut self):
+        """Per-frame: record the focused editor's cursor position when
+        it has drifted far enough from the last recorded entry.
+
+        ``_nav_pos == -1`` (the empty stack) seeds with the first
+        position seen. Same-file motion below the row / column
+        thresholds is silently ignored so casual arrow-key drift and
+        short clicks don't pollute the history. A file change always
+        records (cross-file is what makes the back-button useful in
+        the first place).
+
+        After ``navigate_back`` / ``navigate_forward`` jumps the
+        cursor onto an existing entry, the diff against
+        ``stack[_nav_pos]`` is zero so this method silently no-ops on
+        the next frame — no separate suppression flag needed.
+        """
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            # Untitled / file-less buffers can't be re-opened across
+            # sessions and have no stable identity, so skip them
+            # entirely. The stack stays valid for whatever file-backed
+            # editors exist.
+            return
+        var row = self.windows.windows[idx].editor.cursor_row
+        var col = self.windows.windows[idx].editor.cursor_col
+        if self._nav_pos < 0:
+            self._push_nav_point(NavPoint(path, row, col))
+            return
+        var cur = self._nav_stack[self._nav_pos]
+        if cur.file_path == path:
+            var dr = row - cur.row
+            if dr < 0:
+                dr = -dr
+            var dc = col - cur.col
+            if dc < 0:
+                dc = -dc
+            if dr < _NAV_ROW_THRESHOLD and dc < _NAV_COL_THRESHOLD:
+                return
+        self._push_nav_point(NavPoint(path, row, col))
+
+    fn _push_nav_point(mut self, p: NavPoint):
+        """Append ``p`` to the nav stack, truncating any forward branch
+        and capping the total length. No-op if ``p`` matches the
+        current entry exactly (defensive against double-recording the
+        same spot)."""
+        if self._nav_pos >= 0 and self._nav_pos < len(self._nav_stack):
+            var cur = self._nav_stack[self._nav_pos]
+            if cur.file_path == p.file_path \
+                    and cur.row == p.row and cur.col == p.col:
+                return
+        # Drop any forward history past the current position — taking a
+        # new branch wipes redo, same as the editor's undo/redo model.
+        while len(self._nav_stack) > self._nav_pos + 1:
+            _ = self._nav_stack.pop(len(self._nav_stack) - 1)
+        self._nav_stack.append(p)
+        self._nav_pos = len(self._nav_stack) - 1
+        # Cap so a very long session doesn't grow the stack without
+        # bound. Drop the oldest entries; the cursor stays at the top.
+        while len(self._nav_stack) > _NAV_STACK_CAP:
+            _ = self._nav_stack.pop(0)
+            self._nav_pos -= 1
+
+    fn navigate_back(mut self, screen: Rect):
+        """Cmd+[: jump to the previous nav-history entry, if any."""
+        if self._nav_pos <= 0:
+            return
+        self._nav_pos -= 1
+        var p = self._nav_stack[self._nav_pos]
+        self._jump_to_nav(p, screen)
+
+    fn navigate_forward(mut self, screen: Rect):
+        """Cmd+]: jump to the next nav-history entry, if any."""
+        if self._nav_pos < 0 \
+                or self._nav_pos >= len(self._nav_stack) - 1:
+            return
+        self._nav_pos += 1
+        var p = self._nav_stack[self._nav_pos]
+        self._jump_to_nav(p, screen)
+
+    fn _jump_to_nav(mut self, p: NavPoint, screen: Rect):
+        """Focus (or re-open) ``p.file_path`` and place the cursor at
+        ``(p.row, p.col)``. Mirrors ``_jump_to`` but takes a NavPoint
+        so the call sites stay tidy."""
+        var existing = self._find_window_for_path(p.file_path)
+        if existing < 0:
+            try:
+                self.open_file(p.file_path, screen)
+            except:
+                return
+            existing = len(self.windows.windows) - 1
+        else:
+            self.windows.focus_by_index(existing)
+        if existing < 0 or existing >= len(self.windows.windows):
+            return
+        if not self.windows.windows[existing].is_editor:
+            return
+        var lc = self.windows.windows[existing].editor.buffer.line_count()
+        var row = p.row
+        if row < 0:
+            row = 0
+        if lc > 0 and row >= lc:
+            row = lc - 1
+        var col = p.col
+        if col < 0:
+            col = 0
+        self.windows.windows[existing].editor.move_to(row, col, False, True)
+        self.windows.windows[existing].editor.reveal_cursor(
+            self.windows.windows[existing].interior(),
+        )
+
     fn _open_recent_picker(mut self):
         """Open the QuickOpen picker over the recents list, skipping the
         currently focused file. No-op when there's nothing to show
@@ -3948,6 +4213,80 @@ struct Desktop(Movable):
         if ok:
             self.symbol_pick.open(path)
 
+    fn _open_find_symbol(mut self):
+        """Open the workspace-wide Find Symbol picker. Routes through
+        the LSP attached to the focused editor; the picker fires a
+        fresh ``workspace/symbol`` request on every query change.
+        """
+        var lsp_idx = self._lsp_for_focused_editor()
+        if lsp_idx < 0:
+            # Fall back to *any* ready LSP — useful when the user is
+            # focused on a non-editor window (file tree, debug pane)
+            # but has, say, pyright running for the project.
+            for i in range(len(self.lsp_managers)):
+                if self.lsp_managers[i].is_ready():
+                    lsp_idx = i
+                    break
+        if lsp_idx < 0:
+            self.status_bar.set_message(
+                String("LSP: no language server ready for this project"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        if not self.lsp_managers[lsp_idx].is_ready():
+            self.status_bar.set_message(
+                String("LSP: still starting up — try again"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        self._find_symbol_lsp_idx = lsp_idx
+        self._find_symbol_query = String("")
+        self.find_symbol.open()
+
+    fn _fire_find_symbol_query(mut self):
+        """Send a fresh ``workspace/symbol`` request for the picker's
+        current query. Empty queries are skipped — pyright/basedpyright
+        return nothing (or a giant index dump) for empty queries, neither
+        of which is a good UX. The LSP manager's id-shadowing handles
+        stale responses; the picker's ``set_entries`` does the
+        belt-and-braces drop on query mismatch.
+        """
+        var query = self.find_symbol.query
+        if len(query.as_bytes()) == 0:
+            self._find_symbol_query = String("")
+            return
+        if self._find_symbol_lsp_idx < 0 \
+                or self._find_symbol_lsp_idx >= len(self.lsp_managers):
+            return
+        if not self.lsp_managers[self._find_symbol_lsp_idx].is_ready():
+            self.find_symbol.set_error(
+                String("LSP: not ready"),
+            )
+            return
+        var ok = self.lsp_managers[self._find_symbol_lsp_idx] \
+            .request_workspace_symbols(query)
+        if ok:
+            self._find_symbol_query = query
+            self.find_symbol.mark_loading()
+        else:
+            self.find_symbol.set_error(
+                String("LSP: workspace/symbol request failed"),
+            )
+
+    fn _lsp_for_focused_editor(self) -> Int:
+        """Return the index of the LSP manager handling the focused
+        editor's file, or -1 when no editor is focused / no LSP
+        matches. Mirrors ``_lsp_for_path`` but pulls the path from
+        ``windows.focused`` so callers don't have to thread it.
+        """
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return -1
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return -1
+        return self._lsp_for_path(path)
+
     fn _open_save_as_dialog(mut self):
         """Open the modal save-as picker, seeded from the focused editor's
         current path (or the project root for an untitled buffer). The
@@ -4143,7 +4482,8 @@ struct Desktop(Movable):
                 return
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.project_find.active \
+                or self.symbol_pick.active or self.find_symbol.active \
+                or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return

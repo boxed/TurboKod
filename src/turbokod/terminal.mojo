@@ -512,13 +512,17 @@ fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
         folded = (folded ^ MOD_META) | MOD_CTRL
     if folded != MOD_CTRL:
         return (UInt32(cp), folded)
-    if cp < 0x40 or cp > 0x7E:
+    # Only fold to the bare control byte for actual letters A-Z. The
+    # 0x40..0x5F range also covers ``[ \\ ] ^ _ @`` whose Ctrl-form
+    # collapses to ESC / GS / RS / US / NUL — folding those would make
+    # Cmd+[ indistinguishable from the Esc key (and similarly for ]),
+    # killing any chance of binding them to navigation actions.
+    var is_letter = (cp >= 0x41 and cp <= 0x5A) or (cp >= 0x61 and cp <= 0x7A)
+    if not is_letter:
         return (UInt32(cp), folded)
     var letter = cp
     if 0x61 <= letter and letter <= 0x7A:
         letter = letter - 0x20  # lowercase a..z → uppercase A..Z
-    if letter < 0x40 or letter > 0x5F:
-        return (UInt32(cp), folded)
     return (UInt32(letter - 0x40), MOD_NONE)
 
 

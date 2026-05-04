@@ -1576,13 +1576,17 @@ fn lowest_set_bit(b: u8) -> u8 {
     0
 }
 
-// xterm modifier param: 1 + Shift + 2*Alt + 4*Ctrl. 1 means "no modifier",
-// in which case we omit the param entirely.
+// xterm modifier param: 1 + Shift + 2*Alt + 4*Ctrl + 8*Meta. 1 means "no
+// modifier", in which case we omit the param entirely. The meta (Cmd) bit
+// is non-standard but the Mojo terminal parser opts in to it via
+// ``_csi_mods_from``, which lets the embedded app distinguish Cmd+Shift+Right
+// (tab switch) from plain Shift+Right (selection).
 fn modifier_param(mods: ModifiersState) -> u8 {
     let mut m = 1u8;
     if mods.shift_key() { m += 1; }
     if mods.alt_key() { m += 2; }
     if mods.control_key() { m += 4; }
+    if mods.super_key() { m += 8; }
     m
 }
 

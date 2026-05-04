@@ -66,6 +66,26 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
     var character: Int
 
 
+@fieldwise_init
+struct WorkspaceSymbolItem(ImplicitlyCopyable, Movable):
+    """One entry in a ``workspace/symbol`` response.
+
+    Like ``SymbolItem`` but with ``path`` (absolute, decoded from the
+    server's ``location.uri``) so the host can open the file before
+    jumping. Pyright/basedpyright/pylsp return the legacy
+    ``SymbolInformation[]`` shape; newer servers may use the
+    ``WorkspaceSymbol[]`` form (URI without a range, requiring a
+    follow-up ``workspaceSymbol/resolve``) — we only handle the
+    range-included shape today.
+    """
+    var name: String
+    var kind: Int
+    var container: String
+    var path: String
+    var line: Int
+    var character: Int
+
+
 struct LspManager(Copyable, Movable):
     """One LSP server's worth of state plus the transport (``LspClient``).
 
@@ -94,6 +114,15 @@ struct LspManager(Copyable, Movable):
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
     var _symbols_empty: Bool                 # latched when the last response was empty
+    # workspace/symbol bookkeeping. Each fresh ``request_workspace_symbols``
+    # overwrites ``_inflight_workspace_id``; only the response that matches
+    # the *current* id populates ``_resolved_workspace_symbols`` so a
+    # type-as-you-go picker doesn't show stale results from earlier queries
+    # whose responses just happened to land late.
+    var _inflight_workspace_id: Int
+    var _resolved_workspace_symbols: List[WorkspaceSymbolItem]
+    var _has_resolved_workspace_symbols: Bool
+    var _workspace_symbols_empty: Bool
     var _root_uri: String
     var _language_id: String
 
@@ -118,6 +147,10 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_workspace_id = 0
+        self._resolved_workspace_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_workspace_symbols = False
+        self._workspace_symbols_empty = False
         self._root_uri = String("")
         self._language_id = String("")
         self._doc_paths = List[String]()
@@ -145,6 +178,10 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_workspace_id = 0
+        self._resolved_workspace_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_workspace_symbols = False
+        self._workspace_symbols_empty = False
         self._root_uri = String("")
         self._language_id = String("")
         self._doc_paths = List[String]()
@@ -198,6 +235,26 @@ struct LspManager(Copyable, Movable):
 
     fn symbols_empty(self) -> Bool:
         return self._symbols_empty
+
+    fn inflight_workspace_symbols(self) -> Bool:
+        return self._inflight_workspace_id != 0
+
+    fn has_pending_workspace_symbols(self) -> Bool:
+        return self._has_resolved_workspace_symbols
+
+    fn workspace_symbols_empty(self) -> Bool:
+        return self._workspace_symbols_empty
+
+    fn take_workspace_symbols(mut self) -> List[WorkspaceSymbolItem]:
+        """Move the parked workspace-symbol list out of the manager.
+
+        Pair with ``has_pending_workspace_symbols()``. The flag clears
+        either way so a subsequent call returns empty.
+        """
+        var out = self._resolved_workspace_symbols^
+        self._resolved_workspace_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_workspace_symbols = False
+        return out^
 
     fn language_id(self) -> String:
         return self._language_id
@@ -376,6 +433,34 @@ struct LspManager(Copyable, Movable):
         self._symbols_empty = False
         return True
 
+    fn request_workspace_symbols(mut self, query: String) -> Bool:
+        """Ask the server for ``workspace/symbol`` matching ``query``.
+
+        Unlike documentSymbol there's no didOpen/didChange pre-flight —
+        the server resolves against its own indexed view of the workspace
+        (built at ``initialize`` time and updated as files change). A
+        fresh request shadows any earlier in-flight workspace-symbol id;
+        the picker uses that to throw away stale responses when the user
+        types faster than the server can reply.
+
+        Returns False if the server isn't ready or the send failed.
+        """
+        if self.state != _STATE_READY:
+            return False
+        var params = json_object()
+        params.put(String("query"), json_str(query))
+        try:
+            self._inflight_workspace_id = self.client.send_request(
+                String("workspace/symbol"), params,
+            )
+        except:
+            self._inflight_workspace_id = 0
+            return False
+        self._has_resolved_workspace_symbols = False
+        self._resolved_workspace_symbols = List[WorkspaceSymbolItem]()
+        self._workspace_symbols_empty = False
+        return True
+
     fn has_pending_symbols(self) -> Bool:
         """True iff a parsed symbol response is parked, ready for ``take``."""
         return self._has_resolved_symbols
@@ -454,6 +539,19 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_symbols = True
                 self._symbols_empty = (len(self._resolved_symbols) == 0)
                 self._inflight_symbol_id = 0
+                continue
+            if id == self._inflight_workspace_id:
+                var ws_items = List[WorkspaceSymbolItem]()
+                if msg.result:
+                    ws_items = _parse_workspace_symbols_result(
+                        msg.result.value(),
+                    )
+                self._resolved_workspace_symbols = ws_items^
+                self._has_resolved_workspace_symbols = True
+                self._workspace_symbols_empty = (
+                    len(self._resolved_workspace_symbols) == 0
+                )
+                self._inflight_workspace_id = 0
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -667,6 +765,69 @@ fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     if pos[0] < 0:
         return
     out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+
+
+fn _parse_workspace_symbols_result(v: JsonValue) -> List[WorkspaceSymbolItem]:
+    """``workspace/symbol`` returns ``SymbolInformation[]`` (legacy, with
+    ``location.uri`` + ``location.range``) or, on newer servers, the
+    ``WorkspaceSymbol[]`` shape where ``location`` may be just ``{uri}``
+    and a follow-up ``workspaceSymbol/resolve`` is needed for the range.
+
+    We accept the legacy form unconditionally and, for the new form,
+    drop entries that lack a range (the ``resolve`` round-trip isn't
+    wired). In practice pyright/basedpyright/pylsp all return the
+    legacy form, so this is conservative rather than crippling.
+    """
+    var out = List[WorkspaceSymbolItem]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        _parse_workspace_symbol_item(v.array_at(i), out)
+    return out^
+
+
+fn _parse_workspace_symbol_item(
+    v: JsonValue, mut out: List[WorkspaceSymbolItem],
+):
+    if not v.is_object():
+        return
+    var name_opt = v.object_get(String("name"))
+    var kind_opt = v.object_get(String("kind"))
+    var loc_opt = v.object_get(String("location"))
+    var cont_opt = v.object_get(String("containerName"))
+    if not name_opt or not loc_opt:
+        return
+    if not name_opt.value().is_string():
+        return
+    var name = name_opt.value().as_str()
+    var kind = 0
+    if kind_opt and kind_opt.value().is_int():
+        kind = kind_opt.value().as_int()
+    var container = String("")
+    if cont_opt and cont_opt.value().is_string():
+        container = cont_opt.value().as_str()
+    var loc = loc_opt.value()
+    var uri_opt = loc.object_get(String("uri"))
+    if not uri_opt or not uri_opt.value().is_string():
+        return
+    var path = _uri_to_path(uri_opt.value().as_str())
+    if len(path.as_bytes()) == 0:
+        return
+    var range_opt = loc.object_get(String("range"))
+    if not range_opt:
+        # ``WorkspaceSymbol`` (new shape) — needs ``workspaceSymbol/resolve``.
+        # Surface position (0,0) so the entry is at least navigable to
+        # the file even if the server hasn't included a range. Many users
+        # would rather land on line 1 of the right file than see nothing.
+        out.append(WorkspaceSymbolItem(name, kind, container, path, 0, 0))
+        return
+    var pos = _start_pos_of(range_opt.value())
+    if pos[0] < 0:
+        out.append(WorkspaceSymbolItem(name, kind, container, path, 0, 0))
+        return
+    out.append(WorkspaceSymbolItem(
+        name, kind, container, path, pos[0], pos[1],
+    ))
 
 
 fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
