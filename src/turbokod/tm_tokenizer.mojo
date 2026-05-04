@@ -809,6 +809,8 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_decorator_attr())
     if _starts_with_str(scope, String("meta.diff")):
         return Optional[Attr](highlight_keyword_attr())
+    if _starts_with_str(scope, String("punctuation.definition.string")):
+        return Optional[Attr](highlight_string_attr())
     if _starts_with_str(scope, String("punctuation")):
         return Optional[Attr](highlight_operator_attr())
     # ``variable.*`` covers generic variables, function parameters,
