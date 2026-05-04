@@ -79,6 +79,7 @@ from .lsp_dispatch import DefinitionResolved, LspManager
 from .dap_dispatch import DapManager, DapStackFrame, DapVariable
 from .debug_pane import (
     DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
+    PANE_STATE_MAXIMIZED, PANE_STATE_MINIMIZED,
 )
 from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
@@ -715,7 +716,7 @@ struct Desktop(Movable):
                 right = 0
         var bottom = screen.b.y - self._bottom_chrome_height(screen)
         if self.debug_pane.visible:
-            bottom -= self.debug_pane.preferred_height
+            bottom -= self._debug_pane_height(screen)
             if bottom < 1:
                 bottom = 1
         return Rect(0, 1, right, bottom)
@@ -727,10 +728,25 @@ struct Desktop(Movable):
         if not self.debug_pane.visible:
             return Rect.empty()
         var chrome = self._bottom_chrome_height(screen)
-        var top = screen.b.y - chrome - self.debug_pane.preferred_height
+        var top = screen.b.y - chrome - self._debug_pane_height(screen)
         if top < 1:
             top = 1
         return Rect(0, top, screen.b.x, screen.b.y - chrome)
+
+    fn _debug_pane_height(self, screen: Rect) -> Int:
+        """Effective rendered height for the debug pane, considering
+        its window state. NORMAL → ``preferred_height`` (user's drag
+        target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
+        whole bottom area, leaving just the menu bar above and the
+        status / tab strip below."""
+        if self.debug_pane.state == PANE_STATE_MINIMIZED:
+            return 1
+        if self.debug_pane.state == PANE_STATE_MAXIMIZED:
+            var avail = screen.b.y - self._bottom_chrome_height(screen) - 1
+            if avail < 4:
+                avail = 4
+            return avail
+        return self.debug_pane.preferred_height
 
     fn tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one

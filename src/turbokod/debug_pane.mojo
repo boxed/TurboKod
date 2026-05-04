@@ -58,7 +58,7 @@ from .colors import (
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
+    KEY_DOWN, KEY_END, KEY_ESC, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
@@ -96,6 +96,19 @@ comptime PANE_OUT_CONSOLE    = UInt8(2)
 
 comptime PANE_MODE_DEBUG     = UInt8(0)
 comptime PANE_MODE_RUN       = UInt8(1)
+
+
+# --- pane window state ---------------------------------------------------
+# NORMAL is the default — the pane sits at ``preferred_height`` and the
+# user can drag its top border to resize. MINIMIZED collapses the pane
+# to a single header row (title + window buttons stay visible so the
+# user can restore). MAXIMIZED expands the pane to the full workspace
+# height so the user can read long output. State transitions happen via
+# the header buttons or via ESC (handled in ``handle_key``).
+
+comptime PANE_STATE_NORMAL    = UInt8(0)
+comptime PANE_STATE_MINIMIZED = UInt8(1)
+comptime PANE_STATE_MAXIMIZED = UInt8(2)
 
 
 @fieldwise_init
@@ -158,6 +171,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     Output. ``PANE_MODE_RUN`` collapses the pane to Output-only and
     flips the title to "Run". Set by the host on every tick to match
     the active session (or the post-run hold)."""
+    var state: UInt8
+    """``PANE_STATE_NORMAL`` (default), ``PANE_STATE_MINIMIZED`` (header
+    line only), or ``PANE_STATE_MAXIMIZED`` (full workspace). Toggled
+    via the header buttons or ESC."""
 
     var rows: List[PaneRow]
     """Inspect-view rows (status not included). Sectioned via
@@ -214,6 +231,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     """True while the user holds the left button after pressing on
     the pane's top border. Mouse motion in this state updates
     ``preferred_height``; the next non-pressed event clears it."""
+    var _last_min_btn_x: Int
+    """Top-row x of the leftmost cell of the minimize button drawn by
+    the last paint, or ``-1`` if not painted (panel too narrow)."""
+    var _last_max_btn_x: Int
+    """Top-row x of the leftmost cell of the maximize/restore button
+    drawn by the last paint, or ``-1`` if not painted."""
     var _last_links: List[OutputLink]
     """Clickable file:line spans painted by the last ``paint`` call,
     in absolute screen coordinates. Rebuilt on every paint so the
@@ -225,6 +248,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.preferred_height = 14
         self.status_text = String("")
         self.mode = PANE_MODE_DEBUG
+        self.state = PANE_STATE_NORMAL
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
         self.output_lines = List[String]()
@@ -250,12 +274,15 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._right_indices = List[Int]()
         self._resizing = False
         self._last_links = List[OutputLink]()
+        self._last_min_btn_x = -1
+        self._last_max_btn_x = -1
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
         self.preferred_height = copy.preferred_height
         self.status_text = copy.status_text
         self.mode = copy.mode
+        self.state = copy.state
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
         self.output_lines = copy.output_lines.copy()
@@ -281,6 +308,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._right_indices = copy._right_indices.copy()
         self._resizing = copy._resizing
         self._last_links = copy._last_links.copy()
+        self._last_min_btn_x = copy._last_min_btn_x
+        self._last_max_btn_x = copy._last_max_btn_x
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -289,6 +318,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     fn set_mode(mut self, mode: UInt8):
         self.mode = mode
+
+    fn is_minimized(self) -> Bool:
+        return self.state == PANE_STATE_MINIMIZED
+
+    fn is_maximized(self) -> Bool:
+        return self.state == PANE_STATE_MAXIMIZED
+
+    fn set_state(mut self, state: UInt8):
+        self.state = state
+        # Resize-drag belongs to NORMAL only — the top border is just a
+        # button strip in the other states, not a draggable handle.
+        if state != PANE_STATE_NORMAL:
+            self._resizing = False
 
     fn rebuild_inspect(
         mut self,
@@ -537,13 +579,59 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         _ = canvas.put_text(
             Point(panel.a.x + 2, top), title_text, title, panel.b.x,
         )
-        # Number indicator at the top-right, paired with ``Ctrl+9``
-        # to focus the pane from anywhere — same convention as the
-        # per-window ``Ctrl+N`` numbers and the file tree's ``0``.
-        if panel.b.x - panel.a.x >= 6:
+        # Top-right header: two window buttons + the keyboard-hint
+        # number ("9", paired with ``Ctrl+9``). Buttons are 3 cells
+        # each (``[X]``); we paint them in a fixed slot so hit-testing
+        # in ``handle_mouse`` can read ``_last_min_btn_x`` /
+        # ``_last_max_btn_x`` directly.
+        self._last_min_btn_x = -1
+        self._last_max_btn_x = -1
+        var pane_w = panel.b.x - panel.a.x
+        if pane_w >= 12:
+            var min_x = panel.b.x - 9
+            var max_x = panel.b.x - 6
+            self._last_min_btn_x = min_x
+            self._last_max_btn_x = max_x
+            # Minimize: collapses to header row only. Glyph "▁"
+            # (U+2581 lower one-eighth block) reads as "drop to the
+            # bottom" — same convention TV editors and most modern
+            # window chrome use for "minimize".
+            var min_glyph: String
+            if self.state == PANE_STATE_MINIMIZED:
+                # Already minimized — show a "restore" glyph since this
+                # button now restores instead of minimizes.
+                min_glyph = String("□")
+            else:
+                min_glyph = String("▁")
+            _paint_button(canvas, Point(min_x, top), border, min_glyph)
+            # Maximize / restore. Glyph flips between "▣" (maximize)
+            # and "□" (restore) so the button always shows what
+            # clicking it would do next.
+            var max_glyph: String
+            if self.state == PANE_STATE_MAXIMIZED:
+                max_glyph = String("□")
+            else:
+                max_glyph = String("▣")
+            _paint_button(canvas, Point(max_x, top), border, max_glyph)
+            _ = canvas.put_text(
+                Point(panel.b.x - 3, top), String(" 9"), title,
+            )
+        elif pane_w >= 6:
+            # Too narrow for buttons — fall back to just the focus
+            # hint, same as before.
             _ = canvas.put_text(
                 Point(panel.b.x - 3, top), String("9"), title,
             )
+        # In MINIMIZED state we stop after the title bar — the rest of
+        # the pane is hidden, the user reads the status in the
+        # status-bar / window-tab strip until they restore.
+        if self.state == PANE_STATE_MINIMIZED:
+            self._last_inspect_y0 = top + 1
+            self._last_output_y0 = top + 1
+            self._last_divider_x = panel.a.x
+            self._left_indices = List[Int]()
+            self._right_indices = List[Int]()
+            return
         # Status row (one line).
         var row_y = top + 1
         if row_y < panel.b.y and len(self.status_text.as_bytes()) > 0:
@@ -583,12 +671,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # Vertical divider — split panel width in two. Stack frames
         # tend to be shorter than locals, so 40/60 leaves more room
         # for variable trees.
-        var pane_w = panel.b.x - panel.a.x
-        var left_w = pane_w * 4 // 10
+        var pw = panel.b.x - panel.a.x
+        var left_w = pw * 4 // 10
         if left_w < 14:
-            left_w = 14 if pane_w >= 28 else pane_w // 2
-        if left_w >= pane_w - 2:
-            left_w = pane_w - 2
+            left_w = 14 if pw >= 28 else pw // 2
+        if left_w >= pw - 2:
+            left_w = pw - 2
         if left_w < 0:
             left_w = 0
         var div_x = panel.a.x + left_w
@@ -735,11 +823,45 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
         """Hit-test for the top-border row — the pane's drag handle.
         Used by the host to switch the mouse pointer to ``ns-resize``
-        on hover."""
+        on hover. Resize is only available in NORMAL state, and the
+        button cells (top-right) are excluded so the cursor stays as
+        the default pointer over them."""
         if not self.visible or panel.is_empty():
             return False
-        return pos.y == panel.a.y \
-            and pos.x >= panel.a.x and pos.x < panel.b.x
+        if self.state != PANE_STATE_NORMAL:
+            return False
+        if pos.y != panel.a.y:
+            return False
+        if pos.x < panel.a.x or pos.x >= panel.b.x:
+            return False
+        if self._on_button(pos):
+            return False
+        return True
+
+    fn _on_button(self, pos: Point) -> Bool:
+        """True iff ``pos`` falls on either of the title-row buttons
+        drawn by the last ``paint`` call."""
+        if self._last_min_btn_x >= 0 \
+                and pos.x >= self._last_min_btn_x \
+                and pos.x < self._last_min_btn_x + 3:
+            return True
+        if self._last_max_btn_x >= 0 \
+                and pos.x >= self._last_max_btn_x \
+                and pos.x < self._last_max_btn_x + 3:
+            return True
+        return False
+
+    fn _on_min_button(self, pos: Point, panel_top: Int) -> Bool:
+        return pos.y == panel_top \
+            and self._last_min_btn_x >= 0 \
+            and pos.x >= self._last_min_btn_x \
+            and pos.x < self._last_min_btn_x + 3
+
+    fn _on_max_button(self, pos: Point, panel_top: Int) -> Bool:
+        return pos.y == panel_top \
+            and self._last_max_btn_x >= 0 \
+            and pos.x >= self._last_max_btn_x \
+            and pos.x < self._last_max_btn_x + 3
 
     fn is_resizing(self) -> Bool:
         return self._resizing
@@ -766,9 +888,38 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             )
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
-            if event.pos.y == panel.a.y \
+            # Title-row buttons take priority over the resize-drag
+            # handle. They sit on the same row as the drag edge but
+            # have a finer hit area.
+            if self._on_min_button(event.pos, panel.a.y):
+                self.focused = True
+                if self.state == PANE_STATE_MINIMIZED:
+                    self.set_state(PANE_STATE_NORMAL)
+                else:
+                    self.set_state(PANE_STATE_MINIMIZED)
+                return True
+            if self._on_max_button(event.pos, panel.a.y):
+                self.focused = True
+                if self.state == PANE_STATE_MAXIMIZED:
+                    self.set_state(PANE_STATE_NORMAL)
+                else:
+                    self.set_state(PANE_STATE_MAXIMIZED)
+                return True
+            # Drag-to-resize is only meaningful in NORMAL state. In
+            # MINIMIZED / MAXIMIZED the height is dictated by state,
+            # not by the user's preferred-height; the press just
+            # focuses the pane.
+            if self.state == PANE_STATE_NORMAL \
+                    and event.pos.y == panel.a.y \
                     and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
                 self._resizing = True
+                return True
+            if self.state != PANE_STATE_NORMAL \
+                    and event.pos.y == panel.a.y \
+                    and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+                # Click on the title row outside the buttons just
+                # focuses the pane and is consumed.
+                self.focused = True
                 return True
         if not panel.contains(event.pos):
             # Bare hover under mouse-mode 1003 must not steal focus.
@@ -835,6 +986,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         if not self.focused:
             return False
         if event.kind != EVENT_KEY:
+            return False
+        # ESC walks the window-state ladder: maximized → normal →
+        # minimized. Minimized is the terminal state — the pane has no
+        # body to escape out of, and falling further (e.g. dismissing
+        # the pane) belongs to the host's own ESC path, so we leave it
+        # alone there.
+        if event.key == KEY_ESC:
+            if self.state == PANE_STATE_MAXIMIZED:
+                self.set_state(PANE_STATE_NORMAL)
+                return True
+            if self.state == PANE_STATE_NORMAL:
+                self.set_state(PANE_STATE_MINIMIZED)
+                return True
             return False
         # Arrow keys drive the right column (locals + watches) since
         # that's where the deep / scrollable content lives. The stack
@@ -961,6 +1125,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
 
 # --- formatting helpers ---------------------------------------------------
+
+
+fn _paint_button(
+    mut canvas: Canvas, top_left: Point, border: Attr, glyph: String,
+):
+    """Three-cell window button — ``[X]`` — painted in the title row.
+    Mirrors the close-button helper in ``window.mojo`` but with a
+    caller-supplied glyph since the pane has multiple kinds of button
+    (minimize / maximize / restore) sharing the same chrome."""
+    var glyph_attr = Attr(LIGHT_YELLOW, border.bg, border.style)
+    canvas.set(top_left.x, top_left.y, Cell(String("["), border, 1))
+    canvas.set(top_left.x + 1, top_left.y, Cell(glyph, glyph_attr, 1))
+    canvas.set(top_left.x + 2, top_left.y, Cell(String("]"), border, 1))
 
 
 fn _format_variable(name: String, value: String, type_name: String) -> String:
