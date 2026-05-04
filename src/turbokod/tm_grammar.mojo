@@ -32,6 +32,7 @@ from std.collections.optional import Optional
 from .file_io import read_file
 from .json import JsonValue, parse_json
 from .onig import OnigRegex
+from .string_utils import parse_int_all
 
 
 # Pattern kind discriminant. ``MATCH`` / ``BEGIN_END`` / ``INCLUDE`` /
@@ -794,28 +795,13 @@ fn _parse_captures(
         _ = scope_prefix
         if len(name_str.as_bytes()) == 0 and len(nested) == 0:
             continue
-        var idx = _parse_int_or_neg1(member.key)
+        var idx = parse_int_all(member.key)
         if idx < 0:
             continue
         out.append(Capture(idx, name_str^, nested^))
     return out^
 
 
-fn _parse_int_or_neg1(s: String) -> Int:
-    """Parse a small positive integer literal. Returns -1 on bad
-    input. Used only for capture-group keys (always tiny non-negative
-    ints in valid grammars), so we don't bother with overflow or
-    sign handling."""
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return -1
-    var n = 0
-    for i in range(len(b)):
-        var c = Int(b[i])
-        if c < 0x30 or c > 0x39:
-            return -1
-        n = n * 10 + (c - 0x30)
-    return n
 
 
 fn _string_or_empty(node: JsonValue, key: String) -> String:

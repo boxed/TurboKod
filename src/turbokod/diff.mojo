@@ -21,22 +21,7 @@ Output is GNU-style unified diff with three lines of context, including
 
 from std.collections.list import List
 
-
-fn _split_lines(text: String) -> List[String]:
-    """Split on ``\\n``. A trailing newline produces an empty final line,
-    matching ``TextBuffer``'s convention; the unified-diff hunk-header
-    line counts assume the same convention."""
-    var out = List[String]()
-    var bytes = text.as_bytes()
-    var start = 0
-    var i = 0
-    while i < len(bytes):
-        if bytes[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:i])))
-            start = i + 1
-        i += 1
-    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:len(bytes)])))
-    return out^
+from .string_utils import split_lines
 
 
 @fieldwise_init
@@ -182,8 +167,8 @@ fn unified_diff(
     callers that want to detect "no changes" can grep for the absence of
     ``@@`` in the output.
     """
-    var a_lines = _split_lines(a)
-    var b_lines = _split_lines(b)
+    var a_lines = split_lines(a)
+    var b_lines = split_lines(b)
     var ops = diff_lines(a_lines, b_lines)
 
     var out = String("--- ") + a_label + String("\n")

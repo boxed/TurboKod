@@ -28,6 +28,9 @@ from std.collections.optional import Optional
 from .file_io import find_git_project, parent_path
 from .lsp import capture_command
 from .posix import realpath
+from .string_utils import (
+    parse_int_prefix, split_lines_no_trailing, starts_with,
+)
 
 
 @fieldwise_init
@@ -46,48 +49,6 @@ fn _is_hex(b: Int) -> Bool:
     return False
 
 
-fn _parse_int(s: String, start: Int, stop: Int) -> Int:
-    """Parse a non-negative decimal substring; -1 on no digits."""
-    var b = s.as_bytes()
-    var i = start
-    var n = 0
-    var saw = False
-    while i < stop and i < len(b):
-        var c = Int(b[i])
-        if c < 0x30 or c > 0x39:
-            break
-        n = n * 10 + (c - 0x30)
-        saw = True
-        i += 1
-    if not saw:
-        return -1
-    return n
-
-
-fn _split_porcelain_lines(text: String) -> List[String]:
-    """Split on LF, keeping empty trailing line out. Porcelain output has
-    no CR — git writes plain LF — so we don't need to strip CRs."""
-    var out = List[String]()
-    var b = text.as_bytes()
-    var start = 0
-    for i in range(len(b)):
-        if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-    if start < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
-    return out^
-
-
-fn _starts_with(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
 
 
 fn _looks_like_header(line: String) -> Bool:
@@ -118,7 +79,7 @@ fn parse_blame_porcelain(text: String) -> List[BlameLine]:
       if needed (one-based source lines aren't always contiguous in a
       single forward sweep, but git emits them in order).
     """
-    var lines = _split_porcelain_lines(text)
+    var lines = split_lines_no_trailing(text)
     var commits = List[String]()       # parallel SHA cache
     var authors = List[String]()       # ↳ author for that SHA
     var out = List[BlameLine]()
@@ -157,7 +118,7 @@ fn parse_blame_porcelain(text: String) -> List[BlameLine]:
             var fin_end = fin_start
             while fin_end < len(lb) and lb[fin_end] != 0x20:
                 fin_end += 1
-            current_final = _parse_int(ln, fin_start, fin_end)
+            current_final = parse_int_prefix(ln, fin_start, fin_end)
             # Look up cached author for this sha; reset to empty if new.
             pending_author = String("")
             for i in range(len(commits)):
@@ -166,7 +127,7 @@ fn parse_blame_porcelain(text: String) -> List[BlameLine]:
                     break
             in_header = True
             continue
-        if in_header and _starts_with(ln, String("author ")):
+        if in_header and starts_with(ln, String("author ")):
             var author = String(StringSlice(unsafe_from_utf8=lb[7:len(lb)]))
             pending_author = author
             # Cache against the SHA so subsequent same-commit lines pick

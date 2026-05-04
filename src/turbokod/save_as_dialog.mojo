@@ -31,7 +31,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import basename, join_path, parent_path
-from .geometry import Point, Rect
+from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import text_field_clipboard_key
 from .window import hit_close_button, paint_close_button, paint_drop_shadow
 
@@ -46,27 +46,7 @@ comptime _FOCUS_LISTING = UInt8(1)
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    """Compute the dialog's screen rect. ``pos`` is the user-chosen
-    top-left after a title-bar drag; when unset, the dialog auto-
-    centers. Out-of-bounds positions are clamped so the title bar
-    can't be pushed off the screen and become unreachable."""
-    var width = _DIALOG_W
-    var height = _DIALOG_H
-    if width > screen.b.x - 4: width = screen.b.x - 4
-    if height > screen.b.y - 4: height = screen.b.y - 4
-    var x: Int
-    var y: Int
-    if pos:
-        x = pos.value().x
-        y = pos.value().y
-        if x < 0: x = 0
-        if y < 0: y = 0
-        if x + width > screen.b.x: x = screen.b.x - width
-        if y + height > screen.b.y: y = screen.b.y - height
-    else:
-        x = (screen.b.x - width) // 2
-        y = (screen.b.y - height) // 2
-    return Rect(x, y, x + width, y + height)
+    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 fn _input_rect(dialog: Rect) -> Rect:

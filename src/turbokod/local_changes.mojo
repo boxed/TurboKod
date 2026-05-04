@@ -65,6 +65,7 @@ from .git_changes import (
     git_amend_no_edit, git_commit, git_pull, git_push, git_revert_file,
     stage_file, unstage_file,
 )
+from .string_utils import split_lines_no_trailing
 from .text_field import text_field_clipboard_key
 from .window import paint_drop_shadow
 
@@ -145,19 +146,6 @@ struct RightPanel(Movable):
         self.cursor = 0
 
 
-fn _split_lines(text: String) -> List[String]:
-    var out = List[String]()
-    var b = text.as_bytes()
-    var s = 0
-    for i in range(len(b)):
-        if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
-            s = i + 1
-    if s < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
-    return out^
-
-
 fn _line_starts_with_at_at(line: String) -> Bool:
     var b = line.as_bytes()
     return len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40
@@ -213,7 +201,7 @@ fn build_minimal_patch(
     body line, or when no hunk contains it (the caller treats empty as
     "do nothing").
     """
-    var lines = _split_lines(file_diff)
+    var lines = split_lines_no_trailing(file_diff)
     if target_line_idx < 0 or target_line_idx >= len(lines):
         return String("")
     var target_line = lines[target_line_idx]
@@ -855,7 +843,7 @@ struct LocalChanges(Movable):
         if driving == _PANE_BRANCHES:
             if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
                 var b_name = self.branches[self.sel_branch].name
-                var lines = _split_lines(
+                var lines = split_lines_no_trailing(
                     fetch_branch_log(self.root, b_name, 30),
                 )
                 for li in range(len(lines)):
@@ -865,7 +853,7 @@ struct LocalChanges(Movable):
         # commits
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
             var sha = self.commits[self.sel_commit].short_sha
-            var lines = _split_lines(
+            var lines = split_lines_no_trailing(
                 fetch_commit_show(self.root, sha),
             )
             for li in range(len(lines)):
@@ -880,7 +868,7 @@ struct LocalChanges(Movable):
         var fe = self.files[self.sel_file]
         # Unstaged panel.
         if len(fe.unstaged_diff.as_bytes()) > 0:
-            var u_lines = _split_lines(fe.unstaged_diff)
+            var u_lines = split_lines_no_trailing(fe.unstaged_diff)
             for li in range(len(u_lines)):
                 self.unstaged.lines.append(u_lines[li])
                 self.unstaged.diff_line.append(li)
@@ -894,7 +882,7 @@ struct LocalChanges(Movable):
             self.unstaged.diff_line.append(-1)
         # Staged panel.
         if len(fe.staged_diff.as_bytes()) > 0:
-            var s_lines = _split_lines(fe.staged_diff)
+            var s_lines = split_lines_no_trailing(fe.staged_diff)
             for li in range(len(s_lines)):
                 self.staged.lines.append(s_lines[li])
                 self.staged.diff_line.append(li)

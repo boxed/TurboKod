@@ -26,6 +26,7 @@ from std.collections.list import List
 
 from .file_io import join_path, parent_path, read_file, stat_file
 from .posix import realpath
+from .string_utils import parse_int_all, starts_with
 
 
 # --- helpers ---------------------------------------------------------------
@@ -65,32 +66,9 @@ fn _strip(s: String) -> String:
     return _slice(s, i, j)
 
 
-fn _starts_with(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(sb) < len(pb): return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]: return False
-    return True
-
-
 fn _ends_with_byte(s: String, b: UInt8) -> Bool:
     var sb = s.as_bytes()
     return len(sb) > 0 and sb[len(sb) - 1] == b
-
-
-fn _parse_int(s: String) -> Int:
-    """Returns the parsed positive int, or -1 on failure."""
-    var bytes = s.as_bytes()
-    if len(bytes) == 0:
-        return -1
-    var n = 0
-    for i in range(len(bytes)):
-        var b = Int(bytes[i])
-        if b < 0x30 or b > 0x39:
-            return -1
-        n = n * 10 + (b - 0x30)
-    return n
 
 
 fn _parse_bool(s: String) -> Int:
@@ -191,11 +169,11 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
                 # indent_size unset so effective_indent_size falls back.
                 self.indent_size = -1
             else:
-                var n = _parse_int(vl)
+                var n = parse_int_all(vl)
                 if n > 0:
                     self.indent_size = n
         elif k == String("tab_width"):
-            var n = _parse_int(vl)
+            var n = parse_int_all(vl)
             if n > 0:
                 self.tab_width = n
         elif k == String("end_of_line"):
@@ -213,7 +191,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             if b >= 0:
                 self.insert_final_newline = b
         elif k == String("max_line_length"):
-            var n = _parse_int(vl)
+            var n = parse_int_all(vl)
             if n > 0:
                 self.max_line_length = n
 
@@ -543,7 +521,7 @@ fn match_section(pattern: String, rel_path: String) -> Bool:
     if _ends_with_byte(pat, 0x2F):
         pat = _slice(pat, 0, len(pat.as_bytes()) - 1)
     var has_slash: Bool
-    if _starts_with(pat, String("/")):
+    if starts_with(pat, String("/")):
         pat = _slice(pat, 1, len(pat.as_bytes()))
         has_slash = True
     else:
@@ -600,7 +578,7 @@ fn _relative_path(abs_file: String, ec_dir: String) -> String:
     var prefix = ec_dir
     if not _ends_with_byte(prefix, 0x2F):
         prefix = prefix + String("/")
-    if not _starts_with(abs_file, prefix):
+    if not starts_with(abs_file, prefix):
         return abs_file
     return _slice(abs_file, len(prefix.as_bytes()),
                   len(abs_file.as_bytes()))

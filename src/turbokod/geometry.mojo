@@ -6,6 +6,8 @@ of whatever surface owns the rect. All rectangles use a half-open convention:
 TurboVision C++ original.
 """
 
+from std.collections.optional import Optional
+
 
 @fieldwise_init
 struct Point(ImplicitlyCopyable, Movable):
@@ -92,3 +94,30 @@ struct Rect(ImplicitlyCopyable, Movable):
 
     fn __ne__(self, other: Rect) -> Bool:
         return not (self == other)
+
+
+fn compute_dialog_rect(
+    screen: Rect, pos: Optional[Point], width: Int, height: Int,
+) -> Rect:
+    """Place a dialog of the requested ``width`` x ``height`` inside
+    ``screen``. ``pos`` is the user-chosen top-left after a title-bar
+    drag; when unset, the dialog auto-centers. Out-of-bounds positions
+    are clamped so the title bar stays reachable after the user resizes
+    the terminal smaller than the saved drag offset."""
+    var w = width
+    var h = height
+    if w > screen.b.x - 4: w = screen.b.x - 4
+    if h > screen.b.y - 4: h = screen.b.y - 4
+    var x: Int
+    var y: Int
+    if pos:
+        x = pos.value().x
+        y = pos.value().y
+        if x < 0: x = 0
+        if y < 0: y = 0
+        if x + w > screen.b.x: x = screen.b.x - w
+        if y + h > screen.b.y: y = screen.b.y - h
+    else:
+        x = (screen.b.x - w) // 2
+        y = (screen.b.y - h) // 2
+    return Rect(x, y, x + w, y + h)

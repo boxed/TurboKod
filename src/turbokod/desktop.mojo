@@ -100,6 +100,7 @@ from .prompt import Prompt
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
+from .string_utils import parse_int_prefix, starts_with
 from .session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
@@ -2094,7 +2095,7 @@ struct Desktop(Movable):
                 var rel = self.local_changes.selected_path
                 self.local_changes.close()
                 var abs = rel
-                if not _starts_with(rel, String("/")) and self.project:
+                if not starts_with(rel, String("/")) and self.project:
                     abs = join_path(self.project.value(), rel)
                 try:
                     self.open_file(abs, screen)
@@ -2524,8 +2525,8 @@ struct Desktop(Movable):
         if action == WINDOW_CLOSE:
             _ = self.windows.close_focused()
             return Optional[String]()
-        if _starts_with(action, WINDOW_FOCUS_PREFIX):
-            var idx = _parse_int(action, len(WINDOW_FOCUS_PREFIX.as_bytes()))
+        if starts_with(action, WINDOW_FOCUS_PREFIX):
+            var idx = parse_int_prefix(action, len(WINDOW_FOCUS_PREFIX.as_bytes()), len(action.as_bytes()))
             self.windows.focus_by_index(idx)
             # Switching to a window means leaving the side panels —
             # otherwise their handle_key keeps swallowing arrows
@@ -2595,9 +2596,10 @@ struct Desktop(Movable):
         if action == TARGET_TEST:
             self._target_test()
             return Optional[String]()
-        if _starts_with(action, TARGET_SELECT_PREFIX):
-            var idx = _parse_int(
+        if starts_with(action, TARGET_SELECT_PREFIX):
+            var idx = parse_int_prefix(
                 action, len(TARGET_SELECT_PREFIX.as_bytes()),
+                len(action.as_bytes()),
             )
             if idx >= 0 and self.targets.set_active_index(idx):
                 if self.project:
@@ -4566,15 +4568,6 @@ fn _find_doc_entry_for_word(
     return -1
 
 
-fn _starts_with(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
 
 
 fn _expand_save_placeholders(arg: String, saved_path: String) -> String:
@@ -4674,19 +4667,6 @@ fn _same_file(a: String, b: String) -> Bool:
     return len(ra.as_bytes()) > 0 and ra == rb
 
 
-fn _parse_int(s: String, start: Int) -> Int:
-    """Parse decimal digits from ``start`` onward; ``-1`` if no digits."""
-    var sb = s.as_bytes()
-    var i = start
-    var n = 0
-    var any = False
-    while i < len(sb) and sb[i] >= 0x30 and sb[i] <= 0x39:
-        n = n * 10 + Int(sb[i]) - 0x30
-        any = True
-        i += 1
-    if not any:
-        return -1
-    return n
 
 
 fn _mojo_include_dirs(root: String) -> List[String]:

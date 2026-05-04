@@ -38,6 +38,7 @@ from .highlight import (
 from .lsp import CaptureResult, LspProcess, capture_command
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
+from .string_utils import split_lines
 from .text_field import text_field_clipboard_key
 
 
@@ -232,7 +233,7 @@ struct ProjectFind(Movable):
             text = read_file(path)
         except:
             return
-        self._context_lines = _split_lines(text)
+        self._context_lines = split_lines(text)
         # Highlights are filled in lazily during paint via
         # ``_ensure_context_highlights`` — that's where the cached
         # ``GrammarRegistry`` is in scope.
@@ -695,19 +696,6 @@ struct ProjectFind(Movable):
 
 
 # --- internals --------------------------------------------------------------
-
-
-fn _split_lines(text: String) -> List[String]:
-    var out = List[String]()
-    var b = text.as_bytes()
-    var start = 0
-    for i in range(len(b)):
-        if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-    if start <= len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
-    return out^
 
 
 fn _lstrip_tabs(s: String) -> String:

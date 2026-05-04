@@ -42,6 +42,7 @@ from .onig import (
     OnigMatch, OnigRegex,
     ONIG_OPTION_NONE, ONIG_OPTION_NOT_BEGIN_POSITION,
 )
+from .string_utils import starts_with
 from .tm_grammar import (
     Capture, Grammar, Pattern,
     PATTERN_BEGIN_END, PATTERN_BEGIN_WHILE, PATTERN_GROUP,
@@ -766,52 +767,52 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
     a prefix of another (e.g. ``keyword.operator`` before
     ``keyword`` would matter — listed first here).
     """
-    if _starts_with_str(scope, String("keyword.operator")):
+    if starts_with(scope, String("keyword.operator")):
         return Optional[Attr](highlight_operator_attr())
-    if _starts_with_str(scope, String("keyword")):
+    if starts_with(scope, String("keyword")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("string")):
+    if starts_with(scope, String("string")):
         return Optional[Attr](highlight_string_attr())
-    if _starts_with_str(scope, String("comment")):
+    if starts_with(scope, String("comment")):
         return Optional[Attr](highlight_comment_attr())
-    if _starts_with_str(scope, String("constant.numeric")):
+    if starts_with(scope, String("constant.numeric")):
         return Optional[Attr](highlight_number_attr())
-    if _starts_with_str(scope, String("constant.character")):
+    if starts_with(scope, String("constant.character")):
         return Optional[Attr](highlight_string_attr())
-    if _starts_with_str(scope, String("constant.language")):
+    if starts_with(scope, String("constant.language")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("storage.type")):
+    if starts_with(scope, String("storage.type")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("storage.modifier")):
+    if starts_with(scope, String("storage.modifier")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("support.type")):
+    if starts_with(scope, String("support.type")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("support.function")):
+    if starts_with(scope, String("support.function")):
         return Optional[Attr](highlight_ident_attr())
-    if _starts_with_str(scope, String("entity.name.function")):
+    if starts_with(scope, String("entity.name.function")):
         return Optional[Attr](highlight_ident_attr())
-    if _starts_with_str(scope, String("entity.name.type")):
+    if starts_with(scope, String("entity.name.type")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("meta.attribute")):
+    if starts_with(scope, String("meta.attribute")):
         return Optional[Attr](highlight_decorator_attr())
     # Diff scopes: render like ``git diff`` does in a color terminal —
     # deleted lines red, inserted lines green, hunk-range hints cyan,
     # file headers white-on-blue (the keyword color, which is the most
     # eye-catching cell in our palette).
-    if _starts_with_str(scope, String("markup.deleted")):
+    if starts_with(scope, String("markup.deleted")):
         return Optional[Attr](highlight_string_attr())
-    if _starts_with_str(scope, String("markup.inserted")):
+    if starts_with(scope, String("markup.inserted")):
         return Optional[Attr](highlight_ident_attr())
-    if _starts_with_str(scope, String("markup.changed")):
+    if starts_with(scope, String("markup.changed")):
         return Optional[Attr](highlight_decorator_attr())
-    if _starts_with_str(scope, String("meta.diff.range")) \
-            or _starts_with_str(scope, String("meta.toc-list.line-number")):
+    if starts_with(scope, String("meta.diff.range")) \
+            or starts_with(scope, String("meta.toc-list.line-number")):
         return Optional[Attr](highlight_decorator_attr())
-    if _starts_with_str(scope, String("meta.diff")):
+    if starts_with(scope, String("meta.diff")):
         return Optional[Attr](highlight_keyword_attr())
-    if _starts_with_str(scope, String("punctuation.definition.string")):
+    if starts_with(scope, String("punctuation.definition.string")):
         return Optional[Attr](highlight_string_attr())
-    if _starts_with_str(scope, String("punctuation")):
+    if starts_with(scope, String("punctuation")):
         return Optional[Attr](highlight_operator_attr())
     # ``variable.*`` covers generic variables, function parameters,
     # ``self`` / ``this`` (variable.language), and assigned-name
@@ -820,20 +821,11 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
     # default ``YELLOW`` on ``BLUE``, making every identifier look
     # like a syntax error against the green-on-blue idents the rest
     # of the palette already paints (functions, type names, etc.).
-    if _starts_with_str(scope, String("variable")):
+    if starts_with(scope, String("variable")):
         return Optional[Attr](highlight_ident_attr())
     return Optional[Attr]()
 
 
-fn _starts_with_str(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
 
 
 fn _split_scopes(chain: String) -> List[String]:

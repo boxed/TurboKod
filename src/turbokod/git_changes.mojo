@@ -19,6 +19,9 @@ from std.collections.optional import Optional
 from .diff import DiffOp, diff_lines
 from .file_io import find_git_project
 from .lsp import capture_command
+from .string_utils import (
+    split_lines, split_lines_no_trailing, starts_with,
+)
 
 
 # Per-line change status for the editor's git-changes gutter.
@@ -39,17 +42,6 @@ struct ChangedFile(ImplicitlyCopyable, Movable):
     a colorizing renderer."""
     var path: String
     var diff: String
-
-
-fn _starts_with(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
 
 
 fn _strip_prefix_b(line: String) -> String:
@@ -99,7 +91,7 @@ fn parse_unified_diff_files(diff: String) -> List[ChangedFile]:
         var e = line_starts[i + 1] if i + 1 < len(line_starts) else len(b)
         var line = String(StringSlice(unsafe_from_utf8=b[s:e]))
         # Strip trailing LF for the prefix check.
-        if _starts_with(line, String("diff --git ")):
+        if starts_with(line, String("diff --git ")):
             chunk_starts.append(s)
         i += 1
     chunk_starts.append(len(b))    # sentinel
@@ -119,14 +111,14 @@ fn parse_unified_diff_files(diff: String) -> List[ChangedFile]:
             while le < len(cb) and cb[le] != 0x0A:
                 le += 1
             var ln = String(StringSlice(unsafe_from_utf8=cb[ls:le]))
-            if _starts_with(ln, String("+++ ")):
+            if starts_with(ln, String("+++ ")):
                 if ln != String("+++ /dev/null"):
                     path = _strip_prefix_b(ln)
                     break
                 # ``+++ /dev/null`` → pure delete; remember the source
                 # but keep scanning in case a later ``+++`` overrides
                 # (shouldn't happen inside one chunk, but cheap).
-            elif _starts_with(ln, String("--- ")) \
+            elif starts_with(ln, String("--- ")) \
                     and len(path.as_bytes()) == 0 \
                     and ln != String("--- /dev/null"):
                 path = _strip_prefix_b(ln)
@@ -171,26 +163,6 @@ fn _relative_to_root(file_path: String, root: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:len(fb)]))
 
 
-fn _split_lines(text: String) -> List[String]:
-    """Split ``text`` on ``\\n``. A trailing newline produces an empty
-    final line, matching ``TextBuffer``'s convention. Used so the diff
-    against HEAD treats both inputs identically (the HEAD content from
-    ``git show`` always ends in ``\\n`` for normal files; the buffer's
-    ``text_snapshot`` does too whenever the user kept the trailing
-    newline)."""
-    var out = List[String]()
-    var bytes = text.as_bytes()
-    var start = 0
-    var i = 0
-    while i < len(bytes):
-        if bytes[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:i])))
-            start = i + 1
-        i += 1
-    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:len(bytes)])))
-    return out^
-
-
 fn diff_buffer_against_head(
     head_text: String, buffer_lines: List[String],
 ) -> List[Int]:
@@ -210,7 +182,7 @@ fn diff_buffer_against_head(
         return out^
     for _ in range(nb):
         out.append(GIT_CHANGE_NONE)
-    var head_lines = _split_lines(head_text)
+    var head_lines = split_lines(head_text)
     var ops = diff_lines(head_lines, buffer_lines)
     var i = 0
     var n = len(ops)
@@ -713,22 +685,6 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     var is_pushed: Bool
 
 
-fn _split_lines_keep_empty(text: String) -> List[String]:
-    """Split on ``\\n``, dropping a trailing-newline-only empty line. The
-    line-oriented git outputs we feed in here always end in ``\\n`` and
-    we don't want a phantom blank entry at the end."""
-    var out = List[String]()
-    var b = text.as_bytes()
-    var s = 0
-    for i in range(len(b)):
-        if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
-            s = i + 1
-    if s < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
-    return out^
-
-
 fn _split_tab_fields(line: String, n: Int) -> List[String]:
     """Split ``line`` on ``\\t`` into at most ``n`` fields. The last
     field absorbs any further tabs verbatim, so a commit subject that
@@ -778,7 +734,7 @@ fn fetch_git_branches(project_root: String) -> List[GitBranch]:
         stdout = result.stdout
     except:
         return out^
-    var lines = _split_lines_keep_empty(stdout)
+    var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
         var line = lines[li]
         if len(line.as_bytes()) == 0:
@@ -820,7 +776,7 @@ fn _fetch_unpushed_short_shas(
         stdout = result.stdout
     except:
         return out^
-    var lines = _split_lines_keep_empty(stdout)
+    var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
         var line = lines[li]
         if len(line.as_bytes()) > 0:
@@ -863,7 +819,7 @@ fn fetch_git_commits(
     except:
         return out^
     var unpushed = _fetch_unpushed_short_shas(project_root, limit)
-    var lines = _split_lines_keep_empty(stdout)
+    var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
         var line = lines[li]
         if len(line.as_bytes()) == 0:

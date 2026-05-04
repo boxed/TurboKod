@@ -11,6 +11,7 @@ from std.collections.list import List
 from .file_io import (
     join_path, list_directory, read_file, stat_file, write_file,
 )
+from .string_utils import split_lines_no_trailing
 
 
 @fieldwise_init
@@ -58,7 +59,7 @@ struct GitignoreMatcher(ImplicitlyCopyable, Movable):
     @staticmethod
     fn from_text(text: String) -> Self:
         var m = GitignoreMatcher()
-        var lines = _split_lines(text)
+        var lines = split_lines_no_trailing(text)
         for li in range(len(lines)):
             var line = _strip(lines[li])
             var lb = line.as_bytes()
@@ -283,25 +284,6 @@ fn _project_relative(root: String, full: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
-fn _split_lines(text: String) -> List[String]:
-    var lines = List[String]()
-    var bytes = text.as_bytes()
-    var line_start = 0
-    var i = 0
-    while i < len(bytes):
-        if bytes[i] == 0x0A:
-            lines.append(String(StringSlice(
-                unsafe_from_utf8=bytes[line_start:i]
-            )))
-            line_start = i + 1
-        i += 1
-    if line_start < len(bytes):
-        lines.append(String(StringSlice(
-            unsafe_from_utf8=bytes[line_start:]
-        )))
-    return lines^
-
-
 fn _replace_all_in_string(
     haystack: String, needle: String, replacement: String,
 ) -> String:
@@ -370,7 +352,7 @@ fn find_in_project(root: String, needle: String) raises -> List[ProjectMatch]:
             continue
         if _looks_binary(text):
             continue
-        var lines = _split_lines(text)
+        var lines = split_lines_no_trailing(text)
         var rel = _project_relative(root, full)
         for ln in range(len(lines)):
             if _contains_bytes(lines[ln], needle):
