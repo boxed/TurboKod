@@ -36,10 +36,13 @@ from .buttons import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .confirm_dialog import ConfirmDialog
 from .config import (
+    OnSaveAction,
     TurbokodConfig, load_config, record_recent_project, save_config,
 )
+from .action_editor import ActionEditor
+from .settings import Settings
 from .desktop import (
-    APP_QUIT_ACTION,
+    APP_QUIT_ACTION, APP_SETTINGS,
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
     DEBUG_START_OR_CONTINUE, DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER,
     DEBUG_STOP, DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,

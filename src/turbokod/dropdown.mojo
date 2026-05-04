@@ -36,6 +36,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .type_ahead import TypeAhead, starts_with_ci
 from .window import paint_drop_shadow
 
 
@@ -71,6 +72,9 @@ struct Dropdown(ImplicitlyCopyable, Movable):
     var is_open: Bool
     var highlight: Int
     var _scroll: Int
+    var _type_ahead: TypeAhead
+    """Type-to-search buffer (shared with file lists). Reset on
+    ``open`` / ``close``."""
 
     fn __init__(out self, var options: List[String], index: Int = 0):
         self.options = options^
@@ -78,6 +82,7 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         self.is_open = False
         self.highlight = 0
         self._scroll = 0
+        self._type_ahead = TypeAhead()
         self._clip_index()
 
     fn __copyinit__(out self, copy: Self):
@@ -86,6 +91,7 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         self.is_open = copy.is_open
         self.highlight = copy.highlight
         self._scroll = copy._scroll
+        self._type_ahead = copy._type_ahead
 
     fn _clip_index(mut self):
         var n = len(self.options)
@@ -141,9 +147,47 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         # any movement is a no-op (rather than picking option 0).
         self.highlight = self.index if self.index >= 0 else 0
         self._scroll_to_highlight()
+        self._type_ahead.reset()
 
     fn close(mut self):
         self.is_open = False
+        self._type_ahead.reset()
+
+    fn type_to_search(mut self, ch: String) -> Bool:
+        """Extend the prefix buffer with ``ch`` and jump the highlight
+        to the first option whose label starts with the accumulated
+        buffer (case-insensitive). Returns True on a hit.
+
+        Empty options (the "(none)" sentinel many callers prepend) are
+        skipped so a stray printable key doesn't snap back to row 0.
+        Stale-prefix recovery: when no option matches the full buffer,
+        retry with just ``ch`` so a fresh letter after a stale chain
+        lands somewhere useful.
+        """
+        var prefix = self._type_ahead.append(ch)
+        if self._jump_to_prefix(prefix^):
+            return True
+        if len(self._type_ahead.buf.as_bytes()) > 1:
+            var solo = self._type_ahead.solo_fallback(ch)
+            if self._jump_to_prefix(solo^):
+                return True
+        return False
+
+    fn _jump_to_prefix(mut self, var prefix: String) -> Bool:
+        """Move ``highlight`` to the first non-empty option whose
+        label starts with ``prefix`` (case-insensitive). Returns
+        whether a match was found."""
+        var pb = prefix.as_bytes()
+        if len(pb) == 0:
+            return False
+        for i in range(len(self.options)):
+            if len(self.options[i].as_bytes()) == 0:
+                continue
+            if starts_with_ci(self.options[i], prefix):
+                self.highlight = i
+                self._scroll_to_highlight()
+                return True
+        return False
 
     fn toggle(mut self):
         if self.is_open:
@@ -297,6 +341,14 @@ struct Dropdown(ImplicitlyCopyable, Movable):
             return True
         if k == KEY_PAGEDOWN:
             self._step(_MAX_POPUP_ROWS)
+            return True
+        # Type-to-search: any printable ASCII byte extends the prefix
+        # buffer and jumps the highlight to the first matching option.
+        # Mirrors ``DirBrowser.type_to_search`` so a user who already
+        # knows the file-list muscle memory gets it for free in
+        # dropdowns too.
+        if UInt32(0x20) <= k and k < UInt32(0x7F):
+            _ = self.type_to_search(chr(Int(k)))
             return True
         # Swallow other keys while open — the popup is modal-ish and
         # a keystroke that types into the underlying input would be

@@ -36,7 +36,8 @@ from .file_io import (
 )
 from .geometry import Point, Rect
 from .painter import Painter
-from .posix import getenv_value, monotonic_ms, realpath
+from .posix import getenv_value, realpath
+from .type_ahead import TypeAhead, starts_with_ci
 
 
 @fieldwise_init
@@ -101,11 +102,6 @@ fn jump_shortcuts(
     return out^
 
 
-comptime _SEARCH_RESET_MS: Int = 800
-"""How long after the last keystroke a fresh char restarts the type-
-to-search buffer instead of extending it. 800ms matches Windows
-Explorer / GNOME Files / Finder closely enough that muscle memory
-from those carries over."""
 
 
 struct DirBrowser(Movable):
@@ -120,12 +116,11 @@ struct DirBrowser(Movable):
     ``Project`` jump button. Set via ``set_project`` so
     ``_jump_buttons`` can be rebuilt to match (the button table is
     persistent, so growing/shrinking it has to be explicit)."""
-    var _search_buf: String
-    """Accumulated type-to-search keystrokes. Reset on every
-    ``refresh`` (so navigating to a new dir starts fresh) and on
-    timeout (when the user pauses long enough that a fresh letter
-    is clearly a new search, not a continuation)."""
-    var _search_last_ms: Int
+    var _type_ahead: TypeAhead
+    """Type-to-search buffer (shared with dropdowns). Reset on every
+    ``refresh`` (so navigating to a new dir starts fresh) and on the
+    built-in timeout (a long pause clearly means a new search, not a
+    continuation)."""
     var _jump_buttons: List[ShadowButton]
     """Persistent jump-button row. ``ShadowButton.handle_mouse``
     keeps a press latch on each entry, so the table outlives paint
@@ -141,8 +136,7 @@ struct DirBrowser(Movable):
         self.scroll = 0
         self.dirs_only = dirs_only
         self.project = Optional[String]()
-        self._search_buf = String("")
-        self._search_last_ms = 0
+        self._type_ahead = TypeAhead()
         # Build the persistent jump-button row. The labels are baked
         # in here (matching ``jump_shortcuts``) so the press latch
         # outlives a paint that re-derives positions; the *paths*
@@ -216,8 +210,7 @@ struct DirBrowser(Movable):
         self.scroll = 0
         # A new directory is a fresh context; old search prefix would
         # match against entries that no longer exist.
-        self._search_buf = String("")
-        self._search_last_ms = 0
+        self._type_ahead.reset()
 
     fn ascend(mut self):
         """Move ``self.dir`` to its parent. Canonicalizes via
@@ -368,22 +361,11 @@ struct DirBrowser(Movable):
         letter after a stale prefix lands somewhere useful instead
         of feeling like a dead key.
         """
-        var now = monotonic_ms()
-        if now - self._search_last_ms > _SEARCH_RESET_MS:
-            self._search_buf = String("")
-        self._search_last_ms = now
-        self._search_buf = self._search_buf + ch
-        # Copy the buffer before passing to ``_find_and_select``: Mojo
-        # rejects passing ``self._search_buf`` as a borrow argument
-        # while ``self`` is also borrowed mutably (the helper sets the
-        # selection on success).
-        var prefix = self._search_buf
+        var prefix = self._type_ahead.append(ch)
         if self._find_and_select(prefix^, list_h):
             return True
-        # Stale-prefix recovery: try the new char alone.
-        if len(self._search_buf.as_bytes()) > 1:
-            self._search_buf = ch
-            var solo = self._search_buf
+        if len(self._type_ahead.buf.as_bytes()) > 1:
+            var solo = self._type_ahead.solo_fallback(ch)
             if self._find_and_select(solo^, list_h):
                 return True
         return False
@@ -398,7 +380,7 @@ struct DirBrowser(Movable):
         for i in range(len(self.entries)):
             if self.entries[i] == String(".."):
                 continue
-            if _starts_with_ci(self.entries[i], prefix):
+            if starts_with_ci(self.entries[i], prefix):
                 self.set_selection(i, list_h)
                 return True
         return False
@@ -517,22 +499,3 @@ struct DirBrowser(Movable):
         return idx
 
 
-fn _starts_with_ci(name: String, prefix: String) -> Bool:
-    """ASCII-case-insensitive prefix test. Restricted to ASCII —
-    UTF-8 case folding is non-trivial, and filenames in this
-    codebase are matched the same way ``_sort_entries_ci`` (in
-    ``file_io``) compares them, so the two views agree."""
-    var nb = name.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(nb):
-        return False
-    for i in range(len(pb)):
-        var cn = Int(nb[i])
-        var cp = Int(pb[i])
-        if 0x41 <= cn and cn <= 0x5A:
-            cn += 0x20
-        if 0x41 <= cp and cp <= 0x5A:
-            cp += 0x20
-        if cn != cp:
-            return False
-    return True

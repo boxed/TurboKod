@@ -42,6 +42,7 @@ from .events import (
 )
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
+    OnSaveAction,
     TurbokodConfig, load_config, record_recent_project, save_config,
 )
 from .diff import unified_diff
@@ -52,7 +53,8 @@ from .git_blame import compute_blame
 from .git_changes import (
     diff_buffer_against_head, fetch_head_text, project_is_git_repo,
 )
-from .posix import realpath
+from .lsp import LspProcess
+from .posix import close_fd, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
@@ -103,6 +105,7 @@ from .session_store import (
 )
 from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
+from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
@@ -138,6 +141,10 @@ comptime _PA_DOC_INSTALL      = String("docs:install")
 # extension has no bundled TextMate grammar but is in the downloadable-
 # grammar registry.
 comptime _PA_GRAMMAR_INSTALL  = String("grammar:install")
+# "Open settings view" — surfaces the fullscreen Settings widget the
+# host wires into the hamburger menu. Routed through dispatch_action
+# so the host doesn't need to manually toggle ``settings.open()``.
+comptime APP_SETTINGS         = String("app:settings")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
@@ -338,6 +345,12 @@ struct Desktop(Movable):
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
+    # Fullscreen Settings view (hamburger ▸ Settings). Independent of
+    # the modal stack — paints over the workspace but leaves the menu
+    # bar and status bar untouched. Edits to ``settings.actions`` are
+    # mirrored back into ``self.config.on_save_actions`` and persisted
+    # whenever ``settings.dirty`` is True.
+    var settings: Settings
     var bg_pattern: String
     var bg_attr: Attr
     var project: Optional[String]
@@ -510,6 +523,7 @@ struct Desktop(Movable):
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
+        self.settings = Settings()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
         self.project = Optional[String]()
@@ -990,6 +1004,15 @@ struct Desktop(Movable):
         self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen)
         self.targets_dialog.paint(canvas, screen)
+        # Settings overlay — paints over the workspace but below the
+        # modal dialogs so an in-flight prompt is still visible. Drains
+        # ``settings.dirty`` into the persisted config so user changes
+        # survive a restart without an explicit "save settings" step.
+        self.settings.paint(canvas, screen)
+        if self.settings.active and self.settings.dirty:
+            self.config.on_save_actions = self.settings.actions.copy()
+            _ = save_config(self.config)
+            self.settings.ack_dirty()
         # Persist the window session if it changed since the last save.
         # No-op when no project is open or no file-backed windows are
         # showing — closing the last window leaves the previously-saved
@@ -2070,6 +2093,12 @@ struct Desktop(Movable):
             if self.targets_dialog.submitted:
                 self._on_targets_dialog_submit()
             return Optional[String]()
+        if self.settings.active:
+            if event.kind == EVENT_KEY:
+                _ = self.settings.handle_key(event)
+            else:
+                _ = self.settings.handle_mouse(event, screen)
+            return Optional[String]()
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
             # if neither claims the key, fall through to the regular
@@ -2263,6 +2292,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_CONFIG_TARGETS:
             self._open_targets_config()
+            return Optional[String]()
+        if action == APP_SETTINGS:
+            self.settings.open(self.config.on_save_actions.copy())
             return Optional[String]()
         if action == EDITOR_NEW:
             self.new_file(screen)
@@ -3731,11 +3763,103 @@ struct Desktop(Movable):
                 # The diff against ``HEAD`` is now stale; clear the
                 # cache so the next paint re-queries git for this file.
                 self.windows.windows[idx].editor.invalidate_git_changes()
+                # Fire any user-configured on-save actions whose language
+                # matches this file. Each runs synchronously and reports
+                # via the status bar — the editor blocks until they exit.
+                self._run_on_save_actions(saved_path)
             except:
                 pass
             return
         # No backing file — escalate to Save As.
         self._open_save_as_dialog()
+
+    fn _run_on_save_actions(mut self, saved_path: String):
+        """Walk ``self.config.on_save_actions`` and spawn each entry
+        whose ``language_id`` matches the saved file's language (empty
+        ``language_id`` matches every file). Each runs as a one-shot
+        ``program + args`` subprocess; we wait for the exit and report
+        the outcome on the status bar.
+
+        Failures don't escalate — the save itself succeeded; an
+        on-save action that exits non-zero just gets a status-bar
+        warning. Spawn errors (program missing, etc.) likewise.
+        """
+        if len(self.config.on_save_actions) == 0:
+            return
+        var actions = self.config.on_save_actions.copy()
+        var ext = extension_of(saved_path)
+        var lang_idx = find_language_for_extension(self.lsp_specs, ext)
+        var lang = String("")
+        if lang_idx >= 0:
+            lang = self.lsp_specs[lang_idx].language_id
+        for i in range(len(actions)):
+            var act = actions[i]
+            if len(act.language_id.as_bytes()) > 0 \
+                    and act.language_id != lang:
+                continue
+            if len(act.program.as_bytes()) == 0:
+                continue
+            self._spawn_on_save_action(act, saved_path)
+
+    fn _spawn_on_save_action(
+        mut self, act: OnSaveAction, saved_path: String,
+    ):
+        """Fork+exec ``act.program act.args...`` with the configured
+        cwd (or the project root when blank), wait for it, and report.
+
+        Uses ``LspProcess.spawn`` for the fork+exec wiring so the env
+        (``HOME``, ``PATH``, etc.) matches everything else we run. We
+        change the child's working directory by spawning ``sh -c``
+        with a leading ``cd`` rather than going through ``fchdir`` —
+        the env-allowlist + redirection plumbing is already wired for
+        ``sh``, and an inline ``cd`` is one less moving part.
+        """
+        var cwd = act.cwd
+        if len(cwd.as_bytes()) == 0:
+            if self.project:
+                cwd = self.project.value()
+            else:
+                cwd = parent_path(saved_path)
+        var cmd = String("cd '") + cwd + String("' && '") + act.program \
+            + String("'")
+        for k in range(len(act.args)):
+            cmd = cmd + String(" '") + act.args[k] + String("'")
+        var argv = List[String]()
+        argv.append(String("sh"))
+        argv.append(String("-c"))
+        argv.append(cmd^)
+        var label = act.program
+        var b = label.as_bytes()
+        var slash = -1
+        for k in range(len(b)):
+            if b[k] == 0x2F:
+                slash = k
+        if slash >= 0:
+            label = String(StringSlice(unsafe_from_utf8=b[slash + 1:]))
+        try:
+            var proc = LspProcess.spawn(argv)
+            var status = waitpid_blocking(proc.pid)
+            untrack_child(proc.pid)
+            if proc.stdin_fd  >= 0: _ = close_fd(proc.stdin_fd)
+            if proc.stdout_fd >= 0: _ = close_fd(proc.stdout_fd)
+            if proc.stderr_fd >= 0: _ = close_fd(proc.stderr_fd)
+            var exit_code = (Int(status) >> 8) & 0xFF
+            if exit_code == 0:
+                self.status_bar.set_message(
+                    String("on-save: ") + label + String(" ok"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+            else:
+                self.status_bar.set_message(
+                    String("on-save: ") + label + String(" exit ")
+                        + String(exit_code),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+        except:
+            self.status_bar.set_message(
+                String("on-save: failed to spawn ") + label,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
 
     fn _maybe_reload_targets(mut self, saved_path: String):
         if not self.project:

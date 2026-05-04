@@ -53,6 +53,46 @@ fn _ensure_dir(path: String):
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
+struct OnSaveAction(ImplicitlyCopyable, Movable):
+    """One configured "after a successful save, run this" action.
+
+    ``language_id`` empty matches every save; otherwise the action only
+    fires when the saved file's extension resolves (via the LSP language
+    registry) to that language.
+
+    ``program`` is the absolute path to the binary; ``args`` is the list
+    of CLI arguments passed verbatim. ``cwd`` empty means "use the
+    project root" (or the saved file's parent when no project is open).
+
+    Pure data — Desktop owns the runner.
+    """
+    var language_id: String
+    var program: String
+    var args: List[String]
+    var cwd: String
+
+    fn __init__(out self):
+        self.language_id = String("")
+        self.program = String("")
+        self.args = List[String]()
+        self.cwd = String("")
+
+    fn __init__(
+        out self, var language_id: String, var program: String,
+        var args: List[String], var cwd: String,
+    ):
+        self.language_id = language_id^
+        self.program = program^
+        self.args = args^
+        self.cwd = cwd^
+
+    fn __copyinit__(out self, copy: Self):
+        self.language_id = copy.language_id
+        self.program = copy.program
+        self.args = copy.args.copy()
+        self.cwd = copy.cwd
+
+
 @fieldwise_init
 struct TurbokodConfig(ImplicitlyCopyable, Movable):
     """Global preferences. Defaults match the pre-config behavior."""
@@ -64,6 +104,11 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
     var recent_projects: List[String]
+    # User-configured on-save actions (Settings ▸ Actions on save). The
+    # editor scans this list after every successful ``_do_save`` and
+    # spawns each matching entry as a one-shot subprocess. Empty by
+    # default — there's no implicit "format on save" behavior.
+    var on_save_actions: List[OnSaveAction]
 
     fn __init__(out self):
         self.line_numbers = False
@@ -71,6 +116,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.git_changes = False
         self.tab_bar = False
         self.recent_projects = List[String]()
+        self.on_save_actions = List[OnSaveAction]()
 
     fn __copyinit__(out self, copy: Self):
         # ``List[String]`` isn't implicitly copyable, so the synthesized
@@ -80,6 +126,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
         self.recent_projects = copy.recent_projects.copy()
+        self.on_save_actions = copy.on_save_actions.copy()
 
 
 fn record_recent_project(
@@ -133,6 +180,31 @@ fn load_config() -> TurbokodConfig:
                 var item = arr.array_at(i)
                 if item.is_string():
                     cfg.recent_projects.append(item.as_str())
+        var osa = root.object_get(String("on_save_actions"))
+        if osa and osa.value().is_array():
+            var arr = osa.value()
+            for i in range(arr.array_len()):
+                var item = arr.array_at(i)
+                if not item.is_object():
+                    continue
+                var act = OnSaveAction()
+                var lid = item.object_get(String("language_id"))
+                if lid and lid.value().is_string():
+                    act.language_id = lid.value().as_str()
+                var prog = item.object_get(String("program"))
+                if prog and prog.value().is_string():
+                    act.program = prog.value().as_str()
+                var args = item.object_get(String("args"))
+                if args and args.value().is_array():
+                    var aarr = args.value()
+                    for k in range(aarr.array_len()):
+                        var av = aarr.array_at(k)
+                        if av.is_string():
+                            act.args.append(av.as_str())
+                var cwd = item.object_get(String("cwd"))
+                if cwd and cwd.value().is_string():
+                    act.cwd = cwd.value().as_str()
+                cfg.on_save_actions.append(act^)
     except:
         pass
     return cfg
@@ -158,4 +230,17 @@ fn save_config(config: TurbokodConfig) -> Bool:
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))
     root.put(String("recent_projects"), rp^)
+    var osa = json_array()
+    for i in range(len(config.on_save_actions)):
+        var act = config.on_save_actions[i]
+        var obj = json_object()
+        obj.put(String("language_id"), json_str(act.language_id))
+        obj.put(String("program"), json_str(act.program))
+        var aarr = json_array()
+        for k in range(len(act.args)):
+            aarr.append(json_str(act.args[k]))
+        obj.put(String("args"), aarr^)
+        obj.put(String("cwd"), json_str(act.cwd))
+        osa.append(obj^)
+    root.put(String("on_save_actions"), osa^)
     return write_file(path, encode_json(root) + String("\n"))

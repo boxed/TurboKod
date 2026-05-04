@@ -38,7 +38,7 @@ from std.collections.optional import Optional
 from std.sys import argv
 
 from turbokod import (
-    APP_QUIT_ACTION, Application,
+    APP_QUIT_ACTION, APP_SETTINGS, Application,
     Event,
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP,
     DEBUG_START_OR_CONTINUE,
@@ -121,6 +121,8 @@ fn main() raises:
         # File/Edit/View axis. Quit lives here so the File menu can stay
         # focused on document operations.
         var hamburger_items = List[MenuItem]()
+        hamburger_items.append(MenuItem(String("Settings"), APP_SETTINGS))
+        hamburger_items.append(MenuItem.separator())
         hamburger_items.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
         desktop.menu_bar.add(Menu(
             String("≡"), hamburger_items^, is_system=True,

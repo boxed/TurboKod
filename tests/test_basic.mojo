@@ -123,6 +123,10 @@ from turbokod.grammar_install import (
     find_downloadable_grammar_for_extension,
     grammar_install_command, user_grammar_path, user_grammar_path_for_ext,
 )
+from turbokod.action_editor import ActionEditor
+from turbokod.config import OnSaveAction
+from turbokod.dropdown import Dropdown
+from turbokod.settings import Settings
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
@@ -2584,6 +2588,253 @@ fn test_user_grammar_path_for_ext_misses_when_not_installed() raises:
     assert_equal(user_grammar_path_for_ext(String("zzz")), String(""))
 
 
+fn test_on_save_action_default_is_empty() raises:
+    """Default ``OnSaveAction`` is the natural identity element — empty
+    fields and an empty args list. Settings ▸ Add starts here."""
+    var act = OnSaveAction()
+    assert_equal(act.language_id, String(""))
+    assert_equal(act.program, String(""))
+    assert_equal(len(act.args), 0)
+    assert_equal(act.cwd, String(""))
+
+
+fn test_on_save_action_copy_preserves_args() raises:
+    """``List[String]`` doesn't have implicit copy semantics, so the
+    explicit copyinit must clone the args. Without it, two clones
+    would share the same list and edits to one would leak to the
+    other."""
+    var args = List[String]()
+    args.append(String("--quiet"))
+    args.append(String("$FILE"))
+    var a = OnSaveAction(
+        String("python"), String("/usr/bin/black"), args^, String(""),
+    )
+    var b = a
+    assert_equal(len(b.args), 2)
+    assert_equal(b.args[0], String("--quiet"))
+    assert_equal(b.args[1], String("$FILE"))
+    # Mutating ``b.args`` must not touch ``a.args``.
+    b.args.append(String("--check"))
+    assert_equal(len(a.args), 2)
+
+
+fn test_settings_open_seeds_state() raises:
+    """``open`` snapshots the host list and parks the selection on
+    row 0 (or -1 when the list is empty). Focus starts on the section
+    rail so arrow keys move sections rather than rows."""
+    var s = Settings()
+    var actions = List[OnSaveAction]()
+    actions.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    actions.append(OnSaveAction(
+        String("rust"), String("/usr/bin/rustfmt"),
+        List[String](), String(""),
+    ))
+    s.open(actions^)
+    assert_true(s.active)
+    assert_equal(len(s.actions), 2)
+    assert_equal(s.selected_action, 0)
+    assert_equal(s.section, 0)
+    assert_false(s.dirty)
+    s.close()
+    assert_false(s.active)
+    assert_equal(len(s.actions), 0)
+
+
+fn test_settings_open_empty_parks_selection_at_minus_one() raises:
+    """Opening with no actions: selection = -1 so ``Edit`` / ``Remove``
+    skip themselves in the focus walk and the right pane shows the
+    "(no actions configured)" hint."""
+    var s = Settings()
+    s.open(List[OnSaveAction]())
+    assert_true(s.active)
+    assert_equal(len(s.actions), 0)
+    assert_equal(s.selected_action, -1)
+
+
+fn test_settings_remove_marks_dirty() raises:
+    """Removing the highlighted entry must (a) shrink the list,
+    (b) raise ``dirty`` so the host knows to persist, (c) keep the
+    selection on a valid row (or move to -1 when the list empties)."""
+    var s = Settings()
+    var actions = List[OnSaveAction]()
+    actions.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    s.open(actions^)
+    s._remove_selected()
+    assert_equal(len(s.actions), 0)
+    assert_equal(s.selected_action, -1)
+    assert_true(s.dirty)
+
+
+fn test_settings_editor_submit_appends_new_entry() raises:
+    """The full Add → Edit → Save round-trip: opening Add starts the
+    editor with ``edit_index = -1``; setting fields and flipping
+    ``submitted`` then driving ``_maybe_consume_editor`` must append
+    the new entry to ``actions`` and raise ``dirty``."""
+    var s = Settings()
+    s.open(List[OnSaveAction]())
+    s._add_new()
+    assert_true(s.editor.active)
+    assert_equal(s.editor.edit_index, -1)
+    s.editor.entry.language_id = String("python")
+    s.editor.entry.program = String("/usr/bin/black")
+    s.editor.submitted = True
+    s._maybe_consume_editor()
+    assert_false(s.editor.active)
+    assert_equal(len(s.actions), 1)
+    assert_equal(s.actions[0].language_id, String("python"))
+    assert_equal(s.actions[0].program, String("/usr/bin/black"))
+    assert_equal(s.selected_action, 0)
+    assert_true(s.dirty)
+
+
+fn test_settings_editor_submit_replaces_existing_entry() raises:
+    """``edit_index >= 0`` triggers an in-place replace, not an append.
+    The selection stays on the edited row so the user keeps their place
+    in the list."""
+    var s = Settings()
+    var actions = List[OnSaveAction]()
+    actions.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    s.open(actions^)
+    s.selected_action = 0
+    s._edit_selected()
+    s.editor.entry.program = String("/opt/bin/black-edge")
+    s.editor.submitted = True
+    s._maybe_consume_editor()
+    assert_equal(len(s.actions), 1)
+    assert_equal(s.actions[0].program, String("/opt/bin/black-edge"))
+    assert_equal(s.selected_action, 0)
+    assert_true(s.dirty)
+
+
+fn test_action_editor_lang_dropdown_has_options() raises:
+    """The dropdown's language options are sourced from
+    ``built_in_servers()``. If that returns an empty list (e.g. because
+    the bundled languages.json isn't on disk relative to cwd), the
+    user sees a one-option dropdown showing "(none)" and the field
+    looks broken. Guard against the empty case so a regression here
+    surfaces as a test failure rather than an in-the-wild "the
+    dropdown for language is empty" bug report.
+    """
+    var ed = ActionEditor()
+    ed.open(OnSaveAction(), -1)
+    var dd = ed._lang_dropdown(String(""))
+    # Always at least the empty "(any)" sentinel — if it's the only
+    # entry, the language registry didn't load.
+    assert_true(len(dd.options) >= 2,
+        msg=String("dropdown only has the empty sentinel — built_in_servers() "
+                   "returned no languages (cwd missing the bundled JSON?)"))
+
+
+fn test_action_editor_enter_opens_lang_popup() raises:
+    """Pressing Enter on the focused (closed) language dropdown opens
+    its popup. Without this, clicks/Enter were no-ops and users had no
+    way to discover the available languages — earlier code rebuilt the
+    dropdown stateless each paint, so any toggle was discarded
+    immediately."""
+    var ed = ActionEditor()
+    ed.open(OnSaveAction(), -1)
+    ed.focus = UInt8(0)  # _FOCUS_LANG
+    assert_false(ed.lang_dropdown.is_open)
+    var ev = Event.key_event(KEY_ENTER, MOD_NONE)
+    _ = ed.handle_key(ev)
+    assert_true(ed.lang_dropdown.is_open)
+    # Esc on an open popup just closes the popup, not the dialog.
+    var esc = Event.key_event(KEY_ESC, MOD_NONE)
+    _ = ed.handle_key(esc)
+    assert_false(ed.lang_dropdown.is_open)
+    assert_true(ed.active)
+
+
+fn test_dropdown_type_to_search_jumps_to_prefix() raises:
+    """Typing while a popup is open jumps the highlight to the first
+    option matching the accumulated prefix. Mirrors the file-list
+    behavior so the muscle memory transfers."""
+    var opts = List[String]()
+    opts.append(String(""))
+    opts.append(String("apple"))
+    opts.append(String("banana"))
+    opts.append(String("blueberry"))
+    opts.append(String("cherry"))
+    var dd = Dropdown(opts^, 0)
+    dd.open()
+    assert_true(dd.type_to_search(String("b")))
+    assert_equal(dd.highlight, 2)  # banana
+    assert_true(dd.type_to_search(String("l")))
+    assert_equal(dd.highlight, 3)  # blueberry (prefix "bl")
+
+
+fn test_dropdown_type_to_search_skips_empty_sentinel() raises:
+    """The empty "" option (most callers prepend one as the "(none)"
+    sentinel) is not a search target. A user typing 'p' wants
+    "python", not the blank row at index 0."""
+    var opts = List[String]()
+    opts.append(String(""))
+    opts.append(String("python"))
+    opts.append(String("rust"))
+    var dd = Dropdown(opts^, 0)
+    dd.open()
+    assert_true(dd.type_to_search(String("p")))
+    assert_equal(dd.highlight, 1)  # python, not the empty sentinel
+
+
+fn test_dropdown_type_to_search_recovers_from_stale_prefix() raises:
+    """When the accumulated prefix doesn't match anything, retry with
+    just the new char. Otherwise typing 'b' then 'z' would silently
+    do nothing — confusing, since the user clearly intends to jump
+    somewhere starting with 'z'."""
+    var opts = List[String]()
+    opts.append(String("apple"))
+    opts.append(String("banana"))
+    opts.append(String("zebra"))
+    var dd = Dropdown(opts^, 0)
+    dd.open()
+    _ = dd.type_to_search(String("b"))
+    assert_equal(dd.highlight, 1)  # banana
+    # 'z' makes the buffer "bz" which matches nothing — fallback to
+    # the single 'z' should jump to "zebra".
+    assert_true(dd.type_to_search(String("z")))
+    assert_equal(dd.highlight, 2)
+
+
+fn test_dropdown_type_to_search_resets_on_close() raises:
+    """Closing the popup discards the type-to-search prefix so the
+    next open starts fresh. A stale prefix surviving across reopens
+    would silently misroute the first keystroke."""
+    var opts = List[String]()
+    opts.append(String("apple"))
+    opts.append(String("banana"))
+    var dd = Dropdown(opts^, 0)
+    dd.open()
+    _ = dd.type_to_search(String("b"))
+    assert_equal(dd._type_ahead.buf, String("b"))
+    dd.close()
+    assert_equal(dd._type_ahead.buf, String(""))
+
+
+fn test_action_editor_consumes_browse_path() raises:
+    """When the embedded file dialog submits, the picked path must
+    land in the program field (not the cwd field, not nowhere). This
+    is the contract that lets the user click a file in Browse and end
+    up with that path filled in for them."""
+    var ed = ActionEditor()
+    ed.open(OnSaveAction(), -1)
+    ed.file_dialog.open(String("/"))
+    ed.file_dialog.selected_path = String("/usr/bin/black")
+    ed.file_dialog.submitted = True
+    ed._maybe_consume_browse()
+    assert_false(ed.file_dialog.active)
+    assert_equal(ed.entry.program, String("/usr/bin/black"))
+
+
 fn test_extension_of_helper() raises:
     assert_equal(extension_of(String("foo.mojo")), String("mojo"))
     assert_equal(extension_of(String("a/b/foo.MOJO")), String("mojo"))
@@ -3194,6 +3445,65 @@ fn test_editor_default_text_is_light_green() raises:
     # Past EOL the trailing fill cells must also be the new default.
     assert_equal(c.get(15, 0).attr.fg, LIGHT_GREEN)
     assert_equal(c.get(15, 0).attr.bg, BLUE)
+
+
+fn test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
+    """Grammars use ``end: "\\n(?!\\s)"`` to close a scope at end-of-
+    line unless the next line is an indented continuation (Elm/Haskell
+    ``import``/``module``). Per-line tokenization never sees ``\\n``,
+    so the tokenizer has an EOL post-pass that re-fires the top
+    frame's end regex against ``line + "\\n" + next_line`` at byte
+    ``n``. This test pins down both branches of that pass.
+
+    Pre-fix the import frame stayed open forever and its inner
+    patterns swallowed every later line — strings/keywords on row 2
+    were left uncolored or painted with the wrong scope."""
+    var grammar_json = String(
+        "{\"scopeName\":\"source.test\",\"patterns\":["
+        "{\"begin\":\"^\\\\b(import)\\\\s+\","
+        "\"end\":\"\\\\n(?!\\\\s)\","
+        "\"name\":\"meta.import.test\","
+        "\"beginCaptures\":{\"1\":{\"name\":\"keyword.control.test\"}},"
+        "\"patterns\":[{\"match\":\"[A-Z][A-Za-z0-9]*\","
+        "\"name\":\"support.module.test\"}]},"
+        "{\"match\":\"\\\\b(let)\\\\b\","
+        "\"name\":\"keyword.control.test\"}"
+        "],\"repository\":{}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+
+    # Branch 1 — non-indented next line: import frame must close at
+    # end of row 0. ``let`` on row 1 is a root-level keyword pattern
+    # that's NOT inside the import frame's nested list, so it can
+    # only fire from a clean root.
+    var lines = List[String]()
+    lines.append(String("import Foo"))
+    lines.append(String("let x"))
+    var hls = tokenize_with_grammar(g, lines)
+    var saw_let_keyword = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 1 and h.col_start == 0 and h.col_end == 3 \
+                and h.attr == highlight_keyword_attr():
+            saw_let_keyword = True
+    assert_true(saw_let_keyword)
+
+    # Branch 2 — indented next line: ``\\n(?!\\s)`` lookahead fails
+    # because the next line begins with whitespace, so the frame
+    # stays open through row 1. ``let`` on row 2 (after the frame
+    # finally closes at row 1's EOL) must still fire as a keyword.
+    var lines2 = List[String]()
+    lines2.append(String("import Foo"))
+    lines2.append(String("    Bar"))
+    lines2.append(String("let x"))
+    var hls2 = tokenize_with_grammar(g, lines2)
+    var saw_let_kw_row2 = False
+    for i in range(len(hls2)):
+        var h = hls2[i]
+        if h.row == 2 and h.col_start == 0 and h.col_end == 3 \
+                and h.attr == highlight_keyword_attr():
+            saw_let_kw_row2 = True
+    assert_true(saw_let_kw_row2)
 
 
 fn test_textmate_all_bundled_grammars_load() raises:
@@ -7518,6 +7828,20 @@ fn main() raises:
     test_downloadable_grammar_registry_misses_unknown()
     test_grammar_install_command_targets_user_config()
     test_user_grammar_path_for_ext_misses_when_not_installed()
+    test_on_save_action_default_is_empty()
+    test_on_save_action_copy_preserves_args()
+    test_settings_open_seeds_state()
+    test_settings_open_empty_parks_selection_at_minus_one()
+    test_settings_remove_marks_dirty()
+    test_settings_editor_submit_appends_new_entry()
+    test_settings_editor_submit_replaces_existing_entry()
+    test_action_editor_lang_dropdown_has_options()
+    test_action_editor_enter_opens_lang_popup()
+    test_dropdown_type_to_search_jumps_to_prefix()
+    test_dropdown_type_to_search_skips_empty_sentinel()
+    test_dropdown_type_to_search_recovers_from_stale_prefix()
+    test_dropdown_type_to_search_resets_on_close()
+    test_action_editor_consumes_browse_path()
     test_extension_of_helper()
     test_word_at_helper()
     test_highlight_for_extension_recognizes_mojo()
@@ -7538,6 +7862,7 @@ fn main() raises:
     test_textmate_incremental_matches_full_retokenize()
     test_editor_default_text_is_light_green()
     test_textmate_all_bundled_grammars_load()
+    test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()
     test_textmate_rust_block_comment_spans_lines()
     test_editor_refreshes_highlights_after_edits()
