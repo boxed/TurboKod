@@ -701,11 +701,16 @@ struct GitBranch(ImplicitlyCopyable, Movable):
 
 @fieldwise_init
 struct GitCommit(ImplicitlyCopyable, Movable):
-    """One row of ``git log --pretty=format``. ``date`` is YYYY-MM-DD."""
+    """One row of ``git log --pretty=format``. ``date`` is YYYY-MM-DD.
+    ``is_pushed`` is True when the commit is reachable from at least one
+    remote-tracking ref (i.e. already pushed somewhere); False when it
+    only exists locally. With no remotes configured, every commit is
+    treated as unpushed."""
     var short_sha: String
     var author: String
     var date: String
     var subject: String
+    var is_pushed: Bool
 
 
 fn _split_lines_keep_empty(text: String) -> List[String]:
@@ -786,11 +791,57 @@ fn fetch_git_branches(project_root: String) -> List[GitBranch]:
     return out^
 
 
+fn _fetch_unpushed_short_shas(
+    project_root: String, limit: Int,
+) -> List[String]:
+    """Short SHAs of commits reachable from HEAD that are *not* in any
+    remote-tracking ref. Used to flag local-only commits in the commits
+    pane. ``--abbrev-commit`` matches the abbreviation length used by
+    ``git log %h`` in :func:`fetch_git_commits`, so the strings line up
+    for direct equality membership checks."""
+    var out = List[String]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("rev-list"))
+    argv.append(String("-") + String(limit))
+    argv.append(String("HEAD"))
+    argv.append(String("--not"))
+    argv.append(String("--remotes"))
+    argv.append(String("--abbrev-commit"))
+    var stdout: String
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return out^
+        stdout = result.stdout
+    except:
+        return out^
+    var lines = _split_lines_keep_empty(stdout)
+    for li in range(len(lines)):
+        var line = lines[li]
+        if len(line.as_bytes()) > 0:
+            out.append(line)
+    return out^
+
+
+fn _list_contains(shas: List[String], sha: String) -> Bool:
+    for i in range(len(shas)):
+        if shas[i] == sha:
+            return True
+    return False
+
+
 fn fetch_git_commits(
     project_root: String, limit: Int = 50,
 ) -> List[GitCommit]:
     """Run ``git log -<limit> --pretty=format``. The newest commit is
-    first. Empty list on failure."""
+    first. Empty list on failure. Each entry's ``is_pushed`` is set
+    based on whether the commit is reachable from any remote-tracking
+    ref (cross-checked via :func:`_fetch_unpushed_short_shas`)."""
     var out = List[GitCommit]()
     if len(project_root.as_bytes()) == 0:
         return out^
@@ -811,14 +862,18 @@ fn fetch_git_commits(
         stdout = result.stdout
     except:
         return out^
+    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
     var lines = _split_lines_keep_empty(stdout)
     for li in range(len(lines)):
         var line = lines[li]
         if len(line.as_bytes()) == 0:
             continue
         var fields = _split_tab_fields(line, 4)
+        var pushed = not _list_contains(unpushed, fields[0])
         out.append(
-            GitCommit(fields[0], fields[1], fields[2], fields[3]),
+            GitCommit(
+                fields[0], fields[1], fields[2], fields[3], pushed,
+            ),
         )
     return out^
 

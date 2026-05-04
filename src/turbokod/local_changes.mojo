@@ -55,6 +55,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .painter import Painter
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index,
@@ -1255,8 +1256,12 @@ struct LocalChanges(Movable):
         # Per-segment colors (only used when the row isn't selected; on
         # the selection the row attr wins so the selection bar reads as
         # one continuous block — the same way git log's ``--color`` is
-        # suppressed inside lazygit's selection highlight).
-        var sha_attr    = Attr(YELLOW,      BLUE)
+        # suppressed inside lazygit's selection highlight). The SHA
+        # itself is green for commits that have been pushed to a remote
+        # and red for commits that only exist locally — at-a-glance
+        # signal of "what would I lose if this branch went away."
+        var sha_pushed   = Attr(LIGHT_GREEN, BLUE)
+        var sha_local    = Attr(LIGHT_RED,   BLUE)
         var author_attr = Attr(CYAN,        BLUE)
         var subject_attr = Attr(LIGHT_GRAY, BLUE)
         for i in range(height):
@@ -1272,7 +1277,7 @@ struct LocalChanges(Movable):
                 Rect(left, y, right + 1, y + 1), String(" "), row_attr,
             )
             var co = self.commits[idx]
-            var seg_sha    = sha_attr
+            var seg_sha    = sha_pushed if co.is_pushed else sha_local
             var seg_author = author_attr
             var seg_subj   = subject_attr
             if is_sel:
@@ -1319,7 +1324,8 @@ struct LocalChanges(Movable):
         if driving == _PANE_FILES:
             var rp = self._right_panes(screen)
             self._paint_panel_with_header(
-                canvas, left, right, rp[0], rp[1],
+                canvas,
+                Rect(left, rp[0], right + 1, rp[0] + rp[1]),
                 String("Unstaged"), _PANE_RIGHT_UNSTAGED,
                 self.unstaged,
                 section_attr,
@@ -1329,7 +1335,8 @@ struct LocalChanges(Movable):
                 canvas, left, right, rp[0] + rp[1], splitter_attr,
             )
             self._paint_panel_with_header(
-                canvas, left, right, rp[2], rp[3],
+                canvas,
+                Rect(left, rp[2], right + 1, rp[2] + rp[3]),
                 String("Staged"), _PANE_RIGHT_STAGED,
                 self.staged,
                 section_attr,
@@ -1343,7 +1350,8 @@ struct LocalChanges(Movable):
         else:
             info_title = String("Commit details")
         self._paint_panel_with_header(
-            canvas, left, right, top, bottom - top,
+            canvas,
+            Rect(left, top, right + 1, bottom),
             info_title, _PANE_RIGHT_INFO,
             self.info,
             section_attr,
@@ -1352,49 +1360,58 @@ struct LocalChanges(Movable):
 
     fn _paint_panel_with_header(
         self, mut canvas: Canvas,
-        left: Int, right: Int, top: Int, height: Int,
+        area: Rect,
         title: String, pane: Int,
         panel: RightPanel,
         section_attr: Attr,
         ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
         hunk_attr: Attr, header_attr: Attr,
     ):
-        if right <= left or height <= 1:
+        # Bind every write to ``area`` via a Painter — a long diff line
+        # or an over-wide title can't bleed into the neighbour panel,
+        # the splitter row, or off-screen. Children paint without
+        # needing to thread a clip arg through every primitive call.
+        if area.width() < 1 or area.height() < 1:
             return
-        # Header bar.
-        canvas.fill(
-            Rect(left, top, right + 1, top + 1), String(" "), section_attr,
+        var painter = Painter(area)
+        var header_rect = Rect(
+            area.a.x, area.a.y, area.b.x, area.a.y + 1,
         )
+        painter.fill(canvas, header_rect, String(" "), section_attr)
         var marker = String("> ") if self.focus == pane else String("  ")
-        _ = canvas.put_text(
-            Point(left, top), marker + title, section_attr, right + 1,
+        _ = painter.put_text(
+            canvas, Point(area.a.x, area.a.y),
+            marker + title, section_attr,
         )
-        var body_top = top + 1
-        var body_h = height - 1
-        if body_h <= 0:
+        if area.height() <= 1:
             return
+        var body_rect = Rect(
+            area.a.x, area.a.y + 1, area.b.x, area.b.y,
+        )
         self._paint_panel_body(
-            canvas, left, right, body_top, body_h, pane, panel,
+            canvas, body_rect, pane, panel,
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
 
     fn _paint_panel_body(
         self, mut canvas: Canvas,
-        left: Int, right: Int, top: Int, height: Int,
+        area: Rect,
         pane: Int, panel: RightPanel,
         ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
         hunk_attr: Attr, header_attr: Attr,
     ):
-        if len(panel.lines) == 0:
+        if area.is_empty() or len(panel.lines) == 0:
             return
+        var painter = Painter(area)
         var cursor_active = Attr(BLACK, YELLOW)
         var cursor_inactive = Attr(BLACK, LIGHT_GRAY)
         var pane_focused = (self.focus == pane)
+        var height = area.height()
         for i in range(height):
             var idx = panel.scroll + i
             if idx >= len(panel.lines):
                 break
-            var y = top + i
+            var y = area.a.y + i
             var line = panel.lines[idx]
             var is_cursor = (idx == panel.cursor and pane_focused)
             var attr: Attr
@@ -1409,8 +1426,10 @@ struct LocalChanges(Movable):
             # background so the gap to the right reads as part of the
             # selection bar, matching the file-list behavior.
             if is_cursor:
-                canvas.fill(
-                    Rect(left, y, right + 1, y + 1), String(" "), attr,
+                painter.fill(
+                    canvas,
+                    Rect(area.a.x, y, area.b.x, y + 1),
+                    String(" "), attr,
                 )
             var bytes = line.as_bytes()
             var start = panel.scroll_x
@@ -1419,7 +1438,9 @@ struct LocalChanges(Movable):
             var visible = String(StringSlice(
                 unsafe_from_utf8=bytes[start:len(bytes)],
             ))
-            _ = canvas.put_text(Point(left, y), visible, attr, right + 1)
+            _ = painter.put_text(
+                canvas, Point(area.a.x, y), visible, attr,
+            )
         _ = cursor_inactive   # reserved for future "cursor while focus elsewhere"
 
     # --- events -----------------------------------------------------------
