@@ -25,9 +25,9 @@ from .colors import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP,
-    KEY_UP, MOD_ALT, MOD_CTRL,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
+    MOD_ALT, MOD_CTRL,
+    MOUSE_BUTTON_LEFT,
 )
 from .file_io import read_file, stat_file
 from .geometry import Point, Rect
@@ -36,6 +36,7 @@ from .highlight import (
     extension_of, highlight_for_extension, highlight_for_extension_cached,
 )
 from .lsp import CaptureResult, LspProcess, capture_command
+from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
 from .string_utils import split_lines
@@ -593,31 +594,7 @@ struct ProjectFind(Movable):
             self.selected_line = m.line_no
             self.submitted = True
             return True
-        if k == KEY_UP:
-            if self.selected > 0:
-                self.selected -= 1
-                self._scroll_to_selection()
-                self._refresh_context_for_selection()
-            return True
-        if k == KEY_DOWN:
-            if self.selected + 1 < len(self.matches):
-                self.selected += 1
-                self._scroll_to_selection()
-                self._refresh_context_for_selection()
-            return True
-        if k == KEY_PAGEUP:
-            self.selected -= 10
-            if self.selected < 0:
-                self.selected = 0
-            self._scroll_to_selection()
-            self._refresh_context_for_selection()
-            return True
-        if k == KEY_PAGEDOWN:
-            self.selected += 10
-            if self.selected >= len(self.matches):
-                self.selected = len(self.matches) - 1
-            if self.selected < 0:
-                self.selected = 0
+        if picker_nav_key(k, len(self.matches), self.selected):
             self._scroll_to_selection()
             self._refresh_context_for_selection()
             return True
@@ -648,21 +625,10 @@ struct ProjectFind(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         if event.pressed and not event.motion:
-            if event.button == MOUSE_WHEEL_UP:
-                if self.scroll > 0:
-                    self.scroll -= 3
-                    if self.scroll < 0:
-                        self.scroll = 0
-                return True
-            if event.button == MOUSE_WHEEL_DOWN:
-                var visible = self._list_height(screen)
-                var max_scroll = len(self.matches) - visible
-                if max_scroll < 0:
-                    max_scroll = 0
-                if self.scroll < max_scroll:
-                    self.scroll += 3
-                    if self.scroll > max_scroll:
-                        self.scroll = max_scroll
+            if picker_wheel_scroll(
+                event.button, self.scroll, len(self.matches),
+                self._list_height(screen),
+            ):
                 return True
         if event.button != MOUSE_BUTTON_LEFT:
             return True

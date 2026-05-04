@@ -158,6 +158,51 @@ fn json_object() -> JsonValue:
     return v^
 
 
+# --- typed field accessors -------------------------------------------------
+#
+# These collapse the very common
+#   ``var v = obj.object_get(key); if v and v.value().is_T(): ...``
+# pattern down to one call. Each one takes a default for the missing /
+# wrong-type case so the call site doesn't have to branch.
+
+
+fn json_get_bool(obj: JsonValue, key: String, default: Bool) -> Bool:
+    var v = obj.object_get(key)
+    if v and v.value().is_bool():
+        return v.value().as_bool()
+    return default
+
+
+fn json_get_int(obj: JsonValue, key: String, default: Int) -> Int:
+    var v = obj.object_get(key)
+    if v and v.value().is_int():
+        return v.value().as_int()
+    return default
+
+
+fn json_get_string(obj: JsonValue, key: String) -> String:
+    """Return the string at ``key`` or ``""`` if missing / wrong type."""
+    var v = obj.object_get(key)
+    if v and v.value().is_string():
+        return v.value().as_str()
+    return String("")
+
+
+fn json_get_string_array(obj: JsonValue, key: String) -> List[String]:
+    """Return the array-of-strings at ``key`` or an empty list. Non-string
+    array entries are silently skipped."""
+    var out = List[String]()
+    var v = obj.object_get(key)
+    if not v or not v.value().is_array():
+        return out^
+    var arr = v.value()
+    for i in range(arr.array_len()):
+        var item = arr.array_at(i)
+        if item.is_string():
+            out.append(item.as_str())
+    return out^
+
+
 # --- encoder ---------------------------------------------------------------
 
 

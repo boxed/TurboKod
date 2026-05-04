@@ -23,11 +23,12 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .doc_store import DocEntry, html_to_text
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP,
-    KEY_UP, MOD_ALT, MOD_CTRL,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
+    MOD_ALT, MOD_CTRL,
+    MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
 from .text_field import text_field_clipboard_key
 from .window import paint_drop_shadow
@@ -223,28 +224,7 @@ struct DocPick(Movable):
             self.selected_index = self.matched[self.selected]
             self.submitted = True
             return True
-        if k == KEY_UP:
-            if self.selected > 0:
-                self.selected -= 1
-                self._scroll_to_selection()
-            return True
-        if k == KEY_DOWN:
-            if self.selected + 1 < len(self.matched):
-                self.selected += 1
-                self._scroll_to_selection()
-            return True
-        if k == KEY_PAGEUP:
-            self.selected -= 10
-            if self.selected < 0:
-                self.selected = 0
-            self._scroll_to_selection()
-            return True
-        if k == KEY_PAGEDOWN:
-            self.selected += 10
-            if self.selected >= len(self.matched):
-                self.selected = len(self.matched) - 1
-            if self.selected < 0:
-                self.selected = 0
+        if picker_nav_key(k, len(self.matched), self.selected):
             self._scroll_to_selection()
             return True
         if k == KEY_BACKSPACE:
@@ -275,21 +255,10 @@ struct DocPick(Movable):
             return True
         var rect = self._rect(screen)
         if event.pressed and not event.motion:
-            if event.button == MOUSE_WHEEL_UP:
-                if self.scroll > 0:
-                    self.scroll -= 3
-                    if self.scroll < 0:
-                        self.scroll = 0
-                return True
-            if event.button == MOUSE_WHEEL_DOWN:
-                var h = self._list_height(rect)
-                var max_scroll = len(self.matched) - h
-                if max_scroll < 0:
-                    max_scroll = 0
-                if self.scroll < max_scroll:
-                    self.scroll += 3
-                    if self.scroll > max_scroll:
-                        self.scroll = max_scroll
+            if picker_wheel_scroll(
+                event.button, self.scroll, len(self.matched),
+                self._list_height(rect),
+            ):
                 return True
         if event.button != MOUSE_BUTTON_LEFT:
             return True

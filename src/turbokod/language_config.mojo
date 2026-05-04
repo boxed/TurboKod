@@ -25,7 +25,9 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import read_file
-from .json import JsonValue, parse_json
+from .json import (
+    JsonValue, json_get_string, json_get_string_array, parse_json,
+)
 
 
 comptime LANGUAGES_JSON_PATH = String("src/turbokod/data/languages.json")
@@ -76,27 +78,10 @@ struct LanguageSpec(ImplicitlyCopyable, Movable):
         self.install_hint = copy.install_hint
 
 
-fn _string_array(v: JsonValue) -> List[String]:
-    """Pull a JSON array of strings into a Mojo List, dropping non-string
-    entries silently — the refresh script only emits strings here, but
-    tolerating noise keeps a malformed catalog from crashing startup."""
-    var out = List[String]()
-    if not v.is_array():
-        return out^
-    for i in range(v.array_len()):
-        var elem = v.array_at(i)
-        if elem.is_string():
-            out.append(elem.as_str())
-    return out^
-
-
 fn _candidate_from_json(v: JsonValue) -> ServerCandidate:
-    var argv = List[String]()
-    if v.is_object():
-        var argv_v = v.object_get(String("argv"))
-        if argv_v:
-            argv = _string_array(argv_v.value())
-    return ServerCandidate(argv^)
+    if not v.is_object():
+        return ServerCandidate(List[String]())
+    return ServerCandidate(json_get_string_array(v, String("argv")))
 
 
 fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
@@ -106,15 +91,11 @@ fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
     if not v.is_object():
         return Optional[LanguageSpec]()
 
-    var lang_v = v.object_get(String("language_id"))
-    if not lang_v or not lang_v.value().is_string():
+    var language_id = json_get_string(v, String("language_id"))
+    if len(language_id.as_bytes()) == 0:
         return Optional[LanguageSpec]()
-    var language_id = lang_v.value().as_str()
 
-    var file_types = List[String]()
-    var ft_v = v.object_get(String("file_types"))
-    if ft_v:
-        file_types = _string_array(ft_v.value())
+    var file_types = json_get_string_array(v, String("file_types"))
 
     var candidates = List[ServerCandidate]()
     var cands_v = v.object_get(String("candidates"))
@@ -123,10 +104,7 @@ fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
         for i in range(arr.array_len()):
             candidates.append(_candidate_from_json(arr.array_at(i)))
 
-    var install_hint = String("")
-    var hint_v = v.object_get(String("install_hint"))
-    if hint_v and hint_v.value().is_string():
-        install_hint = hint_v.value().as_str()
+    var install_hint = json_get_string(v, String("install_hint"))
 
     return Optional[LanguageSpec](LanguageSpec(
         language_id^, file_types^, candidates^, install_hint^,

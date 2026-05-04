@@ -37,6 +37,7 @@ from .file_io import (
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
+    json_get_bool, json_get_int, json_get_string,
 )
 
 
@@ -188,27 +189,6 @@ fn _resolve_session_path(project_root: String, stored: String) -> String:
     return join_path(project_root, stored)
 
 
-fn _int_field(obj: JsonValue, key: String, default: Int) -> Int:
-    var v = obj.object_get(key)
-    if v and v.value().is_int():
-        return v.value().as_int()
-    return default
-
-
-fn _bool_field(obj: JsonValue, key: String, default: Bool) -> Bool:
-    var v = obj.object_get(key)
-    if v and v.value().is_bool():
-        return v.value().as_bool()
-    return default
-
-
-fn _string_field(obj: JsonValue, key: String) -> String:
-    var v = obj.object_get(key)
-    if v and v.value().is_string():
-        return v.value().as_str()
-    return String("")
-
-
 fn _int_array(value: JsonValue) -> List[Int]:
     var out = List[Int]()
     if not value.is_array():
@@ -251,13 +231,13 @@ fn _parse_session_window(node: JsonValue) -> SessionWindow:
     var w = SessionWindow()
     if not node.is_object():
         return w^
-    w.path = _string_field(node, String("path"))
+    w.path = json_get_string(node, String("path"))
     var rect = _read_int_quad(node, String("rect"), 0, 0, 0, 0)
     w.rect_a_x = rect[0]
     w.rect_a_y = rect[1]
     w.rect_b_x = rect[2]
     w.rect_b_y = rect[3]
-    w.is_maximized = _bool_field(node, String("maximized"), False)
+    w.is_maximized = json_get_bool(node, String("maximized"), False)
     var restore = _read_int_quad(
         node, String("restore_rect"),
         w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y,
@@ -312,7 +292,7 @@ fn load_session(project_root: String) -> Session:
     var z_v = root.object_get(String("z_order"))
     if z_v:
         out.z_order = _int_array(z_v.value())
-    out.focused = _int_field(root, String("focused"), -1)
+    out.focused = json_get_int(root, String("focused"), -1)
     if out.focused < 0 or out.focused >= len(out.windows):
         out.focused = len(out.windows) - 1
     return out^

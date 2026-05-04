@@ -15,6 +15,7 @@ from std.ffi import external_call
 from .file_io import read_file, stat_file, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_object, json_str,
+    json_get_bool, json_get_string, json_get_string_array,
     parse_json,
 )
 from .posix import getenv_value
@@ -161,25 +162,19 @@ fn load_config() -> TurbokodConfig:
         var root = parse_json(text)
         if not root.is_object():
             return cfg
-        var ln = root.object_get(String("line_numbers"))
-        if ln and ln.value().is_bool():
-            cfg.line_numbers = ln.value().as_bool()
-        var sw = root.object_get(String("soft_wrap"))
-        if sw and sw.value().is_bool():
-            cfg.soft_wrap = sw.value().as_bool()
-        var gc = root.object_get(String("git_changes"))
-        if gc and gc.value().is_bool():
-            cfg.git_changes = gc.value().as_bool()
-        var tb = root.object_get(String("tab_bar"))
-        if tb and tb.value().is_bool():
-            cfg.tab_bar = tb.value().as_bool()
-        var rp = root.object_get(String("recent_projects"))
-        if rp and rp.value().is_array():
-            var arr = rp.value()
-            for i in range(arr.array_len()):
-                var item = arr.array_at(i)
-                if item.is_string():
-                    cfg.recent_projects.append(item.as_str())
+        cfg.line_numbers = json_get_bool(
+            root, String("line_numbers"), cfg.line_numbers,
+        )
+        cfg.soft_wrap = json_get_bool(
+            root, String("soft_wrap"), cfg.soft_wrap,
+        )
+        cfg.git_changes = json_get_bool(
+            root, String("git_changes"), cfg.git_changes,
+        )
+        cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
+        cfg.recent_projects = json_get_string_array(
+            root, String("recent_projects"),
+        )
         var osa = root.object_get(String("on_save_actions"))
         if osa and osa.value().is_array():
             var arr = osa.value()
@@ -188,22 +183,10 @@ fn load_config() -> TurbokodConfig:
                 if not item.is_object():
                     continue
                 var act = OnSaveAction()
-                var lid = item.object_get(String("language_id"))
-                if lid and lid.value().is_string():
-                    act.language_id = lid.value().as_str()
-                var prog = item.object_get(String("program"))
-                if prog and prog.value().is_string():
-                    act.program = prog.value().as_str()
-                var args = item.object_get(String("args"))
-                if args and args.value().is_array():
-                    var aarr = args.value()
-                    for k in range(aarr.array_len()):
-                        var av = aarr.array_at(k)
-                        if av.is_string():
-                            act.args.append(av.as_str())
-                var cwd = item.object_get(String("cwd"))
-                if cwd and cwd.value().is_string():
-                    act.cwd = cwd.value().as_str()
+                act.language_id = json_get_string(item, String("language_id"))
+                act.program = json_get_string(item, String("program"))
+                act.args = json_get_string_array(item, String("args"))
+                act.cwd = json_get_string(item, String("cwd"))
                 cfg.on_save_actions.append(act^)
     except:
         pass

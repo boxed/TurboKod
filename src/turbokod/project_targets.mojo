@@ -48,7 +48,7 @@ from .file_io import (
 )
 from .json import (
     JsonValue, encode_json, json_array, json_object, json_str,
-    parse_json,
+    json_get_string, json_get_string_array, parse_json,
 )
 from .posix import getenv_value
 from std.ffi import external_call
@@ -150,24 +150,6 @@ fn _ensure_dir(path: String):
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-fn _string_array(value: JsonValue) -> List[String]:
-    var out = List[String]()
-    if not value.is_array():
-        return out^
-    for i in range(value.array_len()):
-        var item = value.array_at(i)
-        if item.is_string():
-            out.append(item.as_str())
-    return out^
-
-
-fn _string_field(obj: JsonValue, key: String) -> String:
-    var v = obj.object_get(key)
-    if v and v.value().is_string():
-        return v.value().as_str()
-    return String("")
-
-
 fn _parse_target(node: JsonValue) -> RunTarget:
     """Parse one target node. Accepts both the new flat shape
     (``program`` / ``args`` / ``language``) and the legacy nested
@@ -182,14 +164,12 @@ fn _parse_target(node: JsonValue) -> RunTarget:
     var t = RunTarget()
     if not node.is_object():
         return t^
-    t.name = _string_field(node, String("name"))
-    t.cwd = _string_field(node, String("cwd"))
+    t.name = json_get_string(node, String("name"))
+    t.cwd = json_get_string(node, String("cwd"))
     # New shape — flat keys.
-    t.program = _string_field(node, String("program"))
-    var args_v = node.object_get(String("args"))
-    if args_v:
-        t.args = _string_array(args_v.value())
-    t.debug_language = _string_field(node, String("language"))
+    t.program = json_get_string(node, String("program"))
+    t.args = json_get_string_array(node, String("args"))
+    t.debug_language = json_get_string(node, String("language"))
     # Legacy fallback. ``run`` was a shell command string; we drop
     # any space-separated args into ``args`` for backward compat —
     # not perfect for shell-quoted strings but covers the common
@@ -208,15 +188,13 @@ fn _parse_target(node: JsonValue) -> RunTarget:
     var debug_v = node.object_get(String("debug"))
     if debug_v and debug_v.value().is_object():
         if len(t.debug_language.as_bytes()) == 0:
-            t.debug_language = _string_field(
+            t.debug_language = json_get_string(
                 debug_v.value(), String("language"),
             )
         if len(t.program.as_bytes()) == 0:
-            t.program = _string_field(debug_v.value(), String("program"))
+            t.program = json_get_string(debug_v.value(), String("program"))
         if len(t.args) == 0:
-            var dargs_v = debug_v.value().object_get(String("args"))
-            if dargs_v:
-                t.args = _string_array(dargs_v.value())
+            t.args = json_get_string_array(debug_v.value(), String("args"))
     return t^
 
 

@@ -96,6 +96,7 @@ from .highlight import (
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
+    json_get_bool, json_get_int, json_get_string, json_get_string_array,
 )
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE,
