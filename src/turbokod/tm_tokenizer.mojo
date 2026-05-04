@@ -135,7 +135,10 @@ fn tokenize_with_grammar_full(
     var out = List[Highlight]()
     var stack = List[Frame]()
     for row in range(len(lines)):
-        _tokenize_line(grammar, lines[row], row, stack, out)
+        var next_line = String("")
+        if row + 1 < len(lines):
+            next_line = lines[row + 1]
+        _tokenize_line(grammar, lines[row], next_line, row, stack, out)
         post_stacks.append(copy_stack(stack))
     return out^
 
@@ -174,7 +177,10 @@ fn tokenize_lines_from(
     var stack = copy_stack(start_stack)
     var row = start_row
     while row < len(lines):
-        _tokenize_line(grammar, lines[row], row, stack, out)
+        var next_line = String("")
+        if row + 1 < len(lines):
+            next_line = lines[row + 1]
+        _tokenize_line(grammar, lines[row], next_line, row, stack, out)
         post_stacks.append(copy_stack(stack))
         if row < len(cached_post_stacks) \
                 and stack_eq(stack, cached_post_stacks[row]):
@@ -186,7 +192,7 @@ fn tokenize_lines_from(
 
 
 fn _tokenize_line(
-    grammar: Grammar, line: String, row: Int,
+    grammar: Grammar, line: String, next_line: String, row: Int,
     mut stack: List[Frame], mut out: List[Highlight],
 ):
     var hb = line.as_bytes()
@@ -332,6 +338,50 @@ fn _tokenize_line(
         # Unknown / INCLUDE shouldn't reach here because expansion
         # filters them out. Defensive advance.
         pos = match_end
+
+    # End-of-line post-pass for ``\\n``-bearing end regexes. Several
+    # grammars (Elm/Haskell ``import`` and ``module``, etc.) close a
+    # scope with ``end: "\\n(?!\\s)"`` — read as "the construct ends
+    # at the newline that's followed by a non-whitespace character on
+    # the next line." Per-line tokenization would never see ``\\n``,
+    # so without this pass the frame stays open forever and poisons
+    # the rest of the file (everything inside it gets the wrong scope
+    # — or no scope at all if no inner pattern matches).
+    #
+    # We synthesize a virtual ``line + "\\n" + next_line`` and try the
+    # top frame's end regex at byte ``n`` (the position of the virtual
+    # newline). If it matches there, we close the frame; we repeat
+    # while the new top still wants to close on the same boundary.
+    # ``next_line`` is empty on the last row of the buffer, which makes
+    # ``(?!\\s)``-style lookaheads succeed against end-of-string —
+    # treating EOF the same as "next line starts with non-whitespace,"
+    # which closes any single-line construct. Highlight ranges are
+    # clamped to ``n`` so the ``\\n`` itself doesn't paint past the
+    # visible line.
+    var line_nl = line + String("\n") + next_line
+    while len(stack) > 0:
+        var top = stack[len(stack) - 1]
+        var top_pat = grammar.patterns[top.pattern_idx]
+        if top_pat.kind != PATTERN_BEGIN_END:
+            break
+        var end_rx = grammar.regexes[top_pat.end_idx]
+        var m_opt = end_rx.search_at(line_nl, n)
+        if not m_opt:
+            break
+        var m = m_opt.value()
+        if m.start != n:
+            break
+        var clamp_end = m.end
+        if clamp_end > n:
+            clamp_end = n
+        if clamp_end > m.start:
+            var attr = _attr_for_scopes(top.scope_chain, top_pat.name)
+            out.append(Highlight(row, m.start, clamp_end, attr))
+            _emit_captures(
+                grammar, top.scope_chain, top_pat.name, top_pat.end_captures,
+                m, line_nl, row, out,
+            )
+        stack.resize(len(stack) - 1, _empty_frame())
 
     # Bracket post-pass. TextMate grammars vary wildly in whether they
     # tag ``()`` / ``[]`` / ``{}`` — Python's vendored grammar doesn't
