@@ -3792,6 +3792,7 @@ struct Desktop(Movable):
         var lang = String("")
         if lang_idx >= 0:
             lang = self.lsp_specs[lang_idx].language_id
+        var ran_any = False
         for i in range(len(actions)):
             var act = actions[i]
             if len(act.language_id.as_bytes()) > 0 \
@@ -3800,6 +3801,27 @@ struct Desktop(Movable):
             if len(act.program.as_bytes()) == 0:
                 continue
             self._spawn_on_save_action(act, saved_path)
+            ran_any = True
+        # Formatters typically rewrite the saved file in place; pick up
+        # the new bytes so the buffer doesn't drift from disk. The
+        # buffer is clean (just saved + the action ran synchronously),
+        # so this hits the clean-reload path — no merge needed.
+        if ran_any:
+            self._reload_after_on_save(saved_path)
+
+    fn _reload_after_on_save(mut self, saved_path: String):
+        """Re-stat the editor backing ``saved_path`` and adopt any new
+        bytes the on-save action wrote. Silent on no-change."""
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            if self.windows.windows[i].editor.file_path != saved_path:
+                continue
+            try:
+                _ = self.windows.windows[i].editor.check_for_external_change()
+            except:
+                pass
+            return
 
     fn _spawn_on_save_action(
         mut self, act: OnSaveAction, saved_path: String,
@@ -3823,7 +3845,8 @@ struct Desktop(Movable):
         var cmd = String("cd '") + cwd + String("' && '") + act.program \
             + String("'")
         for k in range(len(act.args)):
-            cmd = cmd + String(" '") + act.args[k] + String("'")
+            var expanded = _expand_save_placeholders(act.args[k], saved_path)
+            cmd = cmd + String(" '") + expanded + String("'")
         var argv = List[String]()
         argv.append(String("sh"))
         argv.append(String("-c"))
@@ -4536,6 +4559,42 @@ fn _starts_with(s: String, prefix: String) -> Bool:
         if sb[i] != pb[i]:
             return False
     return True
+
+
+fn _expand_save_placeholders(arg: String, saved_path: String) -> String:
+    """Replace every literal ``$FilePath$`` in ``arg`` with ``saved_path``.
+
+    Only one placeholder is recognised today; this is the entry point
+    for adding more later (``$FileDir$``, ``$ProjectDir$``, …) without
+    touching the call site.
+    """
+    var token_str = String("$FilePath$")
+    var token = token_str.as_bytes()
+    var b = arg.as_bytes()
+    var n = len(b)
+    var t = len(token)
+    if n < t:
+        return arg
+    var out = String("")
+    var i = 0
+    var run_start = 0
+    while i + t <= n:
+        var hit = True
+        for k in range(t):
+            if b[i + k] != token[k]:
+                hit = False
+                break
+        if hit:
+            if i > run_start:
+                out = out + String(StringSlice(unsafe_from_utf8=b[run_start:i]))
+            out = out + saved_path
+            i += t
+            run_start = i
+        else:
+            i += 1
+    if run_start < n:
+        out = out + String(StringSlice(unsafe_from_utf8=b[run_start:n]))
+    return out
 
 
 

@@ -9,8 +9,8 @@ a single record. Layout::
     ║                                                     ║
     ║ Program:    [/usr/local/bin/black…………]  [ Browse ]  ║
     ║                                                     ║
-    ║ Arguments:  [--quiet $FILE………………………]                ║
-    ║                                                     ║
+    ║ Arguments:  [--quiet $FilePath$………………]                ║
+    ║             ($FilePath$ expands to the saved path)  ║
     ║ Working dir [………………………………………………]                    ║
     ║             (empty = project root)                  ║
     ║                                                     ║
@@ -154,6 +154,12 @@ struct ActionEditor(Movable):
     drops the toggle so clicks felt like no-ops. Re-seeded from
     ``built_in_servers()`` on every ``open`` so a freshly-loaded LSP
     catalog is reflected."""
+    var args_text: String
+    """Free-form edit buffer for the Arguments field. Held as a single
+    string while the dialog is open so the user can type spaces and
+    trailing whitespace without losing them to a split-on-space
+    round-trip. Committed to ``entry.args`` via ``_split_args`` only
+    when the user presses Save."""
     var _buttons: List[_PlacedButton]
 
     fn __init__(out self):
@@ -166,6 +172,7 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog = FileDialog()
         self.lang_dropdown = _build_lang_dropdown(String(""))
+        self.args_text = String("")
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Browse "), 0, 0), _FOCUS_BROWSE, True,
@@ -184,6 +191,7 @@ struct ActionEditor(Movable):
         # exclusivity check rejects reading a field on a value we're
         # about to move.
         var seed_lang = entry.language_id
+        var seed_args = _join_args(entry.args)
         self.entry = entry^
         self.edit_index = edit_index
         self.active = True
@@ -192,6 +200,7 @@ struct ActionEditor(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self.lang_dropdown = _build_lang_dropdown(seed_lang^)
+        self.args_text = seed_args^
 
     fn close(mut self):
         self.active = False
@@ -203,6 +212,7 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog.close()
         self.lang_dropdown = _build_lang_dropdown(String(""))
+        self.args_text = String("")
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
@@ -230,6 +240,11 @@ struct ActionEditor(Movable):
         _ = canvas.put_text(_label_at(rect, 2), String("Language:"), bg)
         _ = canvas.put_text(_label_at(rect, 4), String("Program:"), bg)
         _ = canvas.put_text(_label_at(rect, 6), String("Arguments:"), bg)
+        _ = canvas.put_text(
+            Point(_label_at(rect, 7).x + _LABEL_COL_W, rect.a.y + 7),
+            String("$FilePath$ expands to the saved file path"),
+            hint, rect.b.x - 2,
+        )
         _ = canvas.put_text(_label_at(rect, 8), String("Working dir:"), bg)
         _ = canvas.put_text(
             Point(_label_at(rect, 9).x + _LABEL_COL_W, rect.a.y + 9),
@@ -241,9 +256,7 @@ struct ActionEditor(Movable):
         self._paint_input(
             canvas, rect, _FOCUS_PROGRAM, self.entry.program, browse_w + 2,
         )
-        self._paint_input(
-            canvas, rect, _FOCUS_ARGS, _join_args(self.entry.args), 0,
-        )
+        self._paint_input(canvas, rect, _FOCUS_ARGS, self.args_text, 0)
         self._paint_input(canvas, rect, _FOCUS_CWD, self.entry.cwd, 0)
         # Buttons.
         self._paint_buttons(canvas, rect)
@@ -398,6 +411,7 @@ struct ActionEditor(Movable):
             self._open_browse()
             return True
         if self.focus == _FOCUS_SAVE:
+            self.entry.args = _split_args(self.args_text)
             self.submitted = True
             return True
         if self.focus == _FOCUS_CANCEL:
@@ -441,9 +455,7 @@ struct ActionEditor(Movable):
             self.entry.program = _str_pop_byte(self.entry.program)
             return True
         if self.focus == _FOCUS_ARGS:
-            var joined = _join_args(self.entry.args)
-            joined = _str_pop_byte(joined)
-            self.entry.args = _split_args(joined)
+            self.args_text = _str_pop_byte(self.args_text)
             return True
         if self.focus == _FOCUS_CWD:
             self.entry.cwd = _str_pop_byte(self.entry.cwd)
@@ -455,8 +467,7 @@ struct ActionEditor(Movable):
             self.entry.program = self.entry.program + ch
             return True
         if self.focus == _FOCUS_ARGS:
-            var joined = _join_args(self.entry.args) + ch
-            self.entry.args = _split_args(joined)
+            self.args_text = self.args_text + ch
             return True
         if self.focus == _FOCUS_CWD:
             self.entry.cwd = self.entry.cwd + ch
@@ -468,10 +479,7 @@ struct ActionEditor(Movable):
             var clip = text_field_clipboard_key(event, self.entry.program)
             return clip.consumed
         if self.focus == _FOCUS_ARGS:
-            var joined = _join_args(self.entry.args)
-            var clip = text_field_clipboard_key(event, joined)
-            if clip.consumed and clip.changed:
-                self.entry.args = _split_args(joined)
+            var clip = text_field_clipboard_key(event, self.args_text)
             return clip.consumed
         if self.focus == _FOCUS_CWD:
             var clip = text_field_clipboard_key(event, self.entry.cwd)

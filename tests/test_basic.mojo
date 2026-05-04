@@ -40,6 +40,7 @@ from turbokod.desktop import (
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND, PROJECT_REPLACE,
     PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
+    _expand_save_placeholders,
     _find_doc_entry_for_word,
     ctrl_key, format_hotkey,
 )
@@ -2833,6 +2834,121 @@ fn test_action_editor_consumes_browse_path() raises:
     ed._maybe_consume_browse()
     assert_false(ed.file_dialog.active)
     assert_equal(ed.entry.program, String("/usr/bin/black"))
+
+
+fn test_action_editor_args_field_accepts_spaces() raises:
+    """Typing ``a b c`` into the Arguments field used to drop the
+    interior spaces because the field round-tripped through
+    ``_split_args``/``_join_args`` on every keystroke. The fix holds a
+    single string in ``args_text`` while editing and only splits on
+    Save, so multiple arguments can actually be typed."""
+    var ed = ActionEditor()
+    ed.open(OnSaveAction(), -1)
+    ed.focus = UInt8(3)  # _FOCUS_ARGS
+    var letters = String("a b c")
+    var lb = letters.as_bytes()
+    for i in range(len(lb)):
+        var ev = Event.key_event(UInt32(Int(lb[i])), MOD_NONE)
+        _ = ed.handle_key(ev)
+    assert_equal(ed.args_text, String("a b c"))
+    # The committed list is empty until Save fires.
+    assert_equal(len(ed.entry.args), 0)
+    ed.focus = UInt8(5)  # _FOCUS_SAVE
+    var enter = Event.key_event(KEY_ENTER, MOD_NONE)
+    _ = ed.handle_key(enter)
+    assert_true(ed.submitted)
+    assert_equal(len(ed.entry.args), 3)
+    assert_equal(ed.entry.args[0], String("a"))
+    assert_equal(ed.entry.args[1], String("b"))
+    assert_equal(ed.entry.args[2], String("c"))
+
+
+fn test_action_editor_args_buffer_seeded_from_entry() raises:
+    """Editing an existing action seeds the args edit-buffer with the
+    space-joined existing args. Without this, opening a record with
+    args ``["--quiet", "$FilePath$"]`` would show an empty Arguments
+    field and the user would lose their config the moment they saved."""
+    var args = List[String]()
+    args.append(String("--quiet"))
+    args.append(String("$FilePath$"))
+    var existing = OnSaveAction(
+        String("python"), String("/usr/bin/black"), args^, String(""),
+    )
+    var ed = ActionEditor()
+    ed.open(existing^, 0)
+    assert_equal(ed.args_text, String("--quiet $FilePath$"))
+
+
+fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
+    """Formatters like ``black`` rewrite the file on disk; without a
+    reload the buffer drifts to the pre-format text and the next edit
+    silently overwrites the formatter's output. After the action runs,
+    the editor must adopt the new on-disk bytes."""
+    var path = _temp_path(String("_onsave_reload.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(
+        String("onsave_reload.txt"), Rect(0, 1, 40, 12), path,
+    ))
+    # Mark dirty so ``save`` actually writes (a clean buffer skips the
+    # write entirely).
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    # Configure a no-language-filter on-save action that overwrites the
+    # saved file with new bytes. ``$FilePath$`` is expanded before the
+    # outer sh -c sees it, so the shell receives a literal path.
+    var args = List[String]()
+    args.append(String("-c"))
+    # Backslashes in the format would survive Mojo's escape but get
+    # eaten by the *outer* sh -c when single-quoted strings are
+    # concatenated; use printf with a literal arg to dodge that.
+    args.append(String("printf %s world > $FilePath$"))
+    d.config.on_save_actions.append(OnSaveAction(
+        String(""), String("/bin/sh"), args^, String(""),
+    ))
+    var maybe = d.dispatch_action(EDITOR_SAVE, _SCREEN)
+    assert_false(Bool(maybe))
+    # Disk reflects the action's output.
+    assert_equal(read_file(path), String("world"))
+    # And the buffer was reloaded — without the post-action reload the
+    # editor would still be holding "hello!\n".
+    assert_equal(
+        d.windows.windows[0].editor.buffer.line(0), String("world"),
+    )
+    assert_false(d.windows.windows[0].editor.dirty)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_expand_save_placeholders_substitutes_filepath() raises:
+    """``$FilePath$`` in an arg is replaced by the saved file path at
+    spawn time. This is the only placeholder we recognise today."""
+    var got = _expand_save_placeholders(
+        String("$FilePath$"), String("/work/main.py"),
+    )
+    assert_equal(got, String("/work/main.py"))
+    var inline = _expand_save_placeholders(
+        String("--target=$FilePath$"), String("/work/main.py"),
+    )
+    assert_equal(inline, String("--target=/work/main.py"))
+    var multi = _expand_save_placeholders(
+        String("$FilePath$:$FilePath$"), String("/x"),
+    )
+    assert_equal(multi, String("/x:/x"))
+    # No placeholder = pass-through.
+    var passthrough = _expand_save_placeholders(
+        String("--quiet"), String("/work/main.py"),
+    )
+    assert_equal(passthrough, String("--quiet"))
+    # The token is case-sensitive — ``$filepath$`` is left alone so a
+    # user who genuinely wants that literal string can have it.
+    var case_sensitive = _expand_save_placeholders(
+        String("$filepath$"), String("/work/main.py"),
+    )
+    assert_equal(case_sensitive, String("$filepath$"))
 
 
 fn test_extension_of_helper() raises:
@@ -7842,6 +7958,10 @@ fn main() raises:
     test_dropdown_type_to_search_recovers_from_stale_prefix()
     test_dropdown_type_to_search_resets_on_close()
     test_action_editor_consumes_browse_path()
+    test_action_editor_args_field_accepts_spaces()
+    test_action_editor_args_buffer_seeded_from_entry()
+    test_on_save_action_reloads_buffer_when_action_rewrites_file()
+    test_expand_save_placeholders_substitutes_filepath()
     test_extension_of_helper()
     test_word_at_helper()
     test_highlight_for_extension_recognizes_mojo()
