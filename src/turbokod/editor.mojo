@@ -1621,6 +1621,16 @@ struct Editor(ImplicitlyCopyable, Movable):
             return 0
         return 1
 
+    fn _right_gutter(self) -> Int:
+        """Width of the right-side gutter in cells. A single column
+        reserved on the right edge of the editor for at-a-glance row
+        annotations (currently: a gray square on rows with uncommitted
+        changes). Zero when no annotation source is active, so editors
+        that have nothing to show give the full width back to text."""
+        if self.git_changes_visible and len(self.git_change_lines) > 0:
+            return 1
+        return 0
+
     fn _total_gutter(self) -> Int:
         return self.gutter_width + self._line_number_gutter() \
             + self._git_changes_gutter() + self._blame_gutter()
@@ -1819,12 +1829,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         var ln_gutter = self._line_number_gutter()
         var gc_gutter = self._git_changes_gutter()
         var bl_gutter = self._blame_gutter()
+        var right_gutter = self._right_gutter()
         var total_gutter = dap_gutter + ln_gutter + gc_gutter + bl_gutter
         var text_x0 = view.a.x + total_gutter
-        var content_right = view.b.x
+        var content_right = view.b.x - right_gutter
         var content_bottom = view.b.y
         var content_h = view.height()
-        var content_w = view.width() - total_gutter
+        var content_w = view.width() - total_gutter - right_gutter
         if content_w < 1:
             content_w = 1
         # Layout drives every per-screen-row decision below: with soft-
@@ -1882,13 +1893,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
                     if status != GIT_CHANGE_NONE:
-                        # ADDED → green vertical bar, MODIFIED → yellow.
-                        # Same glyph for both so the column reads as a
-                        # bar by colour rather than by shape; matches
-                        # what most editors do in their change gutter.
-                        var fg = LIGHT_GREEN if status == GIT_CHANGE_ADDED \
-                            else LIGHT_YELLOW
-                        var bar_attr = Attr(fg, BLUE)
+                        var bar_attr = Attr(LIGHT_GRAY, BLUE)
                         var gx = view.a.x + dap_gutter + ln_gutter
                         canvas.set(gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
@@ -1904,6 +1909,43 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var ax = bx + 8 + 1
                     _ = canvas.put_text(
                         Point(ax, sy_g), bl.author, ln_attr, bl_right,
+                    )
+        # Right-side gutter: a fixed-height minimap projection of the
+        # whole file, independent of ``scroll_y``. Each screen row owns
+        # an evenly-sized slice of buffer rows; the slice is marked when
+        # any line inside it has uncommitted changes. When the file fits
+        # in ``content_h`` rows the slices collapse to one buffer row
+        # each, so the projection lines up cell-for-cell with the text.
+        if right_gutter > 0 and len(self.git_change_lines) > 0:
+            var sq_attr = Attr(LIGHT_GRAY, BLUE)
+            var n_lines = len(self.git_change_lines)
+            var rows = content_h
+            if rows < 1:
+                rows = 1
+            for sy in range(rows):
+                var start: Int
+                var end: Int
+                if n_lines <= rows:
+                    start = sy
+                    end = sy + 1
+                else:
+                    start = (sy * n_lines) // rows
+                    end = ((sy + 1) * n_lines) // rows
+                    if end <= start:
+                        end = start + 1
+                if start >= n_lines:
+                    break
+                if end > n_lines:
+                    end = n_lines
+                var any_changed = False
+                for li in range(start, end):
+                    if self.git_change_lines[li] != GIT_CHANGE_NONE:
+                        any_changed = True
+                        break
+                if any_changed:
+                    canvas.set(
+                        view.b.x - 1, view.a.y + sy,
+                        Cell(String("■"), sq_attr, 1),
                     )
         # Collect every caret's normalised selection range up front so
         # the per-screen-row overlay loop only has to iterate the list
@@ -3285,6 +3327,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # that line. We stash the row and let Desktop forward to the
         # active DapManager (the editor itself owns no DAP state).
         var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
         var rel_x = event.pos.x - view.a.x
         var in_gutter = total_gutter > 0 and rel_x >= 0 and rel_x < total_gutter
         var cell_x = rel_x - total_gutter
@@ -3293,7 +3336,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # paint, so soft-wrapped buffer rows resolve to their wrapped
         # segment instead of advancing buffer rows 1:1.
         var content_h = view.height()
-        var content_w = view.width() - total_gutter
+        var content_w = view.width() - total_gutter - right_gutter
         if content_w < 1:
             content_w = 1
         var layout = self._layout_lines(content_h, content_w)
@@ -3579,7 +3622,8 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _scroll_to_cursor(mut self, view: Rect):
         var h = view.height()
         var total_gutter = self._total_gutter()
-        var w = view.width() - total_gutter
+        var right_gutter = self._right_gutter()
+        var w = view.width() - total_gutter - right_gutter
         if w < 1:
             w = 1
         if self.cursor_row < self.scroll_y:
@@ -3621,7 +3665,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         longer scroll back to. Vertical axis is clamped symmetrically.
         """
         var total_gutter = self._total_gutter()
-        var content_w = view.width() - total_gutter
+        var right_gutter = self._right_gutter()
+        var content_w = view.width() - total_gutter - right_gutter
         if content_w < 1:
             content_w = 1
         var content_h = view.height()
@@ -3664,7 +3709,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         """
         var h = view.height()
         var total_gutter = self._total_gutter()
-        var w = view.width() - total_gutter
+        var right_gutter = self._right_gutter()
+        var w = view.width() - total_gutter - right_gutter
         if w < 1:
             w = 1
         var max_row = self.buffer.line_count() - 1

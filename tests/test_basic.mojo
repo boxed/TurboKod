@@ -5029,6 +5029,37 @@ fn test_window_v_scroll_by_clamps() raises:
     assert_equal(w.editor.scroll_y, 0)
 
 
+fn test_window_v_scrollbar_track_click_centers_target() raises:
+    """A click in the page area of the v-scrollbar jumps to the
+    proportional buffer row and centers it in the view, instead of
+    scrolling by one page. With 51 buffer rows in an 8-row view and a
+    6-cell track, a click at track row 3 corresponds to row 25 in the
+    file; centering puts ``scroll_y`` at ``25 - 8/2 = 21``."""
+    var lines = String("")
+    for i in range(50):
+        lines = lines + String("L") + String(i) + String("\n")
+    var w = Window.editor_window(String("ed"), Rect(0, 0, 30, 10), lines)
+    # Click below the thumb (part 4): track row 3 of 6.
+    var hit = w.v_scrollbar_hit(Point(29, 5))
+    assert_equal(hit[0], 4)
+    assert_equal(hit[1], 3)
+    w.v_scroll_to_track_pos(hit[1])
+    assert_equal(w.editor.scroll_y, 21)
+    # Click at the very top of the track jumps to row 0 — already at the
+    # file's start, so centering can't go negative; ``scroll_y`` clamps
+    # to 0.
+    w.editor.scroll_y = 30
+    w.v_scroll_to_track_pos(0)
+    assert_equal(w.editor.scroll_y, 0)
+    # Click at the bottom of the track centers a row near the end of the
+    # file. Track row 5 of 6 maps to row ``5*51/6 = 42``; centered that
+    # leaves ``scroll_y = 42 - 4 = 38``, which is below ``max_scroll``
+    # (43) — so the user lands with line 42 in the middle of the view
+    # rather than glued to the bottom of the file.
+    w.v_scroll_to_track_pos(5)
+    assert_equal(w.editor.scroll_y, 38)
+
+
 fn test_window_v_scroll_drag_to_end() raises:
     var lines = String("")
     for i in range(50):
@@ -7610,6 +7641,64 @@ fn test_editor_git_changes_gutter_widens_total_gutter() raises:
     assert_equal(ed._git_changes_gutter(), 0)
 
 
+fn test_editor_right_gutter_paints_gray_square_for_changes() raises:
+    """When the file fits in the view, the right-edge column maps 1:1
+    onto buffer rows: a gray ``■`` lands on each row whose status is
+    ADDED or MODIFIED, and rows with no change leave the column blank."""
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    ed.git_changes_visible = True
+    var marks = List[Int]()
+    marks.append(GIT_CHANGE_ADDED)
+    marks.append(GIT_CHANGE_NONE)
+    marks.append(GIT_CHANGE_MODIFIED)
+    ed.set_git_changes(marks^)
+    assert_equal(ed._right_gutter(), 1)
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    ed.paint(canvas, Rect(0, 0, 40, 5), False)
+    # Column 39 is the right gutter. Row 0 (ADDED) and row 2 (MODIFIED)
+    # should carry the square; row 1 (NONE) is blank.
+    assert_equal(canvas.get(39, 0).glyph, String("■"))
+    assert_equal(canvas.get(39, 0).attr.fg, LIGHT_GRAY)
+    assert_equal(canvas.get(39, 1).glyph, String(" "))
+    assert_equal(canvas.get(39, 2).glyph, String("■"))
+    # When git-changes is off the right gutter is zero-width again.
+    ed.invalidate_git_changes()
+    assert_equal(ed._right_gutter(), 0)
+
+
+fn test_editor_right_gutter_projects_full_file_when_scrolled() raises:
+    """The right gutter is a minimap of the whole file, not of the
+    visible region: scrolling past the changed line still paints the
+    square at the projected screen row, computed off ``line_count`` and
+    ``view.height()``. With 20 lines in a 5-row view, line 10 falls in
+    the slice owned by screen row 2 — and that's where the square lands
+    no matter where ``scroll_y`` sits."""
+    var text = String("")
+    for i in range(20):
+        text = text + String("line") + String(i) + String("\n")
+    var ed = Editor(text^)
+    ed.git_changes_visible = True
+    var marks = List[Int]()
+    for i in range(20):
+        marks.append(
+            GIT_CHANGE_MODIFIED if i == 10 else GIT_CHANGE_NONE
+        )
+    ed.set_git_changes(marks^)
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    # Scroll deep into the file — the gutter must still anchor at the
+    # whole-file projection, not at the visible window.
+    ed.scroll_y = 15
+    ed.paint(canvas, Rect(0, 0, 40, 5), False)
+    # Slice owned by screen row 2 covers buffer rows [(2*20)/5 = 8,
+    # (3*20)/5 = 12), which contains line 10.
+    assert_equal(canvas.get(39, 2).glyph, String("■"))
+    # Adjacent rows share no changed buffer line, so they stay blank.
+    assert_equal(canvas.get(39, 1).glyph, String(" "))
+    assert_equal(canvas.get(39, 3).glyph, String(" "))
+
+
 fn test_local_changes_open_records_status_when_clean() raises:
     """Pointing the widget at ``/tmp`` (not a git repo) makes
     ``compute_local_changes`` return empty; ``open`` should record a
@@ -8123,6 +8212,20 @@ fn test_desktop_confirm_dialog_no_clears_pending_action() raises:
 
 
 fn main() raises:
+    # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
+    # (which writes to ``~/.config/turbokod/config.json`` via
+    # ``_set_project`` → ``save_config``) can't clobber the developer's
+    # real config. Same goes for grammar installs and dir-browser HOME
+    # lookups.
+    var test_home = String("/tmp/turbokod_test_home")
+    var c_home_dir = test_home + String("\0")
+    _ = external_call["mkdir", Int32](c_home_dir.unsafe_ptr(), Int32(0o755))
+    var c_name = String("HOME\0")
+    var c_value = test_home + String("\0")
+    _ = external_call["setenv", Int32](
+        c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
+    )
+
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()
@@ -8152,6 +8255,8 @@ fn main() raises:
     test_parse_unified_diff_handles_pure_delete()
     test_diff_buffer_against_head_marks_added_and_modified()
     test_editor_git_changes_gutter_widens_total_gutter()
+    test_editor_right_gutter_paints_gray_square_for_changes()
+    test_editor_right_gutter_projects_full_file_when_scrolled()
     test_local_changes_open_records_status_when_clean()
     test_build_minimal_patch_keeps_only_target_plus_line()
     test_build_minimal_patch_demotes_paired_minus_to_context()
@@ -8425,6 +8530,7 @@ fn main() raises:
     test_editor_mouse_click_lands_on_codepoint_boundary()
     test_window_v_scrollbar_hit_arrows_and_thumb()
     test_window_v_scroll_by_clamps()
+    test_window_v_scrollbar_track_click_centers_target()
     test_window_v_scroll_drag_to_end()
     test_json_round_trip_lsp_envelope()
     test_json_string_escapes()

@@ -411,8 +411,9 @@ struct Window(ImplicitlyCopyable, Movable):
     # --- scroll bar hit-testing & actions ---------------------------------
     # ``part`` codes: 0=none, 1=up/left arrow, 2=above/left of thumb,
     # 3=on thumb, 4=below/right of thumb, 5=down/right arrow.
-    # The second tuple element is the cursor offset within the thumb at press
-    # time (only meaningful for part==3, used as the drag anchor).
+    # The second tuple element is the track-relative offset of the click
+    # for parts 2 / 3 / 4 — used as the drag anchor for thumb (3) and as
+    # the jump target for the page areas (2, 4).
 
     fn v_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
         if p.x != self.rect.b.x - 1:
@@ -431,8 +432,8 @@ struct Window(ImplicitlyCopyable, Movable):
         if p.y < track_y0 or p.y >= track_y0 + track_h:
             return (0, 0)
         var rel = p.y - track_y0
-        if rel < knob_off: return (2, 0)
-        if rel >= knob_off + knob_h: return (4, 0)
+        if rel < knob_off: return (2, rel)
+        if rel >= knob_off + knob_h: return (4, rel)
         return (3, rel - knob_off)
 
     fn h_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
@@ -453,8 +454,8 @@ struct Window(ImplicitlyCopyable, Movable):
         if p.x < sb_left + 1 or p.x > sb_right - 1:
             return (0, 0)
         var rel = p.x - (sb_left + 1)
-        if rel < knob_off: return (2, 0)
-        if rel >= knob_off + knob_w: return (4, 0)
+        if rel < knob_off: return (2, rel)
+        if rel >= knob_off + knob_w: return (4, rel)
         return (3, rel - knob_off)
 
     fn v_scroll_by(mut self, lines: Int):
@@ -477,6 +478,50 @@ struct Window(ImplicitlyCopyable, Movable):
         var nx = self.editor.scroll_x + cols
         if nx < 0: nx = 0
         if nx > max_x: nx = max_x
+        self.editor.scroll_x = nx
+
+    fn v_scroll_to_track_pos(mut self, track_pos: Int):
+        """Jump so the buffer row whose minimap projection falls at
+        ``track_pos`` (track-relative, 0..track_h) sits centered in the
+        editor view. Triggered by clicks in the page-up / page-down zones
+        of the vertical scrollbar — the user gets a direct "go here, with
+        a screen of context above and below" jump instead of paging."""
+        if not self.is_editor: return
+        var m = self._v_sb_metrics()
+        if not m[0]: return
+        var track_h = m[2]
+        var max_scroll = m[5]
+        var visible = self.rect.height() - 2
+        if visible < 1: visible = 1
+        var total = max_scroll + visible
+        var rel = track_pos
+        if rel < 0: rel = 0
+        if rel >= track_h: rel = track_h - 1
+        var target_row = (rel * total) // track_h
+        var ny = target_row - (visible // 2)
+        if ny < 0: ny = 0
+        if ny > max_scroll: ny = max_scroll
+        self.editor.scroll_y = ny
+
+    fn h_scroll_to_track_pos(mut self, track_pos: Int):
+        """Horizontal twin of :func:`v_scroll_to_track_pos` — clicking in
+        the page-left / page-right zones jumps to that proportional column
+        with the target column horizontally centered in the view."""
+        if not self.is_editor: return
+        var m = self._h_sb_metrics()
+        if not m[0]: return
+        var track_w = m[2]
+        var max_scroll = m[5]
+        var visible = self.rect.width() - 2
+        if visible < 1: visible = 1
+        var total = max_scroll + visible
+        var rel = track_pos
+        if rel < 0: rel = 0
+        if rel >= track_w: rel = track_w - 1
+        var target_col = (rel * total) // track_w
+        var nx = target_col - (visible // 2)
+        if nx < 0: nx = 0
+        if nx > max_scroll: nx = max_scroll
         self.editor.scroll_x = nx
 
     fn v_drag_thumb_to(mut self, mouse_y: Int, drag_offset: Int):
@@ -811,12 +856,8 @@ struct WindowManager(Movable):
                     self.windows[self.focused].v_scroll_by(-1)
                 elif vh[0] == 5:
                     self.windows[self.focused].v_scroll_by(1)
-                elif vh[0] == 2:
-                    var page = self.windows[self.focused].interior().height()
-                    self.windows[self.focused].v_scroll_by(-page)
-                elif vh[0] == 4:
-                    var page = self.windows[self.focused].interior().height()
-                    self.windows[self.focused].v_scroll_by(page)
+                elif vh[0] == 2 or vh[0] == 4:
+                    self.windows[self.focused].v_scroll_to_track_pos(vh[1])
                 else:  # 3 — on thumb
                     self._v_scrolling = self.focused
                     self._v_drag_offset = vh[1]
@@ -827,12 +868,8 @@ struct WindowManager(Movable):
                     self.windows[self.focused].h_scroll_by(-1)
                 elif hh[0] == 5:
                     self.windows[self.focused].h_scroll_by(1)
-                elif hh[0] == 2:
-                    var page = self.windows[self.focused].interior().width()
-                    self.windows[self.focused].h_scroll_by(-page)
-                elif hh[0] == 4:
-                    var page = self.windows[self.focused].interior().width()
-                    self.windows[self.focused].h_scroll_by(page)
+                elif hh[0] == 2 or hh[0] == 4:
+                    self.windows[self.focused].h_scroll_to_track_pos(hh[1])
                 else:
                     self._h_scrolling = self.focused
                     self._h_drag_offset = hh[1]
