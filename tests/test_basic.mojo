@@ -2880,7 +2880,7 @@ fn test_settings_editor_submit_appends_new_entry() raises:
     assert_true(s.editor.active)
     assert_equal(s.editor.edit_index, -1)
     s.editor.entry.language_id = String("python")
-    s.editor.entry.program = String("/usr/bin/black")
+    s.editor.program_tf.set_text(String("/usr/bin/black"))
     s.editor.submitted = True
     s._maybe_consume_editor()
     assert_false(s.editor.active)
@@ -2904,7 +2904,7 @@ fn test_settings_editor_submit_replaces_existing_entry() raises:
     s.open(actions^)
     s.selected_action = 0
     s._edit_selected()
-    s.editor.entry.program = String("/opt/bin/black-edge")
+    s.editor.program_tf.set_text(String("/opt/bin/black-edge"))
     s.editor.submitted = True
     s._maybe_consume_editor()
     assert_equal(len(s.actions), 1)
@@ -3030,7 +3030,7 @@ fn test_action_editor_consumes_browse_path() raises:
     ed.file_dialog.submitted = True
     ed._maybe_consume_browse()
     assert_false(ed.file_dialog.active)
-    assert_equal(ed.entry.program, String("/usr/bin/black"))
+    assert_equal(ed.program_tf.text, String("/usr/bin/black"))
 
 
 fn test_action_editor_args_field_accepts_spaces() raises:
@@ -3047,7 +3047,7 @@ fn test_action_editor_args_field_accepts_spaces() raises:
     for i in range(len(lb)):
         var ev = Event.key_event(UInt32(Int(lb[i])), MOD_NONE)
         _ = ed.handle_key(ev)
-    assert_equal(ed.args_text, String("a b c"))
+    assert_equal(ed.args_tf.text, String("a b c"))
     # The committed list is empty until Save fires.
     assert_equal(len(ed.entry.args), 0)
     ed.focus = UInt8(5)  # _FOCUS_SAVE
@@ -3073,7 +3073,7 @@ fn test_action_editor_args_buffer_seeded_from_entry() raises:
     )
     var ed = ActionEditor()
     ed.open(existing^, 0)
-    assert_equal(ed.args_text, String("--quiet $FilePath$"))
+    assert_equal(ed.args_tf.text, String("--quiet $FilePath$"))
 
 
 fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
@@ -4589,7 +4589,7 @@ fn test_save_as_dialog_seeds_from_existing_path() raises:
     # filter test rooted there would pass vacuously.)
     dlg.open(String("./hello.mojo"))
     assert_true(dlg.active)
-    assert_equal(dlg.filename, String("hello.mojo"))
+    assert_equal(dlg.filename.text, String("hello.mojo"))
     assert_equal(dlg.browser.dir, String("."))
     # The repo root has plain files (CLAUDE.md, run.sh, pixi.toml, …).
     # If the filter were broken, the listing would include them; we
@@ -4606,17 +4606,17 @@ fn test_save_as_dialog_seeds_from_existing_path() raises:
 fn test_save_as_dialog_typing_updates_filename() raises:
     var dlg = SaveAsDialog()
     dlg.open(String(""))
-    assert_equal(dlg.filename, String(""))
+    assert_equal(dlg.filename.text, String(""))
     _ = dlg.handle_key(Event.key_event(UInt32(ord("a"))))
     _ = dlg.handle_key(Event.key_event(UInt32(ord("b"))))
     _ = dlg.handle_key(Event.key_event(UInt32(ord(".")), MOD_NONE))
     _ = dlg.handle_key(Event.key_event(UInt32(ord("t"))))
     _ = dlg.handle_key(Event.key_event(UInt32(ord("x"))))
     _ = dlg.handle_key(Event.key_event(UInt32(ord("t"))))
-    assert_equal(dlg.filename, String("ab.txt"))
+    assert_equal(dlg.filename.text, String("ab.txt"))
     # Backspace deletes from the input while focus stays there.
     _ = dlg.handle_key(Event.key_event(KEY_BACKSPACE))
-    assert_equal(dlg.filename, String("ab.tx"))
+    assert_equal(dlg.filename.text, String("ab.tx"))
 
 
 fn test_save_as_dialog_enter_submits_joined_path() raises:

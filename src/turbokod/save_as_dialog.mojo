@@ -32,7 +32,7 @@ from .events import (
 )
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect, compute_dialog_rect
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import (
     hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
 )
@@ -79,7 +79,7 @@ fn _buttons_rect(dialog: Rect) -> Rect:
 struct SaveAsDialog(Movable):
     var active: Bool
     var submitted: Bool
-    var filename: String          # editable input text
+    var filename: TextField       # editable input text + cursor
     var selected_path: String     # populated on submit
     var focus: UInt8              # _FOCUS_INPUT or _FOCUS_LISTING
     var browser: DirBrowser       # dirs-only listing
@@ -94,7 +94,7 @@ struct SaveAsDialog(Movable):
     fn __init__(out self):
         self.active = False
         self.submitted = False
-        self.filename = String("")
+        self.filename = TextField()
         self.selected_path = String("")
         self.focus = _FOCUS_INPUT
         self.browser = DirBrowser(True)
@@ -115,7 +115,8 @@ struct SaveAsDialog(Movable):
             name = basename(start_path)
         self.active = True
         self.submitted = False
-        self.filename = name^
+        self.filename = TextField()
+        self.filename.set_text(name^)
         self.selected_path = String("")
         self.focus = _FOCUS_INPUT
         self.browser.open(dir^)
@@ -125,7 +126,7 @@ struct SaveAsDialog(Movable):
     fn close(mut self):
         self.active = False
         self.submitted = False
-        self.filename = String("")
+        self.filename = TextField()
         self.selected_path = String("")
         self.focus = _FOCUS_INPUT
         self.browser = DirBrowser(True)
@@ -162,18 +163,14 @@ struct SaveAsDialog(Movable):
             input_focused_attr if self.focus == _FOCUS_INPUT
             else input_blur_attr
         )
-        canvas.fill(input_rect, String(" "), input_attr)
-        _ = canvas.put_text(
-            Point(input_rect.a.x, input_rect.a.y),
-            self.filename, input_attr, input_rect.b.x,
+        # Selection cells use the inverted attr so they read as a
+        # highlight against the (focused) blue field background.
+        var sel_attr = Attr(BLUE, WHITE) if self.focus == _FOCUS_INPUT \
+            else Attr(LIGHT_GRAY, BLACK)
+        self.filename.paint(
+            canvas, input_rect, input_attr, sel_attr,
+            self.focus == _FOCUS_INPUT,
         )
-        if self.focus == _FOCUS_INPUT:
-            var cur_x = input_rect.a.x + len(self.filename.as_bytes())
-            if cur_x < input_rect.b.x:
-                canvas.set(
-                    cur_x, input_rect.a.y,
-                    Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1),
-                )
         # Current-directory line above the listing.
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 4),
@@ -245,24 +242,15 @@ struct SaveAsDialog(Movable):
                 return True
             self._submit()
             return True
-        if k == KEY_BACKSPACE:
-            if self.focus == _FOCUS_INPUT:
-                var bytes = self.filename.as_bytes()
-                if len(bytes) > 0:
-                    self.filename = String(StringSlice(
-                        unsafe_from_utf8=bytes[:len(bytes) - 1],
-                    ))
+        if self.focus == _FOCUS_INPUT:
+            # Field gets full cursor / clipboard / selection handling.
+            var r = self.filename.handle_key(event)
+            if r.consumed:
                 return True
+        # Backspace on the listing ascends to the parent directory.
+        if k == KEY_BACKSPACE and self.focus == _FOCUS_LISTING:
             self.browser.ascend()
             return True
-        if self.focus == _FOCUS_INPUT:
-            # Cut / copy / paste only edit the filename strip; the
-            # listing has no editable text, so a Ctrl+V there should
-            # fall through to the type-to-search branch (which itself
-            # ignores control codepoints).
-            var clip = text_field_clipboard_key(event, self.filename)
-            if clip.consumed:
-                return True
         if UInt32(0x20) <= k and k < UInt32(0x7F):
             if self.focus == _FOCUS_LISTING:
                 # Type-to-search: jump the directory selection to the
@@ -272,9 +260,6 @@ struct SaveAsDialog(Movable):
                 # GNOME Files all behave this way.
                 _ = self.browser.type_to_search(chr(Int(k)), list_h)
                 return True
-            # Input-focused: the keystroke edits the filename.
-            self.filename = self.filename + chr(Int(k))
-            return True
         return True
 
     fn _submit(mut self):
@@ -284,10 +269,10 @@ struct SaveAsDialog(Movable):
         and likely fail the write later; refusing the submit up front
         is friendlier than producing an obviously-broken target.
         """
-        if len(self.filename.as_bytes()) == 0:
+        if len(self.filename.text.as_bytes()) == 0:
             self.focus = _FOCUS_INPUT
             return
-        self.selected_path = join_path(self.browser.dir, self.filename)
+        self.selected_path = join_path(self.browser.dir, self.filename.text)
         self.submitted = True
 
     # --- mouse ------------------------------------------------------------
@@ -339,14 +324,16 @@ struct SaveAsDialog(Movable):
             return True
         var input_rect = _input_rect(rect)
         var list_rect = _list_rect(rect)
-        # Click in the filename strip steals focus; the click position
-        # itself doesn't move a caret yet (the input has no internal
-        # cursor model — typing always appends).
-        if event.pressed and not event.motion \
-                and event.button == MOUSE_BUTTON_LEFT \
+        # Click in the filename strip steals focus and routes the
+        # event to the field so the cursor lands at the click point
+        # (with drag-extend selection if the user keeps holding).
+        if event.button == MOUSE_BUTTON_LEFT \
                 and input_rect.contains(event.pos):
-            self.focus = _FOCUS_INPUT
-            return True
+            if event.pressed and not event.motion:
+                self.focus = _FOCUS_INPUT
+            if self.focus == _FOCUS_INPUT \
+                    and self.filename.handle_mouse(event, input_rect):
+                return True
         # Quick-jump strip lives between the listing and the hint —
         # check it before the listing's mouse handler so the jump
         # buttons' row doesn't get swallowed as out-of-list.

@@ -44,14 +44,14 @@ from .dropdown import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
+    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
     KEY_TAB, KEY_UP,
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
 from .geometry import Point, Rect
 from .language_config import built_in_servers
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import (
     hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
 )
@@ -156,12 +156,18 @@ struct ActionEditor(Movable):
     drops the toggle so clicks felt like no-ops. Re-seeded from
     ``built_in_servers()`` on every ``open`` so a freshly-loaded LSP
     catalog is reflected."""
-    var args_text: String
+    # Editable input strips. Each carries its own cursor + selection.
+    # Programmatic state (``entry.program``, ``entry.cwd``, args list)
+    # is recomputed from these fields on Save, so edits during the
+    # dialog's lifetime don't poke at the host snapshot.
+    var program_tf: TextField
+    var args_tf: TextField
     """Free-form edit buffer for the Arguments field. Held as a single
-    string while the dialog is open so the user can type spaces and
+    string (in the field's ``text``) so the user can type spaces and
     trailing whitespace without losing them to a split-on-space
     round-trip. Committed to ``entry.args`` via ``_split_args`` only
     when the user presses Save."""
+    var cwd_tf: TextField
     var _buttons: List[_PlacedButton]
 
     fn __init__(out self):
@@ -174,7 +180,9 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog = FileDialog()
         self.lang_dropdown = _build_lang_dropdown(String(""))
-        self.args_text = String("")
+        self.program_tf = TextField()
+        self.args_tf = TextField()
+        self.cwd_tf = TextField()
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Browse "), 0, 0), _FOCUS_BROWSE, True,
@@ -194,6 +202,8 @@ struct ActionEditor(Movable):
         # about to move.
         var seed_lang = entry.language_id
         var seed_args = _join_args(entry.args)
+        var seed_program = entry.program
+        var seed_cwd = entry.cwd
         self.entry = entry^
         self.edit_index = edit_index
         self.active = True
@@ -202,7 +212,12 @@ struct ActionEditor(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self.lang_dropdown = _build_lang_dropdown(seed_lang^)
-        self.args_text = seed_args^
+        self.program_tf = TextField()
+        self.program_tf.set_text(seed_program^)
+        self.args_tf = TextField()
+        self.args_tf.set_text(seed_args^)
+        self.cwd_tf = TextField()
+        self.cwd_tf.set_text(seed_cwd^)
 
     fn close(mut self):
         self.active = False
@@ -214,13 +229,23 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog.close()
         self.lang_dropdown = _build_lang_dropdown(String(""))
-        self.args_text = String("")
+        self.program_tf = TextField()
+        self.args_tf = TextField()
+        self.cwd_tf = TextField()
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
 
     fn value(self) -> OnSaveAction:
-        return self.entry
+        # Snapshot the editable fields back into ``entry`` before
+        # returning. Edits during the dialog's life live on the
+        # TextFields; ``entry`` is the host-facing record, populated
+        # only on ``value()`` (and read by Save).
+        var out = self.entry
+        out.program = self.program_tf.text
+        out.cwd = self.cwd_tf.text
+        out.args = _split_args(self.args_tf.text)
+        return out^
 
     # --- painting ---------------------------------------------------
 
@@ -256,10 +281,10 @@ struct ActionEditor(Movable):
         self._paint_lang(canvas, rect)
         var browse_w = self._buttons[0].button.total_width()
         self._paint_input(
-            canvas, rect, _FOCUS_PROGRAM, self.entry.program, browse_w + 2,
+            canvas, rect, _FOCUS_PROGRAM, self.program_tf, browse_w + 2,
         )
-        self._paint_input(canvas, rect, _FOCUS_ARGS, self.args_text, 0)
-        self._paint_input(canvas, rect, _FOCUS_CWD, self.entry.cwd, 0)
+        self._paint_input(canvas, rect, _FOCUS_ARGS, self.args_tf, 0)
+        self._paint_input(canvas, rect, _FOCUS_CWD, self.cwd_tf, 0)
         # Buttons.
         self._paint_buttons(canvas, rect)
         # Dropdown popup overlays the form when open. Paint after the
@@ -291,7 +316,7 @@ struct ActionEditor(Movable):
 
     fn _paint_input(
         self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
-        text: String, right_pad: Int,
+        tf: TextField, right_pad: Int,
     ):
         var row = _row_for_focus(focus)
         if row < 0:
@@ -299,17 +324,8 @@ struct ActionEditor(Movable):
         var ir = _input_rect(dialog, row, right_pad)
         var has_focus = self.focus == focus
         var fill_attr = Attr(WHITE, BLUE) if has_focus else Attr(BLACK, CYAN)
-        canvas.fill(ir, String(" "), fill_attr)
-        _ = canvas.put_text(
-            Point(ir.a.x, ir.a.y), text, fill_attr, ir.b.x,
-        )
-        if has_focus:
-            var cur_x = ir.a.x + len(text.as_bytes())
-            if cur_x < ir.b.x:
-                canvas.set(
-                    cur_x, ir.a.y,
-                    Cell(String(" "), Attr(BLACK, LIGHT_GRAY), 1),
-                )
+        var sel_attr = Attr(BLUE, WHITE) if has_focus else Attr(BLACK, LIGHT_GRAY)
+        tf.paint(canvas, ir, fill_attr, sel_attr, has_focus)
 
     fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect):
         # Browse sits at the right edge of the Program row.
@@ -382,16 +398,26 @@ struct ActionEditor(Movable):
                 self.lang_dropdown.open()
                 return True
             return True
-        if k == KEY_LEFT or k == KEY_RIGHT:
-            if self.focus == _FOCUS_LANG:
-                self._cycle_lang(event)
+        # Lang dropdown left/right cycles options; for editable inputs
+        # we let the field handle them (cursor movement).
+        if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
+            self._cycle_lang(event)
             return True
-        if k == KEY_BACKSPACE:
-            return self._backspace_focused()
-        if self._clipboard_focused(event):
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            return self._type_focused(chr(Int(k)))
+        # Route to the focused editable strip. Save / Cancel / Browse
+        # have no field, so the inner branches fall through and we
+        # swallow-by-default at the bottom.
+        if self.focus == _FOCUS_PROGRAM:
+            var r = self.program_tf.handle_key(event)
+            if r.consumed:
+                return True
+        elif self.focus == _FOCUS_ARGS:
+            var r = self.args_tf.handle_key(event)
+            if r.consumed:
+                return True
+        elif self.focus == _FOCUS_CWD:
+            var r = self.cwd_tf.handle_key(event)
+            if r.consumed:
+                return True
         return True
 
     fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
@@ -413,7 +439,11 @@ struct ActionEditor(Movable):
             self._open_browse()
             return True
         if self.focus == _FOCUS_SAVE:
-            self.entry.args = _split_args(self.args_text)
+            # Snapshot the field-backed values into ``entry`` so the
+            # host (which reads ``value()``) sees what the user typed.
+            self.entry.program = self.program_tf.text
+            self.entry.cwd = self.cwd_tf.text
+            self.entry.args = _split_args(self.args_tf.text)
             self.submitted = True
             return True
         if self.focus == _FOCUS_CANCEL:
@@ -428,7 +458,7 @@ struct ActionEditor(Movable):
         path, or at the user's home when that's empty. The picker is
         modal-on-top of this dialog — events route to it until it
         submits or cancels."""
-        var seed = self.entry.program
+        var seed = self.program_tf.text
         if len(seed.as_bytes()) == 0:
             seed = String("/")
         else:
@@ -449,44 +479,8 @@ struct ActionEditor(Movable):
             return
         var path = self.file_dialog.selected_path
         self.file_dialog.close()
-        self.entry.program = path^
+        self.program_tf.set_text(path^)
         self.focus = _FOCUS_PROGRAM
-
-    fn _backspace_focused(mut self) -> Bool:
-        if self.focus == _FOCUS_PROGRAM:
-            self.entry.program = _str_pop_byte(self.entry.program)
-            return True
-        if self.focus == _FOCUS_ARGS:
-            self.args_text = _str_pop_byte(self.args_text)
-            return True
-        if self.focus == _FOCUS_CWD:
-            self.entry.cwd = _str_pop_byte(self.entry.cwd)
-            return True
-        return True
-
-    fn _type_focused(mut self, ch: String) -> Bool:
-        if self.focus == _FOCUS_PROGRAM:
-            self.entry.program = self.entry.program + ch
-            return True
-        if self.focus == _FOCUS_ARGS:
-            self.args_text = self.args_text + ch
-            return True
-        if self.focus == _FOCUS_CWD:
-            self.entry.cwd = self.entry.cwd + ch
-            return True
-        return True
-
-    fn _clipboard_focused(mut self, event: Event) -> Bool:
-        if self.focus == _FOCUS_PROGRAM:
-            var clip = text_field_clipboard_key(event, self.entry.program)
-            return clip.consumed
-        if self.focus == _FOCUS_ARGS:
-            var clip = text_field_clipboard_key(event, self.args_text)
-            return clip.consumed
-        if self.focus == _FOCUS_CWD:
-            var clip = text_field_clipboard_key(event, self.entry.cwd)
-            return clip.consumed
-        return False
 
     # --- mouse ------------------------------------------------------
 
@@ -556,20 +550,22 @@ struct ActionEditor(Movable):
                 self.entry.language_id = self.lang_dropdown.value()
             self.focus = _FOCUS_LANG
             return True
-        if _input_rect(
+        var program_ir = _input_rect(
             rect, _row_for_focus(_FOCUS_PROGRAM), browse_w + 2,
-        ).contains(event.pos):
+        )
+        if program_ir.contains(event.pos):
             self.focus = _FOCUS_PROGRAM
+            _ = self.program_tf.handle_mouse(event, program_ir)
             return True
-        if _input_rect(
-            rect, _row_for_focus(_FOCUS_ARGS), 0,
-        ).contains(event.pos):
+        var args_ir = _input_rect(rect, _row_for_focus(_FOCUS_ARGS), 0)
+        if args_ir.contains(event.pos):
             self.focus = _FOCUS_ARGS
+            _ = self.args_tf.handle_mouse(event, args_ir)
             return True
-        if _input_rect(
-            rect, _row_for_focus(_FOCUS_CWD), 0,
-        ).contains(event.pos):
+        var cwd_ir = _input_rect(rect, _row_for_focus(_FOCUS_CWD), 0)
+        if cwd_ir.contains(event.pos):
             self.focus = _FOCUS_CWD
+            _ = self.cwd_tf.handle_mouse(event, cwd_ir)
             return True
         return True
 

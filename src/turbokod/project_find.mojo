@@ -25,8 +25,7 @@ from .colors import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
-    MOD_ALT, MOD_CTRL,
+    KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import read_file, stat_file
@@ -40,7 +39,7 @@ from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
 from .string_utils import split_lines
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import paint_window_title
 
 
@@ -60,7 +59,9 @@ struct ProjectFind(Movable):
     var active: Bool
     var submitted: Bool
     var root: String
-    var query: String
+    var query: TextField
+    # Cached input strip rect for mouse routing.
+    var _input_rect: Rect
     var _last_searched_query: String   # what we last ran a search for
     var _query_dirty_at_ms: Int        # 0 when no debounce pending
     var matches: List[ProjectMatch]
@@ -86,7 +87,8 @@ struct ProjectFind(Movable):
         self.active = False
         self.submitted = False
         self.root = String("")
-        self.query = String("")
+        self.query = TextField()
+        self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
@@ -102,7 +104,8 @@ struct ProjectFind(Movable):
     fn open(mut self, var root: String):
         self._runner.cancel()
         self.root = root^
-        self.query = String("")
+        self.query = TextField()
+        self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
@@ -121,7 +124,8 @@ struct ProjectFind(Movable):
         self.active = False
         self.submitted = False
         self.root = String("")
-        self.query = String("")
+        self.query = TextField()
+        self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
@@ -189,13 +193,13 @@ struct ProjectFind(Movable):
             self.scroll = 0
 
     fn _run_search(mut self):
-        self._last_searched_query = self.query
+        self._last_searched_query = self.query.text
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
         # Cancel any previous in-flight rg before spawning a new one.
         self._runner.cancel()
-        if len(self.query.as_bytes()) == 0:
+        if len(self.query.text.as_bytes()) == 0:
             return
         # Streaming ripgrep: spawns a child that writes match lines to
         # stdout as they're found. ``ProjectFind.tick`` drains those
@@ -203,7 +207,7 @@ struct ProjectFind(Movable):
         # Callers gate ``open()`` on ``rg`` being on PATH, so a spawn
         # failure here is a transient OS error — leave matches empty
         # and let the user retry.
-        _ = self._runner.start(self.root, self.query)
+        _ = self._runner.start(self.root, self.query.text)
 
     fn _refresh_context_for_selection(mut self):
         """Reload + retokenize the context panel for the current
@@ -332,16 +336,10 @@ struct ProjectFind(Movable):
         var qw_max = screen.b.x - 2 - qx
         if qw_max < 0:
             qw_max = 0
-        canvas.fill(
-            Rect(qx, input_y, qx + qw_max, input_y + 1),
-            String(" "), input_attr,
-        )
-        _ = canvas.put_text(
-            Point(qx, input_y), self.query, input_attr, screen.b.x - 1,
-        )
-        var cur = qx + len(self.query.as_bytes())
-        if cur < screen.b.x - 1:
-            canvas.set(cur, input_y, Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1))
+        var input_rect = Rect(qx, input_y, qx + qw_max, input_y + 1)
+        self._input_rect = input_rect
+        var sel_attr = Attr(LIGHT_GRAY, BLACK)
+        self.query.paint(canvas, input_rect, input_attr, sel_attr, True)
         # Separator under the input.
         var sep1_y = input_y + 1
         for x in range(screen.a.x + 1, screen.b.x - 1):
@@ -351,10 +349,10 @@ struct ProjectFind(Movable):
         var h = self._list_height(screen)
         if len(self.matches) == 0:
             var msg: String
-            if len(self.query.as_bytes()) == 0:
+            if len(self.query.text.as_bytes()) == 0:
                 msg = String("Type to search.")
             elif self._query_dirty_at_ms != 0 \
-                    or self.query != self._last_searched_query \
+                    or self.query.text != self._last_searched_query \
                     or self._runner.is_active():
                 msg = String("Searching...")
             else:
@@ -426,11 +424,11 @@ struct ProjectFind(Movable):
             return
         var line_stripped = _lstrip_tabs(m.line_text)
         var bytes = line_stripped.as_bytes()
-        var hit = _find_bytes(line_stripped, self.query)
+        var hit = _find_bytes(line_stripped, self.query.text)
         # Slide so the hit (if any) is visible inside the available width.
         var avail = line_max - line_x
         var start = 0
-        if hit >= 0 and hit + len(self.query.as_bytes()) > avail:
+        if hit >= 0 and hit + len(self.query.text.as_bytes()) > avail:
             # Center the hit, keeping start >= 0.
             start = hit - avail // 3
             if start < 0:
@@ -484,9 +482,9 @@ struct ProjectFind(Movable):
                     var ch = chr(b) if b < 0x80 else String("?")
                     canvas.set(line_x + (i - start), y, Cell(ch, hl.attr, 1))
         # Highlight overlay for the hit.
-        if hit >= 0 and len(self.query.as_bytes()) > 0:
+        if hit >= 0 and len(self.query.text.as_bytes()) > 0:
             var hl_start = hit
-            var hl_end = hit + len(self.query.as_bytes())
+            var hl_end = hit + len(self.query.text.as_bytes())
             if hl_start < start: hl_start = start
             if hl_end > end:     hl_end = end
             for i in range(hl_start, hl_end):
@@ -563,11 +561,11 @@ struct ProjectFind(Movable):
                     var ch = chr(b) if b < 0x80 else String("?")
                     canvas.set(x + i, y, Cell(ch, hl.attr, 1))
             # Match-substring highlight on the center row only.
-            if is_match and len(self.query.as_bytes()) > 0:
-                var hit = _find_bytes(line, self.query)
+            if is_match and len(self.query.text.as_bytes()) > 0:
+                var hit = _find_bytes(line, self.query.text)
                 if hit >= 0:
                     var hs = hit
-                    var he = hit + len(self.query.as_bytes())
+                    var he = hit + len(self.query.text.as_bytes())
                     if he > end: he = end
                     for i in range(hs, he):
                         if i < 0 or i >= end:
@@ -599,24 +597,10 @@ struct ProjectFind(Movable):
             self._scroll_to_selection()
             self._refresh_context_for_selection()
             return True
-        if k == KEY_BACKSPACE:
-            var qb = self.query.as_bytes()
-            if len(qb) > 0:
-                self.query = String(StringSlice(
-                    unsafe_from_utf8=qb[:len(qb) - 1],
-                ))
+        var r = self.query.handle_key(event)
+        if r.consumed:
+            if r.changed:
                 self._mark_query_dirty(now_ms)
-            return True
-        var clip = text_field_clipboard_key(event, self.query)
-        if clip.consumed:
-            if clip.changed:
-                self._mark_query_dirty(now_ms)
-            return True
-        if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            self.query = self.query + chr(Int(k))
-            self._mark_query_dirty(now_ms)
             return True
         return True
 
@@ -624,6 +608,9 @@ struct ProjectFind(Movable):
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
+            return True
+        if self._input_rect.width() > 0 \
+                and self.query.handle_mouse(event, self._input_rect):
             return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(

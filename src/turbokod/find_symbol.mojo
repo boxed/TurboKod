@@ -33,15 +33,14 @@ from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
-    MOD_ALT, MOD_CTRL,
+    KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import paint_drop_shadow, paint_window_title
 
 
@@ -214,8 +213,10 @@ comptime _STATE_ERROR      = UInt8(2)
 
 struct FindSymbol(Movable):
     var active: Bool
-    var query: String
+    var query: TextField
     var root: String                 # project root the runner is rooted at
+    # Cached input strip rect for mouse routing.
+    var _input_rect: Rect
     var entries: List[FindSymbolMatch]
     # Parallel name list — kept in sync with ``entries`` for O(N) dedupe
     # on append. Could swap for a hashed set if dedupe ever becomes hot;
@@ -236,7 +237,7 @@ struct FindSymbol(Movable):
 
     fn __init__(out self):
         self.active = False
-        self.query = String("")
+        self.query = TextField()
         self.root = String("")
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
@@ -250,10 +251,11 @@ struct FindSymbol(Movable):
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner = _FindSymbolRunner()
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn open(mut self, var root: String):
         self.active = True
-        self.query = String("")
+        self.query = TextField()
         self.root = root^
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
@@ -267,10 +269,11 @@ struct FindSymbol(Movable):
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn close(mut self):
         self.active = False
-        self.query = String("")
+        self.query = TextField()
         self.root = String("")
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
@@ -280,6 +283,7 @@ struct FindSymbol(Movable):
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn set_pending(mut self, var msg: String):
         self.state = _STATE_PENDING
@@ -337,11 +341,11 @@ struct FindSymbol(Movable):
         self.selected = 0
         self.scroll = 0
         self.runner.cancel()
-        if len(self.query.as_bytes()) < _MIN_QUERY_LEN:
+        if len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
             return
         if len(self.root.as_bytes()) == 0:
             return
-        _ = self.runner.start(self.query, self.root)
+        _ = self.runner.start(self.query.text, self.root)
 
     # --- geometry ---------------------------------------------------------
 
@@ -371,11 +375,12 @@ struct FindSymbol(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
         var sel_attr    = Attr(BLACK,  YELLOW)
+        var inv_attr    = Attr(LIGHT_GRAY, BLACK)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var error_attr  = Attr(RED,    LIGHT_GRAY)
         var rect = self._rect(screen)
@@ -388,12 +393,9 @@ struct FindSymbol(Movable):
             Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
-        _ = canvas.put_text(
-            Point(qx, rect.a.y + 1), self.query, bg, rect.b.x - 1,
-        )
-        var cur = qx + len(self.query.as_bytes())
-        if cur < rect.b.x - 1:
-            canvas.set(cur, rect.a.y + 1, Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1))
+        var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
+        self._input_rect = input_rect
+        self.query.paint(canvas, input_rect, bg, inv_attr, True)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         # Status / placeholder.
@@ -409,7 +411,7 @@ struct FindSymbol(Movable):
                 self.status_message,
                 error_attr, rect.b.x - 1,
             )
-        elif len(self.query.as_bytes()) < _MIN_QUERY_LEN:
+        elif len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
             _ = canvas.put_text(
                 Point(rect.a.x + 2, top),
                 String("Type at least 2 letters of a symbol name."),
@@ -482,36 +484,24 @@ struct FindSymbol(Movable):
         if picker_nav_key(k, len(self.entries), self.selected):
             self._scroll_to_selection()
             return True
-        var prev_query = self.query
-        if k == KEY_BACKSPACE:
-            var qb = self.query.as_bytes()
-            if len(qb) > 0:
-                self.query = String(StringSlice(
-                    unsafe_from_utf8=qb[:len(qb) - 1],
-                ))
-        else:
-            var clip = text_field_clipboard_key(event, self.query)
-            if clip.consumed:
-                # Paste lands raw; strip non-identifier bytes so rg's
-                # regex doesn't see ``-``, ``;`` etc.
-                self.query = sanitize_symbol_query(self.query)
-            else:
-                if (event.mods & MOD_CTRL) != 0 \
-                        or (event.mods & MOD_ALT) != 0:
-                    return True
-                if UInt32(0x20) <= k and k < UInt32(0x7F):
-                    # Filter to identifier bytes only — the rg regex
-                    # would otherwise interpret punctuation as meta
-                    # characters or, for a leading ``-``, as a flag.
-                    if _is_ident_byte(UInt8(Int(k))):
-                        self.query = self.query + chr(Int(k))
-        if self.query != prev_query:
-            # Editing reverts an error state (the message would
-            # otherwise hang around stale).
-            if self.state == _STATE_ERROR:
-                self.state = _STATE_IDLE
-                self.status_message = String("")
-            self.restart_runner()
+        var prev_query = self.query.text
+        var r = self.query.handle_key(event)
+        if not r.consumed:
+            return True
+        if r.changed:
+            # Filter the new value down to identifier bytes only — the
+            # query is interpolated into rg's regex, so leaving
+            # punctuation (or worse, a leading ``-``) in place would let
+            # the user accidentally write a regex / flag. This applies
+            # to typed printables and pasted text alike.
+            var sanitized = sanitize_symbol_query(self.query.text)
+            if sanitized != self.query.text:
+                self.query.set_text(sanitized)
+            if self.query.text != prev_query:
+                if self.state == _STATE_ERROR:
+                    self.state = _STATE_IDLE
+                    self.status_message = String("")
+                self.restart_runner()
         return True
 
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
@@ -520,6 +510,9 @@ struct FindSymbol(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(screen)
+        if self._input_rect.width() > 0 \
+                and self.query.handle_mouse(event, self._input_rect):
+            return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.entries),
