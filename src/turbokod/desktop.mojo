@@ -119,6 +119,7 @@ from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
 # additional code on the application side.
 
 comptime EDITOR_NEW           = String("file:new")
+comptime EDITOR_OPEN          = String("file:open")
 comptime EDITOR_SAVE          = String("file:save")
 comptime EDITOR_SAVE_AS       = String("file:save_as")
 comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
@@ -195,6 +196,12 @@ comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
 # files, but populated from ``self.config.recent_projects`` and routed
 # through ``open_project`` on submit instead of ``open_file``.
 comptime PROJECT_OPEN_RECENT  = String("project:open_recent")
+# "Open project..." — host-handled action that asks the framework's
+# ``FileDialog`` to pick a directory (dirs-only mode). The Desktop
+# doesn't intercept it; it falls through ``dispatch_action`` so the
+# host can drive its own ``FileDialog`` instance and route the picked
+# directory back through ``open_project``.
+comptime PROJECT_OPEN         = String("project:open")
 # Debugger actions. ``DEBUG_START_OR_CONTINUE`` is a single F5-style
 # binding: starts the session if none is active, continues if stopped.
 comptime DEBUG_START_OR_CONTINUE = String("debug:start_or_continue")
@@ -668,7 +675,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(ctrl_key("q"), MOD_NONE, APP_QUIT_ACTION))
         self._hotkeys.append(Hotkey(ctrl_key("w"), MOD_NONE, WINDOW_CLOSE))
         self._hotkeys.append(Hotkey(ctrl_key("n"), MOD_NONE, EDITOR_NEW))
-        self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_QUICK_OPEN))
+        self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_OPEN))
+        # Cmd+Shift+O — Quick Open (type-to-filter file picker). The
+        # plain Cmd+O above bubbles ``file:open`` up to the host's
+        # FileDialog; Quick Open is the project-aware fast picker.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_CTRL | MOD_SHIFT, EDITOR_QUICK_OPEN,
+        ))
         self._hotkeys.append(Hotkey(ctrl_key("e"), MOD_NONE, EDITOR_OPEN_RECENT))
         self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
         self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
@@ -2492,8 +2505,7 @@ struct Desktop(Movable):
             self._open_recent_projects_picker()
             return Optional[String]()
         if action == EDITOR_FIND:
-            self._pending_action = EDITOR_FIND
-            self.prompt.open(String("Find: "))
+            self._open_find_prompt()
             return Optional[String]()
         if action == EDITOR_FIND_NEXT:
             # Repeat the previous Find without re-prompting. ``find_next``
@@ -2501,8 +2513,7 @@ struct Desktop(Movable):
             # prior search, fall through to the Find prompt so Ctrl+G is
             # still useful on a fresh editor.
             if len(self._last_search.as_bytes()) == 0:
-                self._pending_action = EDITOR_FIND
-                self.prompt.open(String("Find: "))
+                self._open_find_prompt()
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
@@ -2516,8 +2527,7 @@ struct Desktop(Movable):
             # Mirror of Find Next, walking backward from the current
             # selection / cursor and wrapping to the file end on miss.
             if len(self._last_search.as_bytes()) == 0:
-                self._pending_action = EDITOR_FIND
-                self.prompt.open(String("Find: "))
+                self._open_find_prompt()
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
@@ -4067,6 +4077,28 @@ struct Desktop(Movable):
         if not self.windows.windows[self.windows.focused].is_editor:
             return -1
         return self.windows.focused
+
+    fn _open_find_prompt(mut self):
+        """Open the Find prompt, seeded from the focused editor's
+        selection when it's a single-line span. The seeded text is
+        left fully selected so the next typed key replaces it — the
+        user can also press Enter to keep the prior selection as the
+        search term, which is the common case when "find this thing
+        I just highlighted" was the intent."""
+        self._pending_action = EDITOR_FIND
+        var prefill = String("")
+        var idx = self._focused_editor_idx()
+        if idx >= 0:
+            var sel = self.windows.windows[idx].editor.selection_text()
+            var sb = sel.as_bytes()
+            var has_newline = False
+            for i in range(len(sb)):
+                if sb[i] == 0x0A or sb[i] == 0x0D:
+                    has_newline = True
+                    break
+            if not has_newline:
+                prefill = sel
+        self.prompt.open(String("Find: "), prefill, select_prefill=True)
 
     fn _do_save(mut self):
         var idx = self._focused_editor_idx()

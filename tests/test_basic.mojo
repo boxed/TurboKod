@@ -35,7 +35,7 @@ from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
     EDITOR_FIND, EDITOR_GOTO, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
-    EDITOR_NEW, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
+    EDITOR_NEW, EDITOR_OPEN, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND, PROJECT_REPLACE,
@@ -1678,6 +1678,47 @@ fn test_desktop_replace_chains_two_prompts() raises:
     _ = d._on_prompt_submit()
     assert_false(d.prompt.active)
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar BAR"))
+
+
+fn test_desktop_find_seeds_from_editor_selection() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar baz\n"),
+    ))
+    # Select "bar" in the editor.
+    d.windows.windows[0].editor.move_to(0, 4, False)
+    d.windows.windows[0].editor.move_to(0, 7, True)
+    assert_equal(d.windows.windows[0].editor.selection_text(), String("bar"))
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_true(d.prompt.active)
+    # Prefilled with the selection, fully selected so a typed key replaces it.
+    assert_equal(d.prompt.input.text, String("bar"))
+    assert_true(d.prompt.input.has_selection())
+    assert_equal(d.prompt.input.selection_text(), String("bar"))
+
+
+fn test_desktop_find_skips_seed_for_multiline_selection() raises:
+    # A find term must be single-line; a multi-line editor selection
+    # is not a meaningful default for the prompt.
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo\nbar\nbaz\n"),
+    ))
+    d.windows.windows[0].editor.move_to(0, 0, False)
+    d.windows.windows[0].editor.move_to(1, 3, True)
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_true(d.prompt.active)
+    assert_equal(d.prompt.input.text, String(""))
+
+
+fn test_desktop_find_no_selection_no_prefill() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar baz\n"),
+    ))
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_true(d.prompt.active)
+    assert_equal(d.prompt.input.text, String(""))
 
 
 fn test_desktop_open_file_uses_80_percent_size() raises:
@@ -4173,18 +4214,31 @@ fn _starts_with(s: String, prefix: String) -> Bool:
     return True
 
 
-fn test_ctrl_o_opens_quick_open_when_project_active() raises:
+fn test_ctrl_o_bubbles_file_open() raises:
+    """Cmd+O always bubbles ``EDITOR_OPEN`` up to the host so the
+    framework's ``FileDialog`` can be used; the project-aware Quick
+    Open picker is on Cmd+Shift+O."""
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
     var ev = Event.key_event(ctrl_key(String("o")))
+    var maybe = d.handle_event(ev, _SCREEN)
+    assert_true(Bool(maybe))
+    assert_equal(maybe.value(), EDITOR_OPEN)
+    assert_false(d.quick_open.active)
+
+
+fn test_ctrl_shift_o_opens_quick_open_when_project_active() raises:
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    var ev = Event.key_event(UInt32(ord("o")), MOD_CTRL | MOD_SHIFT)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_false(Bool(maybe))
     assert_true(d.quick_open.active)
 
 
-fn test_ctrl_o_bubbles_when_no_project() raises:
+fn test_ctrl_shift_o_bubbles_when_no_project() raises:
     var d = Desktop()
-    var ev = Event.key_event(ctrl_key(String("o")))
+    var ev = Event.key_event(UInt32(ord("o")), MOD_CTRL | MOD_SHIFT)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), EDITOR_QUICK_OPEN)
@@ -4576,6 +4630,63 @@ fn test_file_dialog_wheel_scrolls() raises:
         screen,
     )
     assert_true(dlg.browser.scroll <= initial + 3)
+
+
+fn test_file_dialog_directory_mode_picks_current_dir() raises:
+    """``open_directory`` filters the listing to directories and sets
+    up the right-aligned " Open Project " button. Clicking that
+    button submits ``browser.dir`` (not a clicked entry), so the host
+    can route the picked path through ``open_project``."""
+    var dlg = FileDialog()
+    dlg.open_directory(String("."))
+    assert_true(dlg.active)
+    assert_true(dlg.dirs_only)
+    assert_equal(dlg.title, String(" Open Project "))
+    assert_equal(dlg.browser.dir, String("."))
+    # The repo root has plain files; the dirs-only filter should
+    # leave only directories (plus ``..``) in the listing.
+    var saw_real_entry = False
+    for i in range(len(dlg.browser.entries)):
+        if dlg.browser.entries[i] == String(".."):
+            continue
+        saw_real_entry = True
+        assert_true(dlg.browser.entry_is_dir[i])
+    assert_true(saw_real_entry)
+    # Geometry: width=60, height=18, dialog at x=10 / y=3 (centered in
+    # 80×24). Buttons row at y=18; " Open Project " is 14-wide, so the
+    # button face starts at x = (b.x - 1) - 14 = 55.
+    var screen = Rect(0, 0, 80, 24)
+    # Press on the button face — captures the click.
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(56, 18), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_false(dlg.submitted)
+    # Release inside the same button fires it; ``selected_path`` must
+    # be the *current dir*, not whatever happened to be highlighted.
+    _ = dlg.handle_mouse(
+        Event.mouse_event(Point(56, 18), MOUSE_BUTTON_LEFT, False, False),
+        screen,
+    )
+    assert_true(dlg.submitted)
+    assert_equal(dlg.selected_path, String("."))
+
+
+fn test_file_dialog_directory_mode_enter_does_not_submit() raises:
+    """In dirs-only mode every entry is navigable, so Enter on a
+    directory descends rather than submitting. Submission goes
+    exclusively through the Open button — otherwise the user could
+    never browse past their starting directory."""
+    var dlg = FileDialog()
+    dlg.open_directory(String("."))
+    # Step the selection off ``..`` and onto the first real directory,
+    # then press Enter. The dialog should descend (browser.dir
+    # changes) without flipping ``submitted``.
+    _ = dlg.handle_key(Event.key_event(KEY_DOWN))
+    var initial_dir = dlg.browser.dir
+    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(dlg.submitted)
+    assert_true(dlg.browser.dir != initial_dir)
 
 
 fn test_save_as_dialog_seeds_from_existing_path() raises:
@@ -8211,8 +8322,9 @@ fn main() raises:
     test_quick_open_match_case_and_separator_shapes()
     test_quick_open_slash_in_query_requires_directory_separator()
     test_quick_open_filters_as_you_type()
-    test_ctrl_o_opens_quick_open_when_project_active()
-    test_ctrl_o_bubbles_when_no_project()
+    test_ctrl_o_bubbles_file_open()
+    test_ctrl_shift_o_opens_quick_open_when_project_active()
+    test_ctrl_shift_o_bubbles_when_no_project()
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
@@ -8290,6 +8402,8 @@ fn main() raises:
     test_file_dialog_mouse_click_selects()
     test_file_dialog_double_click_opens()
     test_file_dialog_wheel_scrolls()
+    test_file_dialog_directory_mode_picks_current_dir()
+    test_file_dialog_directory_mode_enter_does_not_submit()
     test_save_as_dialog_seeds_from_existing_path()
     test_save_as_dialog_typing_updates_filename()
     test_save_as_dialog_enter_submits_joined_path()

@@ -6,6 +6,13 @@ by pressing Enter on it. Backspace ascends to the parent directory; Esc
 cancels. On submit, ``submitted=True`` and ``selected_path`` holds the absolute
 (or as-supplied) path; the caller calls ``close()`` to dismiss.
 
+Open with ``open_directory(start_dir, ...)`` instead to enter directory-pick
+mode: the listing filters to directories only, the title says "Open Project"
+(or whatever ``title`` was passed), and a right-aligned " Open Project "
+button submits the *current* directory (``browser.dir``) as the selection.
+Enter still descends / ascends; the explicit button is the only path to
+submit, since every entry in dirs-only mode is itself navigable.
+
 The directory-listing state and rendering live on ``DirBrowser`` (shared
 with ``SaveAsDialog``); this file owns the modal lifecycle, the dialog
 chrome, and the open-only key/mouse semantics.
@@ -13,8 +20,12 @@ chrome, and the open-only key/mouse semantics.
 
 from std.collections.optional import Optional
 
+from .buttons import (
+    BUTTON_FIRED, BUTTON_NONE,
+    ShadowButton, paint_shadow_button,
+)
 from .canvas import Canvas
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -71,6 +82,22 @@ struct FileDialog(Movable):
     not currently dragging. Stored as offset rather than as a
     starting absolute point so the move tracks the cursor exactly,
     not relative to where the press happened on screen."""
+    var dirs_only: Bool
+    """Directory-pick mode. When True the listing is filtered to
+    directories (so the user can browse without files cluttering
+    the picker) and the dialog grows a right-aligned button that
+    submits ``browser.dir`` rather than a clicked entry. Set by
+    ``open_directory``; ``open`` always resets it to False."""
+    var title: String
+    """Text painted into the top-edge title chunk. Defaults to
+    ``" Open File "``; ``open_directory`` overrides it (typically
+    ``" Open Project "``) so the same dialog reads correctly in
+    either mode."""
+    var _open_button: ShadowButton
+    """Persistent " Open <X> " button for dirs-only mode. Press
+    latch lives here so the button can't lose its captured state
+    between paints. Repositioned to the right edge of the buttons
+    row on every paint."""
 
     fn __init__(out self):
         self.active = False
@@ -79,14 +106,45 @@ struct FileDialog(Movable):
         self.browser = DirBrowser(False)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+        self.dirs_only = False
+        self.title = String(" Open File ")
+        self._open_button = ShadowButton(String(" Open Project "), 0, 0)
 
     fn open(mut self, var start_dir: String):
         self.active = True
         self.submitted = False
         self.selected_path = String("")
+        self.dirs_only = False
+        self.title = String(" Open File ")
+        self.browser = DirBrowser(False)
         self.browser.open(start_dir^)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+
+    fn open_directory(
+        mut self,
+        var start_dir: String,
+        var title: String = String(" Open Project "),
+        var button_label: String = String(" Open Project "),
+    ):
+        """Open the dialog in directory-pick mode.
+
+        Listing is filtered to directories only; the right-aligned
+        button submits ``browser.dir`` as the selection (rather
+        than a clicked entry). ``title`` paints into the top-edge
+        title chunk; ``button_label`` is the submit button's text
+        (host can override both for non-project picks).
+        """
+        self.active = True
+        self.submitted = False
+        self.selected_path = String("")
+        self.dirs_only = True
+        self.title = title^
+        self.browser = DirBrowser(True)
+        self.browser.open(start_dir^)
+        self.pos = Optional[Point]()
+        self._drag = Optional[Point]()
+        self._open_button = ShadowButton(button_label^, 0, 0)
 
     fn set_project(mut self, project: Optional[String]):
         """Tell the dialog about the active project so the listing's
@@ -99,9 +157,12 @@ struct FileDialog(Movable):
         self.active = False
         self.submitted = False
         self.selected_path = String("")
+        self.dirs_only = False
+        self.title = String(" Open File ")
         self.browser = DirBrowser(False)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+        self._open_button = ShadowButton(String(" Open Project "), 0, 0)
 
     # --- painting ----------------------------------------------------------
 
@@ -122,7 +183,7 @@ struct FileDialog(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        paint_window_title(canvas, rect, String(" Open File "), bg, bg)
+        paint_window_title(canvas, rect, self.title, bg, bg)
         # TV-style close button in the top-left corner. Same chrome as
         # editor windows — the framework helper paints all three cells.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
@@ -134,10 +195,27 @@ struct FileDialog(Movable):
         # Desktop / Home / Root quick-jump strip just above the hint
         # — green TV-style buttons with shadows; colours are owned
         # by ``paint_jump_buttons`` so all dialogs stay consistent.
-        self.browser.paint_jump_buttons(canvas, _buttons_rect(rect))
+        var buttons = _buttons_rect(rect)
+        self.browser.paint_jump_buttons(canvas, buttons)
+        # Directory-pick mode adds a right-aligned " Open <X> " button
+        # in the same row. The jump buttons leave the right edge
+        # untouched, so the submit button sits there without colliding.
+        if self.dirs_only:
+            var face = Attr(BLACK, GREEN)
+            var bw = self._open_button.face_width()
+            var bx = buttons.b.x - bw - 1
+            self._open_button.move_to(bx, buttons.a.y)
+            paint_shadow_button(
+                canvas, self._open_button, face, LIGHT_GRAY, buttons.b.x,
+            )
+        var hint = (
+            String(" Enter: enter dir  ⌫: parent  ESC: cancel ")
+            if self.dirs_only
+            else String(" Enter: open  ⌫: parent  ESC: cancel ")
+        )
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.b.y - 1),
-            String(" Enter: open  ⌫: parent  ESC: cancel "),
+            hint,
             dir_attr,
             rect.b.x - 1,
         )
@@ -248,11 +326,26 @@ struct FileDialog(Movable):
             ))
             return True
         var list_rect = _list_rect(rect)
-        # Jump-button strip is checked first — the listing area is
+        var buttons = _buttons_rect(rect)
+        # Directory-pick mode's submit button shares the buttons row.
+        # Route the event through it before the jump-button strip so a
+        # click on the right-aligned " Open Project " face doesn't get
+        # swallowed by the row's outer hit logic.
+        if self.dirs_only:
+            var bw = self._open_button.face_width()
+            self._open_button.move_to(buttons.b.x - bw - 1, buttons.a.y)
+            var status = self._open_button.handle_mouse(event)
+            if status == BUTTON_FIRED:
+                self.selected_path = self.browser.dir
+                self.submitted = True
+                return True
+            if status != BUTTON_NONE:
+                return True
+        # Jump-button strip is checked next — the listing area is
         # one row above it, so a click landing on the buttons would
         # otherwise fall through ``handle_list_mouse`` as
         # out-of-list and be silently swallowed.
-        if self.browser.handle_jump_click(event, _buttons_rect(rect)):
+        if self.browser.handle_jump_click(event, buttons):
             return True
         var idx = self.browser.handle_list_mouse(event, list_rect)
         if idx == -2:

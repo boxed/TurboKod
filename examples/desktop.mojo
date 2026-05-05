@@ -48,7 +48,8 @@ from turbokod import (
     EDITOR_COMPARE_CLIPBOARD,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
-    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN_RECENT,
+    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS,
+    EDITOR_NEW, EDITOR_OPEN, EDITOR_OPEN_RECENT,
     EDITOR_PASTE,
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
@@ -59,7 +60,7 @@ from turbokod import (
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES,
-    PROJECT_FIND, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
+    PROJECT_FIND, PROJECT_OPEN, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
     TARGET_RUN, WINDOW_CLOSE,
     stat_file,
 )
@@ -130,7 +131,8 @@ fn main() raises:
         ))
         desktop.menu_bar.add(_mk_menu(String("File"),
             (String("New"), EDITOR_NEW),
-            (String("Open..."), String("file:open")),
+            (String("Open..."), EDITOR_OPEN),
+            (String("Open project..."), PROJECT_OPEN),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
             (String("Open recent..."), EDITOR_OPEN_RECENT),
             (String("Open recent project..."), PROJECT_OPEN_RECENT),
@@ -428,11 +430,20 @@ fn main() raises:
                         _ = file_dialog.handle_mouse(ev, app.screen())
                     if file_dialog.submitted:
                         var path = file_dialog.selected_path
+                        var picks_project = file_dialog.dirs_only
                         file_dialog.close()
-                        try:
-                            desktop.open_file(path, app.screen())
-                        except:
-                            pass
+                        if picks_project:
+                            # Project switch: close any current project so
+                            # ``open_project``'s "no-op when one is set"
+                            # guard doesn't swallow the request.
+                            if desktop.project:
+                                desktop.close_project()
+                            desktop.open_project(path)
+                        else:
+                            try:
+                                desktop.open_file(path, app.screen())
+                            except:
+                                pass
                     continue
 
                 var maybe_action = desktop.handle_event(ev, app.screen())
@@ -457,7 +468,7 @@ fn main() raises:
                         if desktop.run_session.is_active():
                             desktop.run_session.terminate()
                         app.quit()
-                    elif action == String("file:open"):
+                    elif action == EDITOR_OPEN:
                         var start = desktop.project.value() \
                             if desktop.project else String(".")
                         file_dialog.open(start)
@@ -466,6 +477,15 @@ fn main() raises:
                         var start = desktop.project.value() \
                             if desktop.project else String(".")
                         file_dialog.open(start)
+                        file_dialog.set_project(desktop.project)
+                    elif action == PROJECT_OPEN:
+                        # Directory-pick mode: the user navigates to the
+                        # project root and clicks " Open Project " (or
+                        # ESC to cancel). Submission goes through the
+                        # ``picks_project`` branch above.
+                        var start = desktop.project.value() \
+                            if desktop.project else String(".")
+                        file_dialog.open_directory(start)
                         file_dialog.set_project(desktop.project)
             except e:
                 # Any uncaught raise lands here. Stamp the trace log

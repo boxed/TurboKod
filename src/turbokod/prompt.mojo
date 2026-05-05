@@ -52,10 +52,24 @@ struct Prompt(Movable):
         self.submitted = False
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn open(mut self, var label: String, var prefill: String = String("")):
+    fn open(
+        mut self,
+        var label: String,
+        var prefill: String = String(""),
+        select_prefill: Bool = False,
+    ):
+        """Open the prompt with ``label`` and an optional ``prefill``.
+
+        ``select_prefill=True`` leaves the prefilled text fully selected
+        so the next typed key replaces it — used by Find when seeded
+        from the editor's current selection, where the user almost
+        always wants to either keep it (Enter) or type something else.
+        """
         self.label = label^
         self.input = TextField()
         self.input.set_text(prefill^)
+        if select_prefill:
+            self.input.select_all()
         self.active = True
         self.submitted = False
         self._input_rect = Rect(0, 0, 0, 0)
