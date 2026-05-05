@@ -514,6 +514,12 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the toggle is on).
     var git_changes_visible: Bool
     var git_change_lines: List[Int]
+    # Right-side minimap gutter. When True, the right-edge column paints
+    # a whole-file projection of uncommitted-change markers (independent
+    # of ``scroll_y``). The gutter is zero-width whenever there's no
+    # source data to project — currently the git_change_lines list — so
+    # turning this on outside a git repo is a silent no-op.
+    var minimap_visible: Bool
     # ``_git_head_text`` caches the file's content at HEAD so the
     # gutter can re-diff against the in-memory buffer on every edit
     # without re-spawning git. ``_git_head_loaded`` distinguishes "not
@@ -604,6 +610,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self.minimap_visible = True
         self._git_head_text = String("")
         self._git_head_loaded = False
         self._git_head_present = False
@@ -657,6 +664,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self.minimap_visible = True
         self._git_head_text = String("")
         self._git_head_loaded = False
         self._git_head_present = False
@@ -731,6 +739,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.blame_visible = copy.blame_visible
         self.git_changes_visible = copy.git_changes_visible
         self.git_change_lines = copy.git_change_lines.copy()
+        self.minimap_visible = copy.minimap_visible
         self._git_head_text = copy._git_head_text
         self._git_head_loaded = copy._git_head_loaded
         self._git_head_present = copy._git_head_present
@@ -1627,7 +1636,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         annotations (currently: a gray square on rows with uncommitted
         changes). Zero when no annotation source is active, so editors
         that have nothing to show give the full width back to text."""
-        if self.git_changes_visible and len(self.git_change_lines) > 0:
+        if not self.minimap_visible:
+            return 0
+        if len(self.git_change_lines) > 0:
             return 1
         return 0
 

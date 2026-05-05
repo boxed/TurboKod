@@ -55,7 +55,9 @@ from turbokod import (
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_GIT_CHANGES,
-    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_SOFT_WRAP,
+    EDITOR_TOGGLE_LINE_NUMBERS,
+    EDITOR_TOGGLE_MINIMAP,
+    EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
@@ -184,6 +186,10 @@ fn main() raises:
         ))
         view_items.append(MenuItem(
             String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR,
+            checkable=True,
+        ))
+        view_items.append(MenuItem(
+            String("Minimap"), EDITOR_TOGGLE_MINIMAP,
             checkable=True,
         ))
         desktop.menu_bar.add(Menu(String("View"), view_items^))

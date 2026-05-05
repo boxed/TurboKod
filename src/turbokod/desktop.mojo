@@ -170,6 +170,12 @@ comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 # column itself only paints when a ``.git`` is reachable from the
 # project root, so flipping it on outside a repo is a silent no-op.
 comptime EDITOR_TOGGLE_GIT_CHANGES  = String("view:git_changes")
+# View-menu toggle for the right-side minimap gutter — a fixed-height
+# whole-file projection of uncommitted-change markers, independent of
+# ``scroll_y``. The flag lives on ``TurbokodConfig`` so it survives
+# across sessions; the column itself only paints when there's data to
+# project (currently: git change lines).
+comptime EDITOR_TOGGLE_MINIMAP      = String("view:minimap")
 # Git actions. ``EDITOR_TOGGLE_BLAME`` runs ``git blame --porcelain`` for
 # the focused editor's file the first time it's switched on, then re-uses
 # the cached attribution for subsequent toggles in the same session.
@@ -1006,6 +1012,9 @@ struct Desktop(Movable):
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
         )
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_MINIMAP, self.config.minimap,
+        )
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
         # adds up; ``self.project`` is the only relevant root because
@@ -1035,10 +1044,19 @@ struct Desktop(Movable):
             # on save / reload gets the next paint to refresh.
             if self.windows.windows[i].editor.read_only:
                 self.windows.windows[i].editor.git_changes_visible = False
+                self.windows.windows[i].editor.minimap_visible = False
             else:
                 self.windows.windows[i].editor.git_changes_visible = \
                     self.config.git_changes and have_git
-                if self.config.git_changes and have_git:
+                self.windows.windows[i].editor.minimap_visible = \
+                    self.config.minimap
+                # Git change data feeds both the +/~ left gutter (Git
+                # Changes toggle) and the right-side projection (Minimap
+                # toggle), so load it whenever either is on.
+                var want_git_data = (
+                    self.config.git_changes or self.config.minimap
+                )
+                if want_git_data and have_git:
                     var fp = self.windows.windows[i].editor.file_path
                     # Step 1: fetch HEAD content once per file. Bracket
                     # the spawn with the loaded flag so untracked / new
@@ -2595,6 +2613,11 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_TOGGLE_TAB_BAR:
             self.config.tab_bar = not self.config.tab_bar
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_MINIMAP:
+            self.config.minimap = not self.config.minimap
             self._apply_view_config()
             _ = save_config(self.config)
             return Optional[String]()
