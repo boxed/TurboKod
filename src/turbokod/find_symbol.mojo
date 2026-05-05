@@ -444,14 +444,11 @@ struct FindSymbol(Movable):
                 Point(rect.a.x + 2, top + i),
                 entry.name, row_attr, rect.b.x - 1,
             )
-            # Path on the right side of the row, dim-coloured.
-            var path_x = rect.a.x + 2 + len(entry.name.as_bytes()) + 2
-            if path_x < rect.b.x - 2:
-                _ = canvas.put_text(
-                    Point(path_x, top + i),
-                    entry.path,
-                    hint_attr, rect.b.x - 1,
-                )
+            # Intentionally no path column: ``entry.path`` is the
+            # location of the *first textual occurrence* (a usage,
+            # almost always), not the definition the LSP will
+            # eventually take us to. Showing it would mislead the
+            # user about where the symbol actually lives.
         # Bottom hint.
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.b.y - 1),
