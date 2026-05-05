@@ -1859,6 +1859,202 @@ fn test_desktop_project_find_requires_active_project() raises:
     assert_true(d.project_find.active)
 
 
+fn test_nav_history_records_initial_open() raises:
+    """Opening a file seeds the nav stack with the file's starting
+    cursor position so the very first Cmd+[ has somewhere to go."""
+    var path = _temp_path(String("_nav_init.txt"))
+    assert_true(write_file(path, String("alpha\nbeta\ngamma\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 1)
+    assert_equal(d._nav_pos, 0)
+    assert_equal(d._nav_stack[0].file_path, path)
+    assert_equal(d._nav_stack[0].row, 0)
+    assert_equal(d._nav_stack[0].col, 0)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_ignores_small_drift() raises:
+    """Movement under the row / col threshold inside the same file
+    does not push a new entry — the stack only captures real jumps."""
+    var path = _temp_path(String("_nav_drift.txt"))
+    var lines = String("")
+    for _ in range(50):
+        lines = lines + String("x\n")
+    assert_true(write_file(path, lines))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 1)
+    # Move 5 rows down — under the 10-row threshold; no new entry.
+    d.windows.windows[0].editor.move_to(5, 0, False, True)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 1)
+    # Move another 4 rows — total 9 from the recorded baseline; still no.
+    d.windows.windows[0].editor.move_to(9, 0, False, True)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 1)
+    # Cross the threshold — a new entry lands at the current position.
+    d.windows.windows[0].editor.move_to(20, 0, False, True)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 2)
+    assert_equal(d._nav_stack[1].row, 20)
+    assert_equal(d._nav_pos, 1)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_records_file_change() raises:
+    """A focus change to a different file always records, regardless of
+    where the cursor lands — cross-file motion is what the back button
+    is most useful for."""
+    var path_a = _temp_path(String("_nav_fa.txt"))
+    var path_b = _temp_path(String("_nav_fb.txt"))
+    assert_true(write_file(path_a, String("a1\na2\na3\n")))
+    assert_true(write_file(path_b, String("b1\nb2\nb3\n")))
+    var d = Desktop()
+    d.open_file(path_a, _SCREEN)
+    d._track_nav_position()
+    d.open_file(path_b, _SCREEN)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 2)
+    assert_equal(d._nav_stack[0].file_path, path_a)
+    assert_equal(d._nav_stack[1].file_path, path_b)
+    assert_equal(d._nav_pos, 1)
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_back_and_forward() raises:
+    """Cmd+[ steps back through stored entries; Cmd+] returns forward.
+    Both bottom-out as no-ops at the ends of the stack."""
+    var path_a = _temp_path(String("_nav_ba.txt"))
+    var path_b = _temp_path(String("_nav_bb.txt"))
+    assert_true(write_file(path_a, String("a1\na2\na3\n")))
+    assert_true(write_file(path_b, String("b1\nb2\nb3\n")))
+    var d = Desktop()
+    d.open_file(path_a, _SCREEN)
+    d._track_nav_position()
+    d.open_file(path_b, _SCREEN)
+    d._track_nav_position()
+    # Three entries: A@0, B@0 — back lands on A.
+    d.navigate_back(_SCREEN)
+    assert_equal(d._nav_pos, 0)
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_a)
+    # Hitting back again at the bottom is a no-op.
+    d.navigate_back(_SCREEN)
+    assert_equal(d._nav_pos, 0)
+    # Forward returns to B.
+    d.navigate_forward(_SCREEN)
+    assert_equal(d._nav_pos, 1)
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_b)
+    # Forward at the top is a no-op.
+    d.navigate_forward(_SCREEN)
+    assert_equal(d._nav_pos, 1)
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_branching_truncates_forward() raises:
+    """After going back, a fresh navigation drops the forward portion
+    of the stack — same model as edit-after-undo wiping redo."""
+    var path = _temp_path(String("_nav_branch.txt"))
+    var lines = String("")
+    for _ in range(80):
+        lines = lines + String("x\n")
+    assert_true(write_file(path, lines))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    d._track_nav_position()
+    d.windows.windows[0].editor.move_to(30, 0, False, True)
+    d._track_nav_position()
+    d.windows.windows[0].editor.move_to(60, 0, False, True)
+    d._track_nav_position()
+    # Stack: 0, 30, 60 — go back to 30.
+    assert_equal(len(d._nav_stack), 3)
+    d.navigate_back(_SCREEN)
+    assert_equal(d._nav_pos, 1)
+    # New jump to 50: forward portion (entry at 60) gets dropped.
+    d.windows.windows[0].editor.move_to(50, 0, False, True)
+    d._track_nav_position()
+    assert_equal(len(d._nav_stack), 3)
+    assert_equal(d._nav_pos, 2)
+    assert_equal(d._nav_stack[2].row, 50)
+    # Forward is now a no-op since we're back at the top.
+    d.navigate_forward(_SCREEN)
+    assert_equal(d._nav_pos, 2)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_back_via_dispatch_action() raises:
+    """The Cmd+[ binding routes through ``dispatch_action`` like any
+    other framework action — the same call should drive the back step."""
+    var path_a = _temp_path(String("_nav_da.txt"))
+    var path_b = _temp_path(String("_nav_db.txt"))
+    assert_true(write_file(path_a, String("a\n")))
+    assert_true(write_file(path_b, String("b\n")))
+    var d = Desktop()
+    d.open_file(path_a, _SCREEN)
+    d._track_nav_position()
+    d.open_file(path_b, _SCREEN)
+    d._track_nav_position()
+    var maybe = d.dispatch_action(EDITOR_NAV_BACK, _SCREEN)
+    assert_false(Bool(maybe))   # framework consumed the action
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_a)
+    var maybe2 = d.dispatch_action(EDITOR_NAV_FORWARD, _SCREEN)
+    assert_false(Bool(maybe2))
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_b)
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
+    """The Cmd+[ event arrives as ``(0x5B, MOD_CTRL)`` after the
+    META→CTRL fold (brackets aren't letters so the parser doesn't
+    collapse them to ESC). The hotkey table must turn those into
+    nav actions."""
+    var path_a = _temp_path(String("_nav_ka.txt"))
+    var path_b = _temp_path(String("_nav_kb.txt"))
+    assert_true(write_file(path_a, String("a\n")))
+    assert_true(write_file(path_b, String("b\n")))
+    var d = Desktop()
+    d.open_file(path_a, _SCREEN)
+    # ``handle_event`` runs the per-frame nav tracking via ``paint``
+    # in the real loop; in this test we drive the recording manually
+    # so the stack reflects the explicit opens.
+    d._track_nav_position()
+    d.open_file(path_b, _SCREEN)
+    d._track_nav_position()
+    var back_ev = Event.key_event(UInt32(ord("[")), MOD_CTRL)
+    _ = d.handle_event(back_ev, _SCREEN)
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_a)
+    var fwd_ev = Event.key_event(UInt32(ord("]")), MOD_CTRL)
+    _ = d.handle_event(fwd_ev, _SCREEN)
+    assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_b)
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
+    """Sanity-check: the terminal parser must NOT fold Cmd+[ down
+    to ESC. The brackets land on (0x5B, MOD_CTRL) so the desktop
+    hotkey table can pick them up — collapsing to 0x1B/MOD_NONE
+    would make Cmd+[ indistinguishable from the Esc key."""
+    # CSI 27 ; 9 ; 91 ~  — modifyOtherKeys=2 form for Cmd+[.
+    var seq = String("\x1b[27;9;91~")
+    var ev_consumed = parse_input(seq)
+    assert_equal(ev_consumed[0].kind, EVENT_KEY)
+    assert_equal(ev_consumed[0].key, UInt32(ord("[")))
+    assert_equal(ev_consumed[0].mods, MOD_CTRL)
+    # And Cmd+S still folds to the bare control byte (0x13) — the
+    # letter path is unchanged so existing Ctrl-letter hotkeys
+    # keep working.
+    var seq_s = String("\x1b[27;9;115~")
+    var ev_s = parse_input(seq_s)
+    assert_equal(ev_s[0].key, UInt32(0x13))
+    assert_equal(ev_s[0].mods, MOD_NONE)
+
+
 fn test_window_manager_close_focused() raises:
     var wm = WindowManager()
     wm.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
@@ -8031,6 +8227,14 @@ fn main() raises:
     test_desktop_window_menu_when_empty()
     test_desktop_window_focus_action_focuses_window()
     test_desktop_maximize_all_and_restore_all()
+    test_nav_history_records_initial_open()
+    test_nav_history_ignores_small_drift()
+    test_nav_history_records_file_change()
+    test_nav_history_back_and_forward()
+    test_nav_history_branching_truncates_forward()
+    test_nav_history_back_via_dispatch_action()
+    test_nav_history_cmd_bracket_keys_fire_dispatch()
+    test_normalize_ctrl_letter_preserves_cmd_bracket()
     test_window_manager_close_focused()
     test_ctrl_n_focuses_window_by_number()
     test_focus_changes_keep_window_list_order_stable()

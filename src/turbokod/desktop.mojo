@@ -47,7 +47,7 @@ from .config import (
 )
 from .diff import unified_diff
 from .file_io import (
-    basename, find_git_project, join_path, parent_path, stat_file,
+    basename, find_git_project, join_path, parent_path, read_file, stat_file,
 )
 from .git_blame import compute_blame
 from .git_changes import (
@@ -75,7 +75,7 @@ from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
-from .lsp_dispatch import DefinitionResolved, LspManager, WorkspaceSymbolItem
+from .lsp_dispatch import DefinitionResolved, LspManager
 from .dap_dispatch import DapManager, DapStackFrame, DapVariable
 from .debug_pane import (
     DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
@@ -151,9 +151,10 @@ comptime APP_SETTINGS         = String("app:settings")
 comptime EDITOR_REPLACE       = String("edit:replace")
 comptime EDITOR_GOTO          = String("edit:goto")
 comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
-# Workspace-wide "find symbol" picker. Backed by ``workspace/symbol``
-# on the focused editor's LSP — type-as-you-go, results include the
-# file path so the user can jump across the project.
+# Project-wide "find symbol" picker (Cmd+Option+O). Type a symbol
+# name, hit Enter, and the host runs ``rg`` for the first occurrence
+# then asks the LSP to follow that usage to its definition. See
+# ``find_symbol.mojo`` for the rationale.
 comptime EDITOR_FIND_SYMBOL   = String("edit:find_symbol")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
@@ -385,12 +386,18 @@ struct Desktop(Movable):
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
     var find_symbol: FindSymbol
-    # Tracks which LSP manager owns the most recent ``workspace/symbol``
-    # request and the query that produced it, so the tick consumer can
-    # drop responses for stale queries (the user has typed past them).
-    # ``-1`` means "no in-flight request".
+    # Tracks which LSP manager owns the find-symbol-driven definition
+    # request. Lets the tick consumer distinguish "this response is
+    # for FindSymbol — close the picker" from a stray Cmd+click
+    # response. ``-1`` means no FindSymbol request is in flight.
     var _find_symbol_lsp_idx: Int
-    var _find_symbol_query: String
+    # The rg hit that produced the in-flight LSP request, captured so
+    # the tick consumer can fall back to it when the LSP comes back
+    # empty (e.g. position is in a comment / string). Empty path means
+    # "no pending hit".
+    var _find_symbol_hit_path: String
+    var _find_symbol_hit_line: Int
+    var _find_symbol_hit_column: Int
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
@@ -583,7 +590,9 @@ struct Desktop(Movable):
         self.symbol_pick = SymbolPick()
         self.find_symbol = FindSymbol()
         self._find_symbol_lsp_idx = -1
-        self._find_symbol_query = String("")
+        self._find_symbol_hit_path = String("")
+        self._find_symbol_hit_line = 0
+        self._find_symbol_hit_column = 0
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
@@ -897,6 +906,10 @@ struct Desktop(Movable):
             if self.symbol_pick.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.find_symbol.active:
+            if self.find_symbol.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
         if self.doc_pick.active:
             if self.doc_pick.is_input_at(pos, screen):
                 return String("text")
@@ -1043,6 +1056,10 @@ struct Desktop(Movable):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
+        # FindSymbol streams rg output across frames; pump it here so
+        # the picker's entry list grows visibly as results arrive
+        # rather than appearing all at once at the end.
+        self.find_symbol.tick()
         # Update the recents list from whichever editor is focused this
         # frame. Cheap (one path compare against ``_recent_files[0]``)
         # on idle frames; promotes a path to the front exactly once
@@ -2167,29 +2184,19 @@ struct Desktop(Movable):
                 )
             return Optional[String]()
         if self.find_symbol.active:
-            var prev_query = self.find_symbol.query
             if event.kind == EVENT_KEY:
                 _ = self.find_symbol.handle_key(event)
             else:
                 _ = self.find_symbol.handle_mouse(event, screen)
             if not self.find_symbol.active:
-                # ESC during handle_key.
+                # ESC inside handle_key — drop any in-flight LSP id and
+                # cached rg hit so a late response doesn't surprise-jump
+                # after close.
                 self._find_symbol_lsp_idx = -1
-                self._find_symbol_query = String("")
+                self._find_symbol_hit_path = String("")
                 return Optional[String]()
-            if self.find_symbol.submitted:
-                var path = self.find_symbol.selected_path
-                var line = self.find_symbol.selected_line
-                var character = self.find_symbol.selected_character
-                self.find_symbol.close()
-                self._find_symbol_lsp_idx = -1
-                self._find_symbol_query = String("")
-                self._jump_to(
-                    DefinitionResolved(path, line, character), screen,
-                )
-                return Optional[String]()
-            if self.find_symbol.query != prev_query:
-                self._fire_find_symbol_query()
+            if self.find_symbol.take_submitted():
+                self._submit_find_symbol(screen)
             return Optional[String]()
         if self.doc_pick.active:
             if event.kind == EVENT_KEY:
@@ -2773,15 +2780,42 @@ struct Desktop(Movable):
         # focused.
         for i in range(len(self.lsp_managers)):
             var resolved = self.lsp_managers[i].tick()
+            var owns_find = (
+                self.find_symbol.active and i == self._find_symbol_lsp_idx
+            )
             if resolved:
+                if owns_find:
+                    # FindSymbol's request resolved — close the picker
+                    # and discard the cached rg hit (we have a real
+                    # def location now).
+                    self.find_symbol.close()
+                    self._find_symbol_lsp_idx = -1
+                    self._find_symbol_hit_path = String("")
                 self._jump_to(resolved.value(), screen)
             else:
-                # Empty response just landed: no source location, but
-                # we may still have offline docs for this symbol — try
-                # the docs fallback before letting the status bar
-                # settle on "no definition found". Stdlib symbols (the
-                # common case for this fallback) live in DevDocs even
-                # when the LSP can't see source for them.
+                # Empty response just landed: no source location.
+                # FindSymbol owns this case — instead of the docs
+                # fallback, jump to the rg hit we stashed on submit.
+                # Consume the empty-word latch so docs fallback below
+                # doesn't also fire.
+                if owns_find and self.lsp_managers[i].last_empty():
+                    _ = self.lsp_managers[i].take_empty_word()
+                    self.lsp_managers[i].clear_empty()
+                    var hit_path = self._find_symbol_hit_path
+                    var hit_line = self._find_symbol_hit_line
+                    var hit_col = self._find_symbol_hit_column
+                    self.find_symbol.close()
+                    self._find_symbol_lsp_idx = -1
+                    self._find_symbol_hit_path = String("")
+                    if len(hit_path.as_bytes()) > 0:
+                        self._jump_to(
+                            DefinitionResolved(hit_path, hit_line, hit_col),
+                            screen,
+                        )
+                    continue
+                # Standard docs fallback: stdlib symbols (the common
+                # case for this branch) live in DevDocs even when the
+                # LSP can't see source for them.
                 var unresolved = self.lsp_managers[i].take_empty_word()
                 if len(unresolved.as_bytes()) > 0:
                     var lang = self.lsp_languages[i]
@@ -2795,13 +2829,6 @@ struct Desktop(Movable):
                     and self.lsp_managers[i].has_pending_symbols():
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
-                )
-            if self.find_symbol.active \
-                    and i == self._find_symbol_lsp_idx \
-                    and self.lsp_managers[i].has_pending_workspace_symbols():
-                self.find_symbol.set_entries(
-                    self.lsp_managers[i].take_workspace_symbols(),
-                    self._find_symbol_query,
                 )
         # Drive the background LSP-install runner from the same per-frame
         # tick. When the install completes we either flash a status-bar
@@ -4214,78 +4241,93 @@ struct Desktop(Movable):
             self.symbol_pick.open(path)
 
     fn _open_find_symbol(mut self):
-        """Open the workspace-wide Find Symbol picker. Routes through
-        the LSP attached to the focused editor; the picker fires a
-        fresh ``workspace/symbol`` request on every query change.
-        """
-        var lsp_idx = self._lsp_for_focused_editor()
-        if lsp_idx < 0:
-            # Fall back to *any* ready LSP — useful when the user is
-            # focused on a non-editor window (file tree, debug pane)
-            # but has, say, pyright running for the project.
-            for i in range(len(self.lsp_managers)):
-                if self.lsp_managers[i].is_ready():
-                    lsp_idx = i
-                    break
-        if lsp_idx < 0:
+        """Open the Find Symbol picker. Validates rg + project
+        availability up front so a misconfigured environment fails
+        fast rather than at submit time."""
+        if len(which(String("rg")).as_bytes()) == 0:
             self.status_bar.set_message(
-                String("LSP: no language server ready for this project"),
+                String("Find Symbol: rg not on PATH"),
                 Attr(RED, LIGHT_GRAY),
             )
             return
-        if not self.lsp_managers[lsp_idx].is_ready():
+        if not self.project:
             self.status_bar.set_message(
-                String("LSP: still starting up — try again"),
-                Attr(BLACK, LIGHT_GRAY),
+                String("Find Symbol: open a project first"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self._find_symbol_lsp_idx = -1
+        self._find_symbol_hit_path = String("")
+        self.find_symbol.open(self.project.value())
+
+    fn _submit_find_symbol(mut self, screen: Rect):
+        """Take the picker's selected entry and resolve it via LSP.
+
+        The entry's ``(path, line, column)`` is the *first textual
+        occurrence* of the chosen symbol name, so it's almost always
+        a usage rather than the definition. We read that file and
+        send ``textDocument/definition`` at the entry's position;
+        the LSP follows the usage back to the def. Falls back to
+        jumping directly to the entry on no-LSP / send-failure
+        paths so the user always lands somewhere useful.
+        """
+        if not self.find_symbol.active:
+            return
+        var path = self.find_symbol.selected_path
+        var line = self.find_symbol.selected_line - 1   # 0-based for LSP
+        var col = self.find_symbol.selected_column - 1
+        var name = self.find_symbol.selected_name
+        if len(path.as_bytes()) == 0:
+            self.find_symbol.set_error(String("No selection."))
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            # No usable LSP — direct jump.
+            self.find_symbol.close()
+            self._find_symbol_lsp_idx = -1
+            self._jump_to(
+                DefinitionResolved(path, line, col), screen,
+            )
+            return
+        var text = self._snapshot_or_read(path)
+        if not text:
+            self.find_symbol.set_error(
+                String("Could not read ") + path,
+            )
+            return
+        var ok = self.lsp_managers[lsp_idx].request_definition(
+            path, line, col, name, text.value(),
+        )
+        if not ok:
+            self.find_symbol.close()
+            self._find_symbol_lsp_idx = -1
+            self._jump_to(
+                DefinitionResolved(path, line, col), screen,
             )
             return
         self._find_symbol_lsp_idx = lsp_idx
-        self._find_symbol_query = String("")
-        self.find_symbol.open()
+        self._find_symbol_hit_path = path
+        self._find_symbol_hit_line = line
+        self._find_symbol_hit_column = col
+        self.find_symbol.set_pending(
+            String("Resolving ") + name + String(" via LSP…"),
+        )
 
-    fn _fire_find_symbol_query(mut self):
-        """Send a fresh ``workspace/symbol`` request for the picker's
-        current query. Empty queries are skipped — pyright/basedpyright
-        return nothing (or a giant index dump) for empty queries, neither
-        of which is a good UX. The LSP manager's id-shadowing handles
-        stale responses; the picker's ``set_entries`` does the
-        belt-and-braces drop on query mismatch.
+    fn _snapshot_or_read(self, path: String) -> Optional[String]:
+        """Return the editor's live buffer text for ``path`` if any
+        window has it open, otherwise the on-disk contents. ``None``
+        on read failure.
         """
-        var query = self.find_symbol.query
-        if len(query.as_bytes()) == 0:
-            self._find_symbol_query = String("")
-            return
-        if self._find_symbol_lsp_idx < 0 \
-                or self._find_symbol_lsp_idx >= len(self.lsp_managers):
-            return
-        if not self.lsp_managers[self._find_symbol_lsp_idx].is_ready():
-            self.find_symbol.set_error(
-                String("LSP: not ready"),
-            )
-            return
-        var ok = self.lsp_managers[self._find_symbol_lsp_idx] \
-            .request_workspace_symbols(query)
-        if ok:
-            self._find_symbol_query = query
-            self.find_symbol.mark_loading()
-        else:
-            self.find_symbol.set_error(
-                String("LSP: workspace/symbol request failed"),
-            )
-
-    fn _lsp_for_focused_editor(self) -> Int:
-        """Return the index of the LSP manager handling the focused
-        editor's file, or -1 when no editor is focused / no LSP
-        matches. Mirrors ``_lsp_for_path`` but pulls the path from
-        ``windows.focused`` so callers don't have to thread it.
-        """
-        var idx = self._focused_editor_idx()
-        if idx < 0:
-            return -1
-        var path = self.windows.windows[idx].editor.file_path
-        if len(path.as_bytes()) == 0:
-            return -1
-        return self._lsp_for_path(path)
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.file_path == path:
+                return Optional[String](
+                    self.windows.windows[i].editor.text_snapshot(),
+                )
+        try:
+            return Optional[String](read_file(path))
+        except:
+            return Optional[String]()
 
     fn _open_save_as_dialog(mut self):
         """Open the modal save-as picker, seeded from the focused editor's
