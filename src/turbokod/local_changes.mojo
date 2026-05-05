@@ -66,7 +66,7 @@ from .git_changes import (
     stage_file, unstage_file,
 )
 from .string_utils import split_lines_no_trailing
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import paint_drop_shadow, paint_window_title
 
 
@@ -515,7 +515,7 @@ struct LocalChanges(Movable):
     # success/failure of a finished git op so the status flash can be
     # colored accordingly.
     var overlay: Int
-    var overlay_input: String
+    var overlay_input: TextField
     var overlay_message: String
     var overlay_ok: Bool
 
@@ -547,7 +547,7 @@ struct LocalChanges(Movable):
         self.selected_line = 0
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
 
@@ -580,7 +580,7 @@ struct LocalChanges(Movable):
         self.selected_line = 0
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
         self._reload_files()
@@ -652,7 +652,7 @@ struct LocalChanges(Movable):
         self.selected_line = 0
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
 
@@ -986,7 +986,7 @@ struct LocalChanges(Movable):
         if self.overlay != _OVERLAY_NONE:
             self._paint_overlay(canvas, screen)
 
-    fn _paint_overlay(self, mut canvas: Canvas, screen: Rect):
+    fn _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
         """Render the active overlay (commit prompt / confirmation /
         status flash) as a small drop-shadowed box centered on the
         modal area."""
@@ -1030,16 +1030,13 @@ struct LocalChanges(Movable):
                 Point(label_x, by + 2), prompt_text, body, bx + box_w - 1,
             )
             var input_x = label_x + len(prompt_text.as_bytes())
-            _ = canvas.put_text(
-                Point(input_x, by + 2), self.overlay_input, input_attr,
-                bx + box_w - 1,
+            var input_rect = Rect(
+                input_x, by + 2, bx + box_w - 1, by + 3,
             )
-            var cur_x = input_x + len(self.overlay_input.as_bytes())
-            if cur_x < bx + box_w - 1:
-                canvas.set(
-                    cur_x, by + 2,
-                    Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1),
-                )
+            self.overlay_input.paint(
+                canvas, input_rect, input_attr,
+                Attr(LIGHT_GRAY, BLACK), True,
+            )
             var hint = String("Enter: commit   ESC: cancel")
             _ = canvas.put_text(
                 Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
@@ -1840,12 +1837,12 @@ struct LocalChanges(Movable):
             )
             return
         self.overlay = _OVERLAY_COMMIT
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = String("")
 
     fn _open_amend_confirm(mut self):
         self.overlay = _OVERLAY_AMEND_CONFIRM
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = \
             String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
 
@@ -1855,7 +1852,7 @@ struct LocalChanges(Movable):
             return
         var fe = self.files[self.sel_file]
         self.overlay = _OVERLAY_REVERT_CONFIRM
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
         if untracked:
             self.overlay_message = \
@@ -1870,11 +1867,11 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_STATUS
         self.overlay_message = msg^
         self.overlay_ok = ok
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
 
     fn _close_overlay(mut self):
         self.overlay = _OVERLAY_NONE
-        self.overlay_input = String("")
+        self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
 
@@ -1891,7 +1888,7 @@ struct LocalChanges(Movable):
         self._show_status(r.message, r.ok)
 
     fn _submit_commit(mut self):
-        var msg = self.overlay_input
+        var msg = self.overlay_input.text
         if len(msg.as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
             return
@@ -1933,18 +1930,8 @@ struct LocalChanges(Movable):
             if k == KEY_ENTER:
                 self._submit_commit()
                 return True
-            var clip = text_field_clipboard_key(event, self.overlay_input)
-            if clip.consumed:
-                return True
-            if k == KEY_BACKSPACE:
-                var bytes = self.overlay_input.as_bytes()
-                if len(bytes) > 0:
-                    self.overlay_input = String(StringSlice(
-                        unsafe_from_utf8=bytes[:len(bytes) - 1]
-                    ))
-                return True
-            if UInt32(0x20) <= k and k < UInt32(0x7F):
-                self.overlay_input = self.overlay_input + chr(Int(k))
+            var r = self.overlay_input.handle_key(event)
+            if r.consumed:
                 return True
             return True
         # Confirmation overlays.

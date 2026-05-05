@@ -2805,6 +2805,19 @@ struct Editor(ImplicitlyCopyable, Movable):
                     )
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi)
+        elif k == UInt32(0x01):    # Ctrl/Cmd+A — select whole buffer
+            # Pure selection move: no buffer mutation, no undo, no
+            # extras (a select-all on top of multi-cursor would
+            # collapse to one selection anyway). Anchor at (0, 0),
+            # cursor at end of last line — same direction as a
+            # Shift-Down/End drive so subsequent shift-arrows extend
+            # in the natural direction.
+            self.clear_extra_carets()
+            var n_rows = self.buffer.line_count()
+            if n_rows > 0:
+                var last = n_rows - 1
+                self.move_to(0, 0, False)
+                self.move_to(last, self.buffer.line_length(last), True)
         elif k == UInt32(0x03):    # Ctrl+C — non-mutating
             # Copy doesn't change the buffer, so there's nothing for
             # undo to walk back to. Drop extras without snapshotting.
