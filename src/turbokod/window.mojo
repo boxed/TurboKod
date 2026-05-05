@@ -216,9 +216,15 @@ struct Window(ImplicitlyCopyable, Movable):
         canvas.draw_box(self.rect, border, focused)
         # Title sits on the top border row through the framework helper:
         # the helper enforces title-bg = body-bg, while ``border`` only
-        # contributes its focus-tinted fg.
+        # contributes its focus-tinted fg. The +6 width gate keeps the
+        # centered title from poking under the close button (left, 3
+        # cells) or the number/maximize indicator (right) on small
+        # windows — those always win the row.
         var title_padded = String(" ") + self.title + String(" ")
-        paint_window_title(canvas, self.rect, title_padded, border, body_bg)
+        if self.rect.width() >= len(title_padded.as_bytes()) + 6:
+            paint_window_title(
+                canvas, self.rect, title_padded, border, body_bg,
+            )
         # Close button [■] at top-LEFT (TV convention) — focused only.
         # Drawing is delegated to ``paint_close_button`` so dialogs
         # can reuse the same chrome without copy-pasting the glyphs.
