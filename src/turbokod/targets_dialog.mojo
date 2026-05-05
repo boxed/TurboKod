@@ -52,13 +52,13 @@ from .dropdown import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
+    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
     KEY_TAB, KEY_UP,
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect, compute_dialog_rect
 from .project_targets import ProjectTargets, RunTarget
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import (
     hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
 )
@@ -172,13 +172,6 @@ fn _split_args(text: String) -> List[String]:
     return out^
 
 
-fn _str_pop_byte(s: String) -> String:
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return s
-    return String(StringSlice(unsafe_from_utf8=b[:len(b) - 1]))
-
-
 # --- TargetsDialog --------------------------------------------------------
 
 
@@ -202,6 +195,19 @@ struct TargetsDialog(Movable):
     var _drag: Optional[Point]
     var _list_scroll: Int
     var _buttons: List[_PlacedButton]
+    # Editable input strips for the currently-selected entry. The
+    # field text is the canonical source of truth while the dialog
+    # is open; ``_sync_fields_into_entries`` writes them back into
+    # ``entries[selected]`` before any selection change or Save.
+    var name_tf: TextField
+    var program_tf: TextField
+    var args_tf: TextField
+    var cwd_tf: TextField
+    # Cached input rects for mouse routing (captured during paint).
+    var _name_rect: Rect
+    var _program_rect: Rect
+    var _args_rect: Rect
+    var _cwd_rect: Rect
     """Persistent button table. Each entry's ``ShadowButton`` carries
     its own press latch (see ``ShadowButton.handle_mouse``), so the
     table must outlive paint cycles — ``_paint_buttons`` repositions
@@ -218,6 +224,14 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self.name_tf = TextField()
+        self.program_tf = TextField()
+        self.args_tf = TextField()
+        self.cwd_tf = TextField()
+        self._name_rect = Rect(0, 0, 0, 0)
+        self._program_rect = Rect(0, 0, 0, 0)
+        self._args_rect = Rect(0, 0, 0, 0)
+        self._cwd_rect = Rect(0, 0, 0, 0)
         # Build the persistent button table once — ``_paint_buttons``
         # repositions and updates ``enabled`` per frame, but the press
         # latch on each ShadowButton has to survive across paints.
@@ -252,6 +266,7 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self._load_fields_from_selected()
 
     fn close(mut self):
         self.active = False
@@ -296,12 +311,16 @@ struct TargetsDialog(Movable):
         immediately and shifting focus to the Name field is what users
         expect — the next keystroke lands where they're already
         thinking ("OK, what should I call this thing?")."""
+        # Stash the currently-edited fields back into their row so the
+        # newly-appended entry doesn't overwrite them.
+        self._commit_fields_to_selected()
         var t = RunTarget()
         t.name = self._unique_name(String("new"))
         self.entries.append(t^)
         self.selected = len(self.entries) - 1
         self.focus = _FOCUS_NAME
         self._scroll_selection_into_view()
+        self._load_fields_from_selected()
 
     fn _unique_name(self, base: String) -> String:
         """Return ``base`` if no entry uses it, else ``base 2``,
@@ -359,6 +378,8 @@ struct TargetsDialog(Movable):
                 self.entries[self.selected].name
                 if self.selected >= 0 else String("")
             )
+        # Reload the editable strips from whichever row we landed on.
+        self._load_fields_from_selected()
 
     fn _selected_target(self) -> RunTarget:
         if self.selected < 0 or self.selected >= len(self.entries):
@@ -372,6 +393,42 @@ struct TargetsDialog(Movable):
         """
         if self.selected < 0 or self.selected >= len(self.entries):
             return
+        self.entries[self.selected] = t^
+
+    fn _load_fields_from_selected(mut self):
+        """Populate the editable strips from ``entries[selected]`` —
+        called after every selection change (open, add, remove,
+        list-arrow-key, list click). Empty fields when no row is
+        selected so the right-side strips don't show stale text from
+        whichever row was last viewed."""
+        if self.selected < 0 or self.selected >= len(self.entries):
+            self.name_tf = TextField()
+            self.program_tf = TextField()
+            self.args_tf = TextField()
+            self.cwd_tf = TextField()
+            return
+        var t = self.entries[self.selected]
+        self.name_tf = TextField()
+        self.name_tf.set_text(t.name)
+        self.program_tf = TextField()
+        self.program_tf.set_text(t.program)
+        self.args_tf = TextField()
+        self.args_tf.set_text(_join_args(t.args))
+        self.cwd_tf = TextField()
+        self.cwd_tf.set_text(t.cwd)
+
+    fn _commit_fields_to_selected(mut self):
+        """Write the editable strip values back into
+        ``entries[selected]``. Called before any selection change, and
+        on Save, so the entries snapshot is always up-to-date with
+        what the user typed."""
+        if self.selected < 0 or self.selected >= len(self.entries):
+            return
+        var t = self.entries[self.selected]
+        t.name = self.name_tf.text
+        t.program = self.program_tf.text
+        t.args = _split_args(self.args_tf.text)
+        t.cwd = self.cwd_tf.text
         self.entries[self.selected] = t^
 
     # --- focus walk -------------------------------------------------
@@ -486,7 +543,7 @@ struct TargetsDialog(Movable):
                 Point(inner.a.x, inner.a.y + r), line, attr, inner.b.x,
             )
 
-    fn _paint_form(self, mut canvas: Canvas, rect: Rect):
+    fn _paint_form(mut self, mut canvas: Canvas, rect: Rect):
         """Paint the labels + editable strips for the selected target.
         When nothing is selected, paint a centered hint — the form
         rows would otherwise show empty boxes the user can't actually
@@ -523,14 +580,22 @@ struct TargetsDialog(Movable):
             String("(left/right to choose; (none) disables Cmd+D)"),
             hint_attr, rect.b.x - 2,
         )
-        self._paint_input(canvas, rect, _FOCUS_NAME, t.name)
-        self._paint_input(canvas, rect, _FOCUS_PROGRAM, t.program)
-        self._paint_input(canvas, rect, _FOCUS_ARGS, _join_args(t.args))
-        self._paint_input(canvas, rect, _FOCUS_CWD, t.cwd)
+        # Copy each field out before the call: ``_paint_input_tf``
+        # takes ``mut self``, so an aliased ``self.name_tf`` reference
+        # would fail Mojo's exclusivity check.
+        var name_tf = self.name_tf.copy()
+        self._paint_input_tf(canvas, rect, _FOCUS_NAME, name_tf)
+        var program_tf = self.program_tf.copy()
+        self._paint_input_tf(canvas, rect, _FOCUS_PROGRAM, program_tf)
+        var args_tf = self.args_tf.copy()
+        self._paint_input_tf(canvas, rect, _FOCUS_ARGS, args_tf)
+        var cwd_tf = self.cwd_tf.copy()
+        self._paint_input_tf(canvas, rect, _FOCUS_CWD, cwd_tf)
         self._paint_lang_dropdown(canvas, rect, t.debug_language)
 
-    fn _paint_input(
-        self, mut canvas: Canvas, dialog: Rect, focus: UInt8, text: String,
+    fn _paint_input_tf(
+        mut self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
+        tf: TextField,
     ):
         """Single-line input strip in the Turbo Vision style: cyan
         face when blurred, blue with white text when focused. The
@@ -546,16 +611,16 @@ struct TargetsDialog(Movable):
         var fill_attr = (
             Attr(WHITE, BLUE) if has_focus else Attr(BLACK, CYAN)
         )
-        canvas.fill(ir, String(" "), fill_attr)
-        _ = canvas.put_text(
-            Point(ir.a.x, ir.a.y), text, fill_attr, ir.b.x,
+        var sel_attr = (
+            Attr(BLUE, WHITE) if has_focus else Attr(BLACK, LIGHT_GRAY)
         )
-        if has_focus:
-            var cur_x = ir.a.x + len(text.as_bytes())
-            if cur_x < ir.b.x:
-                canvas.set(
-                    cur_x, ir.a.y, Cell(String(" "), Attr(BLACK, LIGHT_GRAY), 1),
-                )
+        # Stash the strip rect so ``handle_mouse`` can route a click
+        # back to ``tf.handle_mouse`` for cursor placement.
+        if focus == _FOCUS_NAME:    self._name_rect = ir
+        elif focus == _FOCUS_PROGRAM: self._program_rect = ir
+        elif focus == _FOCUS_ARGS:    self._args_rect = ir
+        elif focus == _FOCUS_CWD:     self._cwd_rect = ir
+        tf.paint(canvas, ir, fill_attr, sel_attr, has_focus)
 
     fn _lang_dropdown(self, current: String) -> Dropdown:
         """Build a fresh ``Dropdown`` for the debug-language slot,
@@ -671,63 +736,34 @@ struct TargetsDialog(Movable):
                 self._move_selection(1)
                 return True
             return True
-        if k == KEY_LEFT or k == KEY_RIGHT:
-            if self.focus == _FOCUS_LANG:
-                self._cycle_lang(event)
+        # Lang dropdown left/right cycles options; for editable inputs
+        # we let the field handle them (cursor movement, selection).
+        if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
+            self._cycle_lang(event)
             return True
-        if k == KEY_BACKSPACE:
-            return self._backspace_focused()
-        if self._clipboard_focused(event):
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            return self._type_focused(chr(Int(k)))
-        return True
-
-    fn _clipboard_focused(mut self, event: Event) -> Bool:
-        """Apply Ctrl+C/X/V to whichever editable field has focus.
-
-        The list, language dropdown, and button focuses have no text
-        to operate on — clipboard ops are silently swallowed there
-        (returning ``False`` so the caller's normal swallow-keystroke
-        path still runs).
-        """
-        if self.selected < 0:
-            return False
+        # Route to the focused editable strip. Save / Cancel / Add /
+        # Remove / List have no field, so we fall through.
         if self.focus == _FOCUS_NAME:
-            var t = self._selected_target()
-            var clip = text_field_clipboard_key(event, t.name)
-            if not clip.consumed:
-                return False
-            if clip.changed:
-                self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_PROGRAM:
-            var t = self._selected_target()
-            var clip = text_field_clipboard_key(event, t.program)
-            if not clip.consumed:
-                return False
-            if clip.changed:
-                self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_ARGS:
-            var t = self._selected_target()
-            var joined = _join_args(t.args)
-            var clip = text_field_clipboard_key(event, joined)
-            if not clip.consumed:
-                return False
-            if clip.changed:
-                t.args = _split_args(joined)
-                self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_CWD:
-            var t = self._selected_target()
-            var clip = text_field_clipboard_key(event, t.cwd)
-            if not clip.consumed:
-                return False
-            if clip.changed:
-                self._put_selected(t^)
-            return True
-        return False
+            var r = self.name_tf.handle_key(event)
+            if r.consumed:
+                self._commit_fields_to_selected()
+                return True
+        elif self.focus == _FOCUS_PROGRAM:
+            var r = self.program_tf.handle_key(event)
+            if r.consumed:
+                self._commit_fields_to_selected()
+                return True
+        elif self.focus == _FOCUS_ARGS:
+            var r = self.args_tf.handle_key(event)
+            if r.consumed:
+                self._commit_fields_to_selected()
+                return True
+        elif self.focus == _FOCUS_CWD:
+            var r = self.cwd_tf.handle_key(event)
+            if r.consumed:
+                self._commit_fields_to_selected()
+                return True
+        return True
 
     fn _cycle_lang(mut self, event: Event):
         """Step the debug-language dropdown in response to a Left /
@@ -768,8 +804,14 @@ struct TargetsDialog(Movable):
             s = 0
         if s >= len(self.entries):
             s = len(self.entries) - 1
+        if s == self.selected:
+            return
+        # Save the editable strips back into the row we're leaving,
+        # then load the row we're moving to.
+        self._commit_fields_to_selected()
         self.selected = s
         self._scroll_selection_into_view()
+        self._load_fields_from_selected()
 
     fn _scroll_selection_into_view(mut self):
         # The visible row count depends on the list rect, which we
@@ -777,58 +819,6 @@ struct TargetsDialog(Movable):
         # Reset enough that paint will pick up.
         if self.selected >= 0 and self.selected < self._list_scroll:
             self._list_scroll = self.selected
-
-    fn _backspace_focused(mut self) -> Bool:
-        if self.focus == _FOCUS_NAME:
-            var t = self._selected_target()
-            t.name = _str_pop_byte(t.name)
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_PROGRAM:
-            var t = self._selected_target()
-            t.program = _str_pop_byte(t.program)
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_ARGS:
-            var t = self._selected_target()
-            var joined = _join_args(t.args)
-            joined = _str_pop_byte(joined)
-            t.args = _split_args(joined)
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_CWD:
-            var t = self._selected_target()
-            t.cwd = _str_pop_byte(t.cwd)
-            self._put_selected(t^)
-            return True
-        # _FOCUS_LANG is a dropdown — backspace is a no-op there.
-        return True
-
-    fn _type_focused(mut self, ch: String) -> Bool:
-        if self.focus == _FOCUS_NAME:
-            var t = self._selected_target()
-            t.name = t.name + ch
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_PROGRAM:
-            var t = self._selected_target()
-            t.program = t.program + ch
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_ARGS:
-            var t = self._selected_target()
-            var joined = _join_args(t.args) + ch
-            t.args = _split_args(joined)
-            self._put_selected(t^)
-            return True
-        if self.focus == _FOCUS_CWD:
-            var t = self._selected_target()
-            t.cwd = t.cwd + ch
-            self._put_selected(t^)
-            return True
-        # _FOCUS_LANG is a dropdown — typing letters is a no-op there;
-        # left/right are routed via ``_cycle_lang`` instead.
-        return True
 
     # --- mouse ------------------------------------------------------
 
@@ -934,7 +924,13 @@ struct TargetsDialog(Movable):
         # data row — no inset to skip past.
         if list_rect.contains(event.pos):
             var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-            if 0 <= idx and idx < len(self.entries):
+            if 0 <= idx and idx < len(self.entries) and idx != self.selected:
+                # Save the right-side fields back into the previous
+                # row before swapping, then load the clicked row.
+                self._commit_fields_to_selected()
+                self.selected = idx
+                self._load_fields_from_selected()
+            elif 0 <= idx and idx < len(self.entries):
                 self.selected = idx
             self.focus = _FOCUS_LIST
             return True
@@ -956,6 +952,17 @@ struct TargetsDialog(Movable):
                 self.focus = fields[i]
                 if fields[i] == _FOCUS_LANG:
                     self._click_lang(ir, screen, event)
+                else:
+                    # Forward the click to the field for cursor
+                    # positioning / drag-extend.
+                    if fields[i] == _FOCUS_NAME:
+                        _ = self.name_tf.handle_mouse(event, ir)
+                    elif fields[i] == _FOCUS_PROGRAM:
+                        _ = self.program_tf.handle_mouse(event, ir)
+                    elif fields[i] == _FOCUS_ARGS:
+                        _ = self.args_tf.handle_mouse(event, ir)
+                    elif fields[i] == _FOCUS_CWD:
+                        _ = self.cwd_tf.handle_mouse(event, ir)
                 return True
         return True
 
