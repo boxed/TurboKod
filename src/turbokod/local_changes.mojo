@@ -992,7 +992,6 @@ struct LocalChanges(Movable):
         modal area."""
         var border = Attr(BLACK, LIGHT_GRAY)
         var body   = Attr(BLACK, LIGHT_GRAY)
-        var input_attr = Attr(BLACK, LIGHT_GRAY)
         var ok_attr   = Attr(WHITE, LIGHT_GREEN)
         var err_attr  = Attr(WHITE, LIGHT_RED)
         # Box geometry — 60 cols wide, 5 rows tall by default; clamps
@@ -1033,10 +1032,7 @@ struct LocalChanges(Movable):
             var input_rect = Rect(
                 input_x, by + 2, bx + box_w - 1, by + 3,
             )
-            self.overlay_input.paint(
-                canvas, input_rect, input_attr,
-                Attr(LIGHT_GRAY, BLACK), True,
-            )
+            self.overlay_input.paint(canvas, input_rect, True)
             var hint = String("Enter: commit   ESC: cancel")
             _ = canvas.put_text(
                 Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,

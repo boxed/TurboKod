@@ -306,7 +306,6 @@ struct ProjectFind(Movable):
         var bg          = Attr(YELLOW, BLUE)
         var border      = Attr(WHITE,  BLUE)
         var title_attr  = Attr(WHITE,  BLUE)
-        var input_attr  = Attr(BLACK,  LIGHT_GRAY)
         var label_attr  = Attr(WHITE,  BLUE)
         var line_attr   = Attr(YELLOW, BLUE)
         var sel_line    = Attr(BLACK,  YELLOW)
@@ -332,14 +331,14 @@ struct ProjectFind(Movable):
             screen.b.x - 1,
         )
         var qx = screen.a.x + 1 + len(label.as_bytes())
-        # Visible input strip uses input_attr so the field reads as a box.
+        # Cyan field bg pops against the BLUE body — same idiom as
+        # every other dialog's input strip.
         var qw_max = screen.b.x - 2 - qx
         if qw_max < 0:
             qw_max = 0
         var input_rect = Rect(qx, input_y, qx + qw_max, input_y + 1)
         self._input_rect = input_rect
-        var sel_attr = Attr(LIGHT_GRAY, BLACK)
-        self.query.paint(canvas, input_rect, input_attr, sel_attr, True)
+        self.query.paint(canvas, input_rect, True)
         # Separator under the input.
         var sep1_y = input_y + 1
         for x in range(screen.a.x + 1, screen.b.x - 1):

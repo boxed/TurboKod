@@ -15,7 +15,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC,
@@ -195,7 +195,6 @@ struct QuickOpen(Movable):
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
         var sel_attr    = Attr(BLACK,  YELLOW)
-        var inv_attr    = Attr(LIGHT_GRAY, BLACK)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
@@ -210,7 +209,7 @@ struct QuickOpen(Movable):
         var qx = rect.a.x + 2 + len(label.as_bytes())
         var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
         self._input_rect = input_rect
-        self.query.paint(canvas, input_rect, bg, inv_attr, True)
+        self.query.paint(canvas, input_rect, True)
         # Listing.
         var top = self._list_top(rect)
         var h = self._list_height(rect)

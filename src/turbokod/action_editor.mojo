@@ -322,10 +322,7 @@ struct ActionEditor(Movable):
         if row < 0:
             return
         var ir = _input_rect(dialog, row, right_pad)
-        var has_focus = self.focus == focus
-        var fill_attr = Attr(WHITE, BLUE) if has_focus else Attr(BLACK, CYAN)
-        var sel_attr = Attr(BLUE, WHITE) if has_focus else Attr(BLACK, LIGHT_GRAY)
-        tf.paint(canvas, ir, fill_attr, sel_attr, has_focus)
+        tf.paint(canvas, ir, self.focus == focus)
 
     fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect):
         # Browse sits at the right edge of the Program row.

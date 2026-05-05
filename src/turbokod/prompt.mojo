@@ -115,7 +115,6 @@ struct Prompt(Movable):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
-        var sel_attr = Attr(LIGHT_GRAY, BLACK)
         var rect = self._layout(screen)
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
@@ -162,7 +161,7 @@ struct Prompt(Movable):
                 input_y = rect.a.y + 1
         var ir = Rect(input_x, input_y, clip_x, input_y + 1)
         self._input_rect = ir
-        self.input.paint(canvas, ir, attr, sel_attr, True)
+        self.input.paint(canvas, ir, True)
 
     fn handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""

@@ -597,30 +597,20 @@ struct TargetsDialog(Movable):
         mut self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
         tf: TextField,
     ):
-        """Single-line input strip in the Turbo Vision style: cyan
-        face when blurred, blue with white text when focused. The
-        cyan/blue contrast against the LIGHT_GRAY dialog body reads
-        as a pressed-in field at a glance — the same idiom the C++
-        original used for ``Save File As`` / ``Open File`` inputs.
-        """
+        """Single-line input strip — colors come from ``TextField.paint``
+        (cyan field bg, white-on-blue selection), so every dialog with
+        an editable strip looks the same."""
         var row = _row_for_focus(focus)
         if row < 0:
             return
         var ir = _input_rect(dialog, row)
-        var has_focus = self.focus == focus
-        var fill_attr = (
-            Attr(WHITE, BLUE) if has_focus else Attr(BLACK, CYAN)
-        )
-        var sel_attr = (
-            Attr(BLUE, WHITE) if has_focus else Attr(BLACK, LIGHT_GRAY)
-        )
         # Stash the strip rect so ``handle_mouse`` can route a click
         # back to ``tf.handle_mouse`` for cursor placement.
         if focus == _FOCUS_NAME:    self._name_rect = ir
         elif focus == _FOCUS_PROGRAM: self._program_rect = ir
         elif focus == _FOCUS_ARGS:    self._args_rect = ir
         elif focus == _FOCUS_CWD:     self._cwd_rect = ir
-        tf.paint(canvas, ir, fill_attr, sel_attr, has_focus)
+        tf.paint(canvas, ir, self.focus == focus)
 
     fn _lang_dropdown(self, current: String) -> Dropdown:
         """Build a fresh ``Dropdown`` for the debug-language slot,

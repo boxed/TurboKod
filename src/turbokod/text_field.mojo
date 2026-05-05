@@ -36,7 +36,21 @@ from std.collections.list import List
 from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
-from .colors import Attr, BLACK, LIGHT_GRAY
+from .colors import Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE
+
+
+# Standard single-line input style, shared by every dialog. Cyan bg
+# is the "this is an input field" marker that pops against both the
+# light-gray and blue dialog bodies used elsewhere in the codebase.
+# Exposed via free fns so callers that need to color an adjacent
+# label or rebuild a bordered strip can match the field color
+# without re-hardcoding the constants.
+
+fn text_field_bg() -> Attr:
+    return Attr(BLACK, CYAN)
+
+fn text_field_sel_attr() -> Attr:
+    return Attr(WHITE, BLUE)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DELETE, KEY_END,
     KEY_HOME, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL, MOD_SHIFT,
@@ -366,21 +380,24 @@ struct TextField(Copyable, Movable):
         return _utf8_cell_of_byte(self.text, self.cursor)
 
     fn paint(
-        self, mut canvas: Canvas, rect: Rect,
-        attr: Attr, sel_attr: Attr, focused: Bool,
+        self, mut canvas: Canvas, rect: Rect, focused: Bool,
     ):
-        """Render ``self.text`` into ``rect`` (one row). Background
-        is filled with ``attr``; the selection cells get ``sel_attr``
-        overlaid; when ``focused`` is True, the cursor cell is
-        painted in reverse-video (LIGHT_GRAY on BLACK).
+        """Render ``self.text`` into ``rect`` (one row) using the
+        standard input-field colors: cyan background, white-on-blue
+        selection. The cursor cell is painted in reverse-video
+        (LIGHT_GRAY on BLACK) when ``focused`` is True.
 
         ``rect`` is the strip the text occupies — typically one row
         tall. Painting clips at ``rect.b.x`` so the field never
-        bleeds past the dialog frame.
+        bleeds past the dialog frame. For a one-line strip
+        ``rect.b.y - rect.a.y`` is 1; the helper renders only the
+        first row regardless.
 
-        For a one-line strip ``rect.b.y - rect.a.y`` is 1; the
-        helper renders only the first row regardless.
+        Every dialog with an editable input strip routes through this
+        method so the cyan-field idiom is consistent across the app.
         """
+        var attr = text_field_bg()
+        var sel_attr = text_field_sel_attr()
         canvas.fill(rect, String(" "), attr)
         _ = canvas.put_text(
             Point(rect.a.x, rect.a.y), self.text, attr, rect.b.x,

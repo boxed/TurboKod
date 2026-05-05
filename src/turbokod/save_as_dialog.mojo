@@ -140,12 +140,10 @@ struct SaveAsDialog(Movable):
             return
         # Same Turbo Vision palette as ``FileDialog``: light-gray
         # body, bright double-line frame, and a title chunk painted
-        # in body colours over the top edge.
+        # in body colors over the top edge.
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
-        var input_focused_attr = Attr(WHITE, BLUE)
-        var input_blur_attr = Attr(BLACK, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
@@ -159,17 +157,8 @@ struct SaveAsDialog(Movable):
             Point(rect.a.x + 2, rect.a.y + 2), String("File:"), bg,
         )
         var input_rect = _input_rect(rect)
-        var input_attr = (
-            input_focused_attr if self.focus == _FOCUS_INPUT
-            else input_blur_attr
-        )
-        # Selection cells use the inverted attr so they read as a
-        # highlight against the (focused) blue field background.
-        var sel_attr = Attr(BLUE, WHITE) if self.focus == _FOCUS_INPUT \
-            else Attr(LIGHT_GRAY, BLACK)
         self.filename.paint(
-            canvas, input_rect, input_attr, sel_attr,
-            self.focus == _FOCUS_INPUT,
+            canvas, input_rect, self.focus == _FOCUS_INPUT,
         )
         # Current-directory line above the listing.
         _ = canvas.put_text(
