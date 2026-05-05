@@ -115,6 +115,7 @@ fn main() raises:
     app.start()
     try:
         var desktop = Desktop()
+        desktop.load_config_from_disk()
         var file_dialog = FileDialog()
 
         # Hamburger menu (≡) — app-level commands that don't belong on the

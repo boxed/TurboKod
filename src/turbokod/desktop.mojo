@@ -640,7 +640,11 @@ struct Desktop(Movable):
         self._dap_stack_cache = List[DapStackFrame]()
         self._dap_watch_exprs = List[String]()
         self._dap_watch_values = List[String]()
-        self.config = load_config()
+        # Defaults only — the host explicitly calls ``load_config_from_disk``
+        # if it wants the user's saved preferences. Tests get deterministic
+        # state without inheriting whatever the developer's config happens
+        # to be (e.g. ``tab_bar`` changes the workspace height by a row).
+        self.config = TurbokodConfig()
         self.targets = ProjectTargets()
         self.run_session = RunSession()
         self._run_output_held = False
@@ -1697,6 +1701,14 @@ struct Desktop(Movable):
         var found = find_git_project(path)
         if found:
             self._set_project(found.value())
+
+    fn load_config_from_disk(mut self):
+        """Replace ``config`` with the user's saved preferences from
+        ``~/.config/turbokod/config.json`` (or defaults if the file is
+        missing / unreadable). The host calls this once at startup;
+        ``__init__`` deliberately doesn't, so tests get deterministic
+        defaults instead of inheriting the developer's local config."""
+        self.config = load_config()
 
     fn open_project(mut self, path: String):
         """Pick a project root for ``path``.
