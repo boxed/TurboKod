@@ -1668,12 +1668,12 @@ fn test_desktop_replace_chains_two_prompts() raises:
     _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
     assert_true(d.prompt.active)
     # Submit "foo" — Desktop should immediately re-open the prompt for "replace".
-    d.prompt.input = String("foo")
+    d.prompt.input.set_text(String("foo"))
     d.prompt.submitted = True
     _ = d._on_prompt_submit()
     assert_true(d.prompt.active)   # second prompt is open
     # Submit "BAR" — the replacement actually happens now.
-    d.prompt.input = String("BAR")
+    d.prompt.input.set_text(String("BAR"))
     d.prompt.submitted = True
     _ = d._on_prompt_submit()
     assert_false(d.prompt.active)
@@ -4146,7 +4146,7 @@ fn test_quick_open_filters_as_you_type() raises:
     var initial_count = len(qo.matched)
     assert_true(initial_count > 5)
     # Typing narrows the match list.
-    qo.query = String("editor")
+    qo.query.set_text(String("editor"))
     qo._refilter()
     assert_true(len(qo.matched) > 0)
     assert_true(len(qo.matched) < initial_count)

@@ -33,7 +33,9 @@ from .events import (
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import text_field_clipboard_key
-from .window import hit_close_button, paint_close_button, paint_drop_shadow
+from .window import (
+    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+)
 
 
 comptime _DIALOG_W = 60
@@ -140,7 +142,6 @@ struct SaveAsDialog(Movable):
         # in body colours over the top edge.
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
-        var title_attr = Attr(BLACK, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var input_focused_attr = Attr(WHITE, BLUE)
         var input_blur_attr = Attr(BLACK, LIGHT_GRAY)
@@ -149,10 +150,7 @@ struct SaveAsDialog(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        # Title bar.
-        var title = String(" Save As ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(canvas, rect, String(" Save As "), bg, bg)
         # Close button shares the same chrome as editor windows.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Filename label + editable strip.

@@ -42,7 +42,7 @@ from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .text_field import text_field_clipboard_key
-from .window import paint_drop_shadow
+from .window import paint_drop_shadow, paint_window_title
 
 
 comptime _ENTRIES_CAP: Int = 500
@@ -375,7 +375,6 @@ struct FindSymbol(Movable):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var title_attr  = Attr(WHITE,  BLUE)
         var sel_attr    = Attr(BLACK,  YELLOW)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var error_attr  = Attr(RED,    LIGHT_GRAY)
@@ -383,9 +382,7 @@ struct FindSymbol(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var title = String(" Find Symbol ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(canvas, rect, String(" Find Symbol "), bg, bg)
         var label = String(" Find: ")
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,

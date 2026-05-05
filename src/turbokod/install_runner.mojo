@@ -25,7 +25,7 @@ from .canvas import Canvas
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .window import paint_drop_shadow
+from .window import paint_drop_shadow, paint_window_title_at
 from .posix import (
     alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
     untrack_child, waitpid_nohang,
@@ -199,16 +199,17 @@ struct InstallRunner(Movable):
         if y < 1: y = 1
         var rect = Rect(x, y, x + width, y + height)
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var title_attr = Attr(WHITE, BLUE)
         var spin_attr = Attr(YELLOW, LIGHT_GRAY)
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        # Title row: `Installing <label>… [spinner]`.
+        # Title row: `Installing <label>… [spinner]`. Routed through the
+        # framework helper (left-aligned variant) since the spinner needs
+        # the right end of the row.
         var spin = self._spinner_glyph()
         var title = String(" Installing ") + self.label + String(" ")
         var tx = rect.a.x + 1
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title_at(canvas, Point(tx, rect.a.y), title, bg, bg)
         var sx = rect.b.x - 3
         if sx > tx + len(title.as_bytes()):
             _ = canvas.put_text(Point(sx, rect.a.y), spin, spin_attr)

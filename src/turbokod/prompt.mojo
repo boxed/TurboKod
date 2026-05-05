@@ -2,7 +2,7 @@
 
 Open it with ``open(label)`` to capture all subsequent key events. The user
 types into ``input``; Enter sets ``submitted=True`` (the caller reads
-``input`` and then calls ``close()``); Esc closes without submitting.
+``input.text`` and then calls ``close()``); Esc closes without submitting.
 
 The dialog is 60 columns wide. A short ``label`` shares the line with the
 input (``Find: ▮``); a label that doesn't fit in 60 cells goes through
@@ -10,16 +10,20 @@ input (``Find: ▮``); a label that doesn't fit in 60 cells goes through
 Both layouts read off the same ``wrap_to_width`` framework primitive, so
 confirm prompts that embed a long install command stay inside the
 dialog instead of bleeding across the workspace.
+
+The input strip is a full ``TextField`` — arrow keys, word jumps,
+Home/End, selection (shift+arrow), Cmd+A select-all, and mouse
+positioning all behave the same as in any editor field.
 """
 
 from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .cell import Cell
 from .colors import Attr, BLACK, LIGHT_GRAY
 from .events import (
-    Event, EVENT_KEY, KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC,
 )
 from .geometry import Point, Rect
-from .text_field import text_field_clipboard_key
+from .text_field import TextField
 from .window import paint_drop_shadow
 
 
@@ -32,27 +36,36 @@ visible place to type."""
 
 struct Prompt(Movable):
     var label: String
-    var input: String
+    var input: TextField
     var active: Bool
     var submitted: Bool
+    # Cached rect for the input strip, captured on the most recent
+    # ``paint`` so ``handle_mouse`` can route clicks back to the
+    # field without re-running the layout. Negative width means "no
+    # paint yet" — mouse handling falls back to a no-op.
+    var _input_rect: Rect
 
     fn __init__(out self):
         self.label = String("")
-        self.input = String("")
+        self.input = TextField()
         self.active = False
         self.submitted = False
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn open(mut self, var label: String, var prefill: String = String("")):
         self.label = label^
-        self.input = prefill^
+        self.input = TextField()
+        self.input.set_text(prefill^)
         self.active = True
         self.submitted = False
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn close(mut self):
         self.active = False
         self.submitted = False
         self.label = String("")
-        self.input = String("")
+        self.input = TextField()
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn _layout(self, screen: Rect) -> Rect:
         """Compute the dialog rect for the current label.
@@ -98,11 +111,11 @@ struct Prompt(Movable):
             y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
-        var input_attr = Attr(BLACK, LIGHT_GRAY)
+        var sel_attr = Attr(LIGHT_GRAY, BLACK)
         var rect = self._layout(screen)
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), attr)
@@ -147,16 +160,9 @@ struct Prompt(Movable):
             input_y = rect.b.y - 2
             if input_y < rect.a.y + 1:
                 input_y = rect.a.y + 1
-        _ = canvas.put_text(
-            Point(input_x, input_y), self.input, input_attr, clip_x,
-        )
-        # Reverse-video cursor at end of input.
-        var cur_x = input_x + utf8_codepoint_count(self.input)
-        if cur_x < clip_x:
-            canvas.set(
-                cur_x, input_y,
-                Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1),
-            )
+        var ir = Rect(input_x, input_y, clip_x, input_y + 1)
+        self._input_rect = ir
+        self.input.paint(canvas, ir, attr, sel_attr, True)
 
     fn handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""
@@ -171,17 +177,17 @@ struct Prompt(Movable):
         if k == KEY_ESC:
             self.close()
             return True
-        var clip = text_field_clipboard_key(event, self.input)
-        if clip.consumed:
+        var r = self.input.handle_key(event)
+        if r.consumed:
             return True
-        if k == KEY_BACKSPACE:
-            var bytes = self.input.as_bytes()
-            if len(bytes) > 0:
-                self.input = String(StringSlice(
-                    unsafe_from_utf8=bytes[:len(bytes) - 1]
-                ))
+        return True
+
+    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+        if not self.active:
+            return False
+        if event.kind != EVENT_MOUSE:
             return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            self.input = self.input + chr(Int(k))
+        if self._input_rect.width() <= 0:
             return True
+        _ = self.input.handle_mouse(event, self._input_rect)
         return True

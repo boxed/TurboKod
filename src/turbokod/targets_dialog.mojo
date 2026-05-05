@@ -59,7 +59,9 @@ from .events import (
 from .geometry import Point, Rect, compute_dialog_rect
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import text_field_clipboard_key
-from .window import hit_close_button, paint_close_button, paint_drop_shadow
+from .window import (
+    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+)
 
 
 # --- focus discriminants --------------------------------------------------
@@ -408,16 +410,12 @@ struct TargetsDialog(Movable):
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
-        var title_attr = Attr(BLACK, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        # Title.
-        var title = String(" Configure Targets ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(canvas, rect, String(" Configure Targets "), bg, bg)
         # Close button [■] in the top-left corner — same chrome as
         # editor windows, drawn by the framework helper.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)

@@ -52,7 +52,9 @@ from .file_dialog import FileDialog
 from .geometry import Point, Rect
 from .language_config import built_in_servers
 from .text_field import text_field_clipboard_key
-from .window import hit_close_button, paint_close_button, paint_drop_shadow
+from .window import (
+    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+)
 
 
 # --- focus discriminants --------------------------------------------------
@@ -232,9 +234,9 @@ struct ActionEditor(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        var title = String(" Edit on-save action ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, bg)
+        paint_window_title(
+            canvas, rect, String(" Edit on-save action "), bg, bg,
+        )
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Labels.
         _ = canvas.put_text(_label_at(rect, 2), String("Language:"), bg)

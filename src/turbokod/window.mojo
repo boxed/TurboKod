@@ -66,6 +66,44 @@ fn hit_close_button(top_left: Point, p: Point) -> Bool:
         and top_left.x + 1 <= p.x and p.x <= top_left.x + 3
 
 
+fn paint_window_title(
+    mut canvas: Canvas, rect: Rect, title: String,
+    title_attr: Attr, body_bg: Attr,
+):
+    """Paint a centered title on the top border row of ``rect``.
+
+    Framework rule: a window's title shares the body's background
+    colour, so the label blends into the rest of the window instead
+    of appearing as a separately-coloured bar. The helper composes
+    ``Attr(title_attr.fg, body_bg.bg, title_attr.style)`` — callers
+    pass whatever foreground/style they want (focus tinting, brighter
+    headline colour, …) and the framework picks up the bg, so the
+    rule can't drift even if a caller's ``title_attr`` carries a stale
+    bg from copy-paste.
+    """
+    var enforced = Attr(title_attr.fg, body_bg.bg, title_attr.style)
+    var title_len = len(title.as_bytes())
+    if rect.width() < title_len + 2:
+        return
+    var tx = rect.a.x + (rect.width() - title_len) // 2
+    _ = canvas.put_text(Point(tx, rect.a.y), title, enforced)
+
+
+fn paint_window_title_at(
+    mut canvas: Canvas, p: Point, title: String,
+    title_attr: Attr, body_bg: Attr,
+):
+    """Paint a title at ``p`` instead of centred on a row.
+
+    Same framework rule as ``paint_window_title``: the title's bg is
+    forced to ``body_bg.bg``. For windows whose title isn't centred
+    on the top edge (e.g. ``InstallRunner``'s left-aligned banner
+    paired with a right-aligned spinner).
+    """
+    var enforced = Attr(title_attr.fg, body_bg.bg, title_attr.style)
+    _ = canvas.put_text(p, title, enforced)
+
+
 fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
     """Paint a Turbo Vision–style drop shadow under ``rect``.
 
@@ -170,20 +208,17 @@ struct Window(ImplicitlyCopyable, Movable):
         else:
             border = Attr(LIGHT_GRAY, BLUE)
         var content_attr = Attr(YELLOW, BLUE)
+        var body_bg = Attr(LIGHT_GRAY, BLUE)
         var interior = self.rect.inset(1, 1)
         if not interior.is_empty():
-            canvas.fill(interior, String(" "), Attr(LIGHT_GRAY, BLUE))
+            canvas.fill(interior, String(" "), body_bg)
         # Focused windows get the classic TV double-line border; others single.
         canvas.draw_box(self.rect, border, focused)
-        # Title centered on the top edge, padded with a space either side.
-        # The title shares the border's colors — focusing must not flip it to a
-        # contrasting reverse-video patch, only the line weight (single → double)
-        # and the border brightness change.
+        # Title sits on the top border row through the framework helper:
+        # the helper enforces title-bg = body-bg, while ``border`` only
+        # contributes its focus-tinted fg.
         var title_padded = String(" ") + self.title + String(" ")
-        var title_len = len(title_padded.as_bytes())
-        if self.rect.width() >= title_len + 6:
-            var tx = self.rect.a.x + (self.rect.width() - title_len) // 2
-            _ = canvas.put_text(Point(tx, self.rect.a.y), title_padded, border)
+        paint_window_title(canvas, self.rect, title_padded, border, body_bg)
         # Close button [■] at top-LEFT (TV convention) — focused only.
         # Drawing is delegated to ``paint_close_button`` so dialogs
         # can reuse the same chrome without copy-pasting the glyphs.

@@ -18,22 +18,21 @@ from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
-    MOD_ALT, MOD_CTRL,
+    KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .project import walk_project_files
-from .text_field import text_field_clipboard_key
-from .window import paint_drop_shadow
+from .text_field import TextField
+from .window import paint_drop_shadow, paint_window_title
 
 
 struct QuickOpen(Movable):
     var active: Bool
     var submitted: Bool
     var root: String
-    var query: String
+    var query: TextField
     var selected_path: String
     # Display labels (project-relative when possible). Each entry has a
     # parallel absolute path in ``entries_abs`` used as the submit target.
@@ -50,12 +49,16 @@ struct QuickOpen(Movable):
     # Desktop reads this on submit to decide between ``open_project``
     # and ``open_file``. Reset on every ``open*`` / ``close``.
     var picks_project: Bool
+    # Cached query strip rect (captured on the most recent ``paint``)
+    # so ``handle_mouse`` can route clicks back to the field without
+    # re-running layout. Negative width = "no paint yet".
+    var _input_rect: Rect
 
     fn __init__(out self):
         self.active = False
         self.submitted = False
         self.root = String("")
-        self.query = String("")
+        self.query = TextField()
         self.selected_path = String("")
         self.entries = List[String]()
         self.entries_abs = List[String]()
@@ -64,10 +67,11 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn open(mut self, var root: String):
         self.root = root^
-        self.query = String("")
+        self.query = TextField()
         self.active = True
         self.submitted = False
         self.selected_path = String("")
@@ -115,7 +119,7 @@ struct QuickOpen(Movable):
         path through ``open_project`` instead of ``open_file``.
         """
         self.root = root^
-        self.query = String("")
+        self.query = TextField()
         self.active = True
         self.submitted = False
         self.selected_path = String("")
@@ -133,7 +137,7 @@ struct QuickOpen(Movable):
         self.active = False
         self.submitted = False
         self.root = String("")
-        self.query = String("")
+        self.query = TextField()
         self.selected_path = String("")
         self.entries = List[String]()
         self.entries_abs = List[String]()
@@ -147,12 +151,12 @@ struct QuickOpen(Movable):
 
     fn _refilter(mut self):
         self.matched = List[Int]()
-        if len(self.query.as_bytes()) == 0:
+        if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
                 self.matched.append(i)
         else:
             for i in range(len(self.entries)):
-                if quick_open_match(self.entries[i], self.query):
+                if quick_open_match(self.entries[i], self.query.text):
                     self.matched.append(i)
         self.selected = 0
         self.scroll = 0
@@ -186,31 +190,27 @@ struct QuickOpen(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var title_attr  = Attr(WHITE,  BLUE)
         var sel_attr    = Attr(BLACK,  YELLOW)
+        var inv_attr    = Attr(LIGHT_GRAY, BLACK)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var tx = rect.a.x + (rect.width() - len(self.title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), self.title, title_attr)
+        paint_window_title(canvas, rect, self.title, bg, bg)
         # Search line: ``Find: <query>_``
         var label = String(" Find: ")
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
-        _ = canvas.put_text(
-            Point(qx, rect.a.y + 1), self.query, bg, rect.b.x - 1,
-        )
-        var cur = qx + len(self.query.as_bytes())
-        if cur < rect.b.x - 1:
-            canvas.set(cur, rect.a.y + 1, Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1))
+        var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
+        self._input_rect = input_rect
+        self.query.paint(canvas, input_rect, bg, inv_attr, True)
         # Listing.
         var top = self._list_top(rect)
         var h = self._list_height(rect)
@@ -255,29 +255,10 @@ struct QuickOpen(Movable):
         if picker_nav_key(k, len(self.matched), self.selected):
             self._scroll_to_selection()
             return True
-        if k == KEY_BACKSPACE:
-            var qb = self.query.as_bytes()
-            if len(qb) > 0:
-                self.query = String(StringSlice(
-                    unsafe_from_utf8=qb[:len(qb) - 1],
-                ))
+        var r = self.query.handle_key(event)
+        if r.consumed:
+            if r.changed:
                 self._refilter()
-            return True
-        # Cut / copy / paste before the MOD_CTRL early-out below — those
-        # arrive as raw control codepoints with MOD_NONE, but the guard
-        # would otherwise catch the Ctrl+letter form on terminals that
-        # report it as MOD_CTRL.
-        var clip = text_field_clipboard_key(event, self.query)
-        if clip.consumed:
-            if clip.changed:
-                self._refilter()
-            return True
-        # Modified letters are commands (e.g., a hotkey) — leave them alone.
-        if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            self.query = self.query + chr(Int(k))
-            self._refilter()
             return True
         return True
 
@@ -287,6 +268,9 @@ struct QuickOpen(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(screen)
+        if self._input_rect.width() > 0 \
+                and self.query.handle_mouse(event, self._input_rect):
+            return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.matched),

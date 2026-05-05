@@ -23,22 +23,21 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .doc_store import DocEntry, html_to_text
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
-    MOD_ALT, MOD_CTRL,
+    KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
-from .text_field import text_field_clipboard_key
-from .window import paint_drop_shadow
+from .text_field import TextField
+from .window import paint_drop_shadow, paint_window_title
 
 
 struct DocPick(Movable):
     var active: Bool
     var submitted: Bool
     var display: String          # docset name shown in title ("Python 3.12")
-    var query: String
+    var query: TextField
     var entries: List[DocEntry]
     var matched: List[Int]
     var selected: Int
@@ -47,17 +46,20 @@ struct DocPick(Movable):
     # before ``submitted`` flips True so the host doesn't have to keep
     # the picker alive after consuming.
     var selected_index: Int
+    # Cached input strip rect for mouse routing.
+    var _input_rect: Rect
 
     fn __init__(out self):
         self.active = False
         self.submitted = False
         self.display = String("")
-        self.query = String("")
+        self.query = TextField()
         self.entries = List[DocEntry]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.selected_index = -1
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn open(
         mut self, var display: String, var entries: List[DocEntry],
@@ -65,31 +67,33 @@ struct DocPick(Movable):
         """Open the picker with ``entries`` already loaded."""
         self.display = display^
         self.entries = entries^
-        self.query = String("")
+        self.query = TextField()
         self.active = True
         self.submitted = False
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.selected_index = -1
+        self._input_rect = Rect(0, 0, 0, 0)
         self._refilter()
 
     fn close(mut self):
         self.active = False
         self.submitted = False
         self.display = String("")
-        self.query = String("")
+        self.query = TextField()
         self.entries = List[DocEntry]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.selected_index = -1
+        self._input_rect = Rect(0, 0, 0, 0)
 
     # --- filtering --------------------------------------------------------
 
     fn _refilter(mut self):
         self.matched = List[Int]()
-        if len(self.query.as_bytes()) == 0:
+        if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
                 self.matched.append(i)
         else:
@@ -103,7 +107,7 @@ struct DocPick(Movable):
                         + self.entries[i].name
                 else:
                     hay = self.entries[i].name
-                if quick_open_match(hay, self.query):
+                if quick_open_match(hay, self.query.text):
                     self.matched.append(i)
         self.selected = 0
         self.scroll = 0
@@ -136,12 +140,12 @@ struct DocPick(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var title_attr  = Attr(WHITE,  BLUE)
         var sel_attr    = Attr(BLACK,  YELLOW)
+        var inv_attr    = Attr(LIGHT_GRAY, BLACK)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var type_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_type    = Attr(BLUE,   YELLOW)
@@ -149,21 +153,19 @@ struct DocPick(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var title = String(" Docs: ") + self.display + String(" ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(
+            canvas, rect, String(" Docs: ") + self.display + String(" "),
+            bg, bg,
+        )
         # Search line.
         var label = String(" Find: ")
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
-        _ = canvas.put_text(
-            Point(qx, rect.a.y + 1), self.query, bg, rect.b.x - 1,
-        )
-        var cur = qx + len(self.query.as_bytes())
-        if cur < rect.b.x - 1:
-            canvas.set(cur, rect.a.y + 1, Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1))
+        var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
+        self._input_rect = input_rect
+        self.query.paint(canvas, input_rect, bg, inv_attr, True)
         # Listing.
         var top = self._list_top(rect)
         var h = self._list_height(rect)
@@ -227,24 +229,10 @@ struct DocPick(Movable):
         if picker_nav_key(k, len(self.matched), self.selected):
             self._scroll_to_selection()
             return True
-        if k == KEY_BACKSPACE:
-            var qb = self.query.as_bytes()
-            if len(qb) > 0:
-                self.query = String(StringSlice(
-                    unsafe_from_utf8=qb[:len(qb) - 1],
-                ))
+        var r = self.query.handle_key(event)
+        if r.consumed:
+            if r.changed:
                 self._refilter()
-            return True
-        var clip = text_field_clipboard_key(event, self.query)
-        if clip.consumed:
-            if clip.changed:
-                self._refilter()
-            return True
-        if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            self.query = self.query + chr(Int(k))
-            self._refilter()
             return True
         return True
 
@@ -254,6 +242,9 @@ struct DocPick(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(screen)
+        if self._input_rect.width() > 0 \
+                and self.query.handle_mouse(event, self._input_rect):
+            return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.matched),

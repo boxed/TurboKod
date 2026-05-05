@@ -23,7 +23,9 @@ from .events import (
 )
 from .file_io import join_path
 from .geometry import Point, Rect, compute_dialog_rect
-from .window import hit_close_button, paint_close_button, paint_drop_shadow
+from .window import (
+    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+)
 
 
 # Geometry must stay in sync between ``paint`` and ``handle_mouse`` —
@@ -112,7 +114,6 @@ struct FileDialog(Movable):
         # reads as a label set into the border.
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
-        var title_attr = Attr(BLACK, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         # Drop shadow first — it darkens cells *outside* ``rect`` so
@@ -121,9 +122,7 @@ struct FileDialog(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        var title = String(" Open File ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(canvas, rect, String(" Open File "), bg, bg)
         # TV-style close button in the top-left corner. Same chrome as
         # editor windows — the framework helper paints all three cells.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)

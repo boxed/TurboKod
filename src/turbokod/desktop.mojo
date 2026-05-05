@@ -2123,6 +2123,8 @@ struct Desktop(Movable):
                 _ = self.prompt.handle_key(event)
                 if self.prompt.submitted:
                     return self._on_prompt_submit()
+            else:
+                _ = self.prompt.handle_mouse(event, screen)
             return Optional[String]()
         if self.confirm_dialog.active:
             if event.kind == EVENT_KEY:
@@ -4503,7 +4505,7 @@ struct Desktop(Movable):
         var word = word_at(line, editor.cursor_col)
         if len(word.as_bytes()) == 0:
             return
-        self.doc_pick.query = word^
+        self.doc_pick.query.set_text(word^)
         self.doc_pick._refilter()
 
     fn _maybe_prompt_doc_install(mut self, spec: DocSpec):
@@ -4795,7 +4797,7 @@ struct Desktop(Movable):
         return Optional[String]()
 
     fn _on_prompt_submit(mut self) -> Optional[String]:
-        var text = self.prompt.input
+        var text = self.prompt.input.text
         self.prompt.close()
         var pa = self._pending_action
         self._pending_action = String("")

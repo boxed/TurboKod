@@ -18,16 +18,15 @@ from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
-    MOD_ALT, MOD_CTRL,
+    KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .lsp_dispatch import SymbolItem
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
-from .text_field import text_field_clipboard_key
-from .window import paint_drop_shadow
+from .text_field import TextField
+from .window import paint_drop_shadow, paint_window_title
 
 
 struct SymbolPick(Movable):
@@ -35,7 +34,7 @@ struct SymbolPick(Movable):
     var loading: Bool       # True while waiting for the LSP response
     var submitted: Bool
     var path: String        # the file the symbols belong to
-    var query: String
+    var query: TextField
     var entries: List[SymbolItem]
     var matched: List[Int]
     var selected: Int
@@ -43,25 +42,28 @@ struct SymbolPick(Movable):
     # Submission output — read after ``submitted`` flips True.
     var selected_line: Int
     var selected_character: Int
+    # Cached input strip rect for mouse routing.
+    var _input_rect: Rect
 
     fn __init__(out self):
         self.active = False
         self.loading = False
         self.submitted = False
         self.path = String("")
-        self.query = String("")
+        self.query = TextField()
         self.entries = List[SymbolItem]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.selected_line = 0
         self.selected_character = 0
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn open(mut self, var path: String):
         """Open the picker in a loading state for ``path``. Entries arrive
         later via ``set_entries`` once the LSP responds."""
         self.path = path^
-        self.query = String("")
+        self.query = TextField()
         self.active = True
         self.loading = True
         self.submitted = False
@@ -71,6 +73,7 @@ struct SymbolPick(Movable):
         self.scroll = 0
         self.selected_line = 0
         self.selected_character = 0
+        self._input_rect = Rect(0, 0, 0, 0)
 
     fn set_entries(mut self, var items: List[SymbolItem]):
         """Populate the picker with the response and clear the loading flag.
@@ -85,17 +88,18 @@ struct SymbolPick(Movable):
         self.loading = False
         self.submitted = False
         self.path = String("")
-        self.query = String("")
+        self.query = TextField()
         self.entries = List[SymbolItem]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self._input_rect = Rect(0, 0, 0, 0)
 
     # --- filtering --------------------------------------------------------
 
     fn _refilter(mut self):
         self.matched = List[Int]()
-        if len(self.query.as_bytes()) == 0:
+        if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
                 self.matched.append(i)
         else:
@@ -108,7 +112,7 @@ struct SymbolPick(Movable):
                         + self.entries[i].name
                 else:
                     hay = self.entries[i].name
-                if quick_open_match(hay, self.query):
+                if quick_open_match(hay, self.query.text):
                     self.matched.append(i)
         self.selected = 0
         self.scroll = 0
@@ -142,12 +146,12 @@ struct SymbolPick(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var title_attr  = Attr(WHITE,  BLUE)
         var sel_attr    = Attr(BLACK,  YELLOW)
+        var inv_attr    = Attr(LIGHT_GRAY, BLACK)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var kind_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_kind    = Attr(BLUE,   YELLOW)
@@ -155,21 +159,16 @@ struct SymbolPick(Movable):
         paint_drop_shadow(canvas, rect)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, bg, False)
-        var title = String(" Go to Symbol ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, title_attr)
+        paint_window_title(canvas, rect, String(" Go to Symbol "), bg, bg)
         # Search line.
         var label = String(" Find: ")
         _ = canvas.put_text(
             Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
-        _ = canvas.put_text(
-            Point(qx, rect.a.y + 1), self.query, bg, rect.b.x - 1,
-        )
-        var cur = qx + len(self.query.as_bytes())
-        if cur < rect.b.x - 1:
-            canvas.set(cur, rect.a.y + 1, Cell(String(" "), Attr(LIGHT_GRAY, BLACK), 1))
+        var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
+        self._input_rect = input_rect
+        self.query.paint(canvas, input_rect, bg, inv_attr, True)
         # Listing.
         var top = self._list_top(rect)
         var h = self._list_height(rect)
@@ -247,24 +246,10 @@ struct SymbolPick(Movable):
         if picker_nav_key(k, len(self.matched), self.selected):
             self._scroll_to_selection()
             return True
-        if k == KEY_BACKSPACE:
-            var qb = self.query.as_bytes()
-            if len(qb) > 0:
-                self.query = String(StringSlice(
-                    unsafe_from_utf8=qb[:len(qb) - 1],
-                ))
+        var r = self.query.handle_key(event)
+        if r.consumed:
+            if r.changed:
                 self._refilter()
-            return True
-        var clip = text_field_clipboard_key(event, self.query)
-        if clip.consumed:
-            if clip.changed:
-                self._refilter()
-            return True
-        if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
-            return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
-            self.query = self.query + chr(Int(k))
-            self._refilter()
             return True
         return True
 
@@ -274,6 +259,9 @@ struct SymbolPick(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(screen)
+        if self._input_rect.width() > 0 \
+                and self.query.handle_mouse(event, self._input_rect):
+            return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.matched),

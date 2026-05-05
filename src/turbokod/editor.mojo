@@ -566,6 +566,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``OnigRegex`` list aliases libonig handles); the next refresh will
     # rebuild it from the file path.
     var _hl_cache: HighlightCache
+    # Smart-select expansion stack. Each Cmd+Up snapshots the current
+    # caret + selection here before growing; Cmd+Down pops to walk back.
+    # Cleared by any other key, click, or edit so the stack only ever
+    # describes a contiguous Cmd+Up run.
+    var _smart_select_stack: List[Caret]
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -618,6 +623,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._tc_active = False
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
+        self._smart_select_stack = List[Caret]()
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -670,6 +676,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._tc_active = False
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
+        self._smart_select_stack = List[Caret]()
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -748,6 +755,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # the aliasing could double-free. Letting the copy rebuild on
         # first refresh costs one cold load but is always correct.
         self._hl_cache = HighlightCache()
+        self._smart_select_stack = copy._smart_select_stack.copy()
 
     fn flush_highlights(mut self, mut registry: GrammarRegistry):
         """Bring ``self.highlights`` up to date by tokenizing against
@@ -2195,6 +2203,389 @@ struct Editor(ImplicitlyCopyable, Movable):
             row_shift -= byte_removed
         self._install_carets(new_carets^)
 
+    # --- smart-select (Cmd+Up / Cmd+Down) ---------------------------------
+    #
+    # Cmd+Up grows the selection to the next-larger syntactic scope and
+    # pushes the previous caret state onto a stack so Cmd+Down can rewind
+    # through every step. The stack is cleared by any other interaction
+    # (handle_key default branch, handle_mouse), so the rewind is always
+    # contiguous with the run of Cmd+Up presses that produced it.
+    #
+    # Levels (smallest → largest):
+    #   1. word at cursor
+    #   2. dotted symbol (``foo.bar.baz``)
+    #   3. interior of enclosing string literal (without quotes)
+    #   4. enclosing string literal with its quotes
+    #   5. interior of enclosing bracket pair ``( ) / [ ] / { }``
+    #   6. enclosing bracket pair including the brackets
+    #   7. line content (leading / trailing whitespace stripped)
+    #   8. whole line (start-of-line .. end-of-line)
+    #   9. enclosing indent block (rows at >= current indent)
+    #   N. whole file
+    #
+    # Each level is *attempted in order*; the first one that strictly
+    # grows the current selection wins, so steps 3 / 5 / 9 silently skip
+    # when the cursor isn't inside the relevant scope. Selections drop
+    # any extra carets — multi-caret + smart-select isn't a meaningful
+    # combination and would just complicate the snapshot model.
+
+    fn _smart_select_set(
+        mut self, sr: Int, sc: Int, er: Int, ec: Int,
+    ):
+        """Install ``[sr, sc) .. [er, ec)`` as the primary caret's
+        anchor / cursor and refresh ``desired_col``. The anchor sits at
+        the start so the cursor lands at the end — this matches what
+        Shift-arrow selections produce, and keeps subsequent right /
+        down arrows extending in the same direction the user expects."""
+        self.anchor_row = sr
+        self.anchor_col = sc
+        self.cursor_row = er
+        self.cursor_col = ec
+        self.desired_col = _utf8_cell_of_byte(self.buffer.line(er), ec)
+
+    fn _smart_select_grow(mut self):
+        """Expand the primary caret's selection to the next-larger
+        smart-select level and push the previous state onto the stack.
+        No-op once the selection covers the whole file."""
+        # Smart-select operates on the primary caret only — drop extras.
+        # No undo snapshot: smart-select doesn't change the buffer, and
+        # the user can always re-add carets after rewinding via Cmd+Down.
+        self.extra_carets = List[Caret]()
+        var before = self.primary_caret()
+        var sr = self.anchor_row
+        var sc = self.anchor_col
+        var er = self.cursor_row
+        var ec = self.cursor_col
+        if (sr > er) or (sr == er and sc > ec):
+            var tr = sr; var tc = sc
+            sr = er; sc = ec
+            er = tr; ec = tc
+        var nxt = self._smart_compute_expansion(sr, sc, er, ec)
+        if nxt[0] == sr and nxt[1] == sc and nxt[2] == er and nxt[3] == ec:
+            return
+        self._smart_select_stack.append(before)
+        self._smart_select_set(nxt[0], nxt[1], nxt[2], nxt[3])
+
+    fn _smart_select_shrink(mut self):
+        """Pop the most-recently captured snapshot and restore it.
+        No-op when the stack is empty — Cmd+Down outside a smart-select
+        run does nothing rather than guessing what to shrink."""
+        if len(self._smart_select_stack) == 0:
+            return
+        self.extra_carets = List[Caret]()
+        var c = self._smart_select_stack[len(self._smart_select_stack) - 1]
+        self._smart_select_stack.resize(
+            len(self._smart_select_stack) - 1, Caret(0, 0, 0, 0, 0),
+        )
+        self._apply_caret(c)
+
+    fn _smart_compute_expansion(
+        self, sr: Int, sc: Int, er: Int, ec: Int,
+    ) -> Tuple[Int, Int, Int, Int]:
+        """Return the next-larger range strictly containing
+        ``[sr, sc) .. [er, ec)``, or the same range if no expansion
+        applies (selection already covers the whole file)."""
+        # 1) Empty selection → word at cursor.
+        if sr == er and sc == ec:
+            var line = self.buffer.line(sr)
+            var w = _word_run_at_or_left(line, sc)
+            if w[0] != w[1]:
+                return (sr, w[0], sr, w[1])
+            # No word at or before cursor: try line content; failing
+            # that, fall through to the whole-line / file ladder below.
+            var lc = _smart_line_content_range(line)
+            if lc[0] != lc[1]:
+                return (sr, lc[0], sr, lc[1])
+        # 2) Dotted symbol — only meaningful when the selection sits on
+        #    a single line and is contained within one identifier run.
+        if sr == er:
+            var line = self.buffer.line(sr)
+            var dotted = _smart_dotted_extend(line, sc, ec)
+            if _smart_strictly_contains(
+                sr, sc, er, ec, sr, dotted[0], sr, dotted[1],
+            ):
+                return (sr, dotted[0], sr, dotted[1])
+        # 3) Interior of an enclosing same-line string literal.
+        if sr == er:
+            var line = self.buffer.line(sr)
+            var s = _smart_string_around(line, sc, ec)
+            if s:
+                var pair = s.value()
+                var inner_s = pair[0] + 1
+                var inner_e = pair[1]
+                if _smart_strictly_contains(
+                    sr, sc, er, ec, sr, inner_s, sr, inner_e,
+                ):
+                    return (sr, inner_s, sr, inner_e)
+                # Already at the interior — try with quotes.
+                if sc == inner_s and ec == inner_e:
+                    return (sr, pair[0], sr, pair[1] + 1)
+        # 4) String with quotes (when the selection didn't reach interior
+        #    above but still sits inside a string).
+        if sr == er:
+            var line = self.buffer.line(sr)
+            var s = _smart_string_around(line, sc, ec)
+            if s:
+                var pair = s.value()
+                var with_s = pair[0]
+                var with_e = pair[1] + 1
+                if _smart_strictly_contains(
+                    sr, sc, er, ec, sr, with_s, sr, with_e,
+                ):
+                    return (sr, with_s, sr, with_e)
+        # 5) Interior of enclosing bracket pair (cross-line).
+        var b = self._smart_find_enclosing_bracket(sr, sc, er, ec)
+        if b:
+            var p = b.value()
+            var open_r = p[0]
+            var open_c = p[1]
+            var close_r = p[2]
+            var close_c = p[3]
+            var inner_sr = open_r
+            var inner_sc = open_c + 1
+            var inner_er = close_r
+            var inner_ec = close_c
+            if _smart_strictly_contains(
+                sr, sc, er, ec, inner_sr, inner_sc, inner_er, inner_ec,
+            ):
+                return (inner_sr, inner_sc, inner_er, inner_ec)
+            # 6) With brackets.
+            if sr == inner_sr and sc == inner_sc \
+                    and er == inner_er and ec == inner_ec:
+                return (open_r, open_c, close_r, close_c + 1)
+            var with_sr = open_r
+            var with_sc = open_c
+            var with_er = close_r
+            var with_ec = close_c + 1
+            if _smart_strictly_contains(
+                sr, sc, er, ec, with_sr, with_sc, with_er, with_ec,
+            ):
+                return (with_sr, with_sc, with_er, with_ec)
+        # 7) Line content (single-line selection only).
+        if sr == er:
+            var line = self.buffer.line(sr)
+            var lc = _smart_line_content_range(line)
+            if _smart_strictly_contains(
+                sr, sc, er, ec, sr, lc[0], sr, lc[1],
+            ):
+                return (sr, lc[0], sr, lc[1])
+        # 8) Whole line(s).
+        var line_end = self.buffer.line_length(er)
+        if _smart_strictly_contains(
+            sr, sc, er, ec, sr, 0, er, line_end,
+        ):
+            return (sr, 0, er, line_end)
+        # 9) Indent block.
+        var ib = self._smart_indent_block(sr, er)
+        if ib:
+            var p = ib.value()
+            var b_sr = p[0]
+            var b_er = p[1]
+            var b_ec = self.buffer.line_length(b_er)
+            if _smart_strictly_contains(
+                sr, sc, er, ec, b_sr, 0, b_er, b_ec,
+            ):
+                return (b_sr, 0, b_er, b_ec)
+        # 10) Whole file.
+        var n = self.buffer.line_count()
+        if n > 0:
+            var last = n - 1
+            var last_len = self.buffer.line_length(last)
+            if _smart_strictly_contains(
+                sr, sc, er, ec, 0, 0, last, last_len,
+            ):
+                return (0, 0, last, last_len)
+        return (sr, sc, er, ec)
+
+    fn _smart_find_enclosing_bracket(
+        self, sr: Int, sc: Int, er: Int, ec: Int,
+    ) -> Optional[Tuple[Int, Int, Int, Int]]:
+        """Find the smallest bracket pair ``( ) / [ ] / { }`` that
+        strictly encloses ``[sr, sc) .. [er, ec)``. Returns
+        ``(open_row, open_col, close_row, close_col)`` of the bracket
+        bytes themselves, or ``None`` when no enclosing pair exists.
+
+        Backward scan tracks one skip-counter per bracket type — when we
+        encounter a closer we owe a same-type opener; when we encounter
+        an opener we either pay the debt or, if no debt outstanding, we
+        found the enclosing opener. Mismatched brackets (``f(x]``) keep
+        the counters from steering us into a wrong pair as long as the
+        actual nesting balances. Once the opener is known, a forward
+        scan finds the matching closer with a single same-type depth
+        counter; brackets of other types pass through untouched.
+        """
+        var paren_skip = 0
+        var bracket_skip = 0
+        var brace_skip = 0
+        var r = sr
+        var c = sc - 1
+        var opener_r = -1
+        var opener_c = -1
+        var opener_b = 0
+        # Walk back; the loop only enters a row's byte-scan when ``c >= 0``.
+        # When ``sc == 0`` the initial ``c == -1`` falls straight through
+        # the row-skip block and lands us on the previous row's last byte,
+        # rather than wrapping forward into the start row's tail.
+        while r >= 0:
+            if c < 0:
+                r -= 1
+                if r < 0: break
+                c = self.buffer.line_length(r) - 1
+                continue
+            var line = self.buffer.line(r)
+            var bytes = line.as_bytes()
+            if c >= len(bytes):
+                c = len(bytes) - 1
+            while c >= 0:
+                var b = Int(bytes[c])
+                if b == 0x29:
+                    paren_skip += 1
+                elif b == 0x5D:
+                    bracket_skip += 1
+                elif b == 0x7D:
+                    brace_skip += 1
+                elif b == 0x28:
+                    if paren_skip > 0:
+                        paren_skip -= 1
+                    else:
+                        opener_r = r; opener_c = c; opener_b = b
+                        break
+                elif b == 0x5B:
+                    if bracket_skip > 0:
+                        bracket_skip -= 1
+                    else:
+                        opener_r = r; opener_c = c; opener_b = b
+                        break
+                elif b == 0x7B:
+                    if brace_skip > 0:
+                        brace_skip -= 1
+                    else:
+                        opener_r = r; opener_c = c; opener_b = b
+                        break
+                c -= 1
+            if opener_r >= 0:
+                break
+            r -= 1
+            if r < 0: break
+            c = self.buffer.line_length(r) - 1
+        if opener_r < 0:
+            return Optional[Tuple[Int, Int, Int, Int]]()
+        var closer_b = _matching_closer(opener_b)
+        var depth = 1
+        var fr = opener_r
+        var fc = opener_c + 1
+        var n = self.buffer.line_count()
+        while fr < n:
+            var line = self.buffer.line(fr)
+            var bytes = line.as_bytes()
+            while fc < len(bytes):
+                var b = Int(bytes[fc])
+                if b == opener_b:
+                    depth += 1
+                elif b == closer_b:
+                    depth -= 1
+                    if depth == 0:
+                        # The found pair must strictly enclose the
+                        # cursor's *end* — otherwise the user's caret
+                        # sits outside this pair (e.g. starts in the
+                        # middle of a closer scan after a partial
+                        # selection past the bracket) and we should
+                        # report nothing.
+                        if (fr > er) or (fr == er and fc >= ec):
+                            return Optional[
+                                Tuple[Int, Int, Int, Int]
+                            ](
+                                (opener_r, opener_c, fr, fc),
+                            )
+                        return Optional[Tuple[Int, Int, Int, Int]]()
+                fc += 1
+            fr += 1
+            fc = 0
+        return Optional[Tuple[Int, Int, Int, Int]]()
+
+    fn _smart_indent_block(
+        self, sr: Int, er: Int,
+    ) -> Optional[Tuple[Int, Int]]:
+        """Expand ``[sr, er]`` outward to consecutive rows whose leading
+        indent is ``>=`` the minimum non-blank indent of the selection.
+        Trailing blank lines are excluded — they're rejoined to the
+        sibling block above unless that block ends *at* a blank.
+
+        Returns the new ``(start_row, end_row)`` if expansion succeeded,
+        otherwise widens the selection by dropping one indent level (the
+        introducer line above the current block enters the selection).
+        Returns ``None`` only when nothing larger remains.
+        """
+        var n = self.buffer.line_count()
+        if n == 0:
+            return Optional[Tuple[Int, Int]]()
+        var min_indent = -1
+        for r in range(sr, er + 1):
+            var line = self.buffer.line(r)
+            if _is_blank_line(line):
+                continue
+            var lead = _leading_indent_cells(line)
+            if min_indent < 0 or lead < min_indent:
+                min_indent = lead
+        if min_indent < 0:
+            min_indent = 0
+        # Phase A: include neighbors at the same-or-greater indent.
+        var new_sr = sr
+        var r = sr - 1
+        var blank_run_top = -1
+        while r >= 0:
+            var line = self.buffer.line(r)
+            if _is_blank_line(line):
+                if blank_run_top < 0:
+                    blank_run_top = r
+                r -= 1
+                continue
+            var lead = _leading_indent_cells(line)
+            if lead >= min_indent:
+                new_sr = r
+                blank_run_top = -1
+                r -= 1
+                continue
+            break
+        # Phase A: walk down.
+        var new_er = er
+        r = er + 1
+        var blank_run_bot = -1
+        while r < n:
+            var line = self.buffer.line(r)
+            if _is_blank_line(line):
+                if blank_run_bot < 0:
+                    blank_run_bot = r
+                r += 1
+                continue
+            var lead = _leading_indent_cells(line)
+            if lead >= min_indent:
+                new_er = r
+                blank_run_bot = -1
+                r += 1
+                continue
+            break
+        if new_sr < sr or new_er > er:
+            return Optional[Tuple[Int, Int]]((new_sr, new_er))
+        # Phase B: drop one indent level — the introducer above the
+        # current block (e.g. the ``def foo():`` line above an indented
+        # body) joins the selection. We stop right after attaching the
+        # introducer; the next Cmd+Up press will run Phase A again at
+        # the parent's indent level and grow to its siblings, so the
+        # user sees one scope per keypress instead of jumping straight
+        # to top-level.
+        if min_indent <= 0:
+            return Optional[Tuple[Int, Int]]()
+        var intro_r = sr - 1
+        while intro_r >= 0 and _is_blank_line(self.buffer.line(intro_r)):
+            intro_r -= 1
+        if intro_r < 0:
+            return Optional[Tuple[Int, Int]]()
+        var intro_indent = _leading_indent_cells(self.buffer.line(intro_r))
+        if intro_indent >= min_indent:
+            return Optional[Tuple[Int, Int]]()
+        return Optional[Tuple[Int, Int]]((intro_r, er))
+
     # --- event handling ----------------------------------------------------
 
     fn handle_key(mut self, event: Event, view: Rect) -> Bool:
@@ -2233,6 +2624,24 @@ struct Editor(ImplicitlyCopyable, Movable):
         # word-jump bindings above (which fire on Ctrl OR Alt, not both).
         var has_ctrl = (event.mods & MOD_CTRL) != 0
         var has_alt = (event.mods & MOD_ALT) != 0
+        # Smart-select bindings — plain Cmd+Up grows, plain Cmd+Down
+        # rewinds. Only the Meta bit may be set: Cmd+Shift+Up doesn't
+        # trigger smart-select (host bindings can use it for something
+        # else), and any other modifier combination falls through to
+        # the existing handlers. Checked before the smart-select stack
+        # gets cleared below so the run survives.
+        if event.mods == MOD_META and k == KEY_UP:
+            self._smart_select_grow()
+            self._scroll_to_cursor(view)
+            return True
+        if event.mods == MOD_META and k == KEY_DOWN:
+            self._smart_select_shrink()
+            self._scroll_to_cursor(view)
+            return True
+        # Anything else breaks the smart-select run — the user has
+        # moved the cursor, edited, or otherwise shifted intent, so
+        # subsequent Cmd+Down should not undo their action.
+        self._smart_select_stack = List[Caret]()
         if has_ctrl and has_alt and k == KEY_UP:
             self.add_caret_above()
             self._scroll_to_cursor(view)
@@ -2828,8 +3237,11 @@ struct Editor(ImplicitlyCopyable, Movable):
             return False
         # Any mouse interaction breaks an active typing run — clicking,
         # dragging or scrolling means the user has shifted attention and
-        # the next keystroke should anchor a new undo step.
+        # the next keystroke should anchor a new undo step. Same idea
+        # for the smart-select stack: clicking elsewhere is a fresh
+        # caret intent, so abandon the rewind history.
         self._typing_active = False
+        self._smart_select_stack = List[Caret]()
         # Wheel events scroll the view without moving the cursor.
         if event.button == MOUSE_WHEEL_UP:
             if event.pressed:
@@ -3378,3 +3790,158 @@ fn _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
     while end < n and _char_class(Int(bytes[end])) == cls:
         end += 1
     return (start, end)
+
+
+# --- Smart-select helpers ---------------------------------------------------
+#
+# These power Cmd+Up / Cmd+Down: each press of Cmd+Up grows the selection
+# to the next syntactic scope (word → dotted symbol → string → enclosing
+# brackets → line → block → file); Cmd+Down rewinds through the snapshots
+# captured on the stack. Helpers operate on raw byte ranges and don't
+# touch the editor — keeping them pure makes the levels easy to test.
+
+
+fn _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
+    """Word range covering ``col``. If ``col`` sits on whitespace or
+    punctuation, try ``col - 1`` so a click just past the end of an
+    identifier still selects it. Empty result when neither side is a
+    word character."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var c = col
+    if c >= n: c = n - 1
+    if c < 0: return (0, 0)
+    if _is_word_char(Int(bytes[c])):
+        var start = c
+        while start > 0 and _is_word_char(Int(bytes[start - 1])):
+            start -= 1
+        var end = c + 1
+        while end < n and _is_word_char(Int(bytes[end])):
+            end += 1
+        return (start, end)
+    if c > 0 and _is_word_char(Int(bytes[c - 1])):
+        var end = c
+        var start = c
+        while start > 0 and _is_word_char(Int(bytes[start - 1])):
+            start -= 1
+        return (start, end)
+    return (col, col)
+
+
+fn _smart_dotted_extend(
+    line: String, sc: Int, ec: Int,
+) -> Tuple[Int, Int]:
+    """Extend ``[sc, ec)`` over surrounding ``.``-joined word runs. So
+    ``bar`` inside ``foo.bar.baz`` grows to the whole dotted path. No-op
+    when nothing on either side qualifies."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var s = sc
+    var e = ec
+    while s >= 2 and Int(bytes[s - 1]) == 0x2E \
+            and _is_word_char(Int(bytes[s - 2])):
+        s -= 2
+        while s > 0 and _is_word_char(Int(bytes[s - 1])):
+            s -= 1
+    while e + 1 < n and Int(bytes[e]) == 0x2E \
+            and _is_word_char(Int(bytes[e + 1])):
+        e += 2
+        while e < n and _is_word_char(Int(bytes[e])):
+            e += 1
+    return (s, e)
+
+
+fn _is_string_quote(b: Int) -> Bool:
+    """ASCII single, double, and back-tick quotes — the three string
+    delimiters we recognize for smart-select."""
+    return b == 0x22 or b == 0x27 or b == 0x60
+
+
+fn _smart_string_around(
+    line: String, sc: Int, ec: Int,
+) -> Optional[Tuple[Int, Int]]:
+    """Find the nearest matching pair of ASCII quote characters on
+    ``line`` whose interior contains ``[sc, ec)``. Returns
+    ``(open_index, close_index)`` of the quote bytes themselves.
+
+    Same-line only: multi-line strings would need grammar awareness to
+    handle correctly, so we sidestep them. Pairs are found by scanning
+    left and right from the selection to the *next* same-quote char,
+    which works for the common one-quote-per-side case but doesn't try
+    to skip escapes — a backslash-escaped quote can mis-pair. Acceptable
+    for an interactive grow-selection: the worst case is one extra
+    Cmd+Up to land on the right scope.
+    """
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = sc - 1
+    while i >= 0:
+        if _is_string_quote(Int(bytes[i])):
+            var qb = Int(bytes[i])
+            var j = ec
+            while j < n:
+                if Int(bytes[j]) == qb:
+                    return Optional[Tuple[Int, Int]]((i, j))
+                j += 1
+            return Optional[Tuple[Int, Int]]()
+        i -= 1
+    return Optional[Tuple[Int, Int]]()
+
+
+fn _is_blank_line(line: String) -> Bool:
+    """A line of zero or more spaces / tabs is blank for the purpose of
+    smart-select indent block detection."""
+    var bytes = line.as_bytes()
+    for i in range(len(bytes)):
+        var b = Int(bytes[i])
+        if b != 0x20 and b != 0x09:
+            return False
+    return True
+
+
+fn _smart_line_content_range(line: String) -> Tuple[Int, Int]:
+    """Byte range of the non-whitespace content on ``line`` — leading
+    whitespace and trailing whitespace stripped. Empty range for blank
+    lines."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var s = 0
+    while s < n and (bytes[s] == 0x20 or bytes[s] == 0x09):
+        s += 1
+    var e = n
+    while e > s and (bytes[e - 1] == 0x20 or bytes[e - 1] == 0x09):
+        e -= 1
+    return (s, e)
+
+
+fn _smart_strictly_contains(
+    sr1: Int, sc1: Int, er1: Int, ec1: Int,
+    sr2: Int, sc2: Int, er2: Int, ec2: Int,
+) -> Bool:
+    """``True`` if range 2 is a *strictly* larger range than range 1 —
+    i.e. range 2 contains range 1 and they aren't equal. Used to decide
+    whether a candidate expansion actually grows the current selection."""
+    var start_le = (sr2 < sr1) or (sr2 == sr1 and sc2 <= sc1)
+    var end_ge = (er2 > er1) or (er2 == er1 and ec2 >= ec1)
+    if not (start_le and end_ge):
+        return False
+    var start_lt = (sr2 < sr1) or (sr2 == sr1 and sc2 < sc1)
+    var end_gt = (er2 > er1) or (er2 == er1 and ec2 > ec1)
+    return start_lt or end_gt
+
+
+fn _matching_closer(opener: Int) -> Int:
+    """Closing-bracket byte for an opener byte. Returns ``0`` for
+    non-bracket inputs so callers can guard with a nonzero check."""
+    if opener == 0x28: return 0x29  # ( )
+    if opener == 0x5B: return 0x5D  # [ ]
+    if opener == 0x7B: return 0x7D  # { }
+    return 0
+
+
+fn _is_open_bracket(b: Int) -> Bool:
+    return b == 0x28 or b == 0x5B or b == 0x7B
+
+
+fn _is_close_bracket(b: Int) -> Bool:
+    return b == 0x29 or b == 0x5D or b == 0x7D

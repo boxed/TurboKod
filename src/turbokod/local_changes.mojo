@@ -67,7 +67,7 @@ from .git_changes import (
 )
 from .string_utils import split_lines_no_trailing
 from .text_field import text_field_clipboard_key
-from .window import paint_drop_shadow
+from .window import paint_drop_shadow, paint_window_title
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -913,10 +913,10 @@ struct LocalChanges(Movable):
         var header_attr = Attr(WHITE, BLUE)
         canvas.fill(screen, String(" "), bg)
         canvas.draw_box(screen, border, True)
-        # Title row.
-        var title = String(" Local changes ")
-        var tx = screen.a.x + (screen.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, screen.a.y), title, title_attr)
+        # Title row — framework helper enforces title bg = body bg.
+        paint_window_title(
+            canvas, screen, String(" Local changes "), title_attr, bg,
+        )
         # Sub-title: project root (or status banner).
         var sub_y = screen.a.y + 1
         var sub: String

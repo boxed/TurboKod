@@ -49,6 +49,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .window import paint_window_title
 
 
 # --- focus discriminants --------------------------------------------------
@@ -163,9 +164,7 @@ struct Settings(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         canvas.fill(rect, String(" "), bg)
         canvas.draw_box(rect, border, True)
-        var title = String(" Settings ")
-        var tx = rect.a.x + (rect.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, rect.a.y), title, bg)
+        paint_window_title(canvas, rect, String(" Settings "), bg, bg)
         # Left rail.
         self._paint_sections(canvas, rect)
         # Right pane: section header + per-section content.

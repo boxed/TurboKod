@@ -41,6 +41,7 @@ from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
 from .string_utils import split_lines
 from .text_field import text_field_clipboard_key
+from .window import paint_window_title
 
 
 comptime _DEBOUNCE_MS: Int = 200
@@ -315,10 +316,10 @@ struct ProjectFind(Movable):
         var sep_attr    = Attr(WHITE,  BLUE)
         canvas.fill(screen, String(" "), bg)
         canvas.draw_box(screen, border, True)
-        # Title.
-        var title = String(" Find in Project ")
-        var tx = screen.a.x + (screen.width() - len(title.as_bytes())) // 2
-        _ = canvas.put_text(Point(tx, screen.a.y), title, title_attr)
+        # Title — framework helper enforces title bg = body bg.
+        paint_window_title(
+            canvas, screen, String(" Find in Project "), title_attr, bg,
+        )
         # Input row: ``Search: <query>_``.
         var input_y = self._input_y(screen)
         var label = String(" Search: ")
