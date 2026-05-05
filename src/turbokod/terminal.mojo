@@ -78,6 +78,89 @@ fn move_cursor(x: Int, y: Int) -> String:
     return CSI + String(y + 1) + String(";") + String(x + 1) + String("H")
 
 
+fn _contains(haystack: String, needle: String) -> Bool:
+    var hb = haystack.as_bytes()
+    var nb = needle.as_bytes()
+    if len(nb) == 0:
+        return True
+    if len(nb) > len(hb):
+        return False
+    for i in range(len(hb) - len(nb) + 1):
+        var match_at = True
+        for j in range(len(nb)):
+            if hb[i + j] != nb[j]:
+                match_at = False
+                break
+        if match_at:
+            return True
+    return False
+
+
+fn terminal_supports_extended_underline() -> Bool:
+    """``True`` when the host terminal is known to handle the
+    colon-separated ``SGR 4:3`` (curly underline) and ``SGR 58:5:N``
+    (separately-colored underline) extensions.
+
+    Detection is conservative: if we can't positively identify a
+    supporting terminal we say ``False`` and the caller falls back to
+    plain ``SGR 4`` (which uses the foreground color for the line).
+
+    Sniffs (in order of preference):
+
+    * ``TURBOKOD_HOST``    — set by the native macOS wrapper around
+                             the alacritty-backed renderer. Positive
+                             signal: the wrapper's grid renderer
+                             paints curly + separately-colored
+                             underlines, so we want the extended
+                             path even though the inherited
+                             ``TERM_PROGRAM`` may not name a
+                             terminal we'd otherwise recognise.
+    * ``WT_SESSION``       — Windows Terminal sets this on every
+                             session; full support.
+    * ``KITTY_WINDOW_ID``  — kitty.
+    * ``TERM_PROGRAM``     — iTerm.app, WezTerm, vscode (xterm.js
+                             ≥ 5.x), ghostty.
+    * ``TERM``             — ``xterm-kitty``, ``alacritty``,
+                             ``foot``, ``wezterm``.
+    * ``VTE_VERSION``      — gnome-terminal / xfce4-terminal /
+                             tilix on vte ≥ 0.52.
+    * ``COLORTERM=truecolor`` is *not* sufficient (many terminals
+      advertise truecolor without ``58`` support — Apple
+      Terminal.app being the prominent example).
+    """
+    if getenv_value(String("TURBOKOD_HOST")) == String("1"):
+        return True
+    if len(getenv_value(String("WT_SESSION")).as_bytes()) > 0:
+        return True
+    if len(getenv_value(String("KITTY_WINDOW_ID")).as_bytes()) > 0:
+        return True
+    var term_program = getenv_value(String("TERM_PROGRAM"))
+    if term_program == String("iTerm.app"):
+        return True
+    if term_program == String("WezTerm"):
+        return True
+    if term_program == String("ghostty"):
+        return True
+    if term_program == String("vscode"):
+        return True
+    var term = getenv_value(String("TERM"))
+    if _contains(term, String("kitty")):
+        return True
+    if _contains(term, String("alacritty")):
+        return True
+    if _contains(term, String("wezterm")):
+        return True
+    if _contains(term, String("foot")):
+        return True
+    var vte = getenv_value(String("VTE_VERSION"))
+    if len(vte.as_bytes()) > 0:
+        # VTE ≥ 0.52 (5200) ships colored underline. Older builds
+        # don't, but we don't bother parsing the version — anyone on
+        # a vte from before 2018 gets plain underline, no harm done.
+        return True
+    return False
+
+
 # --- Terminal driver --------------------------------------------------------
 
 

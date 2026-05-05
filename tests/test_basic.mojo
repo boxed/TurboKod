@@ -15,7 +15,8 @@ from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
     Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    STYLE_UNDERLINE, WHITE, YELLOW, default_attr,
+    LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
+    attr_to_sgr, default_attr,
 )
 from turbokod.diff import MergeResult, diff3_merge, diff_lines, unified_diff
 from turbokod.editor import (
@@ -119,6 +120,7 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
+from turbokod.spell import Speller, find_misspelled_runs
 from turbokod.grammar_install import (
     built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
@@ -193,6 +195,45 @@ fn test_attr() raises:
     assert_true(b.fg == YELLOW)
     assert_true(b.bg == BLUE)
     assert_false(a == b)
+
+
+fn test_attr_to_sgr_plain_underline() raises:
+    """Default underline emits SGR ``;4`` (no colon, no separate
+    color) — same as the pre-extension shape so non-curly callers
+    don't accidentally trigger 4:3 parsing in older terminals."""
+    var a = Attr(WHITE, BLUE, STYLE_UNDERLINE)
+    var s = attr_to_sgr(a)
+    assert_true(_substring_present(s, String(";4;")))
+    assert_false(_substring_present(s, String(";4:3")))
+    assert_false(_substring_present(s, String(";58;")))
+
+
+fn test_attr_to_sgr_curly_colored_underline() raises:
+    """Curly bit + explicit underline color emits ``;4:3`` and a
+    ``;58;5;<color>`` parameter — the VS-Code-squiggle SGR."""
+    var a = Attr(WHITE, BLUE, STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY) \
+        .with_underline_color(Int16(LIGHT_RED))
+    var s = attr_to_sgr(a)
+    assert_true(_substring_present(s, String(";4:3")))
+    assert_true(
+        _substring_present(s, String(";58;5;") + String(Int(LIGHT_RED)))
+    )
+
+
+fn _substring_present(haystack: String, needle: String) -> Bool:
+    var hb = haystack.as_bytes()
+    var nb = needle.as_bytes()
+    if len(nb) > len(hb):
+        return False
+    for i in range(len(hb) - len(nb) + 1):
+        var match_at = True
+        for j in range(len(nb)):
+            if hb[i + j] != nb[j]:
+                match_at = False
+                break
+        if match_at:
+            return True
+    return False
 
 
 fn test_canvas_put_text() raises:
@@ -1238,7 +1279,8 @@ fn test_editor_external_change_refreshes_highlights() raises:
     ))
     var ed = Editor.from_file(path)
     var registry = GrammarRegistry()
-    ed.flush_highlights(registry)
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
     assert_true(len(ed.highlights) > 0)
     # Same path, but the block comment is gone — the new buffer's
     # post-stacks differ from the cached ones at every row.
@@ -1248,7 +1290,7 @@ fn test_editor_external_change_refreshes_highlights() raises:
     ))
     var status = ed.check_for_external_change()
     assert_equal(status, EXT_CHANGE_RELOADED)
-    ed.flush_highlights(registry)
+    ed.flush_highlights(registry, speller)
     var post = ed.highlights.copy()
     var expected = highlight_for_extension(String("rs"), ed.buffer.lines)
     # Same shape as a full retokenize against the new buffer.
@@ -3986,11 +4028,12 @@ fn test_editor_refreshes_highlights_after_edits() raises:
     assert_true(write_file(path, String("\n")))
     var ed = Editor.from_file(path)
     var registry = GrammarRegistry()
-    ed.flush_highlights(registry)
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
     assert_true(len(ed.highlights) == 0)
     _ = ed.handle_key(_key(UInt32(ord("f"))), _VIEW)
     _ = ed.handle_key(_key(UInt32(ord("n"))), _VIEW)
-    ed.flush_highlights(registry)
+    ed.flush_highlights(registry, speller)
     var saw_fn_keyword = False
     for i in range(len(ed.highlights)):
         var h = ed.highlights[i]
@@ -4008,7 +4051,8 @@ fn test_editor_paint_overlays_highlight_attr() raises:
     assert_true(write_file(path, String("fn main():\n")))
     var ed = Editor.from_file(path)
     var registry = GrammarRegistry()
-    ed.flush_highlights(registry)
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
     var canvas = Canvas(40, 5)
     canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
     ed.paint(canvas, Rect(0, 0, 40, 5), False)
@@ -8211,6 +8255,170 @@ fn test_desktop_confirm_dialog_no_clears_pending_action() raises:
     assert_false(d.install_runner.is_active())
 
 
+fn _spell_with_dict(words: List[String]) -> Speller:
+    """Build a Speller seeded with an explicit small dictionary so the
+    tests don't depend on whichever ``/usr/share/dict/words`` happens to
+    ship with the host."""
+    var s = Speller()
+    s.load_words(words)
+    return s^
+
+
+fn test_speller_check_word_basic() raises:
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var s = _spell_with_dict(words)
+    assert_true(s.check_word(String("hello")))
+    assert_true(s.check_word(String("Hello")))   # case-insensitive
+    assert_true(s.check_word(String("WORLD")))
+    assert_false(s.check_word(String("helo")))
+    assert_false(s.check_word(String("xyzzy")))
+
+
+fn test_speller_strips_common_suffixes() raises:
+    var words = List[String]()
+    words.append(String("dog"))
+    words.append(String("dish"))
+    words.append(String("walk"))
+    words.append(String("love"))
+    words.append(String("foo"))
+    var s = _spell_with_dict(words)
+    assert_true(s.check_word(String("dogs")))    # plural -s
+    assert_true(s.check_word(String("dog's")))   # possessive
+    assert_true(s.check_word(String("dishes")))  # plural -es
+    assert_true(s.check_word(String("walked")))  # past tense
+    assert_true(s.check_word(String("walking"))) # gerund
+    assert_true(s.check_word(String("loved")))   # foo+d
+    assert_true(s.check_word(String("loving")))  # drop-e + ing
+    assert_false(s.check_word(String("foob")))
+
+
+fn test_speller_unloaded_returns_true_for_everything() raises:
+    """When no dictionary is loaded, ``check_word`` must say "fine" for
+    every input — better silent than a screen full of bogus underlines
+    on systems without ``/usr/share/dict/words``."""
+    var s = Speller()
+    assert_true(s.check_word(String("definitelynotaword")))
+
+
+fn find_misspelled_runs_filters_identifiers_and_short_words() raises:
+    """Word-shape filters should suppress: <4 letters, all caps, mixed
+    case mid-word, identifier fragments with digits/underscores."""
+    var words = List[String]()
+    words.append(String("hello"))
+    var s = _spell_with_dict(words)
+    var text = String("ok URL flushHighlights foo_bar123 helo world hello")
+    var runs = find_misspelled_runs(s, text)
+    # ``ok`` (too short), ``URL`` (acronym), ``flushHighlights``
+    # (internal cap), ``foo_bar123`` (identifier), ``hello`` (in dict)
+    # all skipped. Only ``helo`` and ``world`` should flag.
+    assert_equal(len(runs), 2)
+    var b = text.as_bytes()
+    var first_word = String(StringSlice(unsafe_from_utf8=b[runs[0][0]:runs[0][1]]))
+    var second_word = String(StringSlice(unsafe_from_utf8=b[runs[1][0]:runs[1][1]]))
+    assert_equal(first_word, String("helo"))
+    assert_equal(second_word, String("world"))
+
+
+fn test_editor_spell_uses_curly_colored_underline_on_supported_terminal() raises:
+    """When the host terminal advertises support (we spoof
+    ``TERM_PROGRAM=iTerm.app``) the spell highlight keeps the comment
+    cyan foreground and gets a separate curly red underline channel —
+    the VS-Code-squiggle look."""
+    # Force-detect support by setting iTerm2's env var.
+    var c_name = String("TERM_PROGRAM\0")
+    var c_value = String("iTerm.app\0")
+    _ = external_call["setenv", Int32](
+        c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
+    )
+    # Defensive: kitty / wezterm / WT vars can short-circuit before
+    # TERM_PROGRAM is read; clear them so the iTerm.app spoof wins.
+    _ = external_call["unsetenv", Int32](
+        String("WT_SESSION\0").unsafe_ptr(),
+    )
+    _ = external_call["unsetenv", Int32](
+        String("KITTY_WINDOW_ID\0").unsafe_ptr(),
+    )
+    _ = external_call["unsetenv", Int32](
+        String("VTE_VERSION\0").unsafe_ptr(),
+    )
+    var words = List[String]()
+    words.append(String("hello"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_curly.py"))
+    assert_true(write_file(path, String("# helo\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.spell_highlights), 1)
+    var sh = ed.spell_highlights[0]
+    # Curly + underline bits set, separate red underline color, fg
+    # stays the comment's cyan (i.e. *not* LIGHT_RED).
+    assert_true((sh.attr.style & STYLE_UNDERLINE) != 0)
+    assert_true((sh.attr.style & STYLE_UNDERLINE_CURLY) != 0)
+    assert_equal(sh.attr.underline_color, Int16(LIGHT_RED))
+    assert_false(sh.attr.fg == LIGHT_RED)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
+    """When a row has both an uncommitted change and a spelling issue,
+    the right-side minimap projects the git change color (gray), not
+    the spell color (yellow). Spell still paints inline as the
+    underline; the gutter is reserved for the higher-priority signal."""
+    var words = List[String]()
+    words.append(String("hello"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_pri.py"))
+    assert_true(write_file(path, String("# helo\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    # Force both signals on row 0.
+    ed.git_change_lines = List[Int]()
+    ed.git_change_lines.append(GIT_CHANGE_MODIFIED)
+    assert_true(ed.spell_lines[0])
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    ed.paint(canvas, Rect(0, 0, 40, 5), False)
+    # The right-edge cell on row 0 paints in the git-change color
+    # (LIGHT_GRAY on BLUE), not the spell color (YELLOW on BLUE).
+    var sq = canvas.get(39, 0)
+    assert_equal(sq.glyph, String("■"))
+    assert_equal(sq.attr.fg, LIGHT_GRAY)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_spell_underlines_misspelled_word_in_comment() raises:
+    """End-to-end: a misspelled word inside a ``#`` comment surfaces as
+    a ``STYLE_UNDERLINE`` highlight at the right byte range, and the
+    row gets marked in ``spell_lines`` so the minimap can project it."""
+    # Dictionary is broad enough that only ``helo`` flags inside the
+    # comment — ``hello`` and ``world`` are present.
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell.py"))
+    assert_true(write_file(path, String("# helo world hello\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    # Exactly one underline highlight: for ``helo`` at bytes 2..6.
+    assert_equal(len(ed.spell_highlights), 1)
+    var sh = ed.spell_highlights[0]
+    assert_equal(sh.row, 0)
+    assert_equal(sh.col_start, 2)
+    assert_equal(sh.col_end, 6)
+    assert_true((sh.attr.style & STYLE_UNDERLINE) != 0)
+    # Row 0 is marked as having a spell issue; row 1 (the empty
+    # trailing line) is not.
+    assert_true(len(ed.spell_lines) >= 1)
+    assert_true(ed.spell_lines[0])
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 fn main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
     # (which writes to ``~/.config/turbokod/config.json`` via
@@ -8597,4 +8805,13 @@ fn main() raises:
     test_desktop_snapshot_captures_per_window_rects()
     test_desktop_save_then_restore_round_trip_through_paint()
     test_desktop_restores_maximized_window_keeps_per_window_restore_rect()
+    test_speller_check_word_basic()
+    test_speller_strips_common_suffixes()
+    test_speller_unloaded_returns_true_for_everything()
+    find_misspelled_runs_filters_identifiers_and_short_words()
+    test_editor_spell_underlines_misspelled_word_in_comment()
+    test_editor_spell_uses_curly_colored_underline_on_supported_terminal()
+    test_editor_minimap_git_change_wins_over_spell_on_same_row()
+    test_attr_to_sgr_plain_underline()
+    test_attr_to_sgr_curly_colored_underline()
     print("all tests passed")

@@ -824,6 +824,22 @@ struct RenderCell {
     c: char,
     fg: u32,
     bg: u32,
+    // Underline rendering. ``underline`` is the kind (None, Plain,
+    // Curly); when set, ``underline_color`` is the RGB the line is
+    // painted in (defaults to ``fg`` when alacritty reports
+    // ``Color::Named(NamedColor::Foreground)`` for the underline
+    // color). Carried through ``RenderCell`` so the per-cell paint
+    // loop can stamp pixels under the glyph and the frame hash
+    // catches underline-only changes for damage tracking.
+    underline: UnderlineKind,
+    underline_color: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum UnderlineKind {
+    None,
+    Plain,
+    Curly,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -1440,7 +1456,34 @@ impl App {
                     if cell.flags.contains(Flags::HIDDEN) {
                         fg = bg;
                     }
-                    cells.push(RenderCell { c: cell.c, fg, bg });
+                    // Underline: collapse alacritty's five flavors into
+                    // the two we render (plain / curly). Anything in the
+                    // ``ALL_UNDERLINES`` family that isn't UNDERCURL /
+                    // DOTTED / DASHED is treated as plain — our renderer
+                    // doesn't yet draw distinct dotted/dashed/double
+                    // patterns, so they collapse to a solid line rather
+                    // than getting silently dropped.
+                    let underline = if cell
+                        .flags
+                        .intersects(Flags::UNDERCURL | Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE)
+                    {
+                        UnderlineKind::Curly
+                    } else if cell.flags.intersects(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE) {
+                        UnderlineKind::Plain
+                    } else {
+                        UnderlineKind::None
+                    };
+                    let underline_color = match cell.underline_color() {
+                        Some(c) => resolve_color(c, palette, false, fg),
+                        None => fg,
+                    };
+                    cells.push(RenderCell {
+                        c: cell.c,
+                        fg,
+                        bg,
+                        underline,
+                        underline_color,
+                    });
                 }
             }
         }
@@ -1458,6 +1501,8 @@ impl App {
                 c.c.hash(&mut h);
                 c.fg.hash(&mut h);
                 c.bg.hash(&mut h);
+                c.underline.hash(&mut h);
+                c.underline_color.hash(&mut h);
             }
             h.finish()
         };
@@ -1492,6 +1537,8 @@ impl App {
                     c: ' ',
                     fg: DEFAULT_FG,
                     bg: DEFAULT_BG,
+                    underline: UnderlineKind::None,
+                    underline_color: DEFAULT_FG,
                 });
                 let x0 = col * cw;
                 let y0 = line * ch;
@@ -1559,6 +1606,60 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+
+                // Underline overlay. Stamped after the glyph so it
+                // sits on top of any descenders rather than being
+                // hidden by them. Plain = one solid row at
+                // ``ch - underline_thickness``; curly = a sine-shaped
+                // stipple over two rows so a colored underline reads
+                // as a "spell-check squiggle" even at small cell
+                // sizes. ``underline_color`` may differ from ``fg``
+                // (SGR 58:5:N) — handled uniformly here.
+                if cell.underline != UnderlineKind::None {
+                    let uc = cell.underline_color;
+                    let thickness = (s as usize).max(1);
+                    let baseline = ch.saturating_sub(thickness + 1);
+                    match cell.underline {
+                        UnderlineKind::Plain => {
+                            for ty in 0..thickness {
+                                let yy = baseline + ty;
+                                if yy >= ch {
+                                    break;
+                                }
+                                let row_base = (y0 + yy) * win_w + x0;
+                                for x in 0..cw {
+                                    let idx = row_base + x;
+                                    if idx < buf.len() {
+                                        buf[idx] = uc;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineKind::Curly => {
+                            // 4-step square wave: top row for the
+                            // first half of each period, bottom row
+                            // for the second half. Period is two
+                            // pixels (i.e. four cells wide finishes
+                            // two full waves) so the squiggle stays
+                            // legible at the smallest font sizes
+                            // we ship.
+                            let top = baseline;
+                            let bot = (baseline + thickness).min(ch.saturating_sub(1));
+                            for x in 0..cw {
+                                let phase = ((x0 + x) / thickness.max(1)) % 4;
+                                let yy = if phase < 2 { top } else { bot };
+                                if yy >= ch {
+                                    continue;
+                                }
+                                let idx = (y0 + yy) * win_w + x0 + x;
+                                if idx < buf.len() {
+                                    buf[idx] = uc;
+                                }
+                            }
+                        }
+                        UnderlineKind::None => {}
                     }
                 }
             }

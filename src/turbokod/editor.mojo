@@ -16,7 +16,7 @@ from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
     Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
-    LIGHT_YELLOW, WHITE, YELLOW,
+    LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
 )
 from .diff import MergeResult, diff3_merge, unified_diff
 from .events import (
@@ -34,9 +34,11 @@ from .git_changes import (
 )
 from .highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
-    extension_of, highlight_for_extension, highlight_incremental,
-    word_at,
+    extension_of, highlight_comment_attr, highlight_for_extension,
+    highlight_incremental, highlight_string_attr, word_at,
 )
+from .spell import Speller, find_misspelled_runs
+from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
 from .posix import monotonic_ms
@@ -456,6 +458,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     var highlights: List[Highlight]
     var _highlights_dirty: Bool
     var _hl_dirty_row: Int
+    # Spell-check overlay. ``spell_highlights`` holds underline-only
+    # ``Highlight`` entries painted *after* the syntax pass so a
+    # misspelled word inside a comment stays cyan but gets a squiggle.
+    # ``spell_lines[i]`` is True iff buffer row ``i`` contains at least
+    # one misspelling — the right-side minimap projects this list so
+    # the user can scan the file at a glance.
+    var spell_highlights: List[Highlight]
+    var spell_lines: List[Bool]
     # ``pending_definition`` is set when the user Cmd+left-clicks an
     # identifier (delivered as Left+Alt by iTerm2) — the host polls
     # ``consume_definition_request`` and forwards to whichever LSP client
@@ -597,6 +607,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+        self.spell_highlights = List[Highlight]()
+        self.spell_lines = List[Bool]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -651,6 +663,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+        self.spell_highlights = List[Highlight]()
+        self.spell_lines = List[Bool]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -726,6 +740,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
         self._hl_dirty_row = copy._hl_dirty_row
+        self.spell_highlights = copy.spell_highlights.copy()
+        self.spell_lines = copy.spell_lines.copy()
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
@@ -766,9 +782,17 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_cache = HighlightCache()
         self._smart_select_stack = copy._smart_select_stack.copy()
 
-    fn flush_highlights(mut self, mut registry: GrammarRegistry):
+    fn flush_highlights(
+        mut self, mut registry: GrammarRegistry, mut speller: Speller,
+    ):
         """Bring ``self.highlights`` up to date by tokenizing against
         the shared ``GrammarRegistry``. No-op if not ``_highlights_dirty``.
+
+        Also recomputes ``spell_highlights`` and ``spell_lines`` from
+        the fresh syntax pass, so the spell overlay always reflects
+        the current buffer state. ``speller`` is the process-shared
+        wordlist; if it isn't loaded yet we trigger a lazy load on the
+        first call.
 
         Called from the render path (``Desktop.paint`` walks all
         editors before drawing). Edit methods on ``Editor`` no
@@ -789,6 +813,80 @@ struct Editor(ImplicitlyCopyable, Movable):
         # past the end of the buffer. Any subsequent edit will
         # bring it back to a real row via ``_mark_hl_dirty``.
         self._hl_dirty_row = self.buffer.line_count()
+        speller.load_default()
+        self._refresh_spell(speller)
+
+    fn _refresh_spell(mut self, speller: Speller):
+        """Rebuild ``spell_highlights`` and ``spell_lines`` from the
+        current ``self.highlights``. Walks every comment / string
+        highlight, runs the words through the speller, and emits an
+        underline-only highlight for each misspelling.
+
+        On terminals that support the colon-separated SGR extensions
+        (iTerm2, kitty, vte, Windows Terminal, …) the misspelled word
+        keeps its host fg/bg and gets a *red curly underline* —
+        ``SGR 4:3`` + ``SGR 58:5:1`` — the classic VS Code squiggle.
+        On terminals that don't (Apple Terminal.app, basic xterm) we
+        fall back to ``LIGHT_RED`` foreground + plain ``SGR 4`` so the
+        flag is at least visible; the underline alone would be
+        invisible because cyan-on-cyan blends.
+
+        ``spell_lines[i]`` is set True for any row that gained a
+        highlight so the right-side minimap can project a marker."""
+        self.spell_highlights = List[Highlight]()
+        self.spell_lines = List[Bool]()
+        for _ in range(self.buffer.line_count()):
+            self.spell_lines.append(False)
+        if not speller.loaded:
+            return
+        var comment_attr = highlight_comment_attr()
+        var string_attr = highlight_string_attr()
+        var extended = terminal_supports_extended_underline()
+        for h in range(len(self.highlights)):
+            var hl = self.highlights[h]
+            var is_comment = hl.attr == comment_attr
+            var is_string = hl.attr == string_attr
+            if not (is_comment or is_string):
+                continue
+            if hl.row < 0 or hl.row >= self.buffer.line_count():
+                continue
+            var line = self.buffer.line(hl.row)
+            var line_bytes = line.as_bytes()
+            var lo = hl.col_start
+            var hi = hl.col_end
+            if lo < 0:
+                lo = 0
+            if hi > len(line_bytes):
+                hi = len(line_bytes)
+            if lo >= hi:
+                continue
+            var slice_text = String(
+                StringSlice(unsafe_from_utf8=line_bytes[lo:hi])
+            )
+            var runs = find_misspelled_runs(speller, slice_text)
+            if len(runs) == 0:
+                continue
+            var underline_attr: Attr
+            if extended:
+                # Keep the host comment/string color, add curly red
+                # underline as a separate channel.
+                underline_attr = hl.attr.add_style(
+                    STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY,
+                ).with_underline_color(Int16(LIGHT_RED))
+            else:
+                # Plain underline: paint the word red so the flag
+                # itself is visible (the line would otherwise blend
+                # into the cyan comment text).
+                underline_attr = hl.attr.with_fg(LIGHT_RED).add_style(
+                    STYLE_UNDERLINE,
+                )
+            for r in range(len(runs)):
+                var rs = runs[r][0] + lo
+                var re = runs[r][1] + lo
+                self.spell_highlights.append(
+                    Highlight(hl.row, rs, re, underline_attr)
+                )
+            self.spell_lines[hl.row] = True
 
     fn invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
@@ -1633,14 +1731,97 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _right_gutter(self) -> Int:
         """Width of the right-side gutter in cells. A single column
         reserved on the right edge of the editor for at-a-glance row
-        annotations (currently: a gray square on rows with uncommitted
-        changes). Zero when no annotation source is active, so editors
-        that have nothing to show give the full width back to text."""
+        annotations: gray squares for uncommitted-change lines, yellow
+        squares for rows with spelling issues. Zero when no annotation
+        source is active, so editors that have nothing to show give the
+        full width back to text."""
         if not self.minimap_visible:
             return 0
         if len(self.git_change_lines) > 0:
             return 1
+        if self._has_spell_issues():
+            return 1
         return 0
+
+    fn _has_spell_issues(self) -> Bool:
+        for i in range(len(self.spell_lines)):
+            if self.spell_lines[i]:
+                return True
+        return False
+
+    fn _minimap_total_lines(self) -> Int:
+        """Largest source length — sets the file-row span the minimap
+        projects onto its content_h screen rows. Sources may differ in
+        length (e.g. ``git_change_lines`` is empty for non-git files
+        even when ``spell_lines`` has entries) so we take the max
+        rather than locking to ``buffer.line_count()``."""
+        var n = len(self.git_change_lines)
+        if len(self.spell_lines) > n:
+            n = len(self.spell_lines)
+        return n
+
+    fn _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
+        """Source registry for the right-side projection. Sources are
+        checked in priority order; the first hit wins, so a row with
+        both an uncommitted change and a spell issue surfaces the
+        change mark (the spell signal is still readable inline as the
+        underline).
+
+        To add a new source: append a check below at the desired
+        priority. Earlier = higher priority. Each source returns the
+        ``Attr`` to paint, or falls through to the next on no hit."""
+        # Priority 1: uncommitted git change.
+        var n_git = len(self.git_change_lines)
+        var s = start if start < n_git else n_git
+        var e = end if end < n_git else n_git
+        for li in range(s, e):
+            if self.git_change_lines[li] != GIT_CHANGE_NONE:
+                return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
+        # Priority 2: spell-check issue.
+        var n_sp = len(self.spell_lines)
+        s = start if start < n_sp else n_sp
+        e = end if end < n_sp else n_sp
+        for li in range(s, e):
+            if self.spell_lines[li]:
+                return Optional[Attr](Attr(YELLOW, BLUE))
+        return Optional[Attr]()
+
+    fn _paint_right_gutter(
+        self, mut canvas: Canvas, view: Rect, content_h: Int,
+    ):
+        """Paint the right-edge minimap column. Each screen row owns an
+        evenly-sized slice of buffer rows; for that slice we ask
+        ``_minimap_attr_for_slice`` which (if any) source has a hit and
+        paint a square in that color. When the file fits in
+        ``content_h`` rows the slices collapse to one buffer row each,
+        so the projection lines up cell-for-cell with the text."""
+        var n_lines = self._minimap_total_lines()
+        if n_lines == 0:
+            return
+        var rows = content_h
+        if rows < 1:
+            rows = 1
+        for sy in range(rows):
+            var start: Int
+            var end: Int
+            if n_lines <= rows:
+                start = sy
+                end = sy + 1
+            else:
+                start = (sy * n_lines) // rows
+                end = ((sy + 1) * n_lines) // rows
+                if end <= start:
+                    end = start + 1
+            if start >= n_lines:
+                break
+            if end > n_lines:
+                end = n_lines
+            var attr_opt = self._minimap_attr_for_slice(start, end)
+            if attr_opt:
+                canvas.set(
+                    view.b.x - 1, view.a.y + sy,
+                    Cell(String("■"), attr_opt.value(), 1),
+                )
 
     fn _total_gutter(self) -> Int:
         return self.gutter_width + self._line_number_gutter() \
@@ -1921,43 +2102,12 @@ struct Editor(ImplicitlyCopyable, Movable):
                     _ = canvas.put_text(
                         Point(ax, sy_g), bl.author, ln_attr, bl_right,
                     )
-        # Right-side gutter: a fixed-height minimap projection of the
-        # whole file, independent of ``scroll_y``. Each screen row owns
-        # an evenly-sized slice of buffer rows; the slice is marked when
-        # any line inside it has uncommitted changes. When the file fits
-        # in ``content_h`` rows the slices collapse to one buffer row
-        # each, so the projection lines up cell-for-cell with the text.
-        if right_gutter > 0 and len(self.git_change_lines) > 0:
-            var sq_attr = Attr(LIGHT_GRAY, BLUE)
-            var n_lines = len(self.git_change_lines)
-            var rows = content_h
-            if rows < 1:
-                rows = 1
-            for sy in range(rows):
-                var start: Int
-                var end: Int
-                if n_lines <= rows:
-                    start = sy
-                    end = sy + 1
-                else:
-                    start = (sy * n_lines) // rows
-                    end = ((sy + 1) * n_lines) // rows
-                    if end <= start:
-                        end = start + 1
-                if start >= n_lines:
-                    break
-                if end > n_lines:
-                    end = n_lines
-                var any_changed = False
-                for li in range(start, end):
-                    if self.git_change_lines[li] != GIT_CHANGE_NONE:
-                        any_changed = True
-                        break
-                if any_changed:
-                    canvas.set(
-                        view.b.x - 1, view.a.y + sy,
-                        Cell(String("■"), sq_attr, 1),
-                    )
+        # Right-side gutter: a fixed-height projection of the whole
+        # file, independent of ``scroll_y``. ``_paint_right_gutter``
+        # handles slicing + per-source priority — see
+        # ``_minimap_attr_for_slice`` for the source registry.
+        if right_gutter > 0:
+            self._paint_right_gutter(canvas, view, content_h)
         # Collect every caret's normalised selection range up front so
         # the per-screen-row overlay loop only has to iterate the list
         # — saves recomputing on every row. Empty-selection carets are
@@ -2037,6 +2187,34 @@ struct Editor(ImplicitlyCopyable, Movable):
                     if sx_hl >= content_right:
                         break
                     canvas.set_attr(sx_hl, sy_hl, hl.attr)
+            # Spell-check overlay: same byte-to-cell mapping as the
+            # syntax pass above, but reapplies the *same* fg/bg with
+            # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
+            # pass so the underline lands on the comment/string color
+            # rather than getting flattened back to plain text.
+            for h in range(len(self.spell_highlights)):
+                var sh = self.spell_highlights[h]
+                if sh.row != buf_row:
+                    continue
+                var sh_byte_start = sh.col_start - start_byte
+                var sh_byte_end = sh.col_end - start_byte
+                if sh_byte_start < 0:
+                    sh_byte_start = 0
+                if sh_byte_end > visible_byte_count:
+                    sh_byte_end = visible_byte_count
+                if sh_byte_start >= sh_byte_end:
+                    continue
+                var sh_cell_start = visible_cell_map[sh_byte_start]
+                var sh_cell_end: Int
+                if sh_byte_end < visible_byte_count:
+                    sh_cell_end = visible_cell_map[sh_byte_end]
+                else:
+                    sh_cell_end = visible_cell_count
+                for cell_off in range(sh_cell_start, sh_cell_end):
+                    var sx_sh = seg_x0 + cell_off
+                    if sx_sh >= content_right:
+                        break
+                    canvas.set_attr(sx_sh, sy_hl, sh.attr)
             # Overlay each caret's selection on this row, if any. Per-
             # caret iteration so overlapping selections still paint
             # (the second one re-stamps the same attr — visually no

@@ -58,6 +58,7 @@ from .posix import close_fd, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
+from .spell import Speller
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .grammar_install import (
@@ -472,6 +473,10 @@ struct Desktop(Movable):
     # every editor's highlights against this registry before
     # drawing.
     var grammar_registry: GrammarRegistry
+    # Process-wide spell checker. Shared across editors so the 235k-word
+    # dictionary is loaded once per session, not per buffer. Lazy-loaded
+    # on the first ``flush_highlights`` call.
+    var speller: Speller
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -633,6 +638,7 @@ struct Desktop(Movable):
         self._doc_install_prompted = List[String]()
         self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
+        self.speller = Speller()
         self._lsp_install_prompted = List[String]()
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
@@ -1140,7 +1146,7 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.flush_highlights(
-                    self.grammar_registry,
+                    self.grammar_registry, self.speller,
                 )
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
