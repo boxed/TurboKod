@@ -120,7 +120,14 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
-from turbokod.spell import Speller, find_misspelled_runs
+from turbokod.spell import (
+    Speller, SpellActionRequest, find_misspelled_runs,
+    project_dict_path, user_dict_path,
+)
+from turbokod.spell_menu import (
+    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SPELL_ACTION_NONE,
+    SpellMenu,
+)
 from turbokod.grammar_install import (
     built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
@@ -8361,6 +8368,327 @@ fn test_speller_unloaded_returns_true_for_everything() raises:
     assert_true(s.check_word(String("definitelynotaword")))
 
 
+fn test_speller_set_project_loads_idea_dictionary() raises:
+    """Words inside ``<project>/.idea/dictionaries/*.xml`` should be
+    treated as correctly spelled — that's the team's shared vocabulary
+    of names and domain terms. ``set_project`` folds them into
+    ``project_buckets`` alongside ``.turbokod/dictionary.txt``."""
+    var dir = String("/tmp/turbokod_idea_dict_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    var idea = dir + String("/.idea")
+    var dicts = idea + String("/dictionaries")
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        (idea + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        (dicts + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var xml_path = dicts + String("/boxed.xml")
+    assert_true(write_file(xml_path, String(
+        "<component name=\"ProjectDictionaryState\">\n"
+        + "  <dictionary name=\"boxed\">\n"
+        + "    <words>\n"
+        + "      <w>turbokod</w>\n"
+        + "      <w>aarrgh</w>\n"
+        + "    </words>\n"
+        + "  </dictionary>\n"
+        + "</component>\n"
+    )))
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    s.load_words(seed)
+    s.set_project(dir)
+    # Project-specific words should now be looked up via project_buckets.
+    assert_true(s.check_word(String("turbokod")))
+    assert_true(s.check_word(String("aarrgh")))
+    # Case-insensitive lookup still works.
+    assert_true(s.check_word(String("Turbokod")))
+    # And the previously-loaded baseline is preserved.
+    assert_true(s.check_word(String("hello")))
+    # An unrelated word stays misspelled.
+    assert_false(s.check_word(String("xyzzy")))
+    # Switching to a project without IDEA dicts must clear the words —
+    # they're per-project, not session-wide.
+    s.set_project(String("/tmp/turbokod_no_idea_here_xyzzy"))
+    assert_false(s.check_word(String("turbokod")))
+    assert_false(s.check_word(String("aarrgh")))
+    # The session-wide baseline still holds.
+    assert_true(s.check_word(String("hello")))
+    _ = external_call["unlink", Int32]((xml_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dicts + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((idea + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
+fn test_speller_set_project_with_no_idea_dir_is_noop() raises:
+    """A project without a ``.idea/dictionaries/`` directory must not
+    raise and must leave the existing dictionary untouched."""
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    s.load_words(seed)
+    s.set_project(String("/tmp/turbokod_no_idea_here_xyzzy"))
+    assert_true(s.check_word(String("hello")))
+    assert_false(s.check_word(String("xyzzy")))
+
+
+fn test_speller_add_user_word_persists_and_check_word_passes() raises:
+    """``add_user_word`` should both flip ``check_word`` to True for
+    that word *and* append it to ``~/.config/turbokod/dictionary.txt``
+    so the addition survives a restart. Tests run with ``HOME`` set to
+    a scratch dir, so the file path is predictable."""
+    var path = user_dict_path()
+    # Defensive cleanup — earlier tests may have written here.
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    s.load_words(seed)
+    assert_false(s.check_word(String("turbokod")))
+    assert_true(s.add_user_word(String("turbokod")))
+    # In-memory: subsequent lookups pass without touching the file.
+    assert_true(s.check_word(String("turbokod")))
+    # On-disk: the file exists and contains the word.
+    var content = read_file(path)
+    var lines = List[String]()
+    var b = content.as_bytes()
+    var start = 0
+    var i = 0
+    while i < len(b):
+        if b[i] == 0x0A:
+            lines.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            start = i + 1
+        i += 1
+    var saw = False
+    for k in range(len(lines)):
+        if lines[k] == String("turbokod"):
+            saw = True
+            break
+    assert_true(saw)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_speller_load_default_layers_user_dictionary() raises:
+    """A subsequent ``Speller`` started after ``add_user_word`` writes
+    the file should pick the addition up via ``load_default``. Verifies
+    the persistence round-trips end to end."""
+    var path = user_dict_path()
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    # Seed the user dict directly via the public API on a throwaway
+    # speller so we don't depend on internals of the file layout.
+    var primer = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    primer.load_words(seed)
+    _ = primer.add_user_word(String("turbokod"))
+    # Fresh speller; load_default should fold in the user dict.
+    var s = Speller()
+    s.load_default()
+    # ``loaded`` is True because *something* was loaded — either an OS
+    # list or the user dict (depending on the runner). Either way the
+    # added word must check out.
+    assert_true(s.check_word(String("turbokod")))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_speller_add_project_word_persists_in_project_dir() raises:
+    """``add_project_word`` writes ``<project>/.turbokod/dictionary.txt``
+    and updates ``project_buckets`` in memory. ``set_project`` must
+    have been called first; without it the call is a no-op."""
+    var dir = String("/tmp/turbokod_proj_dict_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    s.load_words(seed)
+    # Without set_project, the call short-circuits to False and the
+    # word stays misspelled.
+    assert_false(s.add_project_word(String("turbokod")))
+    assert_false(s.check_word(String("turbokod")))
+    # With set_project active, the word sticks in memory and lands on
+    # disk under .turbokod/dictionary.txt.
+    s.set_project(dir)
+    assert_true(s.add_project_word(String("turbokod")))
+    assert_true(s.check_word(String("turbokod")))
+    var dict_path = project_dict_path(dir)
+    assert_equal(dict_path, dir + String("/.turbokod/dictionary.txt"))
+    var info = stat_file(dict_path)
+    assert_true(info.ok)
+    # Switching to a different project clears the in-memory entry —
+    # project words are per-project, never session-wide.
+    s.set_project(String(""))
+    assert_false(s.check_word(String("turbokod")))
+    # And reloading the same project restores them from disk.
+    s.set_project(dir)
+    assert_true(s.check_word(String("turbokod")))
+    _ = external_call["unlink", Int32](
+        (dict_path + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["rmdir", Int32](
+        ((dir + String("/.turbokod")) + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
+fn test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
+    """Alt+Enter while the cursor is parked inside a misspelled-word
+    underline should stamp ``pending_spell_action`` with that word
+    rather than splitting the line. The editor must NOT touch the
+    buffer (no row split) — the host opens the popup over the still-
+    intact text."""
+    var words = List[String]()
+    words.append(String("hello"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_alt_enter.py"))
+    assert_true(write_file(path, String("# helo\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.spell_highlights), 1)
+    # Park the cursor in the middle of "helo".
+    ed.cursor_row = 0
+    ed.cursor_col = 3
+    var line_count_before = ed.buffer.line_count()
+    var alt_enter = Event.key_event(KEY_ENTER, MOD_ALT)
+    var consumed = ed.handle_key(alt_enter, Rect(0, 0, 40, 5))
+    assert_true(consumed)
+    # Buffer must be unchanged: Alt+Enter on a misspelling is a
+    # menu-open gesture, not an Enter.
+    assert_equal(ed.buffer.line_count(), line_count_before)
+    var sa_opt = ed.consume_spell_action_request()
+    assert_true(Bool(sa_opt))
+    var sa = sa_opt.value()
+    assert_equal(sa.word, String("helo"))
+    assert_equal(sa.row, 0)
+    assert_equal(sa.col_start, 2)
+    assert_equal(sa.col_end, 6)
+    # The slot is one-shot.
+    assert_false(Bool(ed.consume_spell_action_request()))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
+    """Alt+Enter on a row without any misspelling must fall through —
+    the editor returns False so the host's hotkey table can bind it
+    to something else. No buffer mutation either way."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_alt_outside.py"))
+    assert_true(write_file(path, String("# hello world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.spell_highlights), 0)
+    var line_count_before = ed.buffer.line_count()
+    var alt_enter = Event.key_event(KEY_ENTER, MOD_ALT)
+    var consumed = ed.handle_key(alt_enter, Rect(0, 0, 40, 5))
+    assert_false(consumed)
+    assert_equal(ed.buffer.line_count(), line_count_before)
+    assert_false(Bool(ed.consume_spell_action_request()))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_invalidate_spell_drops_overlay_after_word_added() raises:
+    """After ``Speller.add_user_word`` and ``Editor.invalidate_spell``,
+    the next ``flush_highlights`` should clear the underline for the
+    newly-accepted word — verifying the refresh hook actually loops
+    back through ``_refresh_spell``."""
+    var words = List[String]()
+    words.append(String("hello"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_invalidate.py"))
+    assert_true(write_file(path, String("# helo\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.spell_highlights), 1)
+    # Teach the speller about "helo", then ask the editor to redo
+    # the spell pass on the next flush.
+    var udp = user_dict_path()
+    _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
+    _ = speller.add_user_word(String("helo"))
+    ed.invalidate_spell()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.spell_highlights), 0)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
+
+
+fn test_spell_menu_open_close_default_selection() raises:
+    """Open positions selection on row 0 (user dict) regardless of
+    whether the project row is enabled — that's the safe default
+    every time, easier to undo than accidentally training the team
+    dict with a personal word."""
+    var m = SpellMenu()
+    m.open(String("helo"), Point(10, 5), True)
+    assert_true(m.active)
+    assert_equal(m.selected, 0)
+    assert_equal(m.word, String("helo"))
+    assert_true(m.has_project)
+    m.close()
+    assert_false(m.active)
+    # Open without a project: user-dict still selectable, project row
+    # rendered but ``has_project=False`` so Enter on it is a no-op.
+    m.open(String("helo"), Point(0, 0), False)
+    assert_false(m.has_project)
+
+
+fn test_spell_menu_enter_on_user_resolves_with_add_user() raises:
+    var m = SpellMenu()
+    m.open(String("helo"), Point(0, 0), True)
+    var ev = Event.key_event(KEY_ENTER)
+    _ = m.handle_key(ev)
+    assert_true(m.submitted)
+    assert_equal(m.action, SPELL_ACTION_ADD_USER)
+
+
+fn test_spell_menu_enter_on_project_disabled_stays_open() raises:
+    """When ``has_project=False``, pressing Enter on the project row
+    must NOT submit — the menu stays open so the user can arrow back
+    up to the user-dict row."""
+    var m = SpellMenu()
+    m.open(String("helo"), Point(0, 0), False)
+    _ = m.handle_key(Event.key_event(KEY_DOWN))
+    assert_equal(m.selected, 1)
+    _ = m.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(m.submitted)
+    assert_true(m.active)
+    # Arrow back up — the user-dict pick still works.
+    _ = m.handle_key(Event.key_event(KEY_UP))
+    assert_equal(m.selected, 0)
+    _ = m.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(m.submitted)
+    assert_equal(m.action, SPELL_ACTION_ADD_USER)
+
+
+fn test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
+    var m = SpellMenu()
+    m.open(String("helo"), Point(0, 0), True)
+    _ = m.handle_key(Event.key_event(KEY_DOWN))
+    _ = m.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(m.submitted)
+    assert_equal(m.action, SPELL_ACTION_ADD_PROJECT)
+
+
+fn test_spell_menu_esc_dismisses() raises:
+    var m = SpellMenu()
+    m.open(String("helo"), Point(0, 0), True)
+    _ = m.handle_key(Event.key_event(KEY_ESC))
+    assert_true(m.submitted)
+    assert_equal(m.action, SPELL_ACTION_NONE)
+
+
 fn find_misspelled_runs_filters_identifiers_and_short_words() raises:
     """Word-shape filters should suppress: <4 letters, all caps, mixed
     case mid-word, identifier fragments with digits/underscores."""
@@ -8446,6 +8774,103 @@ fn test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
     var sq = canvas.get(39, 0)
     assert_equal(sq.glyph, String("■"))
     assert_equal(sq.attr.fg, LIGHT_GRAY)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_minimap_click_scrolls_to_marked_line() raises:
+    """Clicking on the right-edge minimap column should scroll the
+    editor so the buffer row that owns the projected slice is visible
+    (and place the cursor on it). With 20 lines in a 5-row view, the
+    slice owned by screen row 2 covers buffer rows [8, 12); a left-
+    click on column 39 / row 2 must center buffer row 10 (the marked
+    one) in the view rather than fall through to the text-area
+    handler."""
+    var text = String("")
+    for i in range(20):
+        text = text + String("line") + String(i) + String("\n")
+    var ed = Editor(text^)
+    ed.git_changes_visible = True
+    var marks = List[Int]()
+    for i in range(20):
+        marks.append(
+            GIT_CHANGE_MODIFIED if i == 10 else GIT_CHANGE_NONE
+        )
+    ed.set_git_changes(marks^)
+    ed.scroll_y = 0
+    var view = Rect(0, 0, 40, 5)
+    var click = Event.mouse_event(
+        Point(39, 2), MOUSE_BUTTON_LEFT, True, False,
+    )
+    _ = ed.handle_mouse(click, view)
+    # Cursor lands on the marked buffer row, scroll_y centers it.
+    assert_equal(ed.cursor_row, 10)
+    assert_equal(ed.cursor_col, 0)
+    # 5-row view, target = 10 - 2 = 8
+    assert_equal(ed.scroll_y, 8)
+
+
+fn test_editor_minimap_hover_records_spell_word() raises:
+    """A bare-hover event over a minimap row that carries a spelling
+    issue should populate ``_minimap_hover_*`` with kind=2 and the
+    offending word so the tooltip can render it. Clicking elsewhere
+    afterwards must clear the hover state again."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_hover.py"))
+    assert_true(write_file(path, String("# helo world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_true(ed.spell_lines[0])
+    var view = Rect(0, 0, 40, 5)
+    # Bare hover (button=NONE, motion=True) on the minimap column on
+    # row 0 — there's only the spell mark, so kind=2 and word=helo.
+    var hover = Event.mouse_event(
+        Point(39, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover, view)
+    assert_equal(ed._minimap_hover_kind, 2)
+    assert_equal(ed._minimap_hover_buf_row, 0)
+    assert_equal(ed._minimap_hover_word, String("helo"))
+    # Hover off the minimap column clears the state.
+    var hover_off = Event.mouse_event(
+        Point(5, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover_off, view)
+    assert_equal(ed._minimap_hover_kind, 0)
+    assert_equal(ed._minimap_hover_buf_row, -1)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_minimap_hover_paints_tooltip() raises:
+    """After a hover sets the spell-mark state, ``Editor.paint`` must
+    overlay a tooltip box that includes the misspelled word so the user
+    can read it."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_tip.py"))
+    assert_true(write_file(path, String("# helo world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    var view = Rect(0, 0, 40, 5)
+    var hover = Event.mouse_event(
+        Point(39, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover, view)
+    var canvas = Canvas(40, 5)
+    canvas.fill(view, String(" "), default_attr())
+    ed.paint(canvas, view, False)
+    # Pull the row of cells where the tooltip's label sits and concat
+    # the glyphs into a string so we can search for the word.
+    var row_text = String("")
+    for x in range(view.b.x):
+        row_text = row_text + canvas.get(x, 1).glyph
+    assert_true(_contains(row_text, String("helo")))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -8871,10 +9296,24 @@ fn main() raises:
     test_speller_check_word_basic()
     test_speller_strips_common_suffixes()
     test_speller_unloaded_returns_true_for_everything()
+    test_speller_add_user_word_persists_and_check_word_passes()
+    test_speller_load_default_layers_user_dictionary()
+    test_speller_add_project_word_persists_in_project_dir()
+    test_editor_alt_enter_on_misspelling_emits_pending_action()
+    test_editor_alt_enter_outside_misspelling_does_not_consume()
+    test_editor_invalidate_spell_drops_overlay_after_word_added()
+    test_spell_menu_open_close_default_selection()
+    test_spell_menu_enter_on_user_resolves_with_add_user()
+    test_spell_menu_enter_on_project_disabled_stays_open()
+    test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
+    test_spell_menu_esc_dismisses()
     find_misspelled_runs_filters_identifiers_and_short_words()
     test_editor_spell_underlines_misspelled_word_in_comment()
     test_editor_spell_uses_curly_colored_underline_on_supported_terminal()
     test_editor_minimap_git_change_wins_over_spell_on_same_row()
+    test_editor_minimap_click_scrolls_to_marked_line()
+    test_editor_minimap_hover_records_spell_word()
+    test_editor_minimap_hover_paints_tooltip()
     test_attr_to_sgr_plain_underline()
     test_attr_to_sgr_curly_colored_underline()
     print("all tests passed")

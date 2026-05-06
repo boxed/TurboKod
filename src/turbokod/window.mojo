@@ -21,7 +21,7 @@ from .editor import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 
@@ -809,6 +809,27 @@ struct WindowManager(Movable):
                 if self.windows[i].rect.contains(event.pos):
                     return self.windows[i].handle_mouse_in_body(event)
                 k -= 1
+            return True
+        # Bare hover (button=NONE, motion=True under xterm 1003 mode):
+        # forward to the editor body of whichever window the pointer is
+        # over so it can drive minimap-tooltip state. Don't touch focus
+        # or z-order — the user hasn't clicked. Editors not under the
+        # pointer have their hover state cleared so a stale tooltip
+        # doesn't linger after the pointer crosses a border.
+        if event.button == MOUSE_BUTTON_NONE:
+            var k2 = len(self.z_order) - 1
+            var hit = -1
+            while k2 >= 0:
+                var i2 = self.z_order[k2]
+                if self.windows[i2].rect.contains(event.pos):
+                    hit = i2
+                    break
+                k2 -= 1
+            for j in range(len(self.windows)):
+                if self.windows[j].is_editor and j != hit:
+                    self.windows[j].editor.clear_minimap_hover()
+            if hit >= 0 and self.windows[hit].is_editor:
+                _ = self.windows[hit].handle_mouse_in_body(event)
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False

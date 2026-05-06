@@ -59,6 +59,10 @@ from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
 from .spell import Speller
+from .spell_menu import (
+    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER,
+    SPELL_HIT_INSIDE, SPELL_HIT_OUTSIDE, SpellMenu,
+)
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .grammar_install import (
@@ -477,6 +481,12 @@ struct Desktop(Movable):
     # dictionary is loaded once per session, not per buffer. Lazy-loaded
     # on the first ``flush_highlights`` call.
     var speller: Speller
+    # Popup that opens on Alt+Enter over a misspelled word so the user
+    # can teach the speller about it. Surfaced from
+    # ``Editor.consume_spell_action_request``; resolution feeds back
+    # through ``speller.add_user_word`` / ``add_project_word`` and
+    # forces a spell-only re-render across every open editor.
+    var spell_menu: SpellMenu
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -639,6 +649,7 @@ struct Desktop(Movable):
         self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
         self.speller = Speller()
+        self.spell_menu = SpellMenu()
         self._lsp_install_prompted = List[String]()
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
@@ -1186,6 +1197,10 @@ struct Desktop(Movable):
         self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen)
         self.targets_dialog.paint(canvas, screen)
+        # Spell-action popup. Painted last among modals so it overlays
+        # everything else (it's contextual to the editor cursor and
+        # routinely opens above already-rendered widgets).
+        self.spell_menu.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -1769,6 +1784,7 @@ struct Desktop(Movable):
 
     fn close_project(mut self):
         self.project = Optional[String]()
+        self.speller.set_project(String(""))
         self.file_tree.close()
         if self._project_menu_idx >= 0:
             self.menu_bar.menus[self._project_menu_idx].visible = False
@@ -1852,6 +1868,10 @@ struct Desktop(Movable):
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
         # silently no-op until the user authors ``.turbokod/targets.json``.
         self.targets = load_project_targets(canonical)
+        # Swap the speller's per-project bucket to this project's
+        # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
+        # so the team's shared vocabulary doesn't trigger spell flags.
+        self.speller.set_project(canonical)
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
         # against. The restore code merges by file path (existing
@@ -2175,6 +2195,19 @@ struct Desktop(Movable):
         # editor happens here, before any caller-routed handling.
         if event.kind == EVENT_FOCUS_OUT and self.config.auto_save:
             self._autosave_all_dirty()
+        if self.spell_menu.active:
+            # Spell-action popup is the topmost modal: it opens
+            # contextually over the cursor, so any other modal
+            # surfacing while it's up would be a layering bug. It
+            # gets first dibs on every event until the user resolves
+            # or dismisses it.
+            if event.kind == EVENT_KEY:
+                _ = self.spell_menu.handle_key(event)
+            else:
+                _ = self.spell_menu.handle_mouse(event, screen)
+            if self.spell_menu.submitted:
+                self._on_spell_menu_submit()
+            return Optional[String]()
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
@@ -2458,6 +2491,11 @@ struct Desktop(Movable):
         if event.mods == MOD_ALT and self._open_menu_by_mnemonic(event.key):
             return Optional[String]()
         _ = self.windows.handle_key(event)
+        # The editor may have stamped a ``pending_spell_action`` while
+        # handling Alt+Enter on a misspelled word — surface the popup
+        # before the next paint so it renders on the same frame the
+        # user pressed the key.
+        self._maybe_open_spell_menu()
         return Optional[String]()
 
     fn _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
@@ -4839,6 +4877,87 @@ struct Desktop(Movable):
         self.windows.windows[idx].editor.line_numbers = False
         if was_max:
             self.windows.windows[idx].toggle_maximize(workspace)
+
+    fn _maybe_open_spell_menu(mut self):
+        """Drain ``Editor.consume_spell_action_request`` on the focused
+        window and, if it returned a request, open ``spell_menu``
+        anchored at the misspelled word's screen position.
+
+        The anchor is approximate: we don't account for tabs, wide
+        characters, or the gutter widths — ``SpellMenu._rect`` clamps
+        to the screen bounds and flips above the cursor row when
+        there isn't enough space below, so a few cells of slop is
+        cosmetic, not a correctness issue."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var sa_opt = self.windows.windows[idx] \
+            .editor.consume_spell_action_request()
+        if not sa_opt:
+            return
+        var sa = sa_opt.value()
+        var interior = self.windows.windows[idx].interior()
+        var sx = sa.col_start - self.windows.windows[idx].editor.scroll_x
+        var sy = sa.row - self.windows.windows[idx].editor.scroll_y
+        var ax = interior.a.x + sx
+        var ay = interior.a.y + sy
+        if ax < interior.a.x:
+            ax = interior.a.x
+        if ay < interior.a.y:
+            ay = interior.a.y
+        # ``self.project`` is an ``Optional[String]`` — its truthiness
+        # tells us whether a project root is set. ``Speller.add_project_word``
+        # is gated on the same ``project_root``, so this is the right
+        # signal to feed into the menu's enabled/disabled state.
+        var has_project = False
+        if self.project:
+            has_project = True
+        self.spell_menu.open(sa.word, Point(ax, ay), has_project)
+
+    fn _on_spell_menu_submit(mut self):
+        """Resolve the spell-menu pick: append the word to the chosen
+        dictionary and force every editor to recompute its spell
+        overlay so the underline disappears on this same frame.
+
+        On ``ADD_USER`` we tolerate the persist-to-disk step failing
+        (e.g. ``$HOME`` unset, no write permission): the word still
+        sticks for the rest of the session via the in-memory bucket
+        update, just not across restarts. We surface that via the
+        status bar so the user knows their training was ephemeral."""
+        var act = self.spell_menu.action
+        var word = self.spell_menu.word
+        self.spell_menu.close()
+        if len(word.as_bytes()) == 0:
+            return
+        if act == SPELL_ACTION_ADD_USER:
+            var ok = self.speller.add_user_word(word)
+            if not ok:
+                self.status_bar.set_message(
+                    String("Spelling: added to session only — couldn't write ")
+                        + String("user dictionary"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+        elif act == SPELL_ACTION_ADD_PROJECT:
+            if not self.project:
+                # Defensive: the menu greys this row out, but a stray
+                # mouse click on the disabled label could still get
+                # here on a future change. Leave the in-memory state
+                # alone and tell the user.
+                self.status_bar.set_message(
+                    String("Spelling: no project open — open one first"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+                return
+            _ = self.speller.add_project_word(word)
+        else:
+            # SPELL_ACTION_NONE — the user cancelled. No state to flush.
+            return
+        # Force every editor to re-derive ``spell_highlights`` next
+        # paint. The grammar pass hits the incremental cache so this
+        # is microseconds even on large buffers.
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.invalidate_spell()
 
     fn _on_confirm_submit(mut self) -> Optional[String]:
         """Resolve the most recent ``confirm_dialog.open`` by reading

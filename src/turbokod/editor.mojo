@@ -15,7 +15,7 @@ from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
-    Attr, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
     LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
 )
 from .diff import MergeResult, diff3_merge, unified_diff
@@ -24,7 +24,7 @@ from .events import (
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
@@ -37,7 +37,7 @@ from .highlight import (
     extension_of, highlight_comment_attr, highlight_for_extension,
     highlight_incremental, highlight_string_attr, word_at,
 )
-from .spell import Speller, find_misspelled_runs
+from .spell import Speller, SpellActionRequest, find_misspelled_runs
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
@@ -466,6 +466,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the user can scan the file at a glance.
     var spell_highlights: List[Highlight]
     var spell_lines: List[Bool]
+    # ``pending_spell_action`` is set when the user hits Alt+Enter on
+    # a misspelled word — the host polls
+    # ``consume_spell_action_request`` and forwards to whichever popup
+    # menu it wants to surface (currently the "Add to user/project
+    # dictionary" menu in ``Desktop``). Lives next to
+    # ``pending_definition`` so multi-pending state is uniformly
+    # consumed by the host on every paint.
+    var pending_spell_action: Optional[SpellActionRequest]
     # ``pending_definition`` is set when the user Cmd+left-clicks an
     # identifier (delivered as Left+Alt by iTerm2) — the host polls
     # ``consume_definition_request`` and forwards to whichever LSP client
@@ -587,6 +595,20 @@ struct Editor(ImplicitlyCopyable, Movable):
     # Cleared by any other key, click, or edit so the stack only ever
     # describes a contiguous Cmd+Up run.
     var _smart_select_stack: List[Caret]
+    # Right-side minimap hover state. ``_minimap_hover_kind`` is 0 when
+    # nothing is hovered, 1 for an uncommitted-change mark, 2 for a
+    # spelling mark; ``_minimap_hover_buf_row`` is the buffer row the
+    # tooltip describes; ``_minimap_hover_word`` is the offending word
+    # for spell hovers (empty otherwise); ``_minimap_hover_x/y`` are
+    # the screen coordinates the cursor was last at, used to anchor the
+    # tooltip box. Updated by hover events flowing through
+    # ``handle_mouse``; consumed by ``paint_minimap_tooltip`` after the
+    # main editor paint pass.
+    var _minimap_hover_kind: Int
+    var _minimap_hover_buf_row: Int
+    var _minimap_hover_word: String
+    var _minimap_hover_x: Int
+    var _minimap_hover_y: Int
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -609,6 +631,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = 0
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
+        self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -643,6 +666,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
         self._smart_select_stack = List[Caret]()
+        self._minimap_hover_kind = 0
+        self._minimap_hover_buf_row = -1
+        self._minimap_hover_word = String("")
+        self._minimap_hover_x = 0
+        self._minimap_hover_y = 0
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -665,6 +693,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = 0
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
+        self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
@@ -699,6 +728,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
         self._smart_select_stack = List[Caret]()
+        self._minimap_hover_kind = 0
+        self._minimap_hover_buf_row = -1
+        self._minimap_hover_word = String("")
+        self._minimap_hover_x = 0
+        self._minimap_hover_y = 0
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -742,6 +776,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = copy._hl_dirty_row
         self.spell_highlights = copy.spell_highlights.copy()
         self.spell_lines = copy.spell_lines.copy()
+        self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
@@ -781,6 +816,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         # first refresh costs one cold load but is always correct.
         self._hl_cache = HighlightCache()
         self._smart_select_stack = copy._smart_select_stack.copy()
+        self._minimap_hover_kind = copy._minimap_hover_kind
+        self._minimap_hover_buf_row = copy._minimap_hover_buf_row
+        self._minimap_hover_word = copy._minimap_hover_word
+        self._minimap_hover_x = copy._minimap_hover_x
+        self._minimap_hover_y = copy._minimap_hover_y
 
     fn flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -887,6 +927,20 @@ struct Editor(ImplicitlyCopyable, Movable):
                     Highlight(hl.row, rs, re, underline_attr)
                 )
             self.spell_lines[hl.row] = True
+
+    fn invalidate_spell(mut self):
+        """Force ``flush_highlights`` to rerun ``_refresh_spell`` on
+        the next paint. Used after the speller's word list changes
+        (e.g. user added a word to the user/project dictionary) so the
+        underline goes away on this same frame.
+
+        Sets ``_highlights_dirty`` rather than only touching spell state
+        because ``_refresh_spell`` reads from the cached
+        ``self.highlights`` and we don't have a separate
+        spell-only entry point. The grammar pass hits the incremental
+        cache so the extra cost is microseconds."""
+        self._highlights_dirty = True
+        self._hl_dirty_row = 0
 
     fn invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
@@ -1199,6 +1253,48 @@ struct Editor(ImplicitlyCopyable, Movable):
         var req = self.pending_definition
         self.pending_definition = Optional[DefinitionRequest]()
         return req
+
+    fn consume_spell_action_request(
+        mut self,
+    ) -> Optional[SpellActionRequest]:
+        """Return any pending ``SpellActionRequest`` and clear the slot.
+
+        Set by ``handle_key`` when the user hits Alt+Enter while the
+        cursor sits inside a misspelled-word range. The host opens its
+        spell-action popup against the returned row/col span."""
+        var req = self.pending_spell_action
+        self.pending_spell_action = Optional[SpellActionRequest]()
+        return req
+
+    fn spell_run_at_cursor(self) -> Optional[SpellActionRequest]:
+        """Return the misspelled-word range at the current cursor, or
+        ``None`` if the cursor isn't inside one. Treats the trailing
+        boundary as inclusive (``col_start <= cursor_col <= col_end``)
+        so a cursor parked just past the last letter still finds the
+        word — typing usually leaves the cursor there."""
+        for h in range(len(self.spell_highlights)):
+            var hl = self.spell_highlights[h]
+            if hl.row != self.cursor_row:
+                continue
+            if hl.col_start <= self.cursor_col \
+                    and self.cursor_col <= hl.col_end:
+                var line = self.buffer.line(hl.row)
+                var lb = line.as_bytes()
+                var lo = hl.col_start
+                var hi = hl.col_end
+                if lo < 0:
+                    lo = 0
+                if hi > len(lb):
+                    hi = len(lb)
+                if lo >= hi:
+                    return Optional[SpellActionRequest]()
+                var word = String(
+                    StringSlice(unsafe_from_utf8=lb[lo:hi])
+                )
+                return Optional[SpellActionRequest](
+                    SpellActionRequest(hl.row, lo, hi, word)
+                )
+        return Optional[SpellActionRequest]()
 
     fn consume_breakpoint_toggle(mut self) -> Optional[Int]:
         """Return any pending gutter-click row and clear the slot."""
@@ -1760,31 +1856,217 @@ struct Editor(ImplicitlyCopyable, Movable):
             n = len(self.spell_lines)
         return n
 
-    fn _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
-        """Source registry for the right-side projection. Sources are
-        checked in priority order; the first hit wins, so a row with
-        both an uncommitted change and a spell issue surfaces the
-        change mark (the spell signal is still readable inline as the
-        underline).
+    fn _minimap_buf_range_for_screen_row(
+        self, sy: Int, content_h: Int,
+    ) -> Tuple[Int, Int]:
+        """Map screen row ``sy`` (relative to the editor's view) onto the
+        slice of buffer rows the minimap projects onto it. Returns
+        ``(start, end)`` with ``start == end`` when the row is past the
+        end of the projection. Single source of truth for both painting
+        (``_paint_right_gutter``) and hit-testing (hover/click)."""
+        var n_lines = self._minimap_total_lines()
+        if n_lines == 0:
+            return (0, 0)
+        var rows = content_h
+        if rows < 1:
+            rows = 1
+        var start: Int
+        var end: Int
+        if n_lines <= rows:
+            start = sy
+            end = sy + 1
+        else:
+            start = (sy * n_lines) // rows
+            end = ((sy + 1) * n_lines) // rows
+            if end <= start:
+                end = start + 1
+        if start > n_lines:
+            start = n_lines
+        if end > n_lines:
+            end = n_lines
+        return (start, end)
 
-        To add a new source: append a check below at the desired
-        priority. Earlier = higher priority. Each source returns the
-        ``Attr`` to paint, or falls through to the next on no hit."""
-        # Priority 1: uncommitted git change.
+    fn _minimap_kind_in_slice(self, start: Int, end: Int) -> Int:
+        """Return the priority-winning source kind for the slice:
+        ``1`` (git change), ``2`` (spell), or ``0`` (no mark)."""
         var n_git = len(self.git_change_lines)
         var s = start if start < n_git else n_git
         var e = end if end < n_git else n_git
         for li in range(s, e):
             if self.git_change_lines[li] != GIT_CHANGE_NONE:
-                return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
-        # Priority 2: spell-check issue.
+                return 1
         var n_sp = len(self.spell_lines)
         s = start if start < n_sp else n_sp
         e = end if end < n_sp else n_sp
         for li in range(s, e):
             if self.spell_lines[li]:
-                return Optional[Attr](Attr(YELLOW, BLUE))
+                return 2
+        return 0
+
+    fn _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
+        """First buffer row in ``[start, end)`` that carries a mark,
+        preferring git changes over spell issues. Returns ``-1`` when
+        the slice has no marks."""
+        var n_git = len(self.git_change_lines)
+        var s = start if start < n_git else n_git
+        var e = end if end < n_git else n_git
+        for li in range(s, e):
+            if self.git_change_lines[li] != GIT_CHANGE_NONE:
+                return li
+        var n_sp = len(self.spell_lines)
+        s = start if start < n_sp else n_sp
+        e = end if end < n_sp else n_sp
+        for li in range(s, e):
+            if self.spell_lines[li]:
+                return li
+        return -1
+
+    fn _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
+        """Source registry for the right-side projection — same priority
+        order as ``_minimap_kind_in_slice``, returning the Attr to paint."""
+        var kind = self._minimap_kind_in_slice(start, end)
+        if kind == 1:
+            return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
+        if kind == 2:
+            return Optional[Attr](Attr(YELLOW, BLUE))
         return Optional[Attr]()
+
+    fn _minimap_first_misspelled_word(self, row: Int) -> String:
+        """The first misspelled word on ``row``, sliced from the buffer
+        line using ``spell_highlights``. Empty string if none — callers
+        fall back to a generic 'spelling issue' label."""
+        for h in range(len(self.spell_highlights)):
+            var hl = self.spell_highlights[h]
+            if hl.row == row:
+                var line = self.buffer.line(row)
+                return _slice(line, hl.col_start, hl.col_end)
+        return String("")
+
+    fn _is_minimap_hit(self, pos: Point, view: Rect) -> Bool:
+        """True when ``pos`` lands on the minimap column for ``view``."""
+        if not self.minimap_visible:
+            return False
+        if self._right_gutter() == 0:
+            return False
+        if pos.x != view.b.x - 1:
+            return False
+        var sy = pos.y - view.a.y
+        if sy < 0 or sy >= view.height():
+            return False
+        return True
+
+    fn clear_minimap_hover(mut self):
+        self._minimap_hover_kind = 0
+        self._minimap_hover_buf_row = -1
+        self._minimap_hover_word = String("")
+
+    fn _update_minimap_hover(mut self, pos: Point, view: Rect):
+        """Refresh hover state from a mouse position. Sets
+        ``_minimap_hover_*`` when ``pos`` is over a marked row in the
+        minimap column; clears them otherwise."""
+        self.clear_minimap_hover()
+        if not self._is_minimap_hit(pos, view):
+            return
+        var sy = pos.y - view.a.y
+        var rng = self._minimap_buf_range_for_screen_row(sy, view.height())
+        var kind = self._minimap_kind_in_slice(rng[0], rng[1])
+        if kind == 0:
+            return
+        var buf_row = self._minimap_first_marked_buf_row(rng[0], rng[1])
+        if buf_row < 0:
+            buf_row = rng[0]
+        self._minimap_hover_kind = kind
+        self._minimap_hover_buf_row = buf_row
+        self._minimap_hover_x = pos.x
+        self._minimap_hover_y = pos.y
+        if kind == 2:
+            self._minimap_hover_word = self._minimap_first_misspelled_word(
+                buf_row
+            )
+
+    fn _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
+        """Handle a left-click on the minimap column: scroll the editor
+        so the corresponding buffer row is centered, and place the cursor
+        at the start of that row. Returns True if the click was on the
+        minimap (and was therefore consumed)."""
+        if not self._is_minimap_hit(pos, view):
+            return False
+        var sy = pos.y - view.a.y
+        var content_h = view.height()
+        var rng = self._minimap_buf_range_for_screen_row(sy, content_h)
+        if rng[0] >= rng[1]:
+            return False
+        var buf_row = self._minimap_first_marked_buf_row(rng[0], rng[1])
+        if buf_row < 0:
+            buf_row = rng[0]
+        var n_lines = self.buffer.line_count()
+        if buf_row >= n_lines:
+            buf_row = n_lines - 1
+        if buf_row < 0:
+            buf_row = 0
+        self.move_to(buf_row, 0, False)
+        var target = buf_row - content_h // 2
+        var max_y = n_lines - content_h
+        if max_y < 0:
+            max_y = 0
+        if target < 0:
+            target = 0
+        if target > max_y:
+            target = max_y
+        self.scroll_y = target
+        return True
+
+    fn paint_minimap_tooltip(self, mut canvas: Canvas, view: Rect):
+        """Render the hover tooltip for the right-side minimap. Called
+        after the editor's main paint pass so it overlays the text. The
+        box floats to the LEFT of the minimap column with one row of
+        padding above and below the label so the tooltip never sits
+        directly beneath the pointer."""
+        if self._minimap_hover_kind == 0:
+            return
+        var label: String
+        if self._minimap_hover_kind == 1:
+            label = String("Modified line ") \
+                + String(self._minimap_hover_buf_row + 1)
+        elif self._minimap_hover_kind == 2:
+            if len(self._minimap_hover_word.as_bytes()) > 0:
+                label = String("Suspected spelling error: ") \
+                    + self._minimap_hover_word
+            else:
+                label = String("Suspected spelling error on line ") \
+                    + String(self._minimap_hover_buf_row + 1)
+        else:
+            return
+        var label_w = utf8_codepoint_count(label)
+        var w = label_w + 4
+        var max_w = view.width()
+        if max_w < 4:
+            return
+        if w > max_w:
+            w = max_w
+        var h = 3
+        var max_h = view.height()
+        if max_h < 3:
+            return
+        # Anchor: prefer left of the minimap column. Fall back to right
+        # if there isn't enough room (small windows).
+        var bx = self._minimap_hover_x - w
+        if bx < view.a.x:
+            bx = view.a.x
+        if bx + w > view.b.x:
+            bx = view.b.x - w
+        var by = self._minimap_hover_y - 1
+        if by < view.a.y:
+            by = view.a.y
+        if by + h > view.b.y:
+            by = view.b.y - h
+        var r = Rect(bx, by, bx + w, by + h)
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        canvas.fill(r, String(" "), attr)
+        canvas.draw_box(r, attr, False)
+        _ = canvas.put_text(
+            Point(r.a.x + 2, r.a.y + 1), label, attr, r.b.x - 1,
+        )
 
     fn _paint_right_gutter(
         self, mut canvas: Canvas, view: Rect, content_h: Int,
@@ -1802,21 +2084,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         if rows < 1:
             rows = 1
         for sy in range(rows):
-            var start: Int
-            var end: Int
-            if n_lines <= rows:
-                start = sy
-                end = sy + 1
-            else:
-                start = (sy * n_lines) // rows
-                end = ((sy + 1) * n_lines) // rows
-                if end <= start:
-                    end = start + 1
-            if start >= n_lines:
+            var rng = self._minimap_buf_range_for_screen_row(sy, content_h)
+            if rng[0] >= n_lines:
                 break
-            if end > n_lines:
-                end = n_lines
-            var attr_opt = self._minimap_attr_for_slice(start, end)
+            if rng[0] >= rng[1]:
+                continue
+            var attr_opt = self._minimap_attr_for_slice(rng[0], rng[1])
             if attr_opt:
                 canvas.set(
                     view.b.x - 1, view.a.y + sy,
@@ -2276,6 +2549,11 @@ struct Editor(ImplicitlyCopyable, Movable):
                     content_right, content_bottom,
                     c.row, c.col,
                 )
+        # Paint the right-side minimap tooltip last so it overlays
+        # everything else in the editor's view. The hover state is set
+        # by ``_update_minimap_hover`` on bare-hover events; when no
+        # mark is hovered this is a no-op.
+        self.paint_minimap_tooltip(canvas, view)
 
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
@@ -2975,6 +3253,21 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_ENTER:
+            # Alt+Enter on a misspelled word stamps a pending
+            # ``SpellActionRequest`` for the host to surface its
+            # spell-action popup. The naked ``KEY_ENTER`` path below
+            # would split the line, so this *must* check the modifier
+            # before falling through. We don't move the cursor, edit
+            # the buffer, or touch undo — the pending request is the
+            # only side effect.
+            if has_alt:
+                var sa = self.spell_run_at_cursor()
+                if sa:
+                    self.pending_spell_action = sa
+                    return True
+                # Alt+Enter outside any misspelling: leave the event
+                # for the caller to bind to a hotkey of their own.
+                return False
             if self.read_only:
                 return True
             # Enter splits a row, which would shift every caret below;
@@ -3479,13 +3772,28 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn handle_mouse(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
-        # Any mouse interaction breaks an active typing run — clicking,
-        # dragging or scrolling means the user has shifted attention and
-        # the next keystroke should anchor a new undo step. Same idea
-        # for the smart-select stack: clicking elsewhere is a fresh
-        # caret intent, so abandon the rewind history.
+        # Bare hover (no button held, motion=True under xterm 1003): the
+        # only thing it currently drives is the right-side minimap
+        # tooltip. Don't touch typing state or selection — the user
+        # hasn't actually clicked.
+        if event.button == MOUSE_BUTTON_NONE:
+            self._update_minimap_hover(event.pos, view)
+            return True
+        # Any actual mouse interaction breaks an active typing run —
+        # clicking, dragging or scrolling means the user has shifted
+        # attention and the next keystroke should anchor a new undo
+        # step. Same idea for the smart-select stack: clicking elsewhere
+        # is a fresh caret intent, so abandon the rewind history.
         self._typing_active = False
         self._smart_select_stack = List[Caret]()
+        # A click on the minimap column is a "scroll-to-here" gesture,
+        # not a text-area interaction — short-circuit before the gutter /
+        # text-area branches below try to interpret it as a caret move.
+        if event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion:
+            if self._try_minimap_click(event.pos, view):
+                self.clear_minimap_hover()
+                return True
         # Wheel events scroll the view without moving the cursor.
         if event.button == MOUSE_WHEEL_UP:
             if event.pressed:
