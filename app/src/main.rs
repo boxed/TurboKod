@@ -1031,6 +1031,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_button(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::Focused(focused) => self.on_focus(focused),
             _ => {}
         }
     }
@@ -1384,6 +1385,20 @@ impl App {
         }
         let btn = if lines > 0.0 { 64 } else { 65 };
         self.send_mouse(btn, true);
+    }
+
+    fn on_focus(&mut self, focused: bool) {
+        // Forward window-level focus changes as xterm focus reports
+        // (DECSET 1004) so the embedded app — turbokod's autosave hook
+        // in particular — sees ``ESC[I`` / ``ESC[O``. Gated on the app
+        // having actually enabled the mode; otherwise generic shells
+        // would see stray bytes whenever the user Cmd-Tabs.
+        let mode = *self.term.lock().mode();
+        if !mode.contains(TermMode::FOCUS_IN_OUT) {
+            return;
+        }
+        let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.notifier.notify(seq.to_vec());
     }
 
     fn send_mouse(&self, button: u8, pressed: bool) {

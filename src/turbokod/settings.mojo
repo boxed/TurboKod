@@ -5,7 +5,7 @@ Activated from the hamburger menu. Layout::
     ╔══ Settings ══════════════════════════════════════════════════════╗
     ║ ┌────────────────┐ Actions on save                               ║
     ║ │ Actions on save│ ┌─────────────────────────────────────────┐   ║
-    ║ │                │ │ python  /usr/local/bin/black --quiet $F │   ║
+    ║ │ Editor         │ │ python  /usr/local/bin/black --quiet $F │   ║
     ║ │                │ │ rust    /usr/local/bin/rustfmt          │   ║
     ║ │                │ └─────────────────────────────────────────┘   ║
     ║ │                │ [+ Add] [✎ Edit] [- Remove]                   ║
@@ -16,13 +16,12 @@ Activated from the hamburger menu. Layout::
     ╚══════════════════════════════════════════════════════════════════╝
 
 Sections live in a left-rail list. The right pane changes per
-section. Today there's one section ("Actions on save"); adding a new
-one is two entries (a string label in ``_section_labels`` and a
-``_paint_section_*`` arm).
+section. Adding a new section is two entries (a string label in
+``_section_labels`` and a ``_paint_section_*`` arm).
 
-Edits commit immediately to ``self.actions``. The host syncs the list
-back into ``TurbokodConfig.on_save_actions`` on close and writes the
-updated config to disk.
+Edits commit immediately to ``self.actions`` / ``self.auto_save``.
+The host syncs them back into ``TurbokodConfig`` on every paint when
+``self.dirty`` is True and writes the updated config to disk.
 
 The view *takes over the workspace* but doesn't repaint the menu bar
 or status bar — the host keeps painting those above and below so the
@@ -42,6 +41,10 @@ from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
 )
 from .config import OnSaveAction
+from .dropdown import (
+    DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
+    DROPDOWN_HIT_POPUP, Dropdown,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP,
@@ -54,17 +57,28 @@ from .window import paint_window_title
 
 # --- focus discriminants --------------------------------------------------
 
-comptime _FOCUS_SECTIONS = UInt8(0)
-comptime _FOCUS_LIST     = UInt8(1)
-comptime _FOCUS_ADD      = UInt8(2)
-comptime _FOCUS_EDIT     = UInt8(3)
-comptime _FOCUS_REMOVE   = UInt8(4)
-comptime _FOCUS_CLOSE    = UInt8(5)
+comptime _FOCUS_SECTIONS      = UInt8(0)
+comptime _FOCUS_LIST          = UInt8(1)
+comptime _FOCUS_ADD           = UInt8(2)
+comptime _FOCUS_EDIT          = UInt8(3)
+comptime _FOCUS_REMOVE        = UInt8(4)
+comptime _FOCUS_CLOSE         = UInt8(5)
+comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
+
+
+# --- section indices ------------------------------------------------------
+
+comptime _SECTION_ACTIONS = 0
+comptime _SECTION_EDITOR  = 1
 
 
 # --- layout ---------------------------------------------------------------
 
 comptime _SECTION_W = 22
+
+# Width of the inline dropdown strip in the Editor section. Wide enough
+# for "Automatic" plus the right-edge ``▼`` indicator.
+comptime _SAVE_DD_W = 16
 
 
 fn _section_labels() -> List[String]:
@@ -73,6 +87,17 @@ fn _section_labels() -> List[String]:
     below; nothing else needs to change."""
     var out = List[String]()
     out.append(String("Actions on save"))
+    out.append(String("Editor"))
+    return out^
+
+
+fn _save_behavior_options() -> List[String]:
+    """Dropdown options for the Editor ▸ Save behavior picker. Order
+    here is the order rendered in the popup; index 0 is the default
+    when no value is committed."""
+    var out = List[String]()
+    out.append(String("Manual"))
+    out.append(String("Automatic"))
     return out^
 
 
@@ -89,13 +114,17 @@ struct _PlacedButton(ImplicitlyCopyable, Movable):
 struct Settings(Movable):
     var active: Bool
     var dirty: Bool
-    """Set when ``actions`` has been mutated. Host watches this flag
-    and writes ``TurbokodConfig`` to disk; ``ack_dirty`` clears it
-    after a successful write."""
+    """Set when ``actions`` or ``auto_save`` has been mutated. Host
+    watches this flag and writes ``TurbokodConfig`` to disk;
+    ``ack_dirty`` clears it after a successful write."""
     var actions: List[OnSaveAction]
     """Working copy of the on-save actions. Host snapshots into this
     on ``open``; mutations are immediate (no per-edit commit step).
     """
+    var auto_save: Bool
+    """Working copy of ``TurbokodConfig.auto_save`` — Editor ▸ Save
+    behavior. ``False`` means Manual (Ctrl+S only), ``True`` means
+    Automatic. Driven by ``_save_dropdown``."""
     var section: Int
     """Index into ``_section_labels`` for the active section."""
     var selected_action: Int
@@ -105,11 +134,21 @@ struct Settings(Movable):
     var _list_scroll: Int
     var _buttons: List[_PlacedButton]
     """Persistent button table — Add / Edit / Remove / Close, in order."""
+    var _save_dropdown: Dropdown
+    """Stateful Save-behavior picker. Index is in lock-step with
+    ``auto_save`` (0 = Manual, 1 = Automatic) and the popup state
+    persists across paints so a click on the strip can show the
+    popup on the next refresh."""
+    var _save_dd_anchor: Rect
+    """Last-painted bounds of the dropdown strip. Cached so mouse
+    events arriving between paints can hit-test against the same
+    rectangle the user just clicked."""
 
     fn __init__(out self):
         self.active = False
         self.dirty = False
         self.actions = List[OnSaveAction]()
+        self.auto_save = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -128,24 +167,32 @@ struct Settings(Movable):
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Close "), 0, 0), _FOCUS_CLOSE, True,
         ))
+        self._save_dropdown = Dropdown(_save_behavior_options(), 0)
+        self._save_dd_anchor = Rect(0, 0, 0, 0)
 
-    fn open(mut self, var actions: List[OnSaveAction]):
+    fn open(mut self, var actions: List[OnSaveAction], auto_save: Bool):
         self.actions = actions^
+        self.auto_save = auto_save
         self.active = True
         self.dirty = False
         self.section = 0
         self.selected_action = 0 if len(self.actions) > 0 else -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
+        self._save_dropdown = Dropdown(
+            _save_behavior_options(), 1 if auto_save else 0,
+        )
 
     fn close(mut self):
         self.active = False
         self.actions = List[OnSaveAction]()
+        self.auto_save = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
         self.editor.close()
+        self._save_dropdown.close()
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
@@ -171,6 +218,14 @@ struct Settings(Movable):
         self._paint_right_pane(canvas, rect)
         # Bottom-right Close button.
         self._paint_close_button(canvas, rect)
+        # Save-behavior popup floats above the right pane so a long
+        # option list isn't clipped by neighbouring widgets. Painted
+        # before the action editor so a modal Add/Edit dialog still
+        # wins z-order.
+        if self.section == _SECTION_EDITOR and self._save_dropdown.is_open:
+            self._save_dropdown.paint_popup(
+                canvas, self._save_dd_anchor, screen,
+            )
         # Editor floats on top.
         if self.editor.active:
             self.editor.paint(canvas, screen)
@@ -229,8 +284,10 @@ struct Settings(Movable):
                 Point(inner.a.x, inner.a.y), labels[self.section], bg,
             )
         # Section content.
-        if self.section == 0:
+        if self.section == _SECTION_ACTIONS:
             self._paint_actions_section(canvas, inner)
+        elif self.section == _SECTION_EDITOR:
+            self._paint_editor_section(canvas, inner)
 
     fn _paint_actions_section(mut self, mut canvas: Canvas, inner: Rect):
         """List of configured on-save actions plus the action-row of
@@ -312,6 +369,44 @@ struct Settings(Movable):
                 line, attr, list_rect.b.x,
             )
 
+    fn _paint_editor_section(mut self, mut canvas: Canvas, inner: Rect):
+        """Editor preferences pane. Single row for now: a label and an
+        inline ``Save behavior`` dropdown."""
+        var bg = Attr(BLACK, LIGHT_GRAY)
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var label = String("Save behavior:")
+        var label_y = inner.a.y + 2
+        _ = canvas.put_text(
+            Point(inner.a.x, label_y), label, bg, inner.b.x,
+        )
+        # Anchor the strip directly to the right of the label, leaving
+        # one column of padding so the value isn't flush against the
+        # colon.
+        var dd_x = inner.a.x + len(label.as_bytes()) + 1
+        var dd_w = _SAVE_DD_W
+        if dd_x + dd_w > inner.b.x:
+            dd_w = inner.b.x - dd_x
+            if dd_w < 4:
+                return
+        var dd_rect = Rect(dd_x, label_y, dd_x + dd_w, label_y + 1)
+        self._save_dd_anchor = dd_rect
+        # Keep ``_save_dropdown.index`` in sync with ``auto_save`` —
+        # the user can mutate ``auto_save`` directly via tests, and
+        # we don't want a stale index to override that.
+        var want_idx = 1 if self.auto_save else 0
+        if self._save_dropdown.index != want_idx:
+            self._save_dropdown.index = want_idx
+        var has_focus = self.focus == _FOCUS_SAVE_BEHAVIOR
+        self._save_dropdown.paint(
+            canvas, dd_rect, has_focus,
+            Attr(WHITE, BLUE), Attr(BLACK, CYAN),
+        )
+        _ = canvas.put_text(
+            Point(inner.a.x, label_y + 2),
+            String("Manual: save with Ctrl+S. Automatic: save on focus changes."),
+            hint, inner.b.x,
+        )
+
     fn _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
         var close = self._buttons[3]
         var btn_w = close.button.face_width()
@@ -343,6 +438,15 @@ struct Settings(Movable):
             return True
         if event.kind != EVENT_KEY:
             return True
+        # Save-behavior dropdown swallows keys while open (the popup
+        # is modal-ish — see ``Dropdown.handle_key``). Esc closes the
+        # popup before it would close the whole Settings view.
+        if (self.focus == _FOCUS_SAVE_BEHAVIOR
+                and self._save_dropdown.is_open):
+            var prev_idx = self._save_dropdown.index
+            _ = self._save_dropdown.handle_key(event)
+            self._sync_dropdown_commit(prev_idx)
+            return True
         var k = event.key
         if k == KEY_ESC:
             self.close()
@@ -364,20 +468,44 @@ struct Settings(Movable):
                 self._step_section(1)
             elif self.focus == _FOCUS_LIST:
                 self._step_action(1)
+            elif self.focus == _FOCUS_SAVE_BEHAVIOR:
+                # Closed: open the popup. Forward the keystroke so
+                # the highlight starts on the committed row.
+                var prev_idx = self._save_dropdown.index
+                _ = self._save_dropdown.handle_key(event)
+                self._sync_dropdown_commit(prev_idx)
             return True
         return True
 
+    fn _sync_dropdown_commit(mut self, prev_idx: Int):
+        """If the dropdown's committed index moved, propagate it back
+        to ``auto_save`` and raise ``dirty``. Called after every event
+        that's been routed into ``_save_dropdown`` so the host's
+        persistence loop sees the change on the next paint."""
+        if self._save_dropdown.index == prev_idx:
+            return
+        var new_auto = self._save_dropdown.index == 1
+        if new_auto != self.auto_save:
+            self.auto_save = new_auto
+            self.dirty = True
+
     fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
-        # Skip Edit / Remove when there's no selection — same disabled
-        # logic the buttons use.
+        # Walk only the widgets that exist on the active section;
+        # otherwise Tab from the rail would land on Add/Edit even
+        # when Editor is selected.
         var ordered = List[UInt8]()
         ordered.append(_FOCUS_SECTIONS)
-        if len(self.actions) > 0:
-            ordered.append(_FOCUS_LIST)
-        ordered.append(_FOCUS_ADD)
-        if self.selected_action >= 0:
-            ordered.append(_FOCUS_EDIT)
-            ordered.append(_FOCUS_REMOVE)
+        if self.section == _SECTION_ACTIONS:
+            # Skip Edit / Remove when there's no selection — same
+            # disabled logic the buttons use.
+            if len(self.actions) > 0:
+                ordered.append(_FOCUS_LIST)
+            ordered.append(_FOCUS_ADD)
+            if self.selected_action >= 0:
+                ordered.append(_FOCUS_EDIT)
+                ordered.append(_FOCUS_REMOVE)
+        elif self.section == _SECTION_EDITOR:
+            ordered.append(_FOCUS_SAVE_BEHAVIOR)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -400,6 +528,11 @@ struct Settings(Movable):
             s = 0
         if s >= len(labels):
             s = len(labels) - 1
+        if s != self.section:
+            # Switching sections invalidates dropdown popup state from
+            # the previous section — close it so a stale popup doesn't
+            # paint over the new pane.
+            self._save_dropdown.close()
         self.section = s
 
     fn _step_action(mut self, delta: Int):
@@ -427,6 +560,11 @@ struct Settings(Movable):
             return True
         if self.focus == _FOCUS_LIST:
             self._edit_selected()
+            return True
+        if self.focus == _FOCUS_SAVE_BEHAVIOR:
+            var prev_idx = self._save_dropdown.index
+            self._save_dropdown.toggle()
+            self._sync_dropdown_commit(prev_idx)
             return True
         return True
 
@@ -485,6 +623,24 @@ struct Settings(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._workspace_rect(screen)
+        # Save-behavior dropdown gets first crack on the editor section
+        # — both for body clicks (which would otherwise miss the focus
+        # walk) and for popup clicks (which sit *above* the dialog
+        # body so subsequent hit-tests must skip them).
+        if self.section == _SECTION_EDITOR:
+            var prev_idx = self._save_dropdown.index
+            var hit = self._save_dropdown.handle_mouse(
+                self._save_dd_anchor, screen, event,
+            )
+            self._sync_dropdown_commit(prev_idx)
+            if hit == DROPDOWN_HIT_BODY:
+                self.focus = _FOCUS_SAVE_BEHAVIOR
+                return True
+            if hit == DROPDOWN_HIT_POPUP:
+                return True
+            # ``DROPDOWN_HIT_OUTSIDE`` and ``DROPDOWN_HIT_NONE`` both
+            # fall through to the regular dispatch; the popup has
+            # already auto-closed in the OUTSIDE case.
         if self._dispatch_buttons(event):
             return True
         if event.button == MOUSE_WHEEL_UP:
@@ -506,11 +662,13 @@ struct Settings(Movable):
             var idx = event.pos.y - sec.a.y
             var labels = _section_labels()
             if 0 <= idx and idx < len(labels):
+                if idx != self.section:
+                    self._save_dropdown.close()
                 self.section = idx
                 self.focus = _FOCUS_SECTIONS
             return True
         # Right pane list (only meaningful for the actions section).
-        if self.section == 0:
+        if self.section == _SECTION_ACTIONS:
             var list_top = rect.a.y + 2 + 2
             var list_bottom = rect.b.y - 2 - 5
             var inner = self._right_rect(rect)

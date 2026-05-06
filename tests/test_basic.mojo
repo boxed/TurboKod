@@ -136,7 +136,8 @@ from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
 from turbokod.window import WindowManager, paint_drop_shadow
 from turbokod.events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
+    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT,
+    EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
     EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_HOME,
@@ -313,6 +314,20 @@ fn test_parse_window_size_report() raises:
     assert_true(ev2[0].kind == EVENT_RESIZE)
     assert_equal(ev2[0].pos.x, 200)
     assert_equal(ev2[0].pos.y, 50)
+
+
+fn test_parse_input_focus_events() raises:
+    """Xterm focus reporting: ``ESC[I`` is focus-in, ``ESC[O`` is
+    focus-out. Both are bare CSI finals and the parser must consume
+    the full 3 bytes — leaving any tail behind would let the rest of
+    the sequence leak into the focused editor as keypresses."""
+    var fin = parse_input(String("\x1b[I"))
+    assert_equal(fin[1], 3)
+    assert_true(fin[0].kind == EVENT_FOCUS_IN)
+
+    var fout = parse_input(String("\x1b[O"))
+    assert_equal(fout[1], 3)
+    assert_true(fout[0].kind == EVENT_FOCUS_OUT)
 
 
 fn test_parse_input_sgr_mouse() raises:
@@ -2913,7 +2928,7 @@ fn test_settings_open_seeds_state() raises:
         String("rust"), String("/usr/bin/rustfmt"),
         List[String](), String(""),
     ))
-    s.open(actions^)
+    s.open(actions^, False)
     assert_true(s.active)
     assert_equal(len(s.actions), 2)
     assert_equal(s.selected_action, 0)
@@ -2929,7 +2944,7 @@ fn test_settings_open_empty_parks_selection_at_minus_one() raises:
     skip themselves in the focus walk and the right pane shows the
     "(no actions configured)" hint."""
     var s = Settings()
-    s.open(List[OnSaveAction]())
+    s.open(List[OnSaveAction](), False)
     assert_true(s.active)
     assert_equal(len(s.actions), 0)
     assert_equal(s.selected_action, -1)
@@ -2945,7 +2960,7 @@ fn test_settings_remove_marks_dirty() raises:
         String("python"), String("/usr/bin/black"),
         List[String](), String(""),
     ))
-    s.open(actions^)
+    s.open(actions^, False)
     s._remove_selected()
     assert_equal(len(s.actions), 0)
     assert_equal(s.selected_action, -1)
@@ -2958,7 +2973,7 @@ fn test_settings_editor_submit_appends_new_entry() raises:
     ``submitted`` then driving ``_maybe_consume_editor`` must append
     the new entry to ``actions`` and raise ``dirty``."""
     var s = Settings()
-    s.open(List[OnSaveAction]())
+    s.open(List[OnSaveAction](), False)
     s._add_new()
     assert_true(s.editor.active)
     assert_equal(s.editor.edit_index, -1)
@@ -2984,7 +2999,7 @@ fn test_settings_editor_submit_replaces_existing_entry() raises:
         String("python"), String("/usr/bin/black"),
         List[String](), String(""),
     ))
-    s.open(actions^)
+    s.open(actions^, False)
     s.selected_action = 0
     s._edit_selected()
     s.editor.program_tf.set_text(String("/opt/bin/black-edge"))
@@ -2994,6 +3009,50 @@ fn test_settings_editor_submit_replaces_existing_entry() raises:
     assert_equal(s.actions[0].program, String("/opt/bin/black-edge"))
     assert_equal(s.selected_action, 0)
     assert_true(s.dirty)
+
+
+fn test_settings_open_seeds_save_behavior_dropdown() raises:
+    """``open(actions, auto_save)`` must seed both the working copy
+    and the dropdown's index so the painted strip and the persisted
+    value agree on first paint."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), True)
+    assert_true(s.auto_save)
+    assert_equal(s._save_dropdown.index, 1)
+    s.close()
+    s.open(List[OnSaveAction](), False)
+    assert_false(s.auto_save)
+    assert_equal(s._save_dropdown.index, 0)
+
+
+fn test_settings_save_behavior_commit_marks_dirty() raises:
+    """Switching the dropdown commits Manual → Automatic, mirrors the
+    new value into ``auto_save``, and raises ``dirty`` so the host
+    persists ``TurbokodConfig.auto_save`` on the next paint."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    # Simulate the user opening the popup, moving to "Automatic", and
+    # pressing Enter — same final state ``Dropdown.handle_key`` lands
+    # on, observed by ``_sync_dropdown_commit``.
+    var prev_idx = s._save_dropdown.index
+    s._save_dropdown.index = 1
+    s._sync_dropdown_commit(prev_idx)
+    assert_true(s.auto_save)
+    assert_true(s.dirty)
+
+
+fn test_settings_save_behavior_no_change_no_dirty() raises:
+    """Re-committing the same value (Manual → Manual) must not raise
+    ``dirty`` — otherwise the host would write the config on every
+    open/close cycle even when nothing changed."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    var prev_idx = s._save_dropdown.index
+    # Index unchanged — the dropdown closed without committing a new
+    # value (Esc, click-outside, or Enter on the same row).
+    s._sync_dropdown_commit(prev_idx)
+    assert_false(s.auto_save)
+    assert_false(s.dirty)
 
 
 fn test_action_editor_lang_dropdown_has_options() raises:
@@ -8482,6 +8541,7 @@ fn main() raises:
     test_event_factories()
     test_parse_input_keys()
     test_parse_window_size_report()
+    test_parse_input_focus_events()
     test_parse_input_sgr_mouse()
     test_centered()
     test_text_buffer_split_and_join()
@@ -8572,6 +8632,9 @@ fn main() raises:
     test_settings_remove_marks_dirty()
     test_settings_editor_submit_appends_new_entry()
     test_settings_editor_submit_replaces_existing_entry()
+    test_settings_open_seeds_save_behavior_dropdown()
+    test_settings_save_behavior_commit_marks_dirty()
+    test_settings_save_behavior_no_change_no_dirty()
     test_action_editor_lang_dropdown_has_options()
     test_action_editor_enter_opens_lang_popup()
     test_dropdown_type_to_search_jumps_to_prefix()

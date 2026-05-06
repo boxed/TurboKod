@@ -32,7 +32,7 @@ from .colors import (
     Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
+    Event, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
@@ -1193,6 +1193,7 @@ struct Desktop(Movable):
         self.settings.paint(canvas, screen)
         if self.settings.active and self.settings.dirty:
             self.config.on_save_actions = self.settings.actions.copy()
+            self.config.auto_save = self.settings.auto_save
             _ = save_config(self.config)
             self.settings.ack_dirty()
         # Persist the window session if it changed since the last save.
@@ -2167,6 +2168,13 @@ struct Desktop(Movable):
         if event.kind == EVENT_RESIZE and self._pending_restore_refit:
             self._reapply_session_rects(screen)
             self._pending_restore_refit = Optional[Session]()
+        # Focus-out from the host terminal triggers autosave when the
+        # user enabled it in Settings ▸ Editor. We don't claim the
+        # event — modal dialogs and the regular dispatch below ignore
+        # it — but the side effect of saving every dirty file-backed
+        # editor happens here, before any caller-routed handling.
+        if event.kind == EVENT_FOCUS_OUT and self.config.auto_save:
+            self._autosave_all_dirty()
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
@@ -2503,7 +2511,9 @@ struct Desktop(Movable):
             self._open_targets_config()
             return Optional[String]()
         if action == APP_SETTINGS:
-            self.settings.open(self.config.on_save_actions.copy())
+            self.settings.open(
+                self.config.on_save_actions.copy(), self.config.auto_save,
+            )
             return Optional[String]()
         if action == EDITOR_NEW:
             self.new_file(screen)
@@ -4128,6 +4138,36 @@ struct Desktop(Movable):
             if not has_newline:
                 prefill = sel
         self.prompt.open(String("Find: "), prefill, select_prefill=True)
+
+    fn _autosave_all_dirty(mut self):
+        """Save every dirty editor that has a backing path. Called on
+        ``EVENT_FOCUS_OUT`` when ``config.auto_save`` is on.
+
+        Untitled buffers (no path) are skipped — escalating to Save As
+        on focus-out would steal focus away from the app the user just
+        switched to. Per-file save errors are swallowed; we don't want
+        a single failing write to break autosave for the rest. The
+        same on-save action plumbing the explicit Ctrl+S path uses
+        runs for each saved file so formatters / linters fire
+        identically in both modes.
+        """
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            if self.windows.windows[i].editor.read_only:
+                continue
+            if not self.windows.windows[i].editor.dirty:
+                continue
+            if len(self.windows.windows[i].editor.file_path.as_bytes()) == 0:
+                continue
+            try:
+                if self.windows.windows[i].editor.save():
+                    var saved_path = self.windows.windows[i].editor.file_path
+                    self._maybe_reload_targets(saved_path)
+                    self.windows.windows[i].editor.invalidate_git_changes()
+                    self._run_on_save_actions(saved_path)
+            except:
+                pass
 
     fn _do_save(mut self):
         var idx = self._focused_editor_idx()

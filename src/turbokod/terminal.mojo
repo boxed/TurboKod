@@ -17,8 +17,8 @@ from .canvas import Canvas
 from .cell import Cell, blank_cell
 from .colors import Attr, attr_to_sgr, default_attr
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
-    EVENT_RESIZE, EVENT_QUIT,
+    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE,
+    EVENT_NONE, EVENT_OPEN_PATH, EVENT_RESIZE, EVENT_QUIT,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
     KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
@@ -57,6 +57,14 @@ comptime SEQ_CURSOR_HOME    = String("\x1b[H")
 # events while click-and-holding. 1006 selects SGR-encoded reports.
 comptime SEQ_MOUSE_ON  = String("\x1b[?1002h\x1b[?1003h\x1b[?1006h")
 comptime SEQ_MOUSE_OFF = String("\x1b[?1006l\x1b[?1003l\x1b[?1002l")
+# xterm focus reporting (DECSET 1004): the terminal emits ``ESC[I``
+# when its window gains focus and ``ESC[O`` when it loses focus.
+# Honoured by xterm, iTerm2, Alacritty, Kitty, WezTerm, Windows
+# Terminal, and Apple Terminal.app. tmux passes them through with
+# ``set -g focus-events on``. Terminals that don't support 1004
+# silently ignore the enable, so leaving it on by default is safe.
+comptime SEQ_FOCUS_ON  = String("\x1b[?1004h")
+comptime SEQ_FOCUS_OFF = String("\x1b[?1004l")
 # Force xterm-style modifier reporting on cursor & function keys, so shift /
 # ctrl with the arrows arrive as `ESC[1;<mod><letter>` even in terminals
 # (iTerm2!) that otherwise strip the modifiers.
@@ -241,6 +249,7 @@ struct Terminal:
             self._front.resize(self.width, self.height)
         write_string(STDOUT_FD, SEQ_MOUSE_ON)
         write_string(STDOUT_FD, SEQ_MODIFY_KEYS_ON)
+        write_string(STDOUT_FD, SEQ_FOCUS_ON)
         write_string(STDOUT_FD, SEQ_CLEAR_SCREEN)
         write_string(STDOUT_FD, SEQ_CURSOR_HOME)
         self._started = True
@@ -273,6 +282,7 @@ struct Terminal:
     fn stop(mut self) raises:
         if not self._started:
             return
+        write_string(STDOUT_FD, SEQ_FOCUS_OFF)
         write_string(STDOUT_FD, SEQ_MODIFY_KEYS_OFF)
         write_string(STDOUT_FD, SEQ_MOUSE_OFF)
         write_string(STDOUT_FD, SEQ_RESET)
@@ -667,6 +677,11 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         # CSI Z = backtab (Shift+Tab). Surface as KEY_TAB + MOD_SHIFT
         # so consumers can treat it as the inverse of plain Tab.
         if final == 0x5A: return (Event.key_event(KEY_TAB, MOD_SHIFT), consumed)
+        # CSI I / CSI O — xterm focus reporting (DECSET 1004). 'I' is
+        # focus-in, 'O' is focus-out. Both are bare CSI finals with no
+        # parameters, hence this branch.
+        if final == 0x49: return (Event.focus_event(True), consumed)
+        if final == 0x4F: return (Event.focus_event(False), consumed)
         return (Event(), consumed)
 
     # Parse parameters as ``;``-separated decimal numbers. Anything else in

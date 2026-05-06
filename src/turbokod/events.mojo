@@ -27,6 +27,14 @@ comptime EVENT_PASTE     = UInt8(5)
 # URLs are translated this way), the 1-based line number is carried in
 # ``pos.y`` and ``pos.x`` is unused. ``pos.y == 0`` means "no line".
 comptime EVENT_OPEN_PATH = UInt8(6)
+# Window-level focus changes from the host terminal. Emitted by
+# ``terminal.mojo``'s parser when xterm focus reporting (``CSI ?1004h``,
+# enabled in ``Terminal.start``) delivers ``ESC[I`` / ``ESC[O``. Hosts
+# typically hook ``EVENT_FOCUS_OUT`` to flush autosave; ``EVENT_FOCUS_IN``
+# is emitted for completeness so consumers can refresh externally
+# modified state if they want to.
+comptime EVENT_FOCUS_IN  = UInt8(7)
+comptime EVENT_FOCUS_OUT = UInt8(8)
 
 
 # --- Modifiers (bitmask) -----------------------------------------------------
@@ -163,6 +171,12 @@ struct Event(ImplicitlyCopyable, Movable):
         var e = Event()
         e.kind = EVENT_PASTE
         e.text = text^
+        return e
+
+    @staticmethod
+    fn focus_event(focused: Bool) -> Event:
+        var e = Event()
+        e.kind = EVENT_FOCUS_IN if focused else EVENT_FOCUS_OUT
         return e
 
     @staticmethod

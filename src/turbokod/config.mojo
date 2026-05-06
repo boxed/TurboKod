@@ -107,6 +107,10 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     # (currently: git change lines), so flipping it on outside a repo
     # is a silent no-op.
     var minimap: Bool
+    # Settings ▸ Editor ▸ Save behavior. ``False`` (default) is the
+    # legacy "save on Ctrl+S only" behavior; ``True`` autosaves on the
+    # focus / lifecycle hooks the editor already exposes.
+    var auto_save: Bool
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -123,6 +127,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.git_changes = False
         self.tab_bar = False
         self.minimap = True
+        self.auto_save = False
         self.recent_projects = List[String]()
         self.on_save_actions = List[OnSaveAction]()
 
@@ -134,6 +139,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
         self.minimap = copy.minimap
+        self.auto_save = copy.auto_save
         self.recent_projects = copy.recent_projects.copy()
         self.on_save_actions = copy.on_save_actions.copy()
 
@@ -181,6 +187,9 @@ fn load_config() -> TurbokodConfig:
         )
         cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
         cfg.minimap = json_get_bool(root, String("minimap"), cfg.minimap)
+        cfg.auto_save = json_get_bool(
+            root, String("auto_save"), cfg.auto_save,
+        )
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -219,6 +228,7 @@ fn save_config(config: TurbokodConfig) -> Bool:
     root.put(String("git_changes"), json_bool(config.git_changes))
     root.put(String("tab_bar"), json_bool(config.tab_bar))
     root.put(String("minimap"), json_bool(config.minimap))
+    root.put(String("auto_save"), json_bool(config.auto_save))
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))
