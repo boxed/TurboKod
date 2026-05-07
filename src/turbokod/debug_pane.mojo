@@ -51,6 +51,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .cell import Cell
+from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, BLUE, CYAN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
     STYLE_UNDERLINE, WHITE, YELLOW,
@@ -62,6 +63,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .text_view import TextLog
 
 
 # --- row kinds ------------------------------------------------------------
@@ -185,8 +187,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     locals are showing). Bound to a frame's ``depth`` field, so a
     single int is enough to identify it."""
 
-    var output_lines: List[String]
-    var output_categories: List[UInt8]   # parallel to output_lines
+    var output: TextLog
+    """The Output panel — a generic ``TextLog`` (soft-wrap + selection
+    + scroll + copy) that the pane composes. Per-line ``Attr`` is the
+    only domain coupling: stderr lines come in red, console gray,
+    everything else default. ``DebugPane`` adds the Python traceback
+    link overlay on top of ``output.paint``."""
 
     var stack_scroll: Int
     """First left-column (Stack) row to paint. Bumped by wheel over
@@ -195,10 +201,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var right_scroll: Int
     """First right-column (Locals/Watches) row to paint. Bumped by
     arrow keys / wheel over the right column."""
-    var output_scroll: Int
-    """First output line to paint (autoscrolled to keep the *last*
-    line visible unless the user scrolled up manually)."""
-    var output_autoscroll: Bool
 
     var focused: Bool
     """True when the pane has keyboard focus — the host sets this on
@@ -217,7 +219,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
-    var _last_output_y0: Int
     var _last_divider_x: Int    # screen x of the column divider
     var _last_panel_top: Int    # screen y of the top-border / drag handle
     var _left_indices: List[Int]
@@ -251,12 +252,11 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.state = PANE_STATE_NORMAL
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
-        self.output_lines = List[String]()
-        self.output_categories = List[UInt8]()
+        self.output = TextLog(
+            default_attr=Attr(WHITE, BLACK), max_lines=_MAX_OUTPUT_LINES,
+        )
         self.stack_scroll = 0
         self.right_scroll = 0
-        self.output_scroll = 0
-        self.output_autoscroll = True
         self.focused = False
         self.pending_frame_id = -1
         self.pending_frame_index = -1
@@ -267,7 +267,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_open_path = String("")
         self.pending_open_line = 0
         self._last_inspect_y0 = 0
-        self._last_output_y0 = 0
         self._last_divider_x = 0
         self._last_panel_top = 0
         self._left_indices = List[Int]()
@@ -285,12 +284,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.state = copy.state
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
-        self.output_lines = copy.output_lines.copy()
-        self.output_categories = copy.output_categories.copy()
+        self.output = copy.output
         self.stack_scroll = copy.stack_scroll
         self.right_scroll = copy.right_scroll
-        self.output_scroll = copy.output_scroll
-        self.output_autoscroll = copy.output_autoscroll
         self.focused = copy.focused
         self.pending_frame_id = copy.pending_frame_id
         self.pending_frame_index = copy.pending_frame_index
@@ -301,7 +297,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
         self._last_inspect_y0 = copy._last_inspect_y0
-        self._last_output_y0 = copy._last_output_y0
         self._last_divider_x = copy._last_divider_x
         self._last_panel_top = copy._last_panel_top
         self._left_indices = copy._left_indices.copy()
@@ -452,54 +447,21 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     ):
         """Append a single output blob, splitting on ``\\n`` so a
         burst that arrives as one DAP event still shows row-by-row.
-        Trims the backlog when it exceeds ``_MAX_OUTPUT_LINES``."""
-        var b = text.as_bytes()
-        var start = 0
-        for i in range(len(b)):
-            if b[i] == 0x0A:  # '\n'
-                self._push_output_line(
-                    String(StringSlice(
-                        ptr=b.unsafe_ptr() + start, length=i - start,
-                    )),
-                    category,
-                )
-                start = i + 1
-        if start < len(b):
-            self._push_output_line(
-                String(StringSlice(
-                    ptr=b.unsafe_ptr() + start, length=len(b) - start,
-                )),
-                category,
-            )
-        var max_scroll = len(self.output_lines) - 1
-        if max_scroll < 0:
-            max_scroll = 0
-        if self.output_autoscroll:
-            self.output_scroll = max_scroll
-
-    fn _push_output_line(mut self, var line: String, category: UInt8):
-        self.output_lines.append(line^)
-        self.output_categories.append(category)
-        if len(self.output_lines) > _MAX_OUTPUT_LINES:
-            # Trim the front. Cheap-ish — happens only when the cap
-            # is hit, which is a rare event for typical sessions.
-            var trimmed = List[String]()
-            var tcat = List[UInt8]()
-            for k in range(
-                len(self.output_lines) - _MAX_OUTPUT_LINES,
-                len(self.output_lines),
-            ):
-                trimmed.append(self.output_lines[k])
-                tcat.append(self.output_categories[k])
-            self.output_lines = trimmed^
-            self.output_categories = tcat^
-            if self.output_scroll > _MAX_OUTPUT_LINES:
-                self.output_scroll = _MAX_OUTPUT_LINES - 1
+        The DAP category drives the per-line color (``Attr``); the
+        backing ``TextLog`` handles splitting, the backlog cap, and
+        the selection-follows-trim bookkeeping."""
+        var attr = self.output.default_attr
+        if category == PANE_OUT_STDERR:
+            attr = Attr(LIGHT_RED, BLACK)
+        elif category == PANE_OUT_CONSOLE:
+            attr = Attr(LIGHT_GRAY, BLACK)
+        self.output.append(text^, attr)
 
     fn clear(mut self):
-        """Wipe all session state. Called on terminate / failure.
-        Output backlog is preserved by design — the user often wants to
-        scroll back through the run after it ends to see what happened."""
+        """Wipe inspect state (stack/locals/watches). Called on
+        terminate / failure. The Output ``TextLog`` is preserved by
+        design — the user often wants to scroll back through the run
+        after it ends to see what happened."""
         self.status_text = String("")
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
@@ -561,7 +523,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var section = Attr(YELLOW, BLACK)
         var current = Attr(BLACK, LIGHT_YELLOW)
         var dim = Attr(LIGHT_GRAY, BLACK)
-        var stderr_attr = Attr(LIGHT_RED, BLACK)
         var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
         # Reset visible-link rects each paint — only what's currently
         # on screen counts for click hit-testing.
@@ -627,7 +588,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # status-bar / window-tab strip until they restore.
         if self.state == PANE_STATE_MINIMIZED:
             self._last_inspect_y0 = top + 1
-            self._last_output_y0 = top + 1
+            self.output.last_y0 = top + 1
             self._last_divider_x = panel.a.x
             self._left_indices = List[Int]()
             self._right_indices = List[Int]()
@@ -768,50 +729,44 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                     title, panel.b.x,
                 )
             out_top = div_y + 1
-        # Output lines (last visible window). Autoscroll places the
-        # *most recent* line on the bottom row so eyes track new
-        # output as it arrives.
-        self._last_output_y0 = out_top
-        var out_visible = panel.b.y - out_top
-        if out_visible < 0:
-            out_visible = 0
-        var first = self.output_scroll - out_visible + 1
-        if self.output_autoscroll:
-            first = len(self.output_lines) - out_visible
-        if first < 0:
-            first = 0
-        for k in range(out_visible):
-            var idx = first + k
-            if idx < 0 or idx >= len(self.output_lines):
+        # Output panel: text + selection overlay are owned by
+        # ``self.output`` (a ``TextLog``). We just hand it a rect; it
+        # remembers the layout for the post-paint link-overlay pass
+        # below and for ``handle_mouse``.
+        var out_rect = Rect(
+            panel.a.x + 2, out_top, panel.b.x - 1, panel.b.y,
+        )
+        self.output.paint(canvas, out_rect)
+        # Layer Python ``File "<path>", line N`` traceback links on
+        # top — ``TextLog`` is content-agnostic so this domain-specific
+        # overlay lives here. We iterate the layout the log just
+        # stamped instead of re-running the wrap math.
+        for k in range(self.output.last_visible_count):
+            var vidx = self.output.last_first_visual + k
+            if vidx < 0 or vidx >= len(self.output.last_visual):
                 continue
-            var line = self.output_lines[idx]
-            var attr = bg
-            if self.output_categories[idx] == PANE_OUT_STDERR:
-                attr = stderr_attr
-            elif self.output_categories[idx] == PANE_OUT_CONSOLE:
-                attr = dim
-            var line_x0 = panel.a.x + 2
-            var line_y = out_top + k
-            var line_x_max = panel.b.x - 1
-            _ = canvas.put_text(
-                Point(line_x0, line_y), line, attr, line_x_max,
-            )
-            # Overlay clickable file:line links — Python's
-            # ``File "<path>", line N`` traceback frames. Done as a
-            # post-pass via ``set_attr`` so the line keeps its glyphs
-            # but the link cells get an underline + blue color the
-            # eye reads as "this is clickable".
+            var vrow = self.output.last_visual[vidx]
+            var line = self.output.lines[vrow.line_idx]
+            var line_y = self.output.last_y0 + k
             var hits = _extract_python_traceback_links(line)
             for h in range(len(hits)):
                 var hit = hits[h]
-                var x0 = line_x0 + hit.cell_start
-                var x1 = line_x0 + hit.cell_end
-                if x0 >= line_x_max:
+                var seg_lo = vrow.cell_start
+                var seg_hi = vrow.cell_start + vrow.cell_count
+                var lo = hit.cell_start
+                if lo < seg_lo:
+                    lo = seg_lo
+                var hi = hit.cell_end
+                if hi > seg_hi:
+                    hi = seg_hi
+                if hi <= lo:
                     continue
-                if x1 > line_x_max:
-                    x1 = line_x_max
-                if x1 <= x0:
+                var x0 = self.output.last_x0 + (lo - seg_lo)
+                var x1 = self.output.last_x0 + (hi - seg_lo)
+                if x0 >= self.output.last_x_max:
                     continue
+                if x1 > self.output.last_x_max:
+                    x1 = self.output.last_x_max
                 for x in range(x0, x1):
                     canvas.set_attr(x, line_y, link_attr)
                 self._last_links.append(OutputLink(
@@ -887,6 +842,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 panel.b.y - event.pos.y, panel,
             )
             return True
+        # Selection drag in flight: forward every event to the output
+        # ``TextLog`` until release, so a drag that wanders off the
+        # pane still extends the selection. Same pattern as resize-
+        # drag above — drag-state owners get first dibs.
+        if self.output.selection.dragging:
+            return self.output.handle_mouse(event)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
             # Title-row buttons take priority over the resize-drag
             # handle. They sit on the same row as the drag edge but
@@ -927,25 +888,33 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 self.focused = False
             return False
         # Wheel routes to the section under the cursor — independent
-        # scroll for the two inspect columns and the output is what
-        # users expect.
+        # scroll for the two inspect columns and the output log is
+        # what users expect.
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
             if event.pressed:
+                if event.pos.y >= self.output.last_y0:
+                    return self.output.handle_mouse(event)
                 var delta = -3 if event.button == MOUSE_WHEEL_UP else 3
-                if event.pos.y >= self._last_output_y0:
-                    self._scroll_output(delta)
-                elif event.pos.x <= self._last_divider_x:
+                if event.pos.x <= self._last_divider_x:
                     self._scroll_stack(delta)
                 else:
                     self._scroll_right(delta)
             return True
+        # Left release outside an in-flight drag is just a no-op.
+        if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+            return True
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed:
+            return True
+        # Drag motion outside an in-flight drag (motion=True with no
+        # ``dragging`` flag set) just gets consumed — focus is already
+        # where the user pressed.
+        if event.motion:
             return True
         self.focused = True
         # Inspect-area click: map back to a row in the column the
         # click landed in.
         if event.pos.y >= self._last_inspect_y0 \
-                and event.pos.y < self._last_output_y0 - 1:
+                and event.pos.y < self.output.last_y0 - 1:
             var col_offset = event.pos.y - self._last_inspect_y0
             if event.pos.x <= self._last_divider_x:
                 var i = self.stack_scroll + col_offset
@@ -955,13 +924,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 var i = self.right_scroll + col_offset
                 if i >= 0 and i < len(self._right_indices):
                     self._on_row_click(self._right_indices[i])
-        # Output-area click: stop autoscroll so the user can read
-        # without lines sliding out from under them. Click again at
-        # the bottom row to re-engage autoscroll.
-        elif event.pos.y >= self._last_output_y0:
+        elif event.pos.y >= self.output.last_y0:
             # File:line link hit-test runs first — clicking on a
             # ``File "x", line N`` span should open the file rather
-            # than toggle the autoscroll mode.
+            # than start a selection drag.
             for li in range(len(self._last_links)):
                 var link = self._last_links[li]
                 if event.pos.y == link.y \
@@ -970,14 +936,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                     self.pending_open_path = link.path
                     self.pending_open_line = link.line
                     return True
-            var visible = panel.b.y - self._last_output_y0
-            var clicked = self.output_scroll - visible + 1 \
-                + (event.pos.y - self._last_output_y0)
-            if clicked >= len(self.output_lines) - 1:
-                self.output_autoscroll = True
-            else:
-                self.output_autoscroll = False
-                self.output_scroll = clicked
+            # Forward to the log: starts the selection drag.
+            return self.output.handle_mouse(event)
         return True
 
     fn handle_key(mut self, event: Event) -> Bool:
@@ -1021,7 +981,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             self.right_scroll = 0
             return True
         if event.key == KEY_END:
-            self.output_autoscroll = True
+            self.output.autoscroll = True
             return True
         return False
 
@@ -1109,19 +1069,18 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._left_indices = left^
         self._right_indices = right^
 
-    fn _scroll_output(mut self, delta: Int):
-        var ns = self.output_scroll + delta
-        if ns < 0:
-            ns = 0
-        var max_s = len(self.output_lines) - 1
-        if max_s < 0:
-            max_s = 0
-        if ns > max_s:
-            ns = max_s
-        # Manual scroll disengages autoscroll until the user releases
-        # by hitting End or scrolling all the way down.
-        self.output_autoscroll = (ns >= max_s)
-        self.output_scroll = ns
+    # --- selection / copy delegations -------------------------------------
+    # These exist so the host (Desktop) can keep using the pane-level
+    # API surface; everything routes to ``self.output``.
+
+    fn has_selection(self) -> Bool:
+        return self.output.has_selection()
+
+    fn selected_text(self) -> String:
+        return self.output.selected_text()
+
+    fn copy_selection_to_clipboard(self) -> Bool:
+        return self.output.copy_to_clipboard()
 
 
 # --- formatting helpers ---------------------------------------------------

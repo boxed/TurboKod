@@ -1,6 +1,6 @@
 # Turbokod
 
-A port of [Turbo Vision](https://en.wikipedia.org/wiki/Turbo_Vision) to [Mojo](https://www.modular.com/mojo) — and a working code editor / IDE built on top of it. The C++ reference (the [`magiblot/tvision`](https://github.com/magiblot/tvision) snapshot) lives under `tvision/` for behavioural reference; the Mojo port lives under `src/turbokod/`.
+A port of [Turbo Vision](https://en.wikipedia.org/wiki/Turbo_Vision) to [Mojo](https://www.modular.com/mojo) — and a working code editor / IDE built on top of it. Based on the modern C++ reference implementation [`magiblot/tvision`](https://github.com/magiblot/tvision).
 
 ![Turbokod editing its own test suite, with a debug session paused at a breakpoint](screenshot.png)
 
@@ -87,8 +87,7 @@ turbokod/
 │   └── data/                     # bundled language metadata (from helix)
 ├── examples/                     # runnable demos (desktop, hello, boxes, ...)
 ├── tests/                        # mojo tests + a couple of repro scripts
-├── app/                          # rust front-end for the macOS .app
-└── tvision/                      # vendored C++ reference (read-only)
+└── app/                          # rust front-end for the macOS .app
 ```
 
 ## Design choices vs. C++ Turbo Vision
@@ -118,4 +117,4 @@ Rough order of value, from the toolkit side:
 
 ## License
 
-The Mojo port is MIT-licensed (see `LICENSE`). Vendored TextMate grammars under `src/turbokod/grammars/` carry their upstream MIT/Apache licenses (per `grammars/README.md`); the vendored `tvision/` snapshot has its own original license — see `tvision/COPYRIGHT`.
+The Mojo port is MIT-licensed (see `LICENSE`). Vendored TextMate grammars under `src/turbokod/grammars/` carry their upstream MIT/Apache licenses (per `grammars/README.md`).

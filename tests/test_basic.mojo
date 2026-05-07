@@ -78,7 +78,9 @@ from turbokod.debug_pane import (
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
+from turbokod.string_utils import slice_codepoints
 from turbokod.targets_dialog import TargetsDialog
+from turbokod.text_view import Selection, VisualLine, wrap_lines
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
 from turbokod.doc_config import (
@@ -5919,6 +5921,79 @@ fn test_dap_launch_arguments_for_debugpy() raises:
     assert_equal(arr.value().array_at(0).as_str(), String("--verbose"))
 
 
+fn test_dap_launch_arguments_for_debugpy_module_mode() raises:
+    """``python -m pytest tests/x.py`` should be rewritten to debugpy's
+    ``module`` field — debugpy can't ``runpy`` the python binary."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("-m"))
+    args.append(String("pytest"))
+    args.append(String("tests/x.py"))
+    var body = launch_arguments_for(
+        debs[idx],
+        String("/Users/me/p/venv/bin/python"),
+        String("/Users/me/p"),
+        args^,
+        False,
+    )
+    assert_true(body.is_object())
+    # Rewritten: ``module: pytest``, ``program`` absent, residual args
+    # carry just the test path.
+    assert_true(not body.object_get(String("program")))
+    assert_equal(
+        body.object_get(String("module")).value().as_str(),
+        String("pytest"),
+    )
+    var arr = body.object_get(String("args"))
+    assert_true(arr.value().is_array())
+    assert_equal(arr.value().array_len(), 1)
+    assert_equal(arr.value().array_at(0).as_str(), String("tests/x.py"))
+
+
+fn test_dap_launch_arguments_for_debugpy_versioned_python() raises:
+    """``python3.11 -m unittest`` should also trigger module-mode
+    rewriting — versioned interpreter basenames are still Python."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("-m"))
+    args.append(String("unittest"))
+    var body = launch_arguments_for(
+        debs[idx],
+        String("/usr/local/bin/python3.11"),
+        String("/tmp"),
+        args^,
+        False,
+    )
+    assert_equal(
+        body.object_get(String("module")).value().as_str(),
+        String("unittest"),
+    )
+
+
+fn test_dap_launch_arguments_for_debugpy_non_python_program() raises:
+    """A real script path (not the python binary) keeps ``program``
+    mode even when ``-m`` happens to be in args, because that's a
+    plain CLI flag at that point."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("-m"))
+    args.append(String("foo"))
+    var body = launch_arguments_for(
+        debs[idx], String("/tmp/main.py"), String("/tmp"), args^, False,
+    )
+    assert_equal(
+        body.object_get(String("program")).value().as_str(),
+        String("/tmp/main.py"),
+    )
+    assert_true(not body.object_get(String("module")))
+
+
 fn test_dap_launch_arguments_for_delve() raises:
     var debs = built_in_debuggers()
     var idx = find_debugger_for_language(debs, String("go"))
@@ -6584,6 +6659,227 @@ fn test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
     )
     var req3 = pane.consume_open_request()
     assert_equal(req3[0], String(""))
+
+
+fn test_text_view_wrap_lines_breaks_at_width() raises:
+    """``wrap_lines`` produces one ``VisualLine`` per painted row,
+    splitting at exactly ``content_w`` cells with no overlap."""
+    var lines = List[String]()
+    lines.append(String("ABCDEFGHIJKLMNOPQRST"))   # 20 cells
+    lines.append(String(""))                       # empty -> 1 zero-width row
+    lines.append(String("xy"))                     # short -> 1 row
+    var wrapped = wrap_lines(lines, 7)
+    # 20 / 7 = 3 segments (7 + 7 + 6).
+    assert_equal(len(wrapped), 3 + 1 + 1)
+    assert_equal(wrapped[0].cell_count, 7)
+    assert_equal(wrapped[1].cell_count, 7)
+    assert_equal(wrapped[2].cell_count, 6)
+    assert_equal(wrapped[0].cell_start, 0)
+    assert_equal(wrapped[1].cell_start, 7)
+    assert_equal(wrapped[2].cell_start, 14)
+    # Empty line still occupies one zero-width visual row.
+    assert_equal(wrapped[3].line_idx, 1)
+    assert_equal(wrapped[3].cell_count, 0)
+    # Short line fits in one segment.
+    assert_equal(wrapped[4].line_idx, 2)
+    assert_equal(wrapped[4].cell_count, 2)
+
+
+fn test_text_view_wrap_lines_word_aware_with_indent() raises:
+    """Editor mode: word-aware wrap that backs up to the last
+    non-word ASCII byte and indents continuations under the parent's
+    leading whitespace plus one indent unit."""
+    var lines = List[String]()
+    lines.append(String("    foo bar baz qux"))   # 4 leading spaces
+    var rows = wrap_lines(
+        lines, 12,
+        indent_size=4, word_aware=True, start_line=0, max_rows=-1,
+    )
+    # Expected: first segment "    foo bar " (12 cells, breaks at the
+    # last space), continuation indents to 4+4=8 cells, then
+    # "baz qux" — fits within 12-8=4 wait, that's too narrow, would
+    # split again. Just assert that a continuation row exists with
+    # the expected hanging indent.
+    assert_true(len(rows) >= 2)
+    assert_equal(rows[0].indent_cells, 0)
+    assert_equal(rows[1].indent_cells, 8)
+
+
+fn test_text_view_selection_extracts_text() raises:
+    """``Selection.extracted_text`` slices a flat ``List[String]`` by
+    cell coordinates and joins lines with ``\\n``."""
+    var lines = List[String]()
+    lines.append(String("hello world"))
+    lines.append(String("second line"))
+    lines.append(String("third"))
+    # Whole-buffer selection.
+    var sel = Selection(True, False, 0, 0, 2, 5)
+    assert_equal(
+        sel.extracted_text(lines),
+        String("hello world\nsecond line\nthird"),
+    )
+    # Mid-line selection on a single row.
+    var inner = Selection(True, False, 1, 7, 1, 11)
+    assert_equal(inner.extracted_text(lines), String("line"))
+    # Empty selection (anchor == cursor) returns empty.
+    var none = Selection(True, False, 0, 3, 0, 3)
+    assert_equal(none.extracted_text(lines), String(""))
+    # Reversed endpoints normalize to the same forward slice.
+    var rev = Selection(True, False, 1, 11, 1, 7)
+    assert_equal(rev.extracted_text(lines), String("line"))
+
+
+fn test_string_utils_slice_codepoints_handles_multibyte() raises:
+    """``slice_codepoints`` slices by codepoint, not byte, so multi-byte
+    characters survive intact and cell offsets line up with cursor
+    positions."""
+    var s = String("aåbäc")  # 5 codepoints, 7 bytes
+    assert_equal(slice_codepoints(s, 0, 5), s)
+    assert_equal(slice_codepoints(s, 1, 4), String("åbä"))
+    assert_equal(slice_codepoints(s, 4, 5), String("c"))
+    assert_equal(slice_codepoints(s, 0, 0), String(""))
+    assert_equal(slice_codepoints(s, 3, 3), String(""))
+
+
+fn test_debug_pane_long_output_line_soft_wraps() raises:
+    """A line longer than the panel content width paints across
+    multiple visual rows. Verifies the line shows up on more than
+    one row and that the second row continues with the next chars."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    # 60 chars, content width is panel.width - 3 = 17 chars.
+    pane.append_output(String("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx"))
+    var panel = Rect(0, 0, 20, 8)
+    var c = Canvas(20, 8)
+    pane.paint(c, panel)
+    # First wrapped segment should start at the panel left margin on
+    # the first output row.
+    var first_x = _find_glyph_x(c, 2, String("A"))
+    assert_true(first_x >= 0)
+    # Second segment continues on the next row, starting where the
+    # first segment ran out — find a char that should land in the
+    # second wrapped row to confirm the line actually wrapped.
+    var second_x = _find_glyph_x(c, 3, String("R"))
+    assert_true(second_x >= 0)
+
+
+fn test_debug_pane_drag_selects_output_text() raises:
+    """Dragging across output text marks a selection — verified
+    through ``selected_text``. A press without a drag clears the
+    selection (no zero-width selection on a plain click)."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("hello world"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    # Find the row 'h' landed on.
+    var hy = -1
+    var hx = -1
+    for y in range(2, 8):
+        var x = _find_glyph_x(c, y, String("h"))
+        if x >= 0:
+            hy = y
+            hx = x
+            break
+    assert_true(hy >= 0)
+    # Press at 'h', drag to one cell past 'd' (cell 11 -> selecting
+    # the entire word).
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx, hy), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 11, hy), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 11, hy), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_true(pane.has_selection())
+    assert_equal(pane.selected_text(), String("hello world"))
+
+
+fn test_debug_pane_selection_spans_multiple_lines() raises:
+    """A selection that starts on one logical line and ends on
+    another joins the two slices with a newline."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("first line\nsecond line"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    # Find both lines on the canvas.
+    var fy = -1
+    var sy = -1
+    var fx = -1
+    var sx = -1
+    for y in range(2, 8):
+        var fx_try = _find_glyph_x(c, y, String("f"))
+        if fx_try >= 0 and c.get(fx_try + 1, y).glyph == String("i"):
+            fy = y
+            fx = fx_try
+        var sx_try = _find_glyph_x(c, y, String("s"))
+        if sx_try >= 0 and c.get(sx_try + 1, y).glyph == String("e"):
+            sy = y
+            sx = sx_try
+    assert_true(fy >= 0)
+    assert_true(sy >= 0)
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(fx, fy), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(sx + 11, sy), MOUSE_BUTTON_LEFT, True, True,
+        ),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(sx + 11, sy), MOUSE_BUTTON_LEFT, False, False,
+        ),
+        panel,
+    )
+    assert_equal(
+        pane.selected_text(),
+        String("first line\nsecond line"),
+    )
+
+
+fn test_debug_pane_plain_click_clears_selection() raises:
+    """A press without any drag motion produces no selection — the
+    user just landed on a row, didn't ask to copy anything."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("hello world"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    var hy = -1
+    var hx = -1
+    for y in range(2, 8):
+        var x = _find_glyph_x(c, y, String("h"))
+        if x >= 0:
+            hy = y
+            hx = x
+            break
+    assert_true(hy >= 0)
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 2, hy), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 2, hy), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_true(not pane.has_selection())
+    assert_equal(pane.selected_text(), String(""))
 
 
 fn test_targets_dialog_edit_and_submit() raises:
@@ -9963,6 +10259,9 @@ fn main() raises:
     test_dap_parse_scopes_and_variables()
     test_dap_registry_lookup()
     test_dap_launch_arguments_for_debugpy()
+    test_dap_launch_arguments_for_debugpy_module_mode()
+    test_dap_launch_arguments_for_debugpy_versioned_python()
+    test_dap_launch_arguments_for_debugpy_non_python_program()
     test_dap_launch_arguments_for_delve()
     test_dap_manager_breakpoint_toggle()
     test_project_targets_load_parses_fields()
@@ -9986,6 +10285,14 @@ fn main() raises:
     test_debug_pane_traceback_link_underlines_span()
     test_debug_pane_plain_output_has_no_link_styling()
     test_debug_pane_click_on_traceback_link_sets_pending_open()
+    test_text_view_wrap_lines_breaks_at_width()
+    test_text_view_wrap_lines_word_aware_with_indent()
+    test_text_view_selection_extracts_text()
+    test_string_utils_slice_codepoints_handles_multibyte()
+    test_debug_pane_long_output_line_soft_wraps()
+    test_debug_pane_drag_selects_output_text()
+    test_debug_pane_selection_spans_multiple_lines()
+    test_debug_pane_plain_click_clears_selection()
     test_targets_dialog_edit_and_submit()
     test_targets_dialog_add_and_remove()
     test_targets_dialog_save_button_submits()

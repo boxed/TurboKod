@@ -194,6 +194,89 @@ fn prev_codepoint_start(s: String, col: Int) -> Int:
     return c
 
 
+fn utf8_codepoint_size(b: Int) -> Int:
+    """Byte length of a UTF-8 codepoint with lead byte ``b``. Returns 1
+    on invalid leads / continuation bytes so a stray byte never traps a
+    walker in an infinite no-op loop. Single source for both editor
+    cursor stepping and ``text_view`` soft-wrap segmentation."""
+    if b < 0x80:
+        return 1
+    if (b & 0xE0) == 0xC0:
+        return 2
+    if (b & 0xF0) == 0xE0:
+        return 3
+    if (b & 0xF8) == 0xF0:
+        return 4
+    return 1
+
+
+fn leading_indent_bytes(line: String) -> Int:
+    """Byte count of leading ASCII spaces and tabs. Each space/tab
+    counts as one byte under the editor's byte-as-cell column model,
+    so the return is also the leading-whitespace cell width. Used by
+    soft-wrap to compute hanging indent and by the editor's
+    smart-indent paths to copy a parent line's indentation."""
+    var bytes = line.as_bytes()
+    var i = 0
+    while i < len(bytes) and (bytes[i] == 0x20 or bytes[i] == 0x09):
+        i += 1
+    return i
+
+
+fn slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
+    """Substring of ``s`` covering codepoints ``[lo_cell, hi_cell)``.
+
+    Cells correspond to codepoints under ``Canvas.put_text``'s layout —
+    one cell per codepoint, no East-Asian width handling. Tolerates
+    out-of-range bounds by clamping (``hi_cell`` past the last
+    codepoint truncates to the end; negative ``lo_cell`` starts at 0).
+    Returns an empty string when ``hi_cell <= lo_cell`` or ``s`` is
+    empty.
+    """
+    if hi_cell <= lo_cell:
+        return String("")
+    var bytes = s.as_bytes()
+    var n = len(bytes)
+    if n == 0:
+        return String("")
+    var lo = lo_cell
+    if lo < 0:
+        lo = 0
+    var cell = 0
+    var byte_lo = 0
+    var byte_hi = n
+    var found_lo = (lo == 0)
+    var i = 0
+    while i < n:
+        var b = Int(bytes[i])
+        var seq_len = 1
+        if (b & 0x80) == 0:
+            seq_len = 1
+        elif (b & 0xE0) == 0xC0:
+            seq_len = 2
+        elif (b & 0xF0) == 0xE0:
+            seq_len = 3
+        elif (b & 0xF8) == 0xF0:
+            seq_len = 4
+        if i + seq_len > n:
+            seq_len = 1
+        if not found_lo and cell == lo:
+            byte_lo = i
+            found_lo = True
+        if cell == hi_cell:
+            byte_hi = i
+            break
+        cell += 1
+        i += seq_len
+    if not found_lo:
+        return String("")
+    if byte_hi <= byte_lo:
+        return String("")
+    return String(StringSlice(
+        ptr=bytes.unsafe_ptr() + byte_lo, length=byte_hi - byte_lo,
+    ))
+
+
 fn parse_int_prefix(s: String, start: Int, stop: Int) -> Int:
     """Parse digits in ``s[start:stop]`` until the first non-digit (or
     ``stop``). Returns ``-1`` when ``start`` is already past a non-digit

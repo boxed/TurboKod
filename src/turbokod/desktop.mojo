@@ -125,6 +125,9 @@ from .session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
 )
+from .breakpoint_store import (
+    StoredBreakpoint, encode_breakpoints, load_breakpoints, save_breakpoints,
+)
 from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
@@ -643,6 +646,12 @@ struct Desktop(Movable):
     var _pending_restore: Bool
     var _last_session_json: String
     var _pending_restore_refit: Optional[Session]
+    # Per-user breakpoint persistence. Mirrors the session-store pattern
+    # — re-encode after every dap_tick and write only when the encoding
+    # differs. Lives next to ``session.json`` but under
+    # ``per_user/<username>/`` so accidentally committing ``.turbokod``
+    # doesn't clobber a teammate's set.
+    var _last_breakpoints_json: String
     # Recently focused file-backed editor paths, most-recent first.
     # Updated each ``paint`` from the focused window's ``file_path``;
     # the front entry is whichever file currently has focus, so the
@@ -747,6 +756,7 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        self._last_breakpoints_json = String("")
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
@@ -1301,6 +1311,10 @@ struct Desktop(Movable):
         # showing — closing the last window leaves the previously-saved
         # session intact so the next ``open_project`` can restore it.
         self._save_session_if_changed()
+        # Persist the per-user breakpoint set on the same cadence — if
+        # the user toggled a breakpoint or set a condition this paint,
+        # capture it now so a window-close doesn't lose the change.
+        self._save_breakpoints_if_changed()
 
     fn _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -1997,6 +2011,12 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        self._last_breakpoints_json = String("")
+        # Drop any in-memory breakpoints — the next project will seed
+        # its own from ``.turbokod/per_user/<username>/breakpoints.json``.
+        self.dap.restore_breakpoints(
+            List[String](), List[Int](), List[String](),
+        )
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
         # guard and leaves the on-disk session.json intact. Reopening
@@ -2065,6 +2085,26 @@ struct Desktop(Movable):
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
         self.speller.set_project(canonical)
+        # Seed the DAP manager from the per-user breakpoints file. We
+        # do this here (rather than lazily on first F5) so the gutter
+        # already shows red dots before the user starts a session, and
+        # so a single ``dap_tick`` save-if-changed naturally captures
+        # any subsequent toggle.
+        var stored = load_breakpoints(canonical)
+        var bp_paths = List[String]()
+        var bp_lines = List[Int]()
+        var bp_conds = List[String]()
+        for i in range(len(stored)):
+            bp_paths.append(stored[i].path)
+            bp_lines.append(stored[i].line)
+            bp_conds.append(stored[i].condition)
+        self.dap.restore_breakpoints(bp_paths^, bp_lines^, bp_conds^)
+        # Seed the change-detection cache with the encoding of what we
+        # just loaded so the immediate post-restore ``dap_tick`` doesn't
+        # re-write the file with the same bytes.
+        self._last_breakpoints_json = encode_breakpoints(
+            canonical, self._snapshot_breakpoints(),
+        )
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
         # against. The restore code merges by file path (existing
@@ -2140,6 +2180,35 @@ struct Desktop(Movable):
         else:
             session.focused = -1
         return session^
+
+    fn _snapshot_breakpoints(self) -> List[StoredBreakpoint]:
+        """Pull the current breakpoint set off the DAP manager into the
+        flat ``StoredBreakpoint`` list we serialize. Iterating via the
+        index API rather than returning the manager's parallel lists
+        directly keeps the encoder oblivious to ``DapManager``'s
+        internal layout."""
+        var out = List[StoredBreakpoint]()
+        var n = self.dap.breakpoint_count()
+        for i in range(n):
+            out.append(StoredBreakpoint(
+                self.dap.breakpoint_path_at(i),
+                self.dap.breakpoint_line_at(i),
+                self.dap.breakpoint_condition_at(i),
+            ))
+        return out^
+
+    fn _save_breakpoints_if_changed(mut self):
+        """Re-encode the current breakpoint set and write it to disk
+        only when the encoding differs from the previously-written one.
+        Skipped when no project is open — nowhere to write."""
+        if not self.project:
+            return
+        var snapshot = self._snapshot_breakpoints()
+        var encoded = encode_breakpoints(self.project.value(), snapshot)
+        if encoded == self._last_breakpoints_json:
+            return
+        if save_breakpoints(self.project.value(), snapshot):
+            self._last_breakpoints_json = encoded
 
     fn _save_session_if_changed(mut self):
         """Re-encode the current session and write it to disk only when
@@ -2917,6 +2986,12 @@ struct Desktop(Movable):
                 self.windows.windows[self.windows.focused].editor.cut_to_clipboard()
             return Optional[String]()
         if action == EDITOR_COPY:
+            # Debug pane wins when it's focused with an active output
+            # selection — the user is plainly trying to copy from there
+            # rather than from a window in the background.
+            if self.debug_pane.focused and self.debug_pane.has_selection():
+                _ = self.debug_pane.copy_selection_to_clipboard()
+                return Optional[String]()
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
                 self.windows.windows[self.windows.focused].editor.copy_to_clipboard()
@@ -3697,10 +3772,15 @@ struct Desktop(Movable):
     fn _debug_start_or_continue(mut self):
         """F5: start a session if none is active, otherwise resume.
 
-        Picks the debugger spec from the focused editor's file
-        extension → language id → registry. If no debugger is registered
-        for that language (or the binary isn't on $PATH), surfaces a
-        descriptive status message rather than failing silently.
+        When the project has an active target with ``debug_language``
+        + ``program`` set, defers to ``_target_debug`` so F5 and Cmd+D
+        agree on what's being debugged — the user already authored
+        the launch shape there (e.g., ``python -m pytest``), and
+        running the focused file as a script would be a different
+        thing. Falls back to the focused-editor file when there's
+        no project, no targets, or no debug_language on the active
+        target — supporting ad-hoc single-file debugging in trees
+        without a configured workflow.
         """
         if self.dap.is_running():
             return  # already running, nothing to do
@@ -3709,7 +3789,14 @@ struct Desktop(Movable):
             return
         if self.dap.is_active():
             return  # mid-handshake, ignore
-        # Fresh start. Need: program path + language → spec.
+        # Project has an actionable debug target → use it.
+        if self.project and self.targets.has_active():
+            var target = self.targets.targets[self.targets.active]
+            if len(target.debug_language.as_bytes()) > 0 \
+                    and len(target.program.as_bytes()) > 0:
+                self._target_debug()
+                return
+        # Fresh start, no target. Use the focused editor's file.
         var idx = self._focused_editor_idx()
         if idx < 0:
             self.status_bar.set_message(

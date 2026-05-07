@@ -642,6 +642,46 @@ struct DapManager(Copyable, Movable):
                 out.append(self._bp_line[i])
         return out^
 
+    fn breakpoint_count(self) -> Int:
+        return len(self._bp_path)
+
+    fn breakpoint_path_at(self, idx: Int) -> String:
+        if idx < 0 or idx >= len(self._bp_path):
+            return String("")
+        return self._bp_path[idx]
+
+    fn breakpoint_line_at(self, idx: Int) -> Int:
+        if idx < 0 or idx >= len(self._bp_line):
+            return 0
+        return self._bp_line[idx]
+
+    fn breakpoint_condition_at(self, idx: Int) -> String:
+        if idx < 0 or idx >= len(self._bp_condition):
+            return String("")
+        return self._bp_condition[idx]
+
+    fn restore_breakpoints(
+        mut self,
+        var paths: List[String],
+        var lines: List[Int],
+        var conditions: List[String],
+    ):
+        """Replace the in-memory breakpoint set wholesale, without
+        sending any ``setBreakpoints`` to the adapter. Used at project
+        setup to seed from the on-disk per-user file before the user
+        starts a debug session — once they hit F5,
+        ``_push_all_breakpoints`` ships the restored set during the
+        CONFIGURING transition.
+
+        ``paths`` / ``lines`` / ``conditions`` must be the same length;
+        a length mismatch is treated as "no breakpoints to restore"
+        rather than partially populating the parallel arrays."""
+        if len(paths) != len(lines) or len(paths) != len(conditions):
+            return
+        self._bp_path = paths^
+        self._bp_line = lines^
+        self._bp_condition = conditions^
+
     fn has_breakpoint(self, path: String, line: Int) -> Bool:
         for i in range(len(self._bp_path)):
             if self._bp_path[i] == path and self._bp_line[i] == line:

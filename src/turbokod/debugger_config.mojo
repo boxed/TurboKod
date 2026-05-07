@@ -325,7 +325,16 @@ fn _launch_args_debugpy(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
-    """``debugpy``: ``program`` + ``args`` + ``cwd`` + ``console``.
+    """``debugpy``: ``program``-or-``module`` + ``args`` + ``cwd`` +
+    ``console``.
+
+    Targets that look like ``python -m <name> [...]`` get rewritten to
+    debugpy's ``module`` mode: debugpy's ``program`` field is for
+    Python script paths and runpy's the file directly, so passing
+    ``<venv>/bin/python`` would have it try to runpy the binary
+    (meaningless). The rewrite is what lets pytest / unittest / mypy
+    etc. be debugged off a single ``python -m foo`` Run target without
+    the user having to hand-author launch JSON.
 
     ``console: "internalConsole"`` keeps stdout/stderr coming back as
     DAP ``output`` events instead of being routed to a separate
@@ -342,14 +351,60 @@ fn _launch_args_debugpy(
     want to skip stdlib frames can set the flag back via the
     debugger's ``setDebuggerProperty`` mechanism later.
     """
+    var module_name = String("")
+    if _is_python_interpreter(program) and len(args) >= 2 \
+            and args[0] == String("-m"):
+        module_name = args[1]
+        var rest = List[String]()
+        for i in range(2, len(args)):
+            rest.append(args[i])
+        args = rest^
     var o = json_object()
-    o.put(String("program"), json_str(program))
+    if len(module_name.as_bytes()) > 0:
+        o.put(String("module"), json_str(module_name))
+    else:
+        o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
     o.put(String("args"), _string_list_to_json(args^))
     o.put(String("console"), json_str(String("internalConsole")))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
     o.put(String("justMyCode"), json_bool(False))
     return o^
+
+
+fn _is_python_interpreter(program: String) -> Bool:
+    """Return True if ``program``'s basename looks like a Python
+    interpreter — ``python``, ``python3``, ``python3.11``, etc. Used
+    to detect the ``python -m <module>`` idiom in run targets so a
+    debug launch can be rewritten to debugpy's ``module`` mode.
+
+    Filesystem-free: just inspects the path string. Won't be fooled
+    by a binary literally named ``mypython``, since the prefix has
+    to be ``python`` exactly at the start of the basename.
+    """
+    var pb = program.as_bytes()
+    var n = len(pb)
+    var start = n
+    while start > 0 and pb[start - 1] != 0x2F:    # '/'
+        start -= 1
+    var basename_len = n - start
+    var prefix = String("python")
+    var pre_b = prefix.as_bytes()
+    if basename_len < len(pre_b):
+        return False
+    for k in range(len(pre_b)):
+        if pb[start + k] != pre_b[k]:
+            return False
+    # Trailing chars after "python" must be empty / digits / dots,
+    # so ``python``, ``python3``, ``python3.11`` match but ``pythonw``
+    # and ``python-config`` don't.
+    for k in range(len(pre_b), basename_len):
+        var c = pb[start + k]
+        var is_digit = c >= 0x30 and c <= 0x39
+        var is_dot = c == 0x2E
+        if not (is_digit or is_dot):
+            return False
+    return True
 
 
 fn _launch_args_lldb(
