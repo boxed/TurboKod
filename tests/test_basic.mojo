@@ -53,7 +53,7 @@ from turbokod.file_io import (
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
     ChangedFile, GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    diff_buffer_against_head, parse_unified_diff_files,
+    compute_revert_block, diff_buffer_against_head, parse_unified_diff_files,
 )
 from turbokod.local_changes import LocalChanges, build_minimal_patch
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
@@ -7792,6 +7792,62 @@ fn test_diff_buffer_against_head_marks_added_and_modified() raises:
     assert_equal(marks[4], GIT_CHANGE_NONE)
 
 
+fn test_compute_revert_block_modified_line() raises:
+    """Reverting a modified line maps the buffer row back to the run's
+    HEAD lines so the editor can splice them in place."""
+    var head = (
+        String("alpha\n")
+        + String("beta\n")
+        + String("gamma\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("BETA"))
+    buffer.append(String("gamma"))
+    buffer.append(String(""))
+    var block_opt = compute_revert_block(head, buffer, 1)
+    assert_true(Bool(block_opt))
+    var block = block_opt.value().copy()
+    assert_equal(block.buf_start, 1)
+    assert_equal(block.buf_end_excl, 2)
+    assert_equal(len(block.head_lines), 1)
+    assert_equal(block.head_lines[0], String("beta"))
+
+
+fn test_compute_revert_block_added_line() raises:
+    """Reverting a pure-insert run yields an empty HEAD slice — the
+    editor splices nothing in, effectively deleting the buffer rows."""
+    var head = (
+        String("alpha\n")
+        + String("gamma\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("inserted"))
+    buffer.append(String("gamma"))
+    buffer.append(String(""))
+    var block_opt = compute_revert_block(head, buffer, 1)
+    assert_true(Bool(block_opt))
+    var block = block_opt.value().copy()
+    assert_equal(block.buf_start, 1)
+    assert_equal(block.buf_end_excl, 2)
+    assert_equal(len(block.head_lines), 0)
+
+
+fn test_compute_revert_block_unchanged_returns_empty() raises:
+    """A row that matches HEAD has nothing to revert."""
+    var head = (
+        String("alpha\n")
+        + String("beta\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("beta"))
+    buffer.append(String(""))
+    var block_opt = compute_revert_block(head, buffer, 0)
+    assert_true(not Bool(block_opt))
+
+
 fn test_editor_git_changes_gutter_widens_total_gutter() raises:
     """``set_git_changes`` flips the column on; the editor's overall
     left margin grows by exactly one cell. ``invalidate_git_changes``
@@ -9182,6 +9238,9 @@ fn main() raises:
     test_parse_unified_diff_splits_two_files()
     test_parse_unified_diff_handles_pure_delete()
     test_diff_buffer_against_head_marks_added_and_modified()
+    test_compute_revert_block_modified_line()
+    test_compute_revert_block_added_line()
+    test_compute_revert_block_unchanged_returns_empty()
     test_editor_git_changes_gutter_widens_total_gutter()
     test_editor_right_gutter_paints_gray_square_for_changes()
     test_editor_right_gutter_projects_full_file_when_scrolled()

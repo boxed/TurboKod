@@ -51,7 +51,12 @@ from .file_io import (
 )
 from .git_blame import compute_blame
 from .git_changes import (
+    GitRevertBlock, compute_revert_block,
     diff_buffer_against_head, fetch_head_text, project_is_git_repo,
+)
+from .git_gutter_menu import (
+    GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
+    GitGutterMenu,
 )
 from .lsp import LspProcess
 from .posix import close_fd, realpath, untrack_child, waitpid_blocking
@@ -492,6 +497,11 @@ struct Desktop(Movable):
     # through ``speller.add_user_word`` / ``add_project_word`` and
     # forces a spell-only re-render across every open editor.
     var spell_menu: SpellMenu
+    # Popup that opens when the user clicks the per-line bar in the
+    # git-changes gutter. Currently offers a single ``Revert this line``
+    # action; surfaced from ``Editor.consume_git_revert_request`` after
+    # mouse dispatch and routed input-first like ``spell_menu``.
+    var git_gutter_menu: GitGutterMenu
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -661,6 +671,7 @@ struct Desktop(Movable):
         self.grammar_registry = GrammarRegistry()
         self.speller = Speller()
         self.spell_menu = SpellMenu()
+        self.git_gutter_menu = GitGutterMenu()
         self._lsp_install_prompted = List[String]()
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
@@ -1213,6 +1224,7 @@ struct Desktop(Movable):
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
         self.spell_menu.paint(canvas, screen)
+        self.git_gutter_menu.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -2335,6 +2347,16 @@ struct Desktop(Movable):
             if self.spell_menu.submitted:
                 self._on_spell_menu_submit()
             return Optional[String]()
+        if self.git_gutter_menu.active:
+            # Same modality story as ``spell_menu`` — opens contextually
+            # over the gutter, eats every event until resolved.
+            if event.kind == EVENT_KEY:
+                _ = self.git_gutter_menu.handle_key(event)
+            else:
+                _ = self.git_gutter_menu.handle_mouse(event, screen)
+            if self.git_gutter_menu.submitted:
+                self._on_git_gutter_menu_submit()
+            return Optional[String]()
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
@@ -2534,6 +2556,10 @@ struct Desktop(Movable):
         if self.file_tree.handle_mouse(event, screen):
             return Optional[String]()
         _ = self.windows.handle_mouse(event, self.workspace_rect(screen))
+        # A click on the per-line bar in the git-changes gutter stamps a
+        # ``pending_git_revert`` on the focused editor — surface the popup
+        # before the next paint so it lands on this same frame.
+        self._maybe_open_git_gutter_menu()
         # A click that reaches the window manager could have started a
         # drag/resize — drop the pending refit so the next resize event
         # doesn't trample the user's intended move. (This is coarse:
@@ -5007,6 +5033,59 @@ struct Desktop(Movable):
         self.windows.windows[idx].editor.line_numbers = False
         if was_max:
             self.windows.windows[idx].toggle_maximize(workspace)
+
+    fn _maybe_open_git_gutter_menu(mut self):
+        """Drain ``Editor.consume_git_revert_request`` on the focused
+        window. The request carries the screen cell that was clicked,
+        so the popup opens right under the gutter bar."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx] \
+            .editor.consume_git_revert_request()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        self.git_gutter_menu.open(req.row, Point(req.anchor_x, req.anchor_y))
+
+    fn _on_git_gutter_menu_submit(mut self):
+        """Resolve the revert pick: recompute the change block against
+        the cached HEAD baseline and apply it to the focused editor.
+
+        We recompute rather than caching the block at open-time because
+        the buffer can shift between open and confirm — typing into the
+        editor is blocked while the menu is up, but opening the menu
+        also pulls focus, and a future async refresh of the baseline
+        could otherwise stale-out a stashed block."""
+        var act = self.git_gutter_menu.action
+        var row = self.git_gutter_menu.row
+        self.git_gutter_menu.close()
+        if act != GUTTER_ACTION_REVERT or row < 0:
+            return
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        # Cached HEAD content lives on the editor (loaded by the gutter
+        # paint pass); use it directly so we don't re-spawn git.
+        var head_opt = self.windows.windows[idx].editor.git_head_text()
+        if not head_opt:
+            self.status_bar.set_message(
+                String("Revert: no HEAD baseline for this file"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var head = head_opt.value()
+        var lines = self.windows.windows[idx].editor.buffer.lines.copy()
+        var block_opt = compute_revert_block(head, lines, row)
+        if not block_opt:
+            self.status_bar.set_message(
+                String("Revert: no change to revert at this line"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var block = block_opt.value().copy()
+        self.windows.windows[idx].editor.apply_revert_block(block^)
+        self.windows.windows[idx].editor.invalidate_git_changes()
 
     fn _maybe_open_spell_menu(mut self):
         """Drain ``Editor.consume_spell_action_request`` on the focused

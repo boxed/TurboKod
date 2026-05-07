@@ -31,6 +31,7 @@ from .file_io import FileInfo, read_file, stat_file, write_file
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
+    GitRevertBlock, GitRevertRequest, compute_revert_block,
 )
 from .highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
@@ -496,6 +497,12 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``DapManager.toggle_breakpoint``; the editor itself owns no DAP
     # state, so the toggle has to round-trip through Desktop.
     var pending_breakpoint_toggle: Optional[Int]
+    # Set by ``handle_mouse`` when the user left-clicks the per-line
+    # change-bar in the git-changes gutter. The host polls
+    # ``consume_git_revert_request``, opens its revert popup anchored at
+    # the click, and on confirmation calls ``apply_revert_block`` with a
+    # block computed from the cached HEAD baseline.
+    var pending_git_revert: Optional[GitRevertRequest]
     # Set by ``check_for_external_change`` when a 3-way merge against a
     # changed-on-disk file produces conflicts. Holds a pre-rendered
     # unified diff (previous on-disk content vs. current on-disk
@@ -640,6 +647,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
@@ -702,6 +710,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = List[Int]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
@@ -785,6 +794,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
+        self.pending_git_revert = copy.pending_git_revert
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
@@ -1305,6 +1315,55 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         return row
 
+    fn consume_git_revert_request(mut self) -> Optional[GitRevertRequest]:
+        """Return any pending git revert request and clear the slot.
+        Set by ``handle_mouse`` when the user clicks the per-line bar
+        in the git-changes column over a row that's actually changed
+        from HEAD."""
+        var req = self.pending_git_revert
+        self.pending_git_revert = Optional[GitRevertRequest]()
+        return req
+
+    fn apply_revert_block(mut self, var block: GitRevertBlock):
+        """Replace ``buffer.lines[buf_start:buf_end_excl]`` with
+        ``block.head_lines``. Used by the git-gutter revert popup;
+        leaves the cursor at the start of the reverted block."""
+        if self.read_only:
+            return
+        var bs = block.buf_start
+        var be = block.buf_end_excl
+        if bs < 0 or bs > self.buffer.line_count():
+            return
+        if be < bs:
+            return
+        if be > self.buffer.line_count():
+            be = self.buffer.line_count()
+        self._push_undo()
+        # Build a new line list with the slice replaced. Doing this as
+        # one rebuild keeps the operation atomic for undo and avoids
+        # repeated mid-list pops/inserts.
+        var new_lines = List[String]()
+        for i in range(bs):
+            new_lines.append(self.buffer.lines[i])
+        for i in range(len(block.head_lines)):
+            new_lines.append(block.head_lines[i])
+        for i in range(be, self.buffer.line_count()):
+            new_lines.append(self.buffer.lines[i])
+        # An empty buffer still needs to hold one (empty) line so the
+        # rest of the editor can index lines[0] safely.
+        if len(new_lines) == 0:
+            new_lines.append(String(""))
+        self.buffer.lines = new_lines^
+        var max_row = self.buffer.line_count() - 1
+        var nr = bs
+        if nr > max_row:
+            nr = max_row
+        if nr < 0:
+            nr = 0
+        self.move_to(nr, 0, False)
+        self.dirty = True
+        self._mark_hl_dirty(bs)
+
     fn consume_conflict_diff(mut self) -> Optional[String]:
         """Return any pending merge-conflict diff text and clear the
         slot. Populated by ``check_for_external_change`` whenever it
@@ -1781,6 +1840,15 @@ struct Editor(ImplicitlyCopyable, Movable):
         pass calls this after running the buffer-vs-HEAD diff."""
         self.git_change_lines = lines^
         self._git_changes_dirty = False
+
+    fn git_head_text(self) -> Optional[String]:
+        """Return the cached HEAD content for this file, or empty
+        Optional when no baseline has been fetched (file is untracked,
+        new, or git isn't reachable). Used by the gutter revert popup
+        so it doesn't re-spawn git on every confirmation."""
+        if not self._git_head_present:
+            return Optional[String]()
+        return Optional[String](self._git_head_text)
 
     fn invalidate_git_changes(mut self):
         """Drop the cached HEAD baseline and per-line change status.
@@ -3870,7 +3938,27 @@ struct Editor(ImplicitlyCopyable, Movable):
             # selection extend, no toggle. Initial-press only, on a row
             # that actually maps to buffer content.
             if not event.motion and on_real_row:
-                self.pending_breakpoint_toggle = Optional[Int](row)
+                # Hit-test: is the click on the git-changes column
+                # specifically, over a row that has a change marker?
+                # That's an "open the revert popup" gesture; everything
+                # else in the gutter remains a breakpoint toggle.
+                var gc_w = self._git_changes_gutter()
+                var gc_x0 = self.gutter_width + self._line_number_gutter()
+                var on_gc = (
+                    gc_w > 0
+                    and rel_x >= gc_x0
+                    and rel_x < gc_x0 + gc_w
+                )
+                var has_change = (
+                    row >= 0 and row < len(self.git_change_lines)
+                    and self.git_change_lines[row] != GIT_CHANGE_NONE
+                )
+                if on_gc and has_change:
+                    self.pending_git_revert = Optional[GitRevertRequest](
+                        GitRevertRequest(row, event.pos.x, event.pos.y)
+                    )
+                else:
+                    self.pending_breakpoint_toggle = Optional[Int](row)
             return True
         # Continuation segments paint their text shifted right by the
         # hanging indent; subtract that here so a click on the indent

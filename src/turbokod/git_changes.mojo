@@ -33,6 +33,91 @@ comptime GIT_CHANGE_MODIFIED: Int = 2
 
 
 @fieldwise_init
+struct GitRevertRequest(ImplicitlyCopyable, Movable):
+    """Payload emitted when the user clicks the gutter change-bar of a
+    modified row. ``row`` is the buffer row that was clicked;
+    ``anchor_x``/``anchor_y`` are the screen cell to anchor the revert
+    popup at (the cell that was clicked, so the menu opens right under
+    the bar)."""
+    var row: Int
+    var anchor_x: Int
+    var anchor_y: Int
+
+
+@fieldwise_init
+struct GitRevertBlock(Copyable, Movable):
+    """Result of mapping a clicked buffer row back through a Myers diff
+    against HEAD. ``buf_start``/``buf_end_excl`` are the buffer-row
+    range covered by the change run; ``head_lines`` is the slice of
+    HEAD that should replace it. For a pure-insert run ``head_lines``
+    is empty (the run gets deleted); for a pure-modify run both ranges
+    are non-empty."""
+    var buf_start: Int
+    var buf_end_excl: Int
+    var head_lines: List[String]
+
+    fn __copyinit__(out self, copy: Self):
+        self.buf_start = copy.buf_start
+        self.buf_end_excl = copy.buf_end_excl
+        self.head_lines = copy.head_lines.copy()
+
+
+fn compute_revert_block(
+    head_text: String, buffer_lines: List[String], target_row: Int,
+) -> Optional[GitRevertBlock]:
+    """Walk the Myers diff between ``head_text`` (the file at HEAD) and
+    ``buffer_lines`` (the editor's in-memory text), find the change run
+    that contains ``target_row`` in the buffer, and return the buffer
+    range to replace plus the HEAD lines to put in its place.
+
+    Returns an empty Optional when ``target_row`` falls outside any
+    non-equal run (i.e. the line is unchanged from HEAD), or when the
+    run is a pure deletion that doesn't actually cover any buffer rows.
+    """
+    if target_row < 0 or target_row >= len(buffer_lines):
+        return Optional[GitRevertBlock]()
+    var head_lines = split_lines(head_text)
+    var ops = diff_lines(head_lines, buffer_lines)
+    var i = 0
+    var n = len(ops)
+    while i < n:
+        if ops[i].kind == 0:
+            i += 1
+            continue
+        # Scan the whole non-equal run.
+        var run_start = i
+        while i < n and ops[i].kind != 0:
+            i += 1
+        # First buffer / head row in this run, plus length on each side.
+        var buf_start = -1
+        var buf_end_excl = -1
+        var head_start = -1
+        var head_end_excl = -1
+        for j in range(run_start, i):
+            if ops[j].kind == 1:    # delete from a (head)
+                if head_start == -1:
+                    head_start = ops[j].a_index
+                head_end_excl = ops[j].a_index + 1
+            else:                   # insert from b (buffer)
+                if buf_start == -1:
+                    buf_start = ops[j].b_index
+                buf_end_excl = ops[j].b_index + 1
+        if buf_start == -1:
+            # Deletion-only run — the gutter shows nothing at this run, so
+            # a click can't have landed here. Skip.
+            continue
+        if buf_start <= target_row and target_row < buf_end_excl:
+            var head_slice = List[String]()
+            if head_start != -1:
+                for k in range(head_start, head_end_excl):
+                    head_slice.append(head_lines[k])
+            return Optional[GitRevertBlock](
+                GitRevertBlock(buf_start, buf_end_excl, head_slice^)
+            )
+    return Optional[GitRevertBlock]()
+
+
+@fieldwise_init
 struct ChangedFile(ImplicitlyCopyable, Movable):
     """One file's slice of a unified diff. ``path`` is relative to the
     project root (taken from the ``+++ b/<path>`` header so
