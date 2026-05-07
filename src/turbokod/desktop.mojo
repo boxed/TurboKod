@@ -106,6 +106,7 @@ from .debugger_config import (
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, which
 from .project import replace_in_project
+from .search_options import SearchOptions
 from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
@@ -461,6 +462,7 @@ struct Desktop(Movable):
     var _pending_action: String      # what to do on next prompt submit
     var _pending_arg: String         # accumulator for two-step prompts
     var _last_search: String         # last Find needle, repeated by Ctrl+G
+    var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
@@ -702,6 +704,7 @@ struct Desktop(Movable):
         self._pending_action = String("")
         self._pending_arg = String("")
         self._last_search = String("")
+        self._last_search_opts = SearchOptions()
         self._open_count = 0
         self._untitled_count = 0
         self._hotkeys = List[Hotkey]()
@@ -1274,7 +1277,7 @@ struct Desktop(Movable):
         self.find_symbol.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen, self.grammar_registry)
-        self.local_changes.paint(canvas, screen)
+        self.local_changes.paint(canvas, screen, self.grammar_registry)
         self.targets_dialog.paint(canvas, screen)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
@@ -2593,9 +2596,13 @@ struct Desktop(Movable):
             return Optional[String]()
         if self.local_changes.active:
             if event.kind == EVENT_KEY:
-                _ = self.local_changes.handle_key(event, screen)
+                _ = self.local_changes.handle_key(
+                    event, screen, self.grammar_registry,
+                )
             else:
-                _ = self.local_changes.handle_mouse(event, screen)
+                _ = self.local_changes.handle_mouse(
+                    event, screen, self.grammar_registry,
+                )
             if self.local_changes.submitted:
                 # ``selected_path`` is project-relative; resolve against
                 # the project root before opening so ``open_file`` can
@@ -2868,7 +2875,9 @@ struct Desktop(Movable):
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_next(self._last_search):
+                if self.windows.windows[idx].editor.find_next(
+                    self._last_search, self._last_search_opts,
+                ):
                     self.windows.windows[idx].editor.reveal_cursor(
                         self.windows.windows[idx].interior(),
                         margin_below=10, margin_above=10,
@@ -2882,7 +2891,9 @@ struct Desktop(Movable):
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_prev(self._last_search):
+                if self.windows.windows[idx].editor.find_prev(
+                    self._last_search, self._last_search_opts,
+                ):
                     self.windows.windows[idx].editor.reveal_cursor(
                         self.windows.windows[idx].interior(),
                         margin_below=10, margin_above=10,
@@ -2890,7 +2901,10 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_REPLACE:
             self._pending_action = _PA_REPLACE_FIND
-            self.prompt.open(String("Replace — find: "))
+            self.prompt.open(
+                String("Replace — find: "), show_options=True,
+            )
+            self.prompt.set_search_options(self._last_search_opts)
             return Optional[String]()
         if action == EDITOR_GOTO:
             self._pending_action = EDITOR_GOTO
@@ -3044,7 +3058,11 @@ struct Desktop(Movable):
         if action == PROJECT_REPLACE:
             if self.project:
                 self._pending_action = _PA_PROJECT_REPLACE_FIND
-                self.prompt.open(String("Replace in project — find: "))
+                self.prompt.open(
+                    String("Replace in project — find: "),
+                    show_options=True,
+                )
+                self.prompt.set_search_options(self._last_search_opts)
             return Optional[String]()
         if action == WINDOW_MAXIMIZE_ALL:
             self.windows.maximize_all(self.workspace_rect(screen))
@@ -4572,7 +4590,10 @@ struct Desktop(Movable):
         left fully selected so the next typed key replaces it — the
         user can also press Enter to keep the prior selection as the
         search term, which is the common case when "find this thing
-        I just highlighted" was the intent."""
+        I just highlighted" was the intent.
+
+        Restores the Cc / W / .* toggles to whatever the user had on
+        for the previous Find so the flags persist across opens."""
         self._pending_action = EDITOR_FIND
         var prefill = String("")
         var idx = self._focused_editor_idx()
@@ -4586,7 +4607,11 @@ struct Desktop(Movable):
                     break
             if not has_newline:
                 prefill = sel
-        self.prompt.open(String("Find: "), prefill, select_prefill=True)
+        self.prompt.open(
+            String("Find: "), prefill,
+            select_prefill=True, show_options=True,
+        )
+        self.prompt.set_search_options(self._last_search_opts)
 
     fn _autosave_all_dirty(mut self):
         """Save every dirty editor that has a backing path. Called on
@@ -5741,9 +5766,12 @@ struct Desktop(Movable):
         self._pending_action = String("")
         if pa == EDITOR_FIND:
             self._last_search = text
+            self._last_search_opts = self.prompt.search_options()
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_next(text):
+                if self.windows.windows[idx].editor.find_next(
+                    text, self._last_search_opts,
+                ):
                     self.windows.windows[idx].editor.reveal_cursor(
                         self.windows.windows[idx].interior(),
                         margin_below=10, margin_above=10,
@@ -5770,28 +5798,38 @@ struct Desktop(Movable):
             return Optional[String]()
         if pa == _PA_REPLACE_FIND:
             self._pending_arg = text
+            # Capture the toggle state on the way through — the replace
+            # value prompt that follows doesn't show toggles, so this
+            # is our last chance to read what the user picked.
+            self._last_search_opts = self.prompt.search_options()
             self._pending_action = _PA_REPLACE_DO
             self.prompt.open(String("Replace with: "))
             return Optional[String]()
         if pa == _PA_REPLACE_DO:
             var find = self._pending_arg
             self._pending_arg = String("")
+            self._last_search = find
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                _ = self.windows.windows[idx].editor.replace_all(find, text)
+                _ = self.windows.windows[idx].editor.replace_all(
+                    find, text, self._last_search_opts,
+                )
             return Optional[String]()
         if pa == _PA_PROJECT_REPLACE_FIND:
             self._pending_arg = text
+            self._last_search_opts = self.prompt.search_options()
             self._pending_action = _PA_PROJECT_REPLACE_DO
             self.prompt.open(String("Replace in project with: "))
             return Optional[String]()
         if pa == _PA_PROJECT_REPLACE_DO:
             var find = self._pending_arg
             self._pending_arg = String("")
+            self._last_search = find
             if self.project:
                 try:
                     var summary = replace_in_project(
                         self.project.value(), find, text,
+                        self._last_search_opts,
                     )
                     self.windows.add(_summary_window(
                         find, text, summary[0], summary[1],

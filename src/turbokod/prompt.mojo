@@ -16,13 +16,17 @@ Home/End, selection (shift+arrow), Cmd+A select-all, and mouse
 positioning all behave the same as in any editor field.
 """
 
+from .buttons import (
+    BUTTON_FIRED, OptionToggle, paint_option_toggle,
+)
 from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .cell import Cell
-from .colors import Attr, BLACK, LIGHT_GRAY
+from .colors import Attr, BLACK, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC,
 )
 from .geometry import Point, Rect
+from .search_options import SearchOptions
 from .text_field import TextField
 from .window import paint_drop_shadow
 
@@ -44,6 +48,18 @@ struct Prompt(Movable):
     # field without re-running the layout. Negative width means "no
     # paint yet" — mouse handling falls back to a no-op.
     var _input_rect: Rect
+    # Search-mode toggles. The three flags persist across ``open()``
+    # calls so the user's "Cc"/"W"/".*" choice carries from one Find
+    # to the next; ``show_options`` decides whether they actually
+    # render and consume mouse events for the current prompt session
+    # (Find / Replace turn it on; Go-to-Line and other prompts do
+    # not). Tooltip text comes from each toggle's ``tooltip`` field
+    # and is painted on the row below the input whenever a toggle is
+    # under the cursor.
+    var show_options: Bool
+    var toggle_case: OptionToggle
+    var toggle_word: OptionToggle
+    var toggle_regex: OptionToggle
 
     fn __init__(out self):
         self.label = String("")
@@ -51,12 +67,23 @@ struct Prompt(Movable):
         self.active = False
         self.submitted = False
         self._input_rect = Rect(0, 0, 0, 0)
+        self.show_options = False
+        self.toggle_case = OptionToggle(
+            String("Cc"), String("Match case"),
+        )
+        self.toggle_word = OptionToggle(
+            String("W"), String("Whole word"),
+        )
+        self.toggle_regex = OptionToggle(
+            String(".*"), String("Regular expression"),
+        )
 
     fn open(
         mut self,
         var label: String,
         var prefill: String = String(""),
         select_prefill: Bool = False,
+        show_options: Bool = False,
     ):
         """Open the prompt with ``label`` and an optional ``prefill``.
 
@@ -64,6 +91,11 @@ struct Prompt(Movable):
         so the next typed key replaces it — used by Find when seeded
         from the editor's current selection, where the user almost
         always wants to either keep it (Enter) or type something else.
+
+        ``show_options=True`` paints the search-mode toggles on the
+        right edge of the input row. The toggle state persists across
+        opens so the user keeps their last choice; pass False (the
+        default) for non-search prompts so the toggles stay hidden.
         """
         self.label = label^
         self.input = TextField()
@@ -73,6 +105,7 @@ struct Prompt(Movable):
         self.active = True
         self.submitted = False
         self._input_rect = Rect(0, 0, 0, 0)
+        self.show_options = show_options
 
     fn close(mut self):
         self.active = False
@@ -80,6 +113,29 @@ struct Prompt(Movable):
         self.label = String("")
         self.input = TextField()
         self._input_rect = Rect(0, 0, 0, 0)
+        self.show_options = False
+        # Drop hover state so a stale tooltip doesn't pop the next time
+        # the prompt opens before the cursor has moved.
+        self.toggle_case.hovered = False
+        self.toggle_word.hovered = False
+        self.toggle_regex.hovered = False
+
+    fn search_options(self) -> SearchOptions:
+        """Read back the toggle states as a ``SearchOptions``. Caller
+        uses this after Enter to drive ``find_next`` / ``replace_all``."""
+        return SearchOptions(
+            self.toggle_case.on,
+            self.toggle_word.on,
+            self.toggle_regex.on,
+        )
+
+    fn set_search_options(mut self, opts: SearchOptions):
+        """Restore toggle states from a previously captured
+        ``SearchOptions``. Used to seed a fresh prompt with whatever
+        flags the user had on for the previous Find."""
+        self.toggle_case.on = opts.case_sensitive
+        self.toggle_word.on = opts.whole_word
+        self.toggle_regex.on = opts.regex
 
     fn _layout(self, screen: Rect) -> Rect:
         """Compute the dialog rect for the current label.
@@ -88,6 +144,10 @@ struct Prompt(Movable):
         allows); height grows to fit the wrapped label. Paint reads
         the same numbers — kept here so the cursor row and the
         painter agree even when the label is long enough to wrap.
+
+        With ``show_options=True`` the dialog reserves an extra row
+        below the input for the toggle tooltip strip (always present
+        so the layout doesn't jump when the user hovers a toggle).
         """
         var width = _DEFAULT_WIDTH
         if width > screen.b.x - 4:
@@ -113,6 +173,8 @@ struct Prompt(Movable):
             if lines < 1:
                 lines = 1
             height = 2 + lines + 1   # top border + label rows + input row + bottom
+        if self.show_options:
+            height += 1   # toggle-tooltip row under the input
         if height > screen.b.y - 4:
             height = screen.b.y - 4
         if height < 3:
@@ -173,9 +235,59 @@ struct Prompt(Movable):
             input_y = rect.b.y - 2
             if input_y < rect.a.y + 1:
                 input_y = rect.a.y + 1
-        var ir = Rect(input_x, input_y, clip_x, input_y + 1)
+        var input_right = clip_x
+        if self.show_options:
+            # Lay the three toggles out right-aligned with one cell of
+            # gap between each, then shrink the input field's right
+            # edge so the cursor never overruns the toggles.
+            var gap = 1
+            var total_w = self.toggle_case.width() \
+                + gap + self.toggle_word.width() \
+                + gap + self.toggle_regex.width()
+            var tx = clip_x - total_w
+            self.toggle_case.move_to(tx, input_y)
+            tx += self.toggle_case.width() + gap
+            self.toggle_word.move_to(tx, input_y)
+            tx += self.toggle_word.width() + gap
+            self.toggle_regex.move_to(tx, input_y)
+            input_right = self.toggle_case.x - 1
+            if input_right < input_x + 1:
+                input_right = input_x + 1
+        var ir = Rect(input_x, input_y, input_right, input_y + 1)
         self._input_rect = ir
         self.input.paint(canvas, ir, True)
+        if self.show_options:
+            # Toggles paint after the input so any cursor on the
+            # rightmost input cell can't bleed over them. Off state
+            # uses the dialog body color; on state inverts to the
+            # standard yellow chip.
+            var off_attr = attr   # BLACK on LIGHT_GRAY
+            var on_attr  = Attr(BLACK, YELLOW)
+            paint_option_toggle(canvas, self.toggle_case, off_attr, on_attr, clip_x)
+            paint_option_toggle(canvas, self.toggle_word, off_attr, on_attr, clip_x)
+            paint_option_toggle(canvas, self.toggle_regex, off_attr, on_attr, clip_x)
+            # Tooltip row under the input. Always painted (blank when
+            # nothing is hovered) so the dialog's height doesn't jump
+            # as the cursor moves over the chips.
+            var tip_y = input_y + 1
+            if tip_y < rect.b.y - 1:
+                var tip = String("")
+                if self.toggle_case.hovered:
+                    tip = self.toggle_case.tooltip
+                elif self.toggle_word.hovered:
+                    tip = self.toggle_word.tooltip
+                elif self.toggle_regex.hovered:
+                    tip = self.toggle_regex.tooltip
+                # Clear the row first so the previous frame's tooltip
+                # never lingers when the cursor leaves a chip.
+                canvas.fill(
+                    Rect(content_x, tip_y, clip_x, tip_y + 1),
+                    String(" "), attr,
+                )
+                if len(tip.as_bytes()) > 0:
+                    _ = canvas.put_text(
+                        Point(content_x, tip_y), tip, attr, clip_x,
+                    )
 
     fn handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""
@@ -200,6 +312,29 @@ struct Prompt(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
+        if self.show_options:
+            # Route through the toggles first so a click on a chip
+            # doesn't leak into the input field below. ``handle_mouse``
+            # also updates ``hovered`` on every event so bare motion
+            # under xterm 1003 mode pops the tooltip on the next paint.
+            var rc = self.toggle_case.handle_mouse(event)
+            if rc == BUTTON_FIRED:
+                self.toggle_case.on = not self.toggle_case.on
+                return True
+            var rw = self.toggle_word.handle_mouse(event)
+            if rw == BUTTON_FIRED:
+                self.toggle_word.on = not self.toggle_word.on
+                return True
+            var rr = self.toggle_regex.handle_mouse(event)
+            if rr == BUTTON_FIRED:
+                self.toggle_regex.on = not self.toggle_regex.on
+                return True
+            # If any toggle has captured the press, swallow the event
+            # so the input field doesn't try to position the cursor
+            # while the user is dragging on a chip.
+            if self.toggle_case.pressed or self.toggle_word.pressed \
+                    or self.toggle_regex.pressed:
+                return True
         if self._input_rect.width() <= 0:
             return True
         _ = self.input.handle_mouse(event, self._input_rect)

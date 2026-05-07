@@ -32,7 +32,8 @@ from .events import (
 )
 from .buttons import (
     BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
-    ShadowButton, paint_shadow_button, shadow_button_hit,
+    OptionToggle, ShadowButton,
+    paint_option_toggle, paint_shadow_button, shadow_button_hit,
 )
 from .clipboard import clipboard_copy, clipboard_paste
 from .confirm_dialog import ConfirmDialog
@@ -160,6 +161,7 @@ from .run_manager import (
     RunOutput, RunSession, drain_run_output, poll_run_exit,
 )
 from .quick_open import QuickOpen
+from .search_options import SearchOptions
 from .symbol_pick import SymbolPick, symbol_kind_label
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult

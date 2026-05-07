@@ -308,6 +308,40 @@ fn diff_buffer_against_head(
     return out^
 
 
+fn fetch_blob_text(
+    project_root: String, git_ref: String, rel_path: String,
+) -> String:
+    """Spawn ``git -C <root> show <git_ref>:<rel_path>`` and return
+    stdout.
+
+    Empty string when git can't resolve the blob — ``git_ref`` not
+    present, ``rel_path`` not in that ref, or the spawn failed.
+    ``git_ref`` can be a commit SHA, ``HEAD``, or empty string (the
+    empty ref is git's shorthand for the index — equivalent to ``:0``).
+
+    Callers use this to obtain the "full file" text on the *after* side
+    of a diff (so a partial-file diff can be highlighted with full
+    multi-line scope context). Untracked files have no after-blob in
+    git's eye; for those the worktree file on disk is the right source
+    instead.
+    """
+    if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
+        return String("")
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(project_root)
+    argv.append(String("show"))
+    argv.append(git_ref + String(":") + rel_path)
+    try:
+        var result = capture_command(argv)
+        if Int(result.status) != 0:
+            return String("")
+        return result.stdout
+    except:
+        return String("")
+
+
 fn fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
     """Spawn ``git -C <root> show HEAD:<rel>`` and return its stdout.
 

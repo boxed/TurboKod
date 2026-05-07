@@ -41,7 +41,7 @@ from collections import Optional
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
@@ -55,17 +55,23 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .highlight import (
+    GrammarRegistry, Highlight, HighlightCache,
+    extension_of, highlight_for_extension_cached,
+)
 from .painter import Painter
+from .file_io import join_path, read_file
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index,
     compute_staged_diff, compute_unstaged_diff,
-    fetch_branch_log, fetch_commit_show, fetch_git_branches,
-    fetch_git_commits, fetch_git_status, parse_unified_diff_files,
+    fetch_blob_text, fetch_branch_log, fetch_commit_show,
+    fetch_git_branches, fetch_git_commits, fetch_git_status,
+    parse_unified_diff_files,
     git_amend_no_edit, git_commit, git_pull, git_push, git_revert_file,
     stage_file, unstage_file,
 )
-from .string_utils import split_lines_no_trailing
+from .string_utils import split_lines_no_trailing, starts_with
 from .text_field import TextField
 from .window import paint_drop_shadow, paint_window_title
 
@@ -102,6 +108,18 @@ comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 
+# Right-pane line kinds — drives the gutter glyph + colouring strategy
+# in ``_paint_panel_body``. ``CTX`` / ``ADD`` / ``REM`` lines have had
+# the unified-diff prefix byte stripped; the prefix character lives in
+# the gutter column instead.
+comptime _LINE_BLANK:     Int = 0
+comptime _LINE_FILEHDR:   Int = 1
+comptime _LINE_INFO:      Int = 2
+comptime _LINE_CTX:       Int = 3
+comptime _LINE_ADD:       Int = 4
+comptime _LINE_REM:       Int = 5
+comptime _LINE_NONEWLINE: Int = 6
+
 
 @fieldwise_init
 struct FileEntry(ImplicitlyCopyable, Movable):
@@ -124,9 +142,17 @@ struct RightPanel(Movable):
     """One scrollable subpane on the right side. ``diff_line`` parallels
     ``lines``: the index into the source per-file diff text for body
     rows that can be staged / unstaged, and ``-1`` for synthetic lines
-    (placeholder messages) that aren't part of any patch."""
+    (placeholder messages, file-name banners, blank separators) that
+    aren't part of any patch.
+
+    ``kind`` parallels ``lines`` and tags each row's render style — see
+    the ``_LINE_*`` constants above. ``highlights`` is a syntax-colour
+    overlay produced from the per-file diff body content; ``row``
+    indexes into ``lines`` directly."""
     var lines: List[String]
     var diff_line: List[Int]
+    var kind: List[Int]
+    var highlights: List[Highlight]
     var scroll: Int
     var scroll_x: Int
     var cursor: Int
@@ -134,6 +160,8 @@ struct RightPanel(Movable):
     fn __init__(out self):
         self.lines = List[String]()
         self.diff_line = List[Int]()
+        self.kind = List[Int]()
+        self.highlights = List[Highlight]()
         self.scroll = 0
         self.scroll_x = 0
         self.cursor = 0
@@ -141,6 +169,8 @@ struct RightPanel(Movable):
     fn reset(mut self):
         self.lines = List[String]()
         self.diff_line = List[Int]()
+        self.kind = List[Int]()
+        self.highlights = List[Highlight]()
         self.scroll = 0
         self.scroll_x = 0
         self.cursor = 0
@@ -367,58 +397,6 @@ fn _author_abbrev(author: String) -> String:
     return _ascii_upper_str(first) + _ascii_upper_str(second)
 
 
-fn _line_attr(line: String, default: Attr, add: Attr, rem: Attr,
-              hunk: Attr, header: Attr) -> Attr:
-    """Pick a color for a unified-diff line based on its prefix.
-
-    Order matters: ``+++`` and ``---`` are *headers*, not adds /
-    deletes, so they have to be checked before the bare ``+`` / ``-``
-    test. Same with ``@@`` (hunk-marker) which would otherwise look
-    like a normal context line. Also catches ``commit ``, ``Author:``,
-    ``Date:`` lines from ``git show`` so they share the header color."""
-    var b = line.as_bytes()
-    if len(b) == 0:
-        return default
-    var c0 = Int(b[0])
-    if len(b) >= 3:
-        var c1 = Int(b[1])
-        var c2 = Int(b[2])
-        if c0 == 0x2B and c1 == 0x2B and c2 == 0x2B:    # +++
-            return header
-        if c0 == 0x2D and c1 == 0x2D and c2 == 0x2D:    # ---
-            return header
-        if c0 == 0x40 and c1 == 0x40:                   # @@
-            return hunk
-    if c0 == 0x2B:    # +
-        return add
-    if c0 == 0x2D:    # -
-        return rem
-    # ``diff --git``, ``index``, ``new file mode``, ``rename`` etc.
-    if c0 == 0x64 and len(b) >= 4 \
-            and Int(b[1]) == 0x69 and Int(b[2]) == 0x66 and Int(b[3]) == 0x66:
-        return header
-    if c0 == 0x69 and len(b) >= 6 \
-            and Int(b[1]) == 0x6E and Int(b[2]) == 0x64 \
-            and Int(b[3]) == 0x65 and Int(b[4]) == 0x78:
-        return header
-    # ``commit <sha>`` (start of ``git show`` output).
-    if c0 == 0x63 and len(b) >= 7 \
-            and Int(b[1]) == 0x6F and Int(b[2]) == 0x6D \
-            and Int(b[3]) == 0x6D and Int(b[4]) == 0x69 \
-            and Int(b[5]) == 0x74 and Int(b[6]) == 0x20:
-        return header
-    if c0 == 0x41 and len(b) >= 7 \
-            and Int(b[1]) == 0x75 and Int(b[2]) == 0x74 \
-            and Int(b[3]) == 0x68 and Int(b[4]) == 0x6F \
-            and Int(b[5]) == 0x72 and Int(b[6]) == 0x3A:
-        return header
-    if c0 == 0x44 and len(b) >= 5 \
-            and Int(b[1]) == 0x61 and Int(b[2]) == 0x74 \
-            and Int(b[3]) == 0x65 and Int(b[4]) == 0x3A:
-        return header
-    return default
-
-
 fn _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
     """Free-function scroller: avoids Mojo's mut-self / mut-self.field
     aliasing rejection. Caller passes the focused panel's body height."""
@@ -455,6 +433,336 @@ fn _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
         panel.scroll = panel.cursor - h + 1
     if panel.scroll < 0:
         panel.scroll = 0
+
+
+fn _strip_first_byte_to_string(s: String) -> String:
+    """Drop the leading byte of ``s`` (the ``+`` / ``-`` / `` `` diff
+    prefix). Returns an empty ``String`` when ``s`` is shorter than one
+    byte. The diff prefix is always ASCII so byte-strip is codepoint-
+    safe."""
+    var b = s.as_bytes()
+    if len(b) <= 1:
+        return String("")
+    return String(StringSlice(unsafe_from_utf8=b[1:]))
+
+
+fn _build_filename_banner(path: String, width: Int) -> String:
+    """Make a ``-- path -----------`` banner sized to ``width``.
+
+    Always emits at least eight trailing dashes so the banner reads as
+    a divider even when the panel is narrow enough that the path alone
+    would fill the row. Width includes the leading two dashes + space
+    + path + space; ``width`` is just a hint to extend the trailing
+    dashes."""
+    var prefix = String("-- ") + path + String(" ")
+    var have = len(prefix.as_bytes())
+    var pad = width - have
+    if pad < 8:
+        pad = 8
+    var dashes = List[UInt8]()
+    for _ in range(pad):
+        dashes.append(0x2D)
+    return prefix + String(StringSlice(unsafe_from_utf8=Span(dashes)))
+
+
+fn _is_skip_diff_header(line: String) -> Bool:
+    """``True`` when ``line`` is one of the unified-diff machine headers
+    we hide from the human-facing rendering: ``diff --git``, ``index ``,
+    ``--- ``, ``+++ ``, ``@@ ...``, plus the lesser-seen rename / mode
+    metadata lines that git emits between ``diff --git`` and ``index``.
+    Body content (``+``, ``-``, ``\\``, `` `` prefixes) is preserved."""
+    var b = line.as_bytes()
+    if len(b) == 0:
+        return False
+    var c0 = Int(b[0])
+    # ``@@``-prefixed hunk header.
+    if c0 == 0x40 and len(b) >= 2 and Int(b[1]) == 0x40:
+        return True
+    if starts_with(line, String("diff --git ")):
+        return True
+    if starts_with(line, String("index ")):
+        return True
+    if starts_with(line, String("--- ")):
+        return True
+    if starts_with(line, String("+++ ")):
+        return True
+    if starts_with(line, String("new file mode ")):
+        return True
+    if starts_with(line, String("deleted file mode ")):
+        return True
+    if starts_with(line, String("old mode ")):
+        return True
+    if starts_with(line, String("new mode ")):
+        return True
+    if starts_with(line, String("similarity index ")):
+        return True
+    if starts_with(line, String("dissimilarity index ")):
+        return True
+    if starts_with(line, String("rename from ")):
+        return True
+    if starts_with(line, String("rename to ")):
+        return True
+    if starts_with(line, String("copy from ")):
+        return True
+    if starts_with(line, String("copy to ")):
+        return True
+    return False
+
+
+fn _emit_filename_banner(
+    mut panel: RightPanel, path: String, width: Int,
+):
+    panel.lines.append(_build_filename_banner(path, width))
+    panel.kind.append(_LINE_FILEHDR)
+    panel.diff_line.append(-1)
+
+
+fn _emit_blank(mut panel: RightPanel):
+    panel.lines.append(String(""))
+    panel.kind.append(_LINE_BLANK)
+    panel.diff_line.append(-1)
+
+
+fn _emit_info(mut panel: RightPanel, var text: String):
+    panel.lines.append(text^)
+    panel.kind.append(_LINE_INFO)
+    panel.diff_line.append(-1)
+
+
+fn _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
+    """Parse ``-a[,b] +c[,d]`` from a ``@@ -a,b +c,d @@`` hunk header.
+    Sets ``old_start`` / ``new_start`` to 1-based line numbers, or -1
+    when the corresponding side is malformed. Both numbers come from
+    the same header so we parse them together rather than running two
+    passes over the same bytes."""
+    old_start = -1
+    new_start = -1
+    var b = line.as_bytes()
+    var n = len(b)
+    if n < 4 or Int(b[0]) != 0x40 or Int(b[1]) != 0x40:
+        return
+    var i = 2
+    while i < n and Int(b[i]) == 0x20:
+        i += 1
+    # ``-a[,b]``
+    if i < n and Int(b[i]) == 0x2D:
+        i += 1
+        var v = 0
+        var have = False
+        while i < n:
+            var c = Int(b[i])
+            if c < 0x30 or c > 0x39:
+                break
+            v = v * 10 + (c - 0x30)
+            have = True
+            i += 1
+        if have:
+            old_start = v
+        # Skip the ``,b`` portion if present.
+        while i < n and Int(b[i]) != 0x20 and Int(b[i]) != 0x09:
+            i += 1
+    while i < n and (Int(b[i]) == 0x20 or Int(b[i]) == 0x09):
+        i += 1
+    # ``+c[,d]``
+    if i < n and Int(b[i]) == 0x2B:
+        i += 1
+        var v = 0
+        var have = False
+        while i < n:
+            var c = Int(b[i])
+            if c < 0x30 or c > 0x39:
+                break
+            v = v * 10 + (c - 0x30)
+            have = True
+            i += 1
+        if have:
+            new_start = v
+
+
+fn _emit_panel_highlights(
+    mut panel: RightPanel,
+    side_text: String,
+    file_path: String,
+    display_to_side_row: List[Int],
+    mut registry: GrammarRegistry,
+):
+    """Tokenize ``side_text`` (the full file content for one side of
+    the diff — before or after) and copy each emitted highlight to
+    every display row in ``display_to_side_row`` that maps to it.
+
+    Tokenizing the full file rather than just the diff body lets the
+    grammar resolve multi-line scopes that begin or end outside the
+    visible hunks. Same call path as ``Editor.flush_highlights``: the
+    process-wide ``GrammarRegistry`` caches the loaded grammar across
+    panels."""
+    if len(side_text.as_bytes()) == 0:
+        return
+    var side_lines = split_lines_no_trailing(side_text)
+    if len(side_lines) == 0:
+        return
+    var ext = extension_of(file_path)
+    var cache = HighlightCache()
+    var hls = highlight_for_extension_cached(
+        ext, side_lines, registry, cache,
+    )
+    if len(hls) == 0:
+        return
+    # Inverse map: for each side row, the list of display rows that
+    # render that line. Keeps the emit loop O(hits) rather than
+    # O(display × hits).
+    var inv = List[List[Int]]()
+    for _ in range(len(side_lines)):
+        inv.append(List[Int]())
+    for d in range(len(display_to_side_row)):
+        var r = display_to_side_row[d]
+        if 0 <= r and r < len(side_lines):
+            inv[r].append(d)
+    for h in range(len(hls)):
+        var hl = hls[h]
+        if hl.row < 0 or hl.row >= len(inv):
+            continue
+        for k in range(len(inv[hl.row])):
+            panel.highlights.append(
+                Highlight(
+                    inv[hl.row][k],
+                    hl.col_start, hl.col_end, hl.attr,
+                ),
+            )
+
+
+fn _populate_diff_panel(
+    mut panel: RightPanel,
+    diff_text: String,
+    file_path: String,
+    before_text: String,
+    after_text: String,
+    banner_width: Int,
+    mut registry: GrammarRegistry,
+):
+    """Transform a per-file unified diff into the human-facing layout
+    the panel paints: a ``-- path ---`` banner, a blank, the body lines
+    with their diff prefix moved to the gutter, then two trailing
+    blanks so the next file (or the bottom of the panel) reads as
+    separated.
+
+    ``panel.diff_line[i]`` keeps each rendered body row pointed at its
+    original line in ``diff_text`` so the staging path
+    (``build_minimal_patch`` → ``git apply --cached``) keeps working
+    against the unmodified diff text. Headers / banners / blanks get
+    ``-1`` because they aren't part of any patch.
+
+    Syntax-highlight strategy: each side of the diff is tokenized in
+    full so multi-line scopes (block comments, triple-quoted strings)
+    resolve correctly even when only part of the construct lives in
+    the visible hunks. Highlights from the *after* file go onto ``+``
+    and context rows; highlights from the *before* file go onto ``-``
+    rows. Either side can be empty (untracked file → no before; binary
+    file or fetch failure → no after) — those rows just paint without
+    a syntax overlay."""
+    var src_lines = split_lines_no_trailing(diff_text)
+    _emit_filename_banner(panel, file_path, banner_width)
+    _emit_blank(panel)
+    # Per-display-row mapping into each side's full file. -1 means "no
+    # corresponding line on this side" — banners, blanks, and the
+    # opposite side's removed/added rows.
+    var display_to_after_row = List[Int]()
+    var display_to_before_row = List[Int]()
+    display_to_after_row.append(-1)    # banner
+    display_to_before_row.append(-1)
+    display_to_after_row.append(-1)    # blank
+    display_to_before_row.append(-1)
+    # 1-based current line on each side; -1 = no hunk header seen yet.
+    var new_line: Int = -1
+    var old_line: Int = -1
+    for i in range(len(src_lines)):
+        var ln = src_lines[i]
+        var b = ln.as_bytes()
+        # ``@@ -a,b +c,d @@`` resets both line counters.
+        if len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40:
+            _parse_hunk_starts(ln, old_line, new_line)
+            continue
+        if _is_skip_diff_header(ln):
+            continue
+        if len(b) == 0:
+            # Bare blank inside a hunk: treat as context.
+            panel.lines.append(String(""))
+            panel.kind.append(_LINE_CTX)
+            panel.diff_line.append(i)
+            display_to_after_row.append(
+                new_line - 1 if new_line > 0 else -1,
+            )
+            display_to_before_row.append(
+                old_line - 1 if old_line > 0 else -1,
+            )
+            if new_line > 0:
+                new_line += 1
+            if old_line > 0:
+                old_line += 1
+            continue
+        var c0 = Int(b[0])
+        if c0 == 0x5C:    # ``\ No newline at end of file``
+            panel.lines.append(ln)
+            panel.kind.append(_LINE_NONEWLINE)
+            panel.diff_line.append(i)
+            display_to_after_row.append(-1)
+            display_to_before_row.append(-1)
+            continue
+        if c0 == 0x2B:
+            panel.lines.append(_strip_first_byte_to_string(ln))
+            panel.kind.append(_LINE_ADD)
+            panel.diff_line.append(i)
+            display_to_after_row.append(
+                new_line - 1 if new_line > 0 else -1,
+            )
+            display_to_before_row.append(-1)
+            if new_line > 0:
+                new_line += 1
+            continue
+        if c0 == 0x2D:
+            panel.lines.append(_strip_first_byte_to_string(ln))
+            panel.kind.append(_LINE_REM)
+            panel.diff_line.append(i)
+            display_to_after_row.append(-1)
+            display_to_before_row.append(
+                old_line - 1 if old_line > 0 else -1,
+            )
+            if old_line > 0:
+                old_line += 1
+            continue
+        if c0 == 0x20:
+            panel.lines.append(_strip_first_byte_to_string(ln))
+            panel.kind.append(_LINE_CTX)
+            panel.diff_line.append(i)
+            display_to_after_row.append(
+                new_line - 1 if new_line > 0 else -1,
+            )
+            display_to_before_row.append(
+                old_line - 1 if old_line > 0 else -1,
+            )
+            if new_line > 0:
+                new_line += 1
+            if old_line > 0:
+                old_line += 1
+            continue
+        # Anything else: keep raw, treat as info so it doesn't get a
+        # gutter mark.
+        panel.lines.append(ln)
+        panel.kind.append(_LINE_INFO)
+        panel.diff_line.append(-1)
+        display_to_after_row.append(-1)
+        display_to_before_row.append(-1)
+    _emit_blank(panel)
+    _emit_blank(panel)
+    display_to_after_row.append(-1)
+    display_to_before_row.append(-1)
+    display_to_after_row.append(-1)
+    display_to_before_row.append(-1)
+    _emit_panel_highlights(
+        panel, after_text, file_path, display_to_after_row, registry,
+    )
+    _emit_panel_highlights(
+        panel, before_text, file_path, display_to_before_row, registry,
+    )
 
 
 struct LocalChanges(Movable):
@@ -820,11 +1128,16 @@ struct LocalChanges(Movable):
             or self.focus == _PANE_RIGHT_STAGED \
             or self.focus == _PANE_RIGHT_INFO
 
-    fn _ensure_right_panels(mut self):
+    fn _ensure_right_panels(
+        mut self, mut registry: GrammarRegistry,
+    ):
         """Recompute the three right-side panel caches when the driving
         sidebar selection changed. Keying by index (not content) means
         re-opening on a fresh tree pulls fresh data; staging mutations
-        explicitly reset ``_right_key`` to force a rebuild."""
+        explicitly reset ``_right_key`` to force a rebuild.
+
+        ``registry`` is the process-wide grammar cache used by
+        ``_populate_diff_panel`` to syntax-colour the diff body lines."""
         var key = self._focus_key()
         if key == self._right_key \
                 and (len(self.unstaged.lines) > 0
@@ -838,7 +1151,7 @@ struct LocalChanges(Movable):
         var driving = self._driving_pane()
         if driving == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
-                self._build_files_right_panels()
+                self._build_files_right_panels(registry)
             return
         if driving == _PANE_BRANCHES:
             if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
@@ -847,52 +1160,133 @@ struct LocalChanges(Movable):
                     fetch_branch_log(self.root, b_name, 30),
                 )
                 for li in range(len(lines)):
-                    self.info.lines.append(lines[li])
-                    self.info.diff_line.append(-1)
+                    _emit_info(self.info, lines[li])
             return
         # commits
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
             var sha = self.commits[self.sel_commit].short_sha
-            var lines = split_lines_no_trailing(
-                fetch_commit_show(self.root, sha),
-            )
-            for li in range(len(lines)):
-                self.info.lines.append(lines[li])
-                self.info.diff_line.append(-1)
+            var show_text = fetch_commit_show(self.root, sha)
+            self._populate_commit_info(sha, show_text, registry)
 
-    fn _build_files_right_panels(mut self):
+    fn _populate_commit_info(
+        mut self, sha: String, show_text: String,
+        mut registry: GrammarRegistry,
+    ):
+        """Render ``git show`` output into the info panel: commit
+        metadata + message rendered as info rows, then each file's
+        diff rendered through ``_populate_diff_panel`` so the same
+        gutter + syntax-highlight treatment applies. The split point
+        is the first ``diff --git`` line — everything before it is
+        free-form metadata that is meant for humans, everything from
+        it onward is a multi-file unified diff."""
+        var lines = split_lines_no_trailing(show_text)
+        var diff_start = -1
+        for i in range(len(lines)):
+            if starts_with(lines[i], String("diff --git ")):
+                diff_start = i
+                break
+        var meta_end = diff_start if diff_start >= 0 else len(lines)
+        for li in range(meta_end):
+            _emit_info(self.info, lines[li])
+        if diff_start < 0:
+            return
+        # Walk per-file diff chunks and feed each one to the same
+        # transform the unstaged/staged panels use.
+        var diff_part_bytes = List[UInt8]()
+        for li in range(diff_start, len(lines)):
+            var lb = lines[li].as_bytes()
+            for j in range(len(lb)):
+                diff_part_bytes.append(lb[j])
+            diff_part_bytes.append(0x0A)
+        var diff_part = String(StringSlice(
+            unsafe_from_utf8=Span(diff_part_bytes),
+        ))
+        var changed = parse_unified_diff_files(diff_part)
+        var banner_w = 200
+        # ``before`` for a commit is its first parent (``<sha>^``) —
+        # standard ``git show`` semantics. Merge commits collapse here
+        # too: ``^`` resolves to ``-m1`` (first parent), which matches
+        # the diff git itself emits unless the user passed ``-m``.
+        var parent_ref = sha + String("^")
+        for k in range(len(changed)):
+            var after = fetch_blob_text(
+                self.root, sha, changed[k].path,
+            )
+            var before = fetch_blob_text(
+                self.root, parent_ref, changed[k].path,
+            )
+            _populate_diff_panel(
+                self.info, changed[k].diff, changed[k].path,
+                before, after, banner_w, registry,
+            )
+
+    fn _build_files_right_panels(
+        mut self, mut registry: GrammarRegistry,
+    ):
         """Populate the unstaged + staged panels from the focused file's
         diffs. Untracked files (XY == ``"??"``) get a hint in the
         unstaged panel so the user knows to press Space on the file row
-        to start tracking them."""
+        to start tracking them.
+
+        For syntax highlighting we hand ``_populate_diff_panel`` the
+        full *after* text of each side: the worktree file for the
+        unstaged side (read directly from disk — that *is* the after
+        version) and the index blob for the staged side. Pulling the
+        full file rather than just the diff body lets the tokenizer
+        see scope context that ends or starts outside the visible
+        hunks (block comments, triple-quoted strings, …)."""
         var fe = self.files[self.sel_file]
-        # Unstaged panel.
+        # Banner width is a hint only — the painter clips long banners
+        # at the panel edge, so a generous fixed width keeps the dashes
+        # filling the row at any panel size we render at.
+        var banner_w = 200
+        # Unstaged panel. The "after" side is the worktree file (read
+        # from disk), the "before" side is the index blob (stage 0).
+        # Either fetch may fail (untracked file → no index entry,
+        # binary / missing file → no worktree text) — both gracefully
+        # degrade to "no full-file highlights for that side".
         if len(fe.unstaged_diff.as_bytes()) > 0:
-            var u_lines = split_lines_no_trailing(fe.unstaged_diff)
-            for li in range(len(u_lines)):
-                self.unstaged.lines.append(u_lines[li])
-                self.unstaged.diff_line.append(li)
+            var after: String
+            try:
+                after = read_file(join_path(self.root, fe.path))
+            except:
+                after = String("")
+            var before = fetch_blob_text(
+                self.root, String(""), fe.path,
+            )
+            _populate_diff_panel(
+                self.unstaged, fe.unstaged_diff, fe.path,
+                before, after, banner_w, registry,
+            )
         else:
             if Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F:
-                self.unstaged.lines.append(
+                _emit_info(
+                    self.unstaged,
                     String(" (untracked — press Space on the file to stage it)"),
                 )
             else:
-                self.unstaged.lines.append(String(" (no unstaged changes)"))
-            self.unstaged.diff_line.append(-1)
-        # Staged panel.
+                _emit_info(self.unstaged, String(" (no unstaged changes)"))
+        # Staged panel. "After" is the index blob, "before" is HEAD.
         if len(fe.staged_diff.as_bytes()) > 0:
-            var s_lines = split_lines_no_trailing(fe.staged_diff)
-            for li in range(len(s_lines)):
-                self.staged.lines.append(s_lines[li])
-                self.staged.diff_line.append(li)
+            var after = fetch_blob_text(
+                self.root, String(""), fe.path,
+            )
+            var before = fetch_blob_text(
+                self.root, String("HEAD"), fe.path,
+            )
+            _populate_diff_panel(
+                self.staged, fe.staged_diff, fe.path,
+                before, after, banner_w, registry,
+            )
         else:
-            self.staged.lines.append(String(" (no staged changes)"))
-            self.staged.diff_line.append(-1)
+            _emit_info(self.staged, String(" (no staged changes)"))
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    fn paint(
+        mut self, mut canvas: Canvas, screen: Rect,
+        mut registry: GrammarRegistry,
+    ):
         if not self.active:
             return
         var bg          = Attr(YELLOW, BLUE)
@@ -958,7 +1352,7 @@ struct LocalChanges(Movable):
             section_attr, list_attr, sel_attr, sel_inactive, list_dim,
         )
         # Right side: split (file mode) or single info panel.
-        self._ensure_right_panels()
+        self._ensure_right_panels(registry)
         self._paint_right_side(
             canvas, screen,
             section_attr, splitter_attr,
@@ -1298,26 +1692,33 @@ struct LocalChanges(Movable):
         var top = self._list_top(screen)
         var bottom = self._list_bottom(screen)
         var left = self._diff_left(screen)
-        var right = self._diff_right(screen)
-        if right <= left:
+        # ``_diff_right`` historically returned the border column itself
+        # (``screen.b.x - 1``). The panels and splitters then used ``+1``
+        # tricks that ended up writing one cell *past* the content area
+        # — straight onto the modal's right border. Treat ``right_excl``
+        # as the panel's exclusive right edge instead, anchored one cell
+        # short of the border so the Painter clip naturally protects the
+        # frame.
+        var right_excl = self._diff_right(screen)
+        if right_excl <= left:
             return
         var driving = self._driving_pane()
         if driving == _PANE_FILES:
             var rp = self._right_panes(screen)
             self._paint_panel_with_header(
                 canvas,
-                Rect(left, rp[0], right + 1, rp[0] + rp[1]),
+                Rect(left, rp[0], right_excl, rp[0] + rp[1]),
                 String("Unstaged"), _PANE_RIGHT_UNSTAGED,
                 self.unstaged,
                 section_attr,
                 ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
             )
             self._paint_horizontal_splitter(
-                canvas, left, right, rp[0] + rp[1], splitter_attr,
+                canvas, left, right_excl - 1, rp[0] + rp[1], splitter_attr,
             )
             self._paint_panel_with_header(
                 canvas,
-                Rect(left, rp[2], right + 1, rp[2] + rp[3]),
+                Rect(left, rp[2], right_excl, rp[2] + rp[3]),
                 String("Staged"), _PANE_RIGHT_STAGED,
                 self.staged,
                 section_attr,
@@ -1332,7 +1733,7 @@ struct LocalChanges(Movable):
             info_title = String("Commit details")
         self._paint_panel_with_header(
             canvas,
-            Rect(left, top, right + 1, bottom),
+            Rect(left, top, right_excl, bottom),
             info_title, _PANE_RIGHT_INFO,
             self.info,
             section_attr,
@@ -1386,43 +1787,163 @@ struct LocalChanges(Movable):
         var painter = Painter(area)
         var cursor_active = Attr(BLACK, YELLOW)
         var cursor_inactive = Attr(BLACK, LIGHT_GRAY)
+        # Base text colour for diff body rows. ``LIGHT_GREEN`` matches
+        # the editor's untokenised baseline (``editor.mojo`` paint), so
+        # the syntax-highlight overlay ends up colouring exactly the
+        # same scopes the editor would — keywords go ``WHITE``, strings
+        # ``RED``, comments ``CYAN``, etc. — and idents/variables stay
+        # ``LIGHT_GREEN`` which reads as the default text colour rather
+        # than a highlight.
+        var body_bg = Attr(LIGHT_GREEN, BLUE)
+        # Add/remove gutter glyphs. The full-cell block characters give
+        # the diff a distinct vertical stripe even in monochromatic
+        # terminals where only the foreground colour changes.
+        var add_gutter_attr = Attr(LIGHT_GREEN, BLUE)
+        var rem_gutter_attr = Attr(LIGHT_RED,   BLUE)
         var pane_focused = (self.focus == pane)
         var height = area.height()
+        # Gutter occupies a single column at the panel's left edge for
+        # diff body rows; banners / blanks / info rows render with no
+        # gutter and start at the panel edge.
         for i in range(height):
             var idx = panel.scroll + i
             if idx >= len(panel.lines):
                 break
             var y = area.a.y + i
             var line = panel.lines[idx]
+            var k = panel.kind[idx] if idx < len(panel.kind) else _LINE_INFO
             var is_cursor = (idx == panel.cursor and pane_focused)
-            var attr: Attr
-            if is_cursor:
-                attr = cursor_active
-            else:
-                attr = _line_attr(
-                    line, ctx_attr, add_attr, rem_attr,
-                    hunk_attr, header_attr,
-                )
-            # When the cursor row is highlighted, paint the entire row
-            # background so the gap to the right reads as part of the
-            # selection bar, matching the file-list behavior.
+            # Cursor row: paint the whole row in cursor_active and write
+            # the line content on top — overrides the per-kind colouring
+            # below. Skip the syntax overlay for this row so the YELLOW
+            # background isn't recoloured back to BLUE.
             if is_cursor:
                 painter.fill(
                     canvas,
                     Rect(area.a.x, y, area.b.x, y + 1),
-                    String(" "), attr,
+                    String(" "), cursor_active,
                 )
+                # Show the gutter character even on the cursor row so
+                # the user can still tell add from remove from context.
+                # The column right of the marker is left as a blank
+                # spacer so the marker doesn't crowd the code.
+                var gutter_glyph: String
+                if k == _LINE_ADD:
+                    gutter_glyph = String("+")
+                elif k == _LINE_REM:
+                    gutter_glyph = String("-")
+                else:
+                    gutter_glyph = String(" ")
+                _ = painter.put_text(
+                    canvas, Point(area.a.x, y), gutter_glyph, cursor_active,
+                )
+                var bytes_c = line.as_bytes()
+                if panel.scroll_x < len(bytes_c):
+                    var visible_c = String(StringSlice(
+                        unsafe_from_utf8=bytes_c[
+                            panel.scroll_x:len(bytes_c)
+                        ],
+                    ))
+                    _ = painter.put_text(
+                        canvas, Point(area.a.x + 2, y),
+                        visible_c, cursor_active,
+                    )
+                continue
+            # Non-cursor row: pick the base colour by line kind.
+            var line_attr: Attr
+            var gutter_glyph: String
+            var gutter_attr: Attr
+            var has_gutter: Bool
+            if k == _LINE_BLANK:
+                line_attr = ctx_attr
+                gutter_glyph = String(" ")
+                gutter_attr = ctx_attr
+                has_gutter = False
+            elif k == _LINE_FILEHDR:
+                line_attr = header_attr
+                gutter_glyph = String(" ")
+                gutter_attr = header_attr
+                has_gutter = False
+            elif k == _LINE_INFO:
+                line_attr = ctx_attr
+                gutter_glyph = String(" ")
+                gutter_attr = ctx_attr
+                has_gutter = False
+            elif k == _LINE_ADD:
+                line_attr = body_bg
+                gutter_glyph = String("+")
+                gutter_attr = add_gutter_attr
+                has_gutter = True
+            elif k == _LINE_REM:
+                line_attr = body_bg
+                gutter_glyph = String("-")
+                gutter_attr = rem_gutter_attr
+                has_gutter = True
+            elif k == _LINE_NONEWLINE:
+                line_attr = ctx_attr
+                gutter_glyph = String(" ")
+                gutter_attr = ctx_attr
+                has_gutter = False
+            else:    # _LINE_CTX
+                line_attr = body_bg
+                gutter_glyph = String(" ")
+                gutter_attr = body_bg
+                has_gutter = True
+            # Gutter is two cells: the +/-/space marker, then a blank
+            # spacer so the code body doesn't crowd against the marker.
+            if has_gutter:
+                _ = painter.put_text(
+                    canvas, Point(area.a.x, y), gutter_glyph, gutter_attr,
+                )
+            var body_x = area.a.x + 2 if has_gutter else area.a.x
             var bytes = line.as_bytes()
             var start = panel.scroll_x
-            if start >= len(bytes):
-                continue
-            var visible = String(StringSlice(
-                unsafe_from_utf8=bytes[start:len(bytes)],
-            ))
-            _ = painter.put_text(
-                canvas, Point(area.a.x, y), visible, attr,
-            )
-        _ = cursor_inactive   # reserved for future "cursor while focus elsewhere"
+            if start < len(bytes):
+                var visible = String(StringSlice(
+                    unsafe_from_utf8=bytes[start:len(bytes)],
+                ))
+                _ = painter.put_text(
+                    canvas, Point(body_x, y), visible, line_attr,
+                )
+            # Syntax-highlight overlay. Highlights' columns are *byte*
+            # offsets in the line text (the same convention the editor
+            # uses); we run them through ``utf8_byte_to_cell`` to land
+            # on the right visual columns when a line contains
+            # multi-byte UTF-8. ``-`` rows pull from the before-file
+            # tokenization, ``+`` and context rows pull from the
+            # after-file — the populate step already routed them to
+            # the right side via ``display_to_*_row``.
+            if has_gutter:
+                var byte_to_cell = utf8_byte_to_cell(line)
+                var byte_count = len(bytes)
+                var cell_count = utf8_codepoint_count(line)
+                for h in range(len(panel.highlights)):
+                    var hl = panel.highlights[h]
+                    if hl.row != idx:
+                        continue
+                    var hl_byte_lo = hl.col_start - panel.scroll_x
+                    var hl_byte_hi = hl.col_end - panel.scroll_x
+                    if hl_byte_lo < 0:
+                        hl_byte_lo = 0
+                    if hl_byte_hi > byte_count:
+                        hl_byte_hi = byte_count
+                    if hl_byte_lo >= hl_byte_hi:
+                        continue
+                    var hl_cell_lo = byte_to_cell[hl_byte_lo]
+                    var hl_cell_hi: Int
+                    if hl_byte_hi < byte_count:
+                        hl_cell_hi = byte_to_cell[hl_byte_hi]
+                    else:
+                        hl_cell_hi = cell_count
+                    for c in range(hl_cell_lo, hl_cell_hi):
+                        var sx = body_x + c
+                        if sx >= area.b.x:
+                            break
+                        painter.set_attr(canvas, sx, y, hl.attr)
+        _ = cursor_inactive
+        _ = hunk_attr   # retained for the legacy diff colour palette
+        _ = rem_attr
+        _ = add_attr
 
     # --- events -----------------------------------------------------------
 
@@ -1532,28 +2053,33 @@ struct LocalChanges(Movable):
         elif self.focus == _PANE_RIGHT_INFO:
             _move_panel_cursor(self.info, delta, h)
 
-    fn _enter_right_pane(mut self, screen: Rect):
+    fn _enter_right_pane(
+        mut self, screen: Rect, mut registry: GrammarRegistry,
+    ):
         """Move focus from sidebar → right side. For file selections we
         land on Unstaged and snap the cursor to the first stageable
-        ``+``/``-`` line so a single Space after Right does something
+        add/remove line so a single Space after Right does something
         useful. For branch/commit selections we land on Info."""
         if self._is_right_focus():
             return
         self.last_sidebar_focus = self.focus
-        self._ensure_right_panels()
+        self._ensure_right_panels(registry)
         var driving = self.last_sidebar_focus
         if driving == _PANE_FILES:
             self.focus = _PANE_RIGHT_UNSTAGED
-            # Find first stageable line in unstaged; fall back to 0.
+            # Find first stageable add/remove line in unstaged; fall
+            # back to 0. Lines now carry their kind explicitly because
+            # the prefix character has moved to the gutter.
             var found = -1
             for i in range(len(self.unstaged.lines)):
-                if self.unstaged.diff_line[i] >= 0:
-                    var lb = self.unstaged.lines[i].as_bytes()
-                    if len(lb) > 0:
-                        var c0 = Int(lb[0])
-                        if c0 == 0x2B or c0 == 0x2D:
-                            found = i
-                            break
+                if self.unstaged.diff_line[i] < 0:
+                    continue
+                if i >= len(self.unstaged.kind):
+                    continue
+                var k = self.unstaged.kind[i]
+                if k == _LINE_ADD or k == _LINE_REM:
+                    found = i
+                    break
             if found < 0:
                 self.unstaged.cursor = 0
             else:
@@ -1575,7 +2101,10 @@ struct LocalChanges(Movable):
             return
         self.focus = self.last_sidebar_focus
 
-    fn handle_key(mut self, event: Event, screen: Rect) -> Bool:
+    fn handle_key(
+        mut self, event: Event, screen: Rect,
+        mut registry: GrammarRegistry,
+    ) -> Bool:
         if not self.active or event.kind != EVENT_KEY:
             return False
         if self.overlay != _OVERLAY_NONE:
@@ -1612,7 +2141,7 @@ struct LocalChanges(Movable):
                 self._cycle_focus(1)
             return True
         if k == KEY_RIGHT:
-            self._enter_right_pane(screen)
+            self._enter_right_pane(screen, registry)
             return True
         if k == KEY_LEFT:
             self._leave_right_pane()
@@ -2067,7 +2596,10 @@ struct LocalChanges(Movable):
             return _PANE_RIGHT_STAGED
         return -1
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    fn handle_mouse(
+        mut self, event: Event, screen: Rect,
+        mut registry: GrammarRegistry,
+    ) -> Bool:
         if not self.active or event.kind != EVENT_MOUSE:
             return False
         # Modal overlay — swallow all mouse so clicks don't sneak under.
@@ -2129,7 +2661,7 @@ struct LocalChanges(Movable):
                 if not self._is_right_focus():
                     self.last_sidebar_focus = self.focus
                 self.focus = rpane
-                self._ensure_right_panels()
+                self._ensure_right_panels(registry)
                 # Determine which panel + its top to jump cursor.
                 if rpane == _PANE_RIGHT_INFO:
                     var top = self._list_top(screen)

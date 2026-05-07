@@ -18,6 +18,9 @@ recently opened one — typical navigation stays inside the same file.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .buttons import (
+    BUTTON_FIRED, OptionToggle, paint_option_toggle,
+)
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
@@ -38,6 +41,7 @@ from .lsp import CaptureResult, LspProcess, capture_command
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
+from .search_options import SearchOptions
 from .string_utils import split_lines
 from .text_field import TextField
 from .window import paint_window_title
@@ -63,6 +67,7 @@ struct ProjectFind(Movable):
     # Cached input strip rect for mouse routing.
     var _input_rect: Rect
     var _last_searched_query: String   # what we last ran a search for
+    var _last_searched_opts: SearchOptions   # toggle state at last search
     var _query_dirty_at_ms: Int        # 0 when no debounce pending
     var matches: List[ProjectMatch]
     var selected: Int
@@ -70,6 +75,13 @@ struct ProjectFind(Movable):
     # Output, set when the user hits Enter.
     var selected_path: String
     var selected_line: Int
+    # Search-mode toggles. Mirror the Find prompt's ``Cc`` / ``W`` /
+    # ``.*`` chips so the project-wide flow honors the same flags.
+    # State persists across opens; flipping a toggle while the dialog
+    # is open kicks off a new debounced search.
+    var toggle_case: OptionToggle
+    var toggle_word: OptionToggle
+    var toggle_regex: OptionToggle
     # Context cache: lines of the file containing ``matches[selected]``.
     # We reload only when the path changes — typical up/down navigation
     # stays in one file. ``_context_highlights`` is the syntax-highlight
@@ -90,12 +102,22 @@ struct ProjectFind(Movable):
         self.query = TextField()
         self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
+        self._last_searched_opts = SearchOptions()
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
         self.selected_path = String("")
         self.selected_line = 0
+        self.toggle_case = OptionToggle(
+            String("Cc"), String("Match case"),
+        )
+        self.toggle_word = OptionToggle(
+            String("W"), String("Whole word"),
+        )
+        self.toggle_regex = OptionToggle(
+            String(".*"), String("Regular expression"),
+        )
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
@@ -107,12 +129,20 @@ struct ProjectFind(Movable):
         self.query = TextField()
         self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
+        self._last_searched_opts = SearchOptions()
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
         self.selected_path = String("")
         self.selected_line = 0
+        # Toggle state persists across opens — leave ``toggle_*.on``
+        # untouched so the user keeps the flags they had on for the
+        # previous Find-in-Project. Hover state is a paint-frame
+        # artifact, drop it to avoid stale tooltips.
+        self.toggle_case.hovered = False
+        self.toggle_word.hovered = False
+        self.toggle_regex.hovered = False
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
@@ -127,15 +157,24 @@ struct ProjectFind(Movable):
         self.query = TextField()
         self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
+        self._last_searched_opts = SearchOptions()
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
         self.selected_path = String("")
         self.selected_line = 0
+        self.toggle_case.hovered = False
+        self.toggle_word.hovered = False
+        self.toggle_regex.hovered = False
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+
+    fn _current_options(self) -> SearchOptions:
+        return SearchOptions(
+            self.toggle_case.on, self.toggle_word.on, self.toggle_regex.on,
+        )
 
     # --- per-frame tick ---------------------------------------------------
 
@@ -175,6 +214,24 @@ struct ProjectFind(Movable):
                         # instead of "(loading <rel>)".
                         self._refresh_context_for_selection()
 
+    fn _mark_toggle_changed(mut self):
+        """Force the next ``tick`` to re-run the search with the
+        current toggle state. Uses the existing debounce path so a
+        rapid sequence of toggle clicks coalesces into one rg
+        spawn. ``_query_dirty_at_ms = 1`` is a sentinel "fire on the
+        next tick" — the host's ``now_ms`` is always >= the debounce
+        window from 1, so the search kicks off immediately."""
+        # Cancel any in-flight rg the same way ``_mark_query_dirty``
+        # does — its results would belong to the previous toggle
+        # state and mixing them with the new ones would confuse the
+        # match list.
+        if self._runner.is_active():
+            self._runner.cancel()
+            self.matches = List[ProjectMatch]()
+            self.selected = 0
+            self.scroll = 0
+        self._query_dirty_at_ms = 1
+
     fn _mark_query_dirty(mut self, now_ms: Int):
         # Reset the debounce on every keystroke. ``now_ms == 0`` (clock
         # syscall failure) gets clamped to 1 so the "no pending" sentinel
@@ -194,6 +251,8 @@ struct ProjectFind(Movable):
 
     fn _run_search(mut self):
         self._last_searched_query = self.query.text
+        var opts = self._current_options()
+        self._last_searched_opts = opts
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
@@ -207,7 +266,7 @@ struct ProjectFind(Movable):
         # Callers gate ``open()`` on ``rg`` being on PATH, so a spawn
         # failure here is a transient OS error — leave matches empty
         # and let the user retry.
-        _ = self._runner.start(self.root, self.query.text)
+        _ = self._runner.start(self.root, self.query.text, opts)
 
     fn _refresh_context_for_selection(mut self):
         """Reload + retokenize the context panel for the current
@@ -323,7 +382,7 @@ struct ProjectFind(Movable):
         paint_window_title(
             canvas, screen, String(" Find in Project "), title_attr, bg,
         )
-        # Input row: ``Search: <query>_``.
+        # Input row: ``Search: <query>_   Cc  W  .*``.
         var input_y = self._input_y(screen)
         var label = String(" Search: ")
         _ = canvas.put_text(
@@ -331,18 +390,70 @@ struct ProjectFind(Movable):
             screen.b.x - 1,
         )
         var qx = screen.a.x + 1 + len(label.as_bytes())
-        # Cyan field bg pops against the BLUE body — same idiom as
-        # every other dialog's input strip.
-        var qw_max = screen.b.x - 2 - qx
+        # Reserve room on the right edge of the input row for the
+        # three search-mode toggles. Lay them out right-aligned with
+        # one cell of gap between each chip — same idiom the Find
+        # prompt uses so the two surfaces feel related.
+        var gap = 1
+        var toggles_w = self.toggle_case.width() \
+            + gap + self.toggle_word.width() \
+            + gap + self.toggle_regex.width()
+        var toggles_right = screen.b.x - 1
+        var tx = toggles_right - toggles_w
+        if tx < qx + 4:
+            # Pathologically narrow window — give the input what little
+            # room is left and shove the toggles right up against the
+            # border.
+            tx = qx + 4
+        self.toggle_case.move_to(tx, input_y)
+        tx += self.toggle_case.width() + gap
+        self.toggle_word.move_to(tx, input_y)
+        tx += self.toggle_word.width() + gap
+        self.toggle_regex.move_to(tx, input_y)
+        var qw_max = self.toggle_case.x - 1 - qx
         if qw_max < 0:
             qw_max = 0
         var input_rect = Rect(qx, input_y, qx + qw_max, input_y + 1)
         self._input_rect = input_rect
         self.query.paint(canvas, input_rect, True)
-        # Separator under the input.
+        # Toggle chips. Off uses a darker on-blue paint so an inactive
+        # chip blends with the dialog body; on inverts to the standard
+        # yellow selection background.
+        var toggle_off = Attr(LIGHT_GRAY, BLUE)
+        var toggle_on  = Attr(BLACK, YELLOW)
+        paint_option_toggle(
+            canvas, self.toggle_case, toggle_off, toggle_on, screen.b.x - 1,
+        )
+        paint_option_toggle(
+            canvas, self.toggle_word, toggle_off, toggle_on, screen.b.x - 1,
+        )
+        paint_option_toggle(
+            canvas, self.toggle_regex, toggle_off, toggle_on, screen.b.x - 1,
+        )
+        # Separator under the input. When a toggle is hovered the
+        # separator gives way to the chip's tooltip text so the user
+        # learns what each abbreviation means without leaving the
+        # search flow.
         var sep1_y = input_y + 1
-        for x in range(screen.a.x + 1, screen.b.x - 1):
-            canvas.set(x, sep1_y, Cell(String("─"), sep_attr, 1))
+        var hovered_tooltip = String("")
+        if self.toggle_case.hovered:
+            hovered_tooltip = self.toggle_case.tooltip
+        elif self.toggle_word.hovered:
+            hovered_tooltip = self.toggle_word.tooltip
+        elif self.toggle_regex.hovered:
+            hovered_tooltip = self.toggle_regex.tooltip
+        if len(hovered_tooltip.as_bytes()) > 0:
+            canvas.fill(
+                Rect(screen.a.x + 1, sep1_y, screen.b.x - 1, sep1_y + 1),
+                String(" "), bg,
+            )
+            _ = canvas.put_text(
+                Point(screen.a.x + 2, sep1_y),
+                hovered_tooltip, ctx_attr, screen.b.x - 1,
+            )
+        else:
+            for x in range(screen.a.x + 1, screen.b.x - 1):
+                canvas.set(x, sep1_y, Cell(String("─"), sep_attr, 1))
         # Match list.
         var top = self._list_top(screen)
         var h = self._list_height(screen)
@@ -608,6 +719,28 @@ struct ProjectFind(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
+        # Toggles run first so a click on a chip doesn't slip through
+        # to the input field and reposition the cursor; the same call
+        # also updates per-toggle hover state from bare-motion events
+        # so the tooltip strip pops on the next paint.
+        var rc = self.toggle_case.handle_mouse(event)
+        if rc == BUTTON_FIRED:
+            self.toggle_case.on = not self.toggle_case.on
+            self._mark_toggle_changed()
+            return True
+        var rw = self.toggle_word.handle_mouse(event)
+        if rw == BUTTON_FIRED:
+            self.toggle_word.on = not self.toggle_word.on
+            self._mark_toggle_changed()
+            return True
+        var rr = self.toggle_regex.handle_mouse(event)
+        if rr == BUTTON_FIRED:
+            self.toggle_regex.on = not self.toggle_regex.on
+            self._mark_toggle_changed()
+            return True
+        if self.toggle_case.pressed or self.toggle_word.pressed \
+                or self.toggle_regex.pressed:
+            return True
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):
             return True
@@ -723,14 +856,21 @@ struct _RgRunner(Movable):
         self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
-    fn start(mut self, root: String, query: String) -> Bool:
+    fn start(
+        mut self, root: String, query: String, opts: SearchOptions,
+    ) -> Bool:
         """Spawn a fresh ``rg`` child for ``(root, query)``. Returns
         False when the spawn syscall failed (callers gate on rg being
         on PATH before opening the find UI).
 
         Any previous in-flight search is cancelled first, so calling
         ``start`` repeatedly (one per debounced keystroke) never lets
-        old children pile up."""
+        old children pile up.
+
+        ``opts`` maps onto rg's flags: ``Cc`` ↔ ``-s`` / ``-i``
+        (replacing the default ``--smart-case``), ``W`` ↔ ``-w``,
+        ``.*`` toggles between ``-F`` (fixed-string) and rg's regex
+        default. ``-w`` works with both modes."""
         self.cancel()
         var argv = List[String]()
         argv.append(String("rg"))
@@ -738,8 +878,18 @@ struct _RgRunner(Movable):
         argv.append(String("--line-number"))
         argv.append(String("--column"))
         argv.append(String("--color=never"))
-        argv.append(String("--smart-case"))
-        argv.append(String("-F"))                # fixed-string (no regex)
+        # Case mode: explicit ``-s`` / ``-i`` so the toggle's behavior
+        # is unambiguous. Smart-case (the previous default) felt
+        # slightly magical and would silently override the user's
+        # intent when the query happened to contain an uppercase byte.
+        if opts.case_sensitive:
+            argv.append(String("--case-sensitive"))
+        else:
+            argv.append(String("--ignore-case"))
+        if opts.whole_word:
+            argv.append(String("--word-regexp"))
+        if not opts.regex:
+            argv.append(String("-F"))            # fixed-string
         # Cap how much rg emits per matched line. Without this, a hit
         # in a minified JS / CSS bundle would push a single multi-MB
         # match line into our pipe; we'd have to buffer it whole

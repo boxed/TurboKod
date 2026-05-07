@@ -31,7 +31,7 @@ font issue.
 from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK
-from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
+from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
 
 
@@ -238,6 +238,115 @@ fn paint_shadow_button(
     # produces the diagonal "lifted" 3D effect.
     for sx in range(button.x + 1, sx_end):
         canvas.set(sx, button.y + 1, Cell(String("▀"), shadow, 1))
+
+
+struct OptionToggle(ImplicitlyCopyable, Movable):
+    """Compact two-state pill button used for search-mode flags.
+
+    Renders ``label`` between single-cell pads — ``Cc`` paints as a
+    4-cell strip (`` Cc ``). Off state uses dialog-body colors so it
+    sits flat against the surrounding chrome; on state inverts to a
+    high-contrast ``BLACK`` on ``YELLOW`` chip so the active flag is
+    easy to scan at a glance.
+
+    Mouse handling mirrors ``ShadowButton``'s press / drag / release
+    state machine: a captured press latches until release, and the
+    toggle only flips when the release lands back inside the hit
+    rect. Hosts keep one instance per visible toggle alive across
+    paints — recreating per-frame would drop a held press. Hover
+    state is updated on every mouse event (including bare motion in
+    xterm 1003 mode) so callers can render ``tooltip`` next to the
+    toggle that the user is pointing at.
+    """
+    var label: String
+    var tooltip: String
+    var on: Bool
+    var x: Int
+    var y: Int
+    var pressed: Bool
+    var pressed_inside: Bool
+    var hovered: Bool
+
+    fn __init__(
+        out self, var label: String, var tooltip: String,
+        x: Int = 0, y: Int = 0,
+    ):
+        self.label = label^
+        self.tooltip = tooltip^
+        self.on = False
+        self.x = x
+        self.y = y
+        self.pressed = False
+        self.pressed_inside = False
+        self.hovered = False
+
+    fn width(self) -> Int:
+        """Cells the toggle paints horizontally (label plus 1-cell pad
+        on each side)."""
+        return len(self.label.as_bytes()) + 2
+
+    fn hit_rect(self) -> Rect:
+        return Rect(self.x, self.y, self.x + self.width(), self.y + 1)
+
+    fn move_to(mut self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    fn handle_mouse(mut self, event: Event) -> UInt8:
+        """Press / drag / release state machine; returns
+        ``BUTTON_FIRED`` on a release inside the hit rect after a
+        captured press (caller should flip ``on``). Hover state is
+        updated on every mouse event so the host can render the
+        tooltip the same frame the cursor enters the chip.
+        """
+        if event.kind != EVENT_MOUSE:
+            return BUTTON_NONE
+        # Hover tracking runs for every mouse event regardless of
+        # button. Bare motion under xterm 1003 reports
+        # ``MOUSE_BUTTON_NONE`` with ``motion=True`` — that's the
+        # signal we use to pop the tooltip.
+        self.hovered = self.hit_rect().contains(event.pos)
+        if event.button != MOUSE_BUTTON_LEFT:
+            return BUTTON_NONE
+        if event.pressed and not event.motion:
+            if self.pressed:
+                self.pressed = False
+                self.pressed_inside = False
+            if self.hit_rect().contains(event.pos):
+                self.pressed = True
+                self.pressed_inside = True
+                return BUTTON_CAPTURED
+            return BUTTON_NONE
+        if event.pressed and event.motion:
+            if not self.pressed:
+                return BUTTON_NONE
+            self.pressed_inside = self.hit_rect().contains(event.pos)
+            return BUTTON_CAPTURED
+        if not event.pressed:
+            if not self.pressed:
+                return BUTTON_NONE
+            self.pressed = False
+            self.pressed_inside = False
+            if self.hit_rect().contains(event.pos):
+                return BUTTON_FIRED
+            return BUTTON_CANCELED
+        return BUTTON_NONE
+
+
+fn paint_option_toggle(
+    mut canvas: Canvas, toggle: OptionToggle,
+    off_attr: Attr, on_attr: Attr, max_x: Int = -1,
+):
+    """Render ``toggle`` as a single-row pill. ``off_attr`` should
+    match the surrounding dialog body; ``on_attr`` should pop (the
+    standard pick is ``BLACK`` on ``YELLOW`` to match other selected
+    affordances). The label is always padded with one space on each
+    side so the 1- to 2-character abbreviations don't crowd each other
+    when toggles sit shoulder to shoulder.
+    """
+    var attr = on_attr if toggle.on else off_attr
+    var padded = String(" ") + toggle.label + String(" ")
+    _ = canvas.put_text(Point(toggle.x, toggle.y), padded, attr, max_x)
 
 
 fn shadow_button_hit(button: ShadowButton, event: Event) -> Bool:

@@ -64,6 +64,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
 )
+from turbokod.search_options import SearchOptions
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
     detect_project_language,
@@ -916,6 +917,68 @@ fn test_editor_find_next() raises:
     var hit2 = ed.find_next(String("foo"))
     assert_true(hit2)
     assert_equal(ed.cursor_col, 3)
+
+
+fn test_editor_find_next_case_insensitive() raises:
+    """Cc OFF (case_sensitive=False, the default) should match
+    across letter case; Cc ON should require an exact byte match."""
+    var ed = Editor(String("Foo bar FOO baz"))
+    # Cc ON: case-sensitive — no lowercase "foo" exists, so miss.
+    var sensitive = SearchOptions(True, False, False)
+    var hit_sensitive = ed.find_next(String("foo"), sensitive)
+    assert_true(not hit_sensitive)
+    ed.move_to(0, 0, False)
+    # Cc OFF: case-insensitive — should hit "Foo" first, then wrap.
+    var insensitive = SearchOptions(False, False, False)
+    var hit_first = ed.find_next(String("foo"), insensitive)
+    assert_true(hit_first)
+    assert_equal(ed.selection_text(), String("FOO"))
+    var hit_second = ed.find_next(String("foo"), insensitive)
+    assert_true(hit_second)
+    assert_equal(ed.selection_text(), String("Foo"))
+
+
+fn test_editor_find_next_whole_word() raises:
+    """Whole-word toggle should reject substring matches."""
+    var ed = Editor(String("foobar foo bar"))
+    var opts = SearchOptions(True, True, False)  # case-sensitive + whole-word
+    var hit = ed.find_next(String("foo"), opts)
+    assert_true(hit)
+    # The substring at col 0 ("foobar") is not a whole word; the
+    # whole-word "foo" sits at col 7.
+    assert_equal(ed.cursor_col, 10)
+
+
+fn test_editor_find_next_regex() raises:
+    """Regex toggle should let the user write a real pattern.
+    ``find_next`` skips the byte at the cursor (so a repeated press
+    walks forward), so the first hit from cursor=(0,0) is the
+    second token, not the first."""
+    var ed = Editor(String("a1 b2 c3"))
+    var opts = SearchOptions(True, False, True)  # case-sensitive regex
+    var hit = ed.find_next(String("[a-c][0-9]"), opts)
+    assert_true(hit)
+    assert_equal(ed.selection_text(), String("b2"))
+
+
+fn test_editor_replace_all_case_insensitive() raises:
+    var ed = Editor(String("Foo foo FOO"))
+    var opts = SearchOptions(False, False, False)  # ci, no-word, no-regex
+    var n = ed.replace_all(String("foo"), String("bar"), opts)
+    assert_equal(n, 3)
+    assert_equal(ed.buffer.line(0), String("bar bar bar"))
+
+
+fn test_find_in_project_options_smoke() raises:
+    """Sanity check that project search compiles and runs with
+    options. Picks a string the test file itself contains."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var opts = SearchOptions(True, False, False)
+    var matches = find_in_project(
+        root.value(), String("Turbokod: a Mojo-idiomatic port"), opts,
+    )
+    assert_true(len(matches) >= 1)
 
 
 fn test_editor_toggle_comment_single_line() raises:
@@ -10080,6 +10143,11 @@ fn main() raises:
     test_editor_selection_text_multiline()
     test_editor_goto_line()
     test_editor_find_next()
+    test_editor_find_next_case_insensitive()
+    test_editor_find_next_whole_word()
+    test_editor_find_next_regex()
+    test_editor_replace_all_case_insensitive()
+    test_find_in_project_options_smoke()
     test_editor_toggle_comment_single_line()
     test_editor_toggle_comment_selection()
     test_editor_toggle_case()

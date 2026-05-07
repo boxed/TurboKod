@@ -11,6 +11,10 @@ from std.collections.list import List
 from .file_io import (
     join_path, list_directory, read_file, stat_file, write_file,
 )
+from .onig import OnigRegex
+from .search_options import (
+    SearchOptions, build_search_regex, default_search_options,
+)
 from .string_utils import split_lines_no_trailing
 
 
@@ -337,11 +341,19 @@ fn _contains_bytes(line: String, needle: String) -> Bool:
     return False
 
 
-fn find_in_project(root: String, needle: String) raises -> List[ProjectMatch]:
-    """Return every line in every project file that contains ``needle``."""
+fn find_in_project(
+    root: String, needle: String,
+    opts: SearchOptions = default_search_options(),
+) raises -> List[ProjectMatch]:
+    """Return every line in every project file that contains ``needle``.
+
+    ``opts`` honors the Cc / W / .* search-mode flags. Default-set
+    options (no flags) take the byte-match fast path that pre-existed
+    options support; any flag set switches to libonig per line."""
     var out = List[ProjectMatch]()
     if len(needle.as_bytes()) == 0:
         return out^
+    var rx_opt = build_search_regex(needle, opts)
     var paths = walk_project_files(root)
     for p in range(len(paths)):
         var full = paths[p]
@@ -355,25 +367,36 @@ fn find_in_project(root: String, needle: String) raises -> List[ProjectMatch]:
         var lines = split_lines_no_trailing(text)
         var rel = _project_relative(root, full)
         for ln in range(len(lines)):
-            if _contains_bytes(lines[ln], needle):
+            var hit: Bool
+            if rx_opt:
+                var m = rx_opt.value().search(lines[ln])
+                hit = Bool(m) and m.value().start >= 0
+            else:
+                hit = _contains_bytes(lines[ln], needle)
+            if hit:
                 out.append(ProjectMatch(full, rel, ln + 1, lines[ln]))
     return out^
 
 
 fn replace_in_project(
     root: String, needle: String, replacement: String,
+    opts: SearchOptions = default_search_options(),
 ) raises -> Tuple[Int, Int]:
     """Replace ``needle`` with ``replacement`` across all project files.
 
     Returns ``(files_changed, total_replacements)``. Files that look binary
     or where the write fails are silently skipped.
-    """
+
+    With ``opts`` flags set the per-line replace runs through libonig
+    so case-folding, whole-word, and regex modes share one path with
+    the in-file ``Editor.replace_all``."""
     var files_changed = 0
     var total = 0
     var nbytes = needle.as_bytes()
     var n = len(nbytes)
     if n == 0:
         return (0, 0)
+    var rx_opt = build_search_regex(needle, opts)
     var paths = walk_project_files(root)
     for p in range(len(paths)):
         var full = paths[p]
@@ -384,27 +407,76 @@ fn replace_in_project(
             continue
         if _looks_binary(text):
             continue
-        var hb = text.as_bytes()
-        var h = len(hb)
-        if h < n:
-            continue
         var count = 0
-        var i = 0
-        while i + n <= h:
-            var hit = True
-            for k in range(n):
-                if hb[i + k] != nbytes[k]:
-                    hit = False
-                    break
-            if hit:
-                count += 1
-                i += n
-            else:
-                i += 1
+        var new_text: String
+        if rx_opt:
+            var pair = _regex_replace_count(
+                text, rx_opt.value(), replacement,
+            )
+            new_text = pair[0]
+            count = pair[1]
+        else:
+            var hb = text.as_bytes()
+            var h = len(hb)
+            if h < n:
+                continue
+            var i = 0
+            while i + n <= h:
+                var hit = True
+                for k in range(n):
+                    if hb[i + k] != nbytes[k]:
+                        hit = False
+                        break
+                if hit:
+                    count += 1
+                    i += n
+                else:
+                    i += 1
+            if count == 0:
+                continue
+            new_text = _replace_all_in_string(text, needle, replacement)
         if count == 0:
             continue
-        var new_text = _replace_all_in_string(text, needle, replacement)
         if write_file(full, new_text):
             files_changed += 1
             total += count
     return (files_changed, total)
+
+
+fn _regex_replace_count(
+    text: String, rx: OnigRegex, replacement: String,
+) -> Tuple[String, Int]:
+    """Walk libonig matches across ``text`` rebuilding the file with
+    every hit swapped for ``replacement``. Replacement is literal —
+    no ``$1`` backreferences, matching the in-file path. Returns
+    ``(new_text, replacement_count)``."""
+    var hb = text.as_bytes()
+    var h = len(hb)
+    var out = String("")
+    var pos = 0
+    var seg_start = 0
+    var count = 0
+    while pos <= h:
+        var m = rx.search_at(text, pos)
+        if not m:
+            break
+        var mv = m.value()
+        if mv.start < 0 or mv.end < mv.start:
+            break
+        if mv.start > seg_start:
+            out = out + String(StringSlice(
+                unsafe_from_utf8=hb[seg_start:mv.start]
+            ))
+        out = out + replacement
+        count += 1
+        if mv.end == mv.start:
+            seg_start = mv.start
+            pos = mv.start + 1
+        else:
+            seg_start = mv.end
+            pos = mv.end
+    if count == 0:
+        return (text, 0)
+    if seg_start < h:
+        out = out + String(StringSlice(unsafe_from_utf8=hb[seg_start:h]))
+    return (out, count)
