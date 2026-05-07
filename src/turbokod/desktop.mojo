@@ -134,7 +134,9 @@ from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .find_symbol import FindSymbol
-from .window import MIN_WIN_H, MIN_WIN_W, Window, WindowManager
+from .window import (
+    MIN_WIN_H, MIN_WIN_W, TitleCommand, Window, WindowManager,
+)
 
 
 # --- Public action strings --------------------------------------------------
@@ -247,6 +249,7 @@ comptime DEBUG_STEP_OVER         = String("debug:step_over")
 comptime DEBUG_STEP_IN           = String("debug:step_in")
 comptime DEBUG_STEP_OUT          = String("debug:step_out")
 comptime DEBUG_STOP              = String("debug:stop")
+comptime DEBUG_PAUSE             = String("debug:pause")
 comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
 comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
@@ -3095,10 +3098,18 @@ struct Desktop(Movable):
         if action == DEBUG_STEP_OUT:
             _ = self.dap.step_out()
             return Optional[String]()
+        if action == DEBUG_PAUSE:
+            _ = self.dap.pause()
+            return Optional[String]()
         if action == DEBUG_STOP:
             self.dap.shutdown()
             self._dap_exec_path = String("")
             self._dap_exec_line = -1
+            # Also kill any plain-run that's in flight, so the same
+            # action handles both DEBUG and RUN modes' "Stop" button
+            # (and Shift+F5 in either context). ``terminate`` is
+            # idempotent when no run is active.
+            self.run_session.terminate()
             return Optional[String]()
         if action == DEBUG_ADD_WATCH:
             self._pending_action = _PA_ADD_WATCH
@@ -3417,6 +3428,13 @@ struct Desktop(Movable):
                 self.open_file_at(oreq[0], oreq[1] - 1, 0, screen)
             except:
                 pass
+        # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
+        # stamps the action id; we route it through the same
+        # dispatch_action path the keyboard shortcut uses, so a click
+        # and Shift+F5 share one code path.
+        var cmd = self.debug_pane.consume_command_id()
+        if len(cmd.as_bytes()) > 0:
+            _ = self.dispatch_action(cmd^, screen)
         if self.dap.has_stack():
             var frames = self.dap.take_stack()
             if len(frames) > 0:
@@ -3573,6 +3591,12 @@ struct Desktop(Movable):
             # Surface the failure once even though we hide the pane —
             # status-bar message is more discoverable than nothing.
             pass
+        # Title-row command strip — buttons mirror the keyboard
+        # shortcuts so a user who's never learned the bindings can
+        # drive the debugger from the pane chrome alone. Built fresh
+        # each tick so it tracks DAP state (Continue ↔ Pause swap
+        # depending on whether the program is stopped or running).
+        self.debug_pane.set_commands(self._build_debug_pane_commands())
         self._refresh_dap_status()
         # End-of-tick marker — only emitted when the session is
         # actively running so we don't flood the log with one line per
@@ -3580,6 +3604,60 @@ struct Desktop(Movable):
         # narrows a crash to the post-tick paint / next_event path.
         if self.dap.is_running() or self.dap.is_stopped():
             self.dap.client.process.trace(String("dap_tick done"))
+
+    fn _build_debug_pane_commands(self) -> List[TitleCommand]:
+        """Title-strip buttons for the debug pane.
+
+        DEBUG mode (DAP active) shows the per-state debugger controls
+        — Continue / Pause / Stop / Step Over / Step In / Step Out,
+        plus an "Add Watch" shortcut. The Continue label flips between
+        ``▶ Cont`` (when stopped at a breakpoint) and ``⏸ Pause``
+        (while running) so the same slot always reads as "swap
+        running-state". Stop is replaced by ``↻ Restart`` once the
+        session has terminated, since that's the only DAP control
+        that's still actionable. RUN mode (plain runs + post-run hold)
+        shows just a Stop / Restart button — there's nothing to step
+        through.
+
+        Each command's ``id`` is the same action string the menu /
+        keyboard plumbing dispatches on, so a click goes through the
+        same code path as the matching shortcut.
+        """
+        var out = List[TitleCommand]()
+        if self.dap.is_active():
+            if self.dap.is_stopped():
+                out.append(TitleCommand(
+                    String("[▶ Cont]"), DEBUG_START_OR_CONTINUE,
+                ))
+            else:
+                out.append(TitleCommand(
+                    String("[⏸ Pause]"), DEBUG_PAUSE,
+                ))
+            out.append(TitleCommand(
+                String("[↷ Over]"), DEBUG_STEP_OVER,
+            ))
+            out.append(TitleCommand(
+                String("[↳ In]"), DEBUG_STEP_IN,
+            ))
+            out.append(TitleCommand(
+                String("[↰ Out]"), DEBUG_STEP_OUT,
+            ))
+            out.append(TitleCommand(
+                String("[■ Stop]"), DEBUG_STOP,
+            ))
+            out.append(TitleCommand(
+                String("[+Watch]"), DEBUG_ADD_WATCH,
+            ))
+        elif self.run_session.is_active():
+            out.append(TitleCommand(
+                String("[■ Stop]"), DEBUG_STOP,
+            ))
+        elif self._run_output_held \
+                or self.dap.is_failed() or self.dap.is_terminated():
+            out.append(TitleCommand(
+                String("[↻ Restart]"), DEBUG_START_OR_CONTINUE,
+            ))
+        return out^
 
     fn _rebuild_pane_inspect(mut self, var locals: List[DapVariable]):
         """Rebuild the inspect rows from the cached stack + given locals

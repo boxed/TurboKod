@@ -150,7 +150,10 @@ from turbokod.settings import Settings
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
-from turbokod.window import WindowManager, paint_drop_shadow
+from turbokod.window import (
+    TitleCommand, WindowManager, hit_title_command, paint_drop_shadow,
+    paint_title_commands,
+)
 from turbokod.events import (
     Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT,
     EVENT_KEY, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
@@ -260,6 +263,77 @@ fn test_canvas_put_text() raises:
     assert_equal(c.get(2, 1).glyph, String("h"))
     assert_equal(c.get(6, 1).glyph, String("o"))
     assert_equal(c.get(7, 1).glyph, String(" "))  # untouched
+
+
+fn test_paint_title_commands_renders_separator_and_labels() raises:
+    """``paint_title_commands`` paints ``- <cmd1> <cmd2>`` after the
+    given start point, returning one hit rect per fully-painted
+    label (with x_end exclusive). The body-bg rule from
+    ``paint_window_title`` applies here too — we don't assert
+    colours but the basic glyph layout is enough to catch
+    regressions."""
+    var c = Canvas(40, 1)
+    var commands = List[TitleCommand]()
+    commands.append(TitleCommand(String("[A]"), String("a:1")))
+    commands.append(TitleCommand(String("[BB]"), String("b:2")))
+    var attr = Attr(WHITE, BLACK)
+    var hits = paint_title_commands(
+        c, Point(2, 0), commands, attr, attr, attr, 40,
+    )
+    # Layout: "- [A] [BB]" starting at x=2.
+    assert_equal(c.get(2, 0).glyph, String("-"))
+    assert_equal(c.get(3, 0).glyph, String(" "))
+    assert_equal(c.get(4, 0).glyph, String("["))
+    assert_equal(c.get(5, 0).glyph, String("A"))
+    assert_equal(c.get(6, 0).glyph, String("]"))
+    assert_equal(c.get(7, 0).glyph, String(" "))   # gap between commands
+    assert_equal(c.get(8, 0).glyph, String("["))
+    assert_equal(c.get(9, 0).glyph, String("B"))
+    assert_equal(c.get(11, 0).glyph, String("]"))
+    assert_equal(len(hits), 2)
+    assert_equal(hits[0].id, String("a:1"))
+    assert_equal(hits[0].x_start, 4)
+    assert_equal(hits[0].x_end, 7)        # exclusive — past the ``]``
+    assert_equal(hits[1].id, String("b:2"))
+    assert_equal(hits[1].x_start, 8)
+    assert_equal(hits[1].x_end, 12)
+
+
+fn test_paint_title_commands_drops_clipped_label() raises:
+    """A label whose right edge would land past ``max_x`` must be
+    skipped — we'd rather drop it than register a hit on a
+    half-painted button."""
+    var c = Canvas(20, 1)
+    var commands = List[TitleCommand]()
+    commands.append(TitleCommand(String("[A]"), String("a")))
+    commands.append(TitleCommand(String("[verylong]"), String("b")))
+    var attr = Attr(WHITE, BLACK)
+    var hits = paint_title_commands(
+        c, Point(0, 0), commands, attr, attr, attr, 8,
+    )
+    # Available range [0, 8): "- " (2) + "[A]" (3) = 5 cells used,
+    # next gap + "[verylong]" wouldn't fit before x=8.
+    assert_equal(len(hits), 1)
+    assert_equal(hits[0].id, String("a"))
+
+
+fn test_hit_title_command_returns_id_under_cursor() raises:
+    var c = Canvas(40, 1)
+    var commands = List[TitleCommand]()
+    commands.append(TitleCommand(String("[X]"), String("first")))
+    commands.append(TitleCommand(String("[Y]"), String("second")))
+    var attr = Attr(WHITE, BLACK)
+    var hits = paint_title_commands(
+        c, Point(0, 0), commands, attr, attr, attr, 40,
+    )
+    # Inside the first command's rect.
+    assert_equal(hit_title_command(hits, Point(3, 0)), String("first"))
+    # On the gap between commands — no hit.
+    assert_equal(hit_title_command(hits, Point(5, 0)), String(""))
+    # Inside the second command's rect.
+    assert_equal(hit_title_command(hits, Point(7, 0)), String("second"))
+    # Different row — no hit.
+    assert_equal(hit_title_command(hits, Point(3, 1)), String(""))
 
 
 fn test_canvas_box() raises:
@@ -9963,6 +10037,9 @@ fn main() raises:
     test_rect_helpers()
     test_attr()
     test_canvas_put_text()
+    test_paint_title_commands_renders_separator_and_labels()
+    test_paint_title_commands_drops_clipped_label()
+    test_hit_title_command_returns_id_under_cursor()
     test_canvas_box()
     test_canvas_fill()
     test_event_factories()

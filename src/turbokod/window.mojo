@@ -104,6 +104,119 @@ fn paint_window_title_at(
     _ = canvas.put_text(p, title, enforced)
 
 
+@fieldwise_init
+struct TitleCommand(ImplicitlyCopyable, Movable):
+    """One clickable label rendered on a panel/window's title row,
+    after the title and a ``- `` separator.
+
+    ``label`` is painted verbatim — wrap with ``[...]`` for a
+    bracketed-button look, or include a leading glyph to mimic
+    Turbo Vision's icon-buttons. ``id`` is the caller's discriminant;
+    ``hit_title_command`` returns it so the click handler can
+    dispatch. Empty ``id`` is reserved (means "no hit"), so callers
+    must use a non-empty string for every real command.
+    """
+    var label: String
+    var id: String
+
+
+@fieldwise_init
+struct TitleCommandHit(ImplicitlyCopyable, Movable):
+    """Painted-rect record for one ``TitleCommand``. ``y`` is the
+    title row, ``x_start`` is inclusive, ``x_end`` is exclusive.
+    Returned in paint order from ``paint_title_commands``; commands
+    that the helper had to truncate are dropped so a click on a
+    half-painted label can't fire."""
+    var id: String
+    var y: Int
+    var x_start: Int
+    var x_end: Int
+
+
+fn _label_cell_count(s: String) -> Int:
+    """Codepoint count of ``s`` — matches the per-codepoint advance
+    ``Canvas.put_text`` uses, so a label's painted width equals this
+    when nothing was clipped."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var cells = 0
+    var i = 0
+    while i < n:
+        var c = Int(b[i])
+        if (c & 0xC0) != 0x80:
+            cells += 1
+        i += 1
+    return cells
+
+
+fn paint_title_commands(
+    mut canvas: Canvas, p: Point,
+    commands: List[TitleCommand],
+    sep_attr: Attr, cmd_attr: Attr, body_bg: Attr,
+    max_x: Int,
+) -> List[TitleCommandHit]:
+    """Paint a ``- <cmd1> <cmd2>...`` strip starting at ``p``.
+
+    Caller is responsible for painting the title itself; this helper
+    only renders the leading ``- `` separator and the commands. The
+    framework rule (mirroring ``paint_window_title``) is enforced
+    here too: separator and command bg are clamped to ``body_bg.bg``
+    so the strip blends into the title row regardless of the focus
+    tint the caller passes in.
+
+    A one-cell gap is inserted between consecutive commands. Labels
+    that don't fully fit before ``max_x`` are skipped — the returned
+    list contains only commands the user can see end-to-end, so a
+    click never fires on a label whose hint half is off-screen.
+    """
+    var hits = List[TitleCommandHit]()
+    if len(commands) == 0:
+        return hits^
+    var enforced_sep = Attr(sep_attr.fg, body_bg.bg, sep_attr.style)
+    var enforced_cmd = Attr(cmd_attr.fg, body_bg.bg, cmd_attr.style)
+    var x = p.x
+    if x + 2 > max_x:
+        return hits^
+    _ = canvas.put_text(
+        Point(x, p.y), String("- "), enforced_sep, max_x,
+    )
+    x += 2
+    for i in range(len(commands)):
+        var c = commands[i]
+        var label_cells = _label_cell_count(c.label)
+        if x + label_cells > max_x:
+            break
+        var x0 = x
+        var advanced = canvas.put_text(
+            Point(x, p.y), c.label, enforced_cmd, max_x,
+        )
+        if advanced != label_cells:
+            break
+        x += advanced
+        hits.append(TitleCommandHit(c.id, p.y, x0, x))
+        if i < len(commands) - 1:
+            if x + 1 > max_x:
+                break
+            x += 1
+    return hits^
+
+
+fn hit_title_command(
+    hits: List[TitleCommandHit], pos: Point,
+) -> String:
+    """Returns the ``id`` of the command at ``pos``, or empty string
+    when ``pos`` falls on no command. Mirror of ``hit_close_button``
+    — kept as a free function so callers don't need a struct method
+    just to do the contains-check on a list of rects."""
+    for i in range(len(hits)):
+        var h = hits[i]
+        if pos.y == h.y \
+                and pos.x >= h.x_start \
+                and pos.x < h.x_end:
+            return h.id
+    return String("")
+
+
 fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
     """Paint a Turbo Vision–style drop shadow under ``rect``.
 

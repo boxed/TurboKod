@@ -64,6 +64,9 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .text_view import TextLog
+from .window import (
+    TitleCommand, TitleCommandHit, hit_title_command, paint_title_commands,
+)
 
 
 # --- row kinds ------------------------------------------------------------
@@ -238,6 +241,21 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var _last_max_btn_x: Int
     """Top-row x of the leftmost cell of the maximize/restore button
     drawn by the last paint, or ``-1`` if not painted."""
+    var commands: List[TitleCommand]
+    """Clickable labels rendered after the title with a ``- ``
+    separator. Set by the host each tick so the strip mirrors the
+    current DAP state (e.g., ``[▶ Cont]`` when stopped, ``[⏸ Pause]``
+    while running). The pane just paints what the host hands in —
+    state-driven enable/disable is the host's job."""
+    var pending_command_id: String
+    """Id of the title-command the user just clicked, or empty when
+    nothing is pending. Polled and cleared by Desktop each tick;
+    dispatched through the regular action plumbing so a click and
+    its keyboard shortcut go through the same code path."""
+    var _last_cmd_hits: List[TitleCommandHit]
+    """Painted-rect record for each title-command from the last
+    ``paint`` call, used by ``handle_mouse`` to map the click back
+    to a command id."""
     var _last_links: List[OutputLink]
     """Clickable file:line spans painted by the last ``paint`` call,
     in absolute screen coordinates. Rebuilt on every paint so the
@@ -275,6 +293,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._last_links = List[OutputLink]()
         self._last_min_btn_x = -1
         self._last_max_btn_x = -1
+        self.commands = List[TitleCommand]()
+        self.pending_command_id = String("")
+        self._last_cmd_hits = List[TitleCommandHit]()
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
@@ -305,6 +326,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._last_links = copy._last_links.copy()
         self._last_min_btn_x = copy._last_min_btn_x
         self._last_max_btn_x = copy._last_max_btn_x
+        self.commands = copy.commands.copy()
+        self.pending_command_id = copy.pending_command_id
+        self._last_cmd_hits = copy._last_cmd_hits.copy()
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -313,6 +337,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     fn set_mode(mut self, mode: UInt8):
         self.mode = mode
+
+    fn set_commands(mut self, var commands: List[TitleCommand]):
+        """Replace the title-row command strip. Called by the host
+        each tick so the visible buttons track DAP state — the pane
+        just paints what's handed in."""
+        self.commands = commands^
 
     fn is_minimized(self) -> Bool:
         return self.state == PANE_STATE_MINIMIZED
@@ -497,6 +527,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_collapse_row = -1
         return row
 
+    fn consume_command_id(mut self) -> String:
+        """Returns the id of a freshly clicked title-command (if any)
+        and clears the latch. Empty string means no click pending."""
+        var s = self.pending_command_id
+        self.pending_command_id = String("")
+        return s^
+
     fn consume_open_request(mut self) -> Tuple[String, Int]:
         """Returns ``(path, line)`` (1-based) for a freshly clicked
         output-log link, or ``("", 0)`` when nothing is pending. The
@@ -537,9 +574,26 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             canvas.set(x, top, Cell(top_glyph, border, 1))
         var title_text = String(" Run ") if self.mode == PANE_MODE_RUN \
             else String(" Debug ")
-        _ = canvas.put_text(
+        var title_advanced = canvas.put_text(
             Point(panel.a.x + 2, top), title_text, title, panel.b.x,
         )
+        # Title-row command strip — painted right after the title with
+        # a ``- `` separator. The right-hand window buttons reserve 11
+        # cells (3 + 3 + 3 trailing " 9", plus one cell of breathing
+        # room before the strip would crowd into them); the rest is
+        # available for commands. Reset the hit list each paint so a
+        # click on a command that just scrolled out doesn't fire.
+        self._last_cmd_hits = List[TitleCommandHit]()
+        var cmd_x = panel.a.x + 2 + title_advanced
+        var cmd_max = panel.b.x - 11
+        if cmd_max < cmd_x:
+            cmd_max = cmd_x
+        if len(self.commands) > 0 and cmd_max > cmd_x + 2:
+            self._last_cmd_hits = paint_title_commands(
+                canvas, Point(cmd_x, top), self.commands,
+                title, title, Attr(WHITE, BLACK),
+                cmd_max,
+            )
         # Top-right header: two window buttons + the keyboard-hint
         # number ("9", paired with ``Ctrl+9``). Buttons are 3 cells
         # each (``[X]``); we paint them in a fixed slot so hit-testing
@@ -865,6 +919,14 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                     self.set_state(PANE_STATE_NORMAL)
                 else:
                     self.set_state(PANE_STATE_MAXIMIZED)
+                return True
+            # Title-row commands. Same priority as the window buttons
+            # so a click on a command label can't accidentally start a
+            # resize drag of the top border.
+            var cmd_id = hit_title_command(self._last_cmd_hits, event.pos)
+            if len(cmd_id.as_bytes()) > 0:
+                self.focused = True
+                self.pending_command_id = cmd_id^
                 return True
             # Drag-to-resize is only meaningful in NORMAL state. In
             # MINIMIZED / MAXIMIZED the height is dictated by state,
