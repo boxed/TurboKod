@@ -21,6 +21,7 @@ from .colors import (
     RED, WHITE, STYLE_NONE,
 )
 from .grammar_install import user_grammar_path_for_ext
+from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
     Frame, copy_stack, stack_eq,
@@ -492,19 +493,29 @@ fn extension_of(path: String) -> String:
 
 fn word_at(line: String, col: Int) -> String:
     """Return the identifier surrounding ``col`` (start ≤ col ≤ end), or
-    empty string when ``col`` isn't on an identifier byte."""
+    empty string when ``col`` isn't on an identifier codepoint. Walks
+    by UTF-8 codepoint so non-ASCII letters (``ä``, Cyrillic, CJK)
+    cluster with their neighbors rather than splitting the word."""
     var b = line.as_bytes()
     var n = len(b)
     if col < 0 or col >= n:
         return String("")
-    if not _is_ident_part(b[col]):
+    var here = codepoint_at(line, col)
+    if not is_word_codepoint(here[0]):
         return String("")
     var start = col
-    while start > 0 and _is_ident_part(b[start - 1]):
-        start -= 1
-    var end = col
-    while end < n and _is_ident_part(b[end]):
-        end += 1
+    while start > 0:
+        var prev = prev_codepoint_start(line, start)
+        var info = codepoint_at(line, prev)
+        if not is_word_codepoint(info[0]):
+            break
+        start = prev
+    var end = col + here[1]
+    while end < n:
+        var info = codepoint_at(line, end)
+        if not is_word_codepoint(info[0]):
+            break
+        end += info[1]
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 

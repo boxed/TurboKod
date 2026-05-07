@@ -41,6 +41,10 @@ from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
 )
 from .config import OnSaveAction
+from .dictionary_install import (
+    DownloadableDictionary, built_in_downloadable_dictionaries,
+    user_dictionary_installed,
+)
 from .dropdown import (
     DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
     DROPDOWN_HIT_POPUP, Dropdown,
@@ -64,17 +68,34 @@ comptime _FOCUS_EDIT          = UInt8(3)
 comptime _FOCUS_REMOVE        = UInt8(4)
 comptime _FOCUS_CLOSE         = UInt8(5)
 comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
+comptime _FOCUS_DICT_LIST     = UInt8(7)
+comptime _FOCUS_DICT_INSTALL  = UInt8(8)
+comptime _FOCUS_DICT_REMOVE   = UInt8(9)
 
 
 # --- section indices ------------------------------------------------------
 
 comptime _SECTION_ACTIONS = 0
 comptime _SECTION_EDITOR  = 1
+comptime _SECTION_SPELL   = 2
 
 
 # --- layout ---------------------------------------------------------------
 
 comptime _SECTION_W = 22
+
+
+# --- button table indices -------------------------------------------------
+# ``Settings._buttons`` is a flat list rather than per-section sublists so
+# the press latches survive across paints and section switches. The names
+# below are the canonical mapping; callers should not hand-write the ints.
+
+comptime _BTN_ADD          = 0
+comptime _BTN_EDIT         = 1
+comptime _BTN_REMOVE       = 2
+comptime _BTN_CLOSE        = 3
+comptime _BTN_DICT_INSTALL = 4
+comptime _BTN_DICT_REMOVE  = 5
 
 # Width of the inline dropdown strip in the Editor section. Wide enough
 # for "Automatic" plus the right-edge ``▼`` indicator.
@@ -88,6 +109,7 @@ fn _section_labels() -> List[String]:
     var out = List[String]()
     out.append(String("Actions on save"))
     out.append(String("Editor"))
+    out.append(String("Spell check"))
     return out^
 
 
@@ -143,6 +165,20 @@ struct Settings(Movable):
     """Last-painted bounds of the dropdown strip. Cached so mouse
     events arriving between paints can hit-test against the same
     rectangle the user just clicked."""
+    var dict_specs: List[DownloadableDictionary]
+    """Catalog of downloadable spell-check dictionaries shown in the
+    Spell-check pane. Snapshotted on ``open`` so the list and the
+    install/remove buttons agree across paints."""
+    var selected_dict: Int
+    """Row in ``dict_specs`` that's highlighted in the Spell-check pane."""
+    var pending_dict_install_lang: String
+    """When non-empty, host should kick off an install for this language
+    on the next ``paint``. The host clears it after picking up the
+    request — Settings emits one request at a time."""
+    var pending_dict_remove_lang: String
+    """When non-empty, host should remove the on-disk wordlist for this
+    language on the next ``paint`` and reload the speller. Host clears
+    after picking up."""
 
     fn __init__(out self):
         self.active = False
@@ -167,8 +203,20 @@ struct Settings(Movable):
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Close "), 0, 0), _FOCUS_CLOSE, True,
         ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" + Install "), 0, 0),
+            _FOCUS_DICT_INSTALL, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" - Remove "), 0, 0),
+            _FOCUS_DICT_REMOVE, True,
+        ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
+        self.dict_specs = List[DownloadableDictionary]()
+        self.selected_dict = 0
+        self.pending_dict_install_lang = String("")
+        self.pending_dict_remove_lang = String("")
 
     fn open(mut self, var actions: List[OnSaveAction], auto_save: Bool):
         self.actions = actions^
@@ -182,6 +230,10 @@ struct Settings(Movable):
         self._save_dropdown = Dropdown(
             _save_behavior_options(), 1 if auto_save else 0,
         )
+        self.dict_specs = built_in_downloadable_dictionaries()
+        self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
+        self.pending_dict_install_lang = String("")
+        self.pending_dict_remove_lang = String("")
 
     fn close(mut self):
         self.active = False
@@ -193,6 +245,10 @@ struct Settings(Movable):
         self._list_scroll = 0
         self.editor.close()
         self._save_dropdown.close()
+        self.dict_specs = List[DownloadableDictionary]()
+        self.selected_dict = -1
+        self.pending_dict_install_lang = String("")
+        self.pending_dict_remove_lang = String("")
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
@@ -288,6 +344,8 @@ struct Settings(Movable):
             self._paint_actions_section(canvas, inner)
         elif self.section == _SECTION_EDITOR:
             self._paint_editor_section(canvas, inner)
+        elif self.section == _SECTION_SPELL:
+            self._paint_spell_section(canvas, inner)
 
     fn _paint_actions_section(mut self, mut canvas: Canvas, inner: Rect):
         """List of configured on-save actions plus the action-row of
@@ -317,20 +375,21 @@ struct Settings(Movable):
         )
         # Buttons row anchored just below the list. ``_paint_buttons``
         # repositions in place so the press latches survive across
-        # paints; layout indices 0..2 are Add/Edit/Remove.
+        # paints.
         var btn_y = list_bottom + 2
         var add_x = inner.a.x
-        self._buttons[0].button.move_to(add_x, btn_y)
-        var edit_x = add_x + self._buttons[0].button.total_width() + 1
-        self._buttons[1].button.move_to(edit_x, btn_y)
-        var rm_x = edit_x + self._buttons[1].button.total_width() + 1
-        self._buttons[2].button.move_to(rm_x, btn_y)
+        self._buttons[_BTN_ADD].button.move_to(add_x, btn_y)
+        var edit_x = add_x + self._buttons[_BTN_ADD].button.total_width() + 1
+        self._buttons[_BTN_EDIT].button.move_to(edit_x, btn_y)
+        var rm_x = edit_x + self._buttons[_BTN_EDIT].button.total_width() + 1
+        self._buttons[_BTN_REMOVE].button.move_to(rm_x, btn_y)
         var has_sel = (self.selected_action >= 0
                        and self.selected_action < len(self.actions))
-        self._buttons[1].enabled = has_sel
-        self._buttons[2].enabled = has_sel
-        for i in range(3):
-            self._paint_button(canvas, i)
+        self._buttons[_BTN_EDIT].enabled = has_sel
+        self._buttons[_BTN_REMOVE].enabled = has_sel
+        self._paint_button(canvas, _BTN_ADD)
+        self._paint_button(canvas, _BTN_EDIT)
+        self._paint_button(canvas, _BTN_REMOVE)
 
     fn _paint_actions_list(mut self, mut canvas: Canvas, list_rect: Rect):
         var visible = list_rect.height()
@@ -407,13 +466,119 @@ struct Settings(Movable):
             hint, inner.b.x,
         )
 
+    fn _paint_spell_section(mut self, mut canvas: Canvas, inner: Rect):
+        """List of catalog dictionaries with an "[X] installed" marker
+        plus an Install / Remove button row. English is built-in (OS
+        ``/usr/share/dict/words`` plus the bundled programmer wordlists)
+        and isn't shown — these are the optional extra-language packs."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var list_top = inner.a.y + 2
+        var list_bottom = inner.b.y - 5
+        if list_bottom <= list_top:
+            return
+        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+        var body_attr = Attr(BLACK, CYAN)
+        canvas.fill(list_rect, String(" "), body_attr)
+        if len(self.dict_specs) == 0:
+            _ = canvas.put_text(
+                Point(list_rect.a.x + 1, list_rect.a.y),
+                String("(no downloadable dictionaries available)"),
+                hint, list_rect.b.x,
+            )
+        else:
+            self._paint_dict_list(canvas, list_rect)
+        # Helper line under the list. Different copy depending on whether
+        # the highlighted row is installed, so the user knows which button
+        # is meaningful.
+        var help = String(
+            "Press Install to download; words appear on the next paint."
+        )
+        var sel_installed = False
+        if 0 <= self.selected_dict and self.selected_dict < len(self.dict_specs):
+            sel_installed = user_dictionary_installed(
+                self.dict_specs[self.selected_dict].language_id,
+            )
+            if sel_installed:
+                help = String(
+                    "Press Remove to delete the on-disk wordlist."
+                )
+        _ = canvas.put_text(
+            Point(inner.a.x, list_bottom), help, hint, inner.b.x,
+        )
+        # Install / Remove buttons row.
+        var btn_y = list_bottom + 2
+        var ix_x = inner.a.x
+        self._buttons[_BTN_DICT_INSTALL].button.move_to(ix_x, btn_y)
+        var rm_x = ix_x \
+            + self._buttons[_BTN_DICT_INSTALL].button.total_width() + 1
+        self._buttons[_BTN_DICT_REMOVE].button.move_to(rm_x, btn_y)
+        var has_sel = (self.selected_dict >= 0
+                       and self.selected_dict < len(self.dict_specs))
+        # Install enabled when a row is selected and not yet installed;
+        # Remove enabled when selected row is installed. Both greyed out
+        # when no selection (catalog empty) or when the action would be a
+        # no-op against the current state.
+        self._buttons[_BTN_DICT_INSTALL].enabled = (
+            has_sel and not sel_installed
+        )
+        self._buttons[_BTN_DICT_REMOVE].enabled = (
+            has_sel and sel_installed
+        )
+        self._paint_button(canvas, _BTN_DICT_INSTALL)
+        self._paint_button(canvas, _BTN_DICT_REMOVE)
+
+    fn _paint_dict_list(mut self, mut canvas: Canvas, list_rect: Rect):
+        """One row per catalog entry: ``[X] German    (de)``.
+
+        Uses the same scroll bookkeeping as the actions list so a long
+        catalog stays usable in a short window."""
+        var visible = list_rect.height()
+        if self.selected_dict >= 0:
+            if self.selected_dict < self._list_scroll:
+                self._list_scroll = self.selected_dict
+            elif self.selected_dict >= self._list_scroll + visible:
+                self._list_scroll = self.selected_dict - visible + 1
+        if self._list_scroll < 0:
+            self._list_scroll = 0
+        var max_scroll = len(self.dict_specs) - visible
+        if max_scroll < 0:
+            max_scroll = 0
+        if self._list_scroll > max_scroll:
+            self._list_scroll = max_scroll
+        var body_attr = Attr(BLACK, CYAN)
+        for r in range(visible):
+            var idx = self._list_scroll + r
+            if idx >= len(self.dict_specs):
+                break
+            var spec = self.dict_specs[idx]
+            var attr = body_attr
+            if idx == self.selected_dict:
+                attr = (
+                    Attr(WHITE, BLUE) if self.focus == _FOCUS_DICT_LIST
+                    else Attr(BLACK, GREEN)
+                )
+                canvas.fill(
+                    Rect(list_rect.a.x, list_rect.a.y + r,
+                         list_rect.b.x, list_rect.a.y + r + 1),
+                    String(" "), attr,
+                )
+            var mark = String("[X] ") if user_dictionary_installed(
+                spec.language_id,
+            ) else String("[ ] ")
+            var line = mark + spec.display + String("  (") \
+                + spec.language_id + String(")")
+            _ = canvas.put_text(
+                Point(list_rect.a.x + 1, list_rect.a.y + r),
+                line, attr, list_rect.b.x,
+            )
+
     fn _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
-        var close = self._buttons[3]
+        var close = self._buttons[_BTN_CLOSE]
         var btn_w = close.button.face_width()
         var btn_x = rect.b.x - 2 - (btn_w + 1)
         var btn_y = rect.b.y - 3
-        self._buttons[3].button.move_to(btn_x, btn_y)
-        self._paint_button(canvas, 3)
+        self._buttons[_BTN_CLOSE].button.move_to(btn_x, btn_y)
+        self._paint_button(canvas, _BTN_CLOSE)
 
     fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
@@ -462,12 +627,16 @@ struct Settings(Movable):
                 self._step_section(-1)
             elif self.focus == _FOCUS_LIST:
                 self._step_action(-1)
+            elif self.focus == _FOCUS_DICT_LIST:
+                self._step_dict(-1)
             return True
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
                 self._step_section(1)
             elif self.focus == _FOCUS_LIST:
                 self._step_action(1)
+            elif self.focus == _FOCUS_DICT_LIST:
+                self._step_dict(1)
             elif self.focus == _FOCUS_SAVE_BEHAVIOR:
                 # Closed: open the popup. Forward the keystroke so
                 # the highlight starts on the committed row.
@@ -506,6 +675,22 @@ struct Settings(Movable):
                 ordered.append(_FOCUS_REMOVE)
         elif self.section == _SECTION_EDITOR:
             ordered.append(_FOCUS_SAVE_BEHAVIOR)
+        elif self.section == _SECTION_SPELL:
+            if len(self.dict_specs) > 0:
+                ordered.append(_FOCUS_DICT_LIST)
+            # Mirror the actions section: skip whichever button isn't
+            # meaningful for the current selection so Tab doesn't land
+            # on a greyed-out button.
+            var sel_installed = False
+            if 0 <= self.selected_dict \
+                    and self.selected_dict < len(self.dict_specs):
+                sel_installed = user_dictionary_installed(
+                    self.dict_specs[self.selected_dict].language_id,
+                )
+            if self.selected_dict >= 0 and not sel_installed:
+                ordered.append(_FOCUS_DICT_INSTALL)
+            if self.selected_dict >= 0 and sel_installed:
+                ordered.append(_FOCUS_DICT_REMOVE)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -545,6 +730,16 @@ struct Settings(Movable):
             s = len(self.actions) - 1
         self.selected_action = s
 
+    fn _step_dict(mut self, delta: Int):
+        if len(self.dict_specs) == 0:
+            return
+        var s = self.selected_dict + delta
+        if s < 0:
+            s = 0
+        if s >= len(self.dict_specs):
+            s = len(self.dict_specs) - 1
+        self.selected_dict = s
+
     fn _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
             self._add_new()
@@ -566,7 +761,54 @@ struct Settings(Movable):
             self._save_dropdown.toggle()
             self._sync_dropdown_commit(prev_idx)
             return True
+        if self.focus == _FOCUS_DICT_INSTALL:
+            self._request_dict_install()
+            return True
+        if self.focus == _FOCUS_DICT_REMOVE:
+            self._request_dict_remove()
+            return True
+        if self.focus == _FOCUS_DICT_LIST:
+            # Enter on a row triggers the action that's meaningful for it
+            # — the same as if the user had Tabbed to the corresponding
+            # button and pressed Enter. Saves a keystroke for the common
+            # "highlight, install" flow.
+            if 0 <= self.selected_dict \
+                    and self.selected_dict < len(self.dict_specs):
+                var lang = self.dict_specs[self.selected_dict].language_id
+                if user_dictionary_installed(lang):
+                    self._request_dict_remove()
+                else:
+                    self._request_dict_install()
+            return True
         return True
+
+    fn _request_dict_install(mut self):
+        if self.selected_dict < 0 \
+                or self.selected_dict >= len(self.dict_specs):
+            return
+        var lang = self.dict_specs[self.selected_dict].language_id
+        if user_dictionary_installed(lang):
+            return
+        self.pending_dict_install_lang = lang
+
+    fn _request_dict_remove(mut self):
+        if self.selected_dict < 0 \
+                or self.selected_dict >= len(self.dict_specs):
+            return
+        var lang = self.dict_specs[self.selected_dict].language_id
+        if not user_dictionary_installed(lang):
+            return
+        self.pending_dict_remove_lang = lang
+
+    fn ack_dict_install(mut self):
+        """Host calls this after picking up ``pending_dict_install_lang``
+        and starting the install — clears the field so the request fires
+        once."""
+        self.pending_dict_install_lang = String("")
+
+    fn ack_dict_remove(mut self):
+        """Host calls this after performing the remove."""
+        self.pending_dict_remove_lang = String("")
 
     fn _add_new(mut self):
         var fresh = OnSaveAction()
@@ -667,7 +909,8 @@ struct Settings(Movable):
                 self.section = idx
                 self.focus = _FOCUS_SECTIONS
             return True
-        # Right pane list (only meaningful for the actions section).
+        # Right pane list — both the actions list and the dictionaries
+        # list share geometry; dispatch by section.
         if self.section == _SECTION_ACTIONS:
             var list_top = rect.a.y + 2 + 2
             var list_bottom = rect.b.y - 2 - 5
@@ -679,10 +922,29 @@ struct Settings(Movable):
                     self.selected_action = idx
                 self.focus = _FOCUS_LIST
                 return True
+        elif self.section == _SECTION_SPELL:
+            var list_top = rect.a.y + 2 + 2
+            var list_bottom = rect.b.y - 2 - 5
+            var inner = self._right_rect(rect)
+            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+            if list_rect.contains(event.pos):
+                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+                if 0 <= idx and idx < len(self.dict_specs):
+                    self.selected_dict = idx
+                self.focus = _FOCUS_DICT_LIST
+                return True
         return True
 
     fn _dispatch_buttons(mut self, event: Event) -> Bool:
+        # Only dispatch buttons that belong to the current section (plus
+        # the always-on Close button). Buttons not painted this frame
+        # still hold their last-painted positions from a different
+        # section; without this gate, a click in the spell pane that
+        # happens to fall under where Add/Edit/Remove last rendered
+        # would fire them.
         for i in range(len(self._buttons)):
+            if not self._button_active_for_section(i):
+                continue
             var status = self._buttons[i].button.handle_mouse(event)
             if status == BUTTON_NONE:
                 continue
@@ -690,6 +952,15 @@ struct Settings(Movable):
                 self.focus = self._buttons[i].focus
                 _ = self._activate_focus()
             return True
+        return False
+
+    fn _button_active_for_section(self, idx: Int) -> Bool:
+        if idx == _BTN_CLOSE:
+            return True
+        if self.section == _SECTION_ACTIONS:
+            return idx == _BTN_ADD or idx == _BTN_EDIT or idx == _BTN_REMOVE
+        if self.section == _SECTION_SPELL:
+            return idx == _BTN_DICT_INSTALL or idx == _BTN_DICT_REMOVE
         return False
 
 

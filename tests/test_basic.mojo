@@ -120,6 +120,7 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
+from turbokod.posix import getenv_value
 from turbokod.spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
     project_dict_path, user_dict_path,
@@ -303,6 +304,19 @@ fn test_parse_input_keys() raises:
     var letter = parse_input(String("a"))
     assert_true(letter[0].kind == EVENT_KEY)
     assert_true(letter[0].key == UInt32(ord("a")))
+
+    # Alt+Enter on iTerm2 / Terminal.app arrives as ``ESC CR`` (or
+    # ``ESC LF``). The ESC+printable path used to deliver this as
+    # ``(0x0D, MOD_ALT)``, which downstream code checking
+    # ``k == KEY_ENTER`` would miss — surface it as
+    # ``KEY_ENTER + MOD_ALT`` instead.
+    var alt_cr = parse_input(String("\x1b\r"))
+    assert_true(alt_cr[0].is_key(KEY_ENTER))
+    assert_equal(alt_cr[0].mods, MOD_ALT)
+    assert_equal(alt_cr[1], 2)
+    var alt_lf = parse_input(String("\x1b\n"))
+    assert_true(alt_lf[0].is_key(KEY_ENTER))
+    assert_equal(alt_lf[0].mods, MOD_ALT)
 
 
 fn test_parse_window_size_report() raises:
@@ -543,6 +557,25 @@ fn test_editor_double_click_selects_word() raises:
     )
     assert_true(ed.has_selection())
     assert_equal(ed.selection_text(), String("world"))
+
+
+fn test_editor_double_click_selects_unicode_word() raises:
+    """Double-clicking inside a non-ASCII word selects the whole word.
+    Pre-fix this would have selected only ``Godk`` (the ASCII prefix
+    up to the first non-letter byte)."""
+    # "Godkänn foo" — the cell column for the ``ä`` codepoint is index 4
+    # (one cell per codepoint, regardless of UTF-8 byte width).
+    var ed = Editor(String("Godkänn foo"))
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(4, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(4, 0), MOUSE_BUTTON_LEFT, True, False),
+        _VIEW,
+    )
+    assert_true(ed.has_selection())
+    assert_equal(ed.selection_text(), String("Godkänn"))
 
 
 fn test_editor_double_click_drag_extends_by_word_forward() raises:
@@ -886,6 +919,22 @@ fn test_editor_alt_arrow_word_jump() raises:
     assert_equal(ed.cursor_col, 12)
     _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
     assert_equal(ed.cursor_col, 6)
+
+
+fn test_editor_word_jump_traverses_unicode_letters() raises:
+    """Word-jump must skip a whole Unicode word in one press, not stop
+    at every multi-byte boundary inside it. Pre-fix, ``Godkänn`` was
+    three "words" and Alt+Right would stop at the byte after ``Godk``,
+    inside the ``ä`` codepoint, then again after ``ä``."""
+    # "Godkänn foo" — bytes: G(1) o(1) d(1) k(1) ä(2) n(1) n(1) ' '(1) f o o
+    # = 8 bytes for Godkänn + space at byte 8 + "foo" at bytes 9-11.
+    var ed = Editor(String("Godkänn foo"))
+    # First Alt+Right jumps past "Godkänn" + the trailing space → byte 9.
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
+    assert_equal(ed.cursor_col, 9)
+    # Alt+Left from inside "foo" lands back at the start of "foo".
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
+    assert_equal(ed.cursor_col, 0)
 
 
 fn test_path_helpers() raises:
@@ -3311,6 +3360,15 @@ fn test_word_at_helper() raises:
     assert_equal(word_at(String("foo bar"), 4), String("bar"))
     assert_equal(word_at(String("foo bar"), 3), String(""))   # space, not ident
     assert_equal(word_at(String("snake_case"), 5), String("snake_case"))
+    # Unicode letters cluster with ASCII letters — ``ä`` / ``ö`` / ``å``
+    # in a Swedish word like "Godkänn" mustn't split it into pieces.
+    var word = String("Godkänn")
+    assert_equal(word_at(word, 0), word)        # starts on G
+    assert_equal(word_at(word, 4), word)        # starts on the ä lead byte
+    assert_equal(word_at(word, 6), word)        # on a trailing n
+    # Cyrillic and Greek roundtrip too.
+    assert_equal(word_at(String("Привет foo"), 0), String("Привет"))
+    assert_equal(word_at(String("λambda"), 0), String("λambda"))
 
 
 fn test_highlight_for_extension_recognizes_mojo() raises:
@@ -8360,6 +8418,76 @@ fn test_speller_strips_common_suffixes() raises:
     assert_false(s.check_word(String("foob")))
 
 
+fn test_speller_handles_english_contractions() raises:
+    """Contractions like ``hasn't`` and ``wouldn't`` must validate against
+    their bare-verb head (``has``, ``would``). Without this the editor
+    flags ``hasn`` / ``wouldn`` as misspelled because the OS dict
+    doesn't list those forms. Both halves of the fix are exercised:
+    ``find_misspelled_runs`` keeps the apostrophe inside the word, and
+    ``check_word`` strips the trailing contraction."""
+    var words = List[String]()
+    words.append(String("has"))
+    words.append(String("would"))
+    words.append(String("did"))
+    words.append(String("they"))
+    words.append(String("you"))
+    words.append(String("can"))
+    words.append(String("won"))
+    words.append(String("hello"))
+    var s = _spell_with_dict(words)
+
+    # n't contractions: head + "n't" must validate.
+    assert_true(s.check_word(String("hasn't")))
+    assert_true(s.check_word(String("wouldn't")))
+    assert_true(s.check_word(String("didn't")))
+    # Bare 't (cannot -> can't, will not -> won't).
+    assert_true(s.check_word(String("can't")))
+    assert_true(s.check_word(String("won't")))
+    # 're / 've / 'll / 'd.
+    assert_true(s.check_word(String("they're")))
+    assert_true(s.check_word(String("they've")))
+    assert_true(s.check_word(String("they'll")))
+    assert_true(s.check_word(String("they'd")))
+    assert_true(s.check_word(String("you're")))
+    # Genuine misspellings still fail (head not in dict).
+    assert_false(s.check_word(String("xyzzyn't")))
+
+    # The tokenizer keeps apostrophe-in-word together so that the head
+    # actually reaches check_word — without that fix, "hasn't" splits
+    # into "hasn" + "t" and "hasn" gets flagged.
+    var runs = find_misspelled_runs(s, String("hasn't wouldn't didn't"))
+    assert_equal(len(runs), 0)
+
+
+fn test_find_misspelled_runs_keeps_unicode_letters_in_word() raises:
+    """``Godkänn`` (Swedish ``approve``) used to tokenize as three runs:
+    ``Godk`` (4 letters, flagged), the lone ``ä`` (skipped as non-letter),
+    and ``nn`` (skipped as <4). After the UTF-8 fix the whole word is
+    one token and either passes (if in dict) or is flagged as a single
+    region — never as ``Godk`` alone."""
+    var words = List[String]()
+    words.append(String("godkänn"))
+    var s = _spell_with_dict(words)
+    var runs = find_misspelled_runs(s, String("Godkänn"))
+    assert_equal(len(runs), 0)
+    # And without "godkänn" in the dictionary, the run that gets flagged
+    # is the whole word — not the ASCII prefix in isolation.
+    var s2 = _spell_with_dict(List[String]())
+    s2.load_words(List[String]())
+    # Force loaded=True so check_word actually runs.
+    var seed2 = List[String]()
+    seed2.append(String("hello"))
+    s2.load_words(seed2)
+    var runs2 = find_misspelled_runs(s2, String("Godkänn"))
+    assert_equal(len(runs2), 1)
+    var rng = runs2[0]
+    # 7 bytes: G(1) o(1) d(1) k(1) ä(2) n(1) n(1) = wait, that's 8.
+    # ``ä`` is U+00E4 = 2 bytes (0xC3 0xA4). G=1, o=1, d=1, k=1, ä=2,
+    # n=1, n=1 → 8 bytes total. Run covers all of them.
+    assert_equal(rng[0], 0)
+    assert_equal(rng[1], 8)
+
+
 fn test_speller_unloaded_returns_true_for_everything() raises:
     """When no dictionary is loaded, ``check_word`` must say "fine" for
     every input — better silent than a screen full of bogus underlines
@@ -8473,6 +8601,26 @@ fn test_speller_add_user_word_persists_and_check_word_passes() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+fn test_speller_load_default_includes_bundled_programmer_terms() raises:
+    """``load_default`` must layer the bundled cspell-derived wordlists
+    on top of the OS dict so common programmer vocabulary that
+    ``/usr/share/dict/words`` lacks (``tokenizer``, ``bitwise``,
+    ``regex``, ``hashable``) doesn't show up as misspelled inside
+    comments and docstrings. Tests run with cwd = project root so the
+    relative path ``src/turbokod/data/wordlists`` resolves."""
+    var s = Speller()
+    s.load_default()
+    # If neither OS list nor bundled list loaded, ``check_word`` returns
+    # True for everything and this test is uninformative — but the
+    # bundled list ships with the repo so on any developer machine it
+    # should always be present.
+    assert_true(s.loaded)
+    assert_true(s.check_word(String("tokenizer")))
+    assert_true(s.check_word(String("bitwise")))
+    assert_true(s.check_word(String("regex")))
+    assert_true(s.check_word(String("hashable")))
+
+
 fn test_speller_load_default_layers_user_dictionary() raises:
     """A subsequent ``Speller`` started after ``add_user_word`` writes
     the file should pick the addition up via ``load_default``. Verifies
@@ -8494,6 +8642,94 @@ fn test_speller_load_default_layers_user_dictionary() raises:
     # added word must check out.
     assert_true(s.check_word(String("turbokod")))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_speller_normalizes_unicode_for_lookup() raises:
+    """Lookup keys must fold both case and Unicode form so a Swedish
+    word like ``Övrigt`` (Ö = U+00D6) matches the on-disk lowercase
+    NFC form ``övrigt`` (ö = U+00F6), and so does the NFD form
+    ``O`` + combining diaeresis (U+004F U+0308) that macOS-sourced text
+    sometimes ships in. Without this fix neither uppercase nor NFD
+    forms hashed to the same bucket as the wordlist's NFC lowercase
+    entry, and ``Övrigt`` was wrongly flagged as misspelled."""
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("övrigt"))
+    seed.append(String("café"))
+    s.load_words(seed)
+    # NFC uppercase: bytes ``0xC3 0x96`` for Ö.
+    assert_true(s.check_word(String("Övrigt")))
+    # NFC mixed case in the middle.
+    assert_true(s.check_word(String("öVrigt")))
+    # NFD: O + combining diaeresis (U+004F U+0308 = ``0x4F 0xCC 0x88``).
+    var nfd_uppercase = String("\x4F\xCC\x88vrigt")
+    assert_true(s.check_word(nfd_uppercase))
+    # NFD lowercase: o + combining diaeresis.
+    var nfd_lowercase = String("\x6F\xCC\x88vrigt")
+    assert_true(s.check_word(nfd_lowercase))
+    # And acute (U+0301) on e: ``café`` decomposes to e + U+0301.
+    var cafe_nfd = String("cafe\xCC\x81")
+    assert_true(s.check_word(cafe_nfd))
+
+
+fn test_speller_load_default_layers_user_language_dictionaries() raises:
+    """A wordlist dropped under ``~/.config/turbokod/dictionaries/`` is
+    picked up by ``load_default``, mirroring the bundled-wordlists
+    layer. This is the on-disk shape Settings ▸ Spell-check writes via
+    its install-runner curl."""
+    var home = getenv_value(String("HOME"))
+    var dir = home + String("/.config/turbokod/dictionaries")
+    _ = external_call["mkdir", Int32](
+        ((home + String("/.config")) + String("\0")).unsafe_ptr(),
+        UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        ((home + String("/.config/turbokod")) + String("\0")).unsafe_ptr(),
+        UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var dict_path = dir + String("/de.txt")
+    assert_true(write_file(dict_path, String("Schmetterling\nKühlschrank\n")))
+    var s = Speller()
+    s.load_default()
+    assert_true(s.loaded)
+    assert_true(s.check_word(String("Schmetterling")))
+    assert_true(s.check_word(String("Kühlschrank")))
+    _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
+
+
+fn test_speller_reload_drops_removed_dictionary() raises:
+    """``reload`` must rebuild the bucket set from disk so removing the
+    on-disk wordlist makes its words fall back to "misspelled" without
+    restarting the editor. Used by Settings ▸ Spell-check ▸ Remove."""
+    var home = getenv_value(String("HOME"))
+    var dir = home + String("/.config/turbokod/dictionaries")
+    _ = external_call["mkdir", Int32](
+        ((home + String("/.config")) + String("\0")).unsafe_ptr(),
+        UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        ((home + String("/.config/turbokod")) + String("\0")).unsafe_ptr(),
+        UInt32(0o755),
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var dict_path = dir + String("/sv.txt")
+    assert_true(write_file(dict_path, String("smörgåsbord\n")))
+    var s = Speller()
+    s.load_default()
+    assert_true(s.check_word(String("smörgåsbord")))
+    # Drop the file and reload — the word must no longer be considered
+    # known. Other layers (OS dict, bundled programmer terms) keep
+    # ``loaded`` True so ``check_word`` doesn't fall into the
+    # everything-passes degraded mode.
+    _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
+    s.reload()
+    assert_true(s.loaded)
+    assert_false(s.check_word(String("smörgåsbord")))
 
 
 fn test_speller_add_project_word_persists_in_project_dir() raises:
@@ -9298,6 +9534,9 @@ fn main() raises:
     test_speller_unloaded_returns_true_for_everything()
     test_speller_add_user_word_persists_and_check_word_passes()
     test_speller_load_default_layers_user_dictionary()
+    test_speller_normalizes_unicode_for_lookup()
+    test_speller_load_default_layers_user_language_dictionaries()
+    test_speller_reload_drops_removed_dictionary()
     test_speller_add_project_word_persists_in_project_dir()
     test_editor_alt_enter_on_misspelling_emits_pending_action()
     test_editor_alt_enter_outside_misspelling_does_not_consume()

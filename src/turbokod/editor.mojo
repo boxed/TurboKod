@@ -42,6 +42,9 @@ from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
 from .posix import monotonic_ms
+from .string_utils import (
+    codepoint_at, is_word_codepoint, prev_codepoint_start, word_char_step,
+)
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -2181,7 +2184,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var p = e_hard
                     while p > c + 1:
                         var b = Int(bytes[p - 1])
-                        if b < 0x80 and not _is_word_char(b):
+                        if b < 0x80 and not is_word_codepoint(b):
                             e = p
                             break
                         p -= 1
@@ -4086,7 +4089,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Move to end-of-word + skip following non-word chars on this line.
 
         At end of line, jumps to the start of the next line. One press = one
-        meaningful jump, like every editor since vi.
+        meaningful jump, like every editor since vi. Walks by UTF-8
+        codepoint so word boundaries land on character edges in
+        non-ASCII text (``Godkänn`` is one word, not three).
         """
         var line = self.buffer.line(row)
         var bytes = line.as_bytes()
@@ -4096,10 +4101,16 @@ struct Editor(ImplicitlyCopyable, Movable):
                 return (row + 1, 0)
             return (row, n)
         var c = col
-        while c < n and _is_word_char(Int(bytes[c])):
-            c += 1
-        while c < n and not _is_word_char(Int(bytes[c])):
-            c += 1
+        while c < n:
+            var step = word_char_step(line, c)
+            if not step[0]:
+                break
+            c += step[1]
+        while c < n:
+            var step = word_char_step(line, c)
+            if step[0]:
+                break
+            c += step[1]
         return (row, c)
 
     fn _prev_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
@@ -4108,12 +4119,19 @@ struct Editor(ImplicitlyCopyable, Movable):
                 return (row - 1, self.buffer.line_length(row - 1))
             return (0, 0)
         var line = self.buffer.line(row)
-        var bytes = line.as_bytes()
         var c = col
-        while c > 0 and not _is_word_char(Int(bytes[c - 1])):
-            c -= 1
-        while c > 0 and _is_word_char(Int(bytes[c - 1])):
-            c -= 1
+        while c > 0:
+            var prev = prev_codepoint_start(line, c)
+            var info = codepoint_at(line, prev)
+            if is_word_codepoint(info[0]):
+                break
+            c = prev
+        while c > 0:
+            var prev = prev_codepoint_start(line, c)
+            var info = codepoint_at(line, prev)
+            if not is_word_codepoint(info[0]):
+                break
+            c = prev
         return (row, c)
 
     fn _scroll_to_cursor(mut self, view: Rect):
@@ -4274,27 +4292,16 @@ fn _leading_indent_cells(line: String) -> Int:
     return i
 
 
-fn _is_word_char(b: Int) -> Bool:
-    """ASCII alphanumeric or underscore — the standard ``\\w`` regex class."""
-    if b == 0x5F:
-        return True
-    if 0x30 <= b and b <= 0x39:
-        return True
-    if 0x41 <= b and b <= 0x5A:
-        return True
-    if 0x61 <= b and b <= 0x7A:
-        return True
-    return False
-
-
-fn _char_class(b: Int) -> Int:
+fn _char_class(cp: Int) -> Int:
     """Three-way character class used by ``_word_range_at``. Word chars
     cluster, whitespace clusters, everything else clusters as
     "punctuation" — so a double-click on punctuation selects the run of
-    punctuation, not just the single byte."""
-    if _is_word_char(b):
+    punctuation, not just the single byte. Operates on a codepoint (not
+    a byte) so non-ASCII letters cluster correctly with their ASCII
+    neighbors (``ä`` and ``n`` end up in the same word)."""
+    if is_word_codepoint(cp):
         return 1
-    if b == 0x20 or b == 0x09:
+    if cp == 0x20 or cp == 0x09:
         return 2
     return 3
 
@@ -4333,18 +4340,28 @@ fn _smart_indent_for_enter(
 fn _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
     """Return the (start, end) byte range of the contiguous run of the
     same character class around ``col``. Empty range when ``col`` is at
-    or past end of line."""
+    or past end of line. Walks by UTF-8 codepoint so a multibyte letter
+    (``ä``) groups with its ASCII neighbors instead of breaking the
+    selection in the middle of the codepoint."""
     var bytes = line.as_bytes()
     var n = len(bytes)
     if col < 0 or col >= n:
         return (col, col)
-    var cls = _char_class(Int(bytes[col]))
+    var here = codepoint_at(line, col)
+    var cls = _char_class(here[0])
     var start = col
-    while start > 0 and _char_class(Int(bytes[start - 1])) == cls:
-        start -= 1
-    var end = col
-    while end < n and _char_class(Int(bytes[end])) == cls:
-        end += 1
+    while start > 0:
+        var prev = prev_codepoint_start(line, start)
+        var info = codepoint_at(line, prev)
+        if _char_class(info[0]) != cls:
+            break
+        start = prev
+    var end = col + here[1]
+    while end < n:
+        var info = codepoint_at(line, end)
+        if _char_class(info[0]) != cls:
+            break
+        end += info[1]
     return (start, end)
 
 
@@ -4361,26 +4378,47 @@ fn _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
     """Word range covering ``col``. If ``col`` sits on whitespace or
     punctuation, try ``col - 1`` so a click just past the end of an
     identifier still selects it. Empty result when neither side is a
-    word character."""
+    word character. Walks by UTF-8 codepoint so non-ASCII identifiers
+    select cleanly."""
     var bytes = line.as_bytes()
     var n = len(bytes)
     var c = col
-    if c >= n: c = n - 1
-    if c < 0: return (0, 0)
-    if _is_word_char(Int(bytes[c])):
+    if c >= n:
+        c = prev_codepoint_start(line, n)
+    if c < 0:
+        return (0, 0)
+    var here = codepoint_at(line, c)
+    if is_word_codepoint(here[0]):
         var start = c
-        while start > 0 and _is_word_char(Int(bytes[start - 1])):
-            start -= 1
-        var end = c + 1
-        while end < n and _is_word_char(Int(bytes[end])):
-            end += 1
+        while start > 0:
+            var prev = prev_codepoint_start(line, start)
+            var info = codepoint_at(line, prev)
+            if not is_word_codepoint(info[0]):
+                break
+            start = prev
+        var end = c + here[1]
+        while end < n:
+            var info = codepoint_at(line, end)
+            if not is_word_codepoint(info[0]):
+                break
+            end += info[1]
         return (start, end)
-    if c > 0 and _is_word_char(Int(bytes[c - 1])):
-        var end = c
-        var start = c
-        while start > 0 and _is_word_char(Int(bytes[start - 1])):
-            start -= 1
-        return (start, end)
+    # ``c`` not on a word char — try the codepoint immediately before it,
+    # so a click just past the end of an identifier still selects the
+    # whole word.
+    if c > 0:
+        var prev = prev_codepoint_start(line, c)
+        var info = codepoint_at(line, prev)
+        if is_word_codepoint(info[0]):
+            var end = c
+            var start = prev
+            while start > 0:
+                var p = prev_codepoint_start(line, start)
+                var pinfo = codepoint_at(line, p)
+                if not is_word_codepoint(pinfo[0]):
+                    break
+                start = p
+            return (start, end)
     return (col, col)
 
 
@@ -4394,16 +4432,29 @@ fn _smart_dotted_extend(
     var n = len(bytes)
     var s = sc
     var e = ec
-    while s >= 2 and Int(bytes[s - 1]) == 0x2E \
-            and _is_word_char(Int(bytes[s - 2])):
-        s -= 2
-        while s > 0 and _is_word_char(Int(bytes[s - 1])):
-            s -= 1
-    while e + 1 < n and Int(bytes[e]) == 0x2E \
-            and _is_word_char(Int(bytes[e + 1])):
-        e += 2
-        while e < n and _is_word_char(Int(bytes[e])):
-            e += 1
+    while s >= 2 and Int(bytes[s - 1]) == 0x2E:
+        var before_dot = prev_codepoint_start(line, s - 1)
+        var info = codepoint_at(line, before_dot)
+        if not is_word_codepoint(info[0]):
+            break
+        s = before_dot
+        while s > 0:
+            var prev = prev_codepoint_start(line, s)
+            var pinfo = codepoint_at(line, prev)
+            if not is_word_codepoint(pinfo[0]):
+                break
+            s = prev
+    while e + 1 < n and Int(bytes[e]) == 0x2E:
+        var after_dot = e + 1
+        var info = codepoint_at(line, after_dot)
+        if not is_word_codepoint(info[0]):
+            break
+        e = after_dot + info[1]
+        while e < n:
+            var einfo = codepoint_at(line, e)
+            if not is_word_codepoint(einfo[0]):
+                break
+            e += einfo[1]
     return (s, e)
 
 

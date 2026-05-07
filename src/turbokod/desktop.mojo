@@ -71,6 +71,11 @@ from .grammar_install import (
     find_downloadable_grammar_for_extension,
     grammar_install_command, user_grammar_installed,
 )
+from .dictionary_install import (
+    built_in_downloadable_dictionaries,
+    dictionary_install_command, find_downloadable_dictionary_by_language,
+    remove_user_dictionary,
+)
 from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
     find_docset_by_language, find_docset_for_extension,
@@ -515,6 +520,12 @@ struct Desktop(Movable):
     var _grammar_install_prompted: List[String]
     var _pending_grammar_prompt_ext: String
     var _grammar_install_lang: String
+    # Spell dictionary install bookkeeping. Settings emits requests to
+    # install / remove an extra-language wordlist; ``_dict_install_lang``
+    # is the language whose curl is currently in flight, so the
+    # install-complete hook reloads the speller and invalidates spell
+    # highlights on every open editor.
+    var _dict_install_lang: String
     # Debugger state. One ``DapManager`` per Desktop (single concurrent
     # session) — multi-session debugging would need a list keyed by
     # something (language? session id?), and we don't have a use case
@@ -657,6 +668,7 @@ struct Desktop(Movable):
         self._grammar_install_prompted = List[String]()
         self._pending_grammar_prompt_ext = String("")
         self._grammar_install_lang = String("")
+        self._dict_install_lang = String("")
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
@@ -1211,6 +1223,24 @@ struct Desktop(Movable):
             self.config.auto_save = self.settings.auto_save
             _ = save_config(self.config)
             self.settings.ack_dirty()
+        # Drain pending dictionary install / remove requests emitted by
+        # the Spell-check pane. Install routes through the shared
+        # ``InstallRunner`` (single-slot, queued via status bar); remove
+        # is sync — delete the file, reload the speller, invalidate
+        # spell highlights so the next paint redraws without stale
+        # underlines.
+        if self.settings.active:
+            # Copy the language id off ``settings`` first so the
+            # ``_start_dict_install`` / ``_do_dict_remove`` calls don't
+            # alias a field on ``self.settings`` while we hold ``mut self``.
+            var dict_install = self.settings.pending_dict_install_lang
+            if len(dict_install.as_bytes()) > 0:
+                self.settings.ack_dict_install()
+                self._start_dict_install(dict_install)
+            var dict_remove = self.settings.pending_dict_remove_lang
+            if len(dict_remove.as_bytes()) > 0:
+                self.settings.ack_dict_remove()
+                self._do_dict_remove(dict_remove)
         # Persist the window session if it changed since the last save.
         # No-op when no project is open or no file-backed windows are
         # showing — closing the last window leaves the previously-saved
@@ -1541,6 +1571,103 @@ struct Desktop(Movable):
                 self.windows.windows[win_idx].toggle_maximize(workspace)
             self.status_bar.set_message(
                 String("Grammar install failed (exit ")
+                    + String(result.exit_code()) + String(") — see new window"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _start_dict_install(mut self, lang: String):
+        """Spawn the curl that drops a wordlist into the user dictionary
+        dir. Single-slot ``InstallRunner`` — surfaces a status-bar
+        conflict if another install is in flight rather than queueing,
+        since the popup only renders one at a time.
+        """
+        var specs = built_in_downloadable_dictionaries()
+        var spec_idx = find_downloadable_dictionary_by_language(specs, lang)
+        if spec_idx < 0:
+            return
+        var spec = specs[spec_idx]
+        var cmd = dictionary_install_command(spec.language_id, spec.url)
+        if self.install_runner.is_active():
+            self.status_bar.set_message(
+                String("Install busy; try ") + spec.display
+                    + String(" dictionary again in a moment"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        try:
+            self.install_runner.start(
+                spec.display + String(" dictionary"), cmd,
+            )
+            self._dict_install_lang = lang
+            self.status_bar.set_message(
+                String("Downloading ") + spec.display + String(" dictionary..."),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except:
+            self.status_bar.set_message(
+                String("Failed to start dictionary download"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+
+    fn _do_dict_remove(mut self, lang: String):
+        """Delete the on-disk wordlist for ``lang`` and reload the
+        speller so the words drop out of the in-memory bucket set.
+        Sync — no async work to do, so we don't go through
+        ``InstallRunner``."""
+        var specs = built_in_downloadable_dictionaries()
+        var spec_idx = find_downloadable_dictionary_by_language(specs, lang)
+        var label = String(lang)
+        if spec_idx >= 0:
+            label = specs[spec_idx].display
+        var ok = remove_user_dictionary(lang)
+        if not ok:
+            self.status_bar.set_message(
+                String("Remove failed: ") + label + String(" dictionary"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        self.speller.reload()
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.invalidate_spell()
+        self.status_bar.set_message(
+            String("Removed ") + label + String(" dictionary"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
+    fn _on_dict_install_complete(
+        mut self, result: InstallResult, screen: Rect,
+    ):
+        """React to a dictionary download finishing. Success: reload the
+        speller so the new words land in the bucket set, then invalidate
+        every editor's spell highlights. Failure: pop the curl output
+        into a new editor window — same shape as LSP / grammar / docs
+        install failures."""
+        self._dict_install_lang = String("")
+        if result.ok():
+            self.speller.reload()
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor:
+                    self.windows.windows[i].editor.invalidate_spell()
+            self.status_bar.set_message(
+                String("Installed ") + result.label,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        else:
+            var title = String("Dictionary install failed: ") + result.label \
+                + String(" (exit ") + String(result.exit_code()) + String(")")
+            var workspace = self.workspace_rect(screen)
+            var rect = self._default_window_rect(workspace)
+            var was_max = self._frontmost_maximized()
+            var body = String("$ ") + result.command + String("\n\n") \
+                + result.output
+            self.windows.add(Window.editor_window(title^, rect, body^))
+            self._open_count += 1
+            if was_max:
+                var idx = len(self.windows.windows) - 1
+                self.windows.windows[idx].toggle_maximize(workspace)
+            self.status_bar.set_message(
+                String("Dictionary install failed (exit ")
                     + String(result.exit_code()) + String(") — see new window"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
@@ -2958,6 +3085,9 @@ struct Desktop(Movable):
             return
         if len(self._grammar_install_lang.as_bytes()) > 0:
             self._on_grammar_install_complete(result, screen)
+            return
+        if len(self._dict_install_lang.as_bytes()) > 0:
+            self._on_dict_install_complete(result, screen)
             return
         var lang = self._install_lang
         self._install_lang = String("")

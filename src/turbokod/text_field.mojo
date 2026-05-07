@@ -57,6 +57,9 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import (
+    codepoint_at, is_word_codepoint, prev_codepoint_start, word_char_step,
+)
 
 
 @fieldwise_init
@@ -597,44 +600,44 @@ fn _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
     return i
 
 
-fn _is_word_byte(b: Int) -> Bool:
-    """ASCII alphanumeric or underscore — matches the editor's
-    ``_is_word_char`` so word-jump in the field feels the same as in
-    the buffer."""
-    if b == 0x5F:
-        return True
-    if 0x30 <= b and b <= 0x39:
-        return True
-    if 0x41 <= b and b <= 0x5A:
-        return True
-    if 0x61 <= b and b <= 0x7A:
-        return True
-    return False
-
-
 fn _next_word_pos(text: String, col: Int) -> Int:
     """Skip the current word run, then any non-word run. Mirrors
     ``Editor._next_word_pos`` for a single-line buffer (no row
-    wrapping). One press = one meaningful jump."""
+    wrapping). One press = one meaningful jump. Walks by UTF-8
+    codepoint so non-ASCII letters (``ä``, Cyrillic, CJK) cluster
+    with their ASCII neighbors."""
     var bytes = text.as_bytes()
     var n = len(bytes)
     if col >= n:
         return n
     var c = col
-    while c < n and _is_word_byte(Int(bytes[c])):
-        c += 1
-    while c < n and not _is_word_byte(Int(bytes[c])):
-        c += 1
+    while c < n:
+        var step = word_char_step(text, c)
+        if not step[0]:
+            break
+        c += step[1]
+    while c < n:
+        var step = word_char_step(text, c)
+        if step[0]:
+            break
+        c += step[1]
     return c
 
 
 fn _prev_word_pos(text: String, col: Int) -> Int:
     if col <= 0:
         return 0
-    var bytes = text.as_bytes()
     var c = col
-    while c > 0 and not _is_word_byte(Int(bytes[c - 1])):
-        c -= 1
-    while c > 0 and _is_word_byte(Int(bytes[c - 1])):
-        c -= 1
+    while c > 0:
+        var prev = prev_codepoint_start(text, c)
+        var info = codepoint_at(text, prev)
+        if is_word_codepoint(info[0]):
+            break
+        c = prev
+    while c > 0:
+        var prev = prev_codepoint_start(text, c)
+        var info = codepoint_at(text, prev)
+        if not is_word_codepoint(info[0]):
+            break
+        c = prev
     return c

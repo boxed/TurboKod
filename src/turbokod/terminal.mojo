@@ -548,6 +548,19 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
         # routing in Desktop can see them. Word-jump still works via
         # ``Ctrl+arrow`` and (on terminals that report modifiers for
         # arrows) ``Alt+arrow``.
+        #
+        # The bare-key shortcuts that have their own ``KEY_*`` constants
+        # also need the same translation when delivered with Alt — e.g.
+        # ``Alt+Enter`` arrives as ``ESC CR`` and must surface as
+        # ``KEY_ENTER + MOD_ALT`` so handlers checking ``k == KEY_ENTER``
+        # see it. Without this, the editor's spell-action popup (and any
+        # other Alt+Enter binding) would never fire.
+        if b1 == 0x0D or b1 == 0x0A:
+            return (Event.key_event(KEY_ENTER, MOD_ALT), 2)
+        if b1 == 0x09:
+            return (Event.key_event(KEY_TAB, MOD_ALT), 2)
+        if b1 == 0x7F or b1 == 0x08:
+            return (Event.key_event(KEY_BACKSPACE, MOD_ALT), 2)
         return (Event.key_event(UInt32(Int(b1)), MOD_ALT), 2)
 
     if b0 == 0x0D or b0 == 0x0A:

@@ -25,9 +25,12 @@ Filtering rules in ``find_misspelled_runs``:
 from std.collections.list import List
 from std.ffi import external_call
 
+from .dictionary_install import user_dictionaries_root
 from .file_io import join_path, list_directory, read_file, stat_file, write_file
 from .posix import getenv_value
-from .string_utils import split_lines_no_trailing
+from .string_utils import (
+    codepoint_at, is_word_codepoint, split_lines_no_trailing, word_char_step,
+)
 
 
 # 4096 buckets keyed by FNV-1a low bits. Bucketing keeps lookup at
@@ -151,18 +154,27 @@ struct Speller(Movable):
         self.project_root = String("")
 
     fn load_default(mut self):
-        """Try the OS-supplied wordlist locations in order, then layer
-        the user dictionary on top. Silently becomes a no-op
-        (``loaded == False``) when no OS list is found, so the editor
-        degrades to "no spell highlights" rather than spurious red
-        squiggles on every word.
+        """Layer five word sources, in order, into ``buckets``:
 
-        The user dictionary is loaded *after* the OS list so additions
-        reach ``buckets`` even when the OS list fails. In that case
-        ``loaded`` flips to True iff the user dict had at least one
-        entry; lookup will then flag everything else as misspelled,
-        which is the right behavior — the user explicitly chose what
-        was correct."""
+        1. The OS-supplied wordlist (``/usr/share/dict/words`` and
+           friends) — broad English vocabulary.
+        2. The bundled programmer wordlists under
+           ``src/turbokod/data/wordlists/`` (vendored from
+           ``streetsidesoftware/cspell-dicts``, MIT) — software terms
+           that the OS list lacks (``bitwise``, ``hashable``,
+           ``tokenizer``, ``regex``, ``bcrypt``, …) and per-language
+           jargon for the most common languages we ship grammars for.
+        3. User-installed extra-language dictionaries under
+           ``~/.config/turbokod/dictionaries/`` (German, Swedish, …).
+        4. The user dictionary — words the user has explicitly added.
+
+        Each layer is best-effort; missing files are skipped silently.
+        ``loaded`` flips True if *anything* loaded — when nothing did,
+        ``check_word`` returns True for everything so the editor degrades
+        to "no spell highlights" rather than spurious squiggles.
+
+        The user dictionary loads last so additions reach ``buckets``
+        even when the OS / bundled lists fail."""
         if self.loaded:
             return
         var candidates = List[String]()
@@ -179,6 +191,8 @@ struct Speller(Movable):
                 break
             except:
                 continue
+        self._load_bundled_wordlists()
+        self._load_user_language_dictionaries()
         var udp = user_dict_path()
         if len(udp.as_bytes()) > 0:
             try:
@@ -188,6 +202,90 @@ struct Speller(Movable):
                     self._load_words(lines)
             except:
                 pass
+
+    fn reload(mut self):
+        """Drop the in-memory main bucket set and re-run ``load_default``.
+        Used after the user installs or removes a downloaded dictionary
+        from Settings — the just-installed words show up on the next
+        spell pass without restarting the editor.
+
+        ``project_buckets`` is preserved (the project dictionary is
+        independent of installed languages); the caller decides whether
+        to additionally call ``set_project`` to refresh it."""
+        for i in range(len(self.buckets)):
+            self.buckets[i] = List[String]()
+        self.loaded = False
+        self.load_default()
+
+    fn _load_user_language_dictionaries(mut self):
+        """Load every ``<lang>.txt`` under ``~/.config/turbokod/dictionaries/``.
+
+        Each file is treated as a plain wordlist (one word per line,
+        ``#``-prefixed comments skipped, lines containing whitespace
+        rejected — the same shape as the bundled cspell-derived
+        wordlists). Missing root dir is a silent no-op so a fresh
+        machine without any installed extra languages still loads
+        cleanly."""
+        var dir = user_dictionaries_root()
+        if len(dir.as_bytes()) == 0:
+            return
+        var entries = list_directory(dir)
+        if len(entries) == 0:
+            return
+        for i in range(len(entries)):
+            var name = entries[i]
+            if not _has_txt_suffix(name):
+                continue
+            var path = join_path(dir, name)
+            try:
+                var content = read_file(path)
+                if len(content.as_bytes()) == 0:
+                    continue
+                var lines = split_lines_no_trailing(content)
+                var filtered = List[String]()
+                for j in range(len(lines)):
+                    var w = _strip_word(lines[j])
+                    if len(w.as_bytes()) == 0:
+                        continue
+                    filtered.append(w^)
+                if len(filtered) > 0:
+                    self._load_words(filtered)
+            except:
+                continue
+
+    fn _load_bundled_wordlists(mut self):
+        """Load every ``.txt`` in ``src/turbokod/data/wordlists/``.
+
+        Path is relative to cwd; ``run.sh`` cd's to the project root
+        before exec, so this resolves whether the user invokes the
+        editor via ``run.sh`` or ``pixi run``. When the directory is
+        missing (e.g. running from an installed binary in a future
+        packaging) the load is silently skipped — the OS list and user
+        dict still work."""
+        var dir = String("src/turbokod/data/wordlists")
+        var entries = list_directory(dir)
+        if len(entries) == 0:
+            return
+        for i in range(len(entries)):
+            var name = entries[i]
+            if not _has_txt_suffix(name):
+                continue
+            var path = join_path(dir, name)
+            try:
+                var content = read_file(path)
+                if len(content.as_bytes()) == 0:
+                    continue
+                var lines = split_lines_no_trailing(content)
+                var filtered = List[String]()
+                for j in range(len(lines)):
+                    var w = _strip_word(lines[j])
+                    if len(w.as_bytes()) == 0:
+                        continue
+                    filtered.append(w^)
+                if len(filtered) > 0:
+                    self._load_words(filtered)
+            except:
+                continue
 
     fn set_project(mut self, project_root: String):
         """Swap ``project_buckets`` to the dictionary for ``project_root``.
@@ -249,7 +347,7 @@ struct Speller(Movable):
 
     fn _load_project_words(mut self, words: List[String]):
         for i in range(len(words)):
-            var w = _lower(words[i])
+            var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
                 continue
             var b = _bucket(w)
@@ -266,7 +364,7 @@ struct Speller(Movable):
         Returns False when the word can't be persisted (e.g. ``$HOME``
         unset); the in-memory addition still happens so the underline
         goes away for the rest of the session."""
-        var lw = _lower(word)
+        var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
         var b = _bucket(lw)
@@ -287,7 +385,7 @@ struct Speller(Movable):
         right" vs "I, the user, consider this spelled right")."""
         if len(self.project_root.as_bytes()) == 0:
             return False
-        var lw = _lower(word)
+        var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
         var b = _bucket(lw)
@@ -305,7 +403,7 @@ struct Speller(Movable):
 
     fn _load_words(mut self, words: List[String]):
         for i in range(len(words)):
-            var w = _lower(words[i])
+            var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
                 continue
             var b = _bucket(w)
@@ -320,13 +418,41 @@ struct Speller(Movable):
         word as misspelled."""
         if not self.loaded:
             return True
-        var lw = _lower(word)
+        var lw = _normalize(word)
         if self._has(lw):
             return True
         var b = lw.as_bytes()
         var n = len(b)
-        # Possessive: foo's -> foo
+        # Possessive / contracted "is": foo's -> foo (also covers it's, he's).
         if n >= 3 and b[n - 2] == 0x27 and b[n - 1] == 0x73:
+            if self._has(_slice(lw, 0, n - 2)):
+                return True
+        # Negative contraction "n't": hasn't -> has, wouldn't -> would,
+        # didn't -> did. Most English negative contractions follow this
+        # pattern; the few that don't (won't, shan't, ain't) fall through
+        # to the "'t" stripper below or to the user dictionary.
+        if n >= 5 and b[n - 3] == 0x6E and b[n - 2] == 0x27 and b[n - 1] == 0x74:
+            if self._has(_slice(lw, 0, n - 3)):
+                return True
+        # Bare "'t" contraction: can't -> can, won't -> won. Tighter
+        # than n't because two-letter heads (ai't, sh't) are noise.
+        if n >= 5 and b[n - 2] == 0x27 and b[n - 1] == 0x74:
+            if self._has(_slice(lw, 0, n - 2)):
+                return True
+        # "'re": they're -> they, you're -> you.
+        if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x72 and b[n - 1] == 0x65:
+            if self._has(_slice(lw, 0, n - 3)):
+                return True
+        # "'ve": they've -> they, would've -> would.
+        if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x76 and b[n - 1] == 0x65:
+            if self._has(_slice(lw, 0, n - 3)):
+                return True
+        # "'ll": they'll -> they, you'll -> you.
+        if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x6C and b[n - 1] == 0x6C:
+            if self._has(_slice(lw, 0, n - 3)):
+                return True
+        # "'d": they'd -> they, would'd... rare but cheap to support.
+        if n >= 5 and b[n - 2] == 0x27 and b[n - 1] == 0x64:
             if self._has(_slice(lw, 0, n - 2)):
                 return True
         # Plural: foos -> foo, dishes -> dish
@@ -386,21 +512,42 @@ fn find_misspelled_runs(
         # We swallow the whole run so a word like ``foo123`` doesn't
         # produce a clean ``foo`` lookup (it's part of a token, not
         # English prose).
-        if _is_letter(c) or _is_digit(c) or c == 0x5F:
+        var step = word_char_step(text, i)
+        if step[0] or _is_digit(c) or c == 0x5F:
             var run_start = i
             var letters_only = True
             while i < n:
                 var d = b[i]
-                if _is_letter(d):
-                    pass
-                elif _is_digit(d) or d == 0x5F:
+                if _is_digit(d) or d == 0x5F:
                     letters_only = False
+                    i += 1
+                elif (
+                    d == 0x27
+                    and i > run_start and _is_letter(b[i - 1])
+                    and i + 1 < n and _is_letter(b[i + 1])
+                ):
+                    # Apostrophe between two ASCII letters — part of a
+                    # contraction or possessive (it's, hasn't, Bob's).
+                    # Keep it in the run so check_word's contraction
+                    # strippers can fire; without this, "hasn't"
+                    # tokenizes as ["hasn", "t"] and the head ("hasn")
+                    # is flagged as a misspelling.
+                    i += 1
                 else:
-                    break
-                i += 1
+                    var s = word_char_step(text, i)
+                    if s[0]:
+                        # Letter (ASCII or Unicode). Walks by UTF-8
+                        # codepoint so non-ASCII letters (``ä``, Cyrillic,
+                        # CJK) join the run instead of breaking it.
+                        i += s[1]
+                    else:
+                        break
             if not letters_only:
                 continue
-            # Pure-letter run. Apply word-shape filters.
+            # Pure-letter run (possibly with internal apostrophes). Apply
+            # word-shape filters. Counts use the raw byte length, which
+            # includes the apostrophe — fine because apostrophe-containing
+            # words (it's, hasn't) are at least 4 chars by construction.
             var word_end = i
             var word_len = word_end - run_start
             if word_len < 4:
@@ -434,18 +581,144 @@ fn _bucket(w: String) -> Int:
     return Int(h % _N_BUCKETS)
 
 
-fn _lower(s: String) -> String:
-    var b = s.as_bytes()
+fn _normalize(s: String) -> String:
+    """Bucket-lookup key: lowercase + Latin-1 case fold + NFD→NFC compose.
+
+    Three things happen here, all driven by examples that bit us in
+    practice:
+
+    * **Case fold** ASCII A-Z and the Latin-1 supplement (À-Ö, Ø-Þ).
+      Without the second range, ``Övrigt`` (Ö = ``0xC3 0x96``) hashed
+      to a different bucket than the on-disk lowercase ``övrigt``
+      (ö = ``0xC3 0xB6``) and was flagged as a misspelling.
+    * **NFD → NFC compose** the Latin-1 letters. macOS-sourced text
+      sometimes ships in NFD form: ``Ö`` arrives as ``O`` + combining
+      diaeresis (``U+004F U+0308``) instead of the precomposed
+      ``U+00D6``. Both forms fold to the same key here so the lookup
+      doesn't depend on which path the bytes took into the editor.
+    * **UTF-8 in/out** so the key works for any input the user types
+      or pastes. Non-Latin scripts pass through unchanged (they already
+      have only one form), and 4-byte codepoints (CJK, emoji) are
+      preserved untouched.
+
+    Used both at load time (when populating buckets) and at lookup
+    time, so producer and consumer agree on the canonical form."""
+    var n_bytes = len(s.as_bytes())
+    if n_bytes == 0:
+        return String("")
     var out = List[UInt8]()
-    for i in range(len(b)):
-        var c = b[i]
-        if c >= 0x41 and c <= 0x5A:
-            out.append(c + 0x20)
-        else:
-            out.append(c)
+    var i = 0
+    while i < n_bytes:
+        var step = codepoint_at(s, i)
+        var cp = step[0]
+        var sz = step[1]
+        var lower_cp = _lower_codepoint(cp)
+        # Peek the next codepoint — if it's a combining diacritic that
+        # composes with this base letter, emit the precomposed form
+        # instead and skip past both. Falls through when the next
+        # codepoint isn't a known mark or doesn't combine.
+        var next_i = i + sz
+        if next_i < n_bytes:
+            var next_step = codepoint_at(s, next_i)
+            var combined = _compose_diacritic(lower_cp, next_step[0])
+            if combined > 0:
+                _emit_utf8(out, combined)
+                i = next_i + next_step[1]
+                continue
+        _emit_utf8(out, lower_cp)
+        i += sz
     if len(out) == 0:
         return String("")
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+
+
+fn _lower_codepoint(cp: Int) -> Int:
+    """Lowercase ``cp`` if it's an upper-case ASCII or Latin-1 letter.
+
+    Skips ``×`` (U+00D7) — it shares its slot with the multiplication
+    sign in the Latin-1 supplement and isn't a letter. ``ß`` (U+00DF)
+    has no precomposed Latin-1 uppercase form, so we leave it alone
+    (the modern uppercase ``ẞ`` at U+1E9E is rare in everyday text)."""
+    if 0x41 <= cp and cp <= 0x5A:
+        return cp + 0x20
+    if 0xC0 <= cp and cp <= 0xDE and cp != 0xD7:
+        return cp + 0x20
+    return cp
+
+
+fn _compose_diacritic(base: Int, mark: Int) -> Int:
+    """Compose ``base`` (an ASCII or Latin-1 lowercase letter) with
+    ``mark`` (a combining diacritic) into a precomposed Latin-1
+    supplement codepoint, or return 0 when no composition is known.
+
+    Covers the diacritics European languages we ship dictionaries
+    for actually use: grave, acute, circumflex, tilde, diaeresis,
+    ring above, cedilla. Letters outside this list (e.g. composed
+    Latin Extended-A like ``ē`` U+0113) aren't folded — the spell
+    bucket just stores them in their decomposed form, which is fine
+    as long as both producer and consumer agree (and they do, since
+    both go through this normalizer)."""
+    if mark == 0x300:
+        if base == 0x61: return 0xE0    # à
+        if base == 0x65: return 0xE8    # è
+        if base == 0x69: return 0xEC    # ì
+        if base == 0x6F: return 0xF2    # ò
+        if base == 0x75: return 0xF9    # ù
+    elif mark == 0x301:
+        if base == 0x61: return 0xE1    # á
+        if base == 0x65: return 0xE9    # é
+        if base == 0x69: return 0xED    # í
+        if base == 0x6F: return 0xF3    # ó
+        if base == 0x75: return 0xFA    # ú
+        if base == 0x79: return 0xFD    # ý
+    elif mark == 0x302:
+        if base == 0x61: return 0xE2    # â
+        if base == 0x65: return 0xEA    # ê
+        if base == 0x69: return 0xEE    # î
+        if base == 0x6F: return 0xF4    # ô
+        if base == 0x75: return 0xFB    # û
+    elif mark == 0x303:
+        if base == 0x61: return 0xE3    # ã
+        if base == 0x6E: return 0xF1    # ñ
+        if base == 0x6F: return 0xF5    # õ
+    elif mark == 0x308:
+        if base == 0x61: return 0xE4    # ä
+        if base == 0x65: return 0xEB    # ë
+        if base == 0x69: return 0xEF    # ï
+        if base == 0x6F: return 0xF6    # ö
+        if base == 0x75: return 0xFC    # ü
+        if base == 0x79: return 0xFF    # ÿ
+    elif mark == 0x30A:
+        if base == 0x61: return 0xE5    # å
+    elif mark == 0x327:
+        if base == 0x63: return 0xE7    # ç
+    return 0
+
+
+fn _emit_utf8(mut out: List[UInt8], cp: Int):
+    """Append ``cp``'s UTF-8 encoding to ``out``. Handles the full
+    1- to 4-byte range so any normalized codepoint round-trips
+    cleanly. Negative / oversized inputs are clamped to ``?``
+    rather than emitted as malformed UTF-8."""
+    if cp < 0 or cp > 0x10FFFF:
+        out.append(UInt8(0x3F))
+        return
+    if cp < 0x80:
+        out.append(UInt8(cp))
+        return
+    if cp < 0x800:
+        out.append(UInt8(0xC0 | (cp >> 6)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+        return
+    if cp < 0x10000:
+        out.append(UInt8(0xE0 | (cp >> 12)))
+        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+        return
+    out.append(UInt8(0xF0 | (cp >> 18)))
+    out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
+    out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+    out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
 fn _slice(s: String, start: Int, end: Int) -> String:
@@ -470,6 +743,42 @@ fn _has_xml_suffix(name: String) -> Bool:
         b[n - 4] == 0x2E and b[n - 3] == 0x78
         and b[n - 2] == 0x6D and b[n - 1] == 0x6C
     )
+
+
+fn _has_txt_suffix(name: String) -> Bool:
+    var b = name.as_bytes()
+    var n = len(b)
+    if n < 4:
+        return False
+    return (
+        b[n - 4] == 0x2E and b[n - 3] == 0x74
+        and b[n - 2] == 0x78 and b[n - 1] == 0x74
+    )
+
+
+fn _strip_word(line: String) -> String:
+    """Strip a wordlist line: trim ASCII whitespace, drop comment-only
+    (``#``-prefixed) lines, and reject anything containing whitespace
+    after trimming (entries from cspell are sometimes weird shapes —
+    e.g. ``en cspell-tools: keep-case`` headers — that we don't want
+    polluting the buckets)."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var i = 0
+    while i < n and (b[i] == 0x20 or b[i] == 0x09):
+        i += 1
+    var j = n
+    while j > i and (b[j - 1] == 0x20 or b[j - 1] == 0x09 or b[j - 1] == 0x0D):
+        j -= 1
+    if j <= i:
+        return String("")
+    if b[i] == 0x23:    # '#'
+        return String("")
+    for k in range(i, j):
+        var c = b[k]
+        if c == 0x20 or c == 0x09:
+            return String("")
+    return String(StringSlice(unsafe_from_utf8=b[i:j]))
 
 
 fn _parse_idea_dict_words(content: String, mut out: List[String]):
