@@ -32,6 +32,9 @@ from turbokod.session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
 )
+from turbokod.breakpoint_store import (
+    StoredBreakpoint, encode_breakpoints, load_breakpoints, save_breakpoints,
+)
 from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
@@ -7279,6 +7282,82 @@ fn test_session_load_missing_returns_empty() raises:
     assert_equal(s.focused, -1)
 
 
+fn test_breakpoint_store_round_trip() raises:
+    """Persisted breakpoints decode to the same fields they were
+    encoded from. Inside-project paths are stored project-relative so
+    the file survives moving the project directory; absolute paths
+    pass through. ``load_breakpoints`` re-anchors relatives onto the
+    current root."""
+    var root = String("/tmp/turbokod_bp_test_round_trip")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var bps = List[StoredBreakpoint]()
+    bps.append(StoredBreakpoint(
+        root + String("/src/foo.mojo"), 41, String(""),
+    ))
+    bps.append(StoredBreakpoint(
+        root + String("/src/foo.mojo"), 87, String("i > 10"),
+    ))
+    bps.append(StoredBreakpoint(
+        String("/etc/hosts"), 0, String(""),
+    ))
+    assert_true(save_breakpoints(root, bps))
+    var loaded = load_breakpoints(root)
+    assert_equal(len(loaded), 3)
+    # First two are inside the project — they round-trip absolute via
+    # the project-relative encoding.
+    assert_equal(loaded[0].path, root + String("/src/foo.mojo"))
+    assert_equal(loaded[0].line, 41)
+    assert_equal(loaded[0].condition, String(""))
+    assert_equal(loaded[1].path, root + String("/src/foo.mojo"))
+    assert_equal(loaded[1].line, 87)
+    assert_equal(loaded[1].condition, String("i > 10"))
+    # Outside the project — kept absolute on disk, loaded verbatim.
+    assert_equal(loaded[2].path, String("/etc/hosts"))
+    assert_equal(loaded[2].line, 0)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+fn test_breakpoint_store_load_missing_returns_empty() raises:
+    """No file → empty list. Mirrors the session-store contract."""
+    var bps = load_breakpoints(String("/tmp/turbokod_bp_does_not_exist_xyz"))
+    assert_equal(len(bps), 0)
+
+
+fn test_breakpoint_store_per_user_path() raises:
+    """The on-disk file lives under ``per_user/<USER>/``. Verify by
+    overriding ``$USER`` for the test and checking the file appears at
+    the expected sub-path. Without this isolation an accidental
+    ``git add .turbokod`` on a checkout would replace a teammate's
+    breakpoint set with the committer's."""
+    var root = String("/tmp/turbokod_bp_per_user_test")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    # Stash and override $USER so the directory name is predictable.
+    var user_env = String("USER=alice_test\0")
+    _ = external_call["putenv", Int32](user_env.unsafe_ptr())
+    var bps = List[StoredBreakpoint]()
+    bps.append(StoredBreakpoint(
+        root + String("/main.py"), 7, String(""),
+    ))
+    assert_true(save_breakpoints(root, bps))
+    var expected = root + String("/.turbokod/per_user/alice_test/breakpoints.json")
+    assert_true(stat_file(expected).ok)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
 fn test_session_relative_path_round_trip() raises:
     """``_session_relative`` strips the project prefix; the inverse
     re-anchors. Files outside the project keep their absolute form
@@ -9918,6 +9997,9 @@ fn main() raises:
     test_text_field_clipboard_key_round_trips_through_clipboard()
     test_session_round_trip()
     test_session_load_missing_returns_empty()
+    test_breakpoint_store_round_trip()
+    test_breakpoint_store_load_missing_returns_empty()
+    test_breakpoint_store_per_user_path()
     test_session_relative_path_round_trip()
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_restores_session_from_disk()
