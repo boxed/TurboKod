@@ -101,6 +101,7 @@ from .debug_pane import (
 )
 from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
+    python_debugger_spec_for_venv, python_venv_has_debugpy,
 )
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, which
@@ -109,6 +110,7 @@ from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
     detect_project_language,
+    python_venv_dir,
     resolve_python_interpreter, resolved_cwd, resolved_program,
     save_project_targets,
     write_all_targets,
@@ -163,6 +165,13 @@ comptime _PA_DOC_INSTALL      = String("docs:install")
 # extension has no bundled TextMate grammar but is in the downloadable-
 # grammar registry.
 comptime _PA_GRAMMAR_INSTALL  = String("grammar:install")
+# "Install debugpy into venv?" — fired from F5 / Cmd+D when the project
+# venv lacks debugpy and the user is starting a Python debug session.
+# Different from ``_PA_LSP_INSTALL`` because the install path is venv-
+# scoped (``<venv>/bin/python -m pip install debugpy``) rather than the
+# spec's ``install_hint``, and a yes-answer must retry the deferred
+# ``dap.start`` once the install completes.
+comptime _PA_DEBUGPY_INSTALL  = String("debugpy:install")
 # "Open settings view" — surfaces the fullscreen Settings widget the
 # host wires into the hamburger menu. Routed through dispatch_action
 # so the host doesn't need to manually toggle ``settings.open()``.
@@ -509,6 +518,30 @@ struct Desktop(Movable):
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
     var _lsp_install_prompted: List[String]
+    # Venv directories we've already auto-installed the Python LSP into
+    # for this session. Starting a Python debug session in a venv
+    # triggers a one-shot ``pip install pyright`` so the editor's LSP
+    # features cover venv-installed packages — but only once per venv,
+    # so re-running Cmd+D doesn't keep firing pip.
+    var _venv_lsp_installed: List[String]
+    # Venv directories we've already prompted the user about installing
+    # debugpy into. One-prompt-per-venv-per-session — re-asking on every
+    # F5 after the user said no would be hostile, and re-asking after a
+    # successful install would race the pip-installed bits.
+    var _debugpy_install_prompted: List[String]
+    # Set while the in-flight ``install_runner`` job is a debugpy install,
+    # so ``_on_install_complete`` can dispatch to the debugpy-specific
+    # completion path (which retries the deferred ``dap.start``) instead
+    # of treating it as an LSP install.
+    var _debugpy_install_active: Bool
+    # Stash for the ``dap.start`` parameters that were deferred while we
+    # asked the user about installing debugpy. Replayed by
+    # ``_on_debugpy_install_complete`` after the pip install finishes.
+    # Empty ``_pending_dap_program`` = nothing pending.
+    var _pending_dap_program: String
+    var _pending_dap_cwd: String
+    var _pending_dap_args: List[String]
+    var _pending_dap_venv_dir: String
     # Extension of a deferred install prompt: a file was opened while
     # another modal was active, so the prompt couldn't fire then. Drained
     # at the top of ``paint`` whenever no modal is in the way. Empty
@@ -676,6 +709,13 @@ struct Desktop(Movable):
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
         self._lsp_install_prompted = List[String]()
+        self._venv_lsp_installed = List[String]()
+        self._debugpy_install_prompted = List[String]()
+        self._debugpy_install_active = False
+        self._pending_dap_program = String("")
+        self._pending_dap_cwd = String("")
+        self._pending_dap_args = List[String]()
+        self._pending_dap_venv_dir = String("")
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
         self._install_lang = String("")
@@ -3129,6 +3169,10 @@ struct Desktop(Movable):
         if len(self._dict_install_lang.as_bytes()) > 0:
             self._on_dict_install_complete(result, screen)
             return
+        if self._debugpy_install_active:
+            self._debugpy_install_active = False
+            self._on_debugpy_install_complete(result, screen)
+            return
         var lang = self._install_lang
         self._install_lang = String("")
         if result.ok():
@@ -3707,9 +3751,22 @@ struct Desktop(Movable):
         if self.dap.is_failed() or self.dap.is_terminated():
             self.dap.reset_for_restart()
         var cwd = self.project.value() if self.project else String(".")
-        self.dap.start(
-            self.dap_specs[deb_idx], path, cwd, List[String](),
+        var venv_dir = python_venv_dir(cwd)
+        var spec = python_debugger_spec_for_venv(
+            self.dap_specs[deb_idx], venv_dir,
         )
+        # Ask before pip-installing debugpy. If the prompt opens, defer
+        # the dap.start — ``_on_debugpy_install_complete`` replays it
+        # (and runs the LSP auto-install at that point) once the user
+        # accepts and pip finishes. Ordered ahead of the LSP install
+        # so the single-slot ``install_runner`` is free for the debugpy
+        # job we're about to kick off if the user says yes.
+        if self._maybe_prompt_debugpy_install(
+            lang_id, venv_dir, path, cwd, List[String](),
+        ):
+            return
+        self._maybe_install_python_lsp_in_venv(lang_id, venv_dir)
+        self.dap.start(spec, path, cwd, List[String]())
         # Surface the resolved spawn line to the pane log immediately.
         # Pre-stderr-drain debugging this was guesswork ("did it pick
         # debugpy-adapter or python -m debugpy.adapter?"); a single
@@ -3898,7 +3955,26 @@ struct Desktop(Movable):
             self.project.value(), target.cwd, program_seed,
         )
         var args = target.args.copy()
-        self.dap.start(self.dap_specs[deb_idx], program, cwd, args^)
+        # Python in a project venv: redirect the adapter to ``<venv>/bin``
+        # so the debugger runs against the same interpreter the program
+        # does, and kick off a one-shot LSP install into the venv so the
+        # editor's completion / diagnostics also see venv-installed
+        # packages. Both no-op for non-Python targets and projects
+        # without a venv, so this is safe to apply unconditionally.
+        var venv_dir = python_venv_dir(self.project.value())
+        var spec = python_debugger_spec_for_venv(
+            self.dap_specs[deb_idx], venv_dir,
+        )
+        # See ``_debug_start_or_continue`` — same prompt-before-start
+        # gating, with the deferred replay rebuilding the spawn-line
+        # log + status flash from the same fields the user authored
+        # the target with.
+        if self._maybe_prompt_debugpy_install(
+            target.debug_language, venv_dir, program, cwd, args.copy(),
+        ):
+            return
+        self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
+        self.dap.start(spec, program, cwd, args^)
         self.debug_pane.clear()
         if len(self.dap.spawn_argv) > 0:
             var line = String("$ ")
@@ -4860,6 +4936,207 @@ struct Desktop(Movable):
                 + String(" docs (~few MB)?")
         )
 
+    fn _maybe_prompt_debugpy_install(
+        mut self, language_id: String, venv_dir: String,
+        program: String, cwd: String, var args: List[String],
+    ) -> Bool:
+        """Open a confirm dialog to install debugpy into ``venv_dir``
+        when starting a Python debug session in a venv that doesn't
+        have debugpy yet. Returns True iff a prompt was opened — the
+        caller must skip ``dap.start`` and let
+        ``_on_debugpy_install_complete`` replay it after pip finishes.
+
+        No-op (returns False) for non-Python languages, missing /
+        empty venv, a venv that already has debugpy, an in-flight
+        install, an active modal, or a venv we've already prompted
+        about this session.
+        """
+        if language_id != String("python") \
+                or len(venv_dir.as_bytes()) == 0:
+            return False
+        var py = join_path(venv_dir, String("bin/python"))
+        var info_py = stat_file(py)
+        if not info_py.ok or info_py.is_dir():
+            return False
+        if python_venv_has_debugpy(venv_dir):
+            return False
+        for i in range(len(self._debugpy_install_prompted)):
+            if self._debugpy_install_prompted[i] == venv_dir:
+                return False
+        if self.install_runner.is_active():
+            return False
+        if self.prompt.active or self.confirm_dialog.active \
+                or self.quick_open.active \
+                or self.symbol_pick.active or self.find_symbol.active \
+                or self.project_find.active \
+                or self.local_changes.active \
+                or self.save_as_dialog.active or self.doc_pick.active:
+            return False
+        self._debugpy_install_prompted.append(venv_dir)
+        self._pending_action = _PA_DEBUGPY_INSTALL
+        self._pending_dap_venv_dir = venv_dir
+        self._pending_dap_program = program
+        self._pending_dap_cwd = cwd
+        self._pending_dap_args = args^
+        self.confirm_dialog.open(
+            String("debugpy not installed in ") + venv_dir
+                + String(" — install it now?")
+        )
+        return True
+
+    fn _clear_pending_dap_start(mut self):
+        """Drop the deferred ``dap.start`` parameters. Called whenever
+        the prompt-and-install flow exits without retrying — user said
+        no, install spawn failed, install errored out."""
+        self._pending_dap_program = String("")
+        self._pending_dap_cwd = String("")
+        self._pending_dap_args = List[String]()
+        self._pending_dap_venv_dir = String("")
+
+    fn _on_debugpy_install_complete(
+        mut self, result: InstallResult, screen: Rect,
+    ):
+        """Replay the deferred ``dap.start`` after the debugpy pip
+        install finishes. On failure, surface the captured pip output
+        in a new editor window — same shape as the LSP / grammar /
+        docs install failure paths — and clear the pending start so a
+        subsequent F5 starts fresh.
+        """
+        if not result.ok():
+            var title = String("debugpy install failed: ") + result.label \
+                + String(" (exit ") + String(result.exit_code()) + String(")")
+            var workspace = self.workspace_rect(screen)
+            var rect = self._default_window_rect(workspace)
+            var was_max = self._frontmost_maximized()
+            var body = String("$ ") + result.command + String("\n\n") \
+                + result.output
+            self.windows.add(Window.editor_window(title^, rect, body^))
+            self._open_count += 1
+            if was_max:
+                var idx = len(self.windows.windows) - 1
+                self.windows.windows[idx].toggle_maximize(workspace)
+            self.status_bar.set_message(
+                String("debugpy install failed (exit ")
+                    + String(result.exit_code()) + String(") — see new window"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            self._clear_pending_dap_start()
+            return
+        self.status_bar.set_message(
+            String("Installed debugpy"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+        # Nothing to retry? The user must have triggered another action
+        # mid-install that cleared the stash. Bail cleanly.
+        if len(self._pending_dap_program.as_bytes()) == 0:
+            return
+        var deb_idx = find_debugger_for_language(
+            self.dap_specs, String("python"),
+        )
+        if deb_idx < 0:
+            self._clear_pending_dap_start()
+            return
+        var venv_dir = self._pending_dap_venv_dir
+        var spec = python_debugger_spec_for_venv(
+            self.dap_specs[deb_idx], venv_dir,
+        )
+        if self.dap.is_failed() or self.dap.is_terminated():
+            self.dap.reset_for_restart()
+        var program = self._pending_dap_program
+        var cwd = self._pending_dap_cwd
+        var args = self._pending_dap_args.copy()
+        self._clear_pending_dap_start()
+        self._maybe_install_python_lsp_in_venv(String("python"), venv_dir)
+        self.dap.start(spec, program, cwd, args^)
+        self.debug_pane.clear()
+        if len(self.dap.spawn_argv) > 0:
+            var line = String("$ ")
+            for k in range(len(self.dap.spawn_argv)):
+                if k > 0:
+                    line = line + String(" ")
+                line = line + self.dap.spawn_argv[k]
+            self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
+        self.debug_pane.visible = True
+
+    fn _maybe_install_python_lsp_in_venv(
+        mut self, language_id: String, venv_dir: String,
+    ):
+        """Kick off ``<venv>/bin/python -m pip install <lsp-package>`` if
+        a Python debug session just started in a venv that doesn't
+        already have the LSP installed. One-shot per venv per session
+        so re-running Cmd+D doesn't keep firing pip; the
+        ``install_runner`` is the same single-slot subprocess used by
+        manual installs, so a clash with another in-flight install
+        downgrades to a quiet skip rather than an error popup.
+
+        The install command is derived from the LSP spec's
+        ``install_hint`` — typically ``pip install pyright`` — rewritten
+        to call the venv's pip module directly. That keeps the package
+        landing inside the venv regardless of the user's ambient PATH.
+        """
+        if language_id != String("python") \
+                or len(venv_dir.as_bytes()) == 0:
+            return
+        var py = join_path(venv_dir, String("bin/python"))
+        var info_py = stat_file(py)
+        if not info_py.ok or info_py.is_dir():
+            return
+        # Already installed?  Probe for the canonical pyright binary
+        # plus a couple of fallbacks; any hit means the venv has *some*
+        # Python LSP and we leave the user's choice alone.
+        var probes = List[String]()
+        probes.append(String("pyright-langserver"))
+        probes.append(String("basedpyright-langserver"))
+        probes.append(String("pylsp"))
+        probes.append(String("jedi-language-server"))
+        for i in range(len(probes)):
+            var info = stat_file(join_path(
+                venv_dir, String("bin/") + probes[i],
+            ))
+            if info.ok and not info.is_dir():
+                return
+        # Already kicked off in this session?
+        for i in range(len(self._venv_lsp_installed)):
+            if self._venv_lsp_installed[i] == venv_dir:
+                return
+        if self.install_runner.is_active():
+            return
+        # Resolve the package name from the spec's install_hint
+        # (currently "pip install pyright"). Fall back to "pyright" if
+        # the hint is empty or shaped differently — better to install
+        # the canonical default than to do nothing.
+        var package = String("pyright")
+        for i in range(len(self.lsp_specs)):
+            if self.lsp_specs[i].language_id == String("python"):
+                var hint = self.lsp_specs[i].install_hint
+                var prefix = String("pip install ")
+                var hb = hint.as_bytes()
+                var pb = prefix.as_bytes()
+                if len(hb) > len(pb):
+                    var matches = True
+                    for k in range(len(pb)):
+                        if hb[k] != pb[k]:
+                            matches = False
+                            break
+                    if matches:
+                        package = String(StringSlice(
+                            unsafe_from_utf8=hb[len(pb):len(hb)],
+                        ))
+                break
+        self._venv_lsp_installed.append(venv_dir)
+        var cmd = py + String(" -m pip install ") + package
+        try:
+            self.install_runner.start(
+                String("python LSP into venv"), cmd,
+            )
+            self._install_lang = String("python")
+            self.status_bar.set_message(
+                String("Installing ") + package + String(" into ") + venv_dir,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        except:
+            pass
+
     fn _start_doc_install(mut self, lang: String):
         """Spawn the ``curl`` install for the docset matching ``lang``,
         through the same ``InstallRunner`` that handles LSP installs.
@@ -5204,6 +5481,47 @@ struct Desktop(Movable):
             if yes:
                 self._start_grammar_install(lang)
             return Optional[String]()
+        if pa == _PA_DEBUGPY_INSTALL:
+            if not yes:
+                # User declined — don't start the debug session, drop
+                # the deferred parameters, and let them re-trigger F5
+                # later (we won't re-prompt this session for this venv
+                # because the prompt-once latch is already set).
+                self._clear_pending_dap_start()
+                self.status_bar.set_message(
+                    String("debugger needs debugpy in the venv"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+                return Optional[String]()
+            var venv_dir = self._pending_dap_venv_dir
+            var py = join_path(venv_dir, String("bin/python"))
+            var cmd = py + String(" -m pip install debugpy")
+            if self.install_runner.is_active():
+                # Race: another install fired between the prompt opening
+                # and the user clicking yes. Drop the deferred start so
+                # the user can retry F5 once the runner is free.
+                self._clear_pending_dap_start()
+                self.status_bar.set_message(
+                    String("Install busy; retry debug in a moment"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+                return Optional[String]()
+            try:
+                self.install_runner.start(
+                    String("debugpy into venv"), cmd,
+                )
+                self._debugpy_install_active = True
+                self.status_bar.set_message(
+                    String("Installing debugpy into ") + venv_dir,
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+            except:
+                self._clear_pending_dap_start()
+                self.status_bar.set_message(
+                    String("Failed to start debugpy install"),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+            return Optional[String]()
         if pa == _PA_LSP_INSTALL:
             # Yes → run the install command as ``sh -c <hint>`` and show
             # a non-modal progress popup. The clipboard copy is preserved
@@ -5267,11 +5585,12 @@ struct Desktop(Movable):
                     )
             return Optional[String]()
         if pa == _PA_DOC_INSTALL or pa == _PA_GRAMMAR_INSTALL \
-                or pa == _PA_LSP_INSTALL:
+                or pa == _PA_LSP_INSTALL or pa == _PA_DEBUGPY_INSTALL:
             # The confirm dialog is what drives these actions now —
             # if we ever land here it means a stale pending tag
             # leaked into a regular prompt submit. Drop it cleanly.
             self._pending_arg = String("")
+            self._clear_pending_dap_start()
             return Optional[String]()
         if pa == EDITOR_GOTO:
             var idx = self._focused_editor_idx()

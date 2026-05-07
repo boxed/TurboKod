@@ -2396,11 +2396,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         var attr = Attr(LIGHT_GREEN, BLUE)
         var sel_attr = Attr(LIGHT_GREEN, CYAN)
         canvas.fill(view, String(" "), attr)
-        # Three stacked left gutters: the debugger gutter (breakpoint
-        # dot and exec arrow, owned by Desktop) sits at the very left,
-        # then the line-number gutter (right-aligned, one trailing
-        # space), then the optional blame gutter ("<sha> <author>").
-        # Any of them can be zero-width.
+        # Stacked left gutters: line-number gutter sits at the very
+        # left (right-aligned, one trailing space), then the debugger
+        # gutter (breakpoint dot and exec arrow, owned by Desktop),
+        # then the git-changes column, then the optional blame gutter
+        # ("<sha> <author>"). Any of them can be zero-width.
         var dap_gutter = self.gutter_width
         var ln_gutter = self._line_number_gutter()
         var gc_gutter = self._git_changes_gutter()
@@ -2442,40 +2442,41 @@ struct Editor(ImplicitlyCopyable, Movable):
                 # buffer row when either soft-wrap is off (one segment per
                 # row) or this segment starts at byte 0 of the row.
                 var is_first_seg = (not self.soft_wrap) or (seg_start == 0)
-                if dap_gutter > 0 and is_first_seg:
-                    for k in range(len(self.breakpoint_lines)):
-                        if self.breakpoint_lines[k] == buf_row:
-                            canvas.set(
-                                view.a.x, sy_g,
-                                Cell(String("●"), bp_attr, 1),
-                            )
-                            break
-                    if buf_row == self.exec_line:
-                        var ax = view.a.x + (1 if dap_gutter >= 2 else 0)
-                        canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
                 if ln_gutter > 0 and is_first_seg:
                     var num_str = String(buf_row + 1)
                     var num_w = len(num_str.as_bytes())
                     # Right-align inside the line-number gutter, leaving
                     # the trailing column as a one-cell separator.
-                    var sx = view.a.x + dap_gutter + (ln_gutter - 1) - num_w
-                    if sx < view.a.x + dap_gutter:
-                        sx = view.a.x + dap_gutter
+                    var sx = view.a.x + (ln_gutter - 1) - num_w
+                    if sx < view.a.x:
+                        sx = view.a.x
                     _ = canvas.put_text(
                         Point(sx, sy_g), num_str, ln_attr,
                         view.a.x + total_gutter,
                     )
+                if dap_gutter > 0 and is_first_seg:
+                    for k in range(len(self.breakpoint_lines)):
+                        if self.breakpoint_lines[k] == buf_row:
+                            canvas.set(
+                                view.a.x + ln_gutter, sy_g,
+                                Cell(String("●"), bp_attr, 1),
+                            )
+                            break
+                    if buf_row == self.exec_line:
+                        var ax = view.a.x + ln_gutter \
+                            + (1 if dap_gutter >= 2 else 0)
+                        canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
                 if gc_gutter > 0 and is_first_seg \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
                     if status != GIT_CHANGE_NONE:
                         var bar_attr = Attr(LIGHT_GRAY, BLUE)
-                        var gx = view.a.x + dap_gutter + ln_gutter
+                        var gx = view.a.x + ln_gutter + dap_gutter
                         canvas.set(gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row < len(self.blame_lines):
                     var bl = self.blame_lines[buf_row]
-                    var bx = view.a.x + dap_gutter + ln_gutter + gc_gutter
+                    var bx = view.a.x + ln_gutter + dap_gutter + gc_gutter
                     var bl_right = bx + bl_gutter - 1
                     _ = canvas.put_text(
                         Point(bx, sy_g), bl.commit, ln_attr, bl_right,

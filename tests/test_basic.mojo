@@ -64,8 +64,8 @@ from turbokod.project import (
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
     detect_project_language,
-    load_project_targets, resolve_python_interpreter, resolved_cwd,
-    resolved_program, save_project_targets,
+    load_project_targets, python_venv_dir, resolve_python_interpreter,
+    resolved_cwd, resolved_program, save_project_targets,
 )
 from turbokod.buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit,
@@ -111,6 +111,7 @@ from turbokod.dap_dispatch import (
 from turbokod.debugger_config import (
     DAP_REQUEST_LAUNCH, DebuggerSpec,
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
+    python_debugger_spec_for_venv,
 )
 from turbokod.highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
@@ -6113,6 +6114,94 @@ fn test_resolve_python_interpreter() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
+fn test_python_venv_dir_finds_dotvenv() raises:
+    """``python_venv_dir`` returns the venv root when ``<root>/.venv``
+    exists with a ``bin/python`` inside; an empty bare directory
+    called ``venv`` (no ``bin/python``) doesn't count, so we don't
+    mis-detect random folders just because of their name."""
+    var root = _temp_path(String("_pyvenv_dir"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    # No venv yet → empty (modulo an ambient $VIRTUAL_ENV in the test
+    # runner; we only assert "not pointing at our root's venv").
+    var no_venv = python_venv_dir(root)
+    assert_true(no_venv != join_path(root, String(".venv")))
+    assert_true(no_venv != join_path(root, String("venv")))
+    # An empty ``venv`` dir without a ``bin/python`` shouldn't count.
+    var bare_venv = join_path(root, String("venv"))
+    _ = external_call["mkdir", Int32](
+        (bare_venv + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var still_no_venv = python_venv_dir(root)
+    assert_true(still_no_venv != bare_venv)
+    # Drop a real ``.venv/bin/python`` and confirm the lookup finds it.
+    var dot_venv = join_path(root, String(".venv"))
+    _ = external_call["mkdir", Int32](
+        (dot_venv + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var dot_bin = join_path(dot_venv, String("bin"))
+    _ = external_call["mkdir", Int32](
+        (dot_bin + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var dot_py = join_path(dot_bin, String("python"))
+    assert_true(write_file(dot_py, String("#!/bin/sh\nexec /usr/bin/false\n")))
+    assert_equal(python_venv_dir(root), dot_venv)
+    # Cleanup.
+    _ = external_call["unlink", Int32]((dot_py + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dot_bin + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dot_venv + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((bare_venv + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+fn test_python_debugger_spec_for_venv_prepends_venv_python() raises:
+    """``python_debugger_spec_for_venv`` adds a ``<venv>/bin/python -m
+    debugpy.adapter`` candidate at the front of the python spec's
+    candidate list when ``<venv>/bin/python`` exists, leaving the
+    PATH-resolved candidates as a fallback. Non-Python specs and
+    empty venv dirs pass through untouched."""
+    var specs = built_in_debuggers()
+    var py_idx = find_debugger_for_language(specs, String("python"))
+    assert_true(py_idx >= 0)
+    var py_spec = specs[py_idx]
+    var orig_count = len(py_spec.candidates)
+    # Empty venv → identity.
+    var same = python_debugger_spec_for_venv(py_spec, String(""))
+    assert_equal(len(same.candidates), orig_count)
+    # Non-Python → identity even with a real-looking venv path.
+    var go_idx = find_debugger_for_language(specs, String("go"))
+    assert_true(go_idx >= 0)
+    var go_same = python_debugger_spec_for_venv(
+        specs[go_idx], String("/tmp/whatever"),
+    )
+    assert_equal(len(go_same.candidates), len(specs[go_idx].candidates))
+    # Build a real venv layout and confirm a venv-resolved candidate
+    # gets prepended.
+    var root = _temp_path(String("_pyvenv_spec"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var bin_dir = join_path(root, String("bin"))
+    _ = external_call["mkdir", Int32](
+        (bin_dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var py = join_path(bin_dir, String("python"))
+    assert_true(write_file(py, String("#!/bin/sh\nexec /usr/bin/false\n")))
+    var adapted = python_debugger_spec_for_venv(py_spec, root)
+    assert_true(len(adapted.candidates) > orig_count)
+    # First candidate's argv[0] is the venv's python.
+    assert_equal(adapted.candidates[0].argv[0], py)
+    # Original candidates still tail the list as a fallback.
+    assert_equal(
+        adapted.candidates[len(adapted.candidates) - 1].argv[0],
+        py_spec.candidates[len(py_spec.candidates) - 1].argv[0],
+    )
+    _ = external_call["unlink", Int32]((py + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((bin_dir + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
 fn test_detect_project_language_python_markers() raises:
     """``detect_project_language`` flags any project root that
     contains a known Python marker file (``pyproject.toml`` /
@@ -9801,6 +9890,8 @@ fn main() raises:
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
     test_resolve_python_interpreter()
+    test_python_venv_dir_finds_dotvenv()
+    test_python_debugger_spec_for_venv_prepends_venv_python()
     test_detect_project_language_python_markers()
     test_detect_project_language_no_match()
     test_status_bar_tab_hit_test()

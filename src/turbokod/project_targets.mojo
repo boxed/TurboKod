@@ -486,18 +486,34 @@ fn resolve_python_interpreter(
     """
     if program != String("python") and program != String("python3"):
         return program
-    var candidates = List[String]()
+    var dir = python_venv_dir(project_root)
+    if len(dir.as_bytes()) > 0:
+        return join_path(dir, String("bin/python"))
+    return program
+
+
+fn python_venv_dir(project_root: String) -> String:
+    """Return the absolute path to the project's Python virtualenv root,
+    or empty when none was found. Same lookup order as
+    ``resolve_python_interpreter`` — project-local ``.venv`` / ``venv``
+    win over a shell-activated ``$VIRTUAL_ENV``, which wins over
+    ``$CONDA_PREFIX``. Each candidate has to actually contain a
+    ``bin/python`` to count: a stale empty directory called ``venv``
+    sitting in the project root shouldn't fool us.
+    """
+    var dirs = List[String]()
     if len(project_root.as_bytes()) > 0:
-        candidates.append(join_path(project_root, String(".venv/bin/python")))
-        candidates.append(join_path(project_root, String("venv/bin/python")))
+        dirs.append(join_path(project_root, String(".venv")))
+        dirs.append(join_path(project_root, String("venv")))
     var venv_env = getenv_value(String("VIRTUAL_ENV"))
     if len(venv_env.as_bytes()) > 0:
-        candidates.append(join_path(venv_env, String("bin/python")))
+        dirs.append(venv_env)
     var conda_env = getenv_value(String("CONDA_PREFIX"))
     if len(conda_env.as_bytes()) > 0:
-        candidates.append(join_path(conda_env, String("bin/python")))
-    for i in range(len(candidates)):
-        var info = stat_file(candidates[i])
+        dirs.append(conda_env)
+    for i in range(len(dirs)):
+        var py = join_path(dirs[i], String("bin/python"))
+        var info = stat_file(py)
         if info.ok and not info.is_dir():
-            return candidates[i]
-    return program
+            return dirs[i]
+    return String("")

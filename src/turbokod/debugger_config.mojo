@@ -28,6 +28,7 @@ entries here when the need is real, not speculative.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .file_io import join_path, list_directory, stat_file
 from .json import (
     JsonValue, json_array, json_bool, json_int, json_object, json_str,
 )
@@ -187,6 +188,95 @@ fn built_in_debuggers() -> List[DebuggerSpec]:
     ))
 
     return out^
+
+
+fn python_debugger_spec_for_venv(
+    spec: DebuggerSpec, venv_dir: String,
+) -> DebuggerSpec:
+    """Return a copy of ``spec`` with venv-resolved adapter candidates
+    prepended, so a Python debug session uses the venv's debugpy
+    instead of whatever's first on ``$PATH``.
+
+    Two venv-aware candidates are added in priority order:
+
+      1. ``<venv>/bin/debugpy-adapter`` — the script wrapper installed
+         by ``pip install debugpy``. Preferred when present.
+      2. ``<venv>/bin/python -m debugpy.adapter`` — the explicit form
+         for venvs whose pip didn't drop the script wrapper (some
+         conda layouts).
+
+    The original PATH-resolved candidates remain as a fallback so a
+    half-installed venv doesn't break a previously-working debug flow.
+    No-op for non-Python specs and for empty ``venv_dir``.
+    """
+    if spec.language_id != String("python") \
+            or len(venv_dir.as_bytes()) == 0:
+        return spec
+    var bin_dir = join_path(venv_dir, String("bin"))
+    var venv_cands = List[AdapterCandidate]()
+    var direct = join_path(bin_dir, String("debugpy-adapter"))
+    var info_d = stat_file(direct)
+    if info_d.ok and not info_d.is_dir():
+        venv_cands.append(_argv1(direct))
+    var py = join_path(bin_dir, String("python"))
+    var info_p = stat_file(py)
+    if info_p.ok and not info_p.is_dir():
+        venv_cands.append(_argv3(py, String("-m"), String("debugpy.adapter")))
+    if len(venv_cands) == 0:
+        return spec
+    var combined = venv_cands^
+    for i in range(len(spec.candidates)):
+        combined.append(spec.candidates[i])
+    return DebuggerSpec(
+        spec.language_id, combined^, spec.request_kind, spec.name,
+    )
+
+
+fn python_venv_has_debugpy(venv_dir: String) -> Bool:
+    """Return True if ``venv_dir`` has debugpy importable.
+
+    Two probes:
+
+      1. ``<venv>/bin/debugpy-adapter`` — script wrapper from a normal
+         ``pip install debugpy`` (the common case).
+      2. ``<venv>/lib/python<X>.<Y>/site-packages/debugpy/`` — covers
+         conda layouts where the script wrapper isn't dropped, and any
+         other env where pip put the package directly.
+
+    Both checks are filesystem-only (no subprocess), so this is cheap
+    enough to call on every debug start. Empty ``venv_dir`` → False.
+    """
+    if len(venv_dir.as_bytes()) == 0:
+        return False
+    var bin_dir = join_path(venv_dir, String("bin"))
+    var direct = join_path(bin_dir, String("debugpy-adapter"))
+    var info_d = stat_file(direct)
+    if info_d.ok and not info_d.is_dir():
+        return True
+    var lib_dir = join_path(venv_dir, String("lib"))
+    var entries = list_directory(lib_dir)
+    var prefix = String("python")
+    var pb = prefix.as_bytes()
+    for i in range(len(entries)):
+        var name = entries[i]
+        var nb = name.as_bytes()
+        if len(nb) <= len(pb):
+            continue
+        var matches = True
+        for k in range(len(pb)):
+            if nb[k] != pb[k]:
+                matches = False
+                break
+        if not matches:
+            continue
+        var pkg = join_path(
+            join_path(join_path(lib_dir, name), String("site-packages")),
+            String("debugpy"),
+        )
+        var info_pkg = stat_file(pkg)
+        if info_pkg.ok and info_pkg.is_dir():
+            return True
+    return False
 
 
 fn find_debugger_for_language(

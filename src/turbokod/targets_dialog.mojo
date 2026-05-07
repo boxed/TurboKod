@@ -45,7 +45,6 @@ from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, LIGHT_RED, RED, WHITE,
 )
-from .debugger_config import built_in_debuggers
 from .dropdown import (
     DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
     DROPDOWN_HIT_POPUP, Dropdown,
@@ -57,6 +56,7 @@ from .events import (
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect, compute_dialog_rect
+from .language_config import built_in_servers
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import TextField
 from .window import (
@@ -203,6 +203,12 @@ struct TargetsDialog(Movable):
     var program_tf: TextField
     var args_tf: TextField
     var cwd_tf: TextField
+    var lang_dropdown: Dropdown
+    """Persistent language picker. Stateful so clicking the strip
+    actually opens a popup the user can pick from — a stateless
+    rebuild-each-paint dropdown silently drops the toggle, making
+    clicks feel like no-ops. Re-seeded from the selected target's
+    ``debug_language`` whenever the selection changes."""
     # Cached input rects for mouse routing (captured during paint).
     var _name_rect: Rect
     var _program_rect: Rect
@@ -228,6 +234,7 @@ struct TargetsDialog(Movable):
         self.program_tf = TextField()
         self.args_tf = TextField()
         self.cwd_tf = TextField()
+        self.lang_dropdown = _build_lang_dropdown(String(""))
         self._name_rect = Rect(0, 0, 0, 0)
         self._program_rect = Rect(0, 0, 0, 0)
         self._args_rect = Rect(0, 0, 0, 0)
@@ -278,6 +285,7 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self.lang_dropdown = _build_lang_dropdown(String(""))
         # Drop any in-flight press latches so re-opening the dialog
         # starts with a clean button row.
         for i in range(len(self._buttons)):
@@ -406,6 +414,7 @@ struct TargetsDialog(Movable):
             self.program_tf = TextField()
             self.args_tf = TextField()
             self.cwd_tf = TextField()
+            self.lang_dropdown = _build_lang_dropdown(String(""))
             return
         var t = self.entries[self.selected]
         self.name_tf = TextField()
@@ -416,6 +425,7 @@ struct TargetsDialog(Movable):
         self.args_tf.set_text(_join_args(t.args))
         self.cwd_tf = TextField()
         self.cwd_tf.set_text(t.cwd)
+        self.lang_dropdown = _build_lang_dropdown(t.debug_language)
 
     fn _commit_fields_to_selected(mut self):
         """Write the editable strip values back into
@@ -486,6 +496,11 @@ struct TargetsDialog(Movable):
         self._paint_form(canvas, rect)
         # Bottom button row.
         self._paint_buttons(canvas, rect)
+        # Language dropdown popup overlays the rest of the dialog when
+        # open — paint last so it sits on top of the form and buttons.
+        if self.lang_dropdown.is_open:
+            var lang_ir = _input_rect(rect, _row_for_focus(_FOCUS_LANG))
+            self.lang_dropdown.paint_popup(canvas, lang_ir, screen)
 
     fn _paint_list(mut self, mut canvas: Canvas, list_rect: Rect):
         """Paint each list entry on a cyan field — no border. The
@@ -558,7 +573,6 @@ struct TargetsDialog(Movable):
             var hx = _label_at(rect, 6).x
             _ = canvas.put_text(Point(hx, rect.a.y + 6), hint, hint_attr)
             return
-        var t = self.entries[self.selected]
         _ = canvas.put_text(_label_at(rect, 2), String("Name:"), bg)
         _ = canvas.put_text(_label_at(rect, 4), String("Program:"), bg)
         _ = canvas.put_text(_label_at(rect, 6), String("Args:"), bg)
@@ -573,13 +587,6 @@ struct TargetsDialog(Movable):
         _ = canvas.put_text(
             _label_at(rect, 11), String("Debug language:"), bg,
         )
-        # Helper line under the language dropdown — explains the
-        # cycler interaction and the meaning of the empty slot.
-        _ = canvas.put_text(
-            Point(_input_rect(rect, 11).a.x, rect.a.y + 12),
-            String("(left/right to choose; (none) disables Cmd+D)"),
-            hint_attr, rect.b.x - 2,
-        )
         # Copy each field out before the call: ``_paint_input_tf``
         # takes ``mut self``, so an aliased ``self.name_tf`` reference
         # would fail Mojo's exclusivity check.
@@ -591,7 +598,7 @@ struct TargetsDialog(Movable):
         self._paint_input_tf(canvas, rect, _FOCUS_ARGS, args_tf)
         var cwd_tf = self.cwd_tf.copy()
         self._paint_input_tf(canvas, rect, _FOCUS_CWD, cwd_tf)
-        self._paint_lang_dropdown(canvas, rect, t.debug_language)
+        self._paint_lang_dropdown(canvas, rect)
 
     fn _paint_input_tf(
         mut self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
@@ -612,34 +619,18 @@ struct TargetsDialog(Movable):
         elif focus == _FOCUS_CWD:     self._cwd_rect = ir
         tf.paint(canvas, ir, self.focus == focus)
 
-    fn _lang_dropdown(self, current: String) -> Dropdown:
-        """Build a fresh ``Dropdown`` for the debug-language slot,
-        seeded from ``current``. The option list is the empty slot
-        (Cmd+D disabled) followed by every ``DebuggerSpec.language_id``
-        in the built-in registry — adding a new spec automatically
-        surfaces in the dialog without touching this file."""
-        var options = List[String]()
-        options.append(String(""))
-        var specs = built_in_debuggers()
-        for i in range(len(specs)):
-            options.append(specs[i].language_id)
-        var dd = Dropdown(options^, 0)
-        dd.set_value(current)
-        return dd^
-
-    fn _paint_lang_dropdown(
-        self, mut canvas: Canvas, dialog: Rect, current: String,
-    ):
+    fn _paint_lang_dropdown(self, mut canvas: Canvas, dialog: Rect):
         """Render the debug-language dropdown using the same focus
         colours as ``_paint_input`` so the form reads as a uniform
-        row of editable strips."""
+        row of editable strips. Reads from the persistent
+        ``lang_dropdown`` so its open / scroll / highlight state
+        survives across paints."""
         var row = _row_for_focus(_FOCUS_LANG)
         if row < 0:
             return
         var ir = _input_rect(dialog, row)
         var has_focus = self.focus == _FOCUS_LANG
-        var dd = self._lang_dropdown(current)
-        dd.paint(
+        self.lang_dropdown.paint(
             canvas, ir, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
@@ -707,6 +698,17 @@ struct TargetsDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
+        # Open dropdown popup eats Esc / Up / Down / Enter before the
+        # dialog's own handlers: arrow keys navigate inside the popup,
+        # Esc closes just the popup (not the whole dialog), and Enter
+        # commits.
+        if self.focus == _FOCUS_LANG and self.lang_dropdown.is_open:
+            if k == KEY_ESC:
+                self.lang_dropdown.close()
+                return True
+            if self.lang_dropdown.handle_key(event):
+                self._commit_lang_dropdown()
+                return True
         if k == KEY_ESC:
             self.close()
             return True
@@ -715,6 +717,12 @@ struct TargetsDialog(Movable):
             self.focus = self._next_focus(self.focus, backward)
             return True
         if k == KEY_ENTER:
+            # Enter on the closed lang dropdown opens the popup —
+            # cheaper to discover than left/right cycling. Once open,
+            # the branch above takes over.
+            if self.focus == _FOCUS_LANG:
+                self.lang_dropdown.open()
+                return True
             return self._activate_focus()
         if k == KEY_UP:
             if self.focus == _FOCUS_LIST:
@@ -725,9 +733,15 @@ struct TargetsDialog(Movable):
             if self.focus == _FOCUS_LIST:
                 self._move_selection(1)
                 return True
+            # Down on the closed lang dropdown opens it (matches the
+            # convention of every native picker).
+            if self.focus == _FOCUS_LANG:
+                self.lang_dropdown.open()
+                return True
             return True
-        # Lang dropdown left/right cycles options; for editable inputs
-        # we let the field handle them (cursor movement, selection).
+        # Lang dropdown left/right cycles options without opening the
+        # popup; for editable inputs we let the field handle them
+        # (cursor movement, selection).
         if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
             self._cycle_lang(event)
             return True
@@ -756,16 +770,23 @@ struct TargetsDialog(Movable):
         return True
 
     fn _cycle_lang(mut self, event: Event):
-        """Step the debug-language dropdown in response to a Left /
-        Right press. Round-trips through ``Dropdown`` so unknown
-        loaded values are preserved (see ``Dropdown.set_value``)."""
+        """Forward a Left / Right press to the persistent dropdown. The
+        dropdown ignores these when collapsed (its primary interaction
+        is the popup), but routing through it keeps any future cycle
+        behavior in one place."""
+        if self.selected < 0:
+            return
+        if not self.lang_dropdown.handle_key(event):
+            return
+        self._commit_lang_dropdown()
+
+    fn _commit_lang_dropdown(mut self):
+        """Push the dropdown's currently-committed value back into the
+        selected target so Save round-trips it."""
         if self.selected < 0:
             return
         var t = self._selected_target()
-        var dd = self._lang_dropdown(t.debug_language)
-        if not dd.handle_key(event):
-            return
-        t.debug_language = dd.value()
+        t.debug_language = self.lang_dropdown.value()
         self._put_selected(t^)
 
     fn _activate_focus(mut self) -> Bool:
@@ -860,6 +881,21 @@ struct TargetsDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        # Open dropdown popup gets first dibs on the click — same as the
+        # keyboard branch. ``handle_mouse`` toggles open on body click,
+        # commits + closes on a popup-row click, and closes on an
+        # outside click.
+        var lang_row = _row_for_focus(_FOCUS_LANG)
+        var lang_ir = _input_rect(rect, lang_row) if lang_row >= 0 \
+                else Rect(0, 0, 0, 0)
+        if self.lang_dropdown.is_open:
+            var hit = self.lang_dropdown.handle_mouse(lang_ir, screen, event)
+            if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
+                self._commit_lang_dropdown()
+                self.focus = _FOCUS_LANG
+                return True
+            # On OUTSIDE the popup auto-closed; let the click fall
+            # through to whatever it was actually targeting.
         # Buttons run their own press / move / release state machine
         # (see ``ShadowButton.handle_mouse``). Dispatch first so a
         # captured button continues to receive drag-motion + release
@@ -957,16 +993,33 @@ struct TargetsDialog(Movable):
         return True
 
     fn _click_lang(mut self, ir: Rect, screen: Rect, event: Event):
-        """Forward a click on the language field to the dropdown.
-        The dropdown is rebuilt fresh each paint so it has no
-        persistent open state — body clicks just set focus (already
-        done by the caller); popup interactions are unreachable
-        from this stateless instance.
-        """
+        """Forward a click on the language strip to the persistent
+        dropdown. A click on the closed strip toggles the popup open;
+        when already open, popup-row clicks are routed through the
+        ``handle_mouse`` branch at the top of the dispatcher."""
         if self.selected < 0:
             return
-        var t = self._selected_target()
-        var dd = self._lang_dropdown(t.debug_language)
-        _ = dd.handle_mouse(ir, screen, event)
-        t.debug_language = dd.value()
-        self._put_selected(t^)
+        var hit = self.lang_dropdown.handle_mouse(ir, screen, event)
+        if hit != DROPDOWN_HIT_NONE:
+            self._commit_lang_dropdown()
+
+
+# --- helpers --------------------------------------------------------------
+
+
+fn _build_lang_dropdown(var current: String) -> Dropdown:
+    """Empty slot ("(none)" — disables Cmd+D) followed by every known
+    language id from the LSP catalog. The catalog is the broadest list
+    of programming languages we ship: anything with a Helix entry
+    surfaces here automatically. ``set_value`` preserves a current id
+    that isn't in the list (e.g. a hand-edited config) by appending it
+    as a synthetic entry rather than silently snapping to a different
+    choice."""
+    var options = List[String]()
+    options.append(String(""))
+    var specs = built_in_servers()
+    for i in range(len(specs)):
+        options.append(specs[i].language_id)
+    var dd = Dropdown(options^, 0)
+    dd.set_value(current^)
+    return dd^
