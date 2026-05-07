@@ -1109,8 +1109,42 @@ impl App {
             }
         }
         let bytes: Cow<'static, [u8]> = match &ev.logical_key {
-            Key::Named(NamedKey::Enter) => Cow::Borrowed(b"\r"),
-            Key::Named(NamedKey::Backspace) => Cow::Borrowed(b"\x7f"),
+            Key::Named(NamedKey::Enter) => {
+                // Bare Enter is plain CR. With any modifier, route
+                // through modifyOtherKeys (``CSI 27 ; <mod> ; 13 ~``)
+                // so the embedded app sees Alt+Enter / Cmd+Enter as
+                // KEY_ENTER + the modifier — without this, e.g. the
+                // editor's spell-action popup (Alt+Enter on a
+                // misspelled word) never fires because the wrapper
+                // strips the modifier and just sends \r.
+                let m = modifier_param(mods);
+                if m == 1 {
+                    Cow::Borrowed(b"\r")
+                } else {
+                    Cow::Owned(
+                        format!(
+                            "\x1b[27;{};13~",
+                            mod_other_param(mods, false),
+                        ).into_bytes()
+                    )
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                // Same deal as Enter — modifiers on Backspace get
+                // routed through modifyOtherKeys so they're not
+                // silently dropped on the floor.
+                let m = modifier_param(mods);
+                if m == 1 {
+                    Cow::Borrowed(b"\x7f")
+                } else {
+                    Cow::Owned(
+                        format!(
+                            "\x1b[27;{};127~",
+                            mod_other_param(mods, false),
+                        ).into_bytes()
+                    )
+                }
+            }
             Key::Named(NamedKey::Tab) => {
                 // Bare Tab: HT (0x09). With any modifier, emit CSI Z so the
                 // embedded app sees Shift+Tab as the inverse of Tab — a bare

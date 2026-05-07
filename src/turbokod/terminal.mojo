@@ -555,12 +555,9 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
         # ``KEY_ENTER + MOD_ALT`` so handlers checking ``k == KEY_ENTER``
         # see it. Without this, the editor's spell-action popup (and any
         # other Alt+Enter binding) would never fire.
-        if b1 == 0x0D or b1 == 0x0A:
-            return (Event.key_event(KEY_ENTER, MOD_ALT), 2)
-        if b1 == 0x09:
-            return (Event.key_event(KEY_TAB, MOD_ALT), 2)
-        if b1 == 0x7F or b1 == 0x08:
-            return (Event.key_event(KEY_BACKSPACE, MOD_ALT), 2)
+        var named = _named_key_for_cp(Int(b1))
+        if named != UInt32(0):
+            return (Event.key_event(named, MOD_ALT), 2)
         return (Event.key_event(UInt32(Int(b1)), MOD_ALT), 2)
 
     if b0 == 0x0D or b0 == 0x0A:
@@ -594,6 +591,27 @@ fn _csi_mods_from(mod_num: Int) -> UInt8:
     if (raw & 4) != 0: mods = mods | MOD_CTRL
     if (raw & 8) != 0: mods = mods | MOD_META
     return mods
+
+
+fn _named_key_for_cp(cp: Int) -> UInt32:
+    """If ``cp`` is one of the C0 control bytes that has its own
+    ``KEY_*`` constant — CR/LF for Enter, TAB for Tab, BS/DEL for
+    Backspace — return that constant. Returns ``0`` for everything
+    else.
+
+    Used by every terminal path that emits ``(codepoint, mods)`` pairs
+    (ESC+printable, kitty ``CSI <cp>;<mod>u``, xterm modifyOtherKeys=2
+    ``CSI 27;<mod>;<cp>~``) so that a modified Enter / Tab / Backspace
+    surfaces with the right ``KEY_*`` constant. Without this,
+    handlers checking ``k == KEY_ENTER`` miss ``Alt+Enter`` etc.
+    """
+    if cp == 0x0D or cp == 0x0A:
+        return KEY_ENTER
+    if cp == 0x09:
+        return KEY_TAB
+    if cp == 0x7F or cp == 0x08:
+        return KEY_BACKSPACE
+    return UInt32(0)
 
 
 fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
@@ -744,6 +762,12 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         if len(params) == 3 and params[0] == 27:
             # modifyOtherKeys=2: CSI 27 ; <mod> ; <codepoint> ~
             var mods = _csi_mods_from(params[1])
+            # Special-key codepoints (CR/LF/TAB/BS) need to surface
+            # with their ``KEY_*`` constants so modified-Enter etc.
+            # match downstream ``k == KEY_ENTER`` checks.
+            var named = _named_key_for_cp(params[2])
+            if named != UInt32(0):
+                return (Event.key_event(named, mods), consumed)
             var nk = _normalize_ctrl_letter(params[2], mods)
             return (Event.key_event(nk[0], nk[1]), consumed)
         return (Event(), consumed)
@@ -760,12 +784,18 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
         # CSI 1 ; <mod> Z — Shift+Tab on terminals that report modifiers.
         if final == 0x5A: return (Event.key_event(KEY_TAB, mods), consumed)
         if final == 0x75:  # 'u' — kitty kbd protocol
+            var named = _named_key_for_cp(num1)
+            if named != UInt32(0):
+                return (Event.key_event(named, mods), consumed)
             var nk = _normalize_ctrl_letter(num1, mods)
             return (Event.key_event(nk[0], nk[1]), consumed)
         return (Event(), consumed)
 
     if len(params) == 1 and final == 0x75:
         # Kitty kbd protocol with no explicit modifier (single param).
+        var named = _named_key_for_cp(params[0])
+        if named != UInt32(0):
+            return (Event.key_event(named, MOD_NONE), consumed)
         var nk = _normalize_ctrl_letter(params[0], MOD_NONE)
         return (Event.key_event(nk[0], nk[1]), consumed)
 
