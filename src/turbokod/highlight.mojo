@@ -85,14 +85,25 @@ fn highlight_for_extension(
     the tokenizer); when that happens we silently fall through to
     the generic tokenizer rather than letting an exception kill the
     editor's render pass.
+
+    After the base tokenization, we run the IntelliJ-style language-
+    injection pass — ``# language=html`` / ``// language=html``
+    markers re-tokenize the *next* string literal's body with the
+    named grammar.
     """
+    var hls: List[Highlight]
     var tm_opt = _try_textmate(ext, lines)
     if tm_opt:
-        return tm_opt.value().copy()
-    var spec_opt = _lang_spec_for_ext(ext)
-    if spec_opt:
-        return _highlight_generic(lines, spec_opt.value())
-    return List[Highlight]()
+        hls = tm_opt.value().copy()
+    else:
+        var spec_opt = _lang_spec_for_ext(ext)
+        if spec_opt:
+            hls = _highlight_generic(lines, spec_opt.value())
+        else:
+            hls = List[Highlight]()
+    var injection_registry = GrammarRegistry()
+    _apply_intellij_injections(lines, hls, injection_registry)
+    return hls^
 
 
 fn _grammar_path_for_ext(ext: String) -> String:
@@ -258,7 +269,9 @@ fn highlight_incremental(
     """
     var path = _grammar_path_for_ext(ext)
     if len(path.as_bytes()) == 0:
-        return _fallback_for_extension(ext, lines)
+        var fb = _fallback_for_extension(ext, lines)
+        _apply_intellij_injections(lines, fb, registry)
+        return fb^
 
     # Grammar load — registry hit if the extension is already known,
     # else cold load + register. The registry is process-shared so
@@ -273,7 +286,9 @@ fn highlight_incremental(
             registry.grammars.append(g^)
             grammar_idx = len(registry.keys) - 1
         except:
-            return _fallback_for_extension(ext, lines)
+            var fb = _fallback_for_extension(ext, lines)
+            _apply_intellij_injections(lines, fb, registry)
+            return fb^
 
     # Per-Editor state: invalidate when the extension changes.
     if cache.ext != ext:
@@ -295,7 +310,10 @@ fn highlight_incremental(
             registry.grammars[grammar_idx], cache, lines,
         )
         if len(hls) == 0 and _has_nonempty_line(lines):
-            return _fallback_for_extension(ext, lines)
+            var fb = _fallback_for_extension(ext, lines)
+            _apply_intellij_injections(lines, fb, registry)
+            return fb^
+        _apply_intellij_injections(lines, hls, registry)
         return hls^
 
     # Incremental path. Start state = post-state at end of line
@@ -344,7 +362,10 @@ fn highlight_incremental(
     cache.highlights = out.copy()
 
     if len(out) == 0 and _has_nonempty_line(lines):
-        return _fallback_for_extension(ext, lines)
+        var fb = _fallback_for_extension(ext, lines)
+        _apply_intellij_injections(lines, fb, registry)
+        return fb^
+    _apply_intellij_injections(lines, out, registry)
     return out^
 
 
@@ -1038,3 +1059,403 @@ fn _starts_with(line: String, i: Int, needle: List[UInt8]) -> Bool:
         if b[i + k] != needle[k]:
             return False
     return True
+
+
+# --- IntelliJ-style language injection ------------------------------------
+#
+# IntelliJ recognizes a marker comment like ``# language=html`` or
+# ``// language=html`` as a hint that the *next* string literal's body
+# should be tokenized as the named language. We do the same: after the
+# base TextMate / generic tokenizer runs, we scan for the marker, find
+# the following string's body, and re-tokenize the body with the
+# injected grammar — overlaying its highlights on top of (and
+# replacing the body-internal portion of) the host's string highlights.
+#
+# Recognized markers (anywhere on a line; we just substring-match on
+# ``language=NAME``):
+#
+#   * ``# language=html``        (Python, Ruby, shell)
+#   * ``// language=html``       (JS/TS/Rust/Go/C/C++)
+#   * ``<!-- language=html -->`` (HTML/XML)
+#   * ``/* language=html */``    (CSS, C-family)
+#
+# Recognized string openings: ``"..."``, ``'...'``, `````...`````, plus
+# triple variants ``"""..."""`` / ``'''...'''``. Backslash escapes are
+# honored for single-char strings; triple-quoted strings span lines.
+# Unterminated strings extend to end-of-buffer (single) / end-of-line
+# (single-char) — same fallback the host tokenizer uses, just without
+# the escape-counting bookkeeping.
+
+
+@fieldwise_init
+struct _LangMarker(ImplicitlyCopyable, Movable):
+    """Result of ``_find_language_marker``. ``end_col`` is the byte
+    offset on the same line just past the language name, so the
+    string-search can start there."""
+    var lang: String
+    var end_col: Int
+
+
+@fieldwise_init
+struct _StringBody(ImplicitlyCopyable, Movable):
+    """Byte-position bounds of an injected string's *body* (inside
+    the quotes). ``end_col`` is exclusive (= the position of the
+    closing quote)."""
+    var start_row: Int
+    var start_col: Int
+    var end_row: Int
+    var end_col: Int
+
+
+fn _apply_intellij_injections(
+    lines: List[String], mut hls: List[Highlight],
+    mut registry: GrammarRegistry,
+):
+    """Scan ``lines`` for IntelliJ-style ``language=NAME`` markers and
+    re-tokenize the next string literal's body with the named
+    grammar. Multiple markers per buffer are honored; each marker
+    consumes the string it points at, so a marker can't double-apply
+    to a string already injected by a prior marker."""
+    var n = len(lines)
+    var i = 0
+    while i < n:
+        var marker_opt = _find_language_marker(lines[i])
+        if marker_opt:
+            var marker = marker_opt.value()
+            # Look at the rest of the marker line first so an inline
+            # form (``/* language=html */ "..."``) finds the string on
+            # the same line. Falls through to subsequent lines via
+            # ``_find_string_body_after``.
+            var body_opt = _find_string_body_after(
+                lines, i, marker.end_col,
+            )
+            if body_opt:
+                var body = body_opt.value()
+                _inject_grammar(
+                    marker.lang, lines, body, hls, registry,
+                )
+                # Skip past the body so a marker inside the injected
+                # body can't re-trigger.
+                i = body.end_row
+        i += 1
+
+
+fn _find_language_marker(line: String) -> Optional[_LangMarker]:
+    """Find a ``language=NAME`` substring in ``line``. Returns the
+    lowercased language name plus the byte offset just past it.
+
+    No comment-marker check: we accept the substring anywhere on the
+    line. False positives are rare in practice (the literal string
+    ``language=`` followed by an identifier is uncommon outside of a
+    deliberate injection comment), and gating on per-language comment
+    syntax would tie this helper to the host file's extension."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var needle = String("language=")
+    var nb = needle.as_bytes()
+    var nlen = len(nb)
+    var i = 0
+    while i + nlen <= n:
+        var matched = True
+        for k in range(nlen):
+            if b[i + k] != nb[k]:
+                matched = False
+                break
+        if matched:
+            var j = i + nlen
+            while j < n and _is_lang_char(b[j]):
+                j += 1
+            if j > i + nlen:
+                var raw = String(StringSlice(unsafe_from_utf8=b[i + nlen:j]))
+                return Optional[_LangMarker](_LangMarker(
+                    _to_lower_ascii(raw), j,
+                ))
+        i += 1
+    return Optional[_LangMarker]()
+
+
+fn _is_lang_char(c: UInt8) -> Bool:
+    var v = Int(c)
+    if 0x30 <= v and v <= 0x39:
+        return True
+    if 0x41 <= v and v <= 0x5A:
+        return True
+    if 0x61 <= v and v <= 0x7A:
+        return True
+    if v == 0x2D or v == 0x5F or v == 0x2B:
+        return True
+    return False
+
+
+fn _to_lower_ascii(s: String) -> String:
+    var b = s.as_bytes()
+    var out = String("")
+    for k in range(len(b)):
+        var v = Int(b[k])
+        if 0x41 <= v and v <= 0x5A:
+            v = v + 0x20
+        out = out + chr(v)
+    return out^
+
+
+fn _find_string_body_after(
+    lines: List[String], start_row: Int, start_col: Int,
+) -> Optional[_StringBody]:
+    """Find the body bounds of the next string literal at or after
+    ``(start_row, start_col)``.
+
+    A "string" here is anything opened by ``"``, ``'``, or `````,
+    optionally tripled. The scan walks bytes forward until it hits an
+    opening quote; everything before that is treated as inert — we do
+    *not* try to skip nested comments or attribute-equals signs.
+    Worst case: a quote inside an unrelated comment looks like the
+    string, and the injection points at the wrong range. The
+    correctness cost is the wrong attr on a few cells; the alternative
+    (host-aware comment tracking) doesn't scale across file types."""
+    var row = start_row
+    var col = start_col
+    if col < 0:
+        col = 0
+    while row < len(lines):
+        var b = lines[row].as_bytes()
+        var n = len(b)
+        if col > n:
+            col = n
+        while col < n:
+            var ch = b[col]
+            if ch == 0x22 or ch == 0x27 or ch == 0x60:
+                if col + 3 <= n and b[col + 1] == ch and b[col + 2] == ch:
+                    return _scan_triple_string(lines, row, col, ch)
+                return _scan_single_string(lines, row, col, ch)
+            col += 1
+        row += 1
+        col = 0
+    return Optional[_StringBody]()
+
+
+fn _scan_triple_string(
+    lines: List[String], open_row: Int, open_col: Int, ch: UInt8,
+) -> Optional[_StringBody]:
+    var body_start_row = open_row
+    var body_start_col = open_col + 3
+    var row = body_start_row
+    var col = body_start_col
+    while row < len(lines):
+        var b = lines[row].as_bytes()
+        var n = len(b)
+        # On the opening row only, ``col`` may be at or past EOL when
+        # ``"""`` sits at column 0/1/2 of the next line. The inner
+        # loop's bound handles that.
+        var c = col
+        while c + 3 <= n:
+            if b[c] == ch and b[c + 1] == ch and b[c + 2] == ch:
+                return Optional[_StringBody](_StringBody(
+                    body_start_row, body_start_col, row, c,
+                ))
+            c += 1
+        row += 1
+        col = 0
+    # Unterminated triple: body extends to end of buffer.
+    var last_row = len(lines) - 1
+    var last_col = 0
+    if last_row >= 0:
+        last_col = len(lines[last_row].as_bytes())
+    if last_row < body_start_row:
+        last_row = body_start_row
+        last_col = body_start_col
+    return Optional[_StringBody](_StringBody(
+        body_start_row, body_start_col, last_row, last_col,
+    ))
+
+
+fn _scan_single_string(
+    lines: List[String], open_row: Int, open_col: Int, ch: UInt8,
+) -> Optional[_StringBody]:
+    """Single-character string: stays on one line. Backslash escapes
+    consume the next byte. Unterminated strings end at end-of-line —
+    same fallback the generic tokenizer uses."""
+    var body_start_row = open_row
+    var body_start_col = open_col + 1
+    var b = lines[body_start_row].as_bytes()
+    var n = len(b)
+    var col = body_start_col
+    while col < n:
+        if b[col] == 0x5C and col + 1 < n:
+            col += 2
+            continue
+        if b[col] == ch:
+            return Optional[_StringBody](_StringBody(
+                body_start_row, body_start_col, body_start_row, col,
+            ))
+        col += 1
+    return Optional[_StringBody](_StringBody(
+        body_start_row, body_start_col, body_start_row, n,
+    ))
+
+
+fn _ext_for_language(lang: String) -> String:
+    """Map an IntelliJ language name to the file extension our
+    grammar registry keys on. Empty string means "we don't have a
+    grammar bundled for this language" — the marker becomes a
+    no-op."""
+    if lang == String("html") or lang == String("htm"):
+        return String("html")
+    if lang == String("css"):
+        return String("css")
+    if lang == String("javascript") or lang == String("js"):
+        return String("js")
+    if lang == String("typescript") or lang == String("ts"):
+        return String("ts")
+    if lang == String("json"):
+        return String("json")
+    if lang == String("python") or lang == String("py"):
+        return String("py")
+    if lang == String("rust") or lang == String("rs"):
+        return String("rs")
+    if lang == String("go") or lang == String("golang"):
+        return String("go")
+    if lang == String("c"):
+        return String("c")
+    if lang == String("cpp") or lang == String("c++") \
+            or lang == String("cxx"):
+        return String("cpp")
+    if lang == String("ruby") or lang == String("rb"):
+        return String("rb")
+    if lang == String("shell") or lang == String("bash") \
+            or lang == String("sh"):
+        return String("sh")
+    if lang == String("yaml") or lang == String("yml"):
+        return String("yaml")
+    if lang == String("mojo"):
+        return String("mojo")
+    if lang == String("diff") or lang == String("patch"):
+        return String("diff")
+    return String("")
+
+
+fn _inject_grammar(
+    lang: String, lines: List[String], body: _StringBody,
+    mut hls: List[Highlight], mut registry: GrammarRegistry,
+):
+    """Tokenize ``body`` with the grammar for ``lang`` and overlay the
+    resulting highlights onto ``hls``. Drops any existing highlights
+    whose range falls entirely inside the body so the injected
+    grammar's colors aren't muddied by the host's string-attr paint
+    underneath."""
+    var ext = _ext_for_language(lang)
+    if len(ext.as_bytes()) == 0:
+        return
+    var path = _grammar_path_for_ext(ext)
+    if len(path.as_bytes()) == 0:
+        return
+    var grammar_idx = registry.lookup_idx(ext)
+    if grammar_idx < 0:
+        try:
+            var g = load_grammar_from_file(path)
+            registry.keys.append(ext)
+            registry.grammars.append(g^)
+            grammar_idx = len(registry.keys) - 1
+        except:
+            return
+
+    var sub_lines = _slice_body_lines(lines, body)
+    var sub_post = List[List[Frame]]()
+    var sub_hls = tokenize_with_grammar_full(
+        registry.grammars[grammar_idx], sub_lines, sub_post,
+    )
+
+    _drop_highlights_in_body(hls, body)
+
+    # Map sub-buffer coordinates back to the host buffer. Row 0 of
+    # the sub-buffer aligns with ``body.start_row`` and its columns
+    # are offset by ``body.start_col``; rows >= 1 share columns with
+    # the host (we kept those lines verbatim) but their host row is
+    # ``body.start_row + sh.row``.
+    var first_row_offset = body.start_col
+    for k in range(len(sub_hls)):
+        var sh = sub_hls[k]
+        var orig_row = body.start_row + sh.row
+        var col_off = 0
+        if sh.row == 0:
+            col_off = first_row_offset
+        hls.append(Highlight(
+            orig_row, sh.col_start + col_off, sh.col_end + col_off,
+            sh.attr,
+        ))
+
+
+fn _slice_body_lines(
+    lines: List[String], body: _StringBody,
+) -> List[String]:
+    """Build the sub-buffer the injected grammar tokenizes against:
+    the body bytes only, with the open/close quotes excluded. Single-
+    line bodies become a single string; multi-line bodies put the
+    head fragment first, full middle rows verbatim, then the tail
+    fragment."""
+    var out = List[String]()
+    if body.start_row == body.end_row:
+        var b = lines[body.start_row].as_bytes()
+        var s = body.start_col
+        var e = body.end_col
+        if s < 0:
+            s = 0
+        if e > len(b):
+            e = len(b)
+        if e < s:
+            e = s
+        out.append(String(StringSlice(unsafe_from_utf8=b[s:e])))
+        return out^
+    var b0 = lines[body.start_row].as_bytes()
+    var s0 = body.start_col
+    if s0 < 0:
+        s0 = 0
+    if s0 > len(b0):
+        s0 = len(b0)
+    out.append(String(StringSlice(unsafe_from_utf8=b0[s0:len(b0)])))
+    for r in range(body.start_row + 1, body.end_row):
+        out.append(lines[r])
+    var bN = lines[body.end_row].as_bytes()
+    var eN = body.end_col
+    if eN < 0:
+        eN = 0
+    if eN > len(bN):
+        eN = len(bN)
+    out.append(String(StringSlice(unsafe_from_utf8=bN[0:eN])))
+    return out^
+
+
+fn _drop_highlights_in_body(
+    mut hls: List[Highlight], body: _StringBody,
+):
+    """Filter out highlights whose range lies inside the body. We
+    keep the open/close quote highlights (they sit *outside* the
+    body bounds by construction) so the visual cue that ``" ... "``
+    is a string is preserved on the surrounding bytes; the body
+    itself is wiped so the injected grammar's highlights don't
+    composite over a uniform string-red underneath."""
+    var kept = List[Highlight]()
+    for i in range(len(hls)):
+        var hl = hls[i]
+        if hl.row < body.start_row or hl.row > body.end_row:
+            kept.append(hl)
+            continue
+        if body.start_row == body.end_row:
+            # Single-row body: drop highlights that overlap
+            # ``[start_col, end_col)``.
+            if hl.col_end <= body.start_col \
+                    or hl.col_start >= body.end_col:
+                kept.append(hl)
+            continue
+        if hl.row == body.start_row:
+            if hl.col_end <= body.start_col:
+                kept.append(hl)
+            continue
+        if hl.row == body.end_row:
+            if hl.col_start >= body.end_col:
+                kept.append(hl)
+            continue
+        # Row strictly between the body's first and last — entire
+        # row is inside the body, drop unconditionally.
+    hls.clear()
+    for i in range(len(kept)):
+        hls.append(kept[i])

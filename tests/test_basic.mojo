@@ -4097,6 +4097,112 @@ fn test_textmate_json_grammar_paints_strings_and_numbers() raises:
     assert_true(saw_keyword)
 
 
+fn test_intellij_language_injection_html_in_python_string() raises:
+    """A ``# language=html`` marker on the line above a string literal
+    re-tokenizes the string body with the HTML grammar. We verify by
+    looking for HTML-specific punctuation (``<`` / ``>``) painted as
+    operator color inside the body — that highlight wouldn't fire
+    against plain Python string content."""
+    var lines = _hl_lines(
+        String("# language=html"),
+        String("html_str = \"<a>link</a>\""),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    # The body sits between cols 12 and 22 on row 1 (after the
+    # opening ``"`` and before the closing ``"``).
+    var saw_op_inside_body = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row != 1:
+            continue
+        if h.col_start < 12 or h.col_end > 23:
+            continue
+        if h.attr == highlight_operator_attr():
+            saw_op_inside_body = True
+    assert_true(saw_op_inside_body)
+
+
+fn test_intellij_language_injection_inline_marker() raises:
+    """The marker can sit on the same line as the string when written
+    in a block-comment form (``/* language=css */``). The injection
+    pass scans forward from the marker's end, so the trailing
+    backtick string on the same line gets injected as CSS.
+
+    Uses ``js`` extension so the host grammar and injected grammar
+    are different, exercising the registry-share path."""
+    var lines = _hl_lines(
+        String("const styles = /* language=css */ `.cls { color: red; }`;"),
+    )
+    var hls = highlight_for_extension(String("js"), lines)
+    # The CSS body inside the backticks is at roughly cols 35..54.
+    # CSS's ``color`` property and selector punctuation produce
+    # multiple non-string highlights — without injection the body
+    # would be a single string-attr run.
+    var non_string_in_body = 0
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row != 0:
+            continue
+        if h.col_start < 35 or h.col_end > 55:
+            continue
+        if h.attr != highlight_string_attr():
+            non_string_in_body += 1
+    assert_true(non_string_in_body > 0)
+
+
+fn test_intellij_language_injection_unknown_language_no_op() raises:
+    """A marker pointing at a language we don't have a grammar for
+    is a silent no-op — the host grammar's highlights stay
+    untouched. ``language=brainfuck`` has no entry in
+    ``_ext_for_language``, so the body keeps its plain Python
+    string color."""
+    var lines = _hl_lines(
+        String("# language=brainfuck"),
+        String("prog = \"+++[->+<]\""),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    # The string body should still paint as a regular Python string —
+    # i.e. at least one string-attr highlight covers row 1's body
+    # cols, and no operator-attr highlight does.
+    var saw_string_on_row1 = False
+    var saw_op_inside_body = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row != 1:
+            continue
+        if h.attr == highlight_string_attr():
+            saw_string_on_row1 = True
+        if h.col_start >= 8 and h.col_end <= 18 \
+                and h.attr == highlight_operator_attr():
+            saw_op_inside_body = True
+    assert_true(saw_string_on_row1)
+    assert_true(not saw_op_inside_body)
+
+
+fn test_intellij_language_injection_triple_quoted_python() raises:
+    """Triple-quoted Python strings span multiple lines. The injection
+    pass walks across rows to find the closing ``\"\"\"`` and
+    tokenizes every body row with the injected grammar. Verified by
+    finding HTML highlights on the *interior* row of the docstring,
+    where the body sits below the opening row."""
+    var lines = _hl_lines(
+        String("# language=html"),
+        String("doc = \"\"\""),
+        String("<div class='x'>hello</div>"),
+        String("\"\"\""),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    # Row 2 (the interior body row) should have several HTML
+    # highlights: tag punctuation, attribute name, etc. — and at
+    # least one operator-attr from ``<`` / ``>`` / ``=``.
+    var saw_op_on_row2 = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 2 and h.attr == highlight_operator_attr():
+            saw_op_on_row2 = True
+    assert_true(saw_op_on_row2)
+
+
 fn test_textmate_rust_block_comment_spans_lines() raises:
     """The TextMate runtime threads its scope stack across lines, so
     a ``/* ... */`` that opens on one line and closes on a later one
@@ -9474,6 +9580,10 @@ fn main() raises:
     test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()
     test_textmate_rust_block_comment_spans_lines()
+    test_intellij_language_injection_html_in_python_string()
+    test_intellij_language_injection_inline_marker()
+    test_intellij_language_injection_unknown_language_no_op()
+    test_intellij_language_injection_triple_quoted_python()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
     test_editor_alt_click_emits_definition_request()
