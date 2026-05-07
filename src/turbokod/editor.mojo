@@ -2088,8 +2088,10 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
         """Handle a left-click on the minimap column: scroll the editor
         so the corresponding buffer row is centered, and place the cursor
-        at the start of that row. Returns True if the click was on the
-        minimap (and was therefore consumed)."""
+        on that row. For rows flagged by the speller, the cursor lands
+        on the first misspelled word so spell-fix actions (Alt+Enter)
+        work immediately; otherwise it lands at column 0. Returns True
+        if the click was on the minimap (and was therefore consumed)."""
         if not self._is_minimap_hit(pos, view):
             return False
         var sy = pos.y - view.a.y
@@ -2097,6 +2099,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         var rng = self._minimap_buf_range_for_screen_row(sy, content_h)
         if rng[0] >= rng[1]:
             return False
+        var kind = self._minimap_kind_in_slice(rng[0], rng[1])
         var buf_row = self._minimap_first_marked_buf_row(rng[0], rng[1])
         if buf_row < 0:
             buf_row = rng[0]
@@ -2105,7 +2108,14 @@ struct Editor(ImplicitlyCopyable, Movable):
             buf_row = n_lines - 1
         if buf_row < 0:
             buf_row = 0
-        self.move_to(buf_row, 0, False)
+        var col = 0
+        if kind == 2:
+            for h in range(len(self.spell_highlights)):
+                var hl = self.spell_highlights[h]
+                if hl.row == buf_row:
+                    col = hl.col_end
+                    break
+        self.move_to(buf_row, col, False)
         var target = buf_row - content_h // 2
         var max_y = n_lines - content_h
         if max_y < 0:
