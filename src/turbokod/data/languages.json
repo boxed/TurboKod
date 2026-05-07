@@ -1880,13 +1880,19 @@
     "candidates": [
       {
         "argv": [
-          "ty",
-          "server"
+          "pyright-langserver",
+          "--stdio"
         ]
       },
       {
         "argv": [
-          "ruff",
+          "basedpyright-langserver",
+          "--stdio"
+        ]
+      },
+      {
+        "argv": [
+          "ty",
           "server"
         ]
       },

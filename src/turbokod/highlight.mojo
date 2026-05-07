@@ -141,6 +141,8 @@ fn _grammar_path_for_ext(ext: String) -> String:
         return String("src/turbokod/grammars/cpp.tmLanguage.json")
     if ext == String("sh") or ext == String("bash"):
         return String("src/turbokod/grammars/shell.tmLanguage.json")
+    if ext == String("sql"):
+        return String("src/turbokod/grammars/sql.tmLanguage.json")
     if ext == String("yaml") or ext == String("yml"):
         return String("src/turbokod/grammars/yaml.tmLanguage.json")
     if ext == String("html") or ext == String("htm"):
@@ -1328,6 +1330,8 @@ fn _ext_for_language(lang: String) -> String:
     if lang == String("shell") or lang == String("bash") \
             or lang == String("sh"):
         return String("sh")
+    if lang == String("sql"):
+        return String("sql")
     if lang == String("yaml") or lang == String("yml"):
         return String("yaml")
     if lang == String("mojo"):

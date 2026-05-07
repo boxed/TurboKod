@@ -20,16 +20,45 @@ the previous one's id). Add when needed.
 
 from std.collections.list import List
 from std.collections.optional import Optional
+from std.ffi import external_call
 
 from .json import (
     JsonValue, encode_json, json_array, json_int, json_object, json_str,
     parse_json,
 )
+from .file_io import read_file, stat_file, write_file
 from .lsp import (
     LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
 )
-from .posix import realpath, which
+from .posix import getenv_value, realpath, which
+
+
+fn _lsp_debug_log(line: String):
+    """Append ``line`` (plus a trailing newline) to ``/tmp/turbokod-lsp.log``
+    when that file already exists, or when ``TURBOKOD_LSP_LOG`` is set.
+    No-op otherwise — ``touch /tmp/turbokod-lsp.log`` to enable, delete
+    the file to disable.
+
+    Read-modify-write — same trade-off as ``spell._append_to_file``. Opt-in
+    debug aid only; not on the hot path unless the trigger is flipped.
+    """
+    var path = String("/tmp/turbokod-lsp.log")
+    var info = stat_file(path)
+    if not info.ok \
+            and len(getenv_value(String("TURBOKOD_LSP_LOG")).as_bytes()) == 0:
+        return
+    var existing = String("")
+    if info.ok:
+        try:
+            existing = read_file(path)
+        except:
+            existing = String("")
+    if len(existing.as_bytes()) > 0:
+        var eb = existing.as_bytes()
+        if eb[len(eb) - 1] != 0x0A:
+            existing = existing + String("\n")
+    _ = write_file(path, existing + line + String("\n"))
 
 
 # --- State -----------------------------------------------------------------
@@ -226,6 +255,21 @@ struct LspManager(Copyable, Movable):
             self.state = _STATE_FAILED
             self.failure_reason = String("spawn failed: ") + String(e)
             return
+        # Enable wire trace if /tmp/turbokod-lsp.log already exists (debug aid).
+        var trace_path_str = String("/tmp/turbokod-lsp-wire-") \
+            + language_id + String(".log")
+        var trace_info = stat_file(String("/tmp/turbokod-lsp.log"))
+        if trace_info.ok:
+            var trace_path = trace_path_str + String("\0")
+            var tfd = external_call["creat", Int32](
+                trace_path.unsafe_ptr(), Int32(0o644),
+            )
+            if Int(tfd) >= 0:
+                self.client.process.trace_fd = tfd
+                var hdr = String("session start argv:")
+                for k in range(len(argv)):
+                    hdr = hdr + String(" ") + argv[k]
+                self.client.process.trace(hdr)
         try:
             self._init_id = self.client.send_request(
                 String("initialize"), lsp_initialize_params(self._root_uri),
@@ -326,6 +370,14 @@ struct LspManager(Copyable, Movable):
         """
         if self.state != _STATE_READY:
             return False
+        _lsp_debug_log(
+            String("→ request_definition lang=") + self._language_id
+            + String(" path=") + path
+            + String(" line=") + String(line)
+            + String(" character=") + String(character)
+            + String(" word=") + word
+            + String(" text_len=") + String(len(text.as_bytes())),
+        )
         self._send_open_or_change(path, text^)
         var params = json_object()
         var doc = json_object()
@@ -427,8 +479,19 @@ struct LspManager(Copyable, Movable):
                 continue
             if id == self._inflight_def_id:
                 var loc = Optional[DefinitionResolved]()
+                var result_dump = String("<no result>")
+                var error_dump = String("<no error>")
                 if msg.result:
+                    result_dump = encode_json(msg.result.value())
                     loc = _parse_definition_result(msg.result.value())
+                if msg.error:
+                    error_dump = encode_json(msg.error.value())
+                _lsp_debug_log(
+                    String("← definition response id=") + String(id)
+                    + String(" word=") + self._inflight_word
+                    + String(" result=") + result_dump
+                    + String(" error=") + error_dump,
+                )
                 if loc:
                     resolved = loc
                     self._last_empty = False
@@ -494,6 +557,12 @@ struct LspManager(Copyable, Movable):
             self._send_did_change(path, version, text^)
 
     fn _send_did_open(mut self, path: String, var text: String):
+        _lsp_debug_log(
+            String("→ didOpen lang=") + self._language_id
+            + String(" path=") + path
+            + String(" uri=") + _path_to_uri(path)
+            + String(" text_len=") + String(len(text.as_bytes())),
+        )
         var params = json_object()
         var doc = json_object()
         doc.put(String("uri"), json_str(_path_to_uri(path)))
@@ -509,6 +578,13 @@ struct LspManager(Copyable, Movable):
             pass
 
     fn _send_did_change(mut self, path: String, version: Int, var text: String):
+        _lsp_debug_log(
+            String("→ didChange lang=") + self._language_id
+            + String(" path=") + path
+            + String(" uri=") + _path_to_uri(path)
+            + String(" version=") + String(version)
+            + String(" text_len=") + String(len(text.as_bytes())),
+        )
         var params = json_object()
         var doc = json_object()
         doc.put(String("uri"), json_str(_path_to_uri(path)))

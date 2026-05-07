@@ -25,6 +25,7 @@ first.
 | `ruby.tmLanguage.json`  | `microsoft/vscode/extensions/ruby`                                       | MIT                    |
 | `rust.tmLanguage.json`  | `dustypomerleau/rust-syntax` (via `microsoft/vscode/extensions/rust`)    | MIT                    |
 | `shell.tmLanguage.json` | `microsoft/vscode/extensions/shellscript`                                | MIT                    |
+| `sql.tmLanguage.json`   | `microsoft/vscode/extensions/sql` (originally `microsoft/vscode-mssql`)  | MIT                    |
 | `typescript.tmLanguage.json` | `microsoft/vscode/extensions/typescript-basics`                     | MIT                    |
 | `yaml.tmLanguage.json`  | `microsoft/vscode/extensions/yaml`                                       | MIT                    |
 
