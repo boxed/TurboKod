@@ -38,7 +38,10 @@ from .highlight import (
     extension_of, highlight_comment_attr, highlight_for_extension,
     highlight_incremental, highlight_string_attr, word_at,
 )
-from .spell import Speller, SpellActionRequest, find_misspelled_runs
+from .spell import (
+    Speller, SpellActionRequest, find_misspelled_runs,
+    has_spell_noinspection_directive,
+)
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
@@ -895,13 +898,40 @@ struct Editor(ImplicitlyCopyable, Movable):
         var comment_attr = highlight_comment_attr()
         var string_attr = highlight_string_attr()
         var extended = terminal_supports_extended_underline()
+        # First pass: honor IntelliJ-style ``noinspection`` directives
+        # in comments. A directive on row N suppresses spell flags on
+        # row N (so ``noinspection`` itself isn't flagged) and on row
+        # N+1, mirroring IntelliJ's "applies to next code element"
+        # behavior.
+        var n_lines = self.buffer.line_count()
+        var suppressed = List[Bool]()
+        var row_has_comment = List[Bool]()
+        for _ in range(n_lines):
+            suppressed.append(False)
+            row_has_comment.append(False)
+        for h in range(len(self.highlights)):
+            var hl = self.highlights[h]
+            if hl.attr != comment_attr:
+                continue
+            if hl.row < 0 or hl.row >= n_lines:
+                continue
+            row_has_comment[hl.row] = True
+        for r in range(n_lines):
+            if not row_has_comment[r]:
+                continue
+            if has_spell_noinspection_directive(self.buffer.line(r)):
+                suppressed[r] = True
+                if r + 1 < n_lines:
+                    suppressed[r + 1] = True
         for h in range(len(self.highlights)):
             var hl = self.highlights[h]
             var is_comment = hl.attr == comment_attr
             var is_string = hl.attr == string_attr
             if not (is_comment or is_string):
                 continue
-            if hl.row < 0 or hl.row >= self.buffer.line_count():
+            if hl.row < 0 or hl.row >= n_lines:
+                continue
+            if suppressed[hl.row]:
                 continue
             var line = self.buffer.line(hl.row)
             var line_bytes = line.as_bytes()

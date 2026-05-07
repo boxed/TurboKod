@@ -573,6 +573,86 @@ fn find_misspelled_runs(
     return out^
 
 
+fn has_spell_noinspection_directive(text: String) -> Bool:
+    """True if ``text`` contains an IntelliJ-style directive that
+    disables the spell-check inspection. Recognized forms:
+
+      ``# noinspection SpellCheckingInspection``
+      ``// noinspection SpellCheckingInspection``
+      ``<!-- noinspection SpellCheckingInspection -->``
+      ``noinspection SpellCheckingInspection,OtherInspection``
+      ``noinspection All``  (catch-all — disables every inspection)
+
+    The comment marker is irrelevant: callers pass already-extracted
+    comment text. The match is on the literal ``noinspection`` keyword
+    (word-bounded) followed by a comma-separated token list that must
+    contain ``SpellCheckingInspection`` or ``All``."""
+    var b = text.as_bytes()
+    var n = len(b)
+    var key = String("noinspection")
+    var kb = key.as_bytes()
+    var kn = len(kb)
+    if kn > n:
+        return False
+    var i = 0
+    while i + kn <= n:
+        var hit = True
+        for j in range(kn):
+            if b[i + j] != kb[j]:
+                hit = False
+                break
+        if not hit:
+            i += 1
+            continue
+        # Word boundary on the left and a whitespace separator on the
+        # right — ``noinspections`` (sic) or ``xnoinspection`` don't
+        # count.
+        var ok_left = i == 0 or not _is_ident_byte(b[i - 1])
+        var after = i + kn
+        var ok_right = (
+            after < n and (b[after] == 0x20 or b[after] == 0x09)
+        )
+        if not (ok_left and ok_right):
+            i += 1
+            continue
+        var p = after
+        while p < n and (b[p] == 0x20 or b[p] == 0x09):
+            p += 1
+        while p < n:
+            var t_start = p
+            while p < n:
+                var c = b[p]
+                if c == 0x20 or c == 0x09 or c == 0x2C:
+                    break
+                p += 1
+            if p > t_start:
+                var token = _slice(text, t_start, p)
+                if (
+                    token == String("SpellCheckingInspection")
+                    or token == String("All")
+                ):
+                    return True
+            while p < n and (b[p] == 0x20 or b[p] == 0x09):
+                p += 1
+            if p < n and b[p] == 0x2C:
+                p += 1
+                while p < n and (b[p] == 0x20 or b[p] == 0x09):
+                    p += 1
+                continue
+            break
+        i = p if p > i else i + 1
+    return False
+
+
+fn _is_ident_byte(c: UInt8) -> Bool:
+    return (
+        (c >= 0x41 and c <= 0x5A)
+        or (c >= 0x61 and c <= 0x7A)
+        or (c >= 0x30 and c <= 0x39)
+        or c == 0x5F
+    )
+
+
 fn _bucket(w: String) -> Int:
     var b = w.as_bytes()
     var h = UInt32(2166136261)

@@ -123,6 +123,7 @@ from turbokod.highlight import (
 from turbokod.posix import getenv_value
 from turbokod.spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
+    has_spell_noinspection_directive,
     project_dict_path, user_dict_path,
 )
 from turbokod.spell_menu import (
@@ -9166,6 +9167,90 @@ fn test_editor_minimap_hover_paints_tooltip() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+fn test_has_spell_noinspection_directive_parses_intellij_forms() raises:
+    """Recognized IntelliJ shapes — comma-separated lists, ``All``
+    catch-all, multiple comment markers — must all return True.
+    Adversarial near-misses (different inspection name, ``noinspection``
+    embedded in a longer identifier) must not."""
+    # Bare directive (caller has already stripped the comment marker).
+    assert_true(has_spell_noinspection_directive(
+        String("noinspection SpellCheckingInspection")
+    ))
+    # Common in-source forms with the comment marker still attached
+    # — the function operates on the slice the editor extracts, which
+    # for a Python ``# ...`` comment includes the leading ``#``.
+    assert_true(has_spell_noinspection_directive(
+        String("# noinspection SpellCheckingInspection")
+    ))
+    assert_true(has_spell_noinspection_directive(
+        String("// noinspection SpellCheckingInspection")
+    ))
+    assert_true(has_spell_noinspection_directive(
+        String("<!-- noinspection SpellCheckingInspection -->")
+    ))
+    # Comma-separated list with the spell inspection somewhere in it.
+    assert_true(has_spell_noinspection_directive(
+        String("# noinspection PyUnresolvedReferences,SpellCheckingInspection")
+    ))
+    assert_true(has_spell_noinspection_directive(
+        String("# noinspection SpellCheckingInspection,PyUnresolvedReferences")
+    ))
+    # Catch-all ``All`` disables every inspection — including spell.
+    assert_true(has_spell_noinspection_directive(
+        String("# noinspection All")
+    ))
+    # Negative cases.
+    assert_false(has_spell_noinspection_directive(
+        String("# helo world")
+    ))
+    assert_false(has_spell_noinspection_directive(
+        String("# noinspection PyUnresolvedReferences")
+    ))
+    # Word boundary on the keyword itself: ``xnoinspection`` mustn't
+    # count.
+    assert_false(has_spell_noinspection_directive(
+        String("# xnoinspection SpellCheckingInspection")
+    ))
+    # Empty / no-trailing-list directive is a no-op.
+    assert_false(has_spell_noinspection_directive(
+        String("# noinspection")
+    ))
+
+
+fn test_editor_spell_noinspection_suppresses_next_line() raises:
+    """A ``# noinspection SpellCheckingInspection`` comment must
+    suppress spell underlines on the directive line itself (so the
+    word ``noinspection`` doesn't get flagged) and on the following
+    line (the IntelliJ "applies to next code element" semantic).
+    Lines after the suppression window must still get flagged."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_noinspect.py"))
+    # Row 0: the directive, contains ``noinspection`` (12 lowercase
+    # letters, would normally be flagged).
+    # Row 1: a comment with a misspelling ``helo`` — must NOT flag.
+    # Row 2: another comment with ``helo`` — must flag (out of window).
+    assert_true(write_file(path, String(
+        "# noinspection SpellCheckingInspection\n"
+        + "# helo world\n"
+        + "# helo world\n"
+    )))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    # Exactly one underline highlight, on row 2.
+    assert_equal(len(ed.spell_highlights), 1)
+    var sh = ed.spell_highlights[0]
+    assert_equal(sh.row, 2)
+    # And spell_lines reflects that — only row 2 is marked.
+    assert_false(ed.spell_lines[0])
+    assert_false(ed.spell_lines[1])
+    assert_true(ed.spell_lines[2])
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 fn test_editor_spell_underlines_misspelled_word_in_comment() raises:
     """End-to-end: a misspelled word inside a ``#`` comment surfaces as
     a ``STYLE_UNDERLINE`` highlight at the right byte range, and the
@@ -9606,6 +9691,8 @@ fn main() raises:
     test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
     test_spell_menu_esc_dismisses()
     find_misspelled_runs_filters_identifiers_and_short_words()
+    test_has_spell_noinspection_directive_parses_intellij_forms()
+    test_editor_spell_noinspection_suppresses_next_line()
     test_editor_spell_underlines_misspelled_word_in_comment()
     test_editor_spell_uses_curly_colored_underline_on_supported_terminal()
     test_editor_minimap_git_change_wins_over_spell_on_same_row()
