@@ -114,6 +114,7 @@ from turbokod.debugger_config import (
 )
 from turbokod.highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
+    embedded_language_extensions,
     extension_of, highlight_for_extension, highlight_incremental,
     highlight_comment_attr, highlight_decorator_attr, highlight_ident_attr,
     highlight_keyword_attr,
@@ -4177,6 +4178,57 @@ fn test_intellij_language_injection_unknown_language_no_op() raises:
             saw_op_inside_body = True
     assert_true(saw_string_on_row1)
     assert_true(not saw_op_inside_body)
+
+
+fn test_embedded_language_extensions_collects_unique_languages() raises:
+    """``embedded_language_extensions`` should de-dup and return the
+    extension for each ``language=NAME`` marker. Languages mapped to
+    bundled extensions (e.g. ``html`` → ``html``) and languages
+    mapped via the downloadable grammar registry (e.g. ``elm`` →
+    ``elm``) both flow through the same lookup."""
+    var lines = _hl_lines(
+        String("# language=html"),
+        String("a = \"<x/>\""),
+        String("// language=css"),
+        String("b = \".x{color:red}\""),
+        # Duplicate marker — must not produce two ``html`` entries.
+        String("# language=html"),
+        String("c = \"<y/>\""),
+        # Language-id from the downloadable registry: maps to the
+        # spec's first file_type (``elm``).
+        String("# language=elm"),
+        String("d = \"main = 1\""),
+    )
+    var exts = embedded_language_extensions(lines)
+    var saw_html = False
+    var saw_css = False
+    var saw_elm = False
+    var html_count = 0
+    for i in range(len(exts)):
+        if exts[i] == String("html"):
+            saw_html = True
+            html_count += 1
+        if exts[i] == String("css"):
+            saw_css = True
+        if exts[i] == String("elm"):
+            saw_elm = True
+    assert_true(saw_html)
+    assert_true(saw_css)
+    assert_true(saw_elm)
+    assert_equal(html_count, 1)
+
+
+fn test_embedded_language_extensions_skips_unknown_languages() raises:
+    """An ``unknown`` language with no entry in ``_ext_for_language``
+    and no downloadable spec should be silently dropped — the
+    install prompt only knows how to act on extensions in the
+    grammar catalog."""
+    var lines = _hl_lines(
+        String("# language=brainfuck"),
+        String("prog = \"+++[->+<]\""),
+    )
+    var exts = embedded_language_extensions(lines)
+    assert_equal(len(exts), 0)
 
 
 fn test_intellij_language_injection_triple_quoted_python() raises:
@@ -9584,6 +9636,8 @@ fn main() raises:
     test_intellij_language_injection_inline_marker()
     test_intellij_language_injection_unknown_language_no_op()
     test_intellij_language_injection_triple_quoted_python()
+    test_embedded_language_extensions_collects_unique_languages()
+    test_embedded_language_extensions_skips_unknown_languages()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
     test_editor_alt_click_emits_definition_request()

@@ -20,7 +20,11 @@ from .colors import (
     Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_YELLOW,
     RED, WHITE, STYLE_NONE,
 )
-from .grammar_install import user_grammar_path_for_ext
+from .grammar_install import (
+    built_in_downloadable_grammars,
+    find_downloadable_grammar_by_language,
+    user_grammar_path_for_ext,
+)
 from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
@@ -1330,7 +1334,46 @@ fn _ext_for_language(lang: String) -> String:
         return String("mojo")
     if lang == String("diff") or lang == String("patch"):
         return String("diff")
+    # Fall through to the downloadable-grammar registry: if the user
+    # has installed (or could install) a grammar whose ``language_id``
+    # matches, use that spec's first file_type as the extension. Lets
+    # ``# language=elm`` resolve to ``"elm"`` once the registered Elm
+    # grammar is installed under ``~/.config/turbokod/languages/``.
+    var specs = built_in_downloadable_grammars()
+    var idx = find_downloadable_grammar_by_language(specs, lang)
+    if idx >= 0 and len(specs[idx].file_types) > 0:
+        return specs[idx].file_types[0]
     return String("")
+
+
+fn embedded_language_extensions(lines: List[String]) -> List[String]:
+    """Return the unique extensions of every IntelliJ-style
+    ``language=NAME`` marker found in ``lines``. Languages that don't
+    map to a known grammar (neither bundled nor downloadable) are
+    skipped.
+
+    Used by ``Desktop`` after a file open to surface the grammar-
+    install prompt for embedded languages — same mechanism that
+    fires when opening a file whose primary extension isn't
+    bundled. The returned extensions are exactly the keys
+    ``_maybe_prompt_grammar_install`` accepts.
+    """
+    var out = List[String]()
+    for r in range(len(lines)):
+        var marker_opt = _find_language_marker(lines[r])
+        if not marker_opt:
+            continue
+        var ext = _ext_for_language(marker_opt.value().lang)
+        if len(ext.as_bytes()) == 0:
+            continue
+        var already = False
+        for k in range(len(out)):
+            if out[k] == ext:
+                already = True
+                break
+        if not already:
+            out.append(ext)
+    return out^
 
 
 fn _inject_grammar(

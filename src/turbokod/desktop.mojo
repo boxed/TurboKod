@@ -62,7 +62,10 @@ from .lsp import LspProcess
 from .posix import close_fd, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
-from .highlight import DefinitionRequest, GrammarRegistry, extension_of, word_at
+from .highlight import (
+    DefinitionRequest, GrammarRegistry, embedded_language_extensions,
+    extension_of, word_at,
+)
 from .spell import Speller
 from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER,
@@ -1399,6 +1402,17 @@ struct Desktop(Movable):
         # unconditionally; the helper bails fast when there's nothing
         # to ask about.
         self._maybe_prompt_grammar_install(ext)
+        # IntelliJ-style ``# language=NAME`` markers in the buffer
+        # also count as "languages this file uses." Surface a grammar
+        # install prompt for each unique embedded language whose
+        # grammar isn't already bundled or installed — the helper
+        # bails for bundled extensions (no downloadable spec) so this
+        # only fires for languages we actually need to fetch.
+        var embedded = embedded_language_extensions(
+            self.windows.windows[idx].editor.buffer.lines,
+        )
+        for k in range(len(embedded)):
+            self._maybe_prompt_grammar_install(embedded[k])
         var lsp_idx = self._ensure_lsp_for_extension(ext)
         if lsp_idx < 0:
             self._maybe_prompt_lsp_install(ext)
