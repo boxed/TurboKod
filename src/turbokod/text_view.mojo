@@ -434,6 +434,16 @@ struct TextLog(ImplicitlyCopyable, Movable):
     var last_x_max: Int
     var last_first_visual: Int
     var last_visible_count: Int
+    var _layout_w: Int
+    """Content width (cells) the cached ``last_visual`` was built for.
+    -1 sentinel means "invalid, recompute" — set on every mutation
+    (``append``, ``_push_line``, ``clear``). When ``paint`` sees
+    ``_layout_w == content_w`` it reuses ``last_visual`` instead of
+    re-running ``wrap_lines`` over the full backlog. Without this the
+    maximized DebugPane re-wrapped its full 500-line stderr backlog
+    every frame at ~210 cols and paint cost ~200 ms, which kept the
+    main loop from ever hitting its idle-blocking ``poll_stdin``
+    timeout — CPU pegged at 100 % until the pane was un-maximized."""
 
     fn __init__(out self, default_attr: Attr, max_lines: Int = 500):
         self.lines = List[String]()
@@ -449,6 +459,7 @@ struct TextLog(ImplicitlyCopyable, Movable):
         self.last_x_max = 0
         self.last_first_visual = 0
         self.last_visible_count = 0
+        self._layout_w = -1
 
     fn __copyinit__(out self, copy: Self):
         self.lines = copy.lines.copy()
@@ -464,6 +475,7 @@ struct TextLog(ImplicitlyCopyable, Movable):
         self.last_x_max = copy.last_x_max
         self.last_first_visual = copy.last_first_visual
         self.last_visible_count = copy.last_visible_count
+        self._layout_w = copy._layout_w
 
     # --- mutation -------------------------------------------------------
 
@@ -500,10 +512,27 @@ struct TextLog(ImplicitlyCopyable, Movable):
         self.selection = Selection.empty()
         self.scroll = 0
         self.autoscroll = True
+        self.last_visual = List[VisualLine]()
+        self._layout_w = -1
 
     fn _push_line(mut self, var line: String, attr: Attr):
         self.lines.append(line^)
         self.line_attrs.append(attr)
+        # Incremental cache update: wrap just the newly-appended line
+        # and tack its rows onto ``last_visual``. Full re-wraps happen
+        # only when the width changes (handled in ``paint``). Without
+        # this, a streaming source like Django's stderr would invalidate
+        # the cache on every line and force ``paint`` to re-wrap the
+        # entire backlog every frame — ~200 ms per frame on a maximized
+        # pane, enough to keep the main loop's idle blocking from ever
+        # firing.
+        if self._layout_w >= 0:
+            var new_rows = wrap_lines(
+                self.lines, self._layout_w,
+                start_line=len(self.lines) - 1,
+            )
+            for k in range(len(new_rows)):
+                self.last_visual.append(new_rows[k])
         if len(self.lines) > self.max_lines:
             var drop = len(self.lines) - self.max_lines
             var trimmed = List[String]()
@@ -513,6 +542,31 @@ struct TextLog(ImplicitlyCopyable, Movable):
                 tattrs.append(self.line_attrs[k])
             self.lines = trimmed^
             self.line_attrs = tattrs^
+            # Trim the layout cache symmetrically: drop visual rows for
+            # the dropped logical lines, renumber the survivors. Track
+            # how many visual rows were dropped so a manually-scrolled
+            # log keeps pointing at the same content (autoscroll users
+            # don't notice — paint recomputes ``first`` from
+            # ``len(last_visual)`` every frame).
+            if self._layout_w >= 0:
+                var trimmed_layout = List[VisualLine]()
+                var dropped_rows = 0
+                for k in range(len(self.last_visual)):
+                    var vr = self.last_visual[k]
+                    if vr.line_idx < drop:
+                        dropped_rows += 1
+                        continue
+                    trimmed_layout.append(VisualLine(
+                        vr.line_idx - drop,
+                        vr.byte_start, vr.byte_end,
+                        vr.cell_start, vr.cell_count,
+                        vr.indent_cells,
+                    ))
+                self.last_visual = trimmed_layout^
+                if not self.autoscroll:
+                    self.scroll -= dropped_rows
+                    if self.scroll < 0:
+                        self.scroll = 0
             if self.scroll > self.max_lines:
                 self.scroll = self.max_lines - 1
             if self.selection.active:
@@ -556,7 +610,9 @@ struct TextLog(ImplicitlyCopyable, Movable):
         var content_w = view.b.x - view.a.x
         if content_w < 1:
             content_w = 1
-        self.last_visual = wrap_lines(self.lines, content_w)
+        if self._layout_w != content_w:
+            self.last_visual = wrap_lines(self.lines, content_w)
+            self._layout_w = content_w
         var visible = view.b.y - view.a.y
         if visible < 0:
             visible = 0

@@ -71,11 +71,18 @@ struct DapStopped(ImplicitlyCopyable, Movable):
     request. ``reason`` is the spec'd code (``breakpoint``, ``step``,
     ``exception``, ``pause``, ``entry``, ...). ``description`` is the
     adapter's human text — often empty.
+
+    ``from_subprocess`` flags stops that arrived on the forked-child
+    DAP socket. The thread/frame/variable IDs in any follow-up request
+    are subprocess-scoped — pydevd hands out per-process dap_ids and
+    raises ``KeyError("Wrong ID sent from the client")`` if a parent
+    socket gets one of the child's IDs.
     """
     var thread_id: Int
     var reason: String
     var description: String
     var all_threads_stopped: Bool
+    var from_subprocess: Bool
 
 
 @fieldwise_init
@@ -163,6 +170,16 @@ struct SubprocessAttach(Copyable, Movable):
     var inflight_initialize: Int
     var inflight_attach: Int
     var inflight_config_done: Int
+    # Inspect-side inflight slots. The subprocess has its own pydevd and
+    # therefore its own seq counter, so we can't share the parent's
+    # ``_inflight_*`` fields — a parent seq=5 would collide with a
+    # subprocess seq=5. Responses arriving on the subprocess socket are
+    # demuxed against these and the parsed bodies are written into the
+    # same ``_pending_*`` buffers on ``DapManager`` (the UI is
+    # single-session and doesn't care which session answered).
+    var inflight_stack_trace: Int
+    var inflight_scopes: Int
+    var inflight_variables: Int
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
     # Mirror of the parent's breakpoints at attach time. Sent to the
@@ -185,6 +202,9 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_initialize = 0
         self.inflight_attach = 0
         self.inflight_config_done = 0
+        self.inflight_stack_trace = 0
+        self.inflight_scopes = 0
+        self.inflight_variables = 0
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
         self.bp_paths = List[String]()
@@ -203,6 +223,9 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_initialize = 0
         self.inflight_attach = 0
         self.inflight_config_done = 0
+        self.inflight_stack_trace = 0
+        self.inflight_scopes = 0
+        self.inflight_variables = 0
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
         self.bp_paths = List[String]()
@@ -319,6 +342,19 @@ struct DapManager(Copyable, Movable):
     # startup); extending to a list when a real-world target needs it
     # is straightforward — each entry is independent.
     var _subprocess: SubprocessAttach
+    # Tracks which session ``request_stack_trace`` was last routed to.
+    # ``request_scopes`` / ``request_variables`` consume frame_ids /
+    # variable_references that came from that stack response, so they
+    # must follow the same routing — pydevd's per-process dap_id table
+    # rejects IDs from a different session.
+    var _last_inspect_in_subprocess: Bool
+    # Sticky mirror of ``_stopped.from_subprocess`` that survives
+    # ``take_stopped``. Set in ``_on_stopped_event``, cleared in the
+    # ``continued`` handlers and at teardown. ``request_stack_trace``
+    # and ``_send_thread_command`` consult this — they often run *after*
+    # the host has popped ``_stopped`` via ``take_stopped`` and would
+    # otherwise lose the routing hint.
+    var _stop_in_subprocess: Bool
 
     fn __init__(out self):
         self.client = DapClient(LspProcess())
@@ -364,6 +400,8 @@ struct DapManager(Copyable, Movable):
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
+        self._last_inspect_in_subprocess = False
+        self._stop_in_subprocess = False
 
     fn __copyinit__(out self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
@@ -415,6 +453,8 @@ struct DapManager(Copyable, Movable):
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
+        self._last_inspect_in_subprocess = False
+        self._stop_in_subprocess = False
 
     # --- state predicates ------------------------------------------------
 
@@ -583,6 +623,8 @@ struct DapManager(Copyable, Movable):
         # raw fields (e.g. ``status_summary``) still benefits from a
         # clean reset.
         self._is_stopped = False
+        self._stop_in_subprocess = False
+        self._last_inspect_in_subprocess = False
         self._continued_pending = False
         # Tear down any attached subprocess too — its socket points at
         # the parent debugpy we just terminated, so leaving it around
@@ -653,6 +695,8 @@ struct DapManager(Copyable, Movable):
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
+        self._last_inspect_in_subprocess = False
+        self._stop_in_subprocess = False
 
     # --- breakpoints -----------------------------------------------------
 
@@ -952,7 +996,11 @@ struct DapManager(Copyable, Movable):
         var args = json_object()
         args.put(String("threadId"), json_int(tid))
         try:
-            _ = self.client.send_request(command, args)
+            if self._stop_in_subprocess \
+                    and self._subprocess.state == _STATE_RUNNING:
+                _ = self._subprocess.client.send_request(command, args)
+            else:
+                _ = self.client.send_request(command, args)
         except:
             return False
         # Optimistic — adapter will send a ``continued`` event back which
@@ -979,10 +1027,30 @@ struct DapManager(Copyable, Movable):
         args.put(String("threadId"), json_int(thread_id))
         args.put(String("startFrame"), json_int(0))
         args.put(String("levels"), json_int(levels))
+        # Route to the subprocess when the latched stop came from there.
+        # We can't read ``self._stopped.from_subprocess`` here because
+        # ``take_stopped`` typically runs *just before* this — the host's
+        # auto-stack hook does ``take_stopped → request_stack_trace`` on
+        # the same tick, and ``take_stopped`` empties ``_stopped``. The
+        # sticky ``_stop_in_subprocess`` mirror survives the take.
+        # Frame ids in the response are scoped to the answering pydevd,
+        # so ``_last_inspect_in_subprocess`` records which session owns
+        # them — ``request_scopes`` / ``request_variables`` follow the
+        # same routing on the next click.
+        var via_subprocess = self._stop_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
         try:
-            self._inflight_stack_trace = self.client.send_request(
-                String("stackTrace"), args,
-            )
+            if via_subprocess:
+                self._subprocess.inflight_stack_trace = \
+                    self._subprocess.client.send_request(
+                        String("stackTrace"), args,
+                    )
+                self._last_inspect_in_subprocess = True
+            else:
+                self._inflight_stack_trace = self.client.send_request(
+                    String("stackTrace"), args,
+                )
+                self._last_inspect_in_subprocess = False
         except:
             return False
         return True
@@ -992,10 +1060,18 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("frameId"), json_int(frame_id))
+        var via_subprocess = self._last_inspect_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
         try:
-            self._inflight_scopes = self.client.send_request(
-                String("scopes"), args,
-            )
+            if via_subprocess:
+                self._subprocess.inflight_scopes = \
+                    self._subprocess.client.send_request(
+                        String("scopes"), args,
+                    )
+            else:
+                self._inflight_scopes = self.client.send_request(
+                    String("scopes"), args,
+                )
         except:
             return False
         return True
@@ -1005,10 +1081,18 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("variablesReference"), json_int(variables_reference))
+        var via_subprocess = self._last_inspect_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
         try:
-            self._inflight_variables = self.client.send_request(
-                String("variables"), args,
-            )
+            if via_subprocess:
+                self._subprocess.inflight_variables = \
+                    self._subprocess.client.send_request(
+                        String("variables"), args,
+                    )
+            else:
+                self._inflight_variables = self.client.send_request(
+                    String("variables"), args,
+                )
         except:
             return False
         return True
@@ -1229,10 +1313,20 @@ struct DapManager(Copyable, Movable):
             if event == String("exited"):
                 return
             if event == String("stopped"):
-                # Surface in parent UI so the user sees the subprocess
-                # paused — minimal UX while subprocess inspect isn't a
-                # first-class panel yet.
-                self._on_stopped_event(msg)
+                # Surface in parent UI. The ``from_subprocess=True`` flag
+                # routes follow-up stackTrace/scopes/variables/continue
+                # to the subprocess client — its thread/frame/varRef
+                # ids are scoped to its own pydevd translation table.
+                self._on_stopped_event(msg, True)
+                return
+            if event == String("continued"):
+                # Mirror the parent's continued handling. Without this
+                # the inspect view stays stuck "stopped" after a
+                # ``continue`` we sent into the subprocess.
+                self._is_stopped = False
+                self._stopped = Optional[DapStopped]()
+                self._stop_in_subprocess = False
+                self._continued_pending = True
                 return
             return
         if msg.kind == DAP_RESPONSE:
@@ -1273,6 +1367,23 @@ struct DapManager(Copyable, Movable):
                     self._subprocess.client.terminate()
                     return
                 self._subprocess.state = _STATE_RUNNING
+                return
+            # Inspect-side responses — write into the same ``_pending_*``
+            # buffers the parent path uses so the UI is session-agnostic.
+            if rseq == self._subprocess.inflight_stack_trace:
+                self._pending_stack = _parse_stack_trace(msg.body)
+                self._pending_stack_ready = True
+                self._subprocess.inflight_stack_trace = 0
+                return
+            if rseq == self._subprocess.inflight_scopes:
+                self._pending_scopes = _parse_scopes(msg.body)
+                self._pending_scopes_ready = True
+                self._subprocess.inflight_scopes = 0
+                return
+            if rseq == self._subprocess.inflight_variables:
+                self._pending_vars = _parse_variables(msg.body)
+                self._pending_vars_ready = True
+                self._subprocess.inflight_variables = 0
                 return
             return
         # Reverse requests: answer not-supported so the subprocess
@@ -1361,11 +1472,12 @@ struct DapManager(Copyable, Movable):
             self._on_initialized_event()
             return
         if event == String("stopped"):
-            self._on_stopped_event(msg)
+            self._on_stopped_event(msg, False)
             return
         if event == String("continued"):
             self._is_stopped = False
             self._stopped = Optional[DapStopped]()
+            self._stop_in_subprocess = False
             self._continued_pending = True
             return
         if event == String("terminated"):
@@ -1576,7 +1688,7 @@ struct DapManager(Copyable, Movable):
             self._state_entered_ms = monotonic_ms()
             self.client.process.trace(String("state -> running"))
 
-    fn _on_stopped_event(mut self, msg: DapIncoming):
+    fn _on_stopped_event(mut self, msg: DapIncoming, from_subprocess: Bool):
         var tid = 1
         var reason = String("")
         var description = String("")
@@ -1596,9 +1708,10 @@ struct DapManager(Copyable, Movable):
             if a and a.value().is_bool():
                 all = a.value().as_bool()
         self._stopped = Optional[DapStopped](DapStopped(
-            tid, reason, description, all,
+            tid, reason, description, all, from_subprocess,
         ))
         self._is_stopped = True
+        self._stop_in_subprocess = from_subprocess
 
     fn _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():

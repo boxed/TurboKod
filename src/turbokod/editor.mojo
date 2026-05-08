@@ -2299,11 +2299,18 @@ struct Editor(ImplicitlyCopyable, Movable):
         the editor's horizontal-scroll semantics (``scroll_x``) which
         the shared wrap primitive doesn't model.
         """
+        # Clamp ``content_h`` to non-negative. ``wrap_lines`` reads
+        # negative values as "unbounded" (the DebugPane idiom) and
+        # would otherwise wrap the entire buffer when callers pass
+        # ``view.height()`` of an empty / collapsed view.
+        var max_rows = content_h
+        if max_rows < 0:
+            max_rows = 0
         var n_lines = self.buffer.line_count()
         var br = self.scroll_y
         if not self.soft_wrap:
             var out = List[VisualLine]()
-            while br < n_lines and len(out) < content_h:
+            while br < n_lines and len(out) < max_rows:
                 var n = self.buffer.line_length(br)
                 out.append(VisualLine(br, self.scroll_x, n, 0, 0, 0))
                 br += 1
@@ -2317,7 +2324,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         return wrap_lines(
             self.buffer.lines, w,
             indent_size=tab, word_aware=True,
-            start_line=self.scroll_y, max_rows=content_h,
+            start_line=self.scroll_y, max_rows=max_rows,
         )
 
     fn _cursor_screen_row(
@@ -2403,6 +2410,15 @@ struct Editor(ImplicitlyCopyable, Movable):
     # --- painting ----------------------------------------------------------
 
     fn paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
+        # Nothing to draw when the host workspace has collapsed (e.g.
+        # the debug pane is maximized and the editor area shrinks to
+        # zero or negative height). Without this early return,
+        # ``content_h = view.height()`` becomes negative, and the
+        # negative value sails past ``wrap_lines``'s ``max_rows >= 0``
+        # gate to walk the entire buffer every frame — ~200 ms on a
+        # large file, enough to peg the main loop at 100 % CPU.
+        if view.is_empty():
+            return
         # Default text: LIGHT_GREEN on BLUE — identifiers / variables
         # are the bulk of "unhighlighted" tokens in code, so this is
         # what every scope-less span lands as. Keywords / strings /

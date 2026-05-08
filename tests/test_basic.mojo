@@ -82,7 +82,7 @@ from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import slice_codepoints
 from turbokod.targets_dialog import TargetsDialog
-from turbokod.text_view import Selection, VisualLine, wrap_lines
+from turbokod.text_view import Selection, TextLog, VisualLine, wrap_lines
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
 from turbokod.doc_config import (
@@ -10428,6 +10428,118 @@ fn test_editor_spell_underlines_misspelled_word_in_comment() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+fn _assert_visual_eq(a: VisualLine, b: VisualLine) raises:
+    assert_equal(a.line_idx, b.line_idx)
+    assert_equal(a.byte_start, b.byte_start)
+    assert_equal(a.byte_end, b.byte_end)
+    assert_equal(a.cell_start, b.cell_start)
+    assert_equal(a.cell_count, b.cell_count)
+    assert_equal(a.indent_cells, b.indent_cells)
+
+
+fn test_text_log_incremental_layout_matches_full_rewrap() raises:
+    """After streaming appends, ``TextLog.last_visual`` must match a
+    fresh ``wrap_lines`` over the same lines at the same width.
+
+    Regression: the maximized DebugPane painted at ~210 cols re-wrapped
+    its full 500-line backlog every frame, costing ~200 ms — enough to
+    keep the main loop pegged at 100 % CPU on every output-streaming
+    debug session. The fix caches ``last_visual`` and only recomputes
+    when the width changes; pushed lines append their own visual rows
+    incrementally.
+    """
+    var log = TextLog(default_attr())
+    # Prime the cache with an initial paint at width 20.
+    var canvas = Canvas(40, 12)
+    log.append(String("alpha"))
+    log.paint(canvas, Rect(0, 0, 20, 5))
+    # Stream a flurry of appends — both short (one visual row) and long
+    # (multiple wrapped rows). This is the hot path: incremental
+    # ``_push_line`` updates piggy-back on the cached layout.
+    log.append(String("bravo charlie"))
+    log.append(String(
+        "this is a longer line that will definitely wrap several times "
+        "across the small twenty-column window we picked for the test"
+    ))
+    log.append(String("delta"))
+    # Re-paint at the same width — the cache should be reused.
+    log.paint(canvas, Rect(0, 0, 20, 5))
+    var fresh = wrap_lines(log.lines, 20)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+
+
+fn test_text_log_incremental_layout_handles_trim() raises:
+    """When ``_push_line`` trims the front to honor ``max_lines``, the
+    cached layout drops the dropped lines' visual rows and renumbers
+    the survivors. Without that, ``last_visual`` would point at stale
+    line indices and ``paint`` would crash on a mismatched lookup."""
+    var log = TextLog(default_attr(), max_lines=3)
+    var canvas = Canvas(40, 12)
+    log.append(String("first"))
+    log.paint(canvas, Rect(0, 0, 20, 5))
+    log.append(String("second"))
+    log.append(String("third"))
+    # Backlog now full at three lines. The next append drops "first".
+    log.append(String("fourth"))
+    log.append(String("fifth"))
+    assert_equal(len(log.lines), 3)
+    var fresh = wrap_lines(log.lines, 20)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+
+
+fn test_editor_paint_collapsed_view_is_cheap() raises:
+    """Maximizing the debug pane collapses the workspace to height 0,
+    which gives editor windows a negative-height ``interior``. Without
+    a guard, ``editor.paint`` would call ``wrap_lines`` with
+    ``max_rows = view.height() = -2``; the negative value bypasses
+    ``wrap_lines``'s ``max_rows >= 0`` gate and walks the entire
+    buffer every frame — ~200 ms on a multi-thousand-line file,
+    enough to peg the main loop at 100 % CPU.
+
+    This regression test asserts the cheap path: a soft-wrap editor
+    with a large buffer, painted into an empty view, must not produce
+    any visual rows. (We can't time the call portably, but a buffer
+    walk would produce many rows; the empty result is the proxy.)
+    """
+    var text = String("")
+    for _ in range(2000):
+        text = text + String(
+            "the quick brown fox jumps over the lazy dog\n"
+        )
+    var ed = Editor(text^)
+    # Negative height (b.y < a.y) is what window.interior() produces
+    # when its outer rect collapses to height 0.
+    var collapsed = Rect(1, 5, 50, 3)
+    assert_true(collapsed.is_empty())
+    var canvas = Canvas(80, 24)
+    ed.paint(canvas, collapsed, False)
+
+
+fn test_text_log_full_rewrap_on_width_change() raises:
+    """Resizing the view (different ``content_w``) forces a full
+    re-wrap. The cached layout is keyed on the width that built it."""
+    var log = TextLog(default_attr())
+    var canvas = Canvas(80, 12)
+    log.append(String(
+        "a fairly long line that will wrap differently at different widths "
+        "once the cache is rebuilt for the new width"
+    ))
+    log.paint(canvas, Rect(0, 0, 20, 5))
+    var first_pass = log.last_visual.copy()
+    # Re-paint at a wider width — must produce a different layout.
+    log.paint(canvas, Rect(0, 0, 60, 5))
+    var fresh = wrap_lines(log.lines, 60)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+    # Sanity: the wider layout has fewer rows than the narrow one.
+    assert_true(len(log.last_visual) < len(first_pass))
+
+
 fn main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
     # (which writes to ``~/.config/turbokod/config.json`` via
@@ -10899,4 +11011,8 @@ fn main() raises:
     test_editor_minimap_hover_paints_tooltip()
     test_attr_to_sgr_plain_underline()
     test_attr_to_sgr_curly_colored_underline()
+    test_text_log_incremental_layout_matches_full_rewrap()
+    test_text_log_incremental_layout_handles_trim()
+    test_text_log_full_rewrap_on_width_change()
+    test_editor_paint_collapsed_view_is_cheap()
     print("all tests passed")
