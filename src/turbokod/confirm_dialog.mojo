@@ -18,6 +18,7 @@ from .buttons import (
     ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas, wrap_to_width
+from .painter import Painter
 from .colors import (
     Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE,
 )
@@ -120,8 +121,9 @@ struct ConfirmDialog(Movable):
         var attr = Attr(BLACK, LIGHT_GRAY)
         var rect = self._layout(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         # Reserve the bottom-most three rows for the button row + its

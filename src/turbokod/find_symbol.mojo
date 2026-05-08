@@ -29,6 +29,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
 from .events import (
@@ -384,12 +385,13 @@ struct FindSymbol(Movable):
         var error_attr  = Attr(RED,    LIGHT_GRAY)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, bg, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, bg, False)
         paint_window_title(canvas, rect, String(" Find Symbol "), bg, bg)
         var label = String(" Find: ")
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 1), label, bg,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
         var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
@@ -399,22 +401,20 @@ struct FindSymbol(Movable):
         var h = self._list_height(rect)
         # Status / placeholder.
         if self.state == _STATE_PENDING:
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top),
-                self.status_message,
-                hint_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top),
+                self.status_message, hint_attr,
             )
         elif self.state == _STATE_ERROR:
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top),
-                self.status_message,
-                error_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top),
+                self.status_message, error_attr,
             )
         elif len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top),
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top),
                 String("Type at least 2 letters of a symbol name."),
-                hint_attr, rect.b.x - 1,
+                hint_attr,
             )
         elif len(self.entries) == 0:
             var msg: String
@@ -422,8 +422,8 @@ struct FindSymbol(Movable):
                 msg = String("Searching…")
             else:
                 msg = String("No matches.")
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top), msg, hint_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top), msg, hint_attr,
             )
         # Listing — paints regardless of state so a leftover error
         # message above the list doesn't hide already-collected hits.
@@ -434,13 +434,13 @@ struct FindSymbol(Movable):
             var entry = self.entries[idx]
             var is_sel = (idx == self.selected)
             var row_attr = sel_attr if is_sel else bg
-            canvas.fill(
-                Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), row_attr,
             )
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top + i),
-                entry.name, row_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top + i),
+                entry.name, row_attr,
             )
             # Intentionally no path column: ``entry.path`` is the
             # location of the *first textual occurrence* (a usage,
@@ -448,10 +448,10 @@ struct FindSymbol(Movable):
             # eventually take us to. Showing it would mislead the
             # user about where the symbol actually lives.
         # Bottom hint.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
             String(" Enter: jump  ESC: cancel "),
-            hint_attr, rect.b.x - 1,
+            hint_attr,
         )
 
     # --- events -----------------------------------------------------------

@@ -14,6 +14,7 @@ of the picker.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
@@ -198,13 +199,14 @@ struct QuickOpen(Movable):
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, bg, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, bg, False)
         paint_window_title(canvas, rect, self.title, bg, bg)
         # Search line: ``Find: <query>_``
         var label = String(" Find: ")
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 1), label, bg,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
         var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
@@ -219,18 +221,18 @@ struct QuickOpen(Movable):
                 break
             var entry = self.entries[self.matched[idx]]
             var attr = sel_attr if idx == self.selected else bg
-            canvas.fill(
-                Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), attr,
             )
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top + i), entry, attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top + i), entry, attr,
             )
         # Bottom hint.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
             String(" Enter: open  ESC: cancel "),
-            hint_attr, rect.b.x - 1,
+            hint_attr,
         )
 
     # --- events -----------------------------------------------------------

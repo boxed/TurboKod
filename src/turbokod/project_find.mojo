@@ -22,6 +22,7 @@ from .buttons import (
     BUTTON_FIRED, OptionToggle, paint_option_toggle,
 )
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, RED, WHITE, YELLOW,
@@ -376,8 +377,12 @@ struct ProjectFind(Movable):
         var ctx_match   = Attr(YELLOW, BLUE)
         var hint_attr   = Attr(BLACK,  LIGHT_GRAY)
         var sep_attr    = Attr(WHITE,  BLUE)
-        canvas.fill(screen, String(" "), bg)
-        canvas.draw_box(screen, border, True)
+        # Bind every write to the dialog rect so an over-long match
+        # path or context line can't leak onto the modal's border or
+        # outside ``screen`` entirely.
+        var painter = Painter(screen)
+        painter.fill(canvas, screen, String(" "), bg)
+        painter.draw_box(canvas, screen, border, True)
         # Title — framework helper enforces title bg = body bg.
         paint_window_title(
             canvas, screen, String(" Find in Project "), title_attr, bg,
@@ -385,9 +390,8 @@ struct ProjectFind(Movable):
         # Input row: ``Search: <query>_   Cc  W  .*``.
         var input_y = self._input_y(screen)
         var label = String(" Search: ")
-        _ = canvas.put_text(
-            Point(screen.a.x + 1, input_y), label, label_attr,
-            screen.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(screen.a.x + 1, input_y), label, label_attr,
         )
         var qx = screen.a.x + 1 + len(label.as_bytes())
         # Reserve room on the right edge of the input row for the
@@ -443,17 +447,18 @@ struct ProjectFind(Movable):
         elif self.toggle_regex.hovered:
             hovered_tooltip = self.toggle_regex.tooltip
         if len(hovered_tooltip.as_bytes()) > 0:
-            canvas.fill(
+            painter.fill(
+                canvas,
                 Rect(screen.a.x + 1, sep1_y, screen.b.x - 1, sep1_y + 1),
                 String(" "), bg,
             )
-            _ = canvas.put_text(
-                Point(screen.a.x + 2, sep1_y),
-                hovered_tooltip, ctx_attr, screen.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(screen.a.x + 2, sep1_y),
+                hovered_tooltip, ctx_attr,
             )
         else:
             for x in range(screen.a.x + 1, screen.b.x - 1):
-                canvas.set(x, sep1_y, Cell(String("─"), sep_attr, 1))
+                painter.set(canvas, x, sep1_y, Cell(String("─"), sep_attr, 1))
         # Match list.
         var top = self._list_top(screen)
         var h = self._list_height(screen)
@@ -467,8 +472,8 @@ struct ProjectFind(Movable):
                 msg = String("Searching...")
             else:
                 msg = String("No matches.")
-            _ = canvas.put_text(
-                Point(screen.a.x + 2, top), msg, ctx_attr, screen.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(screen.a.x + 2, top), msg, ctx_attr,
             )
         for i in range(h):
             var idx = self.scroll + i
@@ -479,34 +484,34 @@ struct ProjectFind(Movable):
             # reference would fail Mojo's exclusivity check.
             var m = self.matches[idx]
             self._paint_match_row(
-                canvas, screen, top + i, m, idx == self.selected,
+                canvas, screen, painter, top + i, m, idx == self.selected,
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
                 registry,
             )
         # Separator above the context panel.
         var ctx_top = self._list_bottom(screen)
         for x in range(screen.a.x + 1, screen.b.x - 1):
-            canvas.set(x, ctx_top, Cell(String("─"), sep_attr, 1))
+            painter.set(canvas, x, ctx_top, Cell(String("─"), sep_attr, 1))
         var ctx_label = String(" Context ")
         var lx = screen.a.x + (screen.width() - len(ctx_label.as_bytes())) // 2
-        _ = canvas.put_text(Point(lx, ctx_top), ctx_label, title_attr)
+        _ = painter.put_text(canvas, Point(lx, ctx_top), ctx_label, title_attr)
         # Context body. Lazy-tokenize the loaded file using the shared
         # registry so the grammar's regexes only get compiled once per
         # session (not per paint frame).
         self._ensure_context_highlights(registry)
         self._paint_context(
-            canvas, screen, ctx_top + 1, ctx_attr, ctx_match,
+            canvas, screen, painter, ctx_top + 1, ctx_attr, ctx_match,
         )
         # Hint at the very bottom (overlays the bottom border).
         var hint = String(" Enter: open  ESC: cancel  Up/Down: navigate ")
         var hx = screen.b.x - len(hint.as_bytes()) - 1
         if hx < screen.a.x + 1:
             hx = screen.a.x + 1
-        _ = canvas.put_text(Point(hx, screen.b.y - 1), hint, hint_attr)
+        _ = painter.put_text(canvas, Point(hx, screen.b.y - 1), hint, hint_attr)
 
     fn _paint_match_row(
-        mut self, mut canvas: Canvas, screen: Rect, y: Int,
-        m: ProjectMatch, is_sel: Bool,
+        mut self, mut canvas: Canvas, screen: Rect, painter: Painter,
+        y: Int, m: ProjectMatch, is_sel: Bool,
         line_attr: Attr, sel_line: Attr,
         hl_attr: Attr, sel_hl_attr: Attr,
         path_attr: Attr, sel_path: Attr,
@@ -517,15 +522,18 @@ struct ProjectFind(Movable):
         var row_hl = sel_hl_attr if is_sel else hl_attr
         var inner_left = screen.a.x + 1
         var inner_right = screen.b.x - 1
-        canvas.fill(Rect(inner_left, y, inner_right, y + 1), String(" "), row_attr)
+        painter.fill(
+            canvas, Rect(inner_left, y, inner_right, y + 1),
+            String(" "), row_attr,
+        )
         # Right-aligned ``rel:line``.
         var path_label = m.rel + String(":") + String(m.line_no)
         var path_len = len(path_label.as_bytes())
         var path_x = inner_right - path_len - 1
         if path_x < inner_left + 1:
             path_x = inner_left + 1
-        _ = canvas.put_text(
-            Point(path_x, y), path_label, row_path, inner_right,
+        _ = painter.put_text(
+            canvas, Point(path_x, y), path_label, row_path,
         )
         # Line text (left-aligned, clipped before the path label).
         var line_x = inner_left + 1
@@ -550,7 +558,7 @@ struct ProjectFind(Movable):
         for i in range(start, end):
             var b = Int(bytes[i])
             var ch = chr(b) if b < 0x80 else String("?")
-            canvas.set(line_x + (i - start), y, Cell(ch, row_attr, 1))
+            painter.set(canvas, line_x + (i - start), y, Cell(ch, row_attr, 1))
         # Syntax-highlight overlay (attr-only). Skipped on the selected
         # row because the solid yellow selection background clashes with
         # the highlighter's blue-background palette — keeping the
@@ -590,7 +598,7 @@ struct ProjectFind(Movable):
                 for i in range(hs, he):
                     var b = Int(bytes[i])
                     var ch = chr(b) if b < 0x80 else String("?")
-                    canvas.set(line_x + (i - start), y, Cell(ch, hl.attr, 1))
+                    painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
         # Highlight overlay for the hit.
         if hit >= 0 and len(self.query.text.as_bytes()) > 0:
             var hl_start = hit
@@ -600,14 +608,14 @@ struct ProjectFind(Movable):
             for i in range(hl_start, hl_end):
                 var b = Int(bytes[i])
                 var ch = chr(b) if b < 0x80 else String("?")
-                canvas.set(line_x + (i - start), y, Cell(ch, row_hl, 1))
+                painter.set(canvas, line_x + (i - start), y, Cell(ch, row_hl, 1))
         # Leading "…" hint when the line was sliced from the left.
         if start > 0:
-            canvas.set(line_x, y, Cell(String("…"), row_attr, 1))
+            painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
 
     fn _paint_context(
-        self, mut canvas: Canvas, screen: Rect, top_y: Int,
-        ctx_attr: Attr, match_attr: Attr,
+        self, mut canvas: Canvas, screen: Rect, painter: Painter,
+        top_y: Int, ctx_attr: Attr, match_attr: Attr,
     ):
         var inner_left = screen.a.x + 1
         var inner_right = screen.b.x - 1
@@ -619,10 +627,10 @@ struct ProjectFind(Movable):
         var center = m.line_no - 1   # 0-based
         if len(self._context_lines) == 0 \
                 or self._context_path != m.path:
-            _ = canvas.put_text(
-                Point(inner_left + 1, top_y),
+            _ = painter.put_text(
+                canvas, Point(inner_left + 1, top_y),
                 String("(loading ") + m.rel + String(")"),
-                ctx_attr, inner_right,
+                ctx_attr,
             )
             return
         var line_count = len(self._context_lines)
@@ -640,9 +648,9 @@ struct ProjectFind(Movable):
             var marker_attr = match_attr if is_match else ctx_attr
             var lineno = String(src + 1) + String(": ")
             var x = inner_left + 1
-            _ = canvas.put_text(Point(x, y), marker, marker_attr, inner_right)
+            _ = painter.put_text(canvas, Point(x, y), marker, marker_attr)
             x += len(marker.as_bytes())
-            _ = canvas.put_text(Point(x, y), lineno, ctx_attr, inner_right)
+            _ = painter.put_text(canvas, Point(x, y), lineno, ctx_attr)
             x += len(lineno.as_bytes())
             # Plain text pass — establishes glyph + base attr per cell.
             var line = self._context_lines[src]
@@ -654,7 +662,7 @@ struct ProjectFind(Movable):
             for i in range(end):
                 var b = Int(bytes[i])
                 var ch = chr(b) if b < 0x80 else String("?")
-                canvas.set(x + i, y, Cell(ch, ctx_attr, 1))
+                painter.set(canvas, x + i, y, Cell(ch, ctx_attr, 1))
             # Syntax-highlight overlay for this row. Highlights are
             # attr-only (glyph already painted above), so order with
             # respect to the plain pass doesn't matter for content.
@@ -669,7 +677,7 @@ struct ProjectFind(Movable):
                 for i in range(hs, he):
                     var b = Int(bytes[i])
                     var ch = chr(b) if b < 0x80 else String("?")
-                    canvas.set(x + i, y, Cell(ch, hl.attr, 1))
+                    painter.set(canvas, x + i, y, Cell(ch, hl.attr, 1))
             # Match-substring highlight on the center row only.
             if is_match and len(self.query.text.as_bytes()) > 0:
                 var hit = _find_bytes(line, self.query.text)
@@ -682,7 +690,7 @@ struct ProjectFind(Movable):
                             continue
                         var b = Int(bytes[i])
                         var ch = chr(b) if b < 0x80 else String("?")
-                        canvas.set(x + i, y, Cell(ch, hit_attr, 1))
+                        painter.set(canvas, x + i, y, Cell(ch, hit_attr, 1))
 
     # --- events -----------------------------------------------------------
 

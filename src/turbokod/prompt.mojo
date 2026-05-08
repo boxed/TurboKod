@@ -20,6 +20,7 @@ from .buttons import (
     BUTTON_FIRED, OptionToggle, paint_option_toggle,
 )
 from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
@@ -193,8 +194,9 @@ struct Prompt(Movable):
         var attr = Attr(BLACK, LIGHT_GRAY)
         var rect = self._layout(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         var text_w = rect.width() - 4
@@ -280,13 +282,13 @@ struct Prompt(Movable):
                     tip = self.toggle_regex.tooltip
                 # Clear the row first so the previous frame's tooltip
                 # never lingers when the cursor leaves a chip.
-                canvas.fill(
-                    Rect(content_x, tip_y, clip_x, tip_y + 1),
+                painter.fill(
+                    canvas, Rect(content_x, tip_y, clip_x, tip_y + 1),
                     String(" "), attr,
                 )
                 if len(tip.as_bytes()) > 0:
-                    _ = canvas.put_text(
-                        Point(content_x, tip_y), tip, attr, clip_x,
+                    _ = painter.put_text(
+                        canvas, Point(content_x, tip_y), tip, attr,
                     )
 
     fn handle_key(mut self, event: Event) -> Bool:

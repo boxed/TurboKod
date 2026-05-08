@@ -10,6 +10,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE
 from .events import (
@@ -281,7 +282,11 @@ struct MenuBar(Movable):
         var bar_key  = Attr(RED,   LIGHT_GRAY)
         var open_bg  = Attr(BLACK, GREEN)
         var open_key = Attr(WHITE, GREEN)
-        canvas.fill(Rect(0, 0, screen.b.x, 1), String(" "), bar)
+        # The menu bar owns the top row only — bind a Painter to that
+        # one-row strip so a long label can't bleed onto the row below.
+        var bar_rect = Rect(0, 0, screen.b.x, 1)
+        var bar_p = Painter(bar_rect)
+        bar_p.fill(canvas, bar_rect, String(" "), bar)
         var rects = self._layout(screen.b.x)
         # Default-paint the static ``≡`` brand mark; gets overdrawn below if
         # an actual system menu is registered (so the hit zone gains a real
@@ -292,7 +297,7 @@ struct MenuBar(Movable):
                 have_system = True
                 break
         if not have_system:
-            canvas.set(1, 0, Cell(String("≡"), bar, 1))
+            bar_p.set(canvas, 1, 0, Cell(String("≡"), bar, 1))
         for i in range(len(self.menus)):
             if not self.menus[i].visible:
                 continue
@@ -308,16 +313,16 @@ struct MenuBar(Movable):
                 # at cell 1 carrying the hotkey-color attr so it pops the
                 # same way a normal menu's first letter does.
                 for x in range(r.a.x, r.b.x):
-                    canvas.set(x, 0, Cell(String(" "), bg, 1))
-                canvas.set(r.a.x + 1, 0, Cell(String("≡"), key, 1))
+                    bar_p.set(canvas, x, 0, Cell(String(" "), bg, 1))
+                bar_p.set(canvas, r.a.x + 1, 0, Cell(String("≡"), key, 1))
                 continue
-            canvas.set(r.a.x, 0, Cell(String(" "), bg, 1))
+            bar_p.set(canvas, r.a.x, 0, Cell(String(" "), bg, 1))
             var label_bytes = self.menus[i].label.as_bytes()
             for j in range(len(label_bytes)):
                 var ch = String(chr(Int(label_bytes[j])))
                 var attr = key if j == 0 else bg
-                canvas.set(r.a.x + 1 + j, 0, Cell(ch, attr, 1))
-            canvas.set(r.b.x - 1, 0, Cell(String(" "), bg, 1))
+                bar_p.set(canvas, r.a.x + 1 + j, 0, Cell(ch, attr, 1))
+            bar_p.set(canvas, r.b.x - 1, 0, Cell(String(" "), bg, 1))
         if self.open_idx >= 0:
             self._paint_dropdown(canvas, screen.b.x)
 
@@ -327,9 +332,13 @@ struct MenuBar(Movable):
         var attr_key = Attr(RED,   LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         var sel_key  = Attr(WHITE, GREEN)
+        # Drop shadow paints into cells *outside* ``rect`` (one row
+        # below + one column right), so it intentionally bypasses the
+        # dropdown's clip; the helper has its own bounds.
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         var menu = self.menus[self.open_idx]
         # When the dropdown contains any checkable item, every row reserves
         # a 2-cell prefix between the left padding and the label so the
@@ -341,25 +350,25 @@ struct MenuBar(Movable):
             if menu.items[i].is_separator:
                 # Horizontal divider across the dropdown's interior.
                 for x in range(rect.a.x + 1, rect.b.x - 1):
-                    canvas.set(x, y, Cell(String("─"), attr, 1))
+                    painter.set(canvas, x, y, Cell(String("─"), attr, 1))
                 continue
             var is_sel = (i == self.selected_item)
             var row_attr = sel_attr if is_sel else attr
             var row_key = sel_key if is_sel else attr_key
             if is_sel:
                 # Fill the row so the green background spans label → shortcut.
-                canvas.fill(
-                    Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
+                painter.fill(
+                    canvas, Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
                     String(" "), row_attr,
                 )
             if menu.items[i].checkable and menu.items[i].checked:
-                canvas.set(rect.a.x + 2, y, Cell(String("✓"), row_attr, 1))
+                painter.set(canvas, rect.a.x + 2, y, Cell(String("✓"), row_attr, 1))
             var label_x = rect.a.x + 2 + indent
             var label_bytes = menu.items[i].label.as_bytes()
             for j in range(len(label_bytes)):
                 var ch = String(chr(Int(label_bytes[j])))
                 var a = row_key if j == 0 else row_attr
-                canvas.set(label_x + j, y, Cell(ch, a, 1))
+                painter.set(canvas, label_x + j, y, Cell(ch, a, 1))
             # Right-aligned shortcut text — last cell sits at rect.b.x - 2
             # (one in from the right border), so the start x is computed
             # backwards from there. ``_dropdown_rect`` already widened the
@@ -368,7 +377,7 @@ struct MenuBar(Movable):
             var sc_w = len(sc.as_bytes())
             if sc_w > 0:
                 var sx = rect.b.x - 1 - sc_w
-                _ = canvas.put_text(Point(sx, y), sc, row_attr, rect.b.x - 1)
+                _ = painter.put_text(canvas, Point(sx, y), sc, row_attr)
 
     # --- keyboard navigation ----------------------------------------------
 

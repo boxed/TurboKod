@@ -20,7 +20,7 @@ canvas reference flows through method args rather than being captured,
 which keeps Painter free of lifetime annotations.
 """
 
-from .canvas import Canvas
+from .canvas import Canvas, TAB_WIDTH
 from .cell import Cell
 from .colors import Attr
 from .geometry import Point, Rect
@@ -60,11 +60,13 @@ struct Painter(Copyable, Movable):
         sides. Returns the number of cells advanced inside the clip
         (zero when the row is outside the clip vertically).
 
-        Codepoint-aligned: when the start point is left of the clip,
-        leading codepoints are skipped one cell at a time so the
-        remaining glyphs land at the correct visual columns. The right
-        edge is delegated to ``Canvas.put_text``'s ``max_x`` arg, which
-        already stops mid-string without splitting a UTF-8 sequence.
+        When the start point is left of the clip, leading codepoints
+        are walked forward (advancing the canvas's cell counter — tabs
+        expand to ``_TAB_WIDTH``-aligned spaces, narrow codepoints to
+        one cell each) until ``x`` reaches the clip's left edge. The
+        right edge is delegated to ``Canvas.put_text``'s ``max_x`` arg,
+        which already stops mid-string without splitting a UTF-8
+        sequence.
         """
         if p.y < self.clip.a.y or p.y >= self.clip.b.y:
             return 0
@@ -75,8 +77,18 @@ struct Painter(Copyable, Movable):
         var i = 0
         var x = p.x
         while x < self.clip.a.x and i < n:
-            i += _codepoint_size(Int(bytes[i]))
-            x += 1
+            var b = Int(bytes[i])
+            if b == 0x09:
+                # Tab expands to spaces aligned to a screen-column tab
+                # stop, so advance ``x`` by however many cells the tab
+                # occupies before the clip's left edge — same width
+                # ``Canvas.put_text`` will emit on the far side of the
+                # clip.
+                x += TAB_WIDTH - (x % TAB_WIDTH)
+                i += 1
+            else:
+                i += _codepoint_size(b)
+                x += 1
         if i >= n:
             return 0
         if i == 0:

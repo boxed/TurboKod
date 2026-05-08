@@ -34,6 +34,7 @@ that operates on a raw ``String`` (no cursor model).
 from std.collections.list import List
 
 from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE
@@ -401,9 +402,10 @@ struct TextField(Copyable, Movable):
         """
         var attr = text_field_bg()
         var sel_attr = text_field_sel_attr()
-        canvas.fill(rect, String(" "), attr)
-        _ = canvas.put_text(
-            Point(rect.a.x, rect.a.y), self.text, attr, rect.b.x,
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        _ = painter.put_text(
+            canvas, Point(rect.a.x, rect.a.y), self.text, attr,
         )
         # Selection overlay: recolor the selected cells without
         # rewriting glyphs (``set_attr`` keeps put_text's UTF-8
@@ -417,7 +419,7 @@ struct TextField(Copyable, Movable):
             if stop > rect.b.x:
                 stop = rect.b.x
             while x < stop:
-                canvas.set_attr(x, rect.a.y, sel_attr)
+                painter.set_attr(canvas, x, rect.a.y, sel_attr)
                 x += 1
         if focused:
             var cur_x = rect.a.x + self.cursor_cell()
@@ -432,8 +434,8 @@ struct TextField(Copyable, Movable):
                     glyph = canvas.get(cur_x, rect.a.y).glyph
                 else:
                     glyph = String(" ")
-                canvas.set(
-                    cur_x, rect.a.y,
+                painter.set(
+                    canvas, cur_x, rect.a.y,
                     Cell(glyph, Attr(LIGHT_GRAY, BLACK), 1),
                 )
 

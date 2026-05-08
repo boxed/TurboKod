@@ -17,6 +17,7 @@ from .canvas import Canvas
 from .cell import Cell, blank_cell
 from .colors import Attr, attr_to_sgr, default_attr
 from .events import (
+    DOUBLE_CLICK_MS,
     Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE,
     EVENT_NONE, EVENT_OPEN_PATH, EVENT_RESIZE, EVENT_QUIT,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
@@ -32,7 +33,8 @@ from .geometry import Point
 from .posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
     alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
-    getenv_value, poll_stdin, query_size_via_cursor, read_into, set_nonblocking,
+    getenv_value, monotonic_ms, poll_stdin, query_size_via_cursor,
+    read_into, set_nonblocking,
     tcflush, tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
@@ -197,6 +199,15 @@ struct Terminal:
     # dedupe ``set_pointer_shape`` so we don't spam the OSC sequence
     # on every mouse-motion event.
     var _last_pointer_shape: String
+    # Double-click counter. Tracks the most recent left/middle/right
+    # mouse press's timestamp + cell so subsequent presses at the same
+    # spot within ``DOUBLE_CLICK_MS`` increment ``Event.click_count``
+    # to 2 (double), 3 (triple), then reset to 1.
+    var _last_press_ms: Int
+    var _last_press_x: Int
+    var _last_press_y: Int
+    var _last_press_button: UInt8
+    var _consec_press_count: UInt8
 
     fn __init__(out self) raises:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
@@ -211,6 +222,11 @@ struct Terminal:
         self._front = Canvas(self.width, self.height)
         self.trace_fd = -1
         self._last_pointer_shape = String("")
+        self._last_press_ms = 0
+        self._last_press_x = 0
+        self._last_press_y = 0
+        self._last_press_button = UInt8(0)
+        self._consec_press_count = UInt8(0)
 
     fn _trace(self, var line: String):
         """Write ``line`` to ``trace_fd`` if open. No newline added —
@@ -456,15 +472,18 @@ struct Terminal:
                     self._pending.append(combined[i])
                 break
             if parsed[0].kind != EVENT_NONE:
-                if parsed[0].kind == EVENT_RESIZE:
+                var ev = parsed[0]
+                if ev.kind == EVENT_RESIZE:
                     # The resize sequence the wrapper pushes carries the new
                     # ``(cols, rows)`` in ``pos``; fold it into our cached
                     # dimensions so callers reading ``self.width/height``
                     # immediately after see the new size, and the front
                     # canvas is re-sized in ``present()`` next paint.
-                    self.width = parsed[0].pos.x
-                    self.height = parsed[0].pos.y
-                self._queue.append(parsed[0])
+                    self.width = ev.pos.x
+                    self.height = ev.pos.y
+                elif ev.kind == EVENT_MOUSE:
+                    ev.click_count = self._update_click_count(ev)
+                self._queue.append(ev)
             pos += consumed
         if len(self._pending) > 64:
             self._pending = List[UInt8]()
@@ -482,6 +501,44 @@ struct Terminal:
             self._queue = List[Event]()
             self._queue_head = 0
         return ev
+
+    fn _update_click_count(mut self, ev: Event) -> UInt8:
+        """Compute the consecutive-press count for a mouse event.
+
+        Only initial presses (``pressed=True``, ``motion=False``) of
+        a real button (left / middle / right) advance the counter.
+        Wheel events, motion, and releases get ``0``. A press at the
+        same screen cell with the same button within
+        ``DOUBLE_CLICK_MS`` of the prior press increments the counter
+        (1 → 2 → 3 → reset to 1); any other press resets to 1.
+        """
+        if not ev.pressed or ev.motion:
+            return UInt8(0)
+        var b = ev.button
+        if b != MOUSE_BUTTON_LEFT \
+                and b != MOUSE_BUTTON_MIDDLE \
+                and b != MOUSE_BUTTON_RIGHT:
+            return UInt8(0)
+        var now = monotonic_ms()
+        var same = (
+            now - self._last_press_ms <= DOUBLE_CLICK_MS
+            and ev.pos.x == self._last_press_x
+            and ev.pos.y == self._last_press_y
+            and b == self._last_press_button
+        )
+        var count: UInt8
+        if same:
+            count = self._consec_press_count + UInt8(1)
+            if count > UInt8(3):
+                count = UInt8(1)
+        else:
+            count = UInt8(1)
+        self._consec_press_count = count
+        self._last_press_ms = now
+        self._last_press_x = ev.pos.x
+        self._last_press_y = ev.pos.y
+        self._last_press_button = b
+        return count
 
     fn _flush_pending_as_esc(mut self):
         """Emit a KEY_ESC for the pending leading byte (must be ESC) and clear.

@@ -41,6 +41,7 @@ from .buttons import (
     ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, LIGHT_RED, RED, WHITE,
@@ -480,20 +481,21 @@ struct TargetsDialog(Movable):
         var rect = _dialog_rect(screen, self.pos)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, border, True)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, border, True)
         paint_window_title(canvas, rect, String(" Configure Targets "), bg, bg)
         # Close button [■] in the top-left corner — same chrome as
         # editor windows, drawn by the framework helper.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Section labels.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 2), String("Targets:"), bg,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 2), String("Targets:"), bg,
         )
         # Render the targets list.
-        self._paint_list(canvas, _list_rect(rect))
+        self._paint_list(canvas, painter, _list_rect(rect))
         # Right-pane labels and inputs.
-        self._paint_form(canvas, rect)
+        self._paint_form(canvas, painter, rect)
         # Bottom button row.
         self._paint_buttons(canvas, rect)
         # Language dropdown popup overlays the rest of the dialog when
@@ -502,7 +504,9 @@ struct TargetsDialog(Movable):
             var lang_ir = _input_rect(rect, _row_for_focus(_FOCUS_LANG))
             self.lang_dropdown.paint_popup(canvas, lang_ir, screen)
 
-    fn _paint_list(mut self, mut canvas: Canvas, list_rect: Rect):
+    fn _paint_list(
+        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
+    ):
         """Paint each list entry on a cyan field — no border. The
         cyan-vs-light-gray contrast already separates the list from
         the form; a frame on top would just be visual noise.
@@ -515,7 +519,7 @@ struct TargetsDialog(Movable):
         # No interior gap — every cell of ``list_rect`` is a list row
         # (or empty space), painting straight against the dialog body.
         var inner = list_rect
-        canvas.fill(inner, String(" "), body_attr)
+        painter.fill(canvas, inner, String(" "), body_attr)
         var visible = inner.height()
         # Re-clip scroll so an entry-add or -remove can't leave us
         # showing past the end of the list.
@@ -549,16 +553,18 @@ struct TargetsDialog(Movable):
                 )
                 # Fill the row so the highlight reaches the right edge,
                 # not just under the text.
-                canvas.fill(
-                    Rect(inner.a.x, inner.a.y + r,
+                painter.fill(
+                    canvas, Rect(inner.a.x, inner.a.y + r,
                          inner.b.x, inner.a.y + r + 1),
                     String(" "), attr,
                 )
-            _ = canvas.put_text(
-                Point(inner.a.x, inner.a.y + r), line, attr, inner.b.x,
+            _ = painter.put_text(
+                canvas, Point(inner.a.x, inner.a.y + r), line, attr,
             )
 
-    fn _paint_form(mut self, mut canvas: Canvas, rect: Rect):
+    fn _paint_form(
+        mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
+    ):
         """Paint the labels + editable strips for the selected target.
         When nothing is selected, paint a centered hint — the form
         rows would otherwise show empty boxes the user can't actually
@@ -571,21 +577,21 @@ struct TargetsDialog(Movable):
         if self.selected < 0:
             var hint = String("(no target selected — use [+ Add])")
             var hx = _label_at(rect, 6).x
-            _ = canvas.put_text(Point(hx, rect.a.y + 6), hint, hint_attr)
+            _ = painter.put_text(canvas, Point(hx, rect.a.y + 6), hint, hint_attr)
             return
-        _ = canvas.put_text(_label_at(rect, 2), String("Name:"), bg)
-        _ = canvas.put_text(_label_at(rect, 4), String("Program:"), bg)
-        _ = canvas.put_text(_label_at(rect, 6), String("Args:"), bg)
-        _ = canvas.put_text(_label_at(rect, 8), String("Working dir:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 2), String("Name:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 4), String("Program:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 6), String("Args:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 8), String("Working dir:"), bg)
         # Helper line under the cwd input — same column as the input
         # so the connection reads at a glance.
-        _ = canvas.put_text(
-            Point(_input_rect(rect, 8).a.x, rect.a.y + 9),
+        _ = painter.put_text(
+            canvas, Point(_input_rect(rect, 8).a.x, rect.a.y + 9),
             String("(empty = project root; relative paths join the project)"),
-            hint_attr, rect.b.x - 2,
+            hint_attr,
         )
-        _ = canvas.put_text(
-            _label_at(rect, 11), String("Debug language:"), bg,
+        _ = painter.put_text(
+            canvas, _label_at(rect, 11), String("Debug language:"), bg,
         )
         # Copy each field out before the call: ``_paint_input_tf``
         # takes ``mut self``, so an aliased ``self.name_tf`` reference

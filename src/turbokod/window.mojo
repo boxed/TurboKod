@@ -13,6 +13,7 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, YELLOW
 from .editor import (
@@ -322,11 +323,16 @@ struct Window(ImplicitlyCopyable, Movable):
             border = Attr(LIGHT_GRAY, BLUE)
         var content_attr = Attr(YELLOW, BLUE)
         var body_bg = Attr(LIGHT_GRAY, BLUE)
+        # Bind every write to the window's own rect — chrome (border,
+        # title, indicators, scrollbars) sits ON the rect's perimeter,
+        # body content fills the interior; either way nothing should
+        # leak outside ``self.rect``.
+        var painter = Painter(self.rect)
         var interior = self.rect.inset(1, 1)
         if not interior.is_empty():
-            canvas.fill(interior, String(" "), body_bg)
+            painter.fill(canvas, interior, String(" "), body_bg)
         # Focused windows get the classic TV double-line border; others single.
-        canvas.draw_box(self.rect, border, focused)
+        painter.draw_box(canvas, self.rect, border, focused)
         # Title sits on the top border row through the framework helper:
         # the helper enforces title-bg = body-bg, while ``border`` only
         # contributes its focus-tinted fg. The +6 width gate keeps the
@@ -357,13 +363,15 @@ struct Window(ImplicitlyCopyable, Movable):
             else:
                 arrow = String("▲")
             var indicator = num_str + String("=[") + arrow + String("]")
-            _ = canvas.put_text(
+            _ = painter.put_text(
+                canvas,
                 Point(self.rect.b.x - num_len - 5, self.rect.a.y),
                 indicator,
                 border,
             )
         elif self.rect.width() >= num_len + 6:
-            _ = canvas.put_text(
+            _ = painter.put_text(
+                canvas,
                 Point(self.rect.b.x - num_len - 2, self.rect.a.y),
                 num_str,
                 border,
@@ -371,29 +379,28 @@ struct Window(ImplicitlyCopyable, Movable):
         if self.is_editor:
             self.editor.paint(canvas, self.interior(), focused)
         else:
-            # Content, left-aligned. Clipped to the interior on both axes:
-            # the loop bound clips vertically; the ``max_x`` arg clips horizontally
-            # so a long line can't bleed onto (or past) the right border.
+            # Content, left-aligned. The painter clips to ``self.rect``
+            # on both axes; ``inner_h`` keeps us off the bottom border.
             var inner_h = self.rect.height() - 2
-            var content_right = self.rect.b.x - 1   # exclusive: stop before right border
             for i in range(len(self.content)):
                 if i >= inner_h:
                     break
-                _ = canvas.put_text(
+                _ = painter.put_text(
+                    canvas,
                     Point(self.rect.a.x + 2, self.rect.a.y + 1 + i),
                     self.content[i],
                     content_attr,
-                    content_right,
                 )
         # Editor windows get scroll bars + a row:col indicator, both integrated
         # into the window border (overlaying the ``─``/``│`` line chars).
         if self.is_editor:
-            self._paint_v_scrollbar(canvas, border)
-            self._paint_h_scrollbar(canvas, border)
+            self._paint_v_scrollbar(canvas, painter, border)
+            self._paint_h_scrollbar(canvas, painter, border)
         # Unsaved-changes marker: a green ``*`` at column a.x+2 of the bottom
         # border (skipping the corner ``└`` at a.x and the dash at a.x+1).
         if self.is_editor and self.editor.dirty and self.rect.width() >= 4:
-            canvas.set(
+            painter.set(
+                canvas,
                 self.rect.a.x + 2, self.rect.b.y - 1,
                 Cell(String("*"), Attr(GREEN, BLUE), 1),
             )
@@ -467,7 +474,9 @@ struct Window(ImplicitlyCopyable, Movable):
         if knob_off > track_w - knob_w: knob_off = track_w - knob_w
         return (True, sb_left, track_w, knob_off, knob_w, max_scroll)
 
-    fn _paint_v_scrollbar(self, mut canvas: Canvas, border: Attr):
+    fn _paint_v_scrollbar(
+        self, mut canvas: Canvas, painter: Painter, border: Attr,
+    ):
         """Vertical scroll bar overlaying the right ``│`` border."""
         var m = self._v_sb_metrics()
         if not m[0]:
@@ -475,8 +484,8 @@ struct Window(ImplicitlyCopyable, Movable):
         var x = self.rect.b.x - 1
         var top = self.rect.a.y + 1
         var bot = self.rect.b.y - 2
-        canvas.set(x, top, Cell(String("▲"), border, 1))
-        canvas.set(x, bot, Cell(String("▼"), border, 1))
+        painter.set(canvas, x, top, Cell(String("▲"), border, 1))
+        painter.set(canvas, x, bot, Cell(String("▼"), border, 1))
         var track_y0 = m[1]
         var track_h = m[2]
         var knob_off = m[3]
@@ -487,9 +496,11 @@ struct Window(ImplicitlyCopyable, Movable):
                 ch = String("█")
             else:
                 ch = String("░")
-            canvas.set(x, track_y0 + i, Cell(ch, border, 1))
+            painter.set(canvas, x, track_y0 + i, Cell(ch, border, 1))
 
-    fn _paint_h_scrollbar(self, mut canvas: Canvas, border: Attr):
+    fn _paint_h_scrollbar(
+        self, mut canvas: Canvas, painter: Painter, border: Attr,
+    ):
         """Horizontal scroll bar + ``row:col`` indicator on the bottom border.
 
         Layout (after the ``└`` corner and the dirty-marker slot at ``a.x+2``):
@@ -502,7 +513,7 @@ struct Window(ImplicitlyCopyable, Movable):
         var pos_text = String(self.editor.cursor_row + 1) \
             + String(":") + String(self.editor.cursor_col + 1)
         var pos_x = self.rect.a.x + 4
-        _ = canvas.put_text(Point(pos_x, y), pos_text, border, self.rect.b.x - 1)
+        _ = painter.put_text(canvas, Point(pos_x, y), pos_text, border)
         var m = self._h_sb_metrics()
         if not m[0]:
             return
@@ -511,15 +522,15 @@ struct Window(ImplicitlyCopyable, Movable):
         var knob_off = m[3]
         var knob_w = m[4]
         var sb_right = sb_left + track_w + 1
-        canvas.set(sb_left, y, Cell(String("◄"), border, 1))
-        canvas.set(sb_right, y, Cell(String("►"), border, 1))
+        painter.set(canvas, sb_left, y, Cell(String("◄"), border, 1))
+        painter.set(canvas, sb_right, y, Cell(String("►"), border, 1))
         for i in range(track_w):
             var ch: String
             if knob_off <= i and i < knob_off + knob_w:
                 ch = String("█")
             else:
                 ch = String("░")
-            canvas.set(sb_left + 1 + i, y, Cell(ch, border, 1))
+            painter.set(canvas, sb_left + 1 + i, y, Cell(ch, border, 1))
 
     # --- scroll bar hit-testing & actions ---------------------------------
     # ``part`` codes: 0=none, 1=up/left arrow, 2=above/left of thumb,

@@ -12,6 +12,7 @@ inserting / removing a line. Fine for source files up to a few thousand lines.
 from std.collections.list import List
 
 from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
@@ -2193,7 +2194,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.scroll_y = target
         return True
 
-    fn paint_minimap_tooltip(self, mut canvas: Canvas, view: Rect):
+    fn paint_minimap_tooltip(
+        self, mut canvas: Canvas, view: Rect,
+    ):
         """Render the hover tooltip for the right-side minimap. Called
         after the editor's main paint pass so it overlays the text. The
         box floats to the LEFT of the minimap column with one row of
@@ -2239,14 +2242,19 @@ struct Editor(ImplicitlyCopyable, Movable):
             by = view.b.y - h
         var r = Rect(bx, by, bx + w, by + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
-        canvas.fill(r, String(" "), attr)
-        canvas.draw_box(r, attr, False)
-        _ = canvas.put_text(
-            Point(r.a.x + 2, r.a.y + 1), label, attr, r.b.x - 1,
+        # Bind to the tooltip's own rect — anchored inside ``view`` by
+        # the math above, but the painter makes that bound enforced
+        # rather than just intended.
+        var tt_painter = Painter(r)
+        tt_painter.fill(canvas, r, String(" "), attr)
+        tt_painter.draw_box(canvas, r, attr, False)
+        _ = tt_painter.put_text(
+            canvas, Point(r.a.x + 2, r.a.y + 1), label, attr,
         )
 
     fn _paint_right_gutter(
-        self, mut canvas: Canvas, view: Rect, content_h: Int,
+        self, mut canvas: Canvas, painter: Painter,
+        view: Rect, content_h: Int,
     ):
         """Paint the right-edge minimap column. Each screen row owns an
         evenly-sized slice of buffer rows; for that slice we ask
@@ -2268,8 +2276,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                 continue
             var attr_opt = self._minimap_attr_for_slice(rng[0], rng[1])
             if attr_opt:
-                canvas.set(
-                    view.b.x - 1, view.a.y + sy,
+                painter.set(
+                    canvas, view.b.x - 1, view.a.y + sy,
                     Cell(String("■"), attr_opt.value(), 1),
                 )
 
@@ -2321,7 +2329,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         return self._screen_row_for(layout, self.cursor_row, self.cursor_col)
 
     fn _paint_one_caret(
-        self, mut canvas: Canvas, view: Rect,
+        self, mut canvas: Canvas, painter: Painter, view: Rect,
         layout: List[VisualLine],
         text_x0: Int, content_right: Int, content_bottom: Int,
         row: Int, col: Int,
@@ -2360,9 +2368,9 @@ struct Editor(ImplicitlyCopyable, Movable):
                 and view.a.y <= sy and sy < content_bottom):
             return
         if col < line_byte_count:
-            canvas.set_attr(sx, sy, Attr(BLUE, YELLOW))
+            painter.set_attr(canvas, sx, sy, Attr(BLUE, YELLOW))
         else:
-            canvas.set(sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
+            painter.set(canvas, sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
 
     fn _screen_row_for(
         self, layout: List[VisualLine],
@@ -2405,7 +2413,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         # selection inversion below).
         var attr = Attr(LIGHT_GREEN, BLUE)
         var sel_attr = Attr(LIGHT_GREEN, CYAN)
-        canvas.fill(view, String(" "), attr)
+        # Single Painter for the entire editor view. Every gutter,
+        # text, caret, and overlay write below routes through it so an
+        # over-long highlight or a stray cell write at the right edge
+        # can't bleed into the neighbouring window's chrome.
+        var painter = Painter(view)
+        painter.fill(canvas, view, String(" "), attr)
         # Stacked left gutters: line-number gutter sits at the very
         # left (right-aligned, one trailing space), then the debugger
         # gutter (breakpoint dot and exec arrow, owned by Desktop),
@@ -2444,8 +2457,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var seg_start = layout[screen_row].byte_start
                 var sy_g = view.a.y + screen_row
                 for gx in range(total_gutter):
-                    canvas.set(
-                        view.a.x + gx, sy_g,
+                    painter.set(
+                        canvas, view.a.x + gx, sy_g,
                         Cell(String(" "), gutter_attr, 1),
                     )
                 # Each layout entry is the *first* visual segment of its
@@ -2460,49 +2473,51 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var sx = view.a.x + (ln_gutter - 1) - num_w
                     if sx < view.a.x:
                         sx = view.a.x
-                    _ = canvas.put_text(
-                        Point(sx, sy_g), num_str, ln_attr,
-                        view.a.x + total_gutter,
+                    _ = painter.put_text(
+                        canvas, Point(sx, sy_g), num_str, ln_attr,
                     )
                 if dap_gutter > 0 and is_first_seg:
                     for k in range(len(self.breakpoint_lines)):
                         if self.breakpoint_lines[k] == buf_row:
-                            canvas.set(
-                                view.a.x + ln_gutter, sy_g,
+                            painter.set(
+                                canvas, view.a.x + ln_gutter, sy_g,
                                 Cell(String("●"), bp_attr, 1),
                             )
                             break
                     if buf_row == self.exec_line:
                         var ax = view.a.x + ln_gutter \
                             + (1 if dap_gutter >= 2 else 0)
-                        canvas.set(ax, sy_g, Cell(String("▶"), exec_attr, 1))
+                        painter.set(canvas, ax, sy_g, Cell(String("▶"), exec_attr, 1))
                 if gc_gutter > 0 and is_first_seg \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
                     if status != GIT_CHANGE_NONE:
                         var bar_attr = Attr(LIGHT_GRAY, BLUE)
                         var gx = view.a.x + ln_gutter + dap_gutter
-                        canvas.set(gx, sy_g, Cell(String("│"), bar_attr, 1))
+                        painter.set(canvas, gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row < len(self.blame_lines):
                     var bl = self.blame_lines[buf_row]
                     var bx = view.a.x + ln_gutter + dap_gutter + gc_gutter
-                    var bl_right = bx + bl_gutter - 1
-                    _ = canvas.put_text(
-                        Point(bx, sy_g), bl.commit, ln_attr, bl_right,
+                    # Blame columns: clip to ``[bx, bx + bl_gutter)``
+                    # via a sub-painter so a long author/commit can't
+                    # bleed into the source text column.
+                    var bl_p = painter.sub(
+                        Rect(bx, sy_g, bx + bl_gutter, sy_g + 1),
                     )
-                    # Author is truncated by ``put_text``'s ``max_x`` clamp
-                    # so a long name doesn't bleed into the source text.
+                    _ = bl_p.put_text(
+                        canvas, Point(bx, sy_g), bl.commit, ln_attr,
+                    )
                     var ax = bx + 8 + 1
-                    _ = canvas.put_text(
-                        Point(ax, sy_g), bl.author, ln_attr, bl_right,
+                    _ = bl_p.put_text(
+                        canvas, Point(ax, sy_g), bl.author, ln_attr,
                     )
         # Right-side gutter: a fixed-height projection of the whole
         # file, independent of ``scroll_y``. ``_paint_right_gutter``
         # handles slicing + per-source priority — see
         # ``_minimap_attr_for_slice`` for the source registry.
         if right_gutter > 0:
-            self._paint_right_gutter(canvas, view, content_h)
+            self._paint_right_gutter(canvas, painter, view, content_h)
         # Text pass — single-source via ``paint_text_segments`` (used
         # by ``TextLog`` too). ``layout`` already accounts for
         # ``indent_cells``; the helper offsets each row's segment
@@ -2563,7 +2578,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var sx_hl = seg_x0 + cell_off
                     if sx_hl >= content_right:
                         break
-                    canvas.set_attr(sx_hl, sy_hl, hl.attr)
+                    painter.set_attr(canvas, sx_hl, sy_hl, hl.attr)
             # Spell-check overlay: same byte-to-cell mapping as the
             # syntax pass above, but reapplies the *same* fg/bg with
             # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
@@ -2591,7 +2606,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var sx_sh = seg_x0 + cell_off
                     if sx_sh >= content_right:
                         break
-                    canvas.set_attr(sx_sh, sy_hl, sh.attr)
+                    painter.set_attr(canvas, sx_sh, sy_hl, sh.attr)
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty
@@ -2619,7 +2634,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             for ci in range(len(all_carets_paint)):
                 var c = all_carets_paint[ci]
                 self._paint_one_caret(
-                    canvas, view, layout, text_x0,
+                    canvas, painter, view, layout, text_x0,
                     content_right, content_bottom,
                     c.row, c.col,
                 )
@@ -3225,6 +3240,30 @@ struct Editor(ImplicitlyCopyable, Movable):
         # moved the cursor, edited, or otherwise shifted intent, so
         # subsequent Cmd+Down should not undo their action.
         self._smart_select_stack = List[Caret]()
+        # Cmd+Right / Cmd+Left — line-level horizontal navigation.
+        # Cmd+Right jumps to end of line; Cmd+Left jumps to the first
+        # non-space, or to col 0 if the cursor is already at or before
+        # the first non-space (so a second press from the indent column
+        # falls all the way to the margin). Shift extends the selection.
+        if (event.mods == MOD_META or event.mods == (MOD_META | MOD_SHIFT)):
+            var extend_line = (event.mods & MOD_SHIFT) != 0
+            if k == KEY_RIGHT:
+                self.clear_extra_carets()
+                self.move_to(
+                    self.cursor_row,
+                    self.buffer.line_length(self.cursor_row),
+                    extend_line,
+                )
+                self._scroll_to_cursor(view)
+                return True
+            if k == KEY_LEFT:
+                self.clear_extra_carets()
+                var line_str = self.buffer.line(self.cursor_row)
+                var first_ns = leading_indent_bytes(line_str)
+                var target = first_ns if self.cursor_col > first_ns else 0
+                self.move_to(self.cursor_row, target, extend_line)
+                self._scroll_to_cursor(view)
+                return True
         if has_ctrl and has_alt and k == KEY_UP:
             self.add_caret_above()
             self._scroll_to_cursor(view)

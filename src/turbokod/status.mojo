@@ -10,6 +10,7 @@ clipped first."""
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
@@ -87,14 +88,19 @@ struct StatusBar(Movable):
         var key_attr = Attr(RED, LIGHT_GRAY)
         var desc_attr = Attr(BLACK, LIGHT_GRAY)
         var y = screen.b.y - 1
-        canvas.fill(Rect(0, y, screen.b.x, screen.b.y), String(" "), bg)
+        # Status bar owns the bottom row only — bind a Painter to that
+        # one-row strip so an over-long label can't bleed up into the
+        # editor stack above.
+        var bar_rect = Rect(0, y, screen.b.x, screen.b.y)
+        var painter = Painter(bar_rect)
+        painter.fill(canvas, bar_rect, String(" "), bg)
         var x = 1
         for i in range(len(self.items)):
             var k = self.items[i].key
             var d = self.items[i].desc
-            _ = canvas.put_text(Point(x, y), k, key_attr)
+            _ = painter.put_text(canvas, Point(x, y), k, key_attr)
             x += len(k.as_bytes()) + 1
-            _ = canvas.put_text(Point(x, y), d, desc_attr)
+            _ = painter.put_text(canvas, Point(x, y), d, desc_attr)
             x += len(d.as_bytes()) + 2
         # Target tabs: painted in the gap between F-key shortcuts and
         # the right-aligned status message. The active tab is
@@ -124,8 +130,7 @@ struct StatusBar(Movable):
                     attr = Attr(WHITE, BLUE)
                 else:
                     attr = Attr(BLACK, LIGHT_GRAY)
-                var max_x = screen.b.x - 1
-                _ = canvas.put_text(Point(x, y), rendered, attr, max_x)
+                _ = painter.put_text(canvas, Point(x, y), rendered, attr)
                 self._tab_hits.append(_TabHit(x, x + w, i))
                 x += w + 1
         # Right-aligned status message — clamped so it never collides with
@@ -135,7 +140,7 @@ struct StatusBar(Movable):
             var mx = screen.b.x - msg_w - 1
             if mx < x + 1:
                 return
-            _ = canvas.put_text(Point(mx, y), self.message, self.message_attr)
+            _ = painter.put_text(canvas, Point(mx, y), self.message, self.message_attr)
 
     fn hit_test_tab(self, pos: Point, screen: Rect) -> Int:
         """Return the index of the tab clicked at ``pos``, or -1 if no

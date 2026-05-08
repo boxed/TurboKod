@@ -14,6 +14,15 @@ from .colors import Attr, BLACK, DARK_GRAY, default_attr
 from .geometry import Point, Rect
 
 
+# Number of cells a tab byte expands to. ``put_text`` aligns each tab
+# to the next multiple of this width. Four matches the prevailing
+# convention in the editor's grammars and mirrors what most code
+# editors render by default. Exported so other layers (Painter's
+# left-clip walker, the editor's column model) advance their own
+# cell counters in lock-step with what ``put_text`` actually emits.
+comptime TAB_WIDTH: Int = 4
+
+
 @fieldwise_init
 struct Canvas(Copyable, Movable):
     var width: Int
@@ -81,6 +90,14 @@ struct Canvas(Copyable, Movable):
         ``utf8_byte_to_cell`` to translate. East-Asian width is *not*
         modeled — every glyph advances by one cell — so wide characters
         will overlap their right neighbour.
+        Tab bytes (``0x09``) are expanded to spaces here — emitting the
+        raw ``\\t`` byte to the terminal would let the terminal advance
+        the cursor by however many columns *it* chose, breaking every
+        downstream cell-position calculation (clip rects, gutter
+        offsets, highlight overlays). Each tab fills until the next
+        multiple of ``TAB_WIDTH`` cells, so on-screen indentation
+        matches the source while every advancing cell remains a
+        deterministic 1-cell-1-glyph write.
         """
         var x = p.x
         var y = p.y
@@ -95,6 +112,18 @@ struct Canvas(Copyable, Movable):
         var i = 0
         while i < n and x < limit:
             var b = Int(bytes[i])
+            if b == 0x09:    # TAB → fill spaces to next tab stop
+                var stop = x + TAB_WIDTH - (x % TAB_WIDTH)
+                if stop > limit: stop = limit
+                while x < stop:
+                    if x >= 0:
+                        self.cells[self._index(x, y)] = Cell(
+                            String(" "), attr, 1,
+                        )
+                    x += 1
+                    advanced += 1
+                i += 1
+                continue
             var glyph: String
             var seq_len: Int
             if b < 0x80:
@@ -322,6 +351,11 @@ fn utf8_byte_to_cell(text: String) -> List[Int]:
     one multi-byte UTF-8 sequence map to the same cell. Use
     ``utf8_codepoint_count(text)`` to find the cell *just past* the
     last codepoint — useful when a cursor or selection sits at EOL.
+    Tab bytes (``0x09``) expand to ``TAB_WIDTH``-aligned spaces in
+    ``put_text``, so they advance the cell counter by however many
+    cells are needed to reach the next tab stop. The byte itself maps
+    to the *first* of those expanded cells, matching where a click on
+    the tab byte would visually land.
     """
     var bytes = text.as_bytes()
     var n = len(bytes)
@@ -330,6 +364,11 @@ fn utf8_byte_to_cell(text: String) -> List[Int]:
     var i = 0
     while i < n:
         var b = Int(bytes[i])
+        if b == 0x09:
+            result.append(cell)
+            cell += TAB_WIDTH - (cell % TAB_WIDTH)
+            i += 1
+            continue
         var seq_len: Int
         if b < 0x80:
             seq_len = 1
@@ -351,14 +390,23 @@ fn utf8_byte_to_cell(text: String) -> List[Int]:
 
 
 fn utf8_codepoint_count(text: String) -> Int:
-    """Number of codepoints in ``text``. Equals the cell count
-    ``Canvas.put_text(text)`` produces."""
+    """Number of cells ``Canvas.put_text(text)`` would produce.
+
+    Counts each codepoint as one cell *except* tabs, which expand to
+    however many cells the next ``TAB_WIDTH`` boundary requires.
+    Callers ranging from selection clamp logic to cursor placement
+    rely on this matching ``put_text`` exactly — keep them in sync.
+    """
     var bytes = text.as_bytes()
     var n = len(bytes)
     var count = 0
     var i = 0
     while i < n:
         var b = Int(bytes[i])
+        if b == 0x09:
+            count += TAB_WIDTH - (count % TAB_WIDTH)
+            i += 1
+            continue
         var seq_len: Int
         if b < 0x80:
             seq_len = 1

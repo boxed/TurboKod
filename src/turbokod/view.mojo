@@ -13,6 +13,7 @@ state-bearing widget structs.
 """
 
 from .canvas import Canvas
+from .painter import Painter
 from .colors import Attr, default_attr, WHITE, BLUE, BLACK, LIGHT_GRAY
 from .events import Event
 from .geometry import Point, Rect
@@ -51,7 +52,8 @@ struct Label(Copyable, Movable, Drawable):
         var x = bounds.a.x + (bounds.width() - text_len) // 2
         if x < bounds.a.x:
             x = bounds.a.x
-        _ = canvas.put_text(Point(x, bounds.a.y), self.text, self.attr)
+        var painter = Painter(bounds)
+        _ = painter.put_text(canvas, Point(x, bounds.a.y), self.text, self.attr)
 
 
 struct Frame(Copyable, Movable, Drawable):
@@ -73,16 +75,17 @@ struct Frame(Copyable, Movable, Drawable):
     fn paint(self, mut canvas: Canvas, bounds: Rect):
         if bounds.width() < 2 or bounds.height() < 2:
             return
+        var painter = Painter(bounds)
         # Fill interior with the frame's background color so contents inherit it.
         var interior = Rect(bounds.a.x + 1, bounds.a.y + 1, bounds.b.x - 1, bounds.b.y - 1)
         if not interior.is_empty():
-            canvas.fill(interior, String(" "), self.attr)
-        canvas.draw_box(bounds, self.attr, self.double_line)
+            painter.fill(canvas, interior, String(" "), self.attr)
+        painter.draw_box(canvas, bounds, self.attr, self.double_line)
         if len(self.title) > 0 and bounds.width() >= len(self.title.as_bytes()) + 4:
             var label = String(" ") + self.title + String(" ")
             var label_len = len(label.as_bytes())
             var x = bounds.a.x + (bounds.width() - label_len) // 2
-            _ = canvas.put_text(Point(x, bounds.a.y), label, self.attr)
+            _ = painter.put_text(canvas, Point(x, bounds.a.y), label, self.attr)
 
 
 struct Fill(Copyable, Movable, Drawable):
@@ -99,7 +102,8 @@ struct Fill(Copyable, Movable, Drawable):
         self.attr = attr
 
     fn paint(self, mut canvas: Canvas, bounds: Rect):
-        canvas.fill(bounds, self.glyph, self.attr)
+        var painter = Painter(bounds)
+        painter.fill(canvas, bounds, self.glyph, self.attr)
 
 
 # --- Layout helpers ---------------------------------------------------------

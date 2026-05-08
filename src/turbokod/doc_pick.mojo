@@ -18,6 +18,7 @@ rendering thousands of HTML bodies up front.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .doc_store import DocEntry, html_to_text
@@ -150,16 +151,17 @@ struct DocPick(Movable):
         var sel_type    = Attr(BLUE,   YELLOW)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, bg, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, bg, False)
         paint_window_title(
             canvas, rect, String(" Docs: ") + self.display + String(" "),
             bg, bg,
         )
         # Search line.
         var label = String(" Find: ")
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 1), label, bg,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
         var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
@@ -174,8 +176,8 @@ struct DocPick(Movable):
                 msg = String("No entries.")
             else:
                 msg = String("No matches.")
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top), msg, hint_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top), msg, hint_attr,
             )
         for i in range(h):
             var idx = self.scroll + i
@@ -185,27 +187,26 @@ struct DocPick(Movable):
             var is_sel = (idx == self.selected)
             var row_attr = sel_attr if is_sel else bg
             var t_attr = sel_type if is_sel else type_attr
-            canvas.fill(
-                Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), row_attr,
             )
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top + i), ent.name, row_attr,
-                rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top + i), ent.name, row_attr,
             )
             if len(ent.type_name.as_bytes()) > 0:
                 var tx2 = rect.a.x + 2 + len(ent.name.as_bytes()) + 2
                 if tx2 < rect.b.x - 2:
-                    _ = canvas.put_text(
-                        Point(tx2, top + i),
+                    _ = painter.put_text(
+                        canvas, Point(tx2, top + i),
                         String("(") + ent.type_name + String(")"),
-                        t_attr, rect.b.x - 1,
+                        t_attr,
                     )
         # Bottom hint.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
             String(" Enter: open  ESC: cancel "),
-            hint_attr, rect.b.x - 1,
+            hint_attr,
         )
 
     # --- events -----------------------------------------------------------

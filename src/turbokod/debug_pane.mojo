@@ -50,6 +50,7 @@ constants is the smoothest pattern available, and matches what
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
@@ -551,7 +552,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     fn paint(mut self, mut canvas: Canvas, panel: Rect):
         """Paint inspect (top) + output (bottom) sections. Stamps the
         screen-y origins so ``handle_mouse`` can later map clicks back
-        to row indices."""
+        to row indices.
+
+        All writes are routed through a ``Painter(panel)`` so an
+        over-long status string, traceback link, or local-variable
+        name can't bleed onto the editor stack below or into a
+        neighbouring pane on either side."""
         if not self.visible or panel.is_empty():
             return
         var bg = Attr(WHITE, BLACK)
@@ -561,21 +567,22 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var current = Attr(BLACK, LIGHT_YELLOW)
         var dim = Attr(LIGHT_GRAY, BLACK)
         var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
+        var painter = Painter(panel)
         # Reset visible-link rects each paint — only what's currently
         # on screen counts for click hit-testing.
         self._last_links = List[OutputLink]()
-        canvas.fill(panel, String(" "), bg)
+        painter.fill(canvas, panel, String(" "), bg)
         self._last_panel_top = panel.a.y
         # Top border with title. Focus is shown via line weight (single →
         # double), mirroring how normal windows render their frame.
         var top = panel.a.y
         var top_glyph = String("═") if self.focused else String("─")
         for x in range(panel.a.x, panel.b.x):
-            canvas.set(x, top, Cell(top_glyph, border, 1))
+            painter.set(canvas, x, top, Cell(top_glyph, border, 1))
         var title_text = String(" Run ") if self.mode == PANE_MODE_RUN \
             else String(" Debug ")
-        var title_advanced = canvas.put_text(
-            Point(panel.a.x + 2, top), title_text, title, panel.b.x,
+        var title_advanced = painter.put_text(
+            canvas, Point(panel.a.x + 2, top), title_text, title,
         )
         # Title-row command strip — painted right after the title with
         # a ``- `` separator. The right-hand window buttons reserve 11
@@ -618,7 +625,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 min_glyph = String("□")
             else:
                 min_glyph = String("▁")
-            _paint_button(canvas, Point(min_x, top), border, min_glyph)
+            _paint_button(canvas, painter, Point(min_x, top), border, min_glyph)
             # Maximize / restore. Glyph flips between "▣" (maximize)
             # and "□" (restore) so the button always shows what
             # clicking it would do next.
@@ -627,15 +634,15 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 max_glyph = String("□")
             else:
                 max_glyph = String("▣")
-            _paint_button(canvas, Point(max_x, top), border, max_glyph)
-            _ = canvas.put_text(
-                Point(panel.b.x - 3, top), String(" 9"), title,
+            _paint_button(canvas, painter, Point(max_x, top), border, max_glyph)
+            _ = painter.put_text(
+                canvas, Point(panel.b.x - 3, top), String(" 9"), title,
             )
         elif pane_w >= 6:
             # Too narrow for buttons — fall back to just the focus
             # hint, same as before.
-            _ = canvas.put_text(
-                Point(panel.b.x - 3, top), String("9"), title,
+            _ = painter.put_text(
+                canvas, Point(panel.b.x - 3, top), String("9"), title,
             )
         # In MINIMIZED state we stop after the title bar — the rest of
         # the pane is hidden, the user reads the status in the
@@ -650,9 +657,8 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # Status row (one line).
         var row_y = top + 1
         if row_y < panel.b.y and len(self.status_text.as_bytes()) > 0:
-            _ = canvas.put_text(
-                Point(panel.a.x + 2, row_y), self.status_text, dim,
-                panel.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(panel.a.x + 2, row_y), self.status_text, dim,
             )
         # Compute the inspect/output split. In RUN mode the inspect
         # section would always be empty (no DAP stack frames to show),
@@ -701,7 +707,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # uses the full width).
         for y in range(content_top, content_top + inspect_h):
             if y < panel.b.y:
-                canvas.set(div_x, y, Cell(String("│"), border, 1))
+                painter.set(canvas, div_x, y, Cell(String("│"), border, 1))
         var left_x_max = div_x
         var right_x0 = div_x + 1
         var right_x_max = panel.b.x
@@ -711,14 +717,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             left_visible = len(self._left_indices) - self.stack_scroll
         if left_visible < 0:
             left_visible = 0
+        # Sub-painter for the left column so a long frame label can't
+        # spill across the divider into the right column.
+        var left_p = painter.sub(
+            Rect(panel.a.x, content_top, left_x_max, content_top + inspect_h),
+        )
         for k in range(left_visible):
             var ridx = self._left_indices[self.stack_scroll + k]
             var r = self.rows[ridx]
             var y = content_top + k
             if r.kind == PANE_ROW_HEADER:
-                _ = canvas.put_text(
-                    Point(panel.a.x + 2, y), r.text + String(":"),
-                    section, left_x_max,
+                _ = left_p.put_text(
+                    canvas, Point(panel.a.x + 2, y), r.text + String(":"),
+                    section,
                 )
             elif r.kind == PANE_ROW_FRAME:
                 var marker = String(" ")
@@ -726,10 +737,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 if r.depth == self.current_frame_index:
                     marker = String("▶")
                     attr = current
-                _ = canvas.put_text(
-                    Point(panel.a.x + 2, y),
+                _ = left_p.put_text(
+                    canvas, Point(panel.a.x + 2, y),
                     String("  ") + marker + String(" ") + r.text,
-                    attr, left_x_max,
+                    attr,
                 )
         # Right column (Locals + Watches).
         var right_visible = inspect_h
@@ -737,14 +748,20 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             right_visible = len(self._right_indices) - self.right_scroll
         if right_visible < 0:
             right_visible = 0
+        # Sub-painter for the right column. Same rationale as the left
+        # one — a long variable name on a deep tree can't bleed past
+        # the right edge of the panel.
+        var right_p = painter.sub(
+            Rect(right_x0, content_top, right_x_max, content_top + inspect_h),
+        )
         for k in range(right_visible):
             var ridx = self._right_indices[self.right_scroll + k]
             var r = self.rows[ridx]
             var y = content_top + k
             if r.kind == PANE_ROW_HEADER:
-                _ = canvas.put_text(
-                    Point(right_x0 + 1, y), r.text + String(":"),
-                    section, right_x_max,
+                _ = right_p.put_text(
+                    canvas, Point(right_x0 + 1, y), r.text + String(":"),
+                    section,
                 )
             elif r.kind == PANE_ROW_VARIABLE:
                 var indent = String("")
@@ -753,16 +770,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 var chev = String("  ")
                 if r.ref_id != 0:
                     chev = String("▼ ") if r.expanded else String("▶ ")
-                _ = canvas.put_text(
-                    Point(right_x0 + 1, y),
+                _ = right_p.put_text(
+                    canvas, Point(right_x0 + 1, y),
                     indent + chev + r.text,
-                    bg, right_x_max,
+                    bg,
                 )
             elif r.kind == PANE_ROW_WATCH:
-                _ = canvas.put_text(
-                    Point(right_x0 + 1, y),
+                _ = right_p.put_text(
+                    canvas, Point(right_x0 + 1, y),
                     String("  ") + r.text,
-                    bg, right_x_max,
+                    bg,
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
@@ -777,10 +794,10 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             var div_y = content_top + inspect_h
             if div_y < panel.b.y and output_h > 0:
                 for x in range(panel.a.x, panel.b.x):
-                    canvas.set(x, div_y, Cell(String("─"), border, 1))
-                _ = canvas.put_text(
-                    Point(panel.a.x + 2, div_y), String(" Output "),
-                    title, panel.b.x,
+                    painter.set(canvas, x, div_y, Cell(String("─"), border, 1))
+                _ = painter.put_text(
+                    canvas, Point(panel.a.x + 2, div_y), String(" Output "),
+                    title,
                 )
             out_top = div_y + 1
         # Output panel: text + selection overlay are owned by
@@ -822,7 +839,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 if x1 > self.output.last_x_max:
                     x1 = self.output.last_x_max
                 for x in range(x0, x1):
-                    canvas.set_attr(x, line_y, link_attr)
+                    painter.set_attr(canvas, x, line_y, link_attr)
                 self._last_links.append(OutputLink(
                     line_y, x0, x1, hit.path, hit.line,
                 ))
@@ -1149,16 +1166,21 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
 
 fn _paint_button(
-    mut canvas: Canvas, top_left: Point, border: Attr, glyph: String,
+    mut canvas: Canvas, painter: Painter,
+    top_left: Point, border: Attr, glyph: String,
 ):
     """Three-cell window button — ``[X]`` — painted in the title row.
     Mirrors the close-button helper in ``window.mojo`` but with a
     caller-supplied glyph since the pane has multiple kinds of button
-    (minimize / maximize / restore) sharing the same chrome."""
+    (minimize / maximize / restore) sharing the same chrome.
+
+    Routed through ``painter`` so a button drawn near the pane edge
+    (e.g. a narrow window) clips against the pane bounds rather than
+    leaking onto a neighbouring widget."""
     var glyph_attr = Attr(LIGHT_YELLOW, border.bg, border.style)
-    canvas.set(top_left.x, top_left.y, Cell(String("["), border, 1))
-    canvas.set(top_left.x + 1, top_left.y, Cell(glyph, glyph_attr, 1))
-    canvas.set(top_left.x + 2, top_left.y, Cell(String("]"), border, 1))
+    painter.set(canvas, top_left.x, top_left.y, Cell(String("["), border, 1))
+    painter.set(canvas, top_left.x + 1, top_left.y, Cell(glyph, glyph_attr, 1))
+    painter.set(canvas, top_left.x + 2, top_left.y, Cell(String("]"), border, 1))
 
 
 fn _format_variable(name: String, value: String, type_name: String) -> String:

@@ -17,6 +17,7 @@ for routing keyboard / mouse events to it before any other widget.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
@@ -180,20 +181,20 @@ struct SpellMenu(Movable):
         var sel_attr_disabled = Attr(WHITE, GREEN)
         var disabled_attr = Attr(DARK_GRAY, LIGHT_GRAY)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         # Row 0: user dict (always enabled).
         var y0 = rect.a.y + 1
         var is_sel0 = (self.selected == 0)
         var row_attr0 = sel_attr if is_sel0 else attr
         if is_sel0:
-            canvas.fill(
-                Rect(rect.a.x + 1, y0, rect.b.x - 1, y0 + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, y0, rect.b.x - 1, y0 + 1),
                 String(" "), row_attr0,
             )
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, y0), _LABEL_USER, row_attr0,
-            rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, y0), _LABEL_USER, row_attr0,
         )
         # Row 1: project dict — disabled when no project is open.
         var y1 = rect.a.y + 2
@@ -205,13 +206,12 @@ struct SpellMenu(Movable):
         else:
             row_attr1 = attr if enabled1 else disabled_attr
         if is_sel1:
-            canvas.fill(
-                Rect(rect.a.x + 1, y1, rect.b.x - 1, y1 + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, y1, rect.b.x - 1, y1 + 1),
                 String(" "), row_attr1,
             )
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, y1), _LABEL_PROJECT, row_attr1,
-            rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, y1), _LABEL_PROJECT, row_attr1,
         )
 
     # --- input ------------------------------------------------------------

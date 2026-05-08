@@ -28,6 +28,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .colors import (
     Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
 )
@@ -1255,7 +1256,8 @@ struct Desktop(Movable):
         # (running, debugging, active) stay in sync with the actual
         # session state — single source of truth for the painter.
         self._refresh_target_tabs()
-        canvas.fill(self.workspace_rect(screen), self.bg_pattern, self.bg_attr)
+        var ws = self.workspace_rect(screen)
+        Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
         self.windows.paint(canvas)
         self.file_tree.paint(canvas, screen)
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
@@ -2607,13 +2609,20 @@ struct Desktop(Movable):
                 # ``selected_path`` is project-relative; resolve against
                 # the project root before opening so ``open_file`` can
                 # find it on disk regardless of the host's cwd.
+                # ``selected_line`` is 1-based (0 = "no jump") — a
+                # double-click on a diff body row sets it so the editor
+                # lands on the corresponding line.
                 var rel = self.local_changes.selected_path
+                var jump_line = self.local_changes.selected_line
                 self.local_changes.close()
                 var abs = rel
                 if not starts_with(rel, String("/")) and self.project:
                     abs = join_path(self.project.value(), rel)
                 try:
-                    self.open_file(abs, screen)
+                    if jump_line > 0:
+                        self.open_file_at(abs, jump_line - 1, 0, screen)
+                    else:
+                        self.open_file(abs, screen)
                 except:
                     pass
             return Optional[String]()

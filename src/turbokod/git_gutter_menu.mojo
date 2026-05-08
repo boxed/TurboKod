@@ -11,6 +11,7 @@ mouse events to it before any other widget.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, GREEN, LIGHT_GRAY,
@@ -108,19 +109,19 @@ struct GitGutterMenu(Movable):
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         var y0 = rect.a.y + 1
         var is_sel = (self.selected == 0)
         var row_attr = sel_attr if is_sel else attr
         if is_sel:
-            canvas.fill(
-                Rect(rect.a.x + 1, y0, rect.b.x - 1, y0 + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, y0, rect.b.x - 1, y0 + 1),
                 String(" "), row_attr,
             )
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, y0), _LABEL_REVERT, row_attr,
-            rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, y0), _LABEL_REVERT, row_attr,
         )
 
     fn handle_key(mut self, event: Event) -> Bool:

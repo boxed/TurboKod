@@ -22,6 +22,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
@@ -201,8 +202,9 @@ struct InstallRunner(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var spin_attr = Attr(YELLOW, LIGHT_GRAY)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, bg, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, bg, False)
         # Title row: `Installing <label>… [spinner]`. Routed through the
         # framework helper (left-aligned variant) since the spinner needs
         # the right end of the row.
@@ -212,16 +214,15 @@ struct InstallRunner(Movable):
         paint_window_title_at(canvas, Point(tx, rect.a.y), title, bg, bg)
         var sx = rect.b.x - 3
         if sx > tx + len(title.as_bytes()):
-            _ = canvas.put_text(Point(sx, rect.a.y), spin, spin_attr)
+            _ = painter.put_text(canvas, Point(sx, rect.a.y), spin, spin_attr)
         # Last N lines of output, top-down. Truncated to the popup width
-        # by ``put_text``'s ``max_x`` clamp.
+        # by the painter's clip.
         var tail = _last_lines(self.output, _LAST_LINES)
         var inner_top = rect.a.y + 1
         var inner_left = rect.a.x + 2
-        var max_x = rect.b.x - 1
         for i in range(len(tail)):
-            _ = canvas.put_text(
-                Point(inner_left, inner_top + i), tail[i], bg, max_x,
+            _ = painter.put_text(
+                canvas, Point(inner_left, inner_top + i), tail[i], bg,
             )
 
     fn _spinner_glyph(self) -> String:

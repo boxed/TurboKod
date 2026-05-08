@@ -14,6 +14,7 @@ the same fuzzy-with-word-boundary feel they're already used to.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
@@ -156,13 +157,14 @@ struct SymbolPick(Movable):
         var sel_kind    = Attr(BLUE,   YELLOW)
         var rect = self._rect(screen)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, bg, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, bg, False)
         paint_window_title(canvas, rect, String(" Go to Symbol "), bg, bg)
         # Search line.
         var label = String(" Find: ")
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 1), label, bg, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 1), label, bg,
         )
         var qx = rect.a.x + 2 + len(label.as_bytes())
         var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
@@ -172,10 +174,10 @@ struct SymbolPick(Movable):
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         if self.loading:
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top),
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top),
                 String("Loading symbols..."),
-                hint_attr, rect.b.x - 1,
+                hint_attr,
             )
         elif len(self.matched) == 0:
             var msg: String
@@ -183,8 +185,8 @@ struct SymbolPick(Movable):
                 msg = String("No symbols.")
             else:
                 msg = String("No matches.")
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top), msg, hint_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top), msg, hint_attr,
             )
         for i in range(h):
             var idx = self.scroll + i
@@ -194,32 +196,31 @@ struct SymbolPick(Movable):
             var is_sel = (idx == self.selected)
             var row_attr = sel_attr if is_sel else bg
             var k_attr = sel_kind if is_sel else kind_attr
-            canvas.fill(
-                Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
+            painter.fill(
+                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), row_attr,
             )
             var kind_label = symbol_kind_label(sym.kind)
-            _ = canvas.put_text(
-                Point(rect.a.x + 2, top + i), kind_label, k_attr,
-                rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, top + i), kind_label, k_attr,
             )
             var name_x = rect.a.x + 2 + len(kind_label.as_bytes()) + 1
-            _ = canvas.put_text(
-                Point(name_x, top + i), sym.name, row_attr, rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(name_x, top + i), sym.name, row_attr,
             )
             if len(sym.container.as_bytes()) > 0:
                 var cx = name_x + len(sym.name.as_bytes()) + 2
                 if cx < rect.b.x - 2:
-                    _ = canvas.put_text(
-                        Point(cx, top + i),
+                    _ = painter.put_text(
+                        canvas, Point(cx, top + i),
                         String("(") + sym.container + String(")"),
-                        hint_attr, rect.b.x - 1,
+                        hint_attr,
                     )
         # Bottom hint.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
             String(" Enter: jump  ESC: cancel "),
-            hint_attr, rect.b.x - 1,
+            hint_attr,
         )
 
     # --- events -----------------------------------------------------------

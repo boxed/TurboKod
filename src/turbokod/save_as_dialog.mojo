@@ -21,6 +21,7 @@ On submit, ``submitted=True`` and ``selected_path`` holds the joined
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
@@ -147,23 +148,24 @@ struct SaveAsDialog(Movable):
         var rect = _dialog_rect(screen, self.pos)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, border, True)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, border, True)
         paint_window_title(canvas, rect, String(" Save As "), bg, bg)
         # Close button shares the same chrome as editor windows.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Filename label + editable strip.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 2), String("File:"), bg,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 2), String("File:"), bg,
         )
         var input_rect = _input_rect(rect)
         self.filename.paint(
             canvas, input_rect, self.focus == _FOCUS_INPUT,
         )
         # Current-directory line above the listing.
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 4),
-            self.browser.dir, dir_attr, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 4),
+            self.browser.dir, dir_attr,
         )
         # Listing.
         self.browser.paint(
@@ -178,9 +180,9 @@ struct SaveAsDialog(Movable):
             hint = String(" Enter: save  Tab: pick folder  ESC: cancel ")
         else:
             hint = String(" Enter: open  ⌫: parent  Tab: edit name  ESC: cancel ")
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
-            hint, dir_attr, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
+            hint, dir_attr,
         )
 
     # --- key handling -----------------------------------------------------

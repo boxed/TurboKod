@@ -98,6 +98,13 @@ comptime MOUSE_BUTTON_RIGHT  = UInt8(3)
 comptime MOUSE_WHEEL_UP      = UInt8(4)
 comptime MOUSE_WHEEL_DOWN    = UInt8(5)
 
+# Maximum gap (ms) between two presses at the same screen cell that
+# are still treated as a double-click. The terminal's input parser
+# stamps each press's ``Event.click_count`` from this window so every
+# downstream consumer (editor, dialogs, diff viewer, …) shares one
+# definition rather than rolling its own.
+comptime DOUBLE_CLICK_MS:    Int = 500
+
 
 @fieldwise_init
 struct Event(ImplicitlyCopyable, Movable):
@@ -112,6 +119,13 @@ struct Event(ImplicitlyCopyable, Movable):
     var button: UInt8
     var pressed: Bool   # True for press / drag-motion, False for release
     var motion: Bool    # True if this event came from drag motion (not initial press)
+    # Consecutive-press counter for left/middle/right presses at the
+    # same screen cell within the system double-click window. ``1``
+    # for an initial press, ``2`` for a double-click, ``3`` for triple,
+    # then resets. ``0`` for non-press / motion / release / non-mouse
+    # events. Stamped by ``Terminal.poll_event`` at parse time so the
+    # gap measured is the user's, not the consumer's processing rate.
+    var click_count: UInt8
 
     # Resize payload (also stored in pos: width=x, height=y)
 
@@ -126,6 +140,7 @@ struct Event(ImplicitlyCopyable, Movable):
         self.button = MOUSE_BUTTON_NONE
         self.pressed = False
         self.motion = False
+        self.click_count = 0
         self.text = String("")
 
     @staticmethod
@@ -143,6 +158,7 @@ struct Event(ImplicitlyCopyable, Movable):
         pressed: Bool = True,
         motion: Bool = False,
         mods: UInt8 = MOD_NONE,
+        click_count: UInt8 = 0,
     ) -> Event:
         var e = Event()
         e.kind = EVENT_MOUSE
@@ -151,6 +167,7 @@ struct Event(ImplicitlyCopyable, Movable):
         e.pressed = pressed
         e.motion = motion
         e.mods = mods
+        e.click_count = click_count
         return e
 
     @staticmethod

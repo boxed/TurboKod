@@ -10,6 +10,7 @@ that don't fit are silently dropped on the right.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
@@ -54,7 +55,8 @@ struct TabBar(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var active_attr = Attr(WHITE, BLUE)
         var y = rect.a.y
-        canvas.fill(rect, String(" "), bg)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
         var x = rect.a.x + 1
         var max_x = rect.b.x - 1
         for i in range(len(items)):
@@ -67,7 +69,7 @@ struct TabBar(Movable):
                 attr = active_attr
             else:
                 attr = bg
-            _ = canvas.put_text(Point(x, y), label, attr, max_x)
+            _ = painter.put_text(canvas, Point(x, y), label, attr)
             # Cap the recorded hit-rect at ``max_x`` so a tab that
             # was clipped on the right doesn't claim cells it didn't
             # actually paint.

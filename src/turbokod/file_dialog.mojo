@@ -25,6 +25,7 @@ from .buttons import (
     ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas
+from .painter import Painter
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
 from .events import (
@@ -181,15 +182,16 @@ struct FileDialog(Movable):
         # whatever workspace content sits behind the dialog reads as
         # dim-on-black underneath the right and bottom edges.
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, border, True)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, border, True)
         paint_window_title(canvas, rect, self.title, bg, bg)
         # TV-style close button in the top-left corner. Same chrome as
         # editor windows — the framework helper paints all three cells.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.a.y + 1),
-            self.browser.dir, dir_attr, rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.a.y + 1),
+            self.browser.dir, dir_attr,
         )
         self.browser.paint(canvas, _list_rect(rect), True)
         # Desktop / Home / Root quick-jump strip just above the hint
@@ -213,11 +215,10 @@ struct FileDialog(Movable):
             if self.dirs_only
             else String(" Enter: open  ⌫: parent  ESC: cancel ")
         )
-        _ = canvas.put_text(
-            Point(rect.a.x + 2, rect.b.y - 1),
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 2, rect.b.y - 1),
             hint,
             dir_attr,
-            rect.b.x - 1,
         )
 
     # --- events ------------------------------------------------------------

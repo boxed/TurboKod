@@ -29,6 +29,7 @@ Exported types:
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import Attr, BLACK, CYAN
@@ -275,6 +276,7 @@ fn paint_text_segments(
     """
     if visible <= 0:
         return
+    var painter = Painter(view)
     for k in range(visible):
         var vidx = first + k
         if vidx < 0 or vidx >= len(layout):
@@ -297,9 +299,10 @@ fn paint_text_segments(
                 ptr=bytes.unsafe_ptr() + vrow.byte_start,
                 length=hi - vrow.byte_start,
             ))
-        _ = canvas.put_text(
+        _ = painter.put_text(
+            canvas,
             Point(view.a.x + vrow.indent_cells, view.a.y + k),
-            seg, attr, view.b.x,
+            seg, attr,
         )
 
 
@@ -335,6 +338,7 @@ fn paint_selection_overlay(
         return
     if visible <= 0:
         return
+    var painter = Painter(view)
     var r = selection.normalized()
     var s_line = r[0]; var s_byte = r[1]
     var e_line = r[2]; var e_byte = r[3]
@@ -369,18 +373,19 @@ fn paint_selection_overlay(
             if x1 > view.b.x:
                 x1 = view.b.x
             for x in range(x0, x1):
-                canvas.set_attr(x, line_y, sel_attr)
+                painter.set_attr(canvas, x, line_y, sel_attr)
         if extend_past_eol and is_last_seg \
                 and vrow.line_idx < e_line:
             # The selection continues onto a later line — show the
-            # trailing newline as a one-cell marker. ``canvas.set``
-            # rather than ``set_attr`` because the byte was past EOL
-            # and ``put_text`` left a space (or nothing) there.
+            # trailing newline as a one-cell marker. ``set`` rather
+            # than ``set_attr`` because the byte was past EOL and
+            # ``put_text`` left a space (or nothing) there.
             var marker_cell = _row_cell_offset(vrow, line, line_n)
             var x_marker = view.a.x + vrow.indent_cells + marker_cell
             if x_marker < view.b.x:
-                canvas.set(
-                    x_marker, line_y, Cell(String(" "), sel_attr, 1),
+                painter.set(
+                    canvas, x_marker, line_y,
+                    Cell(String(" "), sel_attr, 1),
                 )
 
 

@@ -33,6 +33,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
@@ -257,25 +258,26 @@ struct ActionEditor(Movable):
         var hint = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, border, True)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, border, True)
         paint_window_title(
             canvas, rect, String(" Edit on-save action "), bg, bg,
         )
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Labels.
-        _ = canvas.put_text(_label_at(rect, 2), String("Language:"), bg)
-        _ = canvas.put_text(_label_at(rect, 4), String("Program:"), bg)
-        _ = canvas.put_text(_label_at(rect, 6), String("Arguments:"), bg)
-        _ = canvas.put_text(
-            Point(_label_at(rect, 7).x + _LABEL_COL_W, rect.a.y + 7),
+        _ = painter.put_text(canvas, _label_at(rect, 2), String("Language:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 4), String("Program:"), bg)
+        _ = painter.put_text(canvas, _label_at(rect, 6), String("Arguments:"), bg)
+        _ = painter.put_text(
+            canvas, Point(_label_at(rect, 7).x + _LABEL_COL_W, rect.a.y + 7),
             String("$FilePath$ expands to the saved file path"),
-            hint, rect.b.x - 2,
+            hint,
         )
-        _ = canvas.put_text(_label_at(rect, 8), String("Working dir:"), bg)
-        _ = canvas.put_text(
-            Point(_label_at(rect, 9).x + _LABEL_COL_W, rect.a.y + 9),
-            String("(empty = project root)"), hint, rect.b.x - 2,
+        _ = painter.put_text(canvas, _label_at(rect, 8), String("Working dir:"), bg)
+        _ = painter.put_text(
+            canvas, Point(_label_at(rect, 9).x + _LABEL_COL_W, rect.a.y + 9),
+            String("(empty = project root)"), hint,
         )
         # Inputs.
         self._paint_lang(canvas, rect)

@@ -570,6 +570,38 @@ fn test_editor_shift_ctrl_arrow_composes() raises:
     assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
 
 
+fn test_editor_cmd_arrow_line_navigation() raises:
+    """Cmd+Right jumps to end of line; Cmd+Left jumps to first non-space,
+    then to col 0 on a second press. Shift extends the selection."""
+    var ed = Editor(String("    hello world"))
+    # Cmd+Right from col 0: end of line.
+    _ = ed.handle_key(_key(KEY_RIGHT, MOD_META), _VIEW)
+    assert_equal(ed.cursor_col, 15)
+    assert_false(ed.has_selection())
+    # Cmd+Left from end: lands at first non-space (col 4).
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
+    assert_equal(ed.cursor_col, 4)
+    # Cmd+Left again: now at first non-space, falls to col 0.
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
+    assert_equal(ed.cursor_col, 0)
+    # Cmd+Left at col 0 stays at col 0.
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
+    assert_equal(ed.cursor_col, 0)
+    # Cmd+Shift+Right selects to end of line.
+    var meta_shift: UInt8 = MOD_META | MOD_SHIFT
+    _ = ed.handle_key(_key(KEY_RIGHT, meta_shift), _VIEW)
+    assert_true(ed.has_selection())
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 15)
+    # Cmd+Shift+Left from end of line extends back to first non-space.
+    _ = ed.handle_key(_key(KEY_LEFT, meta_shift), _VIEW)
+    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 4)
+    # No leading whitespace: Cmd+Left from end goes straight to col 0.
+    var ed2 = Editor(String("hello"))
+    _ = ed2.handle_key(_key(KEY_END), _VIEW)
+    _ = ed2.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
+    assert_equal(ed2.cursor_col, 0)
+
+
 fn test_editor_typing_replaces_selection() raises:
     var ed = Editor(String("hello"))
     # Select first 4 chars
@@ -10117,6 +10149,7 @@ fn main() raises:
     test_editor_word_movement_across_lines()
     test_editor_shift_arrow_extends_selection()
     test_editor_shift_ctrl_arrow_composes()
+    test_editor_cmd_arrow_line_navigation()
     test_editor_typing_replaces_selection()
     test_editor_backspace_deletes_selection()
     test_editor_mouse_click_sets_cursor()

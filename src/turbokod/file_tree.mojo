@@ -14,6 +14,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
@@ -201,25 +202,26 @@ struct FileTree(Movable):
         # Left separator column lives at area.a.x. Focus is shown via line
         # weight (single → double), mirroring how normal windows render
         # their frame.
+        var painter = Painter(area)
         var sep_glyph = String("║") if self.focused else String("│")
         for y in range(area.a.y, area.b.y):
-            canvas.set(area.a.x, y, Cell(sep_glyph, bg, 1))
+            painter.set(canvas, area.a.x, y, Cell(sep_glyph, bg, 1))
         # Title bar fills the rest of the top row of the panel.
-        canvas.fill(
-            Rect(area.a.x + 1, area.a.y, area.b.x, area.a.y + 1),
+        painter.fill(
+            canvas, Rect(area.a.x + 1, area.a.y, area.b.x, area.a.y + 1),
             String(" "),
             title_attr,
         )
         var title = String(" ") + basename(self.root)
-        _ = canvas.put_text(
-            Point(area.a.x + 1, area.a.y), title, title_attr, area.b.x,
+        _ = painter.put_text(
+            canvas, Point(area.a.x + 1, area.a.y), title, title_attr,
         )
         # Number indicator at the top-right, mirroring the per-window
         # ``Ctrl+N`` shortcut hint. ``0`` is the file tree's slot —
         # paired with ``Ctrl+0`` to focus it from anywhere.
         if area.b.x - area.a.x >= 4:
-            _ = canvas.put_text(
-                Point(area.b.x - 2, area.a.y), String("0"),
+            _ = painter.put_text(
+                canvas, Point(area.b.x - 2, area.a.y), String("0"),
                 title_attr,
             )
         # Listing area starts one row below the title.
@@ -238,7 +240,8 @@ struct FileTree(Movable):
             else:
                 attr = dir_attr if e.is_dir else bg
             # Paint the row background first so selection covers full width.
-            canvas.fill(
+            painter.fill(
+                canvas,
                 Rect(content_x, list_top + i, area.b.x, list_top + i + 1),
                 String(" "),
                 attr,
@@ -252,8 +255,8 @@ struct FileTree(Movable):
             else:
                 marker = String(" ")
             var label = indent + marker + String(" ") + e.name
-            _ = canvas.put_text(
-                Point(content_x, list_top + i), label, attr, area.b.x,
+            _ = painter.put_text(
+                canvas, Point(content_x, list_top + i), label, attr,
             )
 
     # --- mouse ------------------------------------------------------------

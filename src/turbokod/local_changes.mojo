@@ -108,6 +108,17 @@ comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 
+# Hard caps on the inputs we'll feed to the TextMate tokenizer for the
+# diff side panels. Above either bound we skip syntax highlighting and
+# render the diff with gutter colour only — a 200 KB minified JS file
+# can take several seconds to tokenize with the JavaScript grammar
+# (every regex walks every char of every long line), and that stalls
+# the UI thread because tokenization is synchronous. The user can
+# still navigate the diff and double-click to open the file in the
+# editor where the highlighter runs incrementally.
+comptime _HL_SIZE_CAP:    Int = 64 * 1024
+comptime _HL_LONG_LINE:   Int = 2000
+
 # Right-pane line kinds — drives the gutter glyph + colouring strategy
 # in ``_paint_panel_body``. ``CTX`` / ``ADD`` / ``REM`` lines have had
 # the unified-diff prefix byte stripped; the prefix character lives in
@@ -148,10 +159,19 @@ struct RightPanel(Movable):
     ``kind`` parallels ``lines`` and tags each row's render style — see
     the ``_LINE_*`` constants above. ``highlights`` is a syntax-colour
     overlay produced from the per-file diff body content; ``row``
-    indexes into ``lines`` directly."""
+    indexes into ``lines`` directly.
+
+    ``file_path`` / ``file_line`` parallel ``lines`` and carry the
+    project-relative path + 1-based line number that a body row maps
+    to in the *after* file. Empty path / zero line for non-body rows
+    (banners, blanks, info text) where there's nothing to jump to.
+    Used by the double-click handler to open the file at the clicked
+    line."""
     var lines: List[String]
     var diff_line: List[Int]
     var kind: List[Int]
+    var file_path: List[String]
+    var file_line: List[Int]
     var highlights: List[Highlight]
     var scroll: Int
     var scroll_x: Int
@@ -161,6 +181,8 @@ struct RightPanel(Movable):
         self.lines = List[String]()
         self.diff_line = List[Int]()
         self.kind = List[Int]()
+        self.file_path = List[String]()
+        self.file_line = List[Int]()
         self.highlights = List[Highlight]()
         self.scroll = 0
         self.scroll_x = 0
@@ -170,6 +192,8 @@ struct RightPanel(Movable):
         self.lines = List[String]()
         self.diff_line = List[Int]()
         self.kind = List[Int]()
+        self.file_path = List[String]()
+        self.file_line = List[Int]()
         self.highlights = List[Highlight]()
         self.scroll = 0
         self.scroll_x = 0
@@ -515,18 +539,36 @@ fn _emit_filename_banner(
     panel.lines.append(_build_filename_banner(path, width))
     panel.kind.append(_LINE_FILEHDR)
     panel.diff_line.append(-1)
+    panel.file_path.append(String(""))
+    panel.file_line.append(0)
 
 
 fn _emit_blank(mut panel: RightPanel):
     panel.lines.append(String(""))
     panel.kind.append(_LINE_BLANK)
     panel.diff_line.append(-1)
+    panel.file_path.append(String(""))
+    panel.file_line.append(0)
 
 
 fn _emit_info(mut panel: RightPanel, var text: String):
     panel.lines.append(text^)
     panel.kind.append(_LINE_INFO)
     panel.diff_line.append(-1)
+    panel.file_path.append(String(""))
+    panel.file_line.append(0)
+
+
+fn _emit_body_row(
+    mut panel: RightPanel,
+    var text: String, kind: Int, diff_idx: Int,
+    path: String, line: Int,
+):
+    panel.lines.append(text^)
+    panel.kind.append(kind)
+    panel.diff_line.append(diff_idx)
+    panel.file_path.append(path)
+    panel.file_line.append(line)
 
 
 fn _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
@@ -594,12 +636,25 @@ fn _emit_panel_highlights(
     grammar resolve multi-line scopes that begin or end outside the
     visible hunks. Same call path as ``Editor.flush_highlights``: the
     process-wide ``GrammarRegistry`` caches the loaded grammar across
-    panels."""
+    panels.
+
+    Skipped on inputs above ``_HL_SIZE_CAP`` bytes or with any line
+    longer than ``_HL_LONG_LINE`` codepoints — the JavaScript /
+    TypeScript grammars walk every regex across every char of every
+    long line, and a 200 KB minified file stalls the UI thread for
+    seconds. The diff still renders with gutter colours in that case;
+    double-clicking opens the worktree file in the editor where the
+    highlighter runs incrementally."""
     if len(side_text.as_bytes()) == 0:
+        return
+    if len(side_text.as_bytes()) > _HL_SIZE_CAP:
         return
     var side_lines = split_lines_no_trailing(side_text)
     if len(side_lines) == 0:
         return
+    for li in range(len(side_lines)):
+        if len(side_lines[li].as_bytes()) > _HL_LONG_LINE:
+            return
     var ext = extension_of(file_path)
     var cache = HighlightCache()
     var hls = highlight_for_extension_cached(
@@ -683,11 +738,18 @@ fn _populate_diff_panel(
             continue
         if _is_skip_diff_header(ln):
             continue
+        # ``jump_line`` for body rows: the 1-based line in the *after*
+        # file the user lands on when they double-click this row. For
+        # ``+`` and context this is the row's own new-file position;
+        # for ``-`` it's the upcoming new-file position (the row that
+        # took the deletion's place, or the next live line) so a
+        # double-click on a removal still lands somewhere meaningful.
         if len(b) == 0:
             # Bare blank inside a hunk: treat as context.
-            panel.lines.append(String(""))
-            panel.kind.append(_LINE_CTX)
-            panel.diff_line.append(i)
+            var jump = new_line if new_line > 0 else 0
+            _emit_body_row(
+                panel, String(""), _LINE_CTX, i, file_path, jump,
+            )
             display_to_after_row.append(
                 new_line - 1 if new_line > 0 else -1,
             )
@@ -701,16 +763,18 @@ fn _populate_diff_panel(
             continue
         var c0 = Int(b[0])
         if c0 == 0x5C:    # ``\ No newline at end of file``
-            panel.lines.append(ln)
-            panel.kind.append(_LINE_NONEWLINE)
-            panel.diff_line.append(i)
+            _emit_body_row(
+                panel, ln, _LINE_NONEWLINE, i, String(""), 0,
+            )
             display_to_after_row.append(-1)
             display_to_before_row.append(-1)
             continue
         if c0 == 0x2B:
-            panel.lines.append(_strip_first_byte_to_string(ln))
-            panel.kind.append(_LINE_ADD)
-            panel.diff_line.append(i)
+            var jump = new_line if new_line > 0 else 0
+            _emit_body_row(
+                panel, _strip_first_byte_to_string(ln),
+                _LINE_ADD, i, file_path, jump,
+            )
             display_to_after_row.append(
                 new_line - 1 if new_line > 0 else -1,
             )
@@ -719,9 +783,11 @@ fn _populate_diff_panel(
                 new_line += 1
             continue
         if c0 == 0x2D:
-            panel.lines.append(_strip_first_byte_to_string(ln))
-            panel.kind.append(_LINE_REM)
-            panel.diff_line.append(i)
+            var jump = new_line if new_line > 0 else 0
+            _emit_body_row(
+                panel, _strip_first_byte_to_string(ln),
+                _LINE_REM, i, file_path, jump,
+            )
             display_to_after_row.append(-1)
             display_to_before_row.append(
                 old_line - 1 if old_line > 0 else -1,
@@ -730,9 +796,11 @@ fn _populate_diff_panel(
                 old_line += 1
             continue
         if c0 == 0x20:
-            panel.lines.append(_strip_first_byte_to_string(ln))
-            panel.kind.append(_LINE_CTX)
-            panel.diff_line.append(i)
+            var jump = new_line if new_line > 0 else 0
+            _emit_body_row(
+                panel, _strip_first_byte_to_string(ln),
+                _LINE_CTX, i, file_path, jump,
+            )
             display_to_after_row.append(
                 new_line - 1 if new_line > 0 else -1,
             )
@@ -746,9 +814,9 @@ fn _populate_diff_panel(
             continue
         # Anything else: keep raw, treat as info so it doesn't get a
         # gutter mark.
-        panel.lines.append(ln)
-        panel.kind.append(_LINE_INFO)
-        panel.diff_line.append(-1)
+        _emit_body_row(
+            panel, ln, _LINE_INFO, -1, String(""), 0,
+        )
         display_to_after_row.append(-1)
         display_to_before_row.append(-1)
     _emit_blank(panel)
@@ -1166,11 +1234,10 @@ struct LocalChanges(Movable):
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
             var sha = self.commits[self.sel_commit].short_sha
             var show_text = fetch_commit_show(self.root, sha)
-            self._populate_commit_info(sha, show_text, registry)
+            self._populate_commit_info(show_text, registry)
 
     fn _populate_commit_info(
-        mut self, sha: String, show_text: String,
-        mut registry: GrammarRegistry,
+        mut self, show_text: String, mut registry: GrammarRegistry,
     ):
         """Render ``git show`` output into the info panel: commit
         metadata + message rendered as info rows, then each file's
@@ -1203,21 +1270,16 @@ struct LocalChanges(Movable):
         ))
         var changed = parse_unified_diff_files(diff_part)
         var banner_w = 200
-        # ``before`` for a commit is its first parent (``<sha>^``) —
-        # standard ``git show`` semantics. Merge commits collapse here
-        # too: ``^`` resolves to ``-m1`` (first parent), which matches
-        # the diff git itself emits unless the user passed ``-m``.
-        var parent_ref = sha + String("^")
+        # Skip syntax highlighting for commits: a single click in the
+        # log can land on a commit that touched dozens of large files,
+        # and tokenizing both blobs for each one stalls the UI.
+        # Gutter colour + plain text is enough information to read the
+        # diff; double-clicking still opens the worktree file at the
+        # right line, where the editor's full highlighter takes over.
         for k in range(len(changed)):
-            var after = fetch_blob_text(
-                self.root, sha, changed[k].path,
-            )
-            var before = fetch_blob_text(
-                self.root, parent_ref, changed[k].path,
-            )
             _populate_diff_panel(
                 self.info, changed[k].diff, changed[k].path,
-                before, after, banner_w, registry,
+                String(""), String(""), banner_w, registry,
             )
 
     fn _build_files_right_panels(
@@ -1383,7 +1445,9 @@ struct LocalChanges(Movable):
     fn _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
         """Render the active overlay (commit prompt / confirmation /
         status flash) as a small drop-shadowed box centered on the
-        modal area."""
+        modal area. Every write is bound to the overlay's clip via a
+        Painter so an over-long status message (or a wide commit
+        title) can't bleed out onto the underlying modal."""
         var border = Attr(BLACK, LIGHT_GRAY)
         var body   = Attr(BLACK, LIGHT_GRAY)
         var ok_attr   = Attr(WHITE, LIGHT_GREEN)
@@ -1399,8 +1463,9 @@ struct LocalChanges(Movable):
         var by = screen.a.y + (screen.height() - box_h) // 2
         var rect = Rect(bx, by, bx + box_w, by + box_h)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), body)
-        canvas.draw_box(rect, border, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), body)
+        painter.draw_box(canvas, rect, border, False)
         var title: String
         var prompt_text: String
         if self.overlay == _OVERLAY_COMMIT:
@@ -1415,46 +1480,47 @@ struct LocalChanges(Movable):
         else:
             title = String(" Status ")
             prompt_text = String("")
-        var tx = bx + 2
-        _ = canvas.put_text(Point(tx, by), title, border)
+        _ = painter.put_text(canvas, Point(bx + 2, by), title, border)
+        # Body text region — one cell of padding inside the border on
+        # all sides. Nested painter so the children can't accidentally
+        # write into the box border.
+        var body_rect = Rect(bx + 1, by + 1, bx + box_w - 1, by + box_h - 1)
+        var body_p = painter.sub(body_rect)
         if self.overlay == _OVERLAY_COMMIT:
-            var label_x = bx + 2
-            _ = canvas.put_text(
-                Point(label_x, by + 2), prompt_text, body, bx + box_w - 1,
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + 2), prompt_text, body,
             )
-            var input_x = label_x + len(prompt_text.as_bytes())
+            var input_x = bx + 2 + len(prompt_text.as_bytes())
             var input_rect = Rect(
                 input_x, by + 2, bx + box_w - 1, by + 3,
             )
             self.overlay_input.paint(canvas, input_rect, True)
             var hint = String("Enter: commit   ESC: cancel")
-            _ = canvas.put_text(
-                Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + box_h - 2), hint, body,
             )
             return
         if self.overlay == _OVERLAY_STATUS:
             var attr = ok_attr if self.overlay_ok else err_attr
-            canvas.fill(
-                Rect(bx + 1, by + 2, bx + box_w - 1, by + 3),
+            body_p.fill(
+                canvas, Rect(bx + 1, by + 2, bx + box_w - 1, by + 3),
                 String(" "), attr,
             )
-            _ = canvas.put_text(
-                Point(bx + 2, by + 2), self.overlay_message, attr,
-                bx + box_w - 1,
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + 2), self.overlay_message, attr,
             )
             var hint = String("Press any key to dismiss")
-            _ = canvas.put_text(
-                Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + box_h - 2), hint, body,
             )
             return
         # Confirmation overlays.
-        _ = canvas.put_text(
-            Point(bx + 2, by + 1), self.overlay_message, body,
-            bx + box_w - 1,
+        _ = body_p.put_text(
+            canvas, Point(bx + 2, by + 1), self.overlay_message, body,
         )
         var hint = String("[y] confirm   [n] / ESC: cancel")
-        _ = canvas.put_text(
-            Point(bx + 2, by + box_h - 2), hint, body, bx + box_w - 1,
+        _ = body_p.put_text(
+            canvas, Point(bx + 2, by + box_h - 2), hint, body,
         )
 
     fn _paint_horizontal_splitter(
@@ -1795,11 +1861,22 @@ struct LocalChanges(Movable):
         # ``LIGHT_GREEN`` which reads as the default text colour rather
         # than a highlight.
         var body_bg = Attr(LIGHT_GREEN, BLUE)
-        # Add/remove gutter glyphs. The full-cell block characters give
-        # the diff a distinct vertical stripe even in monochromatic
-        # terminals where only the foreground colour changes.
-        var add_gutter_attr = Attr(LIGHT_GREEN, BLUE)
-        var rem_gutter_attr = Attr(LIGHT_RED,   BLUE)
+        # Add/remove gutter cells. Saturated bg + black fg gives a
+        # solid coloured block on the left edge that reads as a status
+        # band even at a glance — easier to spot than a fg-only glyph
+        # against the panel's blue background.
+        var add_gutter_attr = Attr(BLACK, LIGHT_GREEN)
+        var rem_gutter_attr = Attr(BLACK, LIGHT_RED)
+        # Explicit body fill — the outer ``LocalChanges.paint`` sets
+        # every screen cell to ``YELLOW`` on ``BLUE``, but per-cell
+        # writes below only touch the gutter glyph (col 0), the body
+        # text (col +2 onward), and any highlight overlays. Without an
+        # explicit fill the spacer column (col +1) and the trailing
+        # cells past the line end carry whatever attr the *previous*
+        # panel paint stamped — which leaves visible artifacts when a
+        # widget that previously occupied this rect (or a slow
+        # repaint) leaks through.
+        painter.fill(canvas, area, String(" "), body_bg)
         var pane_focused = (self.focus == pane)
         var height = area.height()
         # Gutter occupies a single column at the panel's left edge for
@@ -2004,23 +2081,88 @@ struct LocalChanges(Movable):
             if self.scroll_commits < 0: self.scroll_commits = 0
 
     fn _cycle_focus(mut self, direction: Int):
-        """Tab / Shift+Tab. In the sidebar (files/branches/commits)
-        cycles through the three sidebar panels. In the right side
-        cycles between Unstaged and Staged when both are visible (file
-        mode); a no-op when on the single Info panel."""
-        if self._is_right_focus():
-            if self.focus == _PANE_RIGHT_INFO:
-                return
-            if self.focus == _PANE_RIGHT_UNSTAGED:
-                self.focus = _PANE_RIGHT_STAGED
-            else:
-                self.focus = _PANE_RIGHT_UNSTAGED
+        """Tab / Shift+Tab. Cycles through every visible pane in a
+        single sequence: each sidebar pane is followed by the right-
+        side pane(s) it drives, then on to the next sidebar pane.
+
+        Forward order:
+            Files → Unstaged → Staged
+                  → Branches → Info (branch log)
+                  → Commits  → Info (commit details)
+                  → wrap to Files
+
+        The Info pane appears twice — once driven by Branches, once
+        by Commits — because the right side reconfigures its content
+        based on which sidebar pane drove it. ``last_sidebar_focus``
+        carries the driving identity through the right-pane stops so
+        the next Tab knows whether to jump to Commits or wrap to
+        Files."""
+        if direction > 0:
+            self._tab_forward()
+        else:
+            self._tab_backward()
+
+    fn _tab_forward(mut self):
+        var f = self.focus
+        if f == _PANE_FILES:
+            self.focus = _PANE_RIGHT_UNSTAGED
+            self.last_sidebar_focus = _PANE_FILES
             return
-        var f = self.focus + direction
-        if f < 0: f = 2
-        if f > 2: f = 0
-        self.focus = f
-        self.last_sidebar_focus = f
+        if f == _PANE_RIGHT_UNSTAGED:
+            self.focus = _PANE_RIGHT_STAGED
+            return
+        if f == _PANE_RIGHT_STAGED:
+            self.focus = _PANE_BRANCHES
+            self.last_sidebar_focus = _PANE_BRANCHES
+            return
+        if f == _PANE_BRANCHES:
+            self.focus = _PANE_RIGHT_INFO
+            self.last_sidebar_focus = _PANE_BRANCHES
+            return
+        if f == _PANE_COMMITS:
+            self.focus = _PANE_RIGHT_INFO
+            self.last_sidebar_focus = _PANE_COMMITS
+            return
+        if f == _PANE_RIGHT_INFO:
+            # Two stops in the cycle land here — Branches→Info and
+            # Commits→Info. Disambiguate by the driving pane.
+            if self.last_sidebar_focus == _PANE_BRANCHES:
+                self.focus = _PANE_COMMITS
+                self.last_sidebar_focus = _PANE_COMMITS
+            else:
+                self.focus = _PANE_FILES
+                self.last_sidebar_focus = _PANE_FILES
+            return
+
+    fn _tab_backward(mut self):
+        var f = self.focus
+        if f == _PANE_FILES:
+            # Wrap to last stop in the cycle: Info driven by Commits.
+            self.focus = _PANE_RIGHT_INFO
+            self.last_sidebar_focus = _PANE_COMMITS
+            return
+        if f == _PANE_RIGHT_INFO:
+            if self.last_sidebar_focus == _PANE_COMMITS:
+                self.focus = _PANE_COMMITS
+                return
+            # branches-driving → step back to Branches
+            self.focus = _PANE_BRANCHES
+            return
+        if f == _PANE_COMMITS:
+            self.focus = _PANE_RIGHT_INFO
+            self.last_sidebar_focus = _PANE_BRANCHES
+            return
+        if f == _PANE_BRANCHES:
+            self.focus = _PANE_RIGHT_STAGED
+            self.last_sidebar_focus = _PANE_FILES
+            return
+        if f == _PANE_RIGHT_STAGED:
+            self.focus = _PANE_RIGHT_UNSTAGED
+            return
+        if f == _PANE_RIGHT_UNSTAGED:
+            self.focus = _PANE_FILES
+            self.last_sidebar_focus = _PANE_FILES
+            return
 
     fn _focused_right_panel_height(self, screen: Rect) -> Int:
         if self.focus == _PANE_RIGHT_INFO:
@@ -2596,6 +2738,20 @@ struct LocalChanges(Movable):
             return _PANE_RIGHT_STAGED
         return -1
 
+    fn _try_submit_jump(
+        mut self, var path: String, line: Int,
+    ) -> Bool:
+        """Set the submission contract for ``selected_path`` /
+        ``selected_line`` and flag ``submitted``. Caller has already
+        decided this should fire (e.g. a double-click landed on a
+        body row with a valid file mapping)."""
+        if len(path.as_bytes()) == 0 or line <= 0:
+            return False
+        self.selected_path = path^
+        self.selected_line = line
+        self.submitted = True
+        return True
+
     fn handle_mouse(
         mut self, event: Event, screen: Rect,
         mut registry: GrammarRegistry,
@@ -2671,6 +2827,13 @@ struct LocalChanges(Movable):
                     var li = self.info.scroll + (pos.y - top - 1)
                     if 0 <= li and li < len(self.info.lines):
                         self.info.cursor = li
+                        if Int(event.click_count) >= 2 \
+                                and li < len(self.info.file_line) \
+                                and li < len(self.info.file_path):
+                            var path = self.info.file_path[li].copy()
+                            var line = self.info.file_line[li]
+                            if self._try_submit_jump(path^, line):
+                                return True
                     return True
                 var rp = self._right_panes(screen)
                 if rpane == _PANE_RIGHT_UNSTAGED:
@@ -2679,6 +2842,13 @@ struct LocalChanges(Movable):
                     var li = self.unstaged.scroll + (pos.y - rp[0] - 1)
                     if 0 <= li and li < len(self.unstaged.lines):
                         self.unstaged.cursor = li
+                        if Int(event.click_count) >= 2 \
+                                and li < len(self.unstaged.file_line) \
+                                and li < len(self.unstaged.file_path):
+                            var path = self.unstaged.file_path[li].copy()
+                            var line = self.unstaged.file_line[li]
+                            if self._try_submit_jump(path^, line):
+                                return True
                     return True
                 # Staged.
                 if pos.y == rp[2]:
@@ -2686,6 +2856,13 @@ struct LocalChanges(Movable):
                 var li = self.staged.scroll + (pos.y - rp[2] - 1)
                 if 0 <= li and li < len(self.staged.lines):
                     self.staged.cursor = li
+                    if Int(event.click_count) >= 2 \
+                            and li < len(self.staged.file_line) \
+                            and li < len(self.staged.file_path):
+                        var path = self.staged.file_path[li].copy()
+                        var line = self.staged.file_line[li]
+                        if self._try_submit_jump(path^, line):
+                            return True
                 return True
             # Sidebar click.
             var pane = self._pane_at(pos, screen)

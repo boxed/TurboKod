@@ -36,6 +36,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
@@ -265,13 +266,18 @@ struct Settings(Movable):
         var rect = self._workspace_rect(screen)
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
-        canvas.fill(rect, String(" "), bg)
-        canvas.draw_box(rect, border, True)
+        # Bind every write inside the Settings dialog to its workspace
+        # rect — ``rect`` excludes the menu bar above and status bar
+        # below, so even an over-wide section row can't bleed into
+        # them.
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), bg)
+        painter.draw_box(canvas, rect, border, True)
         paint_window_title(canvas, rect, String(" Settings "), bg, bg)
         # Left rail.
-        self._paint_sections(canvas, rect)
+        self._paint_sections(canvas, painter, rect)
         # Right pane: section header + per-section content.
-        self._paint_right_pane(canvas, rect)
+        self._paint_right_pane(canvas, painter, rect)
         # Bottom-right Close button.
         self._paint_close_button(canvas, rect)
         # Save-behavior popup floats above the right pane so a long
@@ -307,10 +313,13 @@ struct Settings(Movable):
             rect.b.x - 2, rect.b.y - 2,
         )
 
-    fn _paint_sections(self, mut canvas: Canvas, rect: Rect):
+    fn _paint_sections(
+        self, mut canvas: Canvas, painter: Painter, rect: Rect,
+    ):
         var inner = self._sections_rect(rect)
+        var sub = painter.sub(inner)
         var body_attr = Attr(BLACK, CYAN)
-        canvas.fill(inner, String(" "), body_attr)
+        sub.fill(canvas, inner, String(" "), body_attr)
         var labels = _section_labels()
         for i in range(len(labels)):
             var y = inner.a.y + i
@@ -322,32 +331,39 @@ struct Settings(Movable):
                     Attr(WHITE, BLUE) if self.focus == _FOCUS_SECTIONS
                     else Attr(BLACK, GREEN)
                 )
-                canvas.fill(
+                sub.fill(
+                    canvas,
                     Rect(inner.a.x, y, inner.b.x, y + 1),
                     String(" "), attr,
                 )
-            _ = canvas.put_text(
-                Point(inner.a.x + 1, y), labels[i], attr, inner.b.x,
+            _ = sub.put_text(
+                canvas, Point(inner.a.x + 1, y), labels[i], attr,
             )
 
-    fn _paint_right_pane(mut self, mut canvas: Canvas, rect: Rect):
+    fn _paint_right_pane(
+        mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
+    ):
         var inner = self._right_rect(rect)
+        var sub = painter.sub(inner)
         var bg = Attr(BLACK, LIGHT_GRAY)
         # Header.
         var labels = _section_labels()
         if 0 <= self.section and self.section < len(labels):
-            _ = canvas.put_text(
-                Point(inner.a.x, inner.a.y), labels[self.section], bg,
+            _ = sub.put_text(
+                canvas, Point(inner.a.x, inner.a.y),
+                labels[self.section], bg,
             )
         # Section content.
         if self.section == _SECTION_ACTIONS:
-            self._paint_actions_section(canvas, inner)
+            self._paint_actions_section(canvas, sub, inner)
         elif self.section == _SECTION_EDITOR:
-            self._paint_editor_section(canvas, inner)
+            self._paint_editor_section(canvas, sub, inner)
         elif self.section == _SECTION_SPELL:
-            self._paint_spell_section(canvas, inner)
+            self._paint_spell_section(canvas, sub, inner)
 
-    fn _paint_actions_section(mut self, mut canvas: Canvas, inner: Rect):
+    fn _paint_actions_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
         """List of configured on-save actions plus the action-row of
         buttons. The list draws on a cyan strip; the buttons live on
         the dialog body (light gray) below it."""
@@ -358,20 +374,20 @@ struct Settings(Movable):
             return
         var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
         var body_attr = Attr(BLACK, CYAN)
-        canvas.fill(list_rect, String(" "), body_attr)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
         if len(self.actions) == 0:
-            _ = canvas.put_text(
-                Point(list_rect.a.x + 1, list_rect.a.y),
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
                 String("(no actions configured — press [+ Add])"),
-                hint, list_rect.b.x,
+                hint,
             )
         else:
-            self._paint_actions_list(canvas, list_rect)
+            self._paint_actions_list(canvas, painter, list_rect)
         # Helper line under the list.
-        _ = canvas.put_text(
-            Point(inner.a.x, list_bottom),
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, list_bottom),
             String("Runs after a successful save when language matches."),
-            hint, inner.b.x,
+            hint,
         )
         # Buttons row anchored just below the list. ``_paint_buttons``
         # repositions in place so the press latches survive across
@@ -391,7 +407,9 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_EDIT)
         self._paint_button(canvas, _BTN_REMOVE)
 
-    fn _paint_actions_list(mut self, mut canvas: Canvas, list_rect: Rect):
+    fn _paint_actions_list(
+        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
+    ):
         var visible = list_rect.height()
         if self.selected_action >= 0:
             if self.selected_action < self._list_scroll:
@@ -417,26 +435,29 @@ struct Settings(Movable):
                     Attr(WHITE, BLUE) if self.focus == _FOCUS_LIST
                     else Attr(BLACK, GREEN)
                 )
-                canvas.fill(
+                painter.fill(
+                    canvas,
                     Rect(list_rect.a.x, list_rect.a.y + r,
                          list_rect.b.x, list_rect.a.y + r + 1),
                     String(" "), attr,
                 )
             var line = _format_action(act)
-            _ = canvas.put_text(
-                Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr, list_rect.b.x,
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
+                line, attr,
             )
 
-    fn _paint_editor_section(mut self, mut canvas: Canvas, inner: Rect):
+    fn _paint_editor_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
         """Editor preferences pane. Single row for now: a label and an
         inline ``Save behavior`` dropdown."""
         var bg = Attr(BLACK, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var label = String("Save behavior:")
         var label_y = inner.a.y + 2
-        _ = canvas.put_text(
-            Point(inner.a.x, label_y), label, bg, inner.b.x,
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, label_y), label, bg,
         )
         # Anchor the strip directly to the right of the label, leaving
         # one column of padding so the value isn't flush against the
@@ -460,13 +481,15 @@ struct Settings(Movable):
             canvas, dd_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
-        _ = canvas.put_text(
-            Point(inner.a.x, label_y + 2),
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, label_y + 2),
             String("Manual: save with Ctrl+S. Automatic: save on focus changes."),
-            hint, inner.b.x,
+            hint,
         )
 
-    fn _paint_spell_section(mut self, mut canvas: Canvas, inner: Rect):
+    fn _paint_spell_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
         """List of catalog dictionaries with an "[X] installed" marker
         plus an Install / Remove button row. English is built-in (OS
         ``/usr/share/dict/words`` plus the bundled programmer wordlists)
@@ -478,15 +501,15 @@ struct Settings(Movable):
             return
         var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
         var body_attr = Attr(BLACK, CYAN)
-        canvas.fill(list_rect, String(" "), body_attr)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
         if len(self.dict_specs) == 0:
-            _ = canvas.put_text(
-                Point(list_rect.a.x + 1, list_rect.a.y),
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
                 String("(no downloadable dictionaries available)"),
-                hint, list_rect.b.x,
+                hint,
             )
         else:
-            self._paint_dict_list(canvas, list_rect)
+            self._paint_dict_list(canvas, painter, list_rect)
         # Helper line under the list. Different copy depending on whether
         # the highlighted row is installed, so the user knows which button
         # is meaningful.
@@ -502,8 +525,8 @@ struct Settings(Movable):
                 help = String(
                     "Press Remove to delete the on-disk wordlist."
                 )
-        _ = canvas.put_text(
-            Point(inner.a.x, list_bottom), help, hint, inner.b.x,
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, list_bottom), help, hint,
         )
         # Install / Remove buttons row.
         var btn_y = list_bottom + 2
@@ -527,7 +550,9 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_DICT_INSTALL)
         self._paint_button(canvas, _BTN_DICT_REMOVE)
 
-    fn _paint_dict_list(mut self, mut canvas: Canvas, list_rect: Rect):
+    fn _paint_dict_list(
+        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
+    ):
         """One row per catalog entry: ``[X] German    (de)``.
 
         Uses the same scroll bookkeeping as the actions list so a long
@@ -557,7 +582,8 @@ struct Settings(Movable):
                     Attr(WHITE, BLUE) if self.focus == _FOCUS_DICT_LIST
                     else Attr(BLACK, GREEN)
                 )
-                canvas.fill(
+                painter.fill(
+                    canvas,
                     Rect(list_rect.a.x, list_rect.a.y + r,
                          list_rect.b.x, list_rect.a.y + r + 1),
                     String(" "), attr,
@@ -567,9 +593,9 @@ struct Settings(Movable):
             ) else String("[ ] ")
             var line = mark + spec.display + String("  (") \
                 + spec.language_id + String(")")
-            _ = canvas.put_text(
-                Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr, list_rect.b.x,
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
+                line, attr,
             )
 
     fn _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):

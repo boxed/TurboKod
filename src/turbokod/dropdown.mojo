@@ -28,6 +28,7 @@ dialog widget so the popup overlays them — same pattern as
 from std.collections.list import List
 
 from .canvas import Canvas
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE
 from .events import (
@@ -252,20 +253,20 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         "none") and a literal blank cell would look like a paint bug.
         """
         var fill_attr = focused_attr if focused else blurred_attr
-        canvas.fill(rect, String(" "), fill_attr)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), fill_attr)
         var v = self.value()
         var display = v if len(v.as_bytes()) > 0 else empty_label
         # 1-cell left padding so the value text doesn't touch the
         # left edge — same idiom as the input strips.
-        _ = canvas.put_text(
-            Point(rect.a.x + 1, rect.a.y), display, fill_attr,
-            rect.b.x - 1,
+        _ = painter.put_text(
+            canvas, Point(rect.a.x + 1, rect.a.y), display, fill_attr,
         )
         # Caret glyph on the right edge: ``▼`` when closed, ``▲``
         # when open, hugging the right cell. Reads the same as the
         # menu bar's open-menu indicator.
         var caret = String("▲") if self.is_open else String("▼")
-        canvas.set(rect.b.x - 1, rect.a.y, Cell(caret, fill_attr, 1))
+        painter.set(canvas, rect.b.x - 1, rect.a.y, Cell(caret, fill_attr, 1))
 
     fn paint_popup(self, mut canvas: Canvas, anchor: Rect, screen: Rect):
         """Render the popup list. Caller invokes this last (after the
@@ -277,8 +278,9 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         paint_drop_shadow(canvas, rect)
-        canvas.fill(rect, String(" "), attr)
-        canvas.draw_box(rect, attr, False)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), attr)
+        painter.draw_box(canvas, rect, attr, False)
         var visible = rect.height() - 2
         for r in range(visible):
             var idx = self._scroll + r
@@ -293,8 +295,8 @@ struct Dropdown(ImplicitlyCopyable, Movable):
             if is_hl:
                 # Fill the row so the green band reaches the inner
                 # right edge of the popup, not just under the label.
-                canvas.fill(
-                    Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
+                painter.fill(
+                    canvas, Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
                     String(" "), row_attr,
                 )
             # Mark the committed value with a leading ``•`` so the
@@ -302,9 +304,8 @@ struct Dropdown(ImplicitlyCopyable, Movable):
             # picked" while moving the highlight around.
             var marker = String("• ") if idx == self.index \
                 else String("  ")
-            _ = canvas.put_text(
-                Point(rect.a.x + 1, y), marker + label, row_attr,
-                rect.b.x - 1,
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 1, y), marker + label, row_attr,
             )
 
     # --- input --------------------------------------------------------
