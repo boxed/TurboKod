@@ -134,6 +134,7 @@ from .dropdown import (
 )
 from .file_dialog import FileDialog
 from .save_as_dialog import SaveAsDialog
+from .scrollbar import HScrollbar, ScrollbarMetrics, VScrollbar
 from .file_io import (
     FileInfo, basename, find_git_project, join_path, list_directory,
     parent_path, read_file, stat_file, write_file,

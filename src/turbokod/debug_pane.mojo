@@ -64,6 +64,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .scrollbar import VScrollbar
 from .text_view import TextLog
 from .window import (
     TitleCommand, TitleCommandHit, hit_title_command, paint_title_commands,
@@ -262,6 +263,23 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     in absolute screen coordinates. Rebuilt on every paint so the
     set always reflects what the user can currently see — scrolled-off
     lines drop out automatically."""
+    var _last_output_sb_x: Int
+    """Screen x of the output scrollbar painted by the last ``paint``,
+    or ``-1`` when the bar wasn't drawn (content fits, or pane too
+    short). Drives mouse hit-testing without re-running the paint
+    geometry."""
+    var _last_output_sb_top: Int
+    """Top y of the output scrollbar from the last paint."""
+    var _last_output_sb_bottom: Int
+    """Bottom y of the output scrollbar (inclusive) from the last
+    paint."""
+    var _output_scrolling: Bool
+    """True while the user is dragging the output thumb. Mouse motion
+    updates the scroll position; release ends the drag."""
+    var _output_drag_offset: Int
+    """Cell offset within the thumb at the moment the user pressed
+    on it — preserves the click point relative to the thumb so the
+    drag doesn't snap the thumb to mouse-y."""
 
     fn __init__(out self):
         self.visible = False
@@ -297,6 +315,11 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.commands = List[TitleCommand]()
         self.pending_command_id = String("")
         self._last_cmd_hits = List[TitleCommandHit]()
+        self._last_output_sb_x = -1
+        self._last_output_sb_top = 0
+        self._last_output_sb_bottom = -1
+        self._output_scrolling = False
+        self._output_drag_offset = 0
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
@@ -330,6 +353,11 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.commands = copy.commands.copy()
         self.pending_command_id = copy.pending_command_id
         self._last_cmd_hits = copy._last_cmd_hits.copy()
+        self._last_output_sb_x = copy._last_output_sb_x
+        self._last_output_sb_top = copy._last_output_sb_top
+        self._last_output_sb_bottom = copy._last_output_sb_bottom
+        self._output_scrolling = copy._output_scrolling
+        self._output_drag_offset = copy._output_drag_offset
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -568,9 +596,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var dim = Attr(LIGHT_GRAY, BLACK)
         var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
         var painter = Painter(panel)
-        # Reset visible-link rects each paint — only what's currently
-        # on screen counts for click hit-testing.
+        # Reset visible-link rects + scrollbar bookkeeping each paint —
+        # only what's currently on screen counts for click hit-testing.
+        # ``_last_output_sb_x = -1`` is the sentinel for "no bar
+        # painted this frame" so the early-returns below (minimized,
+        # zero output) leave a clean state.
         self._last_links = List[OutputLink]()
+        self._last_output_sb_x = -1
         painter.fill(canvas, panel, String(" "), bg)
         self._last_panel_top = panel.a.y
         # Top border with title. Focus is shown via line weight (single →
@@ -803,11 +835,28 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # Output panel: text + selection overlay are owned by
         # ``self.output`` (a ``TextLog``). We just hand it a rect; it
         # remembers the layout for the post-paint link-overlay pass
-        # below and for ``handle_mouse``.
+        # below and for ``handle_mouse``. The right-hand column of the
+        # panel is reserved for the scrollbar — text rect stops one
+        # cell short of ``panel.b.x``.
         var out_rect = Rect(
             panel.a.x + 2, out_top, panel.b.x - 1, panel.b.y,
         )
         self.output.paint(canvas, out_rect)
+        # Vertical scrollbar in the right margin of the output rect.
+        # Driven by the layout the log just stamped — present only when
+        # content overflows the visible area.
+        self._last_output_sb_top = out_rect.a.y
+        self._last_output_sb_bottom = out_rect.b.y - 1
+        if out_rect.height() >= 3 and panel.b.x - 1 > out_rect.a.x:
+            var bar = VScrollbar(
+                panel.b.x - 1, out_rect.a.y, out_rect.b.y - 1,
+                len(self.output.last_visual),
+                self.output.last_visible_count,
+                self.output.last_first_visual,
+            )
+            if bar.metrics().present:
+                bar.paint(canvas, painter, border)
+                self._last_output_sb_x = bar.x
         # Layer Python ``File "<path>", line N`` traceback links on
         # top — ``TextLog`` is content-agnostic so this domain-specific
         # overlay lives here. We iterate the layout the log just
@@ -892,6 +941,19 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     fn is_resizing(self) -> Bool:
         return self._resizing
 
+    fn _output_scrollbar(self) -> VScrollbar:
+        """Reconstruct the output scrollbar value from the last paint's
+        bookkeeping. ``present()`` is False when the bar wasn't drawn."""
+        if self._last_output_sb_x < 0:
+            return VScrollbar(0, 0, -1, 0, 0, 0)
+        return VScrollbar(
+            self._last_output_sb_x,
+            self._last_output_sb_top, self._last_output_sb_bottom,
+            len(self.output.last_visual),
+            self.output.last_visible_count,
+            self.output.last_first_visual,
+        )
+
     fn handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
         """Return True if the click landed in the pane (consumed),
         False to let it fall through to the workspace."""
@@ -912,6 +974,20 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             self.preferred_height = self._clamp_height(
                 panel.b.y - event.pos.y, panel,
             )
+            return True
+        # Output-thumb drag in flight — same drag-state-owners-first
+        # convention as the resize handle. Motion updates scroll;
+        # release ends the drag.
+        if self._output_scrolling:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._output_scrolling = False
+                return True
+            if event.motion:
+                var bar = self._output_scrollbar()
+                if bar.metrics().present:
+                    self.output.scroll_to_top_row(
+                        bar.drag_to(event.pos.y, self._output_drag_offset),
+                    )
             return True
         # Selection drag in flight: forward every event to the output
         # ``TextLog`` until release, so a drag that wanders off the
@@ -1004,7 +1080,23 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 if i >= 0 and i < len(self._right_indices):
                     self._on_row_click(self._right_indices[i])
         elif event.pos.y >= self.output.last_y0:
-            # File:line link hit-test runs first — clicking on a
+            # Scrollbar hit-test runs first — a click in the right
+            # margin should drive scroll instead of starting a
+            # selection drag.
+            var bar = self._output_scrollbar()
+            var hit = bar.hit(event.pos)
+            if hit[0] != 0:
+                if hit[0] == 1:
+                    self.output.scroll_by(-3)
+                elif hit[0] == 5:
+                    self.output.scroll_by(3)
+                elif hit[0] == 2 or hit[0] == 4:
+                    self.output.scroll_to_top_row(bar.track_jump(hit[1]))
+                else:  # 3 — on thumb
+                    self._output_scrolling = True
+                    self._output_drag_offset = hit[1]
+                return True
+            # File:line link hit-test runs second — clicking on a
             # ``File "x", line N`` span should open the file rather
             # than start a selection drag.
             for li in range(len(self._last_links)):

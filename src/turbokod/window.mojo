@@ -25,6 +25,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .scrollbar import HScrollbar, VScrollbar
 
 
 comptime MIN_WIN_W: Int = 12
@@ -406,97 +407,53 @@ struct Window(ImplicitlyCopyable, Movable):
             )
 
     # --- scroll bar geometry ----------------------------------------------
-    # ``_v_sb_metrics`` and ``_h_sb_metrics`` are the single source of truth
-    # for both painting (``_paint_v/h_scrollbar``) and hit-testing
-    # (``v/h_scrollbar_hit``). Keep them in sync by changing only the helpers.
+    # Both axes delegate to the reusable ``scrollbar`` primitive.
+    # ``_v_scrollbar`` / ``_h_scrollbar`` are the single source of truth
+    # for paint + hit-test + drag + track-jump; the public methods are
+    # thin wrappers so existing callers (WindowManager mouse routing)
+    # don't have to know the primitive exists.
 
-    fn _v_sb_metrics(self) -> Tuple[Bool, Int, Int, Int, Int, Int]:
-        """``(present, track_y0, track_h, knob_off, knob_h, max_scroll)``.
-        ``present=False`` means no scroll bar is drawn."""
-        if not self.is_editor:
-            return (False, 0, 0, 0, 0, 0)
-        if self.rect.width() < 2 or self.rect.height() < 5:
-            return (False, 0, 0, 0, 0, 0)
-        var top = self.rect.a.y + 1
-        var bot = self.rect.b.y - 2
-        var track_y0 = top + 1
-        var track_h = bot - top - 1
-        if track_h < 1:
-            return (False, 0, 0, 0, 0, 0)
-        var total = self.editor.buffer.line_count()
+    fn _v_scrollbar(self) -> VScrollbar:
+        """Vertical scrollbar value for this window's editor pane.
+
+        Returns a degenerate bar (``bottom < top``) — and therefore
+        ``metrics().present == False`` — when the window isn't an
+        editor or is too short for a meaningful bar."""
+        if not self.is_editor or self.rect.width() < 2 or self.rect.height() < 5:
+            return VScrollbar(0, 0, -1, 0, 0, 0)
         var visible = self.rect.height() - 2
-        if visible < 1: visible = 1
-        if total <= visible:
-            return (False, 0, 0, 0, 0, 0)
-        var max_scroll = total - visible
-        var knob_h = (track_h * visible) // total
-        if knob_h < 1: knob_h = 1
-        if knob_h > track_h: knob_h = track_h
-        var knob_off = (self.editor.scroll_y * (track_h - knob_h)) // max_scroll
-        if knob_off < 0: knob_off = 0
-        if knob_off > track_h - knob_h: knob_off = track_h - knob_h
-        return (True, track_y0, track_h, knob_off, knob_h, max_scroll)
+        return VScrollbar(
+            self.rect.b.x - 1, self.rect.a.y + 1, self.rect.b.y - 2,
+            self.editor.buffer.line_count(),
+            visible,
+            self.editor.scroll_y,
+        )
 
-    fn _h_sb_metrics(self) -> Tuple[Bool, Int, Int, Int, Int, Int]:
-        """``(present, sb_left, track_w, knob_off, knob_w, max_scroll)``.
-        Track cells run from ``sb_left + 1`` to ``sb_left + track_w`` inclusive;
-        ``sb_right = sb_left + track_w + 1``."""
-        if not self.is_editor:
-            return (False, 0, 0, 0, 0, 0)
-        # Soft-wrap means lines reflow vertically; there is no horizontal
-        # scroll axis to drive a bar with.
-        if self.editor.soft_wrap:
-            return (False, 0, 0, 0, 0, 0)
-        if self.rect.width() < 14 or self.rect.height() < 2:
-            return (False, 0, 0, 0, 0, 0)
+    fn _h_scrollbar(self) -> HScrollbar:
+        """Horizontal scrollbar value. Soft-wrap mode and too-narrow
+        windows produce a degenerate bar (``right < left``)."""
+        if not self.is_editor or self.editor.soft_wrap \
+                or self.rect.width() < 14 or self.rect.height() < 2:
+            return HScrollbar(0, 0, -1, 0, 0, 0)
         var pos_text = String(self.editor.cursor_row + 1) \
             + String(":") + String(self.editor.cursor_col + 1)
         var pos_x = self.rect.a.x + 4
         var pos_len = len(pos_text.as_bytes())
         var sb_left = pos_x + pos_len + 1
         var sb_right = self.rect.b.x - 2
-        if sb_right - sb_left < 4:
-            return (False, 0, 0, 0, 0, 0)
-        var track_w = sb_right - sb_left - 1
-        if track_w < 1:
-            return (False, 0, 0, 0, 0, 0)
-        var total = self.editor.longest_line_width()
         var visible = self.rect.width() - 2
-        if visible < 1: visible = 1
-        if total <= visible:
-            return (False, 0, 0, 0, 0, 0)
-        var max_scroll = total - visible
-        var knob_w = (track_w * visible) // total
-        if knob_w < 1: knob_w = 1
-        if knob_w > track_w: knob_w = track_w
-        var knob_off = (self.editor.scroll_x * (track_w - knob_w)) // max_scroll
-        if knob_off < 0: knob_off = 0
-        if knob_off > track_w - knob_w: knob_off = track_w - knob_w
-        return (True, sb_left, track_w, knob_off, knob_w, max_scroll)
+        return HScrollbar(
+            self.rect.b.y - 1, sb_left, sb_right,
+            self.editor.longest_line_width(),
+            visible,
+            self.editor.scroll_x,
+        )
 
     fn _paint_v_scrollbar(
         self, mut canvas: Canvas, painter: Painter, border: Attr,
     ):
         """Vertical scroll bar overlaying the right ``│`` border."""
-        var m = self._v_sb_metrics()
-        if not m[0]:
-            return
-        var x = self.rect.b.x - 1
-        var top = self.rect.a.y + 1
-        var bot = self.rect.b.y - 2
-        painter.set(canvas, x, top, Cell(String("▲"), border, 1))
-        painter.set(canvas, x, bot, Cell(String("▼"), border, 1))
-        var track_y0 = m[1]
-        var track_h = m[2]
-        var knob_off = m[3]
-        var knob_h = m[4]
-        for i in range(track_h):
-            var ch: String
-            if knob_off <= i and i < knob_off + knob_h:
-                ch = String("█")
-            else:
-                ch = String("░")
-            painter.set(canvas, x, track_y0 + i, Cell(ch, border, 1))
+        self._v_scrollbar().paint(canvas, painter, border)
 
     fn _paint_h_scrollbar(
         self, mut canvas: Canvas, painter: Painter, border: Attr,
@@ -514,23 +471,7 @@ struct Window(ImplicitlyCopyable, Movable):
             + String(":") + String(self.editor.cursor_col + 1)
         var pos_x = self.rect.a.x + 4
         _ = painter.put_text(canvas, Point(pos_x, y), pos_text, border)
-        var m = self._h_sb_metrics()
-        if not m[0]:
-            return
-        var sb_left = m[1]
-        var track_w = m[2]
-        var knob_off = m[3]
-        var knob_w = m[4]
-        var sb_right = sb_left + track_w + 1
-        painter.set(canvas, sb_left, y, Cell(String("◄"), border, 1))
-        painter.set(canvas, sb_right, y, Cell(String("►"), border, 1))
-        for i in range(track_w):
-            var ch: String
-            if knob_off <= i and i < knob_off + knob_w:
-                ch = String("█")
-            else:
-                ch = String("░")
-            painter.set(canvas, sb_left + 1 + i, y, Cell(ch, border, 1))
+        self._h_scrollbar().paint(canvas, painter, border)
 
     # --- scroll bar hit-testing & actions ---------------------------------
     # ``part`` codes: 0=none, 1=up/left arrow, 2=above/left of thumb,
@@ -540,47 +481,10 @@ struct Window(ImplicitlyCopyable, Movable):
     # the jump target for the page areas (2, 4).
 
     fn v_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
-        if p.x != self.rect.b.x - 1:
-            return (0, 0)
-        var m = self._v_sb_metrics()
-        if not m[0]:
-            return (0, 0)
-        var top = self.rect.a.y + 1
-        var bot = self.rect.b.y - 2
-        if p.y == top: return (1, 0)
-        if p.y == bot: return (5, 0)
-        var track_y0 = m[1]
-        var track_h = m[2]
-        var knob_off = m[3]
-        var knob_h = m[4]
-        if p.y < track_y0 or p.y >= track_y0 + track_h:
-            return (0, 0)
-        var rel = p.y - track_y0
-        if rel < knob_off: return (2, rel)
-        if rel >= knob_off + knob_h: return (4, rel)
-        return (3, rel - knob_off)
+        return self._v_scrollbar().hit(p)
 
     fn h_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
-        if not self.is_editor:
-            return (0, 0)
-        if p.y != self.rect.b.y - 1:
-            return (0, 0)
-        var m = self._h_sb_metrics()
-        if not m[0]:
-            return (0, 0)
-        var sb_left = m[1]
-        var track_w = m[2]
-        var knob_off = m[3]
-        var knob_w = m[4]
-        var sb_right = sb_left + track_w + 1
-        if p.x == sb_left: return (1, 0)
-        if p.x == sb_right: return (5, 0)
-        if p.x < sb_left + 1 or p.x > sb_right - 1:
-            return (0, 0)
-        var rel = p.x - (sb_left + 1)
-        if rel < knob_off: return (2, rel)
-        if rel >= knob_off + knob_w: return (4, rel)
-        return (3, rel - knob_off)
+        return self._h_scrollbar().hit(p)
 
     fn v_scroll_by(mut self, lines: Int):
         """Scroll the editor vertically by ``lines`` (negative = up). Cursor
@@ -611,82 +515,28 @@ struct Window(ImplicitlyCopyable, Movable):
         of the vertical scrollbar — the user gets a direct "go here, with
         a screen of context above and below" jump instead of paging."""
         if not self.is_editor: return
-        var m = self._v_sb_metrics()
-        if not m[0]: return
-        var track_h = m[2]
-        var max_scroll = m[5]
-        var visible = self.rect.height() - 2
-        if visible < 1: visible = 1
-        var total = max_scroll + visible
-        var rel = track_pos
-        if rel < 0: rel = 0
-        if rel >= track_h: rel = track_h - 1
-        var target_row = (rel * total) // track_h
-        var ny = target_row - (visible // 2)
-        if ny < 0: ny = 0
-        if ny > max_scroll: ny = max_scroll
-        self.editor.scroll_y = ny
+        self.editor.scroll_y = self._v_scrollbar().track_jump(track_pos)
 
     fn h_scroll_to_track_pos(mut self, track_pos: Int):
         """Horizontal twin of :func:`v_scroll_to_track_pos` — clicking in
         the page-left / page-right zones jumps to that proportional column
         with the target column horizontally centered in the view."""
         if not self.is_editor: return
-        var m = self._h_sb_metrics()
-        if not m[0]: return
-        var track_w = m[2]
-        var max_scroll = m[5]
-        var visible = self.rect.width() - 2
-        if visible < 1: visible = 1
-        var total = max_scroll + visible
-        var rel = track_pos
-        if rel < 0: rel = 0
-        if rel >= track_w: rel = track_w - 1
-        var target_col = (rel * total) // track_w
-        var nx = target_col - (visible // 2)
-        if nx < 0: nx = 0
-        if nx > max_scroll: nx = max_scroll
-        self.editor.scroll_x = nx
+        self.editor.scroll_x = self._h_scrollbar().track_jump(track_pos)
 
     fn v_drag_thumb_to(mut self, mouse_y: Int, drag_offset: Int):
         """Reposition ``scroll_y`` so the thumb's top sits at
         ``mouse_y - drag_offset``. Used while dragging the v-thumb."""
         if not self.is_editor: return
-        var m = self._v_sb_metrics()
-        if not m[0]: return
-        var track_y0 = m[1]
-        var track_h = m[2]
-        var knob_h = m[4]
-        var max_scroll = m[5]
-        var denom = track_h - knob_h
-        if max_scroll == 0 or denom <= 0:
-            return
-        var target = mouse_y - track_y0 - drag_offset
-        if target < 0: target = 0
-        if target > denom: target = denom
-        var ny = (target * max_scroll + denom // 2) // denom
-        if ny < 0: ny = 0
-        if ny > max_scroll: ny = max_scroll
-        self.editor.scroll_y = ny
+        var bar = self._v_scrollbar()
+        if not bar.metrics().present: return
+        self.editor.scroll_y = bar.drag_to(mouse_y, drag_offset)
 
     fn h_drag_thumb_to(mut self, mouse_x: Int, drag_offset: Int):
         if not self.is_editor: return
-        var m = self._h_sb_metrics()
-        if not m[0]: return
-        var sb_left = m[1]
-        var track_w = m[2]
-        var knob_w = m[4]
-        var max_scroll = m[5]
-        var denom = track_w - knob_w
-        if max_scroll == 0 or denom <= 0:
-            return
-        var target = mouse_x - (sb_left + 1) - drag_offset
-        if target < 0: target = 0
-        if target > denom: target = denom
-        var nx = (target * max_scroll + denom // 2) // denom
-        if nx < 0: nx = 0
-        if nx > max_scroll: nx = max_scroll
-        self.editor.scroll_x = nx
+        var bar = self._h_scrollbar()
+        if not bar.metrics().present: return
+        self.editor.scroll_x = bar.drag_to(mouse_x, drag_offset)
 
     fn close_button_hit(self, p: Point) -> Bool:
         return hit_close_button(Point(self.rect.a.x, self.rect.a.y), p)

@@ -690,6 +690,30 @@ struct TextLog(ImplicitlyCopyable, Movable):
         self.autoscroll = (ns >= max_s)
         self.scroll = ns
 
+    fn scroll_to_top_row(mut self, top: Int):
+        """Set the first visible row to ``top``. Disengages autoscroll
+        unless ``top`` would still leave the last visual row visible
+        (in which case autoscroll re-engages so new output keeps
+        sliding into view).
+
+        ``self.scroll`` is the index of the *last* visible row; this
+        helper exists so callers driving the scrollbar can think in
+        terms of "top of view" without juggling that detail.
+        """
+        var visible = self.last_visible_count
+        if visible < 1:
+            visible = 1
+        var max_s = len(self.last_visual) - 1
+        if max_s < 0:
+            max_s = 0
+        var ns = top + visible - 1
+        if ns < 0:
+            ns = 0
+        if ns > max_s:
+            ns = max_s
+        self.autoscroll = (ns >= max_s)
+        self.scroll = ns
+
 
 # --- internal helpers -----------------------------------------------------
 

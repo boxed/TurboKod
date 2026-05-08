@@ -28,6 +28,7 @@ from turbokod.editorconfig import (
 )
 from turbokod.file_dialog import FileDialog
 from turbokod.save_as_dialog import SaveAsDialog
+from turbokod.scrollbar import HScrollbar, VScrollbar
 from turbokod.session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
@@ -464,6 +465,139 @@ fn test_centered() raises:
     var outer = Rect(0, 0, 80, 24)
     var inner = centered(outer, 20, 6)
     assert_true(inner == Rect(30, 9, 50, 15))
+
+
+# ----- Scrollbar primitive tests --------------------------------------------
+
+
+fn test_scrollbar_hidden_when_content_fits() raises:
+    """No bar is drawn when total ≤ visible — there's nothing to
+    scroll, so paint and hit-test must short-circuit."""
+    var bar = VScrollbar(10, 0, 9, 5, 10, 0)
+    assert_false(bar.metrics().present)
+    var c = Canvas(20, 10)
+    var p = Painter(Rect(0, 0, 20, 10))
+    bar.paint(c, p, Attr(WHITE, BLACK))
+    # The scrollbar column must be untouched (still blank cells).
+    assert_equal(c.get(10, 0).glyph, String(" "))
+    assert_equal(c.get(10, 5).glyph, String(" "))
+    var hit = bar.hit(Point(10, 5))
+    assert_equal(hit[0], 0)
+
+
+fn test_scrollbar_hidden_when_too_short() raises:
+    """A 2-cell bar can't fit ▲ + ▼ + at least one track cell, so it
+    stays hidden even when content overflows."""
+    var bar = VScrollbar(10, 0, 1, 100, 5, 0)
+    assert_false(bar.metrics().present)
+
+
+fn test_scrollbar_paints_arrows_and_thumb() raises:
+    """The bar paints ▲ at the top, ▼ at the bottom, and a █ thumb
+    proportional to ``visible / total`` somewhere on the rail."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)
+    var m = bar.metrics()
+    assert_true(m.present)
+    assert_equal(m.track_size, 8)
+    assert_equal(m.knob_size, 1)  # 8 * 10 / 100 = 0 → clamped up to 1
+    assert_equal(m.knob_off, 0)
+    var c = Canvas(20, 10)
+    var p = Painter(Rect(0, 0, 20, 10))
+    bar.paint(c, p, Attr(WHITE, BLACK))
+    assert_equal(c.get(10, 0).glyph, String("▲"))
+    assert_equal(c.get(10, 9).glyph, String("▼"))
+    # Track is 8 cells (rows 1..8). Thumb is one █ at row 1; the rest
+    # are ░.
+    assert_equal(c.get(10, 1).glyph, String("█"))
+    assert_equal(c.get(10, 2).glyph, String("░"))
+    assert_equal(c.get(10, 8).glyph, String("░"))
+
+
+fn test_scrollbar_thumb_tracks_scroll_position() raises:
+    """As ``scroll`` advances toward ``max_scroll``, the thumb's
+    ``knob_off`` must end up at the bottom of the track."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 90)  # max_scroll = 90
+    var m = bar.metrics()
+    assert_true(m.present)
+    # denom = track_size - knob_size = 7. knob_off = 90*7 / 90 = 7.
+    assert_equal(m.knob_off, 7)
+
+
+fn test_scrollbar_hit_arrow_zones() raises:
+    """Top and bottom of the bar are arrow hits, with no rel."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)
+    var up = bar.hit(Point(10, 0))
+    assert_equal(up[0], 1)  # leading arrow
+    var down = bar.hit(Point(10, 9))
+    assert_equal(down[0], 5)  # trailing arrow
+
+
+fn test_scrollbar_hit_thumb_returns_drag_offset() raises:
+    """Clicking on the thumb returns part=3 with the click's offset
+    inside the thumb so the drag preserves the press point."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)  # thumb at track row 0
+    var on_thumb = bar.hit(Point(10, 1))
+    assert_equal(on_thumb[0], 3)
+    assert_equal(on_thumb[1], 0)
+
+
+fn test_scrollbar_hit_page_zones() raises:
+    """Above the thumb is part=2 (page-up), below is part=4 (page-down)."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 90)  # thumb at the bottom
+    # Track rows 1..8. Thumb at knob_off=7, so row 1 (rel=0) is page-up.
+    var pup = bar.hit(Point(10, 1))
+    assert_equal(pup[0], 2)
+    assert_equal(pup[1], 0)
+    # Now flip — scroll=0 puts thumb at top, so a click near the bottom
+    # of the track is page-down.
+    var bar2 = VScrollbar(10, 0, 9, 100, 10, 0)
+    var pdn = bar2.hit(Point(10, 8))
+    assert_equal(pdn[0], 4)
+
+
+fn test_scrollbar_hit_off_axis_returns_none() raises:
+    """A click in a different column (V-bar) must not fire."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)
+    var miss = bar.hit(Point(11, 5))
+    assert_equal(miss[0], 0)
+
+
+fn test_scrollbar_drag_to_extremes() raises:
+    """Dragging the thumb's leading cell to the bottom of the track
+    yields ``scroll == max_scroll``; to the top yields 0."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)
+    # Track starts at top+1 = 1; track size = 8; knob size = 1; denom = 7.
+    # Drag to mouse_y=8 with drag_offset=0 → target=7 → ns=max_scroll=90.
+    assert_equal(bar.drag_to(8, 0), 90)
+    assert_equal(bar.drag_to(1, 0), 0)
+    # Out-of-range clamps.
+    assert_equal(bar.drag_to(-50, 0), 0)
+    assert_equal(bar.drag_to(1000, 0), 90)
+
+
+fn test_scrollbar_track_jump_centers_target() raises:
+    """A click in the middle of the track jumps so the target row is
+    centered in the visible area."""
+    var bar = VScrollbar(10, 0, 9, 100, 10, 0)
+    # track_size=8. rel=4 → target_row = 4*100/8 = 50. ns = 50 - 5 = 45.
+    assert_equal(bar.track_jump(4), 45)
+    # rel=0 → target_row=0 → ns clamps to 0.
+    assert_equal(bar.track_jump(0), 0)
+    # rel=track_size-1=7 → target_row = 7*100/8 = 87 → ns = 87-5 = 82.
+    assert_equal(bar.track_jump(7), 82)
+
+
+fn test_scrollbar_horizontal_paints_arrows_on_axis() raises:
+    """``HScrollbar`` is the same primitive rotated 90° — ◄ at the
+    leading cell, ► at the trailing cell, █/░ along the row."""
+    var bar = HScrollbar(5, 0, 9, 100, 10, 0)
+    var c = Canvas(20, 10)
+    var p = Painter(Rect(0, 0, 20, 10))
+    bar.paint(c, p, Attr(WHITE, BLACK))
+    assert_equal(c.get(0, 5).glyph, String("◄"))
+    assert_equal(c.get(9, 5).glyph, String("►"))
+    assert_equal(c.get(1, 5).glyph, String("█"))
+    assert_equal(c.get(2, 5).glyph, String("░"))
 
 
 # ----- Editor tests ---------------------------------------------------------
@@ -6911,6 +7045,107 @@ fn test_string_utils_slice_codepoints_handles_multibyte() raises:
     assert_equal(slice_codepoints(s, 3, 3), String(""))
 
 
+fn test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
+    """When the run/debug output overflows the visible area, a vertical
+    scrollbar must be painted in the right margin (column ``panel.b.x - 1``)
+    with ▲ at the top and ▼ at the bottom of the output rect."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    for i in range(40):
+        pane.append_output(String("line ") + String(i))
+    var panel = Rect(0, 0, 40, 10)
+    var c = Canvas(40, 10)
+    pane.paint(c, panel)
+    # Output rect spans rows [out_top, panel.b.y - 1] = [2, 9].
+    assert_equal(c.get(39, 2).glyph, String("▲"))
+    assert_equal(c.get(39, 9).glyph, String("▼"))
+    # At least one █ thumb glyph must exist somewhere on the rail.
+    var thumb_seen = False
+    for y in range(3, 9):
+        if c.get(39, y).glyph == String("█"):
+            thumb_seen = True
+            break
+    assert_true(thumb_seen)
+
+
+fn test_debug_pane_run_log_no_scrollbar_when_content_fits() raises:
+    """A short log fits in the output area, so no scrollbar should
+    be painted — the rightmost column stays as the panel background."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("just one line"))
+    var panel = Rect(0, 0, 40, 10)
+    var c = Canvas(40, 10)
+    pane.paint(c, panel)
+    for y in range(2, 10):
+        var glyph = c.get(39, y).glyph
+        assert_true(
+            glyph != String("▲") and glyph != String("▼")
+            and glyph != String("█") and glyph != String("░"),
+        )
+
+
+fn test_debug_pane_run_log_arrow_click_scrolls_output() raises:
+    """A click on the ▼ arrow at the bottom of the scrollbar nudges
+    the output down — autoscroll engages because we hit the bottom,
+    then a click on the ▲ pulls scroll back up and disengages it."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    for i in range(40):
+        pane.append_output(String("line ") + String(i))
+    var panel = Rect(0, 0, 40, 10)
+    var c = Canvas(40, 10)
+    pane.paint(c, panel)
+    # Arrow-up click pulls scroll up by 3 rows; autoscroll must turn off
+    # because we're no longer at the bottom.
+    var ev = Event.mouse_event(
+        Point(39, 2), MOUSE_BUTTON_LEFT, True, False,
+    )
+    var consumed = pane.handle_mouse(ev, panel)
+    assert_true(consumed)
+    assert_false(pane.output.autoscroll)
+
+
+fn test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
+    """Pressing on the thumb starts a drag; mouse motion moves scroll;
+    release ends the drag. Verifies the wiring end-to-end."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    for i in range(40):
+        pane.append_output(String("line ") + String(i))
+    var panel = Rect(0, 0, 40, 10)
+    var c = Canvas(40, 10)
+    pane.paint(c, panel)
+    # Find the thumb glyph y on the scrollbar column.
+    var thumb_y = -1
+    for y in range(3, 9):
+        if c.get(39, y).glyph == String("█"):
+            thumb_y = y
+            break
+    assert_true(thumb_y >= 0)
+    # Press on the thumb.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(39, thumb_y), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    # Drag to the top of the track (mouse_y = 3 — first track row).
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    # Drag must have disengaged autoscroll.
+    assert_false(pane.output.autoscroll)
+    # Release.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+
+
 fn test_debug_pane_long_output_line_soft_wraps() raises:
     """A line longer than the panel content width paints across
     multiple visual rows. Verifies the line shows up on more than
@@ -10212,6 +10447,17 @@ fn main() raises:
     test_parse_input_focus_events()
     test_parse_input_sgr_mouse()
     test_centered()
+    test_scrollbar_hidden_when_content_fits()
+    test_scrollbar_hidden_when_too_short()
+    test_scrollbar_paints_arrows_and_thumb()
+    test_scrollbar_thumb_tracks_scroll_position()
+    test_scrollbar_hit_arrow_zones()
+    test_scrollbar_hit_thumb_returns_drag_offset()
+    test_scrollbar_hit_page_zones()
+    test_scrollbar_hit_off_axis_returns_none()
+    test_scrollbar_drag_to_extremes()
+    test_scrollbar_track_jump_centers_target()
+    test_scrollbar_horizontal_paints_arrows_on_axis()
     test_text_buffer_split_and_join()
     test_editor_typing_and_arrows()
     test_editor_word_movement()
@@ -10537,6 +10783,10 @@ fn main() raises:
     test_text_view_selection_extracts_text()
     test_string_utils_slice_codepoints_handles_multibyte()
     test_debug_pane_long_output_line_soft_wraps()
+    test_debug_pane_run_log_paints_scrollbar_when_overflowing()
+    test_debug_pane_run_log_no_scrollbar_when_content_fits()
+    test_debug_pane_run_log_arrow_click_scrolls_output()
+    test_debug_pane_run_log_thumb_drag_scrolls_output()
     test_debug_pane_drag_selects_output_text()
     test_debug_pane_selection_spans_multiple_lines()
     test_debug_pane_plain_click_clears_selection()
