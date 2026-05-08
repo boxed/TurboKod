@@ -103,8 +103,9 @@ from turbokod.lsp import (
     classify_message,
 )
 from turbokod.git_changes import (
-    apply_patch_to_index, compute_staged_diff, compute_unstaged_diff,
-    fetch_git_status, stage_file, unstage_file,
+    GitStateMtimes, apply_patch_to_index, compute_staged_diff,
+    compute_unstaged_diff, fetch_git_status, git_state_mtimes,
+    stage_file, unstage_file,
 )
 from turbokod.dap import (
     DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
@@ -8860,6 +8861,72 @@ fn _rm_rf(path: String) raises:
     _ = capture_command(argv)
 
 
+fn test_git_state_mtimes_zero_for_non_repo() raises:
+    """``git_state_mtimes`` returns zeros for a directory that isn't a
+    git repo, and for the empty-string root. The desktop's polling
+    loop reads the zero baseline as "no comparison yet" and skips
+    invalidation, so this is the contract that keeps non-git projects
+    from getting spurious refreshes."""
+    var dir = _temp_path(String("_git_mtime_nogit"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var mt = git_state_mtimes(dir)
+    assert_true(mt.is_zero())
+    var empty = git_state_mtimes(String(""))
+    assert_true(empty.is_zero())
+    _rm_rf(dir)
+
+
+fn test_git_state_mtimes_nonzero_after_init_commit() raises:
+    """A fresh ``git init`` + commit produces nonzero mtimes for both
+    ``.git/HEAD`` and ``.git/index`` — the polling loop's "something
+    changed" comparison only fires once a real baseline exists."""
+    var dir = _temp_path(String("_git_mtime_init"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    var rc = _run_git(dir, init_args^)
+    if rc != 0:
+        # No git on PATH — skip silently, matching the staging test.
+        _rm_rf(dir)
+        return
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    var f = join_path(dir, String("a.txt"))
+    assert_true(write_file(f, String("hello\n")))
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("a.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    var mt = git_state_mtimes(dir)
+    assert_true(mt.head_mtime != Int64(0))
+    assert_true(mt.index_mtime != Int64(0))
+    # equals() returns True for itself, False for a zero baseline.
+    assert_true(mt.equals(mt))
+    var zero = GitStateMtimes(Int64(0), Int64(0))
+    assert_true(not mt.equals(zero))
+    assert_true(zero.is_zero())
+    _rm_rf(dir)
+
+
 fn test_stage_unstage_round_trip_against_real_git() raises:
     """End-to-end: spin up a throwaway git repo, modify a file, walk it
     through stage_file → fetch_git_status → unstage_file. Asserts the
@@ -10126,6 +10193,8 @@ fn main() raises:
     test_build_minimal_patch_reverse_drops_paired_minus()
     test_build_minimal_patch_returns_empty_for_non_pm_lines()
     test_build_minimal_patch_drops_other_hunks()
+    test_git_state_mtimes_zero_for_non_repo()
+    test_git_state_mtimes_nonzero_after_init_commit()
     test_stage_unstage_round_trip_against_real_git()
     test_point_arithmetic()
     test_rect_basics()

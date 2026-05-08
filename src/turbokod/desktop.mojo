@@ -52,8 +52,9 @@ from .file_io import (
 )
 from .git_blame import compute_blame
 from .git_changes import (
-    GitRevertBlock, compute_revert_block,
-    diff_buffer_against_head, fetch_head_text, project_is_git_repo,
+    GitRevertBlock, GitStateMtimes, compute_revert_block,
+    diff_buffer_against_head, fetch_head_text, git_state_mtimes,
+    project_is_git_repo,
 )
 from .git_gutter_menu import (
     GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
@@ -303,6 +304,12 @@ comptime _NAV_COL_THRESHOLD = 100
 # Cap on how many entries we keep — purely a memory bound; older
 # entries fall off the back when the cap is hit.
 comptime _NAV_STACK_CAP = 100
+
+# Throttle for the external-git polling in ``_apply_view_config``. One
+# second is fast enough that ``git commit`` / ``git checkout`` outside
+# the editor feel near-instant, and slow enough that we don't run two
+# stat() calls per paint frame on idle.
+comptime _GIT_POLL_INTERVAL_MS = 1000
 
 # When ESC fires at the top level (no menu open, no prompt active), the
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
@@ -676,6 +683,17 @@ struct Desktop(Movable):
     # a fresh edit truncates redo.
     var _nav_stack: List[NavPoint]
     var _nav_pos: Int
+    # External git state polling. ``_apply_view_config`` stats
+    # ``.git/HEAD`` and ``.git/index`` no more than once per
+    # ``_GIT_POLL_INTERVAL_MS`` and invalidates every editor's cached
+    # HEAD baseline when either mtime moves — the user has run something
+    # like ``git commit`` / ``git checkout`` outside the editor and the
+    # gutter would otherwise stay stuck on the pre-op state until save.
+    # Stored mtimes are zero between sessions / project switches; the
+    # zero baseline is a sentinel meaning "nothing to compare against
+    # yet", so the first observation only seeds the cache.
+    var _git_state_mtimes: GitStateMtimes
+    var _last_git_state_check_ms: Int
 
     fn __init__(out self):
         self.menu_bar = MenuBar()
@@ -767,6 +785,8 @@ struct Desktop(Movable):
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
+        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        self._last_git_state_check_ms = 0
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -1125,6 +1145,27 @@ struct Desktop(Movable):
         if self.project:
             root = self.project.value()
             have_git = project_is_git_repo(root)
+        # Poll for external git state changes (commit, checkout, reset,
+        # stash, ...) at ~1 Hz. Two stat() calls — cheap enough on idle.
+        # When ``.git/HEAD`` or ``.git/index`` mtime moves we drop every
+        # editor's cached HEAD baseline so the next paint refetches
+        # ``git show HEAD:<path>`` and re-renders the gutter against the
+        # new commit. The first observation only seeds the cache (zero
+        # baseline → no invalidation), so opening the project doesn't
+        # spuriously thrash ``git show``.
+        if have_git:
+            var now = monotonic_ms()
+            if now - self._last_git_state_check_ms >= _GIT_POLL_INTERVAL_MS:
+                self._last_git_state_check_ms = now
+                var current = git_state_mtimes(root)
+                if not self._git_state_mtimes.is_zero() \
+                        and not current.is_zero() \
+                        and not current.equals(self._git_state_mtimes):
+                    for j in range(len(self.windows.windows)):
+                        if self.windows.windows[j].is_editor \
+                                and not self.windows.windows[j].editor.read_only:
+                            self.windows.windows[j].editor.invalidate_git_changes()
+                self._git_state_mtimes = current
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
@@ -2065,6 +2106,11 @@ struct Desktop(Movable):
         var resolved = realpath(path)
         var canonical = resolved if len(resolved.as_bytes()) > 0 else path
         self.project = Optional[String](canonical)
+        # Reset the external-git polling cache so the new project's
+        # ``.git`` mtimes seed fresh on its first paint instead of
+        # comparing against whatever the previous project was at.
+        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        self._last_git_state_check_ms = 0
         # Record this project at the front of the persistent recents list
         # before any later step might raise — failing to save the config
         # is a non-fatal best-effort, just like the View-menu toggles.

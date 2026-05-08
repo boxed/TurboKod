@@ -17,7 +17,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .diff import DiffOp, diff_lines
-from .file_io import find_git_project
+from .file_io import find_git_project, join_path, stat_file
 from .lsp import capture_command
 from .string_utils import (
     split_lines, split_lines_no_trailing, starts_with,
@@ -378,6 +378,49 @@ fn project_is_git_repo(project_root: String) -> Bool:
         return False
     var found = find_git_project(project_root)
     return Bool(found)
+
+
+@fieldwise_init
+struct GitStateMtimes(ImplicitlyCopyable, Movable):
+    """``mtime`` (seconds) of ``.git/HEAD`` and ``.git/index``. Together
+    these cover the operations that change what ``git show HEAD:<path>``
+    returns: HEAD mtime moves on branch switch / detach / symbolic-ref
+    rewrite, index mtime moves on commit / add / reset / stash. Either
+    field is 0 when the file is missing or the project isn't a git repo
+    — callers treat ``(0, 0)`` as "no baseline yet" and avoid firing a
+    spurious invalidation on the first observation."""
+    var head_mtime: Int64
+    var index_mtime: Int64
+
+    fn equals(self, other: GitStateMtimes) -> Bool:
+        return self.head_mtime == other.head_mtime \
+            and self.index_mtime == other.index_mtime
+
+    fn is_zero(self) -> Bool:
+        return self.head_mtime == Int64(0) and self.index_mtime == Int64(0)
+
+
+fn git_state_mtimes(project_root: String) -> GitStateMtimes:
+    """Stat ``.git/HEAD`` and ``.git/index`` and return their mtimes —
+    the cheap proxy the desktop polls (~1 Hz) to notice external git
+    operations on an open file. Returns zeros for non-repos and for
+    ``.git`` entries that are pointer files (submodules / linked
+    worktrees) — we don't yet follow ``gitdir:`` redirects."""
+    var zero = GitStateMtimes(Int64(0), Int64(0))
+    if len(project_root.as_bytes()) == 0:
+        return zero
+    var found = find_git_project(project_root)
+    if not found:
+        return zero
+    var git_dir = join_path(found.value(), String(".git"))
+    var info = stat_file(git_dir)
+    if not info.ok or not info.is_dir():
+        return zero
+    var head = stat_file(join_path(git_dir, String("HEAD")))
+    var index = stat_file(join_path(git_dir, String("index")))
+    var head_mt = head.mtime_sec if head.ok else Int64(0)
+    var index_mt = index.mtime_sec if index.ok else Int64(0)
+    return GitStateMtimes(head_mt, index_mt)
 
 
 fn compute_local_changes(project_root: String) raises -> String:
