@@ -6298,6 +6298,61 @@ fn test_dap_launch_arguments_for_debugpy_non_python_program() raises:
     assert_true(not body.object_get(String("module")))
 
 
+fn test_dap_launch_arguments_for_debugpy_script_mode() raises:
+    """``python manage.py runserver`` should rewrite ``program`` to the
+    script path (not the python binary) so debugpy actually runs the
+    script. Without this, debugpy tries to ``runpy`` the python
+    interpreter and stalls in ``_run_code``."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("manage.py"))
+    args.append(String("runserver"))
+    var body = launch_arguments_for(
+        debs[idx],
+        String("/Users/me/p/.venv/bin/python"),
+        String("/Users/me/p"),
+        args^,
+        False,
+    )
+    assert_true(body.is_object())
+    assert_equal(
+        body.object_get(String("program")).value().as_str(),
+        String("manage.py"),
+    )
+    assert_true(not body.object_get(String("module")))
+    var arr = body.object_get(String("args"))
+    assert_true(arr.value().is_array())
+    assert_equal(arr.value().array_len(), 1)
+    assert_equal(arr.value().array_at(0).as_str(), String("runserver"))
+
+
+fn test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
+    """When the first arg starts with a dash (e.g. ``-c``, ``-W``) we
+    leave ``program`` alone — those flags need bespoke handling we
+    don't do yet, so forwarding the unrewritten args lets debugpy
+    error explicitly instead of silently dropping a flag."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("print('hi')"))
+    var body = launch_arguments_for(
+        debs[idx],
+        String("/usr/bin/python3"),
+        String("/tmp"),
+        args^,
+        False,
+    )
+    assert_equal(
+        body.object_get(String("program")).value().as_str(),
+        String("/usr/bin/python3"),
+    )
+    assert_true(not body.object_get(String("module")))
+
+
 fn test_dap_launch_arguments_for_delve() raises:
     var debs = built_in_debuggers()
     var idx = find_debugger_for_language(debs, String("go"))
@@ -10755,6 +10810,8 @@ fn main() raises:
     test_dap_launch_arguments_for_debugpy_module_mode()
     test_dap_launch_arguments_for_debugpy_versioned_python()
     test_dap_launch_arguments_for_debugpy_non_python_program()
+    test_dap_launch_arguments_for_debugpy_script_mode()
+    test_dap_launch_arguments_for_debugpy_skips_flag_args()
     test_dap_launch_arguments_for_delve()
     test_dap_manager_breakpoint_toggle()
     test_project_targets_load_parses_fields()

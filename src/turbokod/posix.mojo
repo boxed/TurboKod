@@ -317,6 +317,99 @@ fn waitpid_blocking(pid: Int32) -> Int32:
     return status.unsafe_ptr().bitcast[Int32]()[0]
 
 
+# --- TCP sockets ----------------------------------------------------------
+# Used by debugpy's subprocess-attach flow: when the debuggee forks, debugpy
+# emits a ``debugpyAttach`` event with a TCP host/port for the IDE to connect
+# to so it can debug the child process. We don't run a server ourselves —
+# we're always the connecting side — so the surface here is just enough to
+# open one socket and feed its fd to the existing ``LspProcess`` framer.
+
+comptime _AF_INET: Int32 = 2
+comptime _SOCK_STREAM: Int32 = 1
+
+
+fn _parse_dotted_ipv4(host: String) -> Tuple[UInt32, Bool]:
+    """Parse ``"127.0.0.1"`` into the network-byte-order ``in_addr`` value.
+
+    Returns ``(addr_be, ok)``. We only ever target ``127.0.0.1`` from the
+    debugpyAttach handler, so a hand-rolled parser is enough — pulling
+    ``inet_pton`` in would mean another opaque-buffer ABI dance for one
+    call site.
+    """
+    var bytes = host.as_bytes()
+    var parts = List[Int]()
+    var cur = 0
+    var have_digit = False
+    for i in range(len(bytes)):
+        var c = bytes[i]
+        if c == 0x2E:    # '.'
+            if not have_digit:
+                return (UInt32(0), False)
+            parts.append(cur)
+            cur = 0
+            have_digit = False
+        elif c >= 0x30 and c <= 0x39:
+            cur = cur * 10 + Int(c - 0x30)
+            if cur > 255:
+                return (UInt32(0), False)
+            have_digit = True
+        else:
+            return (UInt32(0), False)
+    if not have_digit:
+        return (UInt32(0), False)
+    parts.append(cur)
+    if len(parts) != 4:
+        return (UInt32(0), False)
+    # Network byte order is big-endian, and the bytes go in the order the
+    # user wrote them: 127.0.0.1 → 0x7F 0x00 0x00 0x01 in memory.
+    var be = (UInt32(parts[0]) << 24) | (UInt32(parts[1]) << 16) \
+           | (UInt32(parts[2]) << 8) | UInt32(parts[3])
+    # The kernel reads ``sin_addr`` as a big-endian 32-bit; on a
+    # little-endian host, putting the dotted bytes in left-to-right order
+    # in memory means storing the *byte-swapped* word.
+    var swapped = ((be & 0xFF) << 24) | ((be & 0xFF00) << 8) \
+                | ((be & 0xFF0000) >> 8) | ((be & 0xFF000000) >> 24)
+    return (swapped, True)
+
+
+fn tcp_connect(host: String, port: Int) -> Int32:
+    """Open a blocking TCP socket to ``host:port`` and return its fd, or
+    ``-1`` on failure (any of: bad host literal, ``socket`` failed,
+    ``connect`` failed). Caller is responsible for ``close``.
+
+    The ``sockaddr_in`` layout differs subtly between Darwin and Linux:
+    Darwin's prefixes the struct with a ``sin_len: u8`` byte, Linux drops
+    it (uses 2 bytes for ``sin_family``). Both totals are 16 bytes; we
+    pick the right layout at compile time.
+    """
+    var addr_pair = _parse_dotted_ipv4(host)
+    if not addr_pair[1]:
+        return Int32(-1)
+    var fd = external_call["socket", Int32](_AF_INET, _SOCK_STREAM, Int32(0))
+    if fd < 0:
+        return Int32(-1)
+    var sa = alloc_zero_buffer(16)
+    # Port in network byte order (big-endian) regardless of host.
+    var port_be = ((Int(port) & 0xFF) << 8) | ((Int(port) >> 8) & 0xFF)
+    var ip = sa.unsafe_ptr()
+    comptime if CompilationTarget.is_macos():
+        # sin_len, sin_family, sin_port (BE), sin_addr (BE), sin_zero[8]
+        ip[0] = UInt8(16)
+        ip[1] = UInt8(_AF_INET)
+        ip.bitcast[UInt16]()[1] = UInt16(port_be)
+        ip.bitcast[UInt32]()[1] = addr_pair[0]
+    else:
+        # sin_family (16-bit), sin_port (BE), sin_addr (BE), sin_zero[8]
+        ip.bitcast[UInt16]()[0] = UInt16(_AF_INET)
+        ip.bitcast[UInt16]()[1] = UInt16(port_be)
+        ip.bitcast[UInt32]()[1] = addr_pair[0]
+    var rc = external_call["connect", Int32](fd, ip, UInt32(16))
+    if Int(rc) != 0:
+        _ = close_fd(fd)
+        return Int32(-1)
+    return fd
+
+
 fn waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     """``waitpid(pid, &status, WNOHANG)``. Returns ``(rc, status)`` —
     rc is 0 if the child hasn't exited, ``pid`` if it has, ``-1`` on error.

@@ -4095,7 +4095,7 @@ struct Desktop(Movable):
         # Stop any prior run, regardless of which target it was for.
         self.run_session.terminate()
         self._run_output_held = False
-        self.debug_pane.clear()
+        self.debug_pane.clear_all()
         self.debug_pane.visible = True
         var cwd = resolved_cwd(self.project.value(), target.cwd)
         # Swap a bare ``python`` / ``python3`` for the project venv's
@@ -4213,7 +4213,7 @@ struct Desktop(Movable):
             return
         self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
         self.dap.start(spec, program, cwd, args^)
-        self.debug_pane.clear()
+        self.debug_pane.clear_all()
         if len(self.dap.spawn_argv) > 0:
             var line = String("$ ")
             for k in range(len(self.dap.spawn_argv)):
@@ -4290,7 +4290,7 @@ struct Desktop(Movable):
             self._dap_exec_line = -1
         self.run_session.terminate()
         self._run_output_held = False
-        self.debug_pane.clear()
+        self.debug_pane.clear_all()
         self.debug_pane.visible = True
         var pretty = program
         for k in range(len(args)):
@@ -5293,7 +5293,7 @@ struct Desktop(Movable):
         self._clear_pending_dap_start()
         self._maybe_install_python_lsp_in_venv(String("python"), venv_dir)
         self.dap.start(spec, program, cwd, args^)
-        self.debug_pane.clear()
+        self.debug_pane.clear_all()
         if len(self.dap.spawn_argv) > 0:
             var line = String("$ ")
             for k in range(len(self.dap.spawn_argv)):

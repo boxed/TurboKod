@@ -328,48 +328,84 @@ fn _launch_args_debugpy(
     """``debugpy``: ``program``-or-``module`` + ``args`` + ``cwd`` +
     ``console``.
 
-    Targets that look like ``python -m <name> [...]`` get rewritten to
-    debugpy's ``module`` mode: debugpy's ``program`` field is for
-    Python script paths and runpy's the file directly, so passing
-    ``<venv>/bin/python`` would have it try to runpy the binary
-    (meaningless). The rewrite is what lets pytest / unittest / mypy
-    etc. be debugged off a single ``python -m foo`` Run target without
-    the user having to hand-author launch JSON.
+    Targets that look like ``python <script> [...]`` or
+    ``python -m <name> [...]`` get rewritten:
+
+    * ``python script.py [args]`` → ``program: script.py, args: [args]``
+    * ``python -m pytest [args]`` → ``module: pytest, args: [args]``
+
+    debugpy's ``program`` field is for Python script paths and runpy's
+    the file directly, so passing ``<venv>/bin/python`` would have it
+    try to runpy the python binary (meaningless — that's what causes
+    debugpy to stall on ``_run_code`` in ``runpy.py``). The rewrite is
+    what lets a single ``python manage.py runserver`` or ``python -m
+    pytest`` Run target be debugged without the user having to
+    hand-author launch JSON.
 
     ``console: "internalConsole"`` keeps stdout/stderr coming back as
     DAP ``output`` events instead of being routed to a separate
     terminal — that's what we want, since we'll surface those events
     in the editor's debug pane.
 
-    ``justMyCode`` is *false* on purpose. With ``true``, debugpy
-    filters frames through its "user code" heuristic — and one
-    failure mode of that filtering, when called from a Mojo client
-    that doesn't perfectly match VS Code's expectations, is to stall
-    the ``variables`` request indefinitely (debugpy is waiting on
-    the debuggee to classify a frame and never gets an answer).
-    Letting all code through avoids the trap; users who specifically
-    want to skip stdlib frames can set the flag back via the
-    debugger's ``setDebuggerProperty`` mechanism later.
+    ``justMyCode: true`` matches debugpy's default. With ``false``,
+    debugpy's tracer fires on *every* Python function call — stdlib
+    and third-party included — and the per-call overhead makes
+    real-world apps (Django runserver serving an HTTP request, for
+    instance) fall over: the request handler calls thousands of
+    functions, each adds a trace event, and the server becomes
+    effectively unresponsive. ``true`` confines tracing to user code
+    so the debuggee runs at near-native speed when no breakpoint is
+    pending.
+
+    ``subProcess: true`` enables subprocess debugging. When the
+    debuggee forks/execs, debugpy emits a ``debugpyAttach`` event
+    with the host/port of a TCP listener the IDE connects to in
+    order to debug the child. Frameworks that fork (Django
+    ``runserver`` spawning the actual HTTP server, multiprocessing
+    pools, pytest-xdist) need this — without subprocess attach the
+    child blocks at startup waiting for the IDE that never arrives,
+    so e.g. ``runserver``'s port never opens.
     """
     var module_name = String("")
-    if _is_python_interpreter(program) and len(args) >= 2 \
-            and args[0] == String("-m"):
-        module_name = args[1]
-        var rest = List[String]()
-        for i in range(2, len(args)):
-            rest.append(args[i])
-        args = rest^
+    var script_program = String("")
+    if _is_python_interpreter(program) and len(args) >= 1:
+        if args[0] == String("-m") and len(args) >= 2:
+            module_name = args[1]
+            var rest = List[String]()
+            for i in range(2, len(args)):
+                rest.append(args[i])
+            args = rest^
+        elif not _starts_with_dash(args[0]):
+            # ``python script.py [args...]`` → debug ``script.py`` with
+            # the residual args as its argv. Skipped when ``args[0]``
+            # starts with a flag (``-c``, ``-X opt``, ``-W ignore``, …)
+            # since those need bespoke handling we don't do yet —
+            # better to forward the unrewritten args and let debugpy
+            # error explicitly than to silently drop a flag.
+            script_program = args[0]
+            var rest = List[String]()
+            for i in range(1, len(args)):
+                rest.append(args[i])
+            args = rest^
     var o = json_object()
     if len(module_name.as_bytes()) > 0:
         o.put(String("module"), json_str(module_name))
+    elif len(script_program.as_bytes()) > 0:
+        o.put(String("program"), json_str(script_program))
     else:
         o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
     o.put(String("args"), _string_list_to_json(args^))
     o.put(String("console"), json_str(String("internalConsole")))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
-    o.put(String("justMyCode"), json_bool(False))
+    o.put(String("justMyCode"), json_bool(True))
+    o.put(String("subProcess"), json_bool(True))
     return o^
+
+
+fn _starts_with_dash(s: String) -> Bool:
+    var b = s.as_bytes()
+    return len(b) > 0 and b[0] == 0x2D
 
 
 fn _is_python_interpreter(program: String) -> Bool:

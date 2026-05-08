@@ -503,23 +503,66 @@ struct LspProcess(Movable):
         return out
 
     fn terminate(mut self):
-        """Send SIGTERM and reap the child. Idempotent."""
-        if not self.alive or self.pid <= 0:
-            return
-        _ = kill_pid(self.pid, SIGTERM)
-        _ = waitpid_blocking(self.pid)
-        untrack_child(self.pid)
+        """Send SIGTERM and reap the child, then close the I/O fds.
+        Idempotent. Safe to call on a socket-mode process (``pid == -1``)
+        — the kill/waitpid steps are skipped, the fd close still runs.
+
+        Socket mode shares one fd between ``stdin_fd`` and ``stdout_fd``,
+        so we close it exactly once even though both fields name it.
+        """
+        if self.alive and self.pid > 0:
+            _ = kill_pid(self.pid, SIGTERM)
+            _ = waitpid_blocking(self.pid)
+            untrack_child(self.pid)
         self.alive = False
-        if self.stdin_fd >= 0:  _ = close_fd(self.stdin_fd);  self.stdin_fd = -1
-        if self.stdout_fd >= 0: _ = close_fd(self.stdout_fd); self.stdout_fd = -1
-        if self.stderr_fd >= 0: _ = close_fd(self.stderr_fd); self.stderr_fd = -1
+        var dup_io = self.stdin_fd >= 0 and self.stdin_fd == self.stdout_fd
+        if self.stdin_fd >= 0:
+            _ = close_fd(self.stdin_fd)
+            self.stdin_fd = -1
+        if self.stdout_fd >= 0 and not dup_io:
+            _ = close_fd(self.stdout_fd)
+        self.stdout_fd = -1
+        if self.stderr_fd >= 0:
+            _ = close_fd(self.stderr_fd)
+            self.stderr_fd = -1
+
+    @staticmethod
+    fn from_socket(fd: Int32) -> Self:
+        """Wrap a connected TCP socket fd in an ``LspProcess`` so the
+        same Content-Length-aware framer can ferry DAP messages over it.
+
+        debugpy's subprocess-attach flow gives us a host/port to connect
+        to; once the socket is open it speaks the same DAP framing as
+        the parent's stdio session, so the entire ``DapClient`` /
+        ``DapManager`` machinery works against it unchanged.
+
+        ``pid = -1`` is the socket-mode sentinel — ``terminate``,
+        ``try_reap`` and ``drain_stderr`` all key off it to skip
+        process-only operations. ``stderr_fd`` stays ``-1``: a TCP peer
+        has no separate stderr channel.
+        """
+        var p = LspProcess()
+        p.pid = -1
+        p.stdin_fd = fd
+        p.stdout_fd = fd
+        p.stderr_fd = -1
+        p.alive = True
+        _ = set_nonblocking(fd)
+        return p^
 
     fn try_reap(mut self) -> Bool:
         """Non-blocking ``waitpid``. Returns True if the child exited.
         Use after ``shutdown``+``exit`` to see if the server cleaned up
-        on its own before resorting to ``terminate``."""
-        if not self.alive or self.pid <= 0:
+        on its own before resorting to ``terminate``.
+
+        Socket-mode (``pid == -1``) has no child to wait on — return
+        False as long as ``alive`` is set, so a TCP-attached subprocess
+        session isn't mistakenly latched to FAILED on the first tick.
+        """
+        if not self.alive:
             return True
+        if self.pid <= 0:
+            return False
         var pair = waitpid_nohang(self.pid)
         if Int(pair[0]) == Int(self.pid):
             untrack_child(self.pid)

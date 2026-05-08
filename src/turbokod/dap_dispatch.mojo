@@ -38,7 +38,7 @@ from .json import (
 from std.ffi import external_call
 
 from .lsp import LspProcess
-from .posix import monotonic_ms, realpath, which
+from .posix import monotonic_ms, realpath, tcp_connect, which
 
 
 # --- state machine --------------------------------------------------------
@@ -138,6 +138,76 @@ struct DapVariable(ImplicitlyCopyable, Movable):
     var value: String
     var type_name: String
     var variables_reference: Int
+
+
+# --- SubprocessAttach -----------------------------------------------------
+# debugpy's subprocess-attach flow: when the debuggee forks, debugpy emits a
+# ``debugpyAttach`` event with a TCP host/port and a ``subProcessId``. The
+# child blocks at startup waiting for the IDE to open that socket and send
+# a normal initialize/attach handshake — without it, frameworks that fork
+# (Django ``runserver`` spawning the actual HTTP server, multiprocessing,
+# pytest-xdist) hang at startup.
+#
+# We keep one ``SubprocessAttach`` per child, each with its own DapClient
+# wrapping a connected socket. Output events are surfaced through the same
+# parent channel (``_output_events``) so the user sees one merged log; we
+# don't expose subprocess threads/stack/scopes through the inspect view —
+# breakpoints in subprocess code are pushed through, but stepping etc. is
+# parent-only for now.
+
+struct SubprocessAttach(Copyable, Movable):
+    var client: DapClient
+    var sub_process_id: Int
+    var name: String
+    var state: UInt8                 # _STATE_NOT_STARTED while idle, then _INITIALIZING / _LAUNCHING / _CONFIGURING / _RUNNING / _TERMINATED / _FAILED
+    var inflight_initialize: Int
+    var inflight_attach: Int
+    var inflight_config_done: Int
+    var got_initialized_event: Bool
+    var pending_attach_args: JsonValue
+    # Mirror of the parent's breakpoints at attach time. Sent to the
+    # subprocess on ``initialized`` so a breakpoint set in shared code
+    # (e.g. a Django view served from the forked child) actually fires.
+    var bp_paths: List[String]
+    var bp_lines: List[Int]
+    var bp_conditions: List[String]
+
+    fn __init__(out self):
+        # Inert default — ``state == _STATE_NOT_STARTED`` is the sentinel
+        # for "no subprocess is attached". Lets the field live as a
+        # direct ``DapManager`` member without ``Optional`` plumbing,
+        # which would force a copy-out / copy-in dance the connected
+        # socket fd doesn't survive.
+        self.client = DapClient(LspProcess())
+        self.sub_process_id = -1
+        self.name = String("")
+        self.state = _STATE_NOT_STARTED
+        self.inflight_initialize = 0
+        self.inflight_attach = 0
+        self.inflight_config_done = 0
+        self.got_initialized_event = False
+        self.pending_attach_args = JsonValue()
+        self.bp_paths = List[String]()
+        self.bp_lines = List[Int]()
+        self.bp_conditions = List[String]()
+
+    fn __copyinit__(out self, copy: Self):
+        # Same caveat as ``DapManager.__copyinit__``: a real copy would
+        # double-own the connected socket. We declare ``Copyable`` only
+        # so the field can live in a ``DapManager`` (which is itself
+        # Copyable for List storage). Hands back an inert sibling.
+        self.client = DapClient(LspProcess())
+        self.sub_process_id = -1
+        self.name = String("")
+        self.state = _STATE_NOT_STARTED
+        self.inflight_initialize = 0
+        self.inflight_attach = 0
+        self.inflight_config_done = 0
+        self.got_initialized_event = False
+        self.pending_attach_args = JsonValue()
+        self.bp_paths = List[String]()
+        self.bp_lines = List[Int]()
+        self.bp_conditions = List[String]()
 
 
 # --- DapManager -----------------------------------------------------------
@@ -242,6 +312,14 @@ struct DapManager(Copyable, Movable):
     # tailing the trace log can tell "frozen" from "idle/waiting".
     var _last_heartbeat_ms: Int
 
+    # Forked subprocess sessions. debugpy emits one ``debugpyAttach``
+    # event per child it sees; we open a TCP socket per child and run a
+    # mini DAP handshake against it so the child can proceed. Single-slot
+    # for now (Django runserver, multiprocessing pools fork once at
+    # startup); extending to a list when a real-world target needs it
+    # is straightforward — each entry is independent.
+    var _subprocess: SubprocessAttach
+
     fn __init__(out self):
         self.client = DapClient(LspProcess())
         self.state = _STATE_NOT_STARTED
@@ -285,6 +363,7 @@ struct DapManager(Copyable, Movable):
         self.spawn_argv = List[String]()
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
+        self._subprocess = SubprocessAttach()
 
     fn __copyinit__(out self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
@@ -335,6 +414,7 @@ struct DapManager(Copyable, Movable):
         self.spawn_argv = List[String]()
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
+        self._subprocess = SubprocessAttach()
 
     # --- state predicates ------------------------------------------------
 
@@ -504,6 +584,13 @@ struct DapManager(Copyable, Movable):
         # clean reset.
         self._is_stopped = False
         self._continued_pending = False
+        # Tear down any attached subprocess too — its socket points at
+        # the parent debugpy we just terminated, so leaving it around
+        # would just spew read-EOF noise.
+        if self._subprocess.state != _STATE_NOT_STARTED \
+                and self._subprocess.state != _STATE_TERMINATED:
+            self._subprocess.client.terminate()
+            self._subprocess.state = _STATE_TERMINATED
 
     fn reset_for_restart(mut self):
         """Return to ``NOT_STARTED`` so ``start()`` can run again,
@@ -565,6 +652,7 @@ struct DapManager(Copyable, Movable):
         self.spawn_argv = List[String]()
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
+        self._subprocess = SubprocessAttach()
 
     # --- breakpoints -----------------------------------------------------
 
@@ -740,9 +828,21 @@ struct DapManager(Copyable, Movable):
         args.put(String("breakpoints"), bps)
         args.put(String("sourceModified"), json_bool(False))
         try:
-            _ = self.client.send_request(String("setBreakpoints"), args)
+            _ = self.client.send_request(String("setBreakpoints"), args.copy())
         except:
             pass
+        # Mirror to the attached subprocess if any — without this, a
+        # breakpoint toggled after attach in shared code (a Django view
+        # served from the forked child) wouldn't fire because only the
+        # parent gets the update.
+        if self._subprocess.state == _STATE_RUNNING \
+                or self._subprocess.state == _STATE_CONFIGURING:
+            try:
+                _ = self._subprocess.client.send_request(
+                    String("setBreakpoints"), args,
+                )
+            except:
+                pass
 
     # --- exception breakpoints --------------------------------------------
 
@@ -1048,7 +1148,7 @@ struct DapManager(Copyable, Movable):
             except:
                 return
             if not maybe:
-                return
+                break
             var msg = maybe.value()
             if msg.kind == DAP_EVENT:
                 self._handle_event(msg)
@@ -1061,6 +1161,194 @@ struct DapManager(Copyable, Movable):
                 # one slips through, just to keep their state machine
                 # unstuck.
                 self._handle_reverse_request(msg)
+        # Drive any subprocess attach session forward in the same tick.
+        # Sits after parent processing so a ``debugpyAttach`` event handled
+        # this tick gets its initialize sent before we poll the new socket.
+        self._tick_subprocess()
+
+    fn _tick_subprocess(mut self):
+        """Pump messages between turbokod and one attached subprocess.
+
+        Runs entirely independently of the parent state machine: the
+        subprocess has its own socket-backed ``DapClient`` and its own
+        initialize → attach → setBreakpoints → configurationDone
+        handshake. We forward its ``output`` events into the parent's
+        output buffer so the user sees one merged log; ``stopped`` and
+        ``terminated`` events route to the same surfaced fields, since
+        the UI is single-session for now.
+        """
+        if self._subprocess.state == _STATE_NOT_STARTED \
+                or self._subprocess.state == _STATE_TERMINATED \
+                or self._subprocess.state == _STATE_FAILED:
+            return
+        var j = 0
+        while j < 32:
+            j += 1
+            var maybe: Optional[DapIncoming]
+            try:
+                maybe = self._subprocess.client.poll(Int32(0))
+            except:
+                self._subprocess.state = _STATE_FAILED
+                return
+            if not maybe:
+                break
+            var msg = maybe.value()
+            self._handle_subprocess_message(msg)
+
+    fn _handle_subprocess_message(mut self, msg: DapIncoming):
+        if msg.kind == DAP_EVENT:
+            if not msg.event:
+                return
+            var event = msg.event.value()
+            if event == String("initialized"):
+                self._subprocess.got_initialized_event = True
+                if self._subprocess.state == _STATE_LAUNCHING:
+                    self._subprocess_configure()
+                return
+            if event == String("output"):
+                # Merge into the parent output channel so the user sees
+                # subprocess prints in the same Output panel.
+                if not msg.body or not msg.body.value().is_object():
+                    return
+                var b = msg.body.value()
+                var category = String("console")
+                var text = String("")
+                var c = b.object_get(String("category"))
+                if c and c.value().is_string():
+                    category = c.value().as_str()
+                var o = b.object_get(String("output"))
+                if o and o.value().is_string():
+                    text = o.value().as_str()
+                if len(text.as_bytes()) > 0:
+                    self._output_events.append(DapOutput(category, text))
+                return
+            if event == String("terminated"):
+                self._subprocess.state = _STATE_TERMINATED
+                self._subprocess.client.terminate()
+                return
+            if event == String("exited"):
+                return
+            if event == String("stopped"):
+                # Surface in parent UI so the user sees the subprocess
+                # paused — minimal UX while subprocess inspect isn't a
+                # first-class panel yet.
+                self._on_stopped_event(msg)
+                return
+            return
+        if msg.kind == DAP_RESPONSE:
+            if not msg.request_seq:
+                return
+            var rseq = msg.request_seq.value()
+            if rseq == self._subprocess.inflight_initialize:
+                self._subprocess.inflight_initialize = 0
+                if msg.success and not msg.success.value():
+                    self._subprocess.state = _STATE_FAILED
+                    self._subprocess.client.terminate()
+                    return
+                # Now send attach with the args debugpy gave us.
+                try:
+                    self._subprocess.inflight_attach = \
+                        self._subprocess.client.send_request(
+                            String("attach"),
+                            self._subprocess.pending_attach_args,
+                        )
+                except:
+                    self._subprocess.state = _STATE_FAILED
+                    self._subprocess.client.terminate()
+                    return
+                self._subprocess.state = _STATE_LAUNCHING
+                if self._subprocess.got_initialized_event:
+                    self._subprocess_configure()
+                return
+            if rseq == self._subprocess.inflight_attach:
+                self._subprocess.inflight_attach = 0
+                if msg.success and not msg.success.value():
+                    self._subprocess.state = _STATE_FAILED
+                    self._subprocess.client.terminate()
+                return
+            if rseq == self._subprocess.inflight_config_done:
+                self._subprocess.inflight_config_done = 0
+                if msg.success and not msg.success.value():
+                    self._subprocess.state = _STATE_FAILED
+                    self._subprocess.client.terminate()
+                    return
+                self._subprocess.state = _STATE_RUNNING
+                return
+            return
+        # Reverse requests: answer not-supported so the subprocess
+        # debugpy isn't blocked.
+        if msg.command:
+            try:
+                self._subprocess.client.send_response(
+                    msg.seq, msg.command.value(), False, json_object(),
+                )
+            except:
+                pass
+
+    fn _subprocess_configure(mut self):
+        """Push breakpoints + exception filters, then ``configurationDone``."""
+        # setBreakpoints per source path.
+        var paths = List[String]()
+        for i in range(len(self._subprocess.bp_paths)):
+            var p = self._subprocess.bp_paths[i]
+            var seen = False
+            for k in range(len(paths)):
+                if paths[k] == p:
+                    seen = True
+                    break
+            if not seen:
+                paths.append(p)
+        for i in range(len(paths)):
+            var path = paths[i]
+            var src = json_object()
+            src.put(String("path"), json_str(path))
+            var bps = json_array()
+            for k in range(len(self._subprocess.bp_paths)):
+                if self._subprocess.bp_paths[k] != path:
+                    continue
+                var bp = json_object()
+                bp.put(
+                    String("line"),
+                    json_int(self._subprocess.bp_lines[k] + 1),
+                )
+                if len(self._subprocess.bp_conditions[k].as_bytes()) > 0:
+                    bp.put(
+                        String("condition"),
+                        json_str(self._subprocess.bp_conditions[k]),
+                    )
+                bps.append(bp^)
+            var args = json_object()
+            args.put(String("source"), src^)
+            args.put(String("breakpoints"), bps^)
+            args.put(String("sourceModified"), json_bool(False))
+            try:
+                _ = self._subprocess.client.send_request(
+                    String("setBreakpoints"), args^,
+                )
+            except:
+                pass
+        # setExceptionBreakpoints — same defaults as parent.
+        var ex_args = json_object()
+        var arr = json_array()
+        for i in range(len(self._exception_filters)):
+            arr.append(json_str(self._exception_filters[i]))
+        ex_args.put(String("filters"), arr^)
+        try:
+            _ = self._subprocess.client.send_request(
+                String("setExceptionBreakpoints"), ex_args^,
+            )
+        except:
+            pass
+        try:
+            self._subprocess.inflight_config_done = \
+                self._subprocess.client.send_request(
+                    String("configurationDone"), json_object(),
+                )
+        except:
+            self._subprocess.state = _STATE_FAILED
+            self._subprocess.client.terminate()
+            return
+        self._subprocess.state = _STATE_CONFIGURING
 
     # --- event / response handlers ---------------------------------------
 
@@ -1091,6 +1379,9 @@ struct DapManager(Copyable, Movable):
             return
         if event == String("output"):
             self._on_output_event(msg)
+            return
+        if event == String("debugpyAttach"):
+            self._on_debugpy_attach_event(msg)
             return
         # ``thread``, ``module``, ``loadedSource``, ``breakpoint``,
         # ``capabilities``, ``progress*`` — unhandled, silently dropped.
@@ -1324,6 +1615,130 @@ struct DapManager(Copyable, Movable):
         if len(text.as_bytes()) == 0:
             return
         self._output_events.append(DapOutput(category, text))
+
+    fn _on_debugpy_attach_event(mut self, msg: DapIncoming):
+        """Open a TCP session to the forked subprocess and start its
+        attach handshake. Without this, the child blocks at startup
+        forever waiting for an IDE that never connects — and frameworks
+        that fork at startup (Django runserver, multiprocessing pools)
+        never get to bind their listening ports.
+
+        Body fields we care about: ``connect.host`` / ``connect.port``
+        (where to dial), ``subProcessId`` (must echo back in the attach
+        request so the parent debugpy routes our messages to the right
+        child), and ``name`` (display only). The rest of the body is
+        treated as a launch-config blob to forward unchanged as the
+        attach arguments — debugpy fills in ``program`` / ``cwd`` /
+        ``justMyCode`` etc. that match the parent session.
+        """
+        if not msg.body or not msg.body.value().is_object():
+            return
+        var b = msg.body.value()
+        # Pull out connect.host/port. Anything weirdly-shaped → bail;
+        # the subprocess will hang but the parent stays usable.
+        var c = b.object_get(String("connect"))
+        if not c or not c.value().is_object():
+            self.client.process.trace(String(
+                "debugpyAttach: missing/invalid 'connect' field; ignoring",
+            ))
+            return
+        var co = c.value()
+        var host = String("127.0.0.1")
+        var hv = co.object_get(String("host"))
+        if hv and hv.value().is_string():
+            host = hv.value().as_str()
+        var port = 0
+        var pv = co.object_get(String("port"))
+        if pv and pv.value().is_int():
+            port = pv.value().as_int()
+        if port <= 0:
+            self.client.process.trace(String(
+                "debugpyAttach: missing/invalid port; ignoring",
+            ))
+            return
+        var spi = -1
+        var sv = b.object_get(String("subProcessId"))
+        if sv and sv.value().is_int():
+            spi = sv.value().as_int()
+        var name = String("Subprocess")
+        var nv = b.object_get(String("name"))
+        if nv and nv.value().is_string():
+            name = nv.value().as_str()
+        # Bail if a subprocess session is already in flight — current
+        # design is single-slot. (When we extend to multi-fork targets,
+        # swap this for an append.)
+        if self._subprocess.state != _STATE_NOT_STARTED \
+                and self._subprocess.state != _STATE_TERMINATED \
+                and self._subprocess.state != _STATE_FAILED:
+            self.client.process.trace(String(
+                "debugpyAttach: subprocess slot busy; ignoring ",
+            ) + name)
+            return
+        var fd = tcp_connect(host, port)
+        if fd < 0:
+            self.client.process.trace(String(
+                "debugpyAttach: tcp_connect failed for ",
+            ) + host + String(":") + String(port))
+            return
+        var proc = LspProcess.from_socket(fd)
+        proc.trace_fd = self.client.process.trace_fd
+        # Reset the subprocess slot in place — direct field access
+        # (instead of an Optional swap) avoids copying the live socket
+        # fd, which the inert __copyinit__ would lose.
+        self._subprocess.client = DapClient(proc^)
+        self._subprocess.sub_process_id = spi
+        self._subprocess.name = name
+        self._subprocess.state = _STATE_INITIALIZING
+        self._subprocess.inflight_initialize = 0
+        self._subprocess.inflight_attach = 0
+        self._subprocess.inflight_config_done = 0
+        self._subprocess.got_initialized_event = False
+        # Send the standard initialize. Same arguments as the parent —
+        # debugpy doesn't really care, but matching shape keeps the log
+        # sensible and the capabilities response well-formed.
+        var init_args = dap_initialize_arguments(
+            String("turbokod"), self.adapter_name,
+        )
+        try:
+            self._subprocess.inflight_initialize = \
+                self._subprocess.client.send_request(
+                    String("initialize"), init_args,
+                )
+        except e:
+            self.client.process.trace(String(
+                "debugpyAttach: initialize send failed: ",
+            ) + String(e))
+            self._subprocess.client.terminate()
+            self._subprocess.state = _STATE_FAILED
+            return
+        # Stash the attach arguments — sent on the initialize response.
+        # Strip out the ``connect`` field (it's instructions for us, not
+        # for the adapter) but otherwise forward the body unchanged. The
+        # adapter expects ``subProcessId`` so it can route to the right
+        # child.
+        var attach_args = json_object()
+        for i in range(len(b.obj_v)):
+            var k = b.obj_v[i].key
+            if k == String("connect"):
+                continue
+            attach_args.put(k, b.obj_v[i].value)
+        self._subprocess.pending_attach_args = attach_args^
+        # Mirror the parent's breakpoints into the subprocess so a
+        # breakpoint set in shared code (a Django view served from the
+        # forked child) actually fires.
+        self._subprocess.bp_paths = List[String]()
+        self._subprocess.bp_lines = List[Int]()
+        self._subprocess.bp_conditions = List[String]()
+        for i in range(len(self._bp_path)):
+            self._subprocess.bp_paths.append(self._bp_path[i])
+            self._subprocess.bp_lines.append(self._bp_line[i])
+            self._subprocess.bp_conditions.append(self._bp_condition[i])
+        self.client.process.trace(
+            String("debugpyAttach: opened ") + host + String(":")
+            + String(port) + String(" pid=") + String(spi)
+            + String(" inflight_initialize=")
+            + String(self._subprocess.inflight_initialize),
+        )
 
 
 # --- module-level helpers -------------------------------------------------

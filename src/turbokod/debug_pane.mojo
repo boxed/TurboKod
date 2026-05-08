@@ -529,6 +529,15 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
 
+    fn clear_all(mut self):
+        """Wipe inspect state *and* the Output log. Called on the start
+        of a new run / debug / test session — preserving the previous
+        session's output across a fresh launch is more confusing than
+        helpful (the user sees stale ``$`` spawn lines and old stdout
+        interleaved with the new session)."""
+        self.clear()
+        self.output.clear()
+
     # --- pending-intent accessors ----------------------------------------
 
     fn consume_frame_click(mut self) -> Tuple[Int, Int]:
