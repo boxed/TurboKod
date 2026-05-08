@@ -355,6 +355,13 @@ struct DapManager(Copyable, Movable):
     # the host has popped ``_stopped`` via ``take_stopped`` and would
     # otherwise lose the routing hint.
     var _stop_in_subprocess: Bool
+    # Sticky mirror of ``_stopped.thread_id``. Same lifecycle as
+    # ``_stop_in_subprocess`` — set on stop, cleared on continue/teardown.
+    # ``_send_thread_command`` (next/stepIn/stepOut/continue/pause) needs
+    # the actual paused thread id; pydevd treats requests with an unknown
+    # threadId as "continue all" rather than a step, so a stale default
+    # of 1 silently turns Step Over into Continue.
+    var _last_stopped_thread_id: Int
 
     fn __init__(out self):
         self.client = DapClient(LspProcess())
@@ -402,6 +409,7 @@ struct DapManager(Copyable, Movable):
         self._subprocess = SubprocessAttach()
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
+        self._last_stopped_thread_id = 0
 
     fn __copyinit__(out self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
@@ -455,6 +463,7 @@ struct DapManager(Copyable, Movable):
         self._subprocess = SubprocessAttach()
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
+        self._last_stopped_thread_id = 0
 
     # --- state predicates ------------------------------------------------
 
@@ -624,6 +633,7 @@ struct DapManager(Copyable, Movable):
         # clean reset.
         self._is_stopped = False
         self._stop_in_subprocess = False
+        self._last_stopped_thread_id = 0
         self._last_inspect_in_subprocess = False
         self._continued_pending = False
         # Tear down any attached subprocess too — its socket points at
@@ -697,6 +707,7 @@ struct DapManager(Copyable, Movable):
         self._subprocess = SubprocessAttach()
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
+        self._last_stopped_thread_id = 0
 
     # --- breakpoints -----------------------------------------------------
 
@@ -990,8 +1001,15 @@ struct DapManager(Copyable, Movable):
     fn _send_thread_command(mut self, command: String) -> Bool:
         if not self.is_active():
             return False
+        # Prefer the sticky thread id over the unread ``_stopped`` event:
+        # the host's auto-stack hook calls ``take_stopped`` every tick, so
+        # by the time the user clicks Step Over ``_stopped`` is empty and
+        # falling back to ``threadId: 1`` makes pydevd step a thread that
+        # isn't paused — which it interprets as "continue all".
         var tid = 1
-        if self._stopped:
+        if self._last_stopped_thread_id != 0:
+            tid = self._last_stopped_thread_id
+        elif self._stopped:
             tid = self._stopped.value().thread_id
         var args = json_object()
         args.put(String("threadId"), json_int(tid))
@@ -1118,6 +1136,17 @@ struct DapManager(Copyable, Movable):
         last call. Used by the host to fold up the debug pane."""
         if self._terminated_pending:
             self._terminated_pending = False
+            return True
+        return False
+
+    fn consume_continued(mut self) -> Bool:
+        """Returns True iff a ``continued`` event has fired since the
+        last call. Host uses this to wipe stack/locals/watches while
+        the program is running again — those rows hold ids tied to
+        the prior stop, so clicking them after resume would request
+        scopes/variables for stale frame ids and surface errors."""
+        if self._continued_pending:
+            self._continued_pending = False
             return True
         return False
 
@@ -1326,6 +1355,7 @@ struct DapManager(Copyable, Movable):
                 self._is_stopped = False
                 self._stopped = Optional[DapStopped]()
                 self._stop_in_subprocess = False
+                self._last_stopped_thread_id = 0
                 self._continued_pending = True
                 return
             return
@@ -1478,6 +1508,7 @@ struct DapManager(Copyable, Movable):
             self._is_stopped = False
             self._stopped = Optional[DapStopped]()
             self._stop_in_subprocess = False
+            self._last_stopped_thread_id = 0
             self._continued_pending = True
             return
         if event == String("terminated"):
@@ -1712,6 +1743,7 @@ struct DapManager(Copyable, Movable):
         ))
         self._is_stopped = True
         self._stop_in_subprocess = from_subprocess
+        self._last_stopped_thread_id = tid
 
     fn _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():

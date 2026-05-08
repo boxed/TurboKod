@@ -3584,6 +3584,18 @@ struct Desktop(Movable):
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
             self.debug_pane.clear()
+        # ``continued`` (Continue / Step*): the program is running again
+        # so the previous stack/locals/watches are stale. Their rows
+        # carry frame ids and variables_references that the adapter has
+        # already discarded — clicking them would request scopes for a
+        # frame that no longer exists. Wipe inspect state; ``set_status``
+        # below repaints the title strip with running indicators.
+        if self.dap.consume_continued():
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+            self._dap_current_frame_id = -1
+            self._dap_stack_cache = List[DapStackFrame]()
+            self.debug_pane.clear()
         # Drain gutter clicks (one per editor) before recomputing
         # ``gutter_width`` below — so a click that creates the very first
         # breakpoint also makes the gutter appear on this same frame.
