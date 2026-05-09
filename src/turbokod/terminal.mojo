@@ -624,6 +624,15 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     if b0 == 0x7F or b0 == 0x08:
         return (Event.key_event(KEY_BACKSPACE), 1)
 
+    # Bare C0 control bytes (0x01..0x1A excluding the named keys above)
+    # are how almost every terminal delivers ``Ctrl+letter``. Promote
+    # to the canonical ``(lowercase letter, MOD_CTRL)`` form so hotkey
+    # tables and downstream handlers see one shape regardless of
+    # whether the terminal also supports modifyOtherKeys=2 (which
+    # already delivers letter+MOD_CTRL directly).
+    if Int(b0) >= 0x01 and Int(b0) <= 0x1A:
+        return (Event.key_event(UInt32(Int(b0) + 0x60), MOD_CTRL), 1)
+
     # Printable ASCII or start of a UTF-8 sequence — return the codepoint.
     var cp_len = _utf8_seq_len(b0)
     if cp_len > len(bytes):
@@ -672,39 +681,27 @@ fn _named_key_for_cp(cp: Int) -> UInt32:
 
 
 fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
-    """Fold ``Ctrl+letter`` (no shift) onto its control-character form.
+    """Canonicalize ``Ctrl+letter`` to ``(lowercase letter, MOD_CTRL)``.
 
-    Terminals supporting modifyOtherKeys=2 deliver ``Ctrl+Q`` as
-    ``(key=ord('q'), mods=MOD_CTRL)``, while terminals without that mode
-    send the bare control byte ``(0x11, MOD_NONE)``. Downstream code
-    (hotkeys, the editor's clipboard handlers) standardizes on the bare
-    control-byte form, so we collapse the modified form into it. The
-    ``Ctrl+Shift+letter`` case is left intact so it remains distinguishable.
+    Terminals deliver ``Ctrl+letter`` in two shapes:
+      * **Bare control byte** (``Ctrl+S`` → ``0x13``, no modifier) —
+        the historical default. Promoted to the canonical form by the
+        bare-byte path in ``parse_input`` before this function runs.
+      * **modifyOtherKeys=2 / Kitty** form (``(ord('s'), MOD_CTRL)``).
+        Already canonical — passed through, with case lowercased so a
+        terminal that uppercased the letter (rare) still matches a
+        binding registered with ``ord("s")``.
 
-    ``Cmd+...`` (``MOD_META``) is collapsed onto ``Ctrl+...`` first — the
-    framework guarantees the two are indistinguishable downstream, so a
-    hotkey table written against ``Ctrl+S`` fires for Cmd+S, and one
-    written against ``Ctrl+Shift+F`` fires for Cmd+Shift+F. After the
-    fold, the same control-byte rule above applies to the bare-Ctrl case.
+    Cmd / Alt / Shift events are passed through unchanged. ``Cmd+letter``
+    (``MOD_META``) is a separate, distinct event from ``Ctrl+letter`` —
+    no cross-modifier fold.
     """
-    var folded = mods
-    if (folded & MOD_META) != 0:
-        # XOR clears the META bit (we just checked it's set), then OR sets CTRL.
-        folded = (folded ^ MOD_META) | MOD_CTRL
-    if folded != MOD_CTRL:
-        return (UInt32(cp), folded)
-    # Only fold to the bare control byte for actual letters A-Z. The
-    # 0x40..0x5F range also covers ``[ \\ ] ^ _ @`` whose Ctrl-form
-    # collapses to ESC / GS / RS / US / NUL — folding those would make
-    # Cmd+[ indistinguishable from the Esc key (and similarly for ]),
-    # killing any chance of binding them to navigation actions.
-    var is_letter = (cp >= 0x41 and cp <= 0x5A) or (cp >= 0x61 and cp <= 0x7A)
-    if not is_letter:
-        return (UInt32(cp), folded)
-    var letter = cp
-    if 0x61 <= letter and letter <= 0x7A:
-        letter = letter - 0x20  # lowercase a..z → uppercase A..Z
-    return (UInt32(letter - 0x40), MOD_NONE)
+    if mods != MOD_CTRL:
+        return (UInt32(cp), mods)
+    var c = cp
+    if 0x41 <= c and c <= 0x5A:
+        c = c + 0x20  # uppercase A-Z → lowercase a-z
+    return (UInt32(c), MOD_CTRL)
 
 
 fn _parse_csi(data: String) -> Tuple[Event, Int]:

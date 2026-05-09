@@ -282,19 +282,19 @@ struct TextField(Copyable, Movable):
         if k == KEY_DELETE:
             return TextFieldKeyResult(True, self.delete_forward())
         # --- clipboard / select-all ---
-        # Cmd/Ctrl+letter is delivered as a bare control byte (the
-        # terminal parser folds Cmd onto Ctrl and Ctrl onto the
-        # control codepoint). See ``terminal._normalize_ctrl_letter``.
-        if k == UInt32(0x01):    # Ctrl/Cmd+A — select all
+        # Ctrl+letter is canonicalized by the parser to
+        # ``(lowercase letter, MOD_CTRL)``.
+        var is_ctrl = (event.mods & MOD_CTRL) != 0
+        if is_ctrl and k == UInt32(ord("a")):    # Ctrl+A — select all
             self.select_all()
             return TextFieldKeyResult(True, False)
-        if k == UInt32(0x03):    # Ctrl/Cmd+C — copy
+        if is_ctrl and k == UInt32(ord("c")):    # Ctrl+C — copy
             if self.has_selection():
                 clipboard_copy(self.selection_text())
             else:
                 clipboard_copy(self.text)
             return TextFieldKeyResult(True, False)
-        if k == UInt32(0x18):    # Ctrl/Cmd+X — cut
+        if is_ctrl and k == UInt32(ord("x")):    # Ctrl+X — cut
             if self.has_selection():
                 clipboard_copy(self.selection_text())
                 _ = self.delete_selection()
@@ -303,7 +303,7 @@ struct TextField(Copyable, Movable):
             var had = len(self.text.as_bytes()) > 0
             self.clear()
             return TextFieldKeyResult(True, had)
-        if k == UInt32(0x16):    # Ctrl/Cmd+V — paste
+        if is_ctrl and k == UInt32(ord("v")):    # Ctrl+V — paste
             var pasted = _sanitize_single_line(clipboard_paste())
             if len(pasted.as_bytes()) == 0:
                 # Still consume the chord (a paste of pure whitespace
@@ -466,17 +466,19 @@ fn text_field_clipboard_key(
     if event.kind != EVENT_KEY:
         return TextFieldKeyResult(False, False)
     var k = event.key
-    if k == UInt32(0x01):    # Ctrl/Cmd+A — no-op without a cursor
+    if (event.mods & MOD_CTRL) == 0:
+        return TextFieldKeyResult(False, False)
+    if k == UInt32(ord("a")):    # Ctrl+A — no-op without a cursor
         return TextFieldKeyResult(True, False)
-    if k == UInt32(0x03):    # Ctrl+C — copy whole field
+    if k == UInt32(ord("c")):    # Ctrl+C — copy whole field
         clipboard_copy(text)
         return TextFieldKeyResult(True, False)
-    if k == UInt32(0x18):    # Ctrl+X — copy then clear
+    if k == UInt32(ord("x")):    # Ctrl+X — copy then clear
         clipboard_copy(text)
         var had_text = len(text.as_bytes()) > 0
         text = String("")
         return TextFieldKeyResult(True, had_text)
-    if k == UInt32(0x16):    # Ctrl+V — append clipboard at end
+    if k == UInt32(ord("v")):    # Ctrl+V — append clipboard at end
         var pasted = _sanitize_single_line(clipboard_paste())
         if len(pasted.as_bytes()) == 0:
             return TextFieldKeyResult(True, False)

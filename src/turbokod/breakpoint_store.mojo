@@ -11,10 +11,15 @@ Format on disk::
 
     {
       "breakpoints": [
-        { "path": "src/foo.mojo", "line": 42, "condition": "i > 10" },
-        { "path": "src/foo.mojo", "line": 87, "condition": "" }
+        { "path": "src/foo.mojo", "line": 42, "condition": "i > 10",
+          "enabled": true },
+        { "path": "src/foo.mojo", "line": 87, "condition": "",
+          "enabled": false }
       ]
     }
+
+A missing ``enabled`` field is treated as ``true`` so files written
+by older builds round-trip without surprising the user.
 
 Paths inside the project root are stored relative to it (matching
 ``session_store``), so the file survives moving the project directory.
@@ -26,9 +31,9 @@ from std.ffi import external_call
 
 from .file_io import join_path, read_file, stat_file, write_file
 from .json import (
-    JsonValue, encode_json, json_array, json_int, json_object,
+    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
-    json_get_int, json_get_string,
+    json_get_bool, json_get_int, json_get_string,
 )
 from .posix import getenv_value
 
@@ -43,10 +48,14 @@ struct StoredBreakpoint(ImplicitlyCopyable, Movable):
     """One breakpoint as it lives on disk. ``path`` is project-relative
     when the file lives inside the project root, absolute otherwise.
     ``line`` is 0-based — same convention as ``DapManager._bp_line``.
-    ``condition`` is empty for unconditional breakpoints."""
+    ``condition`` is empty for unconditional breakpoints.
+    ``enabled`` is False to skip the breakpoint without removing it —
+    the gutter still shows it as a faint dot so the user knows it's
+    parked there."""
     var path: String
     var line: Int
     var condition: String
+    var enabled: Bool
 
 
 fn _current_username() -> String:
@@ -170,7 +179,10 @@ fn load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
             continue
         var resolved = _resolve_bp_path(project_root, raw_path)
         var cond = json_get_string(node, String("condition"))
-        out.append(StoredBreakpoint(resolved^, line, cond^))
+        # Missing ``enabled`` (older files, or hand-edited JSON) defaults
+        # to True — preserves prior behaviour of always-firing BPs.
+        var en = json_get_bool(node, String("enabled"), True)
+        out.append(StoredBreakpoint(resolved^, line, cond^, en))
     return out^
 
 
@@ -187,6 +199,7 @@ fn encode_breakpoints(
         bp.put(String("path"), json_str(rel))
         bp.put(String("line"), json_int(breakpoints[i].line))
         bp.put(String("condition"), json_str(breakpoints[i].condition))
+        bp.put(String("enabled"), json_bool(breakpoints[i].enabled))
         arr.append(bp^)
     root.put(String("breakpoints"), arr^)
     return encode_json(root) + String("\n")

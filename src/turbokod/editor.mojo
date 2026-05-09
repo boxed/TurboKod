@@ -25,7 +25,8 @@ from .events import (
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import FileInfo, read_file, stat_file, write_file
@@ -354,6 +355,18 @@ struct Caret(ImplicitlyCopyable, Movable):
     var anchor_col: Int
 
 
+@fieldwise_init
+struct BreakpointMenuRequest(ImplicitlyCopyable, Movable):
+    """Set by ``handle_mouse`` when the user right-clicks a breakpoint
+    dot in the gutter. ``row`` is the buffer row the BP sits on (so
+    Desktop can look up its current condition + enabled state from the
+    DAP manager); ``anchor_x``/``anchor_y`` are the clicked screen
+    cell so the menu can open under the cursor."""
+    var row: Int
+    var anchor_x: Int
+    var anchor_y: Int
+
+
 struct EditorSnapshot(ImplicitlyCopyable, Movable):
     """One reversible step. Captures everything ``undo`` needs to restore:
     the buffer contents and the caret/selection. Scroll position is excluded
@@ -490,6 +503,13 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the active ``DapManager`` — the editor itself owns no DAP state.
     var gutter_width: Int
     var breakpoint_lines: List[Int]
+    # Parallel to ``breakpoint_lines``. Drives gutter colour:
+    # disabled → gray, conditional → yellow, otherwise red. Both lists
+    # populated together by Desktop's ``dap_tick`` so the entries
+    # always line up; a length mismatch is treated as "render plain
+    # red dots" by the paint code below.
+    var breakpoint_disabled: List[Bool]
+    var breakpoint_conditional: List[Bool]
     var exec_line: Int
     # Set by ``handle_mouse`` when the user left-clicks anywhere in the
     # gutter (debugger / line-number / change / blame strip). The host
@@ -497,6 +517,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     # ``DapManager.toggle_breakpoint``; the editor itself owns no DAP
     # state, so the toggle has to round-trip through Desktop.
     var pending_breakpoint_toggle: Optional[Int]
+    # Right-click on a breakpoint dot in the gutter sets this — the
+    # host opens the breakpoint-context dialog. ``anchor_*`` is the
+    # clicked cell so the dialog opens near the click; ``row`` is the
+    # buffer row the BP sits on.
+    var pending_breakpoint_menu: Optional[BreakpointMenuRequest]
     # Set by ``handle_mouse`` when the user left-clicks the per-line
     # change-bar in the git-changes gutter. The host polls
     # ``consume_git_revert_request``, opens its revert popup anchored at
@@ -645,8 +670,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
+        self.breakpoint_disabled = List[Bool]()
+        self.breakpoint_conditional = List[Bool]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
@@ -708,8 +736,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
+        self.breakpoint_disabled = List[Bool]()
+        self.breakpoint_conditional = List[Bool]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
+        self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
@@ -792,8 +823,11 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
+        self.breakpoint_disabled = copy.breakpoint_disabled.copy()
+        self.breakpoint_conditional = copy.breakpoint_conditional.copy()
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
+        self.pending_breakpoint_menu = copy.pending_breakpoint_menu
         self.pending_git_revert = copy.pending_git_revert
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
@@ -1341,6 +1375,16 @@ struct Editor(ImplicitlyCopyable, Movable):
         var row = self.pending_breakpoint_toggle
         self.pending_breakpoint_toggle = Optional[Int]()
         return row
+
+    fn consume_breakpoint_menu(
+        mut self,
+    ) -> Optional[BreakpointMenuRequest]:
+        """Return any pending right-click on a BP dot and clear the
+        slot. The host opens the breakpoint-context dialog anchored at
+        the request's screen cell."""
+        var req = self.pending_breakpoint_menu
+        self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
+        return req
 
     fn consume_git_revert_request(mut self) -> Optional[GitRevertRequest]:
         """Return any pending git revert request and clear the slot.
@@ -2495,9 +2539,24 @@ struct Editor(ImplicitlyCopyable, Movable):
                 if dap_gutter > 0 and is_first_seg:
                     for k in range(len(self.breakpoint_lines)):
                         if self.breakpoint_lines[k] == buf_row:
+                            # Per-row colour:
+                            #   * disabled BP   → DARK_GRAY (parked)
+                            #   * conditional   → LIGHT_YELLOW (gates on expression)
+                            #   * otherwise     → LIGHT_RED (default firing BP)
+                            # The two metadata lists are populated in
+                            # lockstep with ``breakpoint_lines`` by the
+                            # Desktop's ``dap_tick``; a length mismatch
+                            # falls back to the plain red default.
+                            var dot_attr = bp_attr
+                            if k < len(self.breakpoint_disabled) \
+                                    and self.breakpoint_disabled[k]:
+                                dot_attr = Attr(DARK_GRAY, BLUE)
+                            elif k < len(self.breakpoint_conditional) \
+                                    and self.breakpoint_conditional[k]:
+                                dot_attr = Attr(LIGHT_YELLOW, BLUE)
                             painter.set(
                                 canvas, view.a.x + ln_gutter, sy_g,
-                                Cell(String("●"), bp_attr, 1),
+                                Cell(String("●"), dot_attr, 1),
                             )
                             break
                     if buf_row == self.exec_line:
@@ -3458,7 +3517,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                     )
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi)
-        elif k == UInt32(0x01):    # Ctrl/Cmd+A — select whole buffer
+        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("a")):
+            # Ctrl+A — select whole buffer.
             # Pure selection move: no buffer mutation, no undo, no
             # extras (a select-all on top of multi-cursor would
             # collapse to one selection anyway). Anchor at (0, 0),
@@ -3471,18 +3531,19 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var last = n_rows - 1
                 self.move_to(0, 0, False)
                 self.move_to(last, self.buffer.line_length(last), True)
-        elif k == UInt32(0x03):    # Ctrl+C — non-mutating
-            # Copy doesn't change the buffer, so there's nothing for
-            # undo to walk back to. Drop extras without snapshotting.
+        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("c")):
+            # Ctrl+C — non-mutating copy. No undo snapshot needed.
             self.clear_extra_carets()
             self.copy_to_clipboard()
-        elif k == UInt32(0x18):    # Ctrl+X
+        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("x")):
+            # Ctrl+X — cut.
             if self.read_only:
                 return True
             self._collapse_extras_with_undo()
             self.cut_to_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
-        elif k == UInt32(0x16):    # Ctrl+V
+        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("v")):
+            # Ctrl+V — paste.
             if self.read_only:
                 return True
             self._collapse_extras_with_undo()
@@ -4045,6 +4106,37 @@ struct Editor(ImplicitlyCopyable, Movable):
                 if max_y < 0: max_y = 0
                 self.scroll_y += 3
                 if self.scroll_y > max_y: self.scroll_y = max_y
+            return True
+        # Right-click in the debugger gutter on a row that has a
+        # breakpoint opens the BP context dialog. We resolve which row
+        # the click landed on by replaying the same layout the paint
+        # path uses, then check ``breakpoint_lines`` for that row. Any
+        # other right-click is ignored (no generic editor context menu
+        # yet).
+        if event.button == MOUSE_BUTTON_RIGHT:
+            if event.pressed and not event.motion:
+                var total_g = self._total_gutter()
+                var right_g = self._right_gutter()
+                var rel = event.pos.x - view.a.x
+                if total_g > 0 and rel >= 0 and rel < total_g:
+                    var content_h = view.height()
+                    var content_w = view.width() - total_g - right_g
+                    if content_w < 1:
+                        content_w = 1
+                    var layout = self._layout_lines(content_h, content_w)
+                    var screen_row = event.pos.y - view.a.y
+                    if screen_row >= 0 and screen_row < len(layout):
+                        var buf_row = layout[screen_row].line_idx
+                        for k in range(len(self.breakpoint_lines)):
+                            if self.breakpoint_lines[k] == buf_row:
+                                self.pending_breakpoint_menu = \
+                                    Optional[BreakpointMenuRequest](
+                                        BreakpointMenuRequest(
+                                            buf_row,
+                                            event.pos.x, event.pos.y,
+                                        ),
+                                    )
+                                break
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False

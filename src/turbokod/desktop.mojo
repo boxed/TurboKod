@@ -118,6 +118,10 @@ from .project_targets import (
     save_project_targets,
     write_all_targets,
 )
+from .breakpoint_dialog import (
+    BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY,
+    BreakpointConditionErrorDialog, BreakpointMenu,
+)
 from .confirm_dialog import ConfirmDialog
 from .prompt import Prompt
 from .quick_open import QuickOpen
@@ -251,6 +255,7 @@ comptime DEBUG_CONDITIONAL_BP    = String("debug:conditional_bp")
 comptime DEBUG_STEP_OVER         = String("debug:step_over")
 comptime DEBUG_STEP_IN           = String("debug:step_in")
 comptime DEBUG_STEP_OUT          = String("debug:step_out")
+comptime DEBUG_RUN_TO_CURSOR     = String("debug:run_to_cursor")
 comptime DEBUG_STOP              = String("debug:stop")
 comptime DEBUG_PAUSE             = String("debug:pause")
 comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
@@ -328,22 +333,21 @@ comptime _PA_ADD_WATCH           = String("__pa_add_watch")
 
 
 fn ctrl_key(letter: String) -> UInt32:
-    """Return the control-character codepoint for ``Ctrl+letter``.
+    """Return the canonical key codepoint for a ``Ctrl+letter`` hotkey.
 
-    Most terminals report ``Ctrl+letter`` as a single control byte (e.g.,
-    ``Ctrl+Q`` → ``0x11``) rather than the printable letter with the
-    ``MOD_CTRL`` flag. This helper does the conversion so hotkey
-    registrations read naturally: ``ctrl_key("q")`` → ``0x11``.
+    The parser canonicalizes ``Ctrl+letter`` to
+    ``(lowercase letter, MOD_CTRL)``, so a hotkey is registered as
+    e.g. ``Hotkey(ctrl_key("q"), MOD_CTRL, ...)`` — equivalent to
+    ``Hotkey(UInt32(ord("q")), MOD_CTRL, ...)`` but reads naturally
+    next to other ``ctrl_key("...")`` calls.
     """
     var b = letter.as_bytes()
     if len(b) == 0:
         return UInt32(0)
     var c = Int(b[0])
     if 0x41 <= c and c <= 0x5A:
-        return UInt32(c - 0x40)
-    if 0x61 <= c and c <= 0x7A:
-        return UInt32(c - 0x60)
-    return UInt32(0)
+        c = c + 0x20  # uppercase → lowercase to match the parser's canonical form
+    return UInt32(c)
 
 
 @fieldwise_init
@@ -375,16 +379,11 @@ struct NavPoint(ImplicitlyCopyable, Movable):
 fn format_hotkey(key: UInt32, mods: UInt8) -> String:
     """Render a ``(key, mods)`` pair as a human-readable label.
 
-    Used for the right-aligned shortcut text on menu items. The
-    control-character form (``mods == MOD_NONE`` and ``0x01..0x1A``) is
-    rendered as ``Ctrl+<letter>``, which is what most terminals send for
-    the bare ``Ctrl+letter`` combination — the shortcut shown to the user
-    matches what they have to press, even though the underlying event
-    looks superficially un-modified.
+    Used for the right-aligned shortcut text on menu items. Modifier
+    keys are spelled in ``Ctrl+`` / ``Cmd+`` / ``Alt+`` / ``Shift+``
+    order; the key glyph is uppercased for letters.
     """
     var k = Int(key)
-    if mods == MOD_NONE and 0x01 <= k and k <= 0x1A:
-        return String("Ctrl+") + chr(k + 0x40)
     var prefix = String("")
     if (mods & MOD_CTRL) != 0:
         prefix = prefix + String("Ctrl+")
@@ -530,6 +529,16 @@ struct Desktop(Movable):
     # action; surfaced from ``Editor.consume_git_revert_request`` after
     # mouse dispatch and routed input-first like ``spell_menu``.
     var git_gutter_menu: GitGutterMenu
+    # Right-click on a breakpoint dot → contextual edit dialog. Carries
+    # path + line back through to the DAP manager when the user
+    # confirms with OK. Same modality story as ``git_gutter_menu``: it
+    # opens contextually over the gutter, eats every event until
+    # resolved.
+    var breakpoint_menu: BreakpointMenu
+    # Surfaced when the adapter rejects a BP condition (debugpy reports
+    # ``verified=false`` + a parse-error message). The user sees the
+    # error, edits the condition, and clicks Try / Disable / Cancel.
+    var breakpoint_error: BreakpointConditionErrorDialog
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -622,6 +631,17 @@ struct Desktop(Movable):
     var _dap_stack_cache: List[DapStackFrame]
     var _dap_watch_exprs: List[String]
     var _dap_watch_values: List[String]   # parallel to exprs (last result)
+    # Cached locals from the most recent scope load. The condition-error
+    # dialog grabs this so the user gets a glimpse of the frame state
+    # while editing the bad condition. Falls back to an empty list when
+    # no recent variables are around (program isn't paused).
+    var _dap_locals_cache: List[DapVariable]
+    # Tracks whether the active condition-error dialog is waiting on a
+    # ``setBreakpoints`` round-trip. Set when the user presses ``Try
+    # again``; cleared when ``dap_tick`` either hands the dialog a
+    # fresh error (still bad) or sees no error and no inflight setBp
+    # (accepted, close the dialog).
+    var _breakpoint_error_awaiting_response: Bool
     # Persistent global preferences (View-menu toggles for now). Loaded
     # from ``~/.config/turbokod/config.json`` on construction; rewritten
     # there whenever the user toggles a setting. Synced into every
@@ -742,6 +762,8 @@ struct Desktop(Movable):
         self.speller = Speller()
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
+        self.breakpoint_menu = BreakpointMenu()
+        self.breakpoint_error = BreakpointConditionErrorDialog()
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
         self._debugpy_install_prompted = List[String]()
@@ -770,6 +792,8 @@ struct Desktop(Movable):
         self._dap_stack_cache = List[DapStackFrame]()
         self._dap_watch_exprs = List[String]()
         self._dap_watch_values = List[String]()
+        self._dap_locals_cache = List[DapVariable]()
+        self._breakpoint_error_awaiting_response = False
         # Defaults only — the host explicitly calls ``load_config_from_disk``
         # if it wants the user's saved preferences. Tests get deterministic
         # state without inheriting whatever the developer's config happens
@@ -792,68 +816,89 @@ struct Desktop(Movable):
         # ``_rebuild_window_menu`` repopulates its items every paint.
         self.menu_bar.add(Menu(_WINDOW_MENU_LABEL, List[MenuItem]()))
         self._window_menu_idx = len(self.menu_bar.menus) - 1
-        # Default hotkeys. ``Ctrl+letter`` arrives as a control character on
-        # almost every terminal, so the bindings are stored as the raw
-        # control codepoint with ``MOD_NONE``. ``Ctrl+Shift+letter`` requires
-        # a terminal that reports modifiers for letter keys (CSI u or
-        # modifyOtherKeys=2 — limited support today); the bindings are still
-        # registered so they work as soon as parser support lands.
-        self._hotkeys.append(Hotkey(ctrl_key("q"), MOD_NONE, APP_QUIT_ACTION))
-        self._hotkeys.append(Hotkey(ctrl_key("w"), MOD_NONE, WINDOW_CLOSE))
-        self._hotkeys.append(Hotkey(ctrl_key("n"), MOD_NONE, EDITOR_NEW))
-        self._hotkeys.append(Hotkey(ctrl_key("o"), MOD_NONE, EDITOR_OPEN))
+        # Command bindings. By convention in this app: ``Cmd+letter``
+        # invokes commands (Save / Open / Cut / …); ``Ctrl+`` is reserved
+        # for navigation (window / panel focus, menu access). Cmd and
+        # Ctrl are kept distinct by ``_normalize_ctrl_letter`` — no
+        # cross-modifier fold — so each shortcut binds to MOD_META alone.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("q")), MOD_META, APP_QUIT_ACTION,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("w")), MOD_META, WINDOW_CLOSE,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("n")), MOD_META, EDITOR_NEW,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_META, EDITOR_OPEN,
+        ))
         # Cmd+Shift+O — Quick Open (type-to-filter file picker). The
         # plain Cmd+O above bubbles ``file:open`` up to the host's
         # FileDialog; Quick Open is the project-aware fast picker.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_CTRL | MOD_SHIFT, EDITOR_QUICK_OPEN,
+            UInt32(ord("o")), MOD_META | MOD_SHIFT, EDITOR_QUICK_OPEN,
         ))
-        self._hotkeys.append(Hotkey(ctrl_key("e"), MOD_NONE, EDITOR_OPEN_RECENT))
-        self._hotkeys.append(Hotkey(ctrl_key("s"), MOD_NONE, EDITOR_SAVE))
-        self._hotkeys.append(Hotkey(ctrl_key("f"), MOD_NONE, EDITOR_FIND))
-        # Ctrl/Cmd+H for replace (matches VS Code). Ctrl+R is the
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("e")), MOD_META, EDITOR_OPEN_RECENT,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("s")), MOD_META, EDITOR_SAVE,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("f")), MOD_META, EDITOR_FIND,
+        ))
+        # Cmd+H for replace (matches VS Code). Ctrl+R is the
         # run-target shortcut below, so the old Ctrl+R-for-replace
         # binding had to move; H is the de-facto cross-editor default.
-        self._hotkeys.append(Hotkey(ctrl_key("h"), MOD_NONE, EDITOR_REPLACE))
-        self._hotkeys.append(Hotkey(ctrl_key("g"), MOD_NONE, EDITOR_FIND_NEXT))
-        self._hotkeys.append(Hotkey(ctrl_key("l"), MOD_NONE, EDITOR_GOTO))
-        self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, EDITOR_GOTO_SYMBOL))
-        self._hotkeys.append(Hotkey(ctrl_key("k"), MOD_NONE, EDITOR_LOOKUP_DOCS))
-        # Cmd+Option+O — workspace-wide "Find Symbol". On macOS terminals
-        # ``Cmd`` is intercepted (or folded onto ``MOD_CTRL`` by the
-        # native bundle), so the actual delivery is one of two shapes:
-        # plain ``Option+O`` (``MOD_ALT``) when the terminal swallows
-        # ``Cmd``, or ``Ctrl+Option+O`` (``MOD_CTRL | MOD_ALT``) when it
-        # propagates the ``Meta`` bit through ``_normalize_ctrl_letter``.
-        # Register both so the binding fires either way.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_ALT, EDITOR_FIND_SYMBOL,
+            UInt32(ord("h")), MOD_META, EDITOR_REPLACE,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_CTRL | MOD_ALT, EDITOR_FIND_SYMBOL,
-        ))
-        # Clipboard + undo/redo. Registering Ctrl+X/C/V at the desktop layer
-        # serves two purposes: the menu items get auto-populated shortcut
-        # text via ``_shortcut_for_action``, and the dispatch path is
-        # uniform whether the user clicks a menu or hits the key. Ctrl+Z /
-        # Ctrl+Y use the de-facto-standard binding.
-        self._hotkeys.append(Hotkey(ctrl_key("x"), MOD_NONE, EDITOR_CUT))
-        self._hotkeys.append(Hotkey(ctrl_key("c"), MOD_NONE, EDITOR_COPY))
-        self._hotkeys.append(Hotkey(ctrl_key("v"), MOD_NONE, EDITOR_PASTE))
-        self._hotkeys.append(Hotkey(ctrl_key("z"), MOD_NONE, EDITOR_UNDO))
-        self._hotkeys.append(Hotkey(ctrl_key("y"), MOD_NONE, EDITOR_REDO))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("f")), MOD_CTRL | MOD_SHIFT, PROJECT_FIND,
+            UInt32(ord("g")), MOD_META, EDITOR_FIND_NEXT,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("r")), MOD_CTRL | MOD_SHIFT, PROJECT_REPLACE,
+            UInt32(ord("l")), MOD_META, EDITOR_GOTO,
         ))
-        # Find Previous: Ctrl/Cmd+Shift+G is the de-facto cross-platform
-        # binding (matches VS Code, JetBrains, browsers, …). On macOS the
-        # bundled native app reports Cmd+Shift+G as ``MOD_CTRL|MOD_SHIFT``
-        # over the same channel as Ctrl-shortcuts.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("g")), MOD_CTRL | MOD_SHIFT, EDITOR_FIND_PREV,
+            UInt32(ord("t")), MOD_META, EDITOR_GOTO_SYMBOL,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("k")), MOD_META, EDITOR_LOOKUP_DOCS,
+        ))
+        # Cmd+Option+O — workspace-wide "Find Symbol".
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_META | MOD_ALT, EDITOR_FIND_SYMBOL,
+        ))
+        # Clipboard + undo/redo. Registering Cmd+X/C/V at the desktop
+        # layer serves two purposes: the menu items get auto-populated
+        # shortcut text via ``_shortcut_for_action``, and the dispatch
+        # path is uniform whether the user clicks a menu or hits the
+        # key. Cmd+Z / Cmd+Y use the de-facto-standard binding.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("x")), MOD_META, EDITOR_CUT,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("c")), MOD_META, EDITOR_COPY,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("v")), MOD_META, EDITOR_PASTE,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("z")), MOD_META, EDITOR_UNDO,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("y")), MOD_META, EDITOR_REDO,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("f")), MOD_META | MOD_SHIFT, PROJECT_FIND,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("r")), MOD_META | MOD_SHIFT, PROJECT_REPLACE,
+        ))
+        # Find Previous: Cmd+Shift+G — the de-facto editor binding.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("g")), MOD_META | MOD_SHIFT, EDITOR_FIND_PREV,
         ))
         # Window switching: Ctrl+1 .. Ctrl+9 focus the first nine windows by
         # the same number shown in the top-right of each window's chrome.
@@ -896,33 +941,56 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(KEY_F10, MOD_NONE, DEBUG_STEP_OVER))
         self._hotkeys.append(Hotkey(KEY_F11, MOD_NONE, DEBUG_STEP_IN))
         self._hotkeys.append(Hotkey(KEY_F11, MOD_SHIFT, DEBUG_STEP_OUT))
+        # Cmd+digit debug bindings. Bound on MOD_META rather than
+        # MOD_CTRL so they stay distinct from the Ctrl+0..9 window /
+        # panel-focus bindings above — terminals report Cmd+digit and
+        # Ctrl+digit with different modifier bits, and the parser keeps
+        # them distinct (only Cmd+letter folds to Ctrl+letter). So
+        # Cmd+2 → step over, Ctrl+2 → focus window 2.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("0")), MOD_META, DEBUG_START_OR_CONTINUE,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("2")), MOD_META, DEBUG_STEP_OVER,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("4")), MOD_META, DEBUG_STEP_OUT,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("5")), MOD_META, DEBUG_RUN_TO_CURSOR,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("6")), MOD_META, DEBUG_STEP_IN,
+        ))
         # F8: toggle debug pane focus. Workaround until pane-mouse
         # works; arrow keys then scroll the stack list while the
         # pane is focused.
         self._hotkeys.append(Hotkey(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE))
-        # Cmd+R / Cmd+D — run / debug the active project target.
-        # On macOS terminals Cmd+letter is folded to MOD_CTRL by the
-        # terminal parser (see ``events.MOD_META``), so a single
-        # binding on ``ctrl_key`` covers both ⌘ and Ctrl. Registered
-        # last so they win the newest-first hotkey lookup against the
-        # earlier Ctrl-letter defaults.
-        self._hotkeys.append(Hotkey(ctrl_key("r"), MOD_NONE, TARGET_RUN))
-        self._hotkeys.append(Hotkey(ctrl_key("d"), MOD_NONE, TARGET_DEBUG))
-        self._hotkeys.append(Hotkey(ctrl_key("t"), MOD_NONE, TARGET_TEST))
+        # Cmd+R / Cmd+D / Cmd+T — run / debug / test the active project
+        # target. Registered after the EDITOR_GOTO_SYMBOL Cmd+T above so
+        # the newest-first lookup picks TARGET_TEST.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("r")), MOD_META, TARGET_RUN,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("d")), MOD_META, TARGET_DEBUG,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("t")), MOD_META, TARGET_TEST,
+        ))
         # Cmd+` / Cmd+Shift+` — cycle through windows forward / backward
-        # in stable insertion order. Cmd+letter folds onto Ctrl+letter
-        # via MOD_META, but backtick isn't a letter, so it keeps its
-        # MOD_CTRL flag here. Shift+` produces ``~`` on US layouts; we
-        # bind both glyphs so the reverse rotation works regardless of
-        # whether the terminal reports the shifted or unshifted codepoint.
+        # in stable insertion order. Shift+` produces ``~`` on US
+        # layouts; we bind both glyphs so the reverse rotation works
+        # regardless of whether the terminal reports the shifted or
+        # unshifted codepoint.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("`")), MOD_CTRL, WINDOW_ROTATE_NEXT,
+            UInt32(ord("`")), MOD_META, WINDOW_ROTATE_NEXT,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("`")), MOD_CTRL | MOD_SHIFT, WINDOW_ROTATE_PREV,
+            UInt32(ord("`")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("~")), MOD_CTRL | MOD_SHIFT, WINDOW_ROTATE_PREV,
+            UInt32(ord("~")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
         ))
         # Cmd+Shift+Right / Cmd+Shift+Left — switch tabs forward / backward.
         # Arrows go through the bare CSI path in the terminal parser, which
@@ -936,17 +1004,11 @@ struct Desktop(Movable):
             KEY_LEFT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
         ))
         # Cmd+[ / Cmd+] — back / forward through the navigation history.
-        # Brackets aren't letters, so the terminal parser folds the META
-        # bit onto MOD_CTRL but stops short of collapsing them to the
-        # ESC / GS control bytes (which would make Cmd+[ collide with
-        # the Esc key). The hotkeys land as ``(0x5B|0x5D, MOD_CTRL)``
-        # — we register both modifier-flavors so Ctrl+[ on a terminal
-        # that reports modifiers also works.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("[")), MOD_CTRL, EDITOR_NAV_BACK,
+            UInt32(ord("[")), MOD_META, EDITOR_NAV_BACK,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("]")), MOD_CTRL, EDITOR_NAV_FORWARD,
+            UInt32(ord("]")), MOD_META, EDITOR_NAV_FORWARD,
         ))
 
     fn _bottom_chrome_height(self, screen: Rect) -> Int:
@@ -1327,6 +1389,8 @@ struct Desktop(Movable):
         # routinely opens above already-rendered widgets).
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
+        self.breakpoint_menu.paint(canvas, screen)
+        self.breakpoint_error.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -2064,7 +2128,7 @@ struct Desktop(Movable):
         # Drop any in-memory breakpoints — the next project will seed
         # its own from ``.turbokod/per_user/<username>/breakpoints.json``.
         self.dap.restore_breakpoints(
-            List[String](), List[Int](), List[String](),
+            List[String](), List[Int](), List[String](), List[Bool](),
         )
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
@@ -2148,11 +2212,15 @@ struct Desktop(Movable):
         var bp_paths = List[String]()
         var bp_lines = List[Int]()
         var bp_conds = List[String]()
+        var bp_enabled = List[Bool]()
         for i in range(len(stored)):
             bp_paths.append(stored[i].path)
             bp_lines.append(stored[i].line)
             bp_conds.append(stored[i].condition)
-        self.dap.restore_breakpoints(bp_paths^, bp_lines^, bp_conds^)
+            bp_enabled.append(stored[i].enabled)
+        self.dap.restore_breakpoints(
+            bp_paths^, bp_lines^, bp_conds^, bp_enabled^,
+        )
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
         # re-write the file with the same bytes.
@@ -2248,6 +2316,7 @@ struct Desktop(Movable):
                 self.dap.breakpoint_path_at(i),
                 self.dap.breakpoint_line_at(i),
                 self.dap.breakpoint_condition_at(i),
+                self.dap.breakpoint_enabled_at(i),
             ))
         return out^
 
@@ -2524,6 +2593,25 @@ struct Desktop(Movable):
             if self.spell_menu.submitted:
                 self._on_spell_menu_submit()
             return Optional[String]()
+        if self.breakpoint_error.active:
+            # Condition-error fix dialog gets priority over the regular
+            # right-click menu — it's the second-stage modal that pops
+            # *because* the first stage submitted with a bad condition.
+            if event.kind == EVENT_KEY:
+                _ = self.breakpoint_error.handle_key(event)
+            else:
+                _ = self.breakpoint_error.handle_mouse(event, screen)
+            if self.breakpoint_error.submitted:
+                self._on_breakpoint_error_submit()
+            return Optional[String]()
+        if self.breakpoint_menu.active:
+            if event.kind == EVENT_KEY:
+                _ = self.breakpoint_menu.handle_key(event)
+            else:
+                _ = self.breakpoint_menu.handle_mouse(event, screen)
+            if self.breakpoint_menu.submitted:
+                self._on_breakpoint_menu_submit()
+            return Optional[String]()
         if self.git_gutter_menu.active:
             # Same modality story as ``spell_menu`` — opens contextually
             # over the gutter, eats every event until resolved.
@@ -2748,6 +2836,10 @@ struct Desktop(Movable):
         # ``pending_git_revert`` on the focused editor — surface the popup
         # before the next paint so it lands on this same frame.
         self._maybe_open_git_gutter_menu()
+        # Right-click on a BP dot stamps a pending menu request on the
+        # editor — surface the dialog before the next paint so the
+        # user-visible delay is one frame max.
+        self._maybe_open_breakpoint_menu()
         # A click that reaches the window manager could have started a
         # drag/resize — drop the pending refit so the next resize event
         # doesn't trample the user's intended move. (This is coarse:
@@ -3171,6 +3263,9 @@ struct Desktop(Movable):
         if action == DEBUG_STEP_OUT:
             _ = self.dap.step_out()
             return Optional[String]()
+        if action == DEBUG_RUN_TO_CURSOR:
+            self._debug_run_to_cursor()
+            return Optional[String]()
         if action == DEBUG_PAUSE:
             _ = self.dap.pause()
             return Optional[String]()
@@ -3560,7 +3655,9 @@ struct Desktop(Movable):
                 self._dap_var_target_row = -1
             else:
                 # Initial scope load: rebuild the inspect rows around
-                # the current stack + new locals.
+                # the current stack + new locals. Stash a copy so the
+                # condition-error dialog can show locals when it pops.
+                self._dap_locals_cache = vars.copy()
                 self._rebuild_pane_inspect(vars^)
         # Drain evaluate responses (watches). May arrive in batches.
         if self.dap.has_evaluations():
@@ -3583,6 +3680,7 @@ struct Desktop(Movable):
             self._dap_exec_line = -1
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
+            self._dap_locals_cache = List[DapVariable]()
             self.debug_pane.clear()
         # ``continued`` (Continue / Step*): the program is running again
         # so the previous stack/locals/watches are stale. Their rows
@@ -3595,7 +3693,56 @@ struct Desktop(Movable):
             self._dap_exec_line = -1
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
+            self._dap_locals_cache = List[DapVariable]()
             self.debug_pane.clear()
+        # Surface adapter-side breakpoint rejections (debugpy reports
+        # bad ``condition`` syntax this way). First error pops the fix
+        # dialog; subsequent errors that arrive while it's already open
+        # update its message instead of stacking modals. We pop the
+        # error queue unconditionally so a stale rejection from a now-
+        # disabled BP doesn't reopen the dialog after the user closed
+        # it via Cancel — only enabled BPs trigger the dialog.
+        if self.dap.has_breakpoint_errors():
+            var errs = self.dap.take_breakpoint_errors()
+            for k in range(len(errs)):
+                var e = errs[k]
+                # Skip errors against BPs that have since been disabled
+                # or removed — the user already resolved this case via
+                # Disable & Continue / Cancel and we'd reopen on a
+                # second Try-again round-trip otherwise.
+                if not self.dap.has_breakpoint(e.path, e.line):
+                    continue
+                if not self.dap.breakpoint_enabled(e.path, e.line):
+                    continue
+                if self.breakpoint_error.active \
+                        and self.breakpoint_error.path == e.path \
+                        and self.breakpoint_error.line == e.line:
+                    self.breakpoint_error.set_error(e.message)
+                    continue
+                if self.breakpoint_error.active:
+                    # A second BP errored while the first dialog was up
+                    # — buffer the message until the user closes the
+                    # current dialog. Simpler than queuing properly:
+                    # ignore subsequent errors, the next setBreakpoints
+                    # round will resurface them.
+                    continue
+                var cond = self.dap.breakpoint_condition(e.path, e.line)
+                self.breakpoint_error.open(
+                    e.path, e.line, e.message, cond,
+                    self._snapshot_locals_for_dialog(),
+                )
+        # If a Try-again submit landed cleanly (no inflight setBp left
+        # and no error after this drain), close the dialog so the user
+        # gets feedback that their fix worked. Only fires when the
+        # ``_breakpoint_error_awaiting_response`` sentinel is True —
+        # without it we'd close the dialog on the same tick we opened
+        # it.
+        if self.breakpoint_error.active \
+                and self._breakpoint_error_awaiting_response \
+                and not self.dap.has_breakpoint_errors() \
+                and not self.dap.has_inflight_set_breakpoints():
+            self._breakpoint_error_awaiting_response = False
+            self.breakpoint_error.close()
         # Drain gutter clicks (one per editor) before recomputing
         # ``gutter_width`` below — so a click that creates the very first
         # breakpoint also makes the gutter appear on this same frame.
@@ -3624,7 +3771,10 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.gutter_width = 0
                 self.windows.windows[i].editor.exec_line = -1
                 continue
-            var bps = self.dap.breakpoints_for(path)
+            var info = self.dap.breakpoints_info_for(path)
+            var bps = info[0]
+            var bps_disabled = info[1]
+            var bps_conditional = info[2]
             var has_session = self.dap.is_active()
             var has_bps = len(bps) > 0
             if has_session or has_bps:
@@ -3632,6 +3782,10 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.gutter_width = 0
             self.windows.windows[i].editor.breakpoint_lines = bps^
+            self.windows.windows[i].editor.breakpoint_disabled = \
+                bps_disabled^
+            self.windows.windows[i].editor.breakpoint_conditional = \
+                bps_conditional^
             if _same_file(path, self._dap_exec_path):
                 self.windows.windows[i].editor.exec_line = \
                     self._dap_exec_line
@@ -3931,6 +4085,23 @@ struct Desktop(Movable):
             return
         var line = self.windows.windows[idx].editor.cursor_row
         self.dap.toggle_breakpoint(path, line)
+
+    fn _debug_run_to_cursor(mut self):
+        """Cmd+5: resume execution and stop at the focused editor's
+        cursor row. No-op when not paused / no focused editor / unsaved
+        file."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("debug: file has no path — save it first"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var line = self.windows.windows[idx].editor.cursor_row
+        _ = self.dap.run_to_cursor(path, line)
 
     fn _debug_start_or_continue(mut self):
         """F5: start a session if none is active, otherwise resume.
@@ -5634,6 +5805,105 @@ struct Desktop(Movable):
         var block = block_opt.value().copy()
         self.windows.windows[idx].editor.apply_revert_block(block^)
         self.windows.windows[idx].editor.invalidate_git_changes()
+
+    fn _maybe_open_breakpoint_menu(mut self):
+        """Drain ``Editor.consume_breakpoint_menu`` on every editor
+        window. Right-clicking a BP dot in the gutter sets the request;
+        we look up the BP's current state in the DAP manager and open
+        the dialog seeded with it."""
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var req_opt = self.windows.windows[i] \
+                .editor.consume_breakpoint_menu()
+            if not req_opt:
+                continue
+            var req = req_opt.value()
+            var path = self.windows.windows[i].editor.file_path
+            if len(path.as_bytes()) == 0:
+                continue
+            # Reject when no BP actually exists at that row — the editor
+            # only stamps requests over BP dots, but a race against a
+            # toggle-during-drag is in principle possible.
+            if not self.dap.has_breakpoint(path, req.row):
+                continue
+            var enabled = self.dap.breakpoint_enabled(path, req.row)
+            var cond = self.dap.breakpoint_condition(path, req.row)
+            self.breakpoint_menu.open(path, req.row, enabled, cond)
+
+    fn _on_breakpoint_menu_submit(mut self):
+        """Apply the right-click dialog's result, then close. The user
+        may have toggled enabled, edited the condition, or both — push
+        each change separately so a path that's already correct skips
+        the round-trip."""
+        var r = self.breakpoint_menu.result()
+        var path = self.breakpoint_menu.path
+        var line = self.breakpoint_menu.line
+        self.breakpoint_menu.close()
+        if not r.confirmed:
+            return
+        var cur_en = self.dap.breakpoint_enabled(path, line)
+        if cur_en != r.enabled:
+            self.dap.set_breakpoint_enabled(path, line, r.enabled)
+        var cur_cond = self.dap.breakpoint_condition(path, line)
+        if cur_cond != r.condition:
+            self.dap.set_breakpoint_condition(path, line, r.condition)
+
+    fn _on_breakpoint_error_submit(mut self):
+        """Resolve the condition-error dialog. Three buttons:
+          * Try again — apply the edited condition. The next
+            ``setBreakpoints`` response either lands clean (we close
+            via the early-out below when no error came back) or
+            re-arrives as another rejection (handled by the
+            ``take_breakpoint_errors`` poll in ``dap_tick``, which
+            calls ``set_error`` on this same dialog rather than
+            re-opening it).
+          * Disable & Continue — flip the BP off and resume the
+            program if it's currently paused.
+          * Cancel — close, leave the BP as the user originally
+            authored it (the failed condition stays on the BP, so a
+            later re-launch will re-error and the dialog will
+            re-open).
+        """
+        var act = self.breakpoint_error.action
+        var path = self.breakpoint_error.path
+        var line = self.breakpoint_error.line
+        var new_cond = self.breakpoint_error.condition.text
+        if act == BP_ERR_TRY:
+            # Apply the new condition; the manager pushes a fresh
+            # ``setBreakpoints``. The response either fires ``set_error``
+            # (still bad — dialog stays open) or arrives clean, in
+            # which case ``dap_tick`` notices "no inflight setBp, no
+            # new error" and closes the dialog. The "awaiting" sentinel
+            # is what lets the close branch fire only after a real
+            # round-trip — without it we'd close the dialog on the
+            # very tick we opened it.
+            self.dap.set_breakpoint_condition(path, line, new_cond)
+            self.breakpoint_error.submitted = False
+            self._breakpoint_error_awaiting_response = True
+            return
+        if act == BP_ERR_DISABLE:
+            self.dap.set_breakpoint_enabled(path, line, False)
+            if self.dap.is_stopped():
+                _ = self.dap.cont()
+        # Cancel falls through to close.
+        self._breakpoint_error_awaiting_response = False
+        self.breakpoint_error.close()
+
+    fn _snapshot_locals_for_dialog(self) -> List[String]:
+        """``name = value`` strings for the most recently fetched scope
+        load. The condition-error dialog shows these so the user can
+        gauge what's in scope while editing the bad condition.
+
+        Returns an empty list when no scope has been fetched (the
+        program isn't paused or hasn't reached a stop yet) — the
+        dialog renders ``(no locals — not paused at this BP)`` in
+        that case."""
+        var out = List[String]()
+        for i in range(len(self._dap_locals_cache)):
+            var v = self._dap_locals_cache[i]
+            out.append(v.name + String(" = ") + v.value)
+        return out^
 
     fn _maybe_open_spell_menu(mut self):
         """Drain ``Editor.consume_spell_action_request`` on the focused

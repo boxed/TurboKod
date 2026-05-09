@@ -165,7 +165,8 @@ from turbokod.events import (
     KEY_F5, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
@@ -2475,10 +2476,10 @@ fn test_nav_history_back_via_dispatch_action() raises:
 
 
 fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
-    """The Cmd+[ event arrives as ``(0x5B, MOD_CTRL)`` after the
-    META→CTRL fold (brackets aren't letters so the parser doesn't
-    collapse them to ESC). The hotkey table must turn those into
-    nav actions."""
+    """The Cmd+[ event arrives as ``(0x5B, MOD_META)`` — brackets aren't
+    letters so the parser doesn't collapse them to ESC, and Cmd is kept
+    distinct from Ctrl. The hotkey table must turn those into nav
+    actions."""
     var path_a = _temp_path(String("_nav_ka.txt"))
     var path_b = _temp_path(String("_nav_kb.txt"))
     assert_true(write_file(path_a, String("a\n")))
@@ -2491,10 +2492,10 @@ fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
     d._track_nav_position()
     d.open_file(path_b, _SCREEN)
     d._track_nav_position()
-    var back_ev = Event.key_event(UInt32(ord("[")), MOD_CTRL)
+    var back_ev = Event.key_event(UInt32(ord("[")), MOD_META)
     _ = d.handle_event(back_ev, _SCREEN)
     assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_a)
-    var fwd_ev = Event.key_event(UInt32(ord("]")), MOD_CTRL)
+    var fwd_ev = Event.key_event(UInt32(ord("]")), MOD_META)
     _ = d.handle_event(fwd_ev, _SCREEN)
     assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_b)
     _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
@@ -2503,22 +2504,41 @@ fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
 
 fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
     """Sanity-check: the terminal parser must NOT fold Cmd+[ down
-    to ESC. The brackets land on (0x5B, MOD_CTRL) so the desktop
-    hotkey table can pick them up — collapsing to 0x1B/MOD_NONE
-    would make Cmd+[ indistinguishable from the Esc key."""
-    # CSI 27 ; 9 ; 91 ~  — modifyOtherKeys=2 form for Cmd+[.
+    to ESC, AND must keep Cmd+ distinct from Ctrl+ on non-letter
+    keys — otherwise we couldn't bind Cmd+2 (step over) separately
+    from Ctrl+2 (focus window 2)."""
+    # CSI 27 ; 9 ; 91 ~  — modifyOtherKeys=2 form for Cmd+[. Lands
+    # as (0x5B, MOD_META): Cmd preserved (not folded to Ctrl on a
+    # non-letter), and not collapsed to ESC.
     var seq = String("\x1b[27;9;91~")
     var ev_consumed = parse_input(seq)
     assert_equal(ev_consumed[0].kind, EVENT_KEY)
     assert_equal(ev_consumed[0].key, UInt32(ord("[")))
-    assert_equal(ev_consumed[0].mods, MOD_CTRL)
-    # And Cmd+S still folds to the bare control byte (0x13) — the
-    # letter path is unchanged so existing Ctrl-letter hotkeys
-    # keep working.
+    assert_equal(ev_consumed[0].mods, MOD_META)
+    # Cmd+2 stays MOD_META too — no fold to Ctrl+2 on digits.
+    var seq_two = String("\x1b[27;9;50~")
+    var ev_two = parse_input(seq_two)
+    assert_equal(ev_two[0].key, UInt32(ord("2")))
+    assert_equal(ev_two[0].mods, MOD_META)
+    # Ctrl+2 (mod = 1 + 4 = 5) lands separately as MOD_CTRL.
+    var seq_ctrl_two = String("\x1b[27;5;50~")
+    var ev_ctrl_two = parse_input(seq_ctrl_two)
+    assert_equal(ev_ctrl_two[0].key, UInt32(ord("2")))
+    assert_equal(ev_ctrl_two[0].mods, MOD_CTRL)
+    # Cmd+S surfaces as (ord('s'), MOD_META) — no META→CTRL fold, so
+    # Cmd and Ctrl bindings stay separate. Ctrl+S (the bare control
+    # byte, see test below) is intentionally not bound by default.
     var seq_s = String("\x1b[27;9;115~")
     var ev_s = parse_input(seq_s)
-    assert_equal(ev_s[0].key, UInt32(0x13))
-    assert_equal(ev_s[0].mods, MOD_NONE)
+    assert_equal(ev_s[0].key, UInt32(ord("s")))
+    assert_equal(ev_s[0].mods, MOD_META)
+    # Ctrl+S delivered as the modifyOtherKeys form lands canonical:
+    # (ord('s'), MOD_CTRL). Same shape as Cmd+S above but with CTRL
+    # instead of META so the two are addressable separately.
+    var seq_ctrl_s = String("\x1b[27;5;115~")
+    var ev_ctrl_s = parse_input(seq_ctrl_s)
+    assert_equal(ev_ctrl_s[0].key, UInt32(ord("s")))
+    assert_equal(ev_ctrl_s[0].mods, MOD_CTRL)
 
 
 fn test_window_manager_close_focused() raises:
@@ -2544,7 +2564,11 @@ fn test_ctrl_n_focuses_window_by_number() raises:
     bare Ctrl+digit isn't representable as a control byte — but the
     parser already produces this form, and the hotkey table maps it to
     ``window:focus:N``. Crucially, ``windows`` itself stays in insertion
-    order across focus changes so the bindings remain stable."""
+    order across focus changes so the bindings remain stable.
+
+    The digits 0/2/4/5/6 ALSO have Cmd+ (MOD_META) bindings on the debug
+    actions; those stay distinct from Ctrl+ thanks to ``_normalize_ctrl_letter``
+    suppressing the META→CTRL fold for non-letters."""
     var d = Desktop()
     d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
@@ -2635,7 +2659,7 @@ fn test_window_menu_items_show_ctrl_n_shortcut() raises:
     assert_equal(menu.items[1].shortcut, String("Ctrl+2"))
 
 
-fn test_ctrl_w_closes_focused_window() raises:
+fn test_cmd_w_closes_focused_window() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("first"), Rect(0, 1, 40, 12), String("hello\n"),
@@ -2644,7 +2668,7 @@ fn test_ctrl_w_closes_focused_window() raises:
         String("second"), Rect(0, 1, 40, 12), String("world\n"),
     ))
     assert_equal(len(d.windows.windows), 2)
-    var ev = Event.key_event(ctrl_key(String("w")))
+    var ev = Event.key_event(UInt32(ord("w")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_false(Bool(maybe))
     assert_equal(len(d.windows.windows), 1)
@@ -2652,10 +2676,10 @@ fn test_ctrl_w_closes_focused_window() raises:
 
 
 fn test_format_hotkey_renders_combinations() raises:
-    # Control-character form for plain Ctrl+letter.
-    assert_equal(format_hotkey(ctrl_key(String("q")), MOD_NONE), String("Ctrl+Q"))
-    assert_equal(format_hotkey(ctrl_key(String("s")), MOD_NONE), String("Ctrl+S"))
-    # Modified-letter form for Ctrl+Shift combos.
+    # Plain Ctrl+letter — canonical form is (lowercase letter, MOD_CTRL).
+    assert_equal(format_hotkey(ctrl_key(String("q")), MOD_CTRL), String("Ctrl+Q"))
+    assert_equal(format_hotkey(ctrl_key(String("s")), MOD_CTRL), String("Ctrl+S"))
+    # Ctrl+Shift combos — same shape, with SHIFT in the mod set.
     assert_equal(
         format_hotkey(UInt32(ord("f")), MOD_CTRL | MOD_SHIFT),
         String("Ctrl+Shift+F"),
@@ -2683,9 +2707,9 @@ fn test_menu_items_get_shortcut_text_after_refresh() raises:
             break
     assert_true(file_idx >= 0)
     var fm = d.menu_bar.menus[file_idx]
-    assert_equal(fm.items[0].shortcut, String("Ctrl+S"))
-    assert_equal(fm.items[1].shortcut, String("Ctrl+Q"))
-    assert_equal(fm.items[2].shortcut, String("Ctrl+W"))
+    assert_equal(fm.items[0].shortcut, String("Cmd+S"))
+    assert_equal(fm.items[1].shortcut, String("Cmd+Q"))
+    assert_equal(fm.items[2].shortcut, String("Cmd+W"))
     # Item with no registered hotkey: empty.
     assert_equal(fm.items[3].shortcut, String(""))
 
@@ -2720,20 +2744,20 @@ fn test_dropdown_reserves_indent_for_checkable_items() raises:
 
 fn test_dropdown_widens_to_fit_shortcut() raises:
     """The dropdown rect must accommodate label + gap + shortcut; without
-    the widening, ``Ctrl+Shift+F`` would overlap the menu item label."""
+    the widening, ``Cmd+Shift+F`` would overlap the menu item label."""
     var bar = MenuBar()
     var items = List[MenuItem]()
     var save = MenuItem(String("Save"), EDITOR_SAVE)
-    save.shortcut = String("Ctrl+S")
+    save.shortcut = String("Cmd+S")
     items.append(save)
     var pf = MenuItem(String("Find in project..."), PROJECT_FIND)
-    pf.shortcut = String("Ctrl+Shift+F")
+    pf.shortcut = String("Cmd+Shift+F")
     items.append(pf)
     bar.add(Menu(String("Edit"), items^))
     bar.open_idx = 0
     var dr = bar._dropdown_rect(80)
     var widest_label = len(String("Find in project...").as_bytes())
-    var widest_sc = len(String("Ctrl+Shift+F").as_bytes())
+    var widest_sc = len(String("Cmd+Shift+F").as_bytes())
     # 2 (left pad) + label + 2 (gap) + shortcut + 2 (right pad)
     var expected_min_w = widest_label + widest_sc + 6
     assert_true(dr.b.x - dr.a.x >= expected_min_w)
@@ -2741,13 +2765,15 @@ fn test_dropdown_widens_to_fit_shortcut() raises:
 
 fn test_parse_csi_modify_other_keys_normalizes_ctrl_q() raises:
     """``ESC[27;5;113~`` (xterm modifyOtherKeys=2 form for Ctrl+Q) parses
-    to ``(0x11, MOD_NONE)`` — the same form we get on terminals that send
-    Ctrl+Q as a bare control byte. Without this fix the parser dropped
-    only ``ESC[27;5;`` and the trailing ``113~`` leaked into the editor."""
+    to the canonical ``(ord('q'), MOD_CTRL)``. Bare-byte Ctrl+Q from
+    terminals without modifyOtherKeys lands at the same shape via the
+    parser's bare-byte → ``(letter, MOD_CTRL)`` promotion. Without
+    this normalization the parser dropped only ``ESC[27;5;`` and the
+    trailing ``113~`` leaked into the editor."""
     var ev = parse_input(String("\x1b[27;5;113~"))
     assert_true(ev[0].kind == EVENT_KEY)
-    assert_equal(Int(ev[0].key), 0x11)
-    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+    assert_equal(Int(ev[0].key), Int(ord("q")))
+    assert_equal(Int(ev[0].mods), Int(MOD_CTRL))
     assert_equal(ev[1], len(String("\x1b[27;5;113~").as_bytes()))
 
 
@@ -2761,19 +2787,18 @@ fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
     assert_true((ev[0].mods & MOD_SHIFT) != 0)
 
 
-fn test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f() raises:
+fn test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta() raises:
     """``ESC[27;10;102~`` is the meta-bit form (mod = 1 + 1 + 8) of
-    Cmd+Shift+F. The framework treats Cmd as Ctrl across the board, so
-    this collapses to ``(ord('f'), MOD_CTRL|MOD_SHIFT)`` — the exact
-    event Ctrl+Shift+F produces, so a single hotkey registration covers
-    both modifier flavors. Without this fold the keystroke fell through
-    to the focused editor and got typed as 'f'."""
+    Cmd+Shift+F. With no META→CTRL fold, this surfaces as
+    ``(ord('f'), MOD_META|MOD_SHIFT)`` and binds to PROJECT_FIND
+    (Cmd+Shift+F). Ctrl+Shift+F is *not* bound — Ctrl is reserved for
+    navigation."""
     var ev = parse_input(String("\x1b[27;10;102~"))
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), Int(ord("f")))
-    assert_true((ev[0].mods & MOD_CTRL) != 0)
+    assert_true((ev[0].mods & MOD_META) != 0)
     assert_true((ev[0].mods & MOD_SHIFT) != 0)
-    assert_true((ev[0].mods & MOD_META) == 0)
+    assert_true((ev[0].mods & MOD_CTRL) == 0)
 
 
 fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
@@ -2844,38 +2869,40 @@ fn test_parse_osc_partial_defers() raises:
     assert_equal(ev[1], 0)
 
 
-fn test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form() raises:
+fn test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
     """``ESC[27;9;115~`` is the meta-bit form (mod = 1 + 8) of Cmd+S that
-    the native Rust host emits for ``super_key()``. The framework folds
-    it onto the same ``(0x13, MOD_NONE)`` event that Ctrl+S produces, so
-    a single hotkey registration covers both modifiers."""
+    the native Rust host emits for ``super_key()``. After we removed the
+    META→CTRL fold, the parser surfaces it as ``(ord('s'), MOD_META)``
+    so Cmd+S and Ctrl+S can be bound to different actions."""
     var ev = parse_input(String("\x1b[27;9;115~"))
     assert_true(ev[0].kind == EVENT_KEY)
-    assert_equal(Int(ev[0].key), 0x13)
-    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+    assert_equal(Int(ev[0].key), Int(ord("s")))
+    assert_equal(Int(ev[0].mods), Int(MOD_META))
 
 
 fn test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
     """Cmd+\\` arrives as ``ESC[27;9;96~`` (mod=9 → meta-only, cp=0x60).
     Backtick is *not* a letter, so the Ctrl+letter→control-byte fold
     must skip it — otherwise it would collapse to ``(0, MOD_NONE)``,
-    indistinguishable from KEY_NONE. The event must keep its 0x60 key
-    code with the META→CTRL fold preserved on ``mods`` so hotkey
-    tables can bind to ``(ord('\\`'), MOD_CTRL)``."""
+    indistinguishable from KEY_NONE. The event keeps its 0x60 key code
+    with MOD_META intact (no fold to MOD_CTRL on non-letters), so
+    hotkey tables can bind Cmd+\\` separately from Ctrl+\\`."""
     var ev = parse_input(String("\x1b[27;9;96~"))
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), 0x60)
-    assert_equal(Int(ev[0].mods), Int(MOD_CTRL))
+    assert_equal(Int(ev[0].mods), Int(MOD_META))
 
 
 fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
-    """End-to-end: a Cmd+S event delivered as ``CSI 27;9;115~`` is folded
-    by the terminal parser onto Ctrl+S and triggers ``EDITOR_SAVE`` —
-    same dispatch as if the user had pressed Ctrl+S."""
+    """End-to-end: a Cmd+S event delivered as ``CSI 27;9;115~`` parses as
+    ``(ord('s'), MOD_META)`` and triggers ``EDITOR_SAVE`` via the Cmd+S
+    binding. Ctrl+S is intentionally *not* bound — Ctrl is reserved for
+    window/panel focus."""
     var d = Desktop()
     var parsed = parse_input(String("\x1b[27;9;115~"))
     assert_true(parsed[0].kind == EVENT_KEY)
-    assert_equal(Int(parsed[0].key), 0x13)
+    assert_equal(Int(parsed[0].key), Int(ord("s")))
+    assert_equal(Int(parsed[0].mods), Int(MOD_META))
     var maybe = d.handle_event(parsed[0], _SCREEN)
     # No editor focused → save is a no-op intercepted by Desktop. The
     # important assertion is that the action *was* recognized: nothing
@@ -2885,11 +2912,11 @@ fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
 
 fn test_parse_csi_kitty_u_ctrl_letter() raises:
     """Kitty kbd protocol: ``CSI <cp> ; <mod> u``. ``ESC[113;5u`` (Ctrl+Q)
-    parses with the same control-char normalization."""
+    parses to the canonical ``(ord('q'), MOD_CTRL)``."""
     var ev = parse_input(String("\x1b[113;5u"))
     assert_true(ev[0].kind == EVENT_KEY)
-    assert_equal(Int(ev[0].key), 0x11)
-    assert_equal(Int(ev[0].mods), Int(MOD_NONE))
+    assert_equal(Int(ev[0].key), Int(ord("q")))
+    assert_equal(Int(ev[0].mods), Int(MOD_CTRL))
 
 
 fn test_editor_rejects_modified_letter_typing() raises:
@@ -2906,17 +2933,17 @@ fn test_editor_rejects_modified_letter_typing() raises:
     assert_equal(ed.buffer.line(0), String("helloQ"))
 
 
-fn test_ctrl_q_modifyOtherKeys_triggers_quit_action() raises:
-    """End-to-end: a Ctrl+Q event delivered as the modifyOtherKeys form
-    is normalized by the parser and matched by the default Ctrl+Q hotkey.
-    The Desktop returns APP_QUIT_ACTION; nothing is inserted into the
-    focused editor."""
+fn test_cmd_q_modifyOtherKeys_triggers_quit_action() raises:
+    """End-to-end: a Cmd+Q event delivered as the modifyOtherKeys form
+    parses to ``(ord('q'), MOD_META)`` and matches the default Cmd+Q
+    hotkey. The Desktop returns APP_QUIT_ACTION; nothing is inserted
+    into the focused editor."""
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("hello\n"),
     ))
-    # Synthesize what parse_input would produce for ESC[27;5;113~.
-    var parsed = parse_input(String("\x1b[27;5;113~"))
+    # ESC[27;9;113~ — modifyOtherKeys=2 form for Cmd+Q (mod = 1 + 8).
+    var parsed = parse_input(String("\x1b[27;9;113~"))
     assert_true(parsed[0].kind == EVENT_KEY)
     var maybe = d.handle_event(parsed[0], _SCREEN)
     assert_true(Bool(maybe))
@@ -2926,13 +2953,14 @@ fn test_ctrl_q_modifyOtherKeys_triggers_quit_action() raises:
 
 
 fn test_ctrl_key_helper() raises:
-    """``Ctrl+letter`` arrives as a control character on most terminals;
-    ``ctrl_key`` produces the matching codepoint."""
-    assert_equal(Int(ctrl_key(String("q"))), 0x11)
-    assert_equal(Int(ctrl_key(String("Q"))), 0x11)
-    assert_equal(Int(ctrl_key(String("a"))), 0x01)
-    assert_equal(Int(ctrl_key(String("z"))), 0x1A)
-    assert_equal(Int(ctrl_key(String("f"))), 0x06)
+    """``ctrl_key`` returns the canonical key codepoint for a
+    ``Ctrl+letter`` hotkey: the lowercase letter codepoint (paired
+    with ``MOD_CTRL`` at registration)."""
+    assert_equal(Int(ctrl_key(String("q"))), Int(ord("q")))
+    assert_equal(Int(ctrl_key(String("Q"))), Int(ord("q")))  # case-folded
+    assert_equal(Int(ctrl_key(String("a"))), Int(ord("a")))
+    assert_equal(Int(ctrl_key(String("z"))), Int(ord("z")))
+    assert_equal(Int(ctrl_key(String("f"))), Int(ord("f")))
 
 
 fn test_menu_keyboard_nav_arrows_and_enter() raises:
@@ -3079,28 +3107,28 @@ fn test_top_level_esc_does_not_quit() raises:
     assert_false(d.menu_bar.is_open())
 
 
-fn test_default_hotkey_ctrl_q_returns_quit() raises:
+fn test_default_hotkey_cmd_q_returns_quit() raises:
     var d = Desktop()
-    var ev = Event.key_event(ctrl_key(String("q")))
+    var ev = Event.key_event(UInt32(ord("q")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), APP_QUIT_ACTION)
 
 
-fn test_default_hotkey_ctrl_f_opens_find_prompt() raises:
+fn test_default_hotkey_cmd_f_opens_find_prompt() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("hello\n"),
     ))
     assert_false(d.prompt.active)
-    var ev = Event.key_event(ctrl_key(String("f")))
+    var ev = Event.key_event(UInt32(ord("f")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     # Framework intercepted the hotkey; nothing for the caller to dispatch.
     assert_false(Bool(maybe))
     assert_true(d.prompt.active)
 
 
-fn test_default_hotkey_ctrl_s_saves_focused_editor() raises:
+fn test_default_hotkey_cmd_s_saves_focused_editor() raises:
     var path = _temp_path(String("_hkeys.txt"))
     assert_true(write_file(path, String("hello\n")))
     var d = Desktop()
@@ -3112,7 +3140,7 @@ fn test_default_hotkey_ctrl_s_saves_focused_editor() raises:
         Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
     )
     assert_true(d.windows.windows[0].editor.dirty)
-    var ev = Event.key_event(ctrl_key(String("s")))
+    var ev = Event.key_event(UInt32(ord("s")), MOD_META)
     _ = d.handle_event(ev, _SCREEN)
     assert_false(d.windows.windows[0].editor.dirty)
     assert_equal(read_file(path), String("hello!\n"))
@@ -3123,10 +3151,10 @@ fn test_hotkey_overrides_default_when_registered_later() raises:
     """Registrations are scanned newest-first, so a later-registered binding
     for the same key/mods pair wins."""
     var d = Desktop()
-    # Bind Ctrl+Q to a custom app action; the default (APP_QUIT_ACTION)
+    # Bind Cmd+Q to a custom app action; the default (APP_QUIT_ACTION)
     # should no longer fire.
-    d.register_hotkey(ctrl_key(String("q")), MOD_NONE, String("custom:thing"))
-    var ev = Event.key_event(ctrl_key(String("q")))
+    d.register_hotkey(UInt32(ord("q")), MOD_META, String("custom:thing"))
+    var ev = Event.key_event(UInt32(ord("q")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), String("custom:thing"))
@@ -3136,8 +3164,8 @@ fn test_hotkey_does_not_fire_while_prompt_active() raises:
     """Prompt modal keys must reach the prompt, not the hotkey table."""
     var d = Desktop()
     d.prompt.open(String("Find: "))
-    # Without the modal-prompt guard, Ctrl+Q here would return APP_QUIT.
-    var ev = Event.key_event(ctrl_key(String("q")))
+    # Without the modal-prompt guard, Cmd+Q here would return APP_QUIT.
+    var ev = Event.key_event(UInt32(ord("q")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_false(Bool(maybe))
     assert_true(d.prompt.active)
@@ -4851,31 +4879,31 @@ fn _starts_with(s: String, prefix: String) -> Bool:
     return True
 
 
-fn test_ctrl_o_bubbles_file_open() raises:
+fn test_cmd_o_bubbles_file_open() raises:
     """Cmd+O always bubbles ``EDITOR_OPEN`` up to the host so the
     framework's ``FileDialog`` can be used; the project-aware Quick
     Open picker is on Cmd+Shift+O."""
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
-    var ev = Event.key_event(ctrl_key(String("o")))
+    var ev = Event.key_event(UInt32(ord("o")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), EDITOR_OPEN)
     assert_false(d.quick_open.active)
 
 
-fn test_ctrl_shift_o_opens_quick_open_when_project_active() raises:
+fn test_cmd_shift_o_opens_quick_open_when_project_active() raises:
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
-    var ev = Event.key_event(UInt32(ord("o")), MOD_CTRL | MOD_SHIFT)
+    var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_false(Bool(maybe))
     assert_true(d.quick_open.active)
 
 
-fn test_ctrl_shift_o_bubbles_when_no_project() raises:
+fn test_cmd_shift_o_bubbles_when_no_project() raises:
     var d = Desktop()
-    var ev = Event.key_event(UInt32(ord("o")), MOD_CTRL | MOD_SHIFT)
+    var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), EDITOR_QUICK_OPEN)
@@ -6382,6 +6410,68 @@ fn test_dap_manager_breakpoint_toggle() raises:
     assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 12))
 
 
+fn test_dap_manager_breakpoint_enabled_default_and_toggle() raises:
+    """New breakpoints default to enabled. ``set_breakpoint_enabled``
+    flips the flag; the BP stays in the list (so the gutter still
+    shows it) but is omitted from ``setBreakpoints`` payloads."""
+    var mgr = DapManager()
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 7)
+    assert_true(mgr.breakpoint_enabled(String("/tmp/x.py"), 7))
+    mgr.set_breakpoint_enabled(String("/tmp/x.py"), 7, False)
+    assert_false(mgr.breakpoint_enabled(String("/tmp/x.py"), 7))
+    # Disabled BP stays in the list — the gutter still draws it gray.
+    assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 7))
+    mgr.set_breakpoint_enabled(String("/tmp/x.py"), 7, True)
+    assert_true(mgr.breakpoint_enabled(String("/tmp/x.py"), 7))
+
+
+fn test_dap_manager_breakpoints_info_for() raises:
+    """``breakpoints_info_for`` returns parallel lines / enabled /
+    conditional lists for one path. The editor uses these to colour
+    the gutter dot per-row."""
+    var mgr = DapManager()
+    mgr.toggle_breakpoint(String("/tmp/a.py"), 1)
+    mgr.toggle_breakpoint(String("/tmp/a.py"), 2)
+    mgr.set_breakpoint_condition(String("/tmp/a.py"), 2, String("i > 0"))
+    mgr.toggle_breakpoint(String("/tmp/a.py"), 3)
+    mgr.set_breakpoint_enabled(String("/tmp/a.py"), 3, False)
+    var info = mgr.breakpoints_info_for(String("/tmp/a.py"))
+    assert_equal(len(info[0]), 3)
+    assert_equal(info[0][0], 1)
+    assert_true(info[1][0])    # enabled
+    assert_false(info[2][0])   # not conditional
+    assert_equal(info[0][1], 2)
+    assert_true(info[1][1])
+    assert_true(info[2][1])    # conditional
+    assert_equal(info[0][2], 3)
+    assert_false(info[1][2])   # disabled
+    assert_false(info[2][2])
+
+
+fn test_editor_right_click_on_breakpoint_emits_menu_request() raises:
+    """Right-click in the gutter over a row that has a breakpoint
+    surfaces a ``BreakpointMenuRequest``. A right-click on a gutter
+    row *without* a breakpoint is a no-op."""
+    var ed = Editor(String("a\nb\nc\nd\n"))
+    ed.gutter_width = 2
+    var lines = List[Int]()
+    lines.append(2)
+    ed.breakpoint_lines = lines^
+    var view = Rect(0, 0, 40, 6)
+    var ev_hit = Event.mouse_event(
+        Point(0, 2), MOUSE_BUTTON_RIGHT, True, False,
+    )
+    _ = ed.handle_mouse(ev_hit, view)
+    var req = ed.consume_breakpoint_menu()
+    assert_true(Bool(req))
+    assert_equal(req.value().row, 2)
+    var ev_miss = Event.mouse_event(
+        Point(0, 1), MOUSE_BUTTON_RIGHT, True, False,
+    )
+    _ = ed.handle_mouse(ev_miss, view)
+    assert_false(Bool(ed.consume_breakpoint_menu()))
+
+
 fn test_project_targets_load_parses_fields() raises:
     """A minimal config with one run-only and one run+debug target
     must round-trip through the loader with all fields populated."""
@@ -6883,10 +6973,18 @@ fn test_debug_pane_run_mode_uses_full_height_for_output() raises:
 
 
 fn test_debug_pane_debug_mode_keeps_output_divider() raises:
-    """DEBUG mode still paints the ``─ Output ─`` divider so the
-    inspect column reads as a separate section above the log."""
+    """DEBUG mode with inspect content paints the ``─ Output ─`` divider
+    so the Stack / Locals columns read as a separate section above the
+    log."""
     var pane = DebugPane()
     pane.visible = True
+    var frames = List[DapStackFrame]()
+    frames.append(DapStackFrame(1, String("main"), String("/tmp/foo.py"), 41, 0))
+    var locals = List[DapVariable]()
+    pane.rebuild_inspect(
+        frames^, String("Locals"), locals^,
+        String("Watches"), List[String](), 0,
+    )
     pane.append_output(String("debug output"))
     var c = Canvas(40, 12)
     pane.paint(c, Rect(0, 0, 40, 12))
@@ -6897,6 +6995,24 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
                 and c.get(5, y).glyph == String("t"):
             found = True
     assert_true(found)
+
+
+fn test_debug_pane_debug_mode_running_hides_inspect() raises:
+    """DEBUG mode with no inspect rows (the program is running but not
+    paused) drops the Stack / Locals columns and the ``─ Output ─``
+    divider — same layout as RUN mode. Until a ``stopped`` event fires
+    there's no frame data to show, so painting the section headers
+    above empty columns just wastes screen space."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.append_output(String("debug output"))
+    var c = Canvas(40, 12)
+    pane.paint(c, Rect(0, 0, 40, 12))
+    for y in range(2, 12):
+        if c.get(3, y).glyph == String("O") \
+                and c.get(4, y).glyph == String("u") \
+                and c.get(5, y).glyph == String("t"):
+            assert_true(False)
 
 
 fn _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
@@ -7931,13 +8047,17 @@ fn test_text_field_clipboard_key_ignores_printable() raises:
 
 fn test_text_field_clipboard_key_ctrl_x_clears_text() raises:
     var text = String("delete me")
-    var r = text_field_clipboard_key(Event.key_event(UInt32(0x18)), text)
+    var r = text_field_clipboard_key(
+        Event.key_event(UInt32(ord("x")), MOD_CTRL), text,
+    )
     assert_true(r.consumed)
     assert_true(r.changed)
     assert_equal(text, String(""))
     # A second Ctrl+X on the now-empty field still consumes the keystroke
     # but reports nothing changed (no spurious refilters / dirty marks).
-    var r2 = text_field_clipboard_key(Event.key_event(UInt32(0x18)), text)
+    var r2 = text_field_clipboard_key(
+        Event.key_event(UInt32(ord("x")), MOD_CTRL), text,
+    )
     assert_true(r2.consumed)
     assert_false(r2.changed)
 
@@ -7948,9 +8068,13 @@ fn test_text_field_clipboard_key_round_trips_through_clipboard() raises:
     end-to-end framework path; relies on the platform's clipboard
     helper (pbcopy/pbpaste on macOS) being available."""
     var src = String("payload-from-ctrl-x")
-    _ = text_field_clipboard_key(Event.key_event(UInt32(0x18)), src)
+    _ = text_field_clipboard_key(
+        Event.key_event(UInt32(ord("x")), MOD_CTRL), src,
+    )
     var dst = String("")
-    var r = text_field_clipboard_key(Event.key_event(UInt32(0x16)), dst)
+    var r = text_field_clipboard_key(
+        Event.key_event(UInt32(ord("v")), MOD_CTRL), dst,
+    )
     assert_true(r.consumed)
     assert_true(r.changed)
     assert_equal(dst, String("payload-from-ctrl-x"))
@@ -8053,13 +8177,13 @@ fn test_breakpoint_store_round_trip() raises:
     )
     var bps = List[StoredBreakpoint]()
     bps.append(StoredBreakpoint(
-        root + String("/src/foo.mojo"), 41, String(""),
+        root + String("/src/foo.mojo"), 41, String(""), True,
     ))
     bps.append(StoredBreakpoint(
-        root + String("/src/foo.mojo"), 87, String("i > 10"),
+        root + String("/src/foo.mojo"), 87, String("i > 10"), True,
     ))
     bps.append(StoredBreakpoint(
-        String("/etc/hosts"), 0, String(""),
+        String("/etc/hosts"), 0, String(""), False,
     ))
     assert_true(save_breakpoints(root, bps))
     var loaded = load_breakpoints(root)
@@ -8069,12 +8193,16 @@ fn test_breakpoint_store_round_trip() raises:
     assert_equal(loaded[0].path, root + String("/src/foo.mojo"))
     assert_equal(loaded[0].line, 41)
     assert_equal(loaded[0].condition, String(""))
+    assert_true(loaded[0].enabled)
     assert_equal(loaded[1].path, root + String("/src/foo.mojo"))
     assert_equal(loaded[1].line, 87)
     assert_equal(loaded[1].condition, String("i > 10"))
+    assert_true(loaded[1].enabled)
     # Outside the project — kept absolute on disk, loaded verbatim.
+    # The disabled flag round-trips so a parked BP stays parked.
     assert_equal(loaded[2].path, String("/etc/hosts"))
     assert_equal(loaded[2].line, 0)
+    assert_false(loaded[2].enabled)
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -8104,7 +8232,7 @@ fn test_breakpoint_store_per_user_path() raises:
     _ = external_call["putenv", Int32](user_env.unsafe_ptr())
     var bps = List[StoredBreakpoint]()
     bps.append(StoredBreakpoint(
-        root + String("/main.py"), 7, String(""),
+        root + String("/main.py"), 7, String(""), True,
     ))
     assert_true(save_breakpoints(root, bps))
     var expected = root + String("/.turbokod/per_user/alice_test/breakpoints.json")
@@ -10791,9 +10919,9 @@ fn main() raises:
     test_quick_open_match_case_and_separator_shapes()
     test_quick_open_slash_in_query_requires_directory_separator()
     test_quick_open_filters_as_you_type()
-    test_ctrl_o_bubbles_file_open()
-    test_ctrl_shift_o_opens_quick_open_when_project_active()
-    test_ctrl_shift_o_bubbles_when_no_project()
+    test_cmd_o_bubbles_file_open()
+    test_cmd_shift_o_opens_quick_open_when_project_active()
+    test_cmd_shift_o_bubbles_when_no_project()
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
@@ -10822,17 +10950,17 @@ fn main() raises:
     test_window_manager_rotate_focus_cycles_in_stable_order()
     test_window_manager_rotate_focus_noop_when_fewer_than_two_windows()
     test_window_menu_items_show_ctrl_n_shortcut()
-    test_ctrl_w_closes_focused_window()
+    test_cmd_w_closes_focused_window()
     test_format_hotkey_renders_combinations()
     test_menu_items_get_shortcut_text_after_refresh()
     test_dropdown_widens_to_fit_shortcut()
     test_dropdown_reserves_indent_for_checkable_items()
     test_parse_csi_modify_other_keys_normalizes_ctrl_q()
-    test_parse_csi_modify_other_keys_cmd_letter_folds_onto_ctrl_form()
+    test_parse_csi_modify_other_keys_cmd_letter_keeps_meta()
     test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact()
     test_cmd_s_via_modify_other_keys_triggers_save_hotkey()
     test_parse_csi_modify_other_keys_ctrl_shift_f()
-    test_parse_csi_modify_other_keys_cmd_shift_f_folds_onto_ctrl_shift_f()
+    test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta()
     test_parse_csi_unknown_sequence_is_consumed_whole()
     test_parse_osc_open_path_emits_event_open_path()
     test_parse_osc_open_path_with_line_suffix()
@@ -10841,16 +10969,16 @@ fn main() raises:
     test_parse_osc_partial_defers()
     test_parse_csi_kitty_u_ctrl_letter()
     test_editor_rejects_modified_letter_typing()
-    test_ctrl_q_modifyOtherKeys_triggers_quit_action()
+    test_cmd_q_modifyOtherKeys_triggers_quit_action()
     test_ctrl_key_helper()
     test_menu_keyboard_nav_arrows_and_enter()
     test_alt_letter_opens_menu_by_mnemonic()
     test_esc_prefix_opens_menu_by_mnemonic()
     test_esc_prefix_disarms_after_one_keystroke()
     test_top_level_esc_does_not_quit()
-    test_default_hotkey_ctrl_q_returns_quit()
-    test_default_hotkey_ctrl_f_opens_find_prompt()
-    test_default_hotkey_ctrl_s_saves_focused_editor()
+    test_default_hotkey_cmd_q_returns_quit()
+    test_default_hotkey_cmd_f_opens_find_prompt()
+    test_default_hotkey_cmd_s_saves_focused_editor()
     test_hotkey_overrides_default_when_registered_later()
     test_hotkey_does_not_fire_while_prompt_active()
     test_desktop_project_find_requires_active_project()
@@ -10926,6 +11054,9 @@ fn main() raises:
     test_dap_launch_arguments_for_debugpy_skips_flag_args()
     test_dap_launch_arguments_for_delve()
     test_dap_manager_breakpoint_toggle()
+    test_dap_manager_breakpoint_enabled_default_and_toggle()
+    test_dap_manager_breakpoints_info_for()
+    test_editor_right_click_on_breakpoint_emits_menu_request()
     test_project_targets_load_parses_fields()
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
@@ -10944,6 +11075,7 @@ fn main() raises:
     test_debug_pane_run_mode_hides_inspect_divider()
     test_debug_pane_run_mode_uses_full_height_for_output()
     test_debug_pane_debug_mode_keeps_output_divider()
+    test_debug_pane_debug_mode_running_hides_inspect()
     test_debug_pane_traceback_link_underlines_span()
     test_debug_pane_plain_output_has_no_link_styling()
     test_debug_pane_click_on_traceback_link_sets_pending_open()

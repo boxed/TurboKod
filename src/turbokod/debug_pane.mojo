@@ -704,16 +704,20 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # Compute the inspect/output split. In RUN mode the inspect
         # section would always be empty (no DAP stack frames to show),
         # so the pane collapses to Output-only and gives the full
-        # content area to the log. In DEBUG mode we keep the original
-        # 60% / 40% split with at least 2 output rows when the pane
-        # is taller than 6.
+        # content area to the log. Same applies in DEBUG mode while the
+        # program is running but not paused — ``rows`` is empty until a
+        # ``stopped`` event arrives, so showing the Stack / Locals
+        # headers above blank columns just wastes space. In DEBUG mode
+        # *with* inspect rows we keep the original 60% / 40% split with
+        # at least 2 output rows when the pane is taller than 6.
         var content_top = top + 2
         var content_h = panel.b.y - content_top
         if content_h < 1:
             return
+        var show_inspect = self.mode == PANE_MODE_DEBUG and len(self.rows) > 0
         var output_h: Int
         var inspect_h: Int
-        if self.mode == PANE_MODE_RUN:
+        if not show_inspect:
             output_h = content_h
             inspect_h = 0
         else:
@@ -824,12 +828,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
-        # Inspect / output divider — only meaningful in DEBUG mode.
-        # In RUN mode there's no inspect section to divide off, and
-        # the top title already says "Run", so the row is dropped and
-        # output starts immediately under the status row.
+        # Inspect / output divider — only meaningful when an inspect
+        # section is actually being shown. In RUN mode there's no
+        # inspect section to divide off, and likewise in DEBUG mode
+        # while the program is running (rows empty), so we drop the
+        # divider and output starts immediately under the status row.
         var out_top: Int
-        if self.mode == PANE_MODE_RUN:
+        if not show_inspect:
             out_top = content_top
         else:
             var div_y = content_top + inspect_h

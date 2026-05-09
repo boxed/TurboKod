@@ -147,6 +147,18 @@ struct DapVariable(ImplicitlyCopyable, Movable):
     var variables_reference: Int
 
 
+@fieldwise_init
+struct DapBreakpointError(ImplicitlyCopyable, Movable):
+    """Surfaced when the adapter rejects a breakpoint — most often a
+    bad ``condition`` expression. ``path`` / ``line`` identify the BP
+    in our local list (0-based line). ``message`` is the adapter's
+    human text. The host pops these via ``take_breakpoint_errors`` and
+    opens the condition-fix dialog."""
+    var path: String
+    var line: Int
+    var message: String
+
+
 # --- SubprocessAttach -----------------------------------------------------
 # debugpy's subprocess-attach flow: when the debuggee forks, debugpy emits a
 # ``debugpyAttach`` event with a TCP host/port and a ``subProcessId``. The
@@ -188,6 +200,7 @@ struct SubprocessAttach(Copyable, Movable):
     var bp_paths: List[String]
     var bp_lines: List[Int]
     var bp_conditions: List[String]
+    var bp_enabled: List[Bool]
 
     fn __init__(out self):
         # Inert default — ``state == _STATE_NOT_STARTED`` is the sentinel
@@ -210,6 +223,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.bp_paths = List[String]()
         self.bp_lines = List[Int]()
         self.bp_conditions = List[String]()
+        self.bp_enabled = List[Bool]()
 
     fn __copyinit__(out self, copy: Self):
         # Same caveat as ``DapManager.__copyinit__``: a real copy would
@@ -231,6 +245,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.bp_paths = List[String]()
         self.bp_lines = List[Int]()
         self.bp_conditions = List[String]()
+        self.bp_enabled = List[Bool]()
 
 
 # --- DapManager -----------------------------------------------------------
@@ -279,6 +294,23 @@ struct DapManager(Copyable, Movable):
     var _bp_path: List[String]
     var _bp_line: List[Int]        # 0-based
     var _bp_condition: List[String]
+    # Per-BP enable flag. False marks a "parked" breakpoint — it stays
+    # in the list (and on disk via ``breakpoint_store``) so the user
+    # doesn't lose the row + condition, but it's stripped from
+    # ``setBreakpoints`` payloads so the adapter never fires it.
+    var _bp_enabled: List[Bool]
+    # Demux table for ``setBreakpoints`` responses. Each entry parks
+    # the source path of a sent request; the response carries a
+    # parallel ``breakpoints`` array we line up by index against the
+    # local rows for that path. Without tracking these we can't tell
+    # *which* file's BPs the adapter just verified — and without that
+    # we can't surface a per-BP "verified=false, message=..." back to
+    # the user as a condition error.
+    var _inflight_set_breakpoints_seqs: List[Int]
+    var _inflight_set_breakpoints_paths: List[String]
+    # Buffer of breakpoint errors surfaced via ``take_breakpoint_errors``.
+    # Single drain per frame; entries describe one rejected BP each.
+    var _bp_errors: List[DapBreakpointError]
     # Exception filters to enable on the next ``setExceptionBreakpoints``
     # call. ``"uncaught"`` and ``"raised"`` are the canonical filter ids
     # most adapters accept; we let callers configure freely without
@@ -363,6 +395,15 @@ struct DapManager(Copyable, Movable):
     # of 1 silently turns Step Over into Continue.
     var _last_stopped_thread_id: Int
 
+    # One-shot breakpoint backing "run to cursor". DAP has no native
+    # one-shot, so we inject this into the next ``setBreakpoints`` for
+    # the path and clear it on the next ``stopped`` event (re-pushing
+    # ``setBreakpoints`` to scrub the adapter side). Empty path = no
+    # oneshot. Coexists with a regular BP at the same line — we suppress
+    # the duplicate in ``_send_set_breakpoints``.
+    var _oneshot_bp_path: String
+    var _oneshot_bp_line: Int
+
     fn __init__(out self):
         self.client = DapClient(LspProcess())
         self.state = _STATE_NOT_STARTED
@@ -383,6 +424,10 @@ struct DapManager(Copyable, Movable):
         self._bp_path = List[String]()
         self._bp_line = List[Int]()
         self._bp_condition = List[String]()
+        self._bp_enabled = List[Bool]()
+        self._inflight_set_breakpoints_seqs = List[Int]()
+        self._inflight_set_breakpoints_paths = List[String]()
+        self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
@@ -410,6 +455,8 @@ struct DapManager(Copyable, Movable):
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
         self._last_stopped_thread_id = 0
+        self._oneshot_bp_path = String("")
+        self._oneshot_bp_line = -1
 
     fn __copyinit__(out self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
@@ -437,6 +484,10 @@ struct DapManager(Copyable, Movable):
         self._bp_path = List[String]()
         self._bp_line = List[Int]()
         self._bp_condition = List[String]()
+        self._bp_enabled = List[Bool]()
+        self._inflight_set_breakpoints_seqs = List[Int]()
+        self._inflight_set_breakpoints_paths = List[String]()
+        self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
@@ -464,6 +515,8 @@ struct DapManager(Copyable, Movable):
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
         self._last_stopped_thread_id = 0
+        self._oneshot_bp_path = String("")
+        self._oneshot_bp_line = -1
 
     # --- state predicates ------------------------------------------------
 
@@ -636,6 +689,8 @@ struct DapManager(Copyable, Movable):
         self._last_stopped_thread_id = 0
         self._last_inspect_in_subprocess = False
         self._continued_pending = False
+        self._oneshot_bp_path = String("")
+        self._oneshot_bp_line = -1
         # Tear down any attached subprocess too — its socket points at
         # the parent debugpy we just terminated, so leaving it around
         # would just spew read-EOF noise.
@@ -682,6 +737,9 @@ struct DapManager(Copyable, Movable):
         self._supports_terminate_request = False
         self._got_initialized_event = False
         self._launch_request_kind = DAP_REQUEST_LAUNCH
+        self._inflight_set_breakpoints_seqs = List[Int]()
+        self._inflight_set_breakpoints_paths = List[String]()
+        self._bp_errors = List[DapBreakpointError]()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
         self._evaluations_expr = List[String]()
@@ -708,6 +766,8 @@ struct DapManager(Copyable, Movable):
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False
         self._last_stopped_thread_id = 0
+        self._oneshot_bp_path = String("")
+        self._oneshot_bp_line = -1
 
     # --- breakpoints -----------------------------------------------------
 
@@ -732,6 +792,7 @@ struct DapManager(Copyable, Movable):
             self._bp_path.append(path)
             self._bp_line.append(line)
             self._bp_condition.append(String(""))
+            self._bp_enabled.append(True)
         self._push_breakpoints_for_path(path)
 
     fn set_breakpoint_condition(
@@ -750,9 +811,25 @@ struct DapManager(Copyable, Movable):
             self._bp_path.append(path)
             self._bp_line.append(line)
             self._bp_condition.append(condition^)
+            self._bp_enabled.append(True)
         else:
             self._bp_condition[found] = condition^
         self._push_breakpoints_for_path(path)
+
+    fn set_breakpoint_enabled(
+        mut self, path: String, line: Int, enabled: Bool,
+    ):
+        """Mark the breakpoint at ``(path, line)`` enabled or disabled.
+        No-op when no BP exists at that location — toggling enable on
+        a non-existent BP has no obvious meaning, and the right-click
+        menu only opens over an existing dot anyway."""
+        for i in range(len(self._bp_path)):
+            if self._bp_path[i] == path and self._bp_line[i] == line:
+                if self._bp_enabled[i] == enabled:
+                    return
+                self._bp_enabled[i] = enabled
+                self._push_breakpoints_for_path(path)
+                return
 
     fn breakpoint_condition(self, path: String, line: Int) -> String:
         """Current condition for the breakpoint at ``(path, line)``,
@@ -762,28 +839,61 @@ struct DapManager(Copyable, Movable):
                 return self._bp_condition[i]
         return String("")
 
+    fn breakpoint_enabled(self, path: String, line: Int) -> Bool:
+        """Enable state at ``(path, line)``. Defaults to True (the
+        most common case) so callers can use this in expressions
+        without first probing ``has_breakpoint``."""
+        for i in range(len(self._bp_path)):
+            if self._bp_path[i] == path and self._bp_line[i] == line:
+                return self._bp_enabled[i]
+        return True
+
     fn _remove_bp_at(mut self, idx: Int):
         """Compact the parallel breakpoint lists by skipping ``idx``."""
         var new_paths = List[String]()
         var new_lines = List[Int]()
         var new_conds = List[String]()
+        var new_en = List[Bool]()
         for k in range(len(self._bp_path)):
             if k == idx:
                 continue
             new_paths.append(self._bp_path[k])
             new_lines.append(self._bp_line[k])
             new_conds.append(self._bp_condition[k])
+            new_en.append(self._bp_enabled[k])
         self._bp_path = new_paths^
         self._bp_line = new_lines^
         self._bp_condition = new_conds^
+        self._bp_enabled = new_en^
 
     fn breakpoints_for(self, path: String) -> List[Int]:
-        """Return a copy of the breakpoint lines for ``path``, 0-based."""
+        """Return a copy of the breakpoint lines for ``path``, 0-based.
+        Includes disabled breakpoints — the gutter still draws them
+        (in gray) so the user knows they're parked there."""
         var out = List[Int]()
         for i in range(len(self._bp_path)):
             if self._bp_path[i] == path:
                 out.append(self._bp_line[i])
         return out^
+
+    fn breakpoints_info_for(
+        self, path: String,
+    ) -> Tuple[List[Int], List[Bool], List[Bool]]:
+        """Return parallel ``(lines, enabled, conditional)`` lists for
+        ``path``. ``conditional`` is True when the BP has a non-empty
+        condition expression. The editor uses these to colour the
+        gutter dot (red / yellow / gray) per row."""
+        var lines = List[Int]()
+        var enabled = List[Bool]()
+        var conditional = List[Bool]()
+        for i in range(len(self._bp_path)):
+            if self._bp_path[i] == path:
+                lines.append(self._bp_line[i])
+                enabled.append(self._bp_enabled[i])
+                conditional.append(
+                    len(self._bp_condition[i].as_bytes()) > 0,
+                )
+        return (lines^, enabled^, conditional^)
 
     fn breakpoint_count(self) -> Int:
         return len(self._bp_path)
@@ -803,11 +913,17 @@ struct DapManager(Copyable, Movable):
             return String("")
         return self._bp_condition[idx]
 
+    fn breakpoint_enabled_at(self, idx: Int) -> Bool:
+        if idx < 0 or idx >= len(self._bp_enabled):
+            return True
+        return self._bp_enabled[idx]
+
     fn restore_breakpoints(
         mut self,
         var paths: List[String],
         var lines: List[Int],
         var conditions: List[String],
+        var enabled: List[Bool],
     ):
         """Replace the in-memory breakpoint set wholesale, without
         sending any ``setBreakpoints`` to the adapter. Used at project
@@ -816,14 +932,17 @@ struct DapManager(Copyable, Movable):
         ``_push_all_breakpoints`` ships the restored set during the
         CONFIGURING transition.
 
-        ``paths`` / ``lines`` / ``conditions`` must be the same length;
-        a length mismatch is treated as "no breakpoints to restore"
-        rather than partially populating the parallel arrays."""
-        if len(paths) != len(lines) or len(paths) != len(conditions):
+        All four lists must be the same length; a length mismatch is
+        treated as "no breakpoints to restore" rather than partially
+        populating the parallel arrays."""
+        if len(paths) != len(lines) \
+                or len(paths) != len(conditions) \
+                or len(paths) != len(enabled):
             return
         self._bp_path = paths^
         self._bp_line = lines^
         self._bp_condition = conditions^
+        self._bp_enabled = enabled^
 
     fn has_breakpoint(self, path: String, line: Int) -> Bool:
         for i in range(len(self._bp_path)):
@@ -868,8 +987,26 @@ struct DapManager(Copyable, Movable):
         src.put(String("path"), json_str(p))
         args.put(String("source"), src)
         var bps = json_array()
+        var have_oneshot_match = False
+        # Track which local indices we serialized for ``path``, in send
+        # order, so the response demux can map ``breakpoints[i]`` back
+        # to a ``(path, line)`` pair.
+        var sent_lines = List[Int]()
         for i in range(len(self._bp_path)):
             if self._bp_path[i] != path:
+                continue
+            # Disabled BPs stay in the local list (so the user keeps
+            # their condition + the gutter still shows a faint dot)
+            # but never reach the adapter. Skip without breaking the
+            # response-line correlation — the index on the wire only
+            # advances for BPs we actually send.
+            if not self._bp_enabled[i]:
+                if self._oneshot_bp_path == path \
+                        and self._bp_line[i] == self._oneshot_bp_line:
+                    # A oneshot landing on a disabled BP still needs to
+                    # fire. Fall through and emit it via the oneshot
+                    # branch below.
+                    pass
                 continue
             var bp = json_object()
             # +1: see comment in toggle_breakpoint about lines being
@@ -880,10 +1017,33 @@ struct DapManager(Copyable, Movable):
                     String("condition"), json_str(self._bp_condition[i]),
                 )
             bps.append(bp)
+            sent_lines.append(self._bp_line[i])
+            if self._oneshot_bp_path == path \
+                    and self._bp_line[i] == self._oneshot_bp_line:
+                have_oneshot_match = True
+        # "Run to cursor" oneshot: stitch into this path's BP list iff
+        # the user doesn't already have a regular BP on the same line.
+        # Cleared by ``_on_stopped_event`` (which then re-pushes).
+        if self._oneshot_bp_path == path \
+                and self._oneshot_bp_line >= 0 \
+                and not have_oneshot_match:
+            var bp = json_object()
+            bp.put(String("line"), json_int(self._oneshot_bp_line + 1))
+            bps.append(bp)
+            # Oneshot has no local index — track with -1 so the
+            # response demux skips it instead of misattributing.
+            sent_lines.append(-1)
         args.put(String("breakpoints"), bps)
         args.put(String("sourceModified"), json_bool(False))
         try:
-            _ = self.client.send_request(String("setBreakpoints"), args.copy())
+            var seq = self.client.send_request(
+                String("setBreakpoints"), args.copy(),
+            )
+            self._inflight_set_breakpoints_seqs.append(seq)
+            self._inflight_set_breakpoints_paths.append(path)
+            # ``_handle_set_breakpoints_response`` re-derives lines from
+            # the live arrays, so we don't need to stash sent_lines.
+            _ = sent_lines^
         except:
             pass
         # Mirror to the attached subprocess if any — without this, a
@@ -997,6 +1157,28 @@ struct DapManager(Copyable, Movable):
 
     fn pause(mut self) -> Bool:
         return self._send_thread_command(String("pause"))
+
+    fn run_to_cursor(mut self, path: String, line: Int) -> Bool:
+        """Resume execution and stop again at ``(path, line)``.
+
+        DAP has no native one-shot breakpoint, so we plant a transient
+        BP at the cursor (via the oneshot fields), push the augmented
+        BP list, then send ``continue``. The next ``stopped`` event —
+        whether at our line or at an earlier real BP — clears the
+        oneshot and re-pushes ``setBreakpoints`` so the cursor BP
+        doesn't linger past one stop.
+
+        No-op unless we're currently paused; "resume from where" is
+        ambiguous otherwise. Returns False on no-op.
+        """
+        if not self.is_active() or not self._is_stopped:
+            return False
+        if line < 0 or len(path.as_bytes()) == 0:
+            return False
+        self._oneshot_bp_path = path
+        self._oneshot_bp_line = line
+        self._push_breakpoints_for_path(path)
+        return self._send_thread_command(String("continue"))
 
     fn _send_thread_command(mut self, command: String) -> Bool:
         if not self.is_active():
@@ -1447,6 +1629,8 @@ struct DapManager(Copyable, Movable):
             for k in range(len(self._subprocess.bp_paths)):
                 if self._subprocess.bp_paths[k] != path:
                     continue
+                if not self._subprocess.bp_enabled[k]:
+                    continue
                 var bp = json_object()
                 bp.put(
                     String("line"),
@@ -1575,11 +1759,19 @@ struct DapManager(Copyable, Movable):
         if eidx >= 0:
             self._on_evaluate_response(eidx, msg)
             return
-        # Other responses (setBreakpoints, continue/next/etc.) — ignored.
-        # ``setBreakpoints`` does return a verified-status array per
-        # breakpoint that we could surface in the gutter, but until
-        # the UI has the real estate for a "verified" indicator there's
-        # no point parsing it.
+        # ``setBreakpoints`` response: per-BP verified flag + optional
+        # message. We only surface the negative case — a verified=false
+        # entry with a message is how debugpy reports a syntactically
+        # invalid ``condition``, and that's the trigger for the
+        # condition-fix dialog.
+        var sidx = -1
+        for k in range(len(self._inflight_set_breakpoints_seqs)):
+            if self._inflight_set_breakpoints_seqs[k] == rseq:
+                sidx = k
+                break
+        if sidx >= 0:
+            self._on_set_breakpoints_response(sidx, msg)
+            return
 
     fn _handle_reverse_request(mut self, msg: DapIncoming):
         if not msg.command:
@@ -1636,6 +1828,96 @@ struct DapManager(Copyable, Movable):
         # we'll act on it after the launch request goes out.
         if self.state == _STATE_LAUNCHING:
             self._do_configure()
+
+    fn _on_set_breakpoints_response(mut self, idx: Int, msg: DapIncoming):
+        """Demux a ``setBreakpoints`` response: pop the inflight slot,
+        then walk the response's ``breakpoints`` array against the live
+        local list (filtered by enabled-state to mirror what we sent).
+        Any ``verified == false`` entry produces a ``DapBreakpointError``
+        for the host to surface."""
+        var path = self._inflight_set_breakpoints_paths[idx]
+        # Compact inflight tables.
+        var new_seqs = List[Int]()
+        var new_paths = List[String]()
+        for k in range(len(self._inflight_set_breakpoints_seqs)):
+            if k == idx:
+                continue
+            new_seqs.append(self._inflight_set_breakpoints_seqs[k])
+            new_paths.append(self._inflight_set_breakpoints_paths[k])
+        self._inflight_set_breakpoints_seqs = new_seqs^
+        self._inflight_set_breakpoints_paths = new_paths^
+        # Re-derive the lines we sent in order — same filter rule as
+        # ``_send_set_breakpoints``: same path, enabled. Then append
+        # the oneshot if it would have stitched in. Lines past the end
+        # of this list correspond to the trailing oneshot row.
+        var sent_lines = List[Int]()
+        var have_oneshot_match = False
+        for i in range(len(self._bp_path)):
+            if self._bp_path[i] != path:
+                continue
+            if not self._bp_enabled[i]:
+                continue
+            sent_lines.append(self._bp_line[i])
+            if self._oneshot_bp_path == path \
+                    and self._bp_line[i] == self._oneshot_bp_line:
+                have_oneshot_match = True
+        if self._oneshot_bp_path == path \
+                and self._oneshot_bp_line >= 0 \
+                and not have_oneshot_match:
+            sent_lines.append(-1)   # oneshot — no user-visible BP
+        if not msg.body or not msg.body.value().is_object():
+            return
+        var b = msg.body.value()
+        var arr_opt = b.object_get(String("breakpoints"))
+        if not arr_opt or not arr_opt.value().is_array():
+            return
+        var arr = arr_opt.value()
+        var n = arr.array_len()
+        for i in range(n):
+            var entry = arr.array_at(i)
+            if not entry.is_object():
+                continue
+            var verified_opt = entry.object_get(String("verified"))
+            if not verified_opt or not verified_opt.value().is_bool():
+                continue
+            if verified_opt.value().as_bool():
+                continue
+            var msg_text = String("")
+            var m = entry.object_get(String("message"))
+            if m and m.value().is_string():
+                msg_text = m.value().as_str()
+            if i >= len(sent_lines):
+                continue
+            var line = sent_lines[i]
+            if line < 0:
+                # Oneshot — not the user's BP, no dialog.
+                continue
+            if len(msg_text.as_bytes()) == 0:
+                # Adapters sometimes send verified=false with no message
+                # for breakpoints in modules that aren't loaded yet —
+                # that's not a user error and we shouldn't pop a dialog.
+                continue
+            self._bp_errors.append(
+                DapBreakpointError(path, line, msg_text^),
+            )
+
+    fn take_breakpoint_errors(mut self) -> List[DapBreakpointError]:
+        """Drain any ``setBreakpoints`` rejections since the last call.
+        Empty list when nothing's wrong."""
+        var out = self._bp_errors^
+        self._bp_errors = List[DapBreakpointError]()
+        return out^
+
+    fn has_breakpoint_errors(self) -> Bool:
+        return len(self._bp_errors) > 0
+
+    fn has_inflight_set_breakpoints(self) -> Bool:
+        """True while at least one ``setBreakpoints`` request is still
+        waiting on a response. The condition-error dialog uses this to
+        tell "the adapter hasn't answered yet" from "the adapter
+        accepted the new condition" — only the latter is a cue to
+        close the dialog."""
+        return len(self._inflight_set_breakpoints_seqs) > 0
 
     fn _on_evaluate_response(mut self, idx: Int, msg: DapIncoming):
         """Pop ``idx`` from the in-flight evaluate lists and stash the
@@ -1744,6 +2026,17 @@ struct DapManager(Copyable, Movable):
         self._is_stopped = True
         self._stop_in_subprocess = from_subprocess
         self._last_stopped_thread_id = tid
+        # "Run to cursor" oneshot housekeeping: any stop ends the
+        # oneshot's lifetime — either we hit it (intended) or we hit a
+        # real BP first (intent overridden). Clear the marker and
+        # re-push ``setBreakpoints`` so the adapter forgets the
+        # transient BP. Without this it persists and would re-fire on
+        # subsequent runs through that line.
+        if len(self._oneshot_bp_path.as_bytes()) > 0:
+            var stale_path = self._oneshot_bp_path
+            self._oneshot_bp_path = String("")
+            self._oneshot_bp_line = -1
+            self._push_breakpoints_for_path(stale_path)
 
     fn _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():
@@ -1874,10 +2167,12 @@ struct DapManager(Copyable, Movable):
         self._subprocess.bp_paths = List[String]()
         self._subprocess.bp_lines = List[Int]()
         self._subprocess.bp_conditions = List[String]()
+        self._subprocess.bp_enabled = List[Bool]()
         for i in range(len(self._bp_path)):
             self._subprocess.bp_paths.append(self._bp_path[i])
             self._subprocess.bp_lines.append(self._bp_line[i])
             self._subprocess.bp_conditions.append(self._bp_condition[i])
+            self._subprocess.bp_enabled.append(self._bp_enabled[i])
         self.client.process.trace(
             String("debugpyAttach: opened ") + host + String(":")
             + String(port) + String(" pid=") + String(spi)
