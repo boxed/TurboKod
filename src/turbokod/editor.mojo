@@ -508,7 +508,7 @@ struct Editor(ImplicitlyCopyable, Movable):
     # populated together by Desktop's ``dap_tick`` so the entries
     # always line up; a length mismatch is treated as "render plain
     # red dots" by the paint code below.
-    var breakpoint_disabled: List[Bool]
+    var breakpoint_enabled: List[Bool]
     var breakpoint_conditional: List[Bool]
     var exec_line: Int
     # Set by ``handle_mouse`` when the user left-clicks anywhere in the
@@ -670,7 +670,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
-        self.breakpoint_disabled = List[Bool]()
+        self.breakpoint_enabled = List[Bool]()
         self.breakpoint_conditional = List[Bool]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
@@ -736,7 +736,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
-        self.breakpoint_disabled = List[Bool]()
+        self.breakpoint_enabled = List[Bool]()
         self.breakpoint_conditional = List[Bool]()
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
@@ -823,7 +823,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
-        self.breakpoint_disabled = copy.breakpoint_disabled.copy()
+        self.breakpoint_enabled = copy.breakpoint_enabled.copy()
         self.breakpoint_conditional = copy.breakpoint_conditional.copy()
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
@@ -2548,8 +2548,8 @@ struct Editor(ImplicitlyCopyable, Movable):
                             # Desktop's ``dap_tick``; a length mismatch
                             # falls back to the plain red default.
                             var dot_attr = bp_attr
-                            if k < len(self.breakpoint_disabled) \
-                                    and self.breakpoint_disabled[k]:
+                            if k < len(self.breakpoint_enabled) \
+                                    and not self.breakpoint_enabled[k]:
                                 dot_attr = Attr(DARK_GRAY, BLUE)
                             elif k < len(self.breakpoint_conditional) \
                                     and self.breakpoint_conditional[k]:

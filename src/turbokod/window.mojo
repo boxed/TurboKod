@@ -805,6 +805,21 @@ struct WindowManager(Movable):
             if hit >= 0 and self.windows[hit].is_editor:
                 _ = self.windows[hit].handle_mouse_in_body(event)
             return True
+        # Right-click: forward the press to whichever editor body the
+        # pointer is over so it can stamp a context-menu request (e.g.
+        # the breakpoint-edit dialog on a gutter dot). Don't touch focus
+        # or z-order — the resulting modal doesn't depend on focus and
+        # silently re-stacking on every right-click would be surprising.
+        if event.button == MOUSE_BUTTON_RIGHT:
+            if not event.pressed:
+                return True
+            var k3 = len(self.z_order) - 1
+            while k3 >= 0:
+                var i3 = self.z_order[k3]
+                if self.windows[i3].rect.contains(event.pos):
+                    return self.windows[i3].handle_mouse_in_body(event)
+                k3 -= 1
+            return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False
         if event.pressed and not event.motion:

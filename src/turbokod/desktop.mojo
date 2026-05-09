@@ -3772,9 +3772,9 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.exec_line = -1
                 continue
             var info = self.dap.breakpoints_info_for(path)
-            var bps = info[0]
-            var bps_disabled = info[1]
-            var bps_conditional = info[2]
+            var bps = info[0].copy()
+            var bps_enabled = info[1].copy()
+            var bps_conditional = info[2].copy()
             var has_session = self.dap.is_active()
             var has_bps = len(bps) > 0
             if has_session or has_bps:
@@ -3782,8 +3782,8 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.gutter_width = 0
             self.windows.windows[i].editor.breakpoint_lines = bps^
-            self.windows.windows[i].editor.breakpoint_disabled = \
-                bps_disabled^
+            self.windows.windows[i].editor.breakpoint_enabled = \
+                bps_enabled^
             self.windows.windows[i].editor.breakpoint_conditional = \
                 bps_conditional^
             if _same_file(path, self._dap_exec_path):
