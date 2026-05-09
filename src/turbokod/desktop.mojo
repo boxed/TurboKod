@@ -96,7 +96,10 @@ from .language_config import (
     LanguageSpec, built_in_servers, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager
-from .dap_dispatch import DapManager, DapStackFrame, DapVariable
+from .dap_dispatch import (
+    DapConditionException, DapManager, DapStackFrame, DapTestEvaluation,
+    DapVariable,
+)
 from .debug_pane import (
     DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
     PANE_STATE_MAXIMIZED, PANE_STATE_MINIMIZED,
@@ -642,6 +645,25 @@ struct Desktop(Movable):
     # fresh error (still bad) or sees no error and no inflight setBp
     # (accepted, close the dialog).
     var _breakpoint_error_awaiting_response: Bool
+    # Marks the active condition-error dialog as the *runtime* variant
+    # — opened because pydevd raised while evaluating the condition at
+    # a hit, not because the adapter rejected the syntax up front. The
+    # submit handler dispatches on this: runtime mode validates the
+    # edit via ``request_test_evaluate`` against the live frame and
+    # only commits + continues once the expression evaluates cleanly.
+    var _breakpoint_error_runtime: Bool
+    # Set after the runtime-mode dialog fires a test evaluate. Cleared
+    # when the response lands (dialog either updates its error text or
+    # commits + closes). Without this we'd have no way to tell a stale
+    # response from a fresh one when the user re-clicks ``Try again``.
+    var _breakpoint_error_test_pending: Bool
+    # Buffered runtime condition exception waiting for the matching
+    # ``stopped`` event's stack to land so we know which BP it
+    # belongs to (path + line are read off the top stack frame). The
+    # output event arrives on the same tick as the suspend, but the
+    # stack response we issue from there is async — the dialog opens
+    # a tick or two later when ``_dap_exec_path`` is populated.
+    var _pending_condition_exception: Optional[DapConditionException]
     # Persistent global preferences (View-menu toggles for now). Loaded
     # from ``~/.config/turbokod/config.json`` on construction; rewritten
     # there whenever the user toggles a setting. Synced into every
@@ -794,6 +816,9 @@ struct Desktop(Movable):
         self._dap_watch_values = List[String]()
         self._dap_locals_cache = List[DapVariable]()
         self._breakpoint_error_awaiting_response = False
+        self._breakpoint_error_runtime = False
+        self._breakpoint_error_test_pending = False
+        self._pending_condition_exception = Optional[DapConditionException]()
         # Defaults only — the host explicitly calls ``load_config_from_disk``
         # if it wants the user's saved preferences. Tests get deterministic
         # state without inheriting whatever the developer's config happens
@@ -922,6 +947,10 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
+        ))
+        # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
+        self._hotkeys.append(Hotkey(
+            ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
         ))
         # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
         # the de facto standard set across VS Code, JetBrains, and most
@@ -3681,6 +3710,8 @@ struct Desktop(Movable):
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
             self._dap_locals_cache = List[DapVariable]()
+            self._pending_condition_exception = \
+                Optional[DapConditionException]()
             self.debug_pane.clear()
         # ``continued`` (Continue / Step*): the program is running again
         # so the previous stack/locals/watches are stale. Their rows
@@ -3694,6 +3725,8 @@ struct Desktop(Movable):
             self._dap_current_frame_id = -1
             self._dap_stack_cache = List[DapStackFrame]()
             self._dap_locals_cache = List[DapVariable]()
+            self._pending_condition_exception = \
+                Optional[DapConditionException]()
             self.debug_pane.clear()
         # Surface adapter-side breakpoint rejections (debugpy reports
         # bad ``condition`` syntax this way). First error pops the fix
@@ -3742,7 +3775,40 @@ struct Desktop(Movable):
                 and not self.dap.has_breakpoint_errors() \
                 and not self.dap.has_inflight_set_breakpoints():
             self._breakpoint_error_awaiting_response = False
+            self._breakpoint_error_runtime = False
+            self._breakpoint_error_test_pending = False
             self.breakpoint_error.close()
+        # Runtime condition-exception flow: pydevd raised while
+        # evaluating a BP condition, sent us the message, and
+        # suspended (we forced suspend on via setDebuggerProperty).
+        # Buffer the parsed (condition, error) until the auto-stack
+        # request resolves so we know which BP to open the dialog
+        # against — the output event arrives on the same tick as the
+        # ``stopped`` event but the matching ``stackTrace`` response
+        # we issue from there is one tick behind.
+        var pce = self.dap.take_condition_exception()
+        if pce:
+            self._pending_condition_exception = pce
+        if self._pending_condition_exception \
+                and len(self._dap_exec_path.as_bytes()) > 0 \
+                and self._dap_exec_line >= 0 \
+                and self.dap.is_stopped() \
+                and not self.breakpoint_error.active:
+            var ce = self._pending_condition_exception.value()
+            self._pending_condition_exception = \
+                Optional[DapConditionException]()
+            self._open_condition_exception_dialog(ce)
+        # Runtime test-evaluate response: the user pressed ``Try
+        # again`` on the runtime dialog and we sent a test evaluate
+        # against the live frame. The result either updates the
+        # error text in place (still raising) or commits the new
+        # condition + closes the dialog (clean).
+        if self._breakpoint_error_runtime \
+                and self._breakpoint_error_test_pending \
+                and self.dap.has_test_evaluations():
+            var teval = self.dap.take_test_evaluation()
+            if teval:
+                self._on_runtime_condition_test_result(teval.value())
         # Drain gutter clicks (one per editor) before recomputing
         # ``gutter_width`` below — so a click that creates the very first
         # breakpoint also makes the gutter appear on this same frame.
@@ -5864,7 +5930,17 @@ struct Desktop(Movable):
             authored it (the failed condition stays on the BP, so a
             later re-launch will re-error and the dialog will
             re-open).
+
+        The runtime variant (opened because pydevd raised at hit, not
+        because the adapter rejected the syntax up front) routes
+        through ``_on_breakpoint_error_submit_runtime`` instead — its
+        Try-again validates the edit via a live ``evaluate`` against
+        the paused frame so we don't blindly commit a still-broken
+        expression and re-pause on the next hit.
         """
+        if self._breakpoint_error_runtime:
+            self._on_breakpoint_error_submit_runtime()
+            return
         var act = self.breakpoint_error.action
         var path = self.breakpoint_error.path
         var line = self.breakpoint_error.line
@@ -5887,6 +5963,137 @@ struct Desktop(Movable):
             if self.dap.is_stopped():
                 _ = self.dap.cont()
         # Cancel falls through to close.
+        self._breakpoint_error_awaiting_response = False
+        self._breakpoint_error_runtime = False
+        self._breakpoint_error_test_pending = False
+        self.breakpoint_error.close()
+
+    fn _open_condition_exception_dialog(
+        mut self, ce: DapConditionException,
+    ):
+        """Open the condition-error dialog in *runtime* mode against
+        the BP at the current stop position. Pulls the BP's stored
+        condition (which is what pydevd just tried to evaluate) so the
+        user sees the broken expression in the input field, ready to
+        edit. ``ce.error`` is the short summary line we extracted from
+        pydevd's traceback output.
+
+        No-ops when the stop happens to be on a path/line where we
+        don't track a BP — that would mean pydevd raised on a BP we
+        don't know about, which shouldn't happen but is safer to
+        ignore than open a dialog with no target."""
+        var path = self._dap_exec_path
+        var line = self._dap_exec_line
+        if not self.dap.has_breakpoint(path, line):
+            return
+        var cond = self.dap.breakpoint_condition(path, line)
+        # Prefer the stored BP condition over the one parsed from the
+        # output text — they should match, but an empty stored
+        # condition (race after a recent edit) means the parsed one
+        # is more accurate.
+        if len(cond.as_bytes()) == 0:
+            cond = ce.condition
+        self.breakpoint_error.open(
+            path, line, ce.error, cond,
+            self._snapshot_locals_for_dialog(),
+        )
+        self._breakpoint_error_runtime = True
+        self._breakpoint_error_test_pending = False
+        self._breakpoint_error_awaiting_response = False
+
+    fn _on_breakpoint_error_submit_runtime(mut self):
+        """Dispatch a runtime-mode submit:
+
+        * Try again — fire a test ``evaluate`` against the live frame.
+          The response lands in ``dap_tick`` which calls
+          ``_on_runtime_condition_test_result``: still raising → set
+          new error and keep dialog open; clean → commit the new
+          condition to the BP and close (auto-continuing when the
+          fixed condition evaluates falsy, staying paused otherwise).
+        * Disable & Continue — flip the BP off and resume.
+        * Cancel — close. Program stays paused; user can step or
+          continue manually. The broken condition stays on the BP so
+          this'll re-fire next hit — that's the safe choice (silently
+          fixing or disabling on Cancel would surprise the user)."""
+        var act = self.breakpoint_error.action
+        var path = self.breakpoint_error.path
+        var line = self.breakpoint_error.line
+        var new_cond = self.breakpoint_error.condition.text
+        if act == BP_ERR_TRY:
+            # A second Try while the first ``evaluate`` round-trip is
+            # still in flight: just consume the press and let the
+            # already-sent request's response drive the dialog. Without
+            # this gate two evaluates pile up; the second's response
+            # would land orphaned in the buffer and re-fire the dialog
+            # update on a stale result the next time the dialog
+            # re-opens.
+            if self._breakpoint_error_test_pending:
+                self.breakpoint_error.submitted = False
+                return
+            # Empty condition would mean "always stop" — don't bother
+            # round-tripping the adapter, just commit + close.
+            if len(new_cond.as_bytes()) == 0:
+                self.dap.set_breakpoint_condition(path, line, new_cond)
+                self._close_runtime_breakpoint_error()
+                return
+            var ok = self.dap.request_test_evaluate(
+                new_cond, self._dap_current_frame_id,
+            )
+            if not ok:
+                # No active session (program crashed / disconnected
+                # between the open and the click). Best we can do is
+                # commit the edit and close — the BP is now what the
+                # user wanted, the next launch will exercise it.
+                self.dap.set_breakpoint_condition(path, line, new_cond)
+                self._close_runtime_breakpoint_error()
+                return
+            self.breakpoint_error.submitted = False
+            self._breakpoint_error_test_pending = True
+            return
+        if act == BP_ERR_DISABLE:
+            self.dap.set_breakpoint_enabled(path, line, False)
+            if self.dap.is_stopped():
+                _ = self.dap.cont()
+            self._close_runtime_breakpoint_error()
+            return
+        # Cancel: close, keep program paused, leave the broken
+        # condition in place.
+        self._close_runtime_breakpoint_error()
+
+    fn _on_runtime_condition_test_result(
+        mut self, teval: DapTestEvaluation,
+    ):
+        """Handle the response to a runtime-mode Try-again. On error,
+        update the dialog's error line and stay open. On success,
+        commit the edited condition to the BP and close — then resume
+        the program iff the new condition evaluates falsy (the user
+        fixed the typo and the BP shouldn't have fired here), or stay
+        paused (the new condition is true and the BP would have
+        legitimately stopped at this line)."""
+        self._breakpoint_error_test_pending = False
+        if teval.is_error:
+            var msg = teval.value
+            if len(msg.as_bytes()) == 0:
+                msg = String("evaluation failed")
+            self.breakpoint_error.set_error(msg^)
+            return
+        # Clean evaluation: persist the edited condition.
+        var path = self.breakpoint_error.path
+        var line = self.breakpoint_error.line
+        var new_cond = self.breakpoint_error.condition.text
+        self.dap.set_breakpoint_condition(path, line, new_cond)
+        self._close_runtime_breakpoint_error()
+        # Auto-continue when the fixed condition evaluates falsy:
+        # the BP wouldn't have stopped here had the original
+        # condition been correct, so dropping the user back into
+        # source at this line is a distraction. Truthy results stay
+        # paused — the BP would have legitimately fired.
+        if _is_falsy_value(teval.value) and self.dap.is_stopped():
+            _ = self.dap.cont()
+
+    fn _close_runtime_breakpoint_error(mut self):
+        self._breakpoint_error_runtime = False
+        self._breakpoint_error_test_pending = False
         self._breakpoint_error_awaiting_response = False
         self.breakpoint_error.close()
 
@@ -6338,6 +6545,34 @@ fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
     if ay + h > workspace.b.y:
         ay = workspace.b.y - h
     return Rect(ax, ay, ax + w, ay + h)
+
+
+fn _is_falsy_value(value: String) -> Bool:
+    """Heuristic match for "this evaluate result would have been falsy
+    in the original ``if condition:`` test". Used by the runtime
+    condition-error dialog: when the user fixes a broken condition and
+    the new expression evaluates falsy, the BP wouldn't have stopped
+    here had it been correct from the start, so we resume rather than
+    leaving the user paused on an unrelated line.
+
+    debugpy returns the value as a string (``"False"``, ``"None"``,
+    ``"0"``, ``"''"``, ``"[]"``). This list covers the common literal
+    falsies; non-trivial expressions that happen to evaluate to a
+    falsy custom object will read truthy here and the user just has
+    to press Continue once. That's the safer error direction —
+    auto-continuing on a result we *thought* was falsy but actually
+    suspended for a real reason would lose user attention."""
+    if value == String("False"): return True
+    if value == String("None"): return True
+    if value == String("0"): return True
+    if value == String("0.0"): return True
+    if value == String("''"): return True
+    if value == String('""'): return True
+    if value == String("()"): return True
+    if value == String("[]"): return True
+    if value == String("{}"): return True
+    if value == String("set()"): return True
+    return False
 
 
 fn _category_to_pane(category: String) -> UInt8:

@@ -6448,6 +6448,56 @@ fn test_dap_manager_breakpoints_info_for() raises:
     assert_false(info[2][2])
 
 
+fn test_dap_manager_captures_condition_exception_from_output() raises:
+    """A pydevd ``Error while evaluating expression in conditional
+    breakpoint`` output event must be parsed into the condition + the
+    short error summary (last non-empty traceback line). The full text
+    is *not* swallowed — it still flows through ``take_outputs`` so
+    the user sees the full traceback in the debug pane."""
+    var mgr = DapManager()
+    var text = String(
+        "pydevd: Error while evaluating expression in conditional"
+        " breakpoint: x.attr\n"
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        "NameError: name 'x' is not defined\n"
+    )
+    var matched = mgr._maybe_capture_condition_exception(text)
+    assert_true(matched)
+    assert_true(mgr.has_condition_exception())
+    var ce = mgr.take_condition_exception()
+    assert_true(Bool(ce))
+    assert_equal(ce.value().condition, String("x.attr"))
+    assert_equal(
+        ce.value().error,
+        String("NameError: name 'x' is not defined"),
+    )
+    # Drained — second take returns nothing.
+    assert_false(mgr.has_condition_exception())
+    assert_false(Bool(mgr.take_condition_exception()))
+
+
+fn test_dap_manager_condition_exception_ignores_unrelated_output() raises:
+    """Plain stdout / stderr lines must not trip the condition-exception
+    parser; otherwise random app output containing the word ``error``
+    would pop the dialog."""
+    var mgr = DapManager()
+    assert_false(mgr._maybe_capture_condition_exception(
+        String("hello world\n"),
+    ))
+    assert_false(mgr._maybe_capture_condition_exception(
+        String("Error while evaluating something else\n"),
+    ))
+    # Note: prefix must be exact, including the leading "pydevd: ".
+    assert_false(mgr._maybe_capture_condition_exception(
+        String(
+            "Error while evaluating expression in conditional"
+            " breakpoint: foo\n",
+        ),
+    ))
+    assert_false(mgr.has_condition_exception())
+
+
 fn test_editor_right_click_on_breakpoint_emits_menu_request() raises:
     """Right-click in the gutter over a row that has a breakpoint
     surfaces a ``BreakpointMenuRequest``. A right-click on a gutter
@@ -11056,6 +11106,8 @@ fn main() raises:
     test_dap_manager_breakpoint_toggle()
     test_dap_manager_breakpoint_enabled_default_and_toggle()
     test_dap_manager_breakpoints_info_for()
+    test_dap_manager_captures_condition_exception_from_output()
+    test_dap_manager_condition_exception_ignores_unrelated_output()
     test_editor_right_click_on_breakpoint_emits_menu_request()
     test_project_targets_load_parses_fields()
     test_project_targets_save_roundtrips_active()

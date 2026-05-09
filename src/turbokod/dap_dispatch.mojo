@@ -39,6 +39,7 @@ from std.ffi import external_call
 
 from .lsp import LspProcess
 from .posix import monotonic_ms, realpath, tcp_connect, which
+from .string_utils import starts_with
 
 
 # --- state machine --------------------------------------------------------
@@ -159,6 +160,47 @@ struct DapBreakpointError(ImplicitlyCopyable, Movable):
     var message: String
 
 
+@fieldwise_init
+struct DapConditionException(ImplicitlyCopyable, Movable):
+    """Surfaced when a *runtime* error happens while pydevd evaluates a
+    conditional breakpoint expression (e.g. ``NameError`` because a
+    variable doesn't exist in this frame). Distinct from
+    ``DapBreakpointError`` which fires at ``setBreakpoints`` time for
+    a syntactically bad condition.
+
+    debugpy reports this via an ``output`` event of category
+    ``important`` whose text starts with
+    ``pydevd: Error while evaluating expression in conditional
+    breakpoint: <condition>\\n<traceback>`` — and then suspends the
+    thread (which we forced on via ``setDebuggerProperty``). The host
+    drains this on the next stop and uses it to open the condition-error
+    dialog with the offending condition pre-loaded.
+
+    ``condition`` is the original BP condition expression as pydevd
+    saw it; ``error`` is the short summary (last non-empty traceback
+    line — typically ``ExceptionType: message``) suitable for the
+    dialog's single-line error strip."""
+    var condition: String
+    var error: String
+
+
+@fieldwise_init
+struct DapTestEvaluation(ImplicitlyCopyable, Movable):
+    """One result of ``request_test_evaluate`` — the dedicated channel
+    the condition-error dialog uses to validate an edited expression
+    without colliding with watch / REPL evaluations.
+
+    ``is_error`` is True when the adapter reported the evaluate as a
+    failed request (the expression raised); in that case ``value`` is
+    the error message. On success ``value`` is the evaluated result as
+    a string (e.g. ``"True"``, ``"42"``) — the dialog tests its
+    truthiness to decide whether to keep the program paused or
+    auto-continue past the BP."""
+    var expression: String
+    var value: String
+    var is_error: Bool
+
+
 # --- SubprocessAttach -----------------------------------------------------
 # debugpy's subprocess-attach flow: when the debuggee forks, debugpy emits a
 # ``debugpyAttach`` event with a TCP host/port and a ``subProcessId``. The
@@ -192,6 +234,15 @@ struct SubprocessAttach(Copyable, Movable):
     var inflight_stack_trace: Int
     var inflight_scopes: Int
     var inflight_variables: Int
+    # Watch / REPL evaluates routed through the subprocess client when
+    # the inspect frame was issued by subprocess pydevd. Frame ids are
+    # session-scoped — sending a subprocess-issued frameId through the
+    # parent socket fails with ``Wrong ID sent from the client``. List
+    # rather than single-slot because watches fire all at once.
+    var inflight_evaluate_seqs: List[Int]
+    var inflight_evaluate_exprs: List[String]
+    var inflight_test_eval_seqs: List[Int]
+    var inflight_test_eval_exprs: List[String]
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
     # Mirror of the parent's breakpoints at attach time. Sent to the
@@ -218,6 +269,10 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_stack_trace = 0
         self.inflight_scopes = 0
         self.inflight_variables = 0
+        self.inflight_evaluate_seqs = List[Int]()
+        self.inflight_evaluate_exprs = List[String]()
+        self.inflight_test_eval_seqs = List[Int]()
+        self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
         self.bp_paths = List[String]()
@@ -240,6 +295,10 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_stack_trace = 0
         self.inflight_scopes = 0
         self.inflight_variables = 0
+        self.inflight_evaluate_seqs = List[Int]()
+        self.inflight_evaluate_exprs = List[String]()
+        self.inflight_test_eval_seqs = List[Int]()
+        self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
         self.bp_paths = List[String]()
@@ -328,6 +387,30 @@ struct DapManager(Copyable, Movable):
     var _evaluations_expr: List[String]
     var _evaluations_value: List[String]
     var _evaluations_type: List[String]
+    # Independent test-evaluate channel — used by the condition-error
+    # dialog to validate an edited BP condition against the live frame
+    # before committing it. Kept separate from the watch/REPL evaluate
+    # channel because ``_fold_watch_results`` silently drops anything
+    # that isn't a known watch expression — sending a one-shot test
+    # eval on that channel would lose the response. Same shape (in-flight
+    # seq + expression list, then drained results), with an extra
+    # ``error`` flag so the dialog can distinguish "evaluation raised"
+    # from "evaluation returned the string ``<error: …>``".
+    var _inflight_test_eval_seqs: List[Int]
+    var _inflight_test_eval_exprs: List[String]
+    var _test_eval_expr: List[String]
+    var _test_eval_value: List[String]
+    var _test_eval_error: List[Bool]
+    # Most-recent ``Error while evaluating expression in conditional
+    # breakpoint`` message, parsed from a debugpy ``output`` event of
+    # category ``important``. Cleared by ``take_condition_exception``,
+    # which the host calls once per tick after handling the surfaced
+    # ``stopped`` event. Empty ``condition`` is the sentinel for "none
+    # buffered" (a real BP condition expression is never empty — the
+    # absence of a condition is encoded by ``len(_bp_condition[i]) == 0``,
+    # not by storing an empty condition here).
+    var _pending_cond_exc_condition: String
+    var _pending_cond_exc_error: String
 
     # Surfaced events (consumed via ``take_*`` accessors).
     var _stopped: Optional[DapStopped]
@@ -434,6 +517,13 @@ struct DapManager(Copyable, Movable):
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._inflight_test_eval_seqs = List[Int]()
+        self._inflight_test_eval_exprs = List[String]()
+        self._test_eval_expr = List[String]()
+        self._test_eval_value = List[String]()
+        self._test_eval_error = List[Bool]()
+        self._pending_cond_exc_condition = String("")
+        self._pending_cond_exc_error = String("")
         self._stopped = Optional[DapStopped]()
         self._is_stopped = False
         self._continued_pending = False
@@ -494,6 +584,13 @@ struct DapManager(Copyable, Movable):
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._inflight_test_eval_seqs = List[Int]()
+        self._inflight_test_eval_exprs = List[String]()
+        self._test_eval_expr = List[String]()
+        self._test_eval_value = List[String]()
+        self._test_eval_error = List[Bool]()
+        self._pending_cond_exc_condition = String("")
+        self._pending_cond_exc_error = String("")
         self._stopped = Optional[DapStopped]()
         self._is_stopped = False
         self._continued_pending = False
@@ -745,6 +842,13 @@ struct DapManager(Copyable, Movable):
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._inflight_test_eval_seqs = List[Int]()
+        self._inflight_test_eval_exprs = List[String]()
+        self._test_eval_expr = List[String]()
+        self._test_eval_value = List[String]()
+        self._test_eval_error = List[Bool]()
+        self._pending_cond_exc_condition = String("")
+        self._pending_cond_exc_error = String("")
         self._stopped = Optional[DapStopped]()
         self._is_stopped = False
         self._continued_pending = False
@@ -1104,7 +1208,11 @@ struct DapManager(Copyable, Movable):
         ``frame_id`` of 0 means "global" — most adapters interpret that
         as "use the current top frame", which is the right default
         when the caller hasn't yet picked a specific frame.
-        """
+
+        Routes to the subprocess client when the most recent inspect
+        was in a subprocess — frame ids are session-scoped, so a
+        subprocess-issued frameId sent through the parent socket
+        returns ``Wrong ID sent from the client``."""
         if not self.is_active():
             return False
         var args = json_object()
@@ -1112,13 +1220,27 @@ struct DapManager(Copyable, Movable):
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
         args.put(String("context"), json_str(context^))
+        var via_subprocess = self._last_inspect_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
         var seq: Int
         try:
-            seq = self.client.send_request(String("evaluate"), args)
+            if via_subprocess:
+                seq = self._subprocess.client.send_request(
+                    String("evaluate"), args,
+                )
+            else:
+                seq = self.client.send_request(String("evaluate"), args)
         except:
             return False
-        self._inflight_evaluate_seqs.append(seq)
-        self._inflight_evaluate_exprs.append(expression^)
+        # Demux table is per-channel: parent and subprocess have
+        # independent seq counters that can collide (both start at 1),
+        # so a shared list would mis-route.
+        if via_subprocess:
+            self._subprocess.inflight_evaluate_seqs.append(seq)
+            self._subprocess.inflight_evaluate_exprs.append(expression^)
+        else:
+            self._inflight_evaluate_seqs.append(seq)
+            self._inflight_evaluate_exprs.append(expression^)
         return True
 
     fn has_evaluations(self) -> Bool:
@@ -1515,6 +1637,7 @@ struct DapManager(Copyable, Movable):
                 if o and o.value().is_string():
                     text = o.value().as_str()
                 if len(text.as_bytes()) > 0:
+                    _ = self._maybe_capture_condition_exception(text)
                     self._output_events.append(DapOutput(category, text))
                 return
             if event == String("terminated"):
@@ -1597,6 +1720,28 @@ struct DapManager(Copyable, Movable):
                 self._pending_vars_ready = True
                 self._subprocess.inflight_variables = 0
                 return
+            # Watch / REPL evaluate response routed via subprocess.
+            # Output destination is the same as the parent path
+            # (``_evaluations_*``) so the host's watch fold treats it
+            # uniformly.
+            var eidx = -1
+            for k in range(len(self._subprocess.inflight_evaluate_seqs)):
+                if self._subprocess.inflight_evaluate_seqs[k] == rseq:
+                    eidx = k
+                    break
+            if eidx >= 0:
+                self._on_evaluate_response_subprocess(eidx, msg)
+                return
+            # Test-evaluate response routed via subprocess (condition
+            # dialog editing a BP that hit in subprocess code).
+            var teidx = -1
+            for k in range(len(self._subprocess.inflight_test_eval_seqs)):
+                if self._subprocess.inflight_test_eval_seqs[k] == rseq:
+                    teidx = k
+                    break
+            if teidx >= 0:
+                self._on_test_evaluate_response_subprocess(teidx, msg)
+                return
             return
         # Reverse requests: answer not-supported so the subprocess
         # debugpy isn't blocked.
@@ -1610,6 +1755,18 @@ struct DapManager(Copyable, Movable):
 
     fn _subprocess_configure(mut self):
         """Push breakpoints + exception filters, then ``configurationDone``."""
+        # Subprocess attach is debugpy-only (the ``debugpyAttach`` event
+        # that opens this socket is a debugpy extension), so the same
+        # condition-exception override the parent does applies here too.
+        var sdp = json_object()
+        sdp.put(String("skipSuspendOnBreakpointException"), json_array())
+        sdp.put(String("skipPrintBreakpointException"), json_array())
+        try:
+            _ = self._subprocess.client.send_request(
+                String("setDebuggerProperty"), sdp^,
+            )
+        except:
+            pass
         # setBreakpoints per source path.
         var paths = List[String]()
         for i in range(len(self._subprocess.bp_paths)):
@@ -1758,6 +1915,17 @@ struct DapManager(Copyable, Movable):
                 break
         if eidx >= 0:
             self._on_evaluate_response(eidx, msg)
+            return
+        # Test-evaluate response (condition-error dialog). Same shape
+        # as the watch evaluate but routes into a dedicated buffer so
+        # the watch fold doesn't swallow it.
+        var teidx = -1
+        for k in range(len(self._inflight_test_eval_seqs)):
+            if self._inflight_test_eval_seqs[k] == rseq:
+                teidx = k
+                break
+        if teidx >= 0:
+            self._on_test_evaluate_response(teidx, msg)
             return
         # ``setBreakpoints`` response: per-BP verified flag + optional
         # message. We only surface the negative case — a verified=false
@@ -1920,12 +2088,11 @@ struct DapManager(Copyable, Movable):
         return len(self._inflight_set_breakpoints_seqs) > 0
 
     fn _on_evaluate_response(mut self, idx: Int, msg: DapIncoming):
-        """Pop ``idx`` from the in-flight evaluate lists and stash the
-        result. ``msg.body`` shape: ``{result, type?, variablesReference}``;
-        we surface ``result`` as the value text and ``type`` as the
-        type when present."""
+        """Pop ``idx`` from the parent in-flight evaluate lists and
+        stash the result. ``msg.body`` shape:
+        ``{result, type?, variablesReference}``; we surface ``result``
+        as the value text and ``type`` as the type when present."""
         var expr = self._inflight_evaluate_exprs[idx]
-        # Compact the inflight lists.
         var new_seqs = List[Int]()
         var new_exprs = List[String]()
         for k in range(len(self._inflight_evaluate_seqs)):
@@ -1935,6 +2102,32 @@ struct DapManager(Copyable, Movable):
             new_exprs.append(self._inflight_evaluate_exprs[k])
         self._inflight_evaluate_seqs = new_seqs^
         self._inflight_evaluate_exprs = new_exprs^
+        self._stash_evaluate_result(expr^, msg)
+
+    fn _on_evaluate_response_subprocess(
+        mut self, idx: Int, msg: DapIncoming,
+    ):
+        """Subprocess-channel variant: same body, different inflight
+        list. Result lands in the same ``_evaluations_*`` buffers so
+        the host's watch fold doesn't care which session answered."""
+        var expr = self._subprocess.inflight_evaluate_exprs[idx]
+        var new_seqs = List[Int]()
+        var new_exprs = List[String]()
+        for k in range(len(self._subprocess.inflight_evaluate_seqs)):
+            if k == idx:
+                continue
+            new_seqs.append(self._subprocess.inflight_evaluate_seqs[k])
+            new_exprs.append(self._subprocess.inflight_evaluate_exprs[k])
+        self._subprocess.inflight_evaluate_seqs = new_seqs^
+        self._subprocess.inflight_evaluate_exprs = new_exprs^
+        self._stash_evaluate_result(expr^, msg)
+
+    fn _stash_evaluate_result(
+        mut self, var expr: String, msg: DapIncoming,
+    ):
+        """Append one parsed ``evaluate`` result to the watch/REPL
+        result buffers. Shared between parent and subprocess paths so
+        both surface identically to the host."""
         var value = String("")
         var type_name = String("")
         if msg.success and not msg.success.value():
@@ -1953,13 +2146,233 @@ struct DapManager(Copyable, Movable):
             var t = b.object_get(String("type"))
             if t and t.value().is_string():
                 type_name = t.value().as_str()
-        self._evaluations_expr.append(expr)
+        self._evaluations_expr.append(expr^)
         self._evaluations_value.append(value^)
         self._evaluations_type.append(type_name^)
+
+    # --- condition-exception buffer & test-evaluate channel --------------
+
+    fn _maybe_capture_condition_exception(mut self, text: String) -> Bool:
+        """Detect pydevd's ``Error while evaluating expression in
+        conditional breakpoint`` notice and stash the parsed condition
+        + short error so ``take_condition_exception`` can surface it on
+        the matching ``stopped`` event. Returns True on a match.
+
+        Idempotent: a later match overwrites the buffer, which is fine
+        because the matching ``stopped`` event arrives right after and
+        the host drains both atomically — a stale buffer would only
+        survive a tick where pydevd printed the message but never got
+        to suspend, which doesn't happen for any normal flow."""
+        var prefix = String(
+            "pydevd: Error while evaluating expression in conditional breakpoint: "
+        )
+        if not starts_with(text, prefix):
+            return False
+        var b = text.as_bytes()
+        var p = len(prefix.as_bytes())
+        var nl = -1
+        var i = p
+        while i < len(b):
+            if b[i] == 0x0A:
+                nl = i
+                break
+            i += 1
+        var condition: String
+        var traceback: String
+        if nl < 0:
+            condition = String(StringSlice(unsafe_from_utf8=b[p:]))
+            traceback = String("")
+        else:
+            condition = String(StringSlice(unsafe_from_utf8=b[p:nl]))
+            traceback = String(StringSlice(unsafe_from_utf8=b[nl + 1:]))
+        var short_error = _last_nonempty_line(traceback)
+        if len(short_error.as_bytes()) == 0:
+            short_error = String("evaluation failed")
+        self._pending_cond_exc_condition = condition^
+        self._pending_cond_exc_error = short_error^
+        return True
+
+    fn has_condition_exception(self) -> Bool:
+        return len(self._pending_cond_exc_condition.as_bytes()) > 0
+
+    fn take_condition_exception(mut self) -> Optional[DapConditionException]:
+        """Drain the most recent runtime condition-exception buffer.
+        Returns ``None`` when nothing's pending. The host calls this
+        once per tick after handling the surfaced ``stopped`` event;
+        the dialog opens iff this returns a value."""
+        if len(self._pending_cond_exc_condition.as_bytes()) == 0:
+            return Optional[DapConditionException]()
+        var c = self._pending_cond_exc_condition^
+        var e = self._pending_cond_exc_error^
+        self._pending_cond_exc_condition = String("")
+        self._pending_cond_exc_error = String("")
+        return Optional[DapConditionException](
+            DapConditionException(c^, e^),
+        )
+
+    fn request_test_evaluate(
+        mut self, var expression: String, frame_id: Int,
+    ) -> Bool:
+        """Issue an ``evaluate`` whose result lands in the test-eval
+        channel rather than the watch/REPL channel. Used by the
+        condition-error dialog to validate an edited expression
+        against the live frame before committing it as the new BP
+        condition. Returns False if no session is active.
+
+        The ``context`` is ``"watch"`` so adapters that distinguish
+        side-effect-free from REPL evaluations stay on the cautious
+        side — testing a condition shouldn't mutate state.
+
+        Routes to the subprocess client when the most recent inspect
+        was in a subprocess (same reason as ``request_evaluate``: the
+        ``frame_id`` is session-scoped to whichever pydevd issued it,
+        and parent vs subprocess have independent seq counters which
+        forces per-channel inflight tables to avoid collision)."""
+        if not self.is_active():
+            return False
+        var args = json_object()
+        args.put(String("expression"), json_str(expression))
+        if frame_id != 0:
+            args.put(String("frameId"), json_int(frame_id))
+        args.put(String("context"), json_str(String("watch")))
+        var via_subprocess = self._last_inspect_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
+        var seq: Int
+        try:
+            if via_subprocess:
+                seq = self._subprocess.client.send_request(
+                    String("evaluate"), args,
+                )
+            else:
+                seq = self.client.send_request(String("evaluate"), args)
+        except:
+            return False
+        if via_subprocess:
+            self._subprocess.inflight_test_eval_seqs.append(seq)
+            self._subprocess.inflight_test_eval_exprs.append(expression^)
+        else:
+            self._inflight_test_eval_seqs.append(seq)
+            self._inflight_test_eval_exprs.append(expression^)
+        return True
+
+    fn has_test_evaluations(self) -> Bool:
+        return len(self._test_eval_expr) > 0
+
+    fn take_test_evaluation(mut self) -> Optional[DapTestEvaluation]:
+        """Pop the oldest test-evaluate result. Returns ``None`` when
+        nothing's queued. We pop one at a time rather than draining
+        the batch so the dialog state machine handles each ``Try again``
+        round trip independently — the batch shape would force the
+        host to track which result belongs to which submit."""
+        if len(self._test_eval_expr) == 0:
+            return Optional[DapTestEvaluation]()
+        var expr = self._test_eval_expr[0]
+        var val = self._test_eval_value[0]
+        var err = self._test_eval_error[0]
+        # Pop index 0 — small list (one inflight expected at a time).
+        var ne = List[String]()
+        var nv = List[String]()
+        var nr = List[Bool]()
+        for k in range(1, len(self._test_eval_expr)):
+            ne.append(self._test_eval_expr[k])
+            nv.append(self._test_eval_value[k])
+            nr.append(self._test_eval_error[k])
+        self._test_eval_expr = ne^
+        self._test_eval_value = nv^
+        self._test_eval_error = nr^
+        return Optional[DapTestEvaluation](
+            DapTestEvaluation(expr^, val^, err),
+        )
+
+    fn _on_test_evaluate_response(mut self, idx: Int, msg: DapIncoming):
+        """Pop the parent in-flight slot at ``idx`` and store the value
+        (or the error message) in the test-eval result lists."""
+        var expr = self._inflight_test_eval_exprs[idx]
+        var new_seqs = List[Int]()
+        var new_exprs = List[String]()
+        for k in range(len(self._inflight_test_eval_seqs)):
+            if k == idx:
+                continue
+            new_seqs.append(self._inflight_test_eval_seqs[k])
+            new_exprs.append(self._inflight_test_eval_exprs[k])
+        self._inflight_test_eval_seqs = new_seqs^
+        self._inflight_test_eval_exprs = new_exprs^
+        self._stash_test_evaluate_result(expr^, msg)
+
+    fn _on_test_evaluate_response_subprocess(
+        mut self, idx: Int, msg: DapIncoming,
+    ):
+        """Subprocess-channel variant — same body, different inflight
+        list. Result lands in the same ``_test_eval_*`` buffers."""
+        var expr = self._subprocess.inflight_test_eval_exprs[idx]
+        var new_seqs = List[Int]()
+        var new_exprs = List[String]()
+        for k in range(len(self._subprocess.inflight_test_eval_seqs)):
+            if k == idx:
+                continue
+            new_seqs.append(
+                self._subprocess.inflight_test_eval_seqs[k],
+            )
+            new_exprs.append(
+                self._subprocess.inflight_test_eval_exprs[k],
+            )
+        self._subprocess.inflight_test_eval_seqs = new_seqs^
+        self._subprocess.inflight_test_eval_exprs = new_exprs^
+        self._stash_test_evaluate_result(expr^, msg)
+
+    fn _stash_test_evaluate_result(
+        mut self, var expr: String, msg: DapIncoming,
+    ):
+        var value = String("")
+        var is_error = False
+        if msg.success and not msg.success.value():
+            is_error = True
+            if msg.message:
+                value = msg.message.value()
+            else:
+                value = String("evaluation failed")
+        elif msg.body and msg.body.value().is_object():
+            var b = msg.body.value()
+            var r = b.object_get(String("result"))
+            if r and r.value().is_string():
+                value = r.value().as_str()
+        self._test_eval_expr.append(expr^)
+        self._test_eval_value.append(value^)
+        self._test_eval_error.append(is_error)
+
+    fn _send_set_debugger_property_debugpy(mut self):
+        """debugpy-only: tell pydevd to suspend (and print) on every
+        exception raised while evaluating a conditional breakpoint.
+
+        pydevd's default ``debugpy-dap`` mode sets
+        ``skip_suspend_on_breakpoint_exception = (BaseException,)`` and
+        ``skip_print_breakpoint_exception = (NameError,)`` — meaning a
+        condition that raises (e.g. ``x.y`` when ``x`` is None) silently
+        evaluates to false and the user just doesn't stop. That's worse
+        than useless: a typo in a condition expression looks
+        indistinguishable from "the condition was never true". We
+        override both with empty lists so any exception during condition
+        evaluation gets printed to the debug pane *and* suspends the
+        thread, surfacing the bug instead of hiding it.
+
+        Sent as the debugpy/pydevd ``setDebuggerProperty`` request,
+        which other adapters don't recognize — gate on adapter name."""
+        if self.adapter_name != String("debugpy"):
+            return
+        var args = json_object()
+        args.put(String("skipSuspendOnBreakpointException"), json_array())
+        args.put(String("skipPrintBreakpointException"), json_array())
+        try:
+            _ = self.client.send_request(
+                String("setDebuggerProperty"), args^,
+            )
+        except:
+            pass
 
     fn _do_configure(mut self):
         """Push all breakpoints + exception filters, then send
         ``configurationDone``."""
+        self._send_set_debugger_property_debugpy()
         self._push_all_breakpoints()
         self._send_set_exception_breakpoints()
         if self._supports_configuration_done:
@@ -2052,6 +2465,11 @@ struct DapManager(Copyable, Movable):
             text = o.value().as_str()
         if len(text.as_bytes()) == 0:
             return
+        # Sniff for the runtime-condition-exception marker. We still
+        # forward the full text into the output stream so the user sees
+        # the traceback in the debug pane; the parsed condition + short
+        # error are stashed on the side for the dialog to consume.
+        _ = self._maybe_capture_condition_exception(text)
         self._output_events.append(DapOutput(category, text))
 
     fn _on_debugpy_attach_event(mut self, msg: DapIncoming):
@@ -2193,6 +2611,25 @@ fn _trim_trailing_newline(s: String) -> String:
             ptr=b.unsafe_ptr(), length=len(b) - 1,
         ))
     return s
+
+
+fn _last_nonempty_line(text: String) -> String:
+    """Last ``\\n``-delimited line of ``text`` skipping any trailing
+    blank lines. Used to reduce a Python traceback string down to its
+    final ``ExceptionType: message`` summary, which is what the
+    condition-error dialog can fit on its single error row."""
+    var b = text.as_bytes()
+    if len(b) == 0:
+        return String("")
+    var end = len(b)
+    while end > 0 and b[end - 1] == 0x0A:
+        end -= 1
+    if end == 0:
+        return String("")
+    var start = end
+    while start > 0 and b[start - 1] != 0x0A:
+        start -= 1
+    return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
 fn _state_name(state: UInt8) -> String:

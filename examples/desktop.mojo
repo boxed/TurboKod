@@ -195,7 +195,7 @@ fn main() raises:
         desktop.menu_bar.add(Menu(String("View"), view_items^))
         desktop.menu_bar.add(_mk_menu(String("Git"),
             (String("Toggle Blame"),       EDITOR_TOGGLE_BLAME),
-            (String("Show local changes"), GIT_LOCAL_CHANGES),
+            (String("Show diff viewer"), GIT_LOCAL_CHANGES),
         ))
         var debug_items = List[MenuItem]()
         debug_items.append(MenuItem(String("Run"), TARGET_RUN))
@@ -280,7 +280,7 @@ fn main() raises:
                 )
                 # Git menu: visible while an editor is focused (Toggle
                 # Blame applies to it) or whenever a project is set
-                # (Show local changes is project-scoped and shouldn't
+                # (Show diff viewer is project-scoped and shouldn't
                 # require opening a file first).
                 var git_visible = desktop.windows.focused_is_editor()
                 if not git_visible and desktop.project:

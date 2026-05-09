@@ -54,8 +54,8 @@ from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_RED, LIGHT_YELLOW,
-    STYLE_UNDERLINE, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
+    LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, RED, STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
@@ -144,12 +144,13 @@ struct PaneRow(ImplicitlyCopyable, Movable):
     * ``PANE_ROW_FRAME``: ``text`` is ``"name  file:line"``,
       ``ref`` is the DAP frame id, ``depth`` is the frame index
       (used to highlight the current frame).
-    * ``PANE_ROW_VARIABLE``: ``text`` is ``"name = value (type)"``,
-      ``ref`` is ``variables_reference`` (0 = leaf), ``depth`` is the
-      tree indent level, ``expanded`` distinguishes ``▶ obj`` /
-      ``▼ obj`` rendering.
+    * ``PANE_ROW_VARIABLE``: ``text`` is ``"name = value"``, with
+      ``type_name`` painted as a colored ``" (type)"`` suffix at
+      paint time. ``ref`` is ``variables_reference`` (0 = leaf),
+      ``depth`` is the tree indent level, ``expanded`` distinguishes
+      ``▶ obj`` / ``▼ obj`` rendering.
     * ``PANE_ROW_WATCH``: ``text`` is ``"expression = value"``;
-      ``ref`` is unused.
+      ``ref`` and ``type_name`` are unused.
     * ``PANE_ROW_BLANK``: nothing — paint a blank line.
     """
     var kind: UInt8
@@ -157,6 +158,7 @@ struct PaneRow(ImplicitlyCopyable, Movable):
     var ref_id: Int    # frame_id / variables_reference / 0
     var depth: Int     # frame_index / tree depth
     var expanded: Bool
+    var type_name: String   # variable type for the colored suffix; "" if none
 
 
 # --- pane -----------------------------------------------------------------
@@ -404,7 +406,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         """
         var out = List[PaneRow]()
         out.append(PaneRow(
-            PANE_ROW_HEADER, String("Stack"), 0, 0, False,
+            PANE_ROW_HEADER, String("Stack"), 0, 0, False, String(""),
         ))
         for i in range(len(frames)):
             var f = frames[i]
@@ -415,27 +417,27 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             out.append(PaneRow(
                 PANE_ROW_FRAME,
                 name_pad + String("  ") + loc,
-                f.id, i, False,
+                f.id, i, False, String(""),
             ))
-        out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False))
+        out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False, String("")))
         out.append(PaneRow(
-            PANE_ROW_HEADER, locals_label^, 0, 0, False,
+            PANE_ROW_HEADER, locals_label^, 0, 0, False, String(""),
         ))
         for i in range(len(locals)):
             var v = locals[i]
             out.append(PaneRow(
                 PANE_ROW_VARIABLE,
-                _format_variable(v.name, v.value, v.type_name),
-                v.variables_reference, 0, False,
+                _format_variable(v.name, v.value),
+                v.variables_reference, 0, False, v.type_name,
             ))
         if len(watch_lines) > 0:
-            out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False))
+            out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False, String("")))
             out.append(PaneRow(
-                PANE_ROW_HEADER, watches_label^, 0, 0, False,
+                PANE_ROW_HEADER, watches_label^, 0, 0, False, String(""),
             ))
             for i in range(len(watch_lines)):
                 out.append(PaneRow(
-                    PANE_ROW_WATCH, watch_lines[i], 0, 0, False,
+                    PANE_ROW_WATCH, watch_lines[i], 0, 0, False, String(""),
                 ))
         self.rows = out^
         self.current_frame_index = current_frame_index
@@ -465,8 +467,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                     var v = children[k]
                     out.append(PaneRow(
                         PANE_ROW_VARIABLE,
-                        _format_variable(v.name, v.value, v.type_name),
+                        _format_variable(v.name, v.value),
                         v.variables_reference, child_depth, False,
+                        v.type_name,
                     ))
         self.rows = out^
 
@@ -815,11 +818,30 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 var chev = String("  ")
                 if r.ref_id != 0:
                     chev = String("▼ ") if r.expanded else String("▶ ")
-                _ = right_p.put_text(
-                    canvas, Point(right_x0 + 1, y),
+                # Paint name=value first, then layer the colored
+                # ``(type)`` suffix on top: gray parens, syntax-colored
+                # type word. ``put_text`` returns the cells advanced so
+                # we can chain segments without remeasuring.
+                var x = right_x0 + 1
+                var adv = right_p.put_text(
+                    canvas, Point(x, y),
                     indent + chev + r.text,
                     bg,
                 )
+                if len(r.type_name.as_bytes()) > 0:
+                    x += adv
+                    adv = right_p.put_text(
+                        canvas, Point(x, y), String(" ("), dim,
+                    )
+                    x += adv
+                    adv = right_p.put_text(
+                        canvas, Point(x, y), r.type_name,
+                        _type_attr(r.type_name),
+                    )
+                    x += adv
+                    _ = right_p.put_text(
+                        canvas, Point(x, y), String(")"), dim,
+                    )
             elif r.kind == PANE_ROW_WATCH:
                 _ = right_p.put_text(
                     canvas, Point(right_x0 + 1, y),
@@ -1289,11 +1311,33 @@ fn _paint_button(
     painter.set(canvas, top_left.x + 2, top_left.y, Cell(String("]"), border, 1))
 
 
-fn _format_variable(name: String, value: String, type_name: String) -> String:
-    var type_str = String("")
-    if len(type_name.as_bytes()) > 0:
-        type_str = String(" (") + type_name + String(")")
-    return name + String(" = ") + value + type_str
+fn _format_variable(name: String, value: String) -> String:
+    return name + String(" = ") + value
+
+
+fn _type_attr(type_name: String) -> Attr:
+    """Color for a Python/Mojo value type, mirroring what the syntax
+    highlighter would paint a literal of that type. ``str``/``bytes``
+    take the string-literal color, numerics the number color, bool/None
+    the constant-language color, and built-in collections the identifier
+    color. Anything else (custom classes, NoneType wrappers from
+    third-party libs) falls back to LIGHT_YELLOW so it still stands out
+    against the default WHITE row text.
+    """
+    if type_name == String("str") or type_name == String("bytes") \
+            or type_name == String("bytearray"):
+        return Attr(RED, BLACK)
+    if type_name == String("int") or type_name == String("float") \
+            or type_name == String("complex"):
+        return Attr(LIGHT_GRAY, BLACK)
+    if type_name == String("bool") or type_name == String("NoneType") \
+            or type_name == String("None"):
+        return Attr(LIGHT_MAGENTA, BLACK)
+    if type_name == String("list") or type_name == String("dict") \
+            or type_name == String("tuple") or type_name == String("set") \
+            or type_name == String("frozenset"):
+        return Attr(LIGHT_GREEN, BLACK)
+    return Attr(LIGHT_YELLOW, BLACK)
 
 
 fn _basename(path: String) -> String:
