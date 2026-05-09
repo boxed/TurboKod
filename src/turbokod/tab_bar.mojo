@@ -11,7 +11,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_GREEN, WHITE
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, WHITE
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
 
@@ -70,10 +70,12 @@ struct TabBar(Movable):
             var attr: Attr
             if items[i].window_idx == active_idx:
                 attr = active_attr
+                if items[i].dirty:
+                    attr = attr.with_bg(GREEN)
             else:
                 attr = bg
-            if items[i].dirty:
-                attr = attr.with_fg(LIGHT_GREEN)
+                if items[i].dirty:
+                    attr = attr.with_bg(LIGHT_GREEN)
             _ = painter.put_text(canvas, Point(x, y), label, attr)
             # Cap the recorded hit-rect at ``max_x`` so a tab that
             # was clipped on the right doesn't claim cells it didn't

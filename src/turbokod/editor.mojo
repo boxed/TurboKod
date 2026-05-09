@@ -2153,7 +2153,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         if kind == 1:
             return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
         if kind == 2:
-            return Optional[Attr](Attr(YELLOW, BLUE))
+            return Optional[Attr](Attr(CYAN, BLUE))
         return Optional[Attr]()
 
     fn _minimap_first_misspelled_word(self, row: Int) -> String:
