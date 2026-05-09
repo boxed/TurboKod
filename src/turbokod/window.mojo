@@ -335,6 +335,307 @@ fn paint_panel_window_buttons(
     return hits^
 
 
+# --- docked panel stack ---------------------------------------------------
+# A "docked panel stack" is a vertical column of N section panels with
+# splitters between them — used for the sidebar of a multi-section
+# widget (LocalChanges Files/Branches/Commits, file browsers, outline
+# views, ...). Each section has its own min/max chrome and renders a
+# title bar that stays visible even when collapsed to one row. At most
+# one section may be MAXIMIZED; when one is, the others paint as
+# MINIMIZED so the user can still see what's there and click to bring
+# them back.
+#
+# This is the framework half of the feature. Hosts (LocalChanges et al)
+# add named sections, then on each frame:
+#   1. call ``layout(top, bottom)`` to get per-section [top, h] pairs,
+#   2. paint each section's body inside the rect they own,
+#   3. call ``paint_headers(...)`` once to overlay all title bars +
+#      chrome buttons on top of the bodies (so headers always win),
+#   4. on a left-click, call ``hit_chrome(pos)`` and route the result
+#      back into ``toggle_max(idx)`` / ``toggle_min(idx)``.
+
+
+@fieldwise_init
+struct DockedSection(ImplicitlyCopyable, Movable):
+    """One section in a ``DockedPanelStack``. ``title`` is the bar text;
+    ``state`` is the per-section min/max state; ``chrome_hits`` is
+    refreshed by ``paint_headers`` so the next click can dispatch."""
+    var title: String
+    var state: UInt8
+    var chrome_hits: PanelChromeHits
+
+    fn __init__(out self, var title: String):
+        self.title = title^
+        self.state = PANEL_STATE_NORMAL
+        self.chrome_hits = PanelChromeHits()
+
+
+@fieldwise_init
+struct DockChromeHit(ImplicitlyCopyable, Movable):
+    """Result of ``DockedPanelStack.hit_chrome``. ``section_idx`` is -1
+    on a miss; ``is_max`` distinguishes the maximize vs minimize
+    button so the dispatch can call the right toggle."""
+    var section_idx: Int
+    var is_max: Bool
+
+    fn __init__(out self):
+        self.section_idx = -1
+        self.is_max = False
+
+    fn hit(self) -> Bool:
+        return self.section_idx >= 0
+
+
+struct DockedPanelStack(Movable):
+    """Stack of vertically-tiled docked panels with min/max chrome.
+
+    Owns the per-section state and produces a state-driven layout.
+    State invariants:
+
+    * At most one section may be MAXIMIZED. When one is, the layout
+      coalesces the others to MINIMIZED for painting (their stored
+      state is preserved so a "restore all" returns them to NORMAL).
+    * MIN sections render header-only (height 1).
+    * NORMAL sections share the leftover content rows equally.
+    """
+    var sections: List[DockedSection]
+
+    fn __init__(out self):
+        self.sections = List[DockedSection]()
+
+    fn __copyinit__(out self, copy: Self):
+        self.sections = copy.sections.copy()
+
+    fn add(mut self, var title: String) -> Int:
+        """Append a section, return its 0-based index."""
+        self.sections.append(DockedSection(title^))
+        return len(self.sections) - 1
+
+    fn count(self) -> Int:
+        return len(self.sections)
+
+    fn state(self, idx: Int) -> UInt8:
+        if idx < 0 or idx >= len(self.sections):
+            return PANEL_STATE_NORMAL
+        return self.sections[idx].state
+
+    fn effective_states(self) -> List[UInt8]:
+        """Resolve visual state per section. If any section is
+        MAXIMIZED, the others paint as MINIMIZED regardless of their
+        stored state. Otherwise returns each section's stored state
+        verbatim."""
+        var max_idx = -1
+        for i in range(len(self.sections)):
+            if self.sections[i].state == PANEL_STATE_MAXIMIZED:
+                max_idx = i
+                break
+        var out = List[UInt8]()
+        for i in range(len(self.sections)):
+            if max_idx >= 0:
+                if i == max_idx:
+                    out.append(PANEL_STATE_MAXIMIZED)
+                else:
+                    out.append(PANEL_STATE_MINIMIZED)
+            else:
+                out.append(self.sections[i].state)
+        return out^
+
+    fn all_normal(self) -> Bool:
+        """True iff every section is in PANEL_STATE_NORMAL — used by
+        callers to decide whether splitter-drag should be active."""
+        for i in range(len(self.sections)):
+            if self.sections[i].state != PANEL_STATE_NORMAL:
+                return False
+        return True
+
+    fn layout(self, top: Int, bottom: Int) -> List[Int]:
+        """Return ``[s0_top, s0_h, s1_top, s1_h, ...]`` — per-section
+        ``(top, height)`` pairs. One splitter row between each pair is
+        not counted in any section's height; caller paints the splitter
+        at ``s_i_top + s_i_h``.
+
+        Section heights honor the effective state machine: MIN → 1,
+        NORMAL → equal share of leftover, MAXIMIZED → all remaining
+        space after MIN siblings consume their headers."""
+        var n = len(self.sections)
+        var out = List[Int]()
+        if n == 0:
+            return out^
+        var splitters = n - 1
+        if splitters < 0: splitters = 0
+        var total = bottom - top
+        if total < n:
+            total = n
+        var content = total - splitters
+        if content < n:
+            content = n
+        var states = self.effective_states()
+        var any_non_normal = False
+        for i in range(n):
+            if states[i] != PANEL_STATE_NORMAL:
+                any_non_normal = True
+                break
+        var heights = List[Int]()
+        for _ in range(n):
+            heights.append(0)
+        if any_non_normal:
+            var n_min = 0
+            var n_normal = 0
+            for i in range(n):
+                if states[i] == PANEL_STATE_MINIMIZED:
+                    n_min += 1
+                elif states[i] == PANEL_STATE_NORMAL:
+                    n_normal += 1
+            var leftover = content - n_min
+            if leftover < 0: leftover = 0
+            var normal_share: Int
+            if n_normal > 0:
+                normal_share = leftover // n_normal
+                if normal_share < 1: normal_share = 1
+            else:
+                normal_share = 0
+            for i in range(n):
+                if states[i] == PANEL_STATE_MINIMIZED:
+                    heights[i] = 1
+                elif states[i] == PANEL_STATE_NORMAL:
+                    heights[i] = normal_share
+                else:
+                    heights[i] = -1  # MAXIMIZED — fill leftover
+            var used = 0
+            for i in range(n):
+                if heights[i] > 0:
+                    used += heights[i]
+            var remaining = content - used
+            if remaining < 1: remaining = 1
+            for i in range(n):
+                if heights[i] < 0:
+                    heights[i] = remaining
+                    break
+        else:
+            var share = content // n
+            if share < 1: share = 1
+            for i in range(n - 1):
+                heights[i] = share
+            var rest = content - share * (n - 1)
+            if rest < 1: rest = 1
+            heights[n - 1] = rest
+        var y = top
+        for i in range(n):
+            out.append(y)
+            out.append(heights[i])
+            y += heights[i] + 1  # +1 for splitter between sections
+        return out^
+
+    fn paint_headers(
+        mut self, mut canvas: Canvas,
+        left: Int, right_excl: Int,
+        layout: List[Int],
+        section_attr: Attr,
+        focused_idx: Int = -1,
+    ):
+        """Paint each section's title bar with a one-row bright fill,
+        the centered (via marker) title, and the min/max chrome buttons
+        at the right edge. Refreshes ``chrome_hits`` on each section so
+        the next click can dispatch.
+
+        ``focused_idx`` (default -1) lights the matching section's title
+        with a ``> `` marker — pass the host's currently-focused section
+        index, or ``-1`` to skip the focus marker entirely.
+
+        The header is painted inside ``[left, right_excl)`` and clips
+        to that range via a Painter, so a too-narrow column collapses
+        the buttons gracefully (they just don't paint).
+        """
+        var n = len(self.sections)
+        var states = self.effective_states()
+        for i in range(n):
+            var top = layout[i * 2]
+            # Header always paints, even when the section's effective
+            # height is 1 (header-only): the title strip is the bit the
+            # user clicks to restore.
+            var header_rect = Rect(left, top, right_excl, top + 1)
+            if header_rect.width() < 1:
+                continue
+            var p = Painter(header_rect)
+            p.fill(canvas, header_rect, String(" "), section_attr)
+            var marker: String
+            if focused_idx == i:
+                marker = String("> ")
+            else:
+                marker = String("  ")
+            _ = p.put_text(
+                canvas, Point(left, top),
+                marker + self.sections[i].title, section_attr,
+            )
+            self.sections[i].chrome_hits = paint_panel_window_buttons(
+                canvas, p, top, header_rect,
+                states[i], section_attr,
+            )
+
+    fn toggle_max(mut self, idx: Int):
+        """Click on section ``idx``'s maximize/restore button.
+
+        Toggles between MAXIMIZED and NORMAL on ``idx``. Setting one to
+        MAXIMIZED forces all others to NORMAL (the effective-states
+        resolver paints them as MINIMIZED for the duration of the max).
+        Restoring from MAXIMIZED resets every section to NORMAL so the
+        original splitter-driven layout returns."""
+        if idx < 0 or idx >= len(self.sections):
+            return
+        if self.sections[idx].state == PANEL_STATE_MAXIMIZED:
+            for i in range(len(self.sections)):
+                self.sections[i].state = PANEL_STATE_NORMAL
+            return
+        for i in range(len(self.sections)):
+            self.sections[i].state = PANEL_STATE_NORMAL
+        self.sections[idx].state = PANEL_STATE_MAXIMIZED
+
+    fn toggle_min(mut self, idx: Int):
+        """Click on section ``idx``'s minimize/restore button.
+
+        Toggles between MINIMIZED and NORMAL on the targeted section.
+        If a sibling was MAXIMIZED, that maximize is cleared (the user
+        is overriding the max state by directly poking a min button).
+        Visually-min'd sections of a maximized stack route here too —
+        their click acts as "restore everything to NORMAL" since
+        clicking restore on a min button on top of a max-collapsed
+        sibling is the user's signal to back out of max mode."""
+        if idx < 0 or idx >= len(self.sections):
+            return
+        var states = self.effective_states()
+        var effective = states[idx]
+        for i in range(len(self.sections)):
+            if i != idx and self.sections[i].state == PANEL_STATE_MAXIMIZED:
+                self.sections[i].state = PANEL_STATE_NORMAL
+        if effective == PANEL_STATE_MINIMIZED:
+            self.sections[idx].state = PANEL_STATE_NORMAL
+            return
+        self.sections[idx].state = PANEL_STATE_MINIMIZED
+
+    fn reset(mut self):
+        """Restore every section to NORMAL. Useful on close/reopen."""
+        for i in range(len(self.sections)):
+            self.sections[i].state = PANEL_STATE_NORMAL
+            self.sections[i].chrome_hits = PanelChromeHits()
+
+    fn hit_chrome(self, pos: Point) -> DockChromeHit:
+        """Return the section + button under ``pos``. Returns a hit
+        with ``section_idx == -1`` if the click misses every chrome
+        button. Hosts call this from ``handle_mouse`` and route to
+        ``toggle_max`` / ``toggle_min``."""
+        var out = DockChromeHit()
+        for i in range(len(self.sections)):
+            if self.sections[i].chrome_hits.on_max(pos):
+                out.section_idx = i
+                out.is_max = True
+                return out^
+            if self.sections[i].chrome_hits.on_min(pos):
+                out.section_idx = i
+                out.is_max = False
+                return out^
+        return out^
+
+
 fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
     """Paint a Turbo Vision–style drop shadow under ``rect``.
 

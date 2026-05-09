@@ -62,7 +62,9 @@ from .highlight import (
 from .painter import Painter
 from .file_io import join_path, read_file
 from .window import (
-    PANEL_STATE_MAXIMIZED, PANEL_STATE_NORMAL, PanelChromeHits,
+    DockChromeHit, DockedPanelStack,
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_NORMAL,
+    PanelChromeHits,
     paint_drop_shadow, paint_panel_window_buttons, paint_window_title,
 )
 from .git_changes import (
@@ -906,6 +908,12 @@ struct LocalChanges(Movable):
     # ``show_minimize=False``.
     var state: UInt8
     var _chrome_hits: PanelChromeHits
+    # The three sidebar panels (Modified files / Branches / Commits)
+    # share the framework ``DockedPanelStack`` for min/max state, layout
+    # and chrome dispatch. Section indices match the ``_PANE_FILES`` /
+    # ``_PANE_BRANCHES`` / ``_PANE_COMMITS`` ordering — same identifiers
+    # used elsewhere for focus tracking.
+    var sidebar_dock: DockedPanelStack
 
     fn __init__(out self):
         self.active = False
@@ -940,6 +948,12 @@ struct LocalChanges(Movable):
         self.overlay_ok = False
         self.state = PANEL_STATE_MAXIMIZED
         self._chrome_hits = PanelChromeHits()
+        self.sidebar_dock = DockedPanelStack()
+        # Order must match ``_PANE_FILES`` / ``_PANE_BRANCHES`` /
+        # ``_PANE_COMMITS`` (0/1/2).
+        _ = self.sidebar_dock.add(String("Modified files"))
+        _ = self.sidebar_dock.add(String("Branches"))
+        _ = self.sidebar_dock.add(String("Commits"))
 
     fn open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -973,6 +987,7 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
+        self.sidebar_dock.reset()
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1045,6 +1060,7 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
+        self.sidebar_dock.reset()
 
     # --- geometry ---------------------------------------------------------
 
@@ -1114,9 +1130,11 @@ struct LocalChanges(Movable):
         renders them at ``files_top + files_h`` and
         ``branches_top + branches_h``.
 
-        Honors ``files_height_user`` / ``branches_height_user`` when
-        they're set, clamping so every panel keeps at least one body
-        row (``_min_h = 2``)."""
+        Delegates to ``DockedPanelStack.layout`` when any section is in
+        a non-NORMAL state (the state machine drives the heights). When
+        all sections are NORMAL we honor ``files_height_user`` /
+        ``branches_height_user`` so the user's splitter drags persist
+        across frames."""
         var top = self._list_top(screen)
         var bottom = self._list_bottom(screen)
         var total = bottom - top
@@ -1129,6 +1147,9 @@ struct LocalChanges(Movable):
         var min_h = 1 + _PANEL_MIN_BODY  # header row + body row
         var f_h: Int
         var b_h: Int
+        var c_h: Int
+        if not self.sidebar_dock.all_normal():
+            return self.sidebar_dock.layout(top, bottom)
         if self.files_height_user > 0:
             f_h = self.files_height_user
         else:
@@ -1139,7 +1160,6 @@ struct LocalChanges(Movable):
             b_h = content // 3
         if f_h < min_h: f_h = min_h
         if b_h < min_h: b_h = min_h
-        # Make sure commits panel keeps at least min_h rows.
         if f_h + b_h > content - min_h:
             # Trim branches first (most recently sized), then files.
             var over = f_h + b_h - (content - min_h)
@@ -1155,7 +1175,7 @@ struct LocalChanges(Movable):
                     f_h -= over
                 else:
                     f_h = min_h
-        var c_h = content - f_h - b_h
+        c_h = content - f_h - b_h
         if c_h < min_h: c_h = min_h
         var out = List[Int]()
         out.append(top)
@@ -1436,29 +1456,43 @@ struct LocalChanges(Movable):
         for y in range(self._list_top(bounds), self._list_bottom(bounds)):
             canvas.set(sep_x, y, Cell(String("│"), sep_attr, 1))
         # Sidebar: three stacked panels with horizontal splitters between.
+        # Section bodies paint first (they may not draw the header row
+        # at all when collapsed); the framework dock paints titles +
+        # chrome buttons on top so headers always win.
         var rows = self._pane_rows(bounds)
         var left = bounds.a.x + 1
         var right = bounds.a.x + sw - 1
-        self._paint_section(
-            canvas, left, right, rows[0], rows[1],
-            String("Modified files"), _PANE_FILES,
-            section_attr, list_attr, sel_attr, sel_inactive, list_dim,
+        self._paint_section_body(
+            canvas, left, right, rows[0], rows[1], _PANE_FILES,
+            list_attr, sel_attr, sel_inactive, list_dim,
         )
         self._paint_horizontal_splitter(
             canvas, left, right, rows[0] + rows[1], splitter_attr,
         )
-        self._paint_section(
-            canvas, left, right, rows[2], rows[3],
-            String("Branches"), _PANE_BRANCHES,
-            section_attr, list_attr, sel_attr, sel_inactive, list_dim,
+        self._paint_section_body(
+            canvas, left, right, rows[2], rows[3], _PANE_BRANCHES,
+            list_attr, sel_attr, sel_inactive, list_dim,
         )
         self._paint_horizontal_splitter(
             canvas, left, right, rows[2] + rows[3], splitter_attr,
         )
-        self._paint_section(
-            canvas, left, right, rows[4], rows[5],
-            String("Commits"), _PANE_COMMITS,
-            section_attr, list_attr, sel_attr, sel_inactive, list_dim,
+        self._paint_section_body(
+            canvas, left, right, rows[4], rows[5], _PANE_COMMITS,
+            list_attr, sel_attr, sel_inactive, list_dim,
+        )
+        # Headers + chrome buttons. Pass the focused section's index so
+        # the marker (``> ``) lights the right title.
+        var focused_section: Int
+        if self.focus == _PANE_FILES:
+            focused_section = 0
+        elif self.focus == _PANE_BRANCHES:
+            focused_section = 1
+        elif self.focus == _PANE_COMMITS:
+            focused_section = 2
+        else:
+            focused_section = -1
+        self.sidebar_dock.paint_headers(
+            canvas, left, right + 1, rows, section_attr, focused_section,
         )
         # Right side: split (file mode) or single info panel.
         self._ensure_right_panels(registry)
@@ -1579,23 +1613,18 @@ struct LocalChanges(Movable):
         for x in range(left, right + 1):
             canvas.set(x, y, Cell(String("─"), attr, 1))
 
-    fn _paint_section(
+    fn _paint_section_body(
         self, mut canvas: Canvas,
-        left: Int, right: Int, top: Int, height: Int,
-        title: String, pane: Int,
-        section_attr: Attr, list_attr: Attr, sel_active: Attr,
+        left: Int, right: Int, top: Int, height: Int, pane: Int,
+        list_attr: Attr, sel_active: Attr,
         sel_inactive: Attr, dim_attr: Attr,
     ):
+        """Paint a sidebar section's *body* only — the header row is
+        owned by the framework dock (``DockedPanelStack.paint_headers``).
+        Skipped entirely when the section is collapsed to header-only
+        (height <= 1)."""
         if right <= left or height <= 1:
             return
-        # Section header row — a bright bar across the panel width.
-        canvas.fill(
-            Rect(left, top, right + 1, top + 1), String(" "), section_attr,
-        )
-        var marker = String("> ") if self.focus == pane else String("  ")
-        _ = canvas.put_text(
-            Point(left, top), marker + title, section_attr, right + 1,
-        )
         var body_top = top + 1
         var body_h = height - 1
         if body_h <= 0:
@@ -2680,8 +2709,12 @@ struct LocalChanges(Movable):
         var rows = self._pane_rows(screen)
         var split1_y = rows[0] + rows[1]
         var split2_y = rows[2] + rows[3]
-        # Sidebar horizontal splitters span [screen.a.x, sep_x - 1].
-        if pos.x >= screen.a.x and pos.x < sep_x:
+        # Sidebar horizontal splitters span [screen.a.x, sep_x - 1]. Only
+        # draggable when all three sidebar panels are in NORMAL state —
+        # min/max collapse the layout to state-driven sizing where
+        # ``files_height_user`` / ``branches_height_user`` aren't read.
+        if self.sidebar_dock.all_normal() \
+                and pos.x >= screen.a.x and pos.x < sep_x:
             if pos.y == split1_y:
                 return _DRAG_SPLIT_FB
             if pos.y == split2_y:
@@ -2835,6 +2868,18 @@ struct LocalChanges(Movable):
             else:
                 self.state = PANEL_STATE_MAXIMIZED
             return True
+        # Sidebar panel min/max chrome buttons. Take the same priority
+        # as the modal-level chrome — clicking a header button never
+        # starts a splitter drag or shifts the row selection.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion:
+            var dock_hit = self.sidebar_dock.hit_chrome(pos)
+            if dock_hit.hit():
+                if dock_hit.is_max:
+                    self.sidebar_dock.toggle_max(dock_hit.section_idx)
+                else:
+                    self.sidebar_dock.toggle_min(dock_hit.section_idx)
+                return True
         var sw = self._sidebar_width(bounds)
         var sidebar_right = bounds.a.x + sw
         # Wheel: forward to whichever pane the cursor sits over.

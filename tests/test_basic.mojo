@@ -154,6 +154,8 @@ from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
 from turbokod.window import (
+    DockedPanelStack,
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, WindowManager, hit_title_command, paint_drop_shadow,
     paint_title_commands,
 )
@@ -9240,6 +9242,93 @@ fn test_local_changes_open_records_status_when_clean() raises:
     assert_false(lc.active)
 
 
+fn test_docked_panel_stack_layout_normal_split() raises:
+    """All sections NORMAL → equal share of available content rows."""
+    var dock = DockedPanelStack()
+    _ = dock.add(String("A"))
+    _ = dock.add(String("B"))
+    _ = dock.add(String("C"))
+    # 23 rows total. 2 splitter rows between 3 sections → 21 content rows.
+    # Equal share: 7 each.
+    var lay = dock.layout(0, 23)
+    assert_equal(len(lay), 6)
+    assert_equal(lay[0], 0)   # section 0 top
+    assert_equal(lay[1], 7)   # section 0 height
+    assert_equal(lay[2], 8)   # section 1 top (0 + 7 + 1 splitter)
+    assert_equal(lay[3], 7)
+    assert_equal(lay[4], 16)
+    assert_equal(lay[5], 7)
+
+
+fn test_docked_panel_stack_max_collapses_others() raises:
+    """Maximizing one section should give it nearly all the content
+    while the other two collapse to header-only (height 1)."""
+    var dock = DockedPanelStack()
+    _ = dock.add(String("A"))
+    _ = dock.add(String("B"))
+    _ = dock.add(String("C"))
+    dock.toggle_max(1)  # Maximize section B
+    assert_equal(Int(dock.state(0)), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(dock.state(1)), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(dock.state(2)), Int(PANEL_STATE_NORMAL))
+    var lay = dock.layout(0, 23)
+    # 21 content rows, A and C take 1 each → B gets 19.
+    assert_equal(lay[1], 1)
+    assert_equal(lay[3], 19)
+    assert_equal(lay[5], 1)
+    # Title rows still positioned correctly (so the user sees them).
+    assert_equal(lay[0], 0)
+    assert_equal(lay[2], 2)   # 0 + 1 + 1 splitter
+    assert_equal(lay[4], 22)  # 2 + 19 + 1 splitter
+
+
+fn test_docked_panel_stack_max_then_restore_resets_all() raises:
+    """Toggling max twice on the same section restores everyone to
+    NORMAL (and clears the other sections' visually-min'd state too)."""
+    var dock = DockedPanelStack()
+    _ = dock.add(String("A"))
+    _ = dock.add(String("B"))
+    dock.toggle_max(0)
+    assert_equal(Int(dock.state(0)), Int(PANEL_STATE_MAXIMIZED))
+    dock.toggle_max(0)
+    assert_equal(Int(dock.state(0)), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(dock.state(1)), Int(PANEL_STATE_NORMAL))
+    assert_true(dock.all_normal())
+
+
+fn test_docked_panel_stack_min_collapses_one() raises:
+    """A single minimized section stays at height 1; the rest split
+    the leftover."""
+    var dock = DockedPanelStack()
+    _ = dock.add(String("A"))
+    _ = dock.add(String("B"))
+    _ = dock.add(String("C"))
+    dock.toggle_min(0)
+    var lay = dock.layout(0, 23)
+    assert_equal(lay[1], 1)
+    # 21 - 1 = 20 across two NORMALs → 10 each.
+    assert_equal(lay[3], 10)
+    assert_equal(lay[5], 10)
+
+
+fn test_docked_panel_stack_min_on_max_sibling_clears_max() raises:
+    """If section A is MAXIMIZED (so B is visually min'd), clicking
+    B's min/restore button must clear A's max and restore B to NORMAL —
+    the ``effective`` state on B was MINIMIZED (because of A), so the
+    click is treated as a restore."""
+    var dock = DockedPanelStack()
+    _ = dock.add(String("A"))
+    _ = dock.add(String("B"))
+    _ = dock.add(String("C"))
+    dock.toggle_max(0)
+    assert_equal(Int(dock.state(0)), Int(PANEL_STATE_MAXIMIZED))
+    # Click min/restore on B — the visually-min'd sibling.
+    dock.toggle_min(1)
+    assert_equal(Int(dock.state(0)), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(dock.state(1)), Int(PANEL_STATE_NORMAL))
+    assert_true(dock.all_normal())
+
+
 fn test_build_minimal_patch_keeps_only_target_plus_line() raises:
     """A pure-add hunk with two ``+`` lines: targeting one of them
     must produce a patch with just that one as ``+`` and the other
@@ -10811,6 +10900,11 @@ fn main() raises:
     test_editor_right_gutter_paints_gray_square_for_changes()
     test_editor_right_gutter_projects_full_file_when_scrolled()
     test_local_changes_open_records_status_when_clean()
+    test_docked_panel_stack_layout_normal_split()
+    test_docked_panel_stack_max_collapses_others()
+    test_docked_panel_stack_max_then_restore_resets_all()
+    test_docked_panel_stack_min_collapses_one()
+    test_docked_panel_stack_min_on_max_sibling_clears_max()
     test_build_minimal_patch_keeps_only_target_plus_line()
     test_build_minimal_patch_demotes_paired_minus_to_context()
     test_build_minimal_patch_reverse_drops_paired_minus()
