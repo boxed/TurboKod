@@ -11,7 +11,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_GREEN, WHITE
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
 
@@ -20,9 +20,12 @@ from .geometry import Point, Rect
 struct TabBarItem(ImplicitlyCopyable, Movable):
     """One painted tab. ``window_idx`` is the caller-supplied index
     routed back through ``hit_test`` on click — typically the window
-    manager's array index, but we don't care what it represents."""
+    manager's array index, but we don't care what it represents.
+    ``dirty`` recolors the foreground to flag uncommitted changes —
+    matches the ``*`` marker convention used on window borders."""
     var label: String
     var window_idx: Int
+    var dirty: Bool
 
 
 @fieldwise_init
@@ -69,6 +72,8 @@ struct TabBar(Movable):
                 attr = active_attr
             else:
                 attr = bg
+            if items[i].dirty:
+                attr = attr.with_fg(LIGHT_GREEN)
             _ = painter.put_text(canvas, Point(x, y), label, attr)
             # Cap the recorded hit-rect at ``max_x`` so a tab that
             # was clipped on the right doesn't claim cells it didn't

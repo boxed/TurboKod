@@ -174,3 +174,22 @@ struct Painter(Copyable, Movable):
         current clip. Useful when a parent passes a wider painter and
         the child wants to constrain itself to a sub-area."""
         return Self(rect.intersect(self.clip))
+
+    fn draw_box_inner(
+        self,
+        mut canvas: Canvas,
+        rect: Rect,
+        attr: Attr,
+        double_line: Bool = False,
+    ) -> Self:
+        """Draw a box around ``rect`` and return a sub-painter clipped
+        to the box's interior.
+
+        Use instead of ``draw_box`` whenever the next paints are dialog
+        body content: the returned painter rejects writes that would
+        land on the just-drawn border, so a too-long title or row can't
+        damage the frame. Typical use:
+        ``painter = painter.draw_box_inner(canvas, rect, attr)``.
+        """
+        self.draw_box(canvas, rect, attr, double_line)
+        return self.sub(rect.inset(1, 1))

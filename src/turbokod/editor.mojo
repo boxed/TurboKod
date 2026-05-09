@@ -2004,6 +2004,19 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_present = False
         self._git_changes_dirty = True
 
+    fn has_uncommitted_changes(self) -> Bool:
+        """True if the buffer has unsaved edits or any cached
+        line-vs-HEAD diff entry. Used by the tab bar to tint the
+        filename. ``git_change_lines`` may be empty (non-git file or
+        baseline not yet fetched) — that's not "uncommitted", just
+        "unknown", so we report False."""
+        if self.dirty:
+            return True
+        for i in range(len(self.git_change_lines)):
+            if self.git_change_lines[i] != GIT_CHANGE_NONE:
+                return True
+        return False
+
     fn toggle_soft_wrap(mut self):
         self.soft_wrap = not self.soft_wrap
         if self.soft_wrap:

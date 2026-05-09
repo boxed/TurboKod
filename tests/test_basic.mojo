@@ -6448,6 +6448,41 @@ fn test_dap_manager_breakpoints_info_for() raises:
     assert_false(info[2][2])
 
 
+fn test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
+    """A BP with a non-empty wait-for stays disarmed until
+    ``arm_dependents`` is called for the matching ``"path:line"``
+    key. Setting and clearing ``wait_for`` flips the armed state in
+    the obvious direction. Default (``toggle_breakpoint`` without a
+    wait-for) is empty + armed, matching pre-feature behaviour."""
+    var mgr = DapManager()
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 5)
+    mgr.toggle_breakpoint(String("/tmp/x.py"), 12)
+    # Default: no dependency, both stored as empty.
+    assert_equal(mgr.breakpoint_wait_for(String("/tmp/x.py"), 5), String(""))
+    assert_equal(mgr.breakpoint_wait_for_at(0), String(""))
+    # Make BP at line 12 wait for the BP at line 5 (1-based on the wire).
+    mgr.set_breakpoint_wait_for(
+        String("/tmp/x.py"), 12, String("/tmp/x.py:6"),
+    )
+    assert_equal(
+        mgr.breakpoint_wait_for(String("/tmp/x.py"), 12),
+        String("/tmp/x.py:6"),
+    )
+    # Hitting an unrelated location doesn't arm it.
+    mgr.arm_dependents(String("/tmp/y.py"), 5)
+    # (No public predicate for armed; the only observable effect is
+    # via ``_send_set_breakpoints`` skipping the BP — that's exercised
+    # downstream. We at least verify ``arm_dependents`` doesn't raise.)
+    # Hitting the matching location resolves the dependency.
+    mgr.arm_dependents(String("/tmp/x.py"), 5)
+    # Clearing the wait-for through the API returns the BP to "always
+    # armed".
+    mgr.set_breakpoint_wait_for(
+        String("/tmp/x.py"), 12, String(""),
+    )
+    assert_equal(mgr.breakpoint_wait_for(String("/tmp/x.py"), 12), String(""))
+
+
 fn test_dap_manager_captures_condition_exception_from_output() raises:
     """A pydevd ``Error while evaluating expression in conditional
     breakpoint`` output event must be parsed into the condition + the
@@ -8228,12 +8263,17 @@ fn test_breakpoint_store_round_trip() raises:
     var bps = List[StoredBreakpoint]()
     bps.append(StoredBreakpoint(
         root + String("/src/foo.mojo"), 41, String(""), True,
+        String(""),
     ))
     bps.append(StoredBreakpoint(
         root + String("/src/foo.mojo"), 87, String("i > 10"), True,
+        String(""),
     ))
     bps.append(StoredBreakpoint(
         String("/etc/hosts"), 0, String(""), False,
+        # Wait-for trigger that should round-trip verbatim — the
+        # store doesn't validate keys, it just stashes the string.
+        String("/etc/hosts:1"),
     ))
     assert_true(save_breakpoints(root, bps))
     var loaded = load_breakpoints(root)
@@ -8244,15 +8284,18 @@ fn test_breakpoint_store_round_trip() raises:
     assert_equal(loaded[0].line, 41)
     assert_equal(loaded[0].condition, String(""))
     assert_true(loaded[0].enabled)
+    assert_equal(loaded[0].wait_for, String(""))
     assert_equal(loaded[1].path, root + String("/src/foo.mojo"))
     assert_equal(loaded[1].line, 87)
     assert_equal(loaded[1].condition, String("i > 10"))
     assert_true(loaded[1].enabled)
+    assert_equal(loaded[1].wait_for, String(""))
     # Outside the project — kept absolute on disk, loaded verbatim.
     # The disabled flag round-trips so a parked BP stays parked.
     assert_equal(loaded[2].path, String("/etc/hosts"))
     assert_equal(loaded[2].line, 0)
     assert_false(loaded[2].enabled)
+    assert_equal(loaded[2].wait_for, String("/etc/hosts:1"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -8282,7 +8325,7 @@ fn test_breakpoint_store_per_user_path() raises:
     _ = external_call["putenv", Int32](user_env.unsafe_ptr())
     var bps = List[StoredBreakpoint]()
     bps.append(StoredBreakpoint(
-        root + String("/main.py"), 7, String(""), True,
+        root + String("/main.py"), 7, String(""), True, String(""),
     ))
     assert_true(save_breakpoints(root, bps))
     var expected = root + String("/.turbokod/per_user/alice_test/breakpoints.json")

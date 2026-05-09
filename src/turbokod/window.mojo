@@ -24,6 +24,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .file_io import basename, parent_path
 from .geometry import Point, Rect
 from .scrollbar import HScrollbar, VScrollbar
 
@@ -316,7 +317,10 @@ struct Window(ImplicitlyCopyable, Movable):
             self.rect = workspace
             self.is_maximized = True
 
-    fn paint(self, mut canvas: Canvas, focused: Bool, number: Int):
+    fn paint(
+        self, mut canvas: Canvas, display_title: String,
+        focused: Bool, number: Int,
+    ):
         var border: Attr
         if focused:
             border = Attr(WHITE, BLUE)
@@ -340,7 +344,7 @@ struct Window(ImplicitlyCopyable, Movable):
         # centered title from poking under the close button (left, 3
         # cells) or the number/maximize indicator (right) on small
         # windows — those always win the row.
-        var title_padded = String(" ") + self.title + String(" ")
+        var title_padded = String(" ") + display_title + String(" ")
         if self.rect.width() >= len(title_padded.as_bytes()) + 6:
             paint_window_title(
                 canvas, self.rect, title_padded, border, body_bg,
@@ -564,6 +568,46 @@ struct Window(ImplicitlyCopyable, Movable):
         return (left, right, bottom)
 
 
+fn compute_display_titles(windows: List[Window]) -> List[String]:
+    """Return a parallel list of display titles for ``windows``. When
+    two file-backed windows share a basename but have distinct paths,
+    each colliding title is prefixed with its parent-directory
+    component (``parent/file.py``) so they're distinguishable in the
+    tab bar and on the title border. Non-file-backed windows (and
+    windows with no resolvable parent component) keep their original
+    title."""
+    var titles = List[String]()
+    var n = len(windows)
+    for i in range(n):
+        titles.append(windows[i].title)
+    for i in range(n):
+        if not windows[i].is_editor:
+            continue
+        var path_i = windows[i].editor.file_path
+        if len(path_i.as_bytes()) == 0:
+            continue
+        var collides = False
+        for j in range(n):
+            if i == j:
+                continue
+            if not windows[j].is_editor:
+                continue
+            var path_j = windows[j].editor.file_path
+            if len(path_j.as_bytes()) == 0:
+                continue
+            if windows[j].title == windows[i].title and path_j != path_i:
+                collides = True
+                break
+        if not collides:
+            continue
+        var parent_dir = basename(parent_path(path_i))
+        if len(parent_dir.as_bytes()) == 0 or parent_dir == String("/") \
+                or parent_dir == String("."):
+            continue
+        titles[i] = parent_dir + String("/") + windows[i].title
+    return titles^
+
+
 struct WindowManager(Movable):
     """Owns the open windows and their interaction state.
 
@@ -760,9 +804,10 @@ struct WindowManager(Movable):
     fn paint(self, mut canvas: Canvas):
         # Iterate z-order back-to-front so the focused window (which is
         # always at the end of z_order, by invariant) lands on top.
+        var titles = compute_display_titles(self.windows)
         for k in range(len(self.z_order)):
             var i = self.z_order[k]
-            self.windows[i].paint(canvas, i == self.focused, i + 1)
+            self.windows[i].paint(canvas, titles[i], i == self.focused, i + 1)
 
     fn handle_key(mut self, event: Event) -> Bool:
         """Forward a key event to the focused window's editor (if it has one)."""

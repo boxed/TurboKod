@@ -146,6 +146,7 @@ from .symbol_pick import SymbolPick
 from .find_symbol import FindSymbol
 from .window import (
     MIN_WIN_H, MIN_WIN_W, TitleCommand, Window, WindowManager,
+    compute_display_titles,
 )
 
 
@@ -1419,6 +1420,10 @@ struct Desktop(Movable):
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
+        # Wait-for dropdown popup overlays the rest of the breakpoint
+        # dialog. Paint after the dialog body so the popup z-orders on
+        # top — same pattern as ``Settings`` / ``ActionEditor``.
+        self.breakpoint_menu.paint_popup(canvas, screen)
         self.breakpoint_error.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
@@ -2158,6 +2163,7 @@ struct Desktop(Movable):
         # its own from ``.turbokod/per_user/<username>/breakpoints.json``.
         self.dap.restore_breakpoints(
             List[String](), List[Int](), List[String](), List[Bool](),
+            List[String](),
         )
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
@@ -2242,13 +2248,15 @@ struct Desktop(Movable):
         var bp_lines = List[Int]()
         var bp_conds = List[String]()
         var bp_enabled = List[Bool]()
+        var bp_wait_for = List[String]()
         for i in range(len(stored)):
             bp_paths.append(stored[i].path)
             bp_lines.append(stored[i].line)
             bp_conds.append(stored[i].condition)
             bp_enabled.append(stored[i].enabled)
+            bp_wait_for.append(stored[i].wait_for)
         self.dap.restore_breakpoints(
-            bp_paths^, bp_lines^, bp_conds^, bp_enabled^,
+            bp_paths^, bp_lines^, bp_conds^, bp_enabled^, bp_wait_for^,
         )
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
@@ -2346,6 +2354,7 @@ struct Desktop(Movable):
                 self.dap.breakpoint_line_at(i),
                 self.dap.breakpoint_condition_at(i),
                 self.dap.breakpoint_enabled_at(i),
+                self.dap.breakpoint_wait_for_at(i),
             ))
         return out^
 
@@ -3638,6 +3647,11 @@ struct Desktop(Movable):
                 self._dap_exec_path = frames[0].path
                 self._dap_exec_line = frames[0].line
                 self._dap_current_frame_id = frames[0].id
+                # Arm any BP that was waiting on this stop point. The
+                # adapter started without these BPs in its set; this
+                # wakes them up + re-pushes ``setBreakpoints`` so the
+                # next pass through the dependent line actually fires.
+                self.dap.arm_dependents(frames[0].path, frames[0].line)
                 if len(frames[0].path.as_bytes()) > 0:
                     self._jump_to(
                         DefinitionResolved(
@@ -4602,9 +4616,12 @@ struct Desktop(Movable):
         var rect = self.tab_bar_rect(screen)
         if rect.width() <= 0 or rect.height() <= 0:
             return
+        var titles = compute_display_titles(self.windows.windows)
         var items = List[TabBarItem]()
         for i in range(len(self.windows.windows)):
-            items.append(TabBarItem(self.windows.windows[i].title, i))
+            var dirty = self.windows.windows[i].is_editor \
+                and self.windows.windows[i].editor.has_uncommitted_changes()
+            items.append(TabBarItem(titles[i], i, dirty))
         self.tab_bar.paint(canvas, rect, items, self.windows.focused)
 
     fn _refresh_target_tabs(mut self):
@@ -5895,13 +5912,37 @@ struct Desktop(Movable):
                 continue
             var enabled = self.dap.breakpoint_enabled(path, req.row)
             var cond = self.dap.breakpoint_condition(path, req.row)
-            self.breakpoint_menu.open(path, req.row, enabled, cond)
+            var wait_for = self.dap.breakpoint_wait_for(path, req.row)
+            var options = self._wait_for_options_excluding(path, req.row)
+            self.breakpoint_menu.open(
+                path, req.row, enabled, cond, wait_for, options^,
+            )
+
+    fn _wait_for_options_excluding(
+        self, self_path: String, self_line: Int,
+    ) -> List[String]:
+        """Build the list of trigger-BP keys for the wait-for dropdown,
+        excluding the BP being edited (a BP can't depend on itself).
+
+        Each key is ``"<path>:<1-based-line>"`` — same form
+        ``arm_dependents`` and the BP store use, so the round-trip
+        stays string-identical."""
+        var out = List[String]()
+        var n = self.dap.breakpoint_count()
+        for i in range(n):
+            var p = self.dap.breakpoint_path_at(i)
+            var l = self.dap.breakpoint_line_at(i)
+            if p == self_path and l == self_line:
+                continue
+            out.append(p + String(":") + String(l + 1))
+        return out^
 
     fn _on_breakpoint_menu_submit(mut self):
         """Apply the right-click dialog's result, then close. The user
-        may have toggled enabled, edited the condition, or both — push
-        each change separately so a path that's already correct skips
-        the round-trip."""
+        may have toggled enabled, edited the condition, changed the
+        wait-for trigger, or any combination — push each change
+        separately so a path that's already correct skips the
+        round-trip."""
         var r = self.breakpoint_menu.result()
         var path = self.breakpoint_menu.path
         var line = self.breakpoint_menu.line
@@ -5914,6 +5955,9 @@ struct Desktop(Movable):
         var cur_cond = self.dap.breakpoint_condition(path, line)
         if cur_cond != r.condition:
             self.dap.set_breakpoint_condition(path, line, r.condition)
+        var cur_wait = self.dap.breakpoint_wait_for(path, line)
+        if cur_wait != r.wait_for:
+            self.dap.set_breakpoint_wait_for(path, line, r.wait_for)
 
     fn _on_breakpoint_error_submit(mut self):
         """Resolve the condition-error dialog. Three buttons:

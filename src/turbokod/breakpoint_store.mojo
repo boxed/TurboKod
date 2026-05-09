@@ -51,11 +51,20 @@ struct StoredBreakpoint(ImplicitlyCopyable, Movable):
     ``condition`` is empty for unconditional breakpoints.
     ``enabled`` is False to skip the breakpoint without removing it —
     the gutter still shows it as a faint dot so the user knows it's
-    parked there."""
+    parked there.
+    ``wait_for`` identifies a *trigger* breakpoint as
+    ``"<full-path>:<1-based-line>"`` — when set, this BP stays inert
+    until the trigger fires once in the current session. Empty string
+    means "no dependency" (the default). The trigger key uses absolute
+    paths since the cross-BP reference doesn't survive the session
+    save anyway: each session reloads breakpoints, the wait_for is
+    only consulted while debugging, and absolute paths remove ambiguity
+    between two files with the same basename."""
     var path: String
     var line: Int
     var condition: String
     var enabled: Bool
+    var wait_for: String
 
 
 fn _current_username() -> String:
@@ -182,7 +191,11 @@ fn load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
         # Missing ``enabled`` (older files, or hand-edited JSON) defaults
         # to True — preserves prior behaviour of always-firing BPs.
         var en = json_get_bool(node, String("enabled"), True)
-        out.append(StoredBreakpoint(resolved^, line, cond^, en))
+        # Missing ``wait_for`` defaults to empty (no dependency) so
+        # files written by older builds round-trip without surprising
+        # the user.
+        var wait = json_get_string(node, String("wait_for"))
+        out.append(StoredBreakpoint(resolved^, line, cond^, en, wait^))
     return out^
 
 
@@ -200,6 +213,14 @@ fn encode_breakpoints(
         bp.put(String("line"), json_int(breakpoints[i].line))
         bp.put(String("condition"), json_str(breakpoints[i].condition))
         bp.put(String("enabled"), json_bool(breakpoints[i].enabled))
+        # Only emit ``wait_for`` when set, so a file written from a
+        # session that never used the feature stays as compact as
+        # before — and a hand-edited JSON without the field still
+        # round-trips byte-identically through the next save.
+        if len(breakpoints[i].wait_for.as_bytes()) > 0:
+            bp.put(
+                String("wait_for"), json_str(breakpoints[i].wait_for),
+            )
         arr.append(bp^)
     root.put(String("breakpoints"), arr^)
     return encode_json(root) + String("\n")
