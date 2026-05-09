@@ -349,6 +349,116 @@ fn paint_option_toggle(
     _ = canvas.put_text(Point(toggle.x, toggle.y), padded, attr, max_x)
 
 
+struct Checkbox(ImplicitlyCopyable, Movable):
+    """Two-state checkbox that paints its box *and* label on a single
+    background-colored chip, so the user can see at a glance that
+    everything in the strip is one click target.
+
+    The "chip" idea is what the original Turbo Vision dialogs do for
+    cluster items: the entire ``[ ] Reverse mouse buttons`` strip
+    sits on a cyan background that contrasts with the dialog body,
+    advertising "this whole row toggles." Without that chip the box
+    glyph alone reads as a tiny 3-cell hit target and users
+    underestimate the click area.
+
+    Mouse handling mirrors ``ShadowButton`` / ``OptionToggle``: a
+    captured press latches until release, and the checkbox only
+    reports ``BUTTON_FIRED`` when the release lands back inside the
+    chip. Hosts keep one instance per visible checkbox alive across
+    paints (recreating per-frame would drop a held press) and flip
+    ``on`` on ``BUTTON_FIRED``.
+    """
+    var label: String
+    var on: Bool
+    var x: Int
+    var y: Int
+    var pressed: Bool
+    var pressed_inside: Bool
+
+    fn __init__(
+        out self, var label: String,
+        x: Int = 0, y: Int = 0, on: Bool = False,
+    ):
+        self.label = label^
+        self.on = on
+        self.x = x
+        self.y = y
+        self.pressed = False
+        self.pressed_inside = False
+
+    fn width(self) -> Int:
+        """Cells the chip claims horizontally. Layout is
+        `` [x] Label `` — 1 leading pad + 3 box + 1 separator + label
+        + 1 trailing pad — so the colored strip extends one cell past
+        the box and label on each side and reads as a button-shaped
+        chip rather than tinted text."""
+        return 6 + len(self.label.as_bytes())
+
+    fn hit_rect(self) -> Rect:
+        return Rect(self.x, self.y, self.x + self.width(), self.y + 1)
+
+    fn move_to(mut self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    fn toggle(mut self):
+        self.on = not self.on
+
+    fn handle_mouse(mut self, event: Event) -> UInt8:
+        """Press / drag / release state machine — same shape as
+        ``ShadowButton.handle_mouse``. Returns ``BUTTON_FIRED`` on a
+        release inside the hit rect after a captured press; the
+        caller is responsible for calling ``toggle()`` (so a host
+        that needs to veto a toggle, e.g. on a disabled row, can
+        skip it without re-implementing the state machine)."""
+        if event.kind != EVENT_MOUSE:
+            return BUTTON_NONE
+        if event.button != MOUSE_BUTTON_LEFT:
+            return BUTTON_NONE
+        if event.pressed and not event.motion:
+            if self.pressed:
+                self.pressed = False
+                self.pressed_inside = False
+            if self.hit_rect().contains(event.pos):
+                self.pressed = True
+                self.pressed_inside = True
+                return BUTTON_CAPTURED
+            return BUTTON_NONE
+        if event.pressed and event.motion:
+            if not self.pressed:
+                return BUTTON_NONE
+            self.pressed_inside = self.hit_rect().contains(event.pos)
+            return BUTTON_CAPTURED
+        if not event.pressed:
+            if not self.pressed:
+                return BUTTON_NONE
+            self.pressed = False
+            self.pressed_inside = False
+            if self.hit_rect().contains(event.pos):
+                return BUTTON_FIRED
+            return BUTTON_CANCELED
+        return BUTTON_NONE
+
+
+fn paint_checkbox(
+    mut canvas: Canvas, cb: Checkbox,
+    chip_attr: Attr, focus_attr: Attr, focused: Bool,
+    max_x: Int = -1,
+):
+    """Render ``cb`` as a background-colored strip.
+
+    ``chip_attr`` is the always-on chip color — should contrast with
+    the dialog body so the click area is visible at rest.
+    ``focus_attr`` overrides it when the checkbox is the focused
+    element in its dialog (typically the same focus color other
+    widgets use, e.g. ``BLACK on GREEN``).
+    """
+    var attr = focus_attr if focused else chip_attr
+    var glyph = String("[x]") if cb.on else String("[ ]")
+    var text = String(" ") + glyph + String(" ") + cb.label + String(" ")
+    _ = canvas.put_text(Point(cb.x, cb.y), text, attr, max_x)
+
+
 fn shadow_button_hit(button: ShadowButton, event: Event) -> Bool:
     """True when ``event`` is a left-button press landing on
     ``button``'s hit rect (face or shadow rows). Drag-motion and

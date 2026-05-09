@@ -22,13 +22,14 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
+    BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton, paint_checkbox,
+    paint_shadow_button,
 )
 from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_RED,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_RED,
     LIGHT_YELLOW, WHITE,
 )
 from .events import (
@@ -81,8 +82,8 @@ struct BreakpointMenu(Movable):
     it can locate the BP in the DAP manager."""
     var line: Int
     """0-based buffer row. Same convention as ``DapManager._bp_line``."""
-    var enabled: Bool
-    """Live state of the Enabled checkbox."""
+    var enabled: Checkbox
+    """Live state + geometry for the Enabled checkbox chip."""
     var condition: TextField
     var _focus: UInt8
     var _ok: ShadowButton
@@ -97,7 +98,7 @@ struct BreakpointMenu(Movable):
         self.submitted = False
         self.path = String("")
         self.line = -1
-        self.enabled = True
+        self.enabled = Checkbox(String("Enabled"), 0, 0, True)
         self.condition = TextField()
         self._focus = _FOCUS_CONDITION
         self._ok = ShadowButton(String(" OK "), 0, 0)
@@ -112,7 +113,7 @@ struct BreakpointMenu(Movable):
         self.submitted = False
         self.path = path^
         self.line = line
-        self.enabled = enabled
+        self.enabled = Checkbox(String("Enabled"), 0, 0, enabled)
         self.condition = TextField()
         self.condition.set_text(condition^)
         self._focus = _FOCUS_CONDITION
@@ -139,7 +140,7 @@ struct BreakpointMenu(Movable):
         calling ``close`` so the strings come out in the live form,
         not the post-close empty form."""
         return BreakpointMenuResult(
-            self._confirmed, self.enabled, self.condition.text,
+            self._confirmed, self.enabled.on, self.condition.text,
         )
 
     fn _layout(self, screen: Rect) -> Rect:
@@ -165,10 +166,12 @@ struct BreakpointMenu(Movable):
         var y = dlg.a.y + 6
         return Rect(dlg.a.x + 2, y, dlg.b.x - 2, y + 1)
 
-    fn _enabled_rect(self, dlg: Rect) -> Rect:
-        # Enabled checkbox row.
-        var y = dlg.a.y + 3
-        return Rect(dlg.a.x + 2, y, dlg.a.x + 2 + 14, y + 1)
+    fn _position_checkbox(mut self, dlg: Rect):
+        """Repoint the checkbox at the dialog's current position. Run
+        from both ``paint`` and ``handle_mouse`` so the chip's
+        ``hit_rect`` is in sync with where it was last drawn even if
+        the dialog has since moved/resized."""
+        self.enabled.move_to(dlg.a.x + 2, dlg.a.y + 3)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
@@ -198,16 +201,15 @@ struct BreakpointMenu(Movable):
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, rect.a.y + 1), title + loc, attr,
         )
-        # Enabled checkbox row.
-        var en_rect = self._enabled_rect(rect)
-        var en_attr = attr
-        if self._focus == _FOCUS_ENABLED:
-            en_attr = Attr(BLACK, GREEN)
-            painter.fill(canvas, en_rect, String(" "), en_attr)
-        var box_glyph = String("[x]") if self.enabled else String("[ ]")
-        _ = painter.put_text(
-            canvas, Point(en_rect.a.x, en_rect.a.y),
-            box_glyph + String(" Enabled"), en_attr,
+        # Enabled checkbox: render the box+label on a contrasting
+        # chip so the click target reads as wider than just the 3-cell
+        # ``[x]`` glyph.
+        self._position_checkbox(rect)
+        paint_checkbox(
+            canvas, self.enabled,
+            Attr(BLACK, CYAN), Attr(BLACK, GREEN),
+            self._focus == _FOCUS_ENABLED,
+            rect.b.x - 1,
         )
         # Condition label + field.
         _ = painter.put_text(
@@ -247,7 +249,7 @@ struct BreakpointMenu(Movable):
         self._confirmed = confirmed
 
     fn _toggle_enabled(mut self):
-        self.enabled = not self.enabled
+        self.enabled.toggle()
 
     fn _focus_next(mut self, backward: Bool = False):
         # 4 stops: Enabled → Condition → OK → Cancel → wrap.
@@ -314,14 +316,21 @@ struct BreakpointMenu(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._layout(screen)
-        # Click inside the Enabled rect toggles the checkbox.
+        self._position_checkbox(rect)
+        # Run the Enabled chip first — it captures mouse on press, so
+        # a press inside the chip is consumed even if the focus shift
+        # to text-field below would otherwise grab it.
+        var cb_status = self.enabled.handle_mouse(event)
+        if cb_status != BUTTON_NONE:
+            if cb_status == BUTTON_FIRED:
+                self._focus = _FOCUS_ENABLED
+                self.enabled.toggle()
+            elif cb_status == BUTTON_CAPTURED \
+                    and event.pressed and not event.motion:
+                self._focus = _FOCUS_ENABLED
+            return True
         if event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
-            var er = self._enabled_rect(rect)
-            if er.contains(event.pos):
-                self._focus = _FOCUS_ENABLED
-                self._toggle_enabled()
-                return True
             var ir = self._input_rect(rect)
             if ir.contains(event.pos):
                 self._focus = _FOCUS_CONDITION
