@@ -15,7 +15,7 @@ from std.collections.list import List
 from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
 from .editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor,
@@ -218,6 +218,121 @@ fn hit_title_command(
                 and pos.x < h.x_end:
             return h.id
     return String("")
+
+
+# --- panel chrome (min/max/restore) ---------------------------------------
+# A "panel" here is a docked widget with a title row that can collapse to
+# a single header (MINIMIZED), expand to fill the workspace (MAXIMIZED),
+# or sit at its caller-defined size (NORMAL). The state machine + button
+# chrome live in window.mojo so every panel — debug pane, git viewer, any
+# future docked widget — paints the same affordance in the same slot and
+# dispatches clicks the same way.
+
+comptime PANEL_STATE_NORMAL    = UInt8(0)
+comptime PANEL_STATE_MINIMIZED = UInt8(1)
+comptime PANEL_STATE_MAXIMIZED = UInt8(2)
+
+
+fn paint_panel_button(
+    mut canvas: Canvas, painter: Painter,
+    top_left: Point, border: Attr, glyph: String,
+):
+    """Three-cell ``[<glyph>]`` chrome button painted in a panel's title
+    row. Mirrors ``paint_close_button`` but with a caller-supplied glyph
+    so the same helper renders min, max, and restore buttons. Routed
+    through ``painter`` so a button drawn near the panel edge clips
+    against the panel bounds rather than leaking onto a neighbouring
+    widget."""
+    var glyph_attr = Attr(LIGHT_YELLOW, border.bg, border.style)
+    painter.set(canvas, top_left.x, top_left.y, Cell(String("["), border, 1))
+    painter.set(canvas, top_left.x + 1, top_left.y, Cell(glyph, glyph_attr, 1))
+    painter.set(canvas, top_left.x + 2, top_left.y, Cell(String("]"), border, 1))
+
+
+@fieldwise_init
+struct PanelChromeHits(ImplicitlyCopyable, Movable):
+    """Painted-rect record for the panel min/max chrome buttons. ``-1``
+    on either x means that button wasn't painted this frame (panel too
+    narrow, or caller asked for max-only) — hit-tests against ``-1``
+    always miss. Callers store one of these per paint and consult it
+    from ``handle_mouse``."""
+    var top_y: Int
+    var min_btn_x: Int
+    var max_btn_x: Int
+
+    fn __init__(out self):
+        self.top_y = -1
+        self.min_btn_x = -1
+        self.max_btn_x = -1
+
+    fn on_min(self, pos: Point) -> Bool:
+        return self.min_btn_x >= 0 \
+            and pos.y == self.top_y \
+            and pos.x >= self.min_btn_x \
+            and pos.x < self.min_btn_x + 3
+
+    fn on_max(self, pos: Point) -> Bool:
+        return self.max_btn_x >= 0 \
+            and pos.y == self.top_y \
+            and pos.x >= self.max_btn_x \
+            and pos.x < self.max_btn_x + 3
+
+    fn on_any(self, pos: Point) -> Bool:
+        return self.on_min(pos) or self.on_max(pos)
+
+
+fn paint_panel_window_buttons(
+    mut canvas: Canvas, painter: Painter,
+    top_y: Int, panel: Rect,
+    state: UInt8, border: Attr,
+    trailing_reserve: Int = 0,
+    show_minimize: Bool = True,
+) -> PanelChromeHits:
+    """Paint the standard min/max chrome buttons at the right of a
+    panel's title row.
+
+    Buttons are 3 cells each. Layout (from the right edge of ``panel``):
+    ``[trailing_reserve cells][maximize button][minimize button]``. The
+    ``trailing_reserve`` argument lets callers reserve space for a
+    keyboard-shortcut hint (the debug pane uses ``2`` for `` 9``).
+
+    Glyphs flip between the action and its reverse so the user always
+    sees what the *next* click will do: ``▣`` maximize / ``□`` restore;
+    ``▁`` minimize / ``□`` restore. When ``show_minimize`` is False the
+    minimize button is omitted (panels that have no meaningful collapsed
+    state — e.g. a modal that intercepts all input — still want the
+    maximize/restore toggle).
+
+    Returns a ``PanelChromeHits`` recording the painted x positions so
+    the caller's ``handle_mouse`` can dispatch clicks. When the panel is
+    too narrow to hold the buttons + reserve, returns an empty hit
+    record (everything ``-1``) without painting."""
+    var hits = PanelChromeHits()
+    hits.top_y = top_y
+    var pane_w = panel.b.x - panel.a.x
+    var slots = 6 if show_minimize else 3
+    if pane_w < slots + trailing_reserve:
+        return hits^
+    var max_x = panel.b.x - 3 - trailing_reserve
+    hits.max_btn_x = max_x
+    var max_glyph: String
+    if state == PANEL_STATE_MAXIMIZED:
+        max_glyph = String("□")
+    else:
+        max_glyph = String("▣")
+    paint_panel_button(canvas, painter, Point(max_x, top_y), border, max_glyph)
+    if show_minimize:
+        var min_x = max_x - 3
+        hits.min_btn_x = min_x
+        var min_glyph: String
+        if state == PANEL_STATE_MINIMIZED:
+            min_glyph = String("□")
+        else:
+            min_glyph = String("▁")
+        paint_panel_button(
+            canvas, painter, Point(min_x, top_y), border, min_glyph,
+        )
+    return hits^
 
 
 fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):

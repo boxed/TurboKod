@@ -61,9 +61,9 @@ from turbokod import (
     EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
-    GIT_LOCAL_CHANGES,
+    GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
-    TARGET_RUN, WINDOW_CLOSE,
+    TARGET_RUN, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
     stat_file,
 )
 
@@ -139,6 +139,7 @@ fn main() raises:
             (String("Open recent..."), EDITOR_OPEN_RECENT),
             (String("Open recent project..."), PROJECT_OPEN_RECENT),
             (String("Close"), WINDOW_CLOSE),
+            (String("Close all"), WINDOW_CLOSE_ALL),
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),
         ))
@@ -196,6 +197,7 @@ fn main() raises:
         desktop.menu_bar.add(_mk_menu(String("Git"),
             (String("Toggle Blame"),       EDITOR_TOGGLE_BLAME),
             (String("Show diff viewer"), GIT_LOCAL_CHANGES),
+            (String("Open all with changes"), GIT_OPEN_ALL_CHANGED),
         ))
         var debug_items = List[MenuItem]()
         debug_items.append(MenuItem(String("Run"), TARGET_RUN))

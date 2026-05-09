@@ -52,9 +52,9 @@ from .file_io import (
 )
 from .git_blame import compute_blame
 from .git_changes import (
-    GitRevertBlock, GitStateMtimes, compute_revert_block,
-    diff_buffer_against_head, fetch_head_text, git_state_mtimes,
-    project_is_git_repo,
+    GitFileStatus, GitRevertBlock, GitStateMtimes, compute_revert_block,
+    diff_buffer_against_head, fetch_git_status, fetch_head_text,
+    git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
     GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
@@ -102,7 +102,6 @@ from .dap_dispatch import (
 )
 from .debug_pane import (
     DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
-    PANE_STATE_MAXIMIZED, PANE_STATE_MINIMIZED,
 )
 from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
@@ -145,7 +144,9 @@ from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .find_symbol import FindSymbol
 from .window import (
-    MIN_WIN_H, MIN_WIN_W, TitleCommand, Window, WindowManager,
+    MIN_WIN_H, MIN_WIN_W,
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
+    TitleCommand, Window, WindowManager,
     compute_display_titles,
 )
 
@@ -227,6 +228,11 @@ comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
 # opens the unified diff as a read-only window. Untracked files are not
 # included — only modifications against the last commit.
 comptime GIT_LOCAL_CHANGES          = String("git:local_changes")
+# "Open all with changes" — for every entry from ``git status`` in the
+# active project, open an editor window. Deletions and untracked-empty
+# entries are skipped (no file to show); already-open files are
+# focus-reused, the same way ``open_file`` handles repeats.
+comptime GIT_OPEN_ALL_CHANGED       = String("git:open_all_changed")
 comptime EDITOR_CUT           = String("edit:cut")
 comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
@@ -289,6 +295,10 @@ comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
 comptime WINDOW_MAXIMIZE_ALL  = String("window:maximize_all")
 comptime WINDOW_RESTORE_ALL   = String("window:restore_all")
 comptime WINDOW_CLOSE         = String("window:close")
+# "Close all" — drop every editor window in one shot. Non-editor windows
+# (host-added panels / demo content) are kept; the action reuses the
+# same path that ``close_project`` does.
+comptime WINDOW_CLOSE_ALL     = String("window:close_all")
 comptime WINDOW_ROTATE_NEXT   = String("window:rotate_next")
 comptime WINDOW_ROTATE_PREV   = String("window:rotate_prev")
 comptime _WINDOW_MENU_LABEL   = String("Window")
@@ -1085,9 +1095,9 @@ struct Desktop(Movable):
         target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
         whole bottom area, leaving just the menu bar above and the
         status / tab strip below."""
-        if self.debug_pane.state == PANE_STATE_MINIMIZED:
+        if self.debug_pane.state == PANEL_STATE_MINIMIZED:
             return 1
-        if self.debug_pane.state == PANE_STATE_MAXIMIZED:
+        if self.debug_pane.state == PANEL_STATE_MAXIMIZED:
             var avail = screen.b.y - self._bottom_chrome_height(screen) - 1
             if avail < 4:
                 avail = 4
@@ -3157,6 +3167,28 @@ struct Desktop(Movable):
             if self.project:
                 self.local_changes.open(self.project.value())
             return Optional[String]()
+        if action == GIT_OPEN_ALL_CHANGED:
+            if self.project:
+                var root = self.project.value()
+                var statuses = fetch_git_status(root)
+                for i in range(len(statuses)):
+                    # Skip pure deletions — there's no working-tree file
+                    # to open. ``D`` = 0x44; staged-D plus worktree-space
+                    # (or worktree-D) means the file is gone. ``D`` only in
+                    # the worktree column (e.g. ``MD``) also means the
+                    # current path on disk is missing.
+                    var x = Int(statuses[i].staged)
+                    var y = Int(statuses[i].worktree)
+                    if y == 0x44:
+                        continue
+                    if x == 0x44 and (y == 0x20 or y == 0x44):
+                        continue
+                    var abs = join_path(root, statuses[i].path)
+                    try:
+                        self.open_file(abs, screen)
+                    except:
+                        pass
+            return Optional[String]()
         if action == EDITOR_TOGGLE_BLAME:
             var idx = self._focused_editor_idx()
             if idx >= 0:
@@ -3257,6 +3289,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == WINDOW_CLOSE:
             _ = self.windows.close_focused()
+            return Optional[String]()
+        if action == WINDOW_CLOSE_ALL:
+            self._close_all_editor_windows()
             return Optional[String]()
         if starts_with(action, WINDOW_FOCUS_PREFIX):
             var idx = parse_int_prefix(action, len(WINDOW_FOCUS_PREFIX.as_bytes()), len(action.as_bytes()))

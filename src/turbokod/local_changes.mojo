@@ -61,6 +61,10 @@ from .highlight import (
 )
 from .painter import Painter
 from .file_io import join_path, read_file
+from .window import (
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_NORMAL, PanelChromeHits,
+    paint_drop_shadow, paint_panel_window_buttons, paint_window_title,
+)
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index,
@@ -73,7 +77,6 @@ from .git_changes import (
 )
 from .string_utils import split_lines_no_trailing, starts_with
 from .text_field import TextField
-from .window import paint_drop_shadow, paint_window_title
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -894,6 +897,15 @@ struct LocalChanges(Movable):
     var overlay_input: TextField
     var overlay_message: String
     var overlay_ok: Bool
+    # Framework window state. ``PANEL_STATE_MAXIMIZED`` (default) gives
+    # the original full-screen modal; ``PANEL_STATE_NORMAL`` shrinks to
+    # an inset rect with margins so the workspace + chrome stay visible
+    # behind the panel. MINIMIZED isn't meaningful here — the modal
+    # intercepts all input, so a one-row strip wouldn't be reachable —
+    # which is why ``paint_panel_window_buttons`` is called below with
+    # ``show_minimize=False``.
+    var state: UInt8
+    var _chrome_hits: PanelChromeHits
 
     fn __init__(out self):
         self.active = False
@@ -926,6 +938,8 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
+        self.state = PANEL_STATE_MAXIMIZED
+        self._chrome_hits = PanelChromeHits()
 
     fn open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -1033,6 +1047,23 @@ struct LocalChanges(Movable):
         self.overlay_ok = False
 
     # --- geometry ---------------------------------------------------------
+
+    fn _panel_rect(self, screen: Rect) -> Rect:
+        """Where the panel actually paints. ``MAXIMIZED`` covers the
+        whole screen (the original full-screen modal); ``NORMAL``
+        insets so the menu bar, status bar, and surrounding desktop
+        chrome stay visible behind the panel. Below a usable size the
+        inset rect collapses back to the full screen — a tiny terminal
+        is better off with a fullscreen modal than a 12-cell strip."""
+        if self.state != PANEL_STATE_NORMAL:
+            return screen
+        var top = screen.a.y + 2
+        var bottom = screen.b.y - 2
+        var left = screen.a.x + 4
+        var right = screen.b.x - 4
+        if right - left < 32 or bottom - top < 8:
+            return screen
+        return Rect(left, top, right, bottom)
 
     fn _sidebar_width(self, screen: Rect) -> Int:
         var max_w = screen.width() // 2
@@ -1367,31 +1398,47 @@ struct LocalChanges(Movable):
         var rem_attr    = Attr(LIGHT_RED,   BLUE)
         var hunk_attr   = Attr(CYAN,  BLUE)
         var header_attr = Attr(WHITE, BLUE)
-        canvas.fill(screen, String(" "), bg)
-        canvas.draw_box(screen, border, True)
+        # Resolve where the panel actually paints. ``MAXIMIZED`` is the
+        # original full-screen modal; ``NORMAL`` shrinks to an inset
+        # rect so the workspace stays visible behind it. Every internal
+        # geometry helper takes this rect as ``screen``, so the rest of
+        # the paint code can stay unchanged.
+        var bounds = self._panel_rect(screen)
+        if self.state != PANEL_STATE_MAXIMIZED:
+            paint_drop_shadow(canvas, bounds)
+        canvas.fill(bounds, String(" "), bg)
+        canvas.draw_box(bounds, border, True)
         # Title row — framework helper enforces title bg = body bg.
         paint_window_title(
-            canvas, screen, String(" Local changes "), title_attr, bg,
+            canvas, bounds, String(" Local changes "), title_attr, bg,
+        )
+        # Framework chrome: maximize/restore button. No minimize for
+        # this panel — the modal intercepts all input, so a one-row
+        # strip would be unreachable.
+        var chrome_painter = Painter(bounds)
+        self._chrome_hits = paint_panel_window_buttons(
+            canvas, chrome_painter, bounds.a.y, bounds, self.state, border,
+            show_minimize=False,
         )
         # Sub-title: project root (or status banner).
-        var sub_y = screen.a.y + 1
+        var sub_y = bounds.a.y + 1
         var sub: String
         if len(self.status_message.as_bytes()) > 0:
             sub = String(" ") + self.status_message
         else:
             sub = String(" ") + self.root
         _ = canvas.put_text(
-            Point(screen.a.x + 1, sub_y), sub, list_dim, screen.b.x - 1,
+            Point(bounds.a.x + 1, sub_y), sub, list_dim, bounds.b.x - 1,
         )
         # Vertical separator (also the sidebar/right splitter target).
-        var sw = self._sidebar_width(screen)
-        var sep_x = screen.a.x + sw
-        for y in range(self._list_top(screen), self._list_bottom(screen)):
+        var sw = self._sidebar_width(bounds)
+        var sep_x = bounds.a.x + sw
+        for y in range(self._list_top(bounds), self._list_bottom(bounds)):
             canvas.set(sep_x, y, Cell(String("│"), sep_attr, 1))
         # Sidebar: three stacked panels with horizontal splitters between.
-        var rows = self._pane_rows(screen)
-        var left = screen.a.x + 1
-        var right = screen.a.x + sw - 1
+        var rows = self._pane_rows(bounds)
+        var left = bounds.a.x + 1
+        var right = bounds.a.x + sw - 1
         self._paint_section(
             canvas, left, right, rows[0], rows[1],
             String("Modified files"), _PANE_FILES,
@@ -1416,7 +1463,7 @@ struct LocalChanges(Movable):
         # Right side: split (file mode) or single info panel.
         self._ensure_right_panels(registry)
         self._paint_right_side(
-            canvas, screen,
+            canvas, bounds,
             section_attr, splitter_attr,
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
@@ -1434,13 +1481,13 @@ struct LocalChanges(Movable):
             hint = String(
                 " Tab: pane  Up/Down: select  Right: diff  Space: stage  Enter: open  ESC: close ",
             )
-        var hx = screen.b.x - len(hint.as_bytes()) - 1
-        if hx < screen.a.x + 1:
-            hx = screen.a.x + 1
-        _ = canvas.put_text(Point(hx, screen.b.y - 1), hint, hint_attr)
+        var hx = bounds.b.x - len(hint.as_bytes()) - 1
+        if hx < bounds.a.x + 1:
+            hx = bounds.a.x + 1
+        _ = canvas.put_text(Point(hx, bounds.b.y - 1), hint, hint_attr)
         # Overlay last so it sits on top of everything else.
         if self.overlay != _OVERLAY_NONE:
-            self._paint_overlay(canvas, screen)
+            self._paint_overlay(canvas, bounds)
 
     fn _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
         """Render the active overlay (commit prompt / confirmation /
@@ -2251,6 +2298,7 @@ struct LocalChanges(Movable):
             return False
         if self.overlay != _OVERLAY_NONE:
             return self._handle_overlay_key(event)
+        var bounds = self._panel_rect(screen)
         var k = event.key
         if k == KEY_ESC:
             self.close()
@@ -2283,60 +2331,60 @@ struct LocalChanges(Movable):
                 self._cycle_focus(1)
             return True
         if k == KEY_RIGHT:
-            self._enter_right_pane(screen, registry)
+            self._enter_right_pane(bounds, registry)
             return True
         if k == KEY_LEFT:
             self._leave_right_pane()
             return True
         if k == KEY_SPACE:
-            self._handle_space(screen)
+            self._handle_space(bounds)
             return True
         if self._is_right_focus():
             if k == KEY_UP:
-                self._move_focused_right_cursor(-1, screen)
+                self._move_focused_right_cursor(-1, bounds)
                 return True
             if k == KEY_DOWN:
-                self._move_focused_right_cursor(1, screen)
+                self._move_focused_right_cursor(1, bounds)
                 return True
             if k == KEY_HOME:
-                self._move_focused_right_cursor(-100000, screen)
+                self._move_focused_right_cursor(-100000, bounds)
                 return True
             if k == KEY_END:
-                self._move_focused_right_cursor(100000, screen)
+                self._move_focused_right_cursor(100000, bounds)
                 return True
             if k == KEY_PAGEUP:
-                var h = self._focused_right_panel_height(screen)
-                self._scroll_focused_right(-h, screen)
-                self._move_focused_right_cursor(-h, screen)
+                var h = self._focused_right_panel_height(bounds)
+                self._scroll_focused_right(-h, bounds)
+                self._move_focused_right_cursor(-h, bounds)
                 return True
             if k == KEY_PAGEDOWN:
-                var h = self._focused_right_panel_height(screen)
-                self._scroll_focused_right(h, screen)
-                self._move_focused_right_cursor(h, screen)
+                var h = self._focused_right_panel_height(bounds)
+                self._scroll_focused_right(h, bounds)
+                self._move_focused_right_cursor(h, bounds)
                 return True
             return False
         if k == KEY_UP:
-            self._set_focused_selection(self._focused_selection() - 1, screen)
+            self._set_focused_selection(self._focused_selection() - 1, bounds)
             return True
         if k == KEY_DOWN:
-            self._set_focused_selection(self._focused_selection() + 1, screen)
+            self._set_focused_selection(self._focused_selection() + 1, bounds)
             return True
         if k == KEY_HOME:
-            self._set_focused_selection(0, screen)
+            self._set_focused_selection(0, bounds)
             return True
         if k == KEY_END:
-            self._set_focused_selection(self._focused_count() - 1, screen)
+            self._set_focused_selection(self._focused_count() - 1, bounds)
             return True
         if k == KEY_PAGEUP:
             self._set_focused_selection(
-                self._focused_selection() - self._focused_panel_height(screen),
-                screen,
+                self._focused_selection() - self._focused_panel_height(bounds),
+                bounds,
             )
             return True
         if k == KEY_PAGEDOWN:
             self._set_focused_selection(
-                self._focused_selection() + self._focused_panel_height(screen),
-                screen,
+                self._focused_selection() + self._focused_panel_height(bounds),
+                bounds,
             )
             return True
         if k == KEY_ENTER:
@@ -2762,6 +2810,7 @@ struct LocalChanges(Movable):
         if self.overlay != _OVERLAY_NONE:
             return True
         var pos = event.pos
+        var bounds = self._panel_rect(screen)
         # --- in-progress splitter drag -----------------------------------
         # Resolved before any other handling so a click that *starts* on
         # a splitter never also triggers list-row behaviour even if the
@@ -2769,49 +2818,60 @@ struct LocalChanges(Movable):
         if self._drag_kind != _DRAG_NONE:
             if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                     and event.motion:
-                self._apply_drag(pos, screen)
+                self._apply_drag(pos, bounds)
                 return True
             if not event.pressed:
                 self._drag_kind = _DRAG_NONE
                 return True
             return True
-        var sw = self._sidebar_width(screen)
-        var sidebar_right = screen.a.x + sw
+        # Framework chrome buttons (max/restore). Take priority over
+        # splitter drag-start so the maximize toggle never accidentally
+        # initiates a sidebar resize.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and self._chrome_hits.on_max(pos):
+            if self.state == PANEL_STATE_MAXIMIZED:
+                self.state = PANEL_STATE_NORMAL
+            else:
+                self.state = PANEL_STATE_MAXIMIZED
+            return True
+        var sw = self._sidebar_width(bounds)
+        var sidebar_right = bounds.a.x + sw
         # Wheel: forward to whichever pane the cursor sits over.
         if event.button == MOUSE_WHEEL_UP \
                 or event.button == MOUSE_WHEEL_DOWN:
             var dy = -1 if event.button == MOUSE_WHEEL_UP else 1
             if pos.x > sidebar_right:
                 # Right side — scroll the sub-panel under the cursor.
-                var rpane = self._right_pane_at(pos, screen)
+                var rpane = self._right_pane_at(pos, bounds)
                 if rpane < 0:
                     return True
                 if self.focus != rpane:
                     if not self._is_right_focus():
                         self.last_sidebar_focus = self.focus
                     self.focus = rpane
-                self._scroll_focused_right(3 * dy, screen)
+                self._scroll_focused_right(3 * dy, bounds)
                 return True
-            var pane = self._pane_at(pos, screen)
+            var pane = self._pane_at(pos, bounds)
             if pane < 0:
                 return True
             self.focus = pane
             self.last_sidebar_focus = pane
             self._set_focused_selection(
-                self._focused_selection() + dy, screen,
+                self._focused_selection() + dy, bounds,
             )
             return True
         # --- left-button press: drag-start, focus or selection ----------
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
             # Splitter hit?
-            var splitter = self._hit_splitter(pos, screen)
+            var splitter = self._hit_splitter(pos, bounds)
             if splitter != _DRAG_NONE:
                 self._drag_kind = splitter
                 return True
             # Right-side click: focus the sub-panel and jump line cursor.
             if pos.x > sidebar_right:
-                var rpane = self._right_pane_at(pos, screen)
+                var rpane = self._right_pane_at(pos, bounds)
                 if rpane < 0:
                     return True
                 if not self._is_right_focus():
@@ -2820,7 +2880,7 @@ struct LocalChanges(Movable):
                 self._ensure_right_panels(registry)
                 # Determine which panel + its top to jump cursor.
                 if rpane == _PANE_RIGHT_INFO:
-                    var top = self._list_top(screen)
+                    var top = self._list_top(bounds)
                     # Header is one row; clicking on header is a no-op.
                     if pos.y == top:
                         return True
@@ -2835,7 +2895,7 @@ struct LocalChanges(Movable):
                             if self._try_submit_jump(path^, line):
                                 return True
                     return True
-                var rp = self._right_panes(screen)
+                var rp = self._right_panes(bounds)
                 if rpane == _PANE_RIGHT_UNSTAGED:
                     if pos.y == rp[0]:
                         return True
@@ -2865,10 +2925,10 @@ struct LocalChanges(Movable):
                             return True
                 return True
             # Sidebar click.
-            var pane = self._pane_at(pos, screen)
+            var pane = self._pane_at(pos, bounds)
             if pane < 0:
                 return True
-            var rows = self._pane_rows(screen)
+            var rows = self._pane_rows(bounds)
             var top: Int
             var height: Int
             if pane == _PANE_FILES:
@@ -2894,6 +2954,13 @@ struct LocalChanges(Movable):
                 scroll = self.scroll_branches
             else:
                 scroll = self.scroll_commits
-            self._set_focused_selection(scroll + body_offset, screen)
+            self._set_focused_selection(scroll + body_offset, bounds)
+            if pane == _PANE_FILES \
+                    and Int(event.click_count) >= 2 \
+                    and 0 <= self.sel_file \
+                    and self.sel_file < len(self.files):
+                self.selected_path = self.files[self.sel_file].path
+                self.selected_line = 0
+                self.submitted = True
             return True
         return False
