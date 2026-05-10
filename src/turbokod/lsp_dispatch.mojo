@@ -28,7 +28,7 @@ from .json import (
     JsonValue, encode_json, json_array, json_int, json_object, json_str,
     parse_json,
 )
-from .file_io import read_file, stat_file, write_file
+from .file_io import basename, read_file, stat_file, write_file
 from .lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
@@ -356,7 +356,7 @@ struct LspManager(Copyable, Movable):
         self._language_id = language_id
         self._root_uri = _path_to_uri(root_path) if len(root_path.as_bytes()) > 0 else String("")
         try:
-            self.client = LspClient.spawn(argv)
+            self.client = LspClient.spawn(argv, root_path)
         except e:
             self.state = _STATE_FAILED
             self.failure_reason = String("spawn failed: ") + String(e)
@@ -377,8 +377,11 @@ struct LspManager(Copyable, Movable):
                     hdr = hdr + String(" ") + argv[k]
                 self.client.process.trace(hdr)
         try:
+            var ws_name = basename(root_path) if len(root_path.as_bytes()) > 0 \
+                else String("")
             self._init_id = self.client.send_request(
-                String("initialize"), lsp_initialize_params(self._root_uri),
+                String("initialize"),
+                lsp_initialize_params(self._root_uri, ws_name),
             )
         except e:
             self.state = _STATE_FAILED

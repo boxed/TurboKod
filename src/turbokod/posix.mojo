@@ -613,6 +613,33 @@ fn which(name: String) -> String:
     return String("")
 
 
+fn getcwd_path() -> String:
+    """Return the process's current working directory, or "" on error.
+
+    Uses ``getcwd(3)`` with a 4096-byte buffer (Linux PATH_MAX). Returns
+    the empty string if libc reports failure rather than raising — the
+    typical caller wants a no-op fallback, not an exception.
+    """
+    var buf = alloc_zero_buffer(4096)
+    var rc = external_call["getcwd", Int](buf.unsafe_ptr(), 4096)
+    if rc == 0:
+        return String("")
+    var n = 0
+    while n < 4096 and buf[n] != 0:
+        n += 1
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=n))
+
+
+fn chdir_path(path: String) -> Int32:
+    """Wrap ``chdir(2)``. Returns 0 on success, non-zero on failure.
+
+    Caller is responsible for restoring the previous directory if it
+    matters (we keep this layered so the spawn site can do
+    save → chdir → spawn → restore atomically on the main thread)."""
+    var c_path = path + String("\0")
+    return external_call["chdir", Int32](c_path.unsafe_ptr())
+
+
 fn realpath(path: String) -> String:
     """Return the canonical absolute form of ``path``, or empty on error.
 

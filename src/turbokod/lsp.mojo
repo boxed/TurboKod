@@ -21,11 +21,13 @@ from std.io.file_descriptor import FileDescriptor
 from std.ffi import external_call
 
 from .json import (
-    JsonValue, encode_json, json_int, json_object, json_str, parse_json,
+    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
+    json_str, parse_json,
 )
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
-    alloc_zero_buffer, append_string_bytes, close_fd, getenv_value,
+    alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
+    getcwd_path, getenv_value,
     kill_pid, monotonic_ms, pipe_pair, poll_stdin,
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
@@ -275,12 +277,19 @@ struct LspProcess(Movable):
         self.trace_fd = -1
 
     @staticmethod
-    fn spawn(argv: List[String]) raises -> Self:
+    fn spawn(argv: List[String], cwd: String = String("")) raises -> Self:
         """Run ``argv`` with three pipes wired onto stdin/stdout/stderr.
 
         Returns a process with the parent-side ends owned by ``self``;
         the child-side ends are closed in the parent immediately after
         spawn so EOF propagates correctly when one side hangs up.
+
+        ``cwd`` (when non-empty) is the working directory the child
+        starts in. ``posix_spawn`` doesn't take a cwd argument
+        portably, so we save the parent's cwd, ``chdir`` to ``cwd``
+        across the spawn, then restore. Pyright (and other LSPs) use
+        the child's cwd as a fallback workspace root for module
+        resolution when ``workspaceFolders`` is missing or ambiguous.
         """
         if len(argv) == 0:
             raise Error("argv must not be empty")
@@ -322,17 +331,32 @@ struct LspProcess(Movable):
         # fails to read it, and rejects every document with "unable to
         # locate module 'std'" — turning every definition request into ``[]``.
         var envp_buf = _build_envp_from_parent()
+        # Save parent cwd, chdir into ``cwd`` for the spawn, restore after.
+        # ``posix_spawn`` doesn't take a cwd portably; the child inherits
+        # whatever directory the parent is in at fork time, then exec'd.
+        # We restore unconditionally (even on spawn failure) so a failed
+        # LSP launch doesn't leave the editor in the project's directory.
+        var saved_cwd = String("")
+        var did_chdir = False
+        if len(cwd.as_bytes()) > 0:
+            saved_cwd = getcwd_path()
+            if Int(chdir_path(cwd)) == 0:
+                did_chdir = True
         var pid: Int32
         try:
             pid = posix_spawnp_call(
                 argv_buf.pointers, envp_buf.pointers, fa, argv[0],
             )
         except:
+            if did_chdir and len(saved_cwd.as_bytes()) > 0:
+                _ = chdir_path(saved_cwd)
             _ = posix_spawn_file_actions_destroy(fa)
             _ = close_fd(stdin_r); _ = close_fd(stdin_w)
             _ = close_fd(stdout_r); _ = close_fd(stdout_w)
             _ = close_fd(stderr_r); _ = close_fd(stderr_w)
             raise Error("posix_spawnp failed")
+        if did_chdir and len(saved_cwd.as_bytes()) > 0:
+            _ = chdir_path(saved_cwd)
         _ = posix_spawn_file_actions_destroy(fa)
         # Register the child so it gets SIGTERM if the parent dies on
         # SIGHUP / SIGTERM / clean exit — see ``process_shim.c``.
@@ -671,8 +695,8 @@ struct LspClient(Movable):
         self._next_id = 1
 
     @staticmethod
-    fn spawn(argv: List[String]) raises -> Self:
-        var p = LspProcess.spawn(argv)
+    fn spawn(argv: List[String], cwd: String = String("")) raises -> Self:
+        var p = LspProcess.spawn(argv, cwd)
         return LspClient(p^)
 
     fn send_request(
@@ -749,16 +773,38 @@ fn classify_message(v: JsonValue) -> LspIncoming:
 # --- High-level helpers used by tests + Phase 3 wiring --------------------
 
 
-fn lsp_initialize_params(root_uri: String) -> JsonValue:
-    """Build the bare-minimum ``initialize`` payload that ``mojo-lsp-server``
-    accepts. Phase 3 will expand ``capabilities``."""
+fn lsp_initialize_params(
+    root_uri: String, workspace_name: String,
+) -> JsonValue:
+    """Build the ``initialize`` payload.
+
+    Sends both ``rootUri`` (deprecated but still respected) and
+    ``workspaceFolders`` — pyright keys its workspace/``pyproject.toml``
+    discovery off the latter, and falls back to the process CWD when
+    neither is present, which makes ``from <pkg> import …`` fail to
+    resolve any project-local module.
+    """
     var params = json_object()
     # ``processId`` is informational; ``null`` is allowed.
     params.put(String("processId"), json_int(0))
+    var has_root = len(root_uri.as_bytes()) > 0
     params.put(String("rootUri"),
-        json_str(root_uri) if len(root_uri.as_bytes()) > 0 else json_null_v(),
+        json_str(root_uri) if has_root else json_null_v(),
     )
-    params.put(String("capabilities"), json_object())
+    var folders = json_array()
+    if has_root:
+        var folder = json_object()
+        folder.put(String("uri"), json_str(root_uri))
+        folder.put(String("name"), json_str(workspace_name))
+        folders.append(folder^)
+    params.put(String("workspaceFolders"),
+        folders^ if has_root else json_null_v(),
+    )
+    var capabilities = json_object()
+    var workspace_caps = json_object()
+    workspace_caps.put(String("workspaceFolders"), json_bool(True))
+    capabilities.put(String("workspace"), workspace_caps^)
+    params.put(String("capabilities"), capabilities^)
     return params^
 
 
