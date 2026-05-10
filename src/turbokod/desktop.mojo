@@ -1050,6 +1050,14 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("]")), MOD_META, EDITOR_NAV_FORWARD,
         ))
+        # Cmd+Alt+Left / Cmd+Alt+Right — same back / forward, matching the
+        # browser-style binding many users expect.
+        self._hotkeys.append(Hotkey(
+            KEY_LEFT, MOD_META | MOD_ALT, EDITOR_NAV_BACK,
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_RIGHT, MOD_META | MOD_ALT, EDITOR_NAV_FORWARD,
+        ))
 
     fn _bottom_chrome_height(self, screen: Rect) -> Int:
         """Rows the bottom chrome (status bar + optional tab bar) eats
