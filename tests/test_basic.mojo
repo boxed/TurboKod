@@ -103,6 +103,10 @@ from turbokod.lsp import (
     _drop_prefix, _find_double_crlf, _parse_content_length, capture_command,
     classify_message,
 )
+from turbokod.lsp_dispatch import (
+    DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT, DIAG_SEVERITY_INFO,
+    DIAG_SEVERITY_WARNING, Diagnostic, _parse_diagnostics_array,
+)
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
     compute_unstaged_diff, fetch_git_status, git_state_mtimes,
@@ -5922,6 +5926,181 @@ fn test_lsp_classify_message() raises:
     assert_equal(cn.method.value(), String("window/logMessage"))
 
 
+fn test_lsp_parse_diagnostics_array_minimum_fields() raises:
+    """A publishDiagnostics ``diagnostics`` array with only the spec-
+    required fields (range only) must still parse. Severity defaults
+    to Info per the spec; message/source come back empty."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":3,\"character\":2},"
+        + "\"end\":{\"line\":3,\"character\":7}}}]"
+    ))
+    var diags = _parse_diagnostics_array(v)
+    assert_equal(len(diags), 1)
+    assert_equal(diags[0].start_row, 3)
+    assert_equal(diags[0].start_col, 2)
+    assert_equal(diags[0].end_row, 3)
+    assert_equal(diags[0].end_col, 7)
+    assert_equal(diags[0].severity, DIAG_SEVERITY_INFO)
+    assert_equal(diags[0].message, String(""))
+    assert_equal(diags[0].source, String(""))
+
+
+fn test_lsp_parse_diagnostics_array_full_fields() raises:
+    """All four severities + message + source round-trip exactly."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":1,\"character\":0},"
+        + "\"end\":{\"line\":1,\"character\":5}},"
+        + "\"severity\":1,\"message\":\"undefined name\",\"source\":\"pyright\"},"
+        + "{\"range\":{\"start\":{\"line\":2,\"character\":0},"
+        + "\"end\":{\"line\":2,\"character\":4}},"
+        + "\"severity\":2,\"message\":\"unused import\",\"source\":\"ruff\"},"
+        + "{\"range\":{\"start\":{\"line\":3,\"character\":0},"
+        + "\"end\":{\"line\":3,\"character\":3}},"
+        + "\"severity\":3,\"message\":\"info\"},"
+        + "{\"range\":{\"start\":{\"line\":4,\"character\":0},"
+        + "\"end\":{\"line\":4,\"character\":2}},"
+        + "\"severity\":4,\"message\":\"hint\"}"
+        + "]"
+    ))
+    var diags = _parse_diagnostics_array(v)
+    assert_equal(len(diags), 4)
+    assert_equal(diags[0].severity, DIAG_SEVERITY_ERROR)
+    assert_equal(diags[0].message, String("undefined name"))
+    assert_equal(diags[0].source, String("pyright"))
+    assert_equal(diags[1].severity, DIAG_SEVERITY_WARNING)
+    assert_equal(diags[1].source, String("ruff"))
+    assert_equal(diags[2].severity, DIAG_SEVERITY_INFO)
+    assert_equal(diags[3].severity, DIAG_SEVERITY_HINT)
+
+
+fn test_lsp_parse_diagnostics_skips_malformed_entries() raises:
+    """Entries missing ``range`` are dropped; malformed ones don't
+    poison neighbors. The good entries either side must parse."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":1}},\"severity\":1,"
+        + "\"message\":\"first\"},"
+        # No ``range`` — must be skipped, not abort the loop.
+        + "{\"severity\":1,\"message\":\"orphan\"},"
+        + "{\"range\":{\"start\":{\"line\":5,\"character\":0},"
+        + "\"end\":{\"line\":5,\"character\":2}},\"severity\":2,"
+        + "\"message\":\"third\"}"
+        + "]"
+    ))
+    var diags = _parse_diagnostics_array(v)
+    assert_equal(len(diags), 2)
+    assert_equal(diags[0].message, String("first"))
+    assert_equal(diags[1].message, String("third"))
+
+
+fn test_editor_set_diagnostics_builds_per_row_severity_index() raises:
+    """``Editor.set_diagnostics`` populates ``diagnostic_lines`` so
+    that each row carries the *winning* (lowest-numbered) severity.
+    A row with both an error and a warning surfaces as Error; the
+    minimap uses this index without re-walking the diagnostic list."""
+    var ed = Editor(String("first\nsecond\nthird\nfourth"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 5, DIAG_SEVERITY_WARNING, String("warn"), String("test"),
+    ))
+    diags.append(Diagnostic(
+        1, 0, 1, 6, DIAG_SEVERITY_ERROR, String("err"), String("test"),
+    ))
+    diags.append(Diagnostic(
+        # Same row as the warning above — error must win.
+        0, 1, 0, 4, DIAG_SEVERITY_ERROR, String("err2"), String("test"),
+    ))
+    diags.append(Diagnostic(
+        2, 0, 2, 5, DIAG_SEVERITY_HINT, String("hint"), String("test"),
+    ))
+    # Row 3 has no diagnostic; must stay clean.
+    ed.set_diagnostics(diags^)
+    assert_equal(len(ed.diagnostic_lines), 4)
+    assert_equal(ed.diagnostic_lines[0], DIAG_SEVERITY_ERROR)
+    assert_equal(ed.diagnostic_lines[1], DIAG_SEVERITY_ERROR)
+    assert_equal(ed.diagnostic_lines[2], DIAG_SEVERITY_HINT)
+    assert_equal(ed.diagnostic_lines[3], 0)
+
+
+fn test_editor_minimap_kind_prioritizes_error_over_git_and_spell() raises:
+    """An LSP error on a row outranks both an uncommitted-change marker
+    and a spell flag on the same row — the user shouldn't have to scroll
+    past whitespace edits to see real problems on the minimap."""
+    var ed = Editor(String("alpha\nbeta\ngamma"))
+    # Pretend git change + spell flag on row 0.
+    var git = List[Int]()
+    git.append(2)  # GIT_CHANGE_MODIFIED
+    git.append(0)
+    git.append(0)
+    ed.git_change_lines = git^
+    var spell = List[Bool]()
+    spell.append(True)
+    spell.append(False)
+    spell.append(False)
+    ed.spell_lines = spell^
+    # Error on the same row.
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 3, DIAG_SEVERITY_ERROR, String("e"), String("test"),
+    ))
+    ed.set_diagnostics(diags^)
+    # Error wins (kind=3) over git (1) and spell (2).
+    var kind = ed._minimap_kind_in_slice(0, 1)
+    assert_equal(kind, 3)
+    # Also: an empty slice past the end returns 0 (clean).
+    assert_equal(ed._minimap_kind_in_slice(2, 3), 0)
+
+
+fn test_editor_minimap_warning_outranks_git_change() raises:
+    """Same priority test, one notch lower: warning beats git change."""
+    var ed = Editor(String("a\nb"))
+    var git = List[Int]()
+    git.append(2)
+    git.append(0)
+    ed.git_change_lines = git^
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 1, DIAG_SEVERITY_WARNING, String("w"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    assert_equal(ed._minimap_kind_in_slice(0, 1), 4)
+
+
+fn test_editor_minimap_hint_loses_to_spell() raises:
+    """Hints sit at the bottom of the priority ladder so a 'consider
+    renaming' message can't drown a real misspelling on the minimap."""
+    var ed = Editor(String("a\nb"))
+    var spell = List[Bool]()
+    spell.append(True)
+    spell.append(False)
+    ed.spell_lines = spell^
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 1, DIAG_SEVERITY_HINT, String("h"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    # Spell (kind=2) beats hint (kind=6).
+    assert_equal(ed._minimap_kind_in_slice(0, 1), 2)
+
+
+fn test_editor_clear_diagnostics_drops_per_row_index() raises:
+    """``clear_diagnostics`` empties both lists so the minimap collapses
+    back to git/spell-only kinds — used when an LSP server crashes or
+    a buffer is closed."""
+    var ed = Editor(String("a\nb"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 1, DIAG_SEVERITY_ERROR, String("e"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    assert_equal(len(ed.diagnostic_lines), 2)
+    ed.clear_diagnostics()
+    assert_equal(len(ed.diagnostics), 0)
+    assert_equal(len(ed.diagnostic_lines), 0)
+
+
 fn test_lsp_subprocess_round_trip_via_cat() raises:
     """End-to-end pipe + framer test using ``/bin/cat``."""
     var cat_info = stat_file(String("/bin/cat"))
@@ -9242,6 +9421,67 @@ fn test_local_changes_open_records_status_when_clean() raises:
     assert_false(lc.active)
 
 
+fn test_local_changes_sidebar_splitter_drag_resizes_right_pane() raises:
+    """A press on the vertical ``│`` splitter followed by a drag-motion
+    must update ``sidebar_width_user``, which is what shrinks the
+    sidebar and grows the right-side window. Verifies the artificial
+    16/56-cell caps are gone — the user can drag the splitter freely
+    down to a 1-cell sidebar (so the right side fills nearly the whole
+    window) or out to ``screen.width() - 2``."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var screen = Rect(0, 0, 200, 40)
+    var registry = GrammarRegistry()
+    var default_w = 56
+    # Drag from auto-default to a narrow sidebar.
+    _ = lc.handle_mouse(
+        Event.mouse_event(
+            Point(default_w, 10), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, True, True),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, False, False),
+        screen, registry,
+    )
+    assert_equal(lc.sidebar_width_user, 30)
+    # Drag past the old 16-cell minimum — the user is free to crush
+    # the sidebar to 1 cell.
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, True, True),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, False, False),
+        screen, registry,
+    )
+    assert_equal(lc.sidebar_width_user, 2)
+    # And drag past the old 56-cell maximum — the user can also push
+    # the sidebar out to almost the entire width.
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(180, 10), MOUSE_BUTTON_LEFT, True, True),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(180, 10), MOUSE_BUTTON_LEFT, False, False),
+        screen, registry,
+    )
+    assert_equal(lc.sidebar_width_user, 180)
+    lc.close()
+
+
 fn test_docked_panel_stack_layout_normal_split() raises:
     """All sections NORMAL → equal share of available content rows."""
     var dock = DockedPanelStack()
@@ -10585,9 +10825,13 @@ fn test_editor_minimap_hover_records_spell_word() raises:
     assert_equal(ed._minimap_hover_kind, 2)
     assert_equal(ed._minimap_hover_buf_row, 0)
     assert_equal(ed._minimap_hover_word, String("helo"))
-    # Hover off the minimap column clears the state.
+    # Hover past end-of-line on a clean column — no spell underline
+    # there and no minimap mark, so the state must clear. (A column
+    # that falls *on* the spell word now keeps the tooltip alive
+    # because in-text hover is wired up too — that's covered
+    # separately by ``test_editor_text_hover_*``.)
     var hover_off = Event.mouse_event(
-        Point(5, 0), MOUSE_BUTTON_NONE, True, True,
+        Point(30, 0), MOUSE_BUTTON_NONE, True, True,
     )
     _ = ed.handle_mouse(hover_off, view)
     assert_equal(ed._minimap_hover_kind, 0)
@@ -10622,6 +10866,234 @@ fn test_editor_minimap_hover_paints_tooltip() raises:
     for x in range(view.b.x):
         row_text = row_text + canvas.get(x, 1).glyph
     assert_true(_contains(row_text, String("helo")))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_text_hover_over_diagnostic_records_kind_and_message() raises:
+    """Hovering over a cell covered by a diagnostic underline (in the
+    editor surface itself, not the minimap) must populate the same
+    hover state the minimap-mark hover does so the tooltip can render.
+    A warning at columns [3, 7) on row 0 → cursor at (3, 0) is on it;
+    expect kind=4 and the diagnostic's message in ``_minimap_hover_word``."""
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 3, 0, 7, DIAG_SEVERITY_WARNING,
+        String("unused identifier"), String("pyright"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 40, 5)
+    var hover = Event.mouse_event(
+        Point(3, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover, view)
+    assert_equal(ed._minimap_hover_kind, 4)
+    assert_equal(ed._minimap_hover_buf_row, 0)
+    assert_equal(
+        ed._minimap_hover_word, String("[pyright] unused identifier"),
+    )
+
+
+fn test_editor_text_hover_off_diagnostic_clears_state() raises:
+    """A hover on a cell *outside* a diagnostic range (and not on a
+    spell flag) clears the hover state — no stale tooltip lingers
+    from a previous frame."""
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 3, 0, 7, DIAG_SEVERITY_ERROR, String("oops"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 40, 5)
+    # First hover on the diagnostic so the state is non-empty.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(3, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    # Now hover one cell past the diagnostic's end (col 7 is exclusive).
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 0)
+
+
+fn test_editor_text_hover_picks_most_severe_diagnostic_on_overlap() raises:
+    """When multiple diagnostics overlap a cell, the most severe one
+    wins (lowest numeric severity = highest priority — error beats
+    warning beats info beats hint)."""
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    # Hint covering cols [0, 12).
+    diags.append(Diagnostic(
+        0, 0, 0, 12, DIAG_SEVERITY_HINT, String("hint"), String("t"),
+    ))
+    # Warning covering cols [3, 7).
+    diags.append(Diagnostic(
+        0, 3, 0, 7, DIAG_SEVERITY_WARNING, String("warn"), String("t"),
+    ))
+    # Error at exactly col 5.
+    diags.append(Diagnostic(
+        0, 5, 0, 6, DIAG_SEVERITY_ERROR, String("err"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 40, 5)
+    # Cell 5 has all three: error must win.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(5, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    assert_equal(ed._minimap_hover_word, String("[t] err"))
+    # Cell 4 has hint + warning but not error: warning wins.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(4, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 4)
+    # Cell 10 has only the hint.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(10, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 6)
+
+
+fn test_editor_text_hover_over_spell_word_records_word() raises:
+    """A hover over a misspelled word in the editor surface (not the
+    minimap) must populate kind=2 and surface the offending word so
+    the same tooltip the minimap uses can render. Confirms the
+    text-area branch is wired for spell hits, not just diagnostics."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_text_spell_hover.py"))
+    assert_true(write_file(path, String("# helo world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    assert_true(ed.spell_lines[0])
+    var view = Rect(0, 0, 40, 5)
+    # Cell 4 is inside "helo" (line is "# helo world" → bytes 2..6).
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(4, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 2)
+    assert_equal(ed._minimap_hover_buf_row, 0)
+    assert_equal(ed._minimap_hover_word, String("helo"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+fn test_editor_text_hover_past_eol_clears_state() raises:
+    """Cells past the end of a buffer line don't carry a real cell
+    (the row only has the visible glyphs); hover-tooltip should not
+    fire there even when the row carries diagnostics earlier on."""
+    var ed = Editor(String("ab"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 2, DIAG_SEVERITY_ERROR, String("e"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 40, 5)
+    # Past EOL — no glyph to hover on.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(20, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 0)
+
+
+fn test_editor_text_hover_diagnostic_renders_tooltip() raises:
+    """End-to-end: an in-text hover over a diagnostic range produces a
+    visible tooltip box on the next paint, with the message in it.
+    Mirrors the existing minimap-tooltip render test but exercises the
+    text-area hover path."""
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 6, 0, 10, DIAG_SEVERITY_ERROR,
+        String("unknown name"), String("pyright"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 60, 5)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(7, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    var canvas = Canvas(60, 5)
+    canvas.fill(view, String(" "), default_attr())
+    ed.paint(canvas, view, False)
+    # Sweep the canvas for the message — the tooltip's row anchor is
+    # cursor.y - 1, with the label two cells in. Walking the whole grid
+    # avoids guessing exactly which row the layout pinned it to.
+    var found = False
+    for y in range(view.b.y):
+        var row_text = String("")
+        for x in range(view.b.x):
+            row_text = row_text + canvas.get(x, y).glyph
+        if _contains(row_text, String("unknown name")):
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_editor_text_hover_anchor_aligns_with_underline_left() raises:
+    """The tooltip must sit one row below the underlined span with its
+    left edge aligned to the underline's leftmost cell — not anchored
+    at the cursor like the minimap-mark hover. Buffer ``alpha beta
+    gamma``, diagnostic on bytes [6, 10) which renders the underline at
+    screen cells 6..10. Hovering anywhere in that span (we pick cell 8)
+    should park the anchor at (x=6, y=1) — the cell directly under the
+    'b' of 'beta'."""
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 6, 0, 10, DIAG_SEVERITY_ERROR,
+        String("oops"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 60, 10)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(8, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    assert_true(ed._minimap_hover_below)
+    # Anchor x = leftmost cell of underline (6); y = row directly below
+    # the underline (0 + 1 = 1).
+    assert_equal(ed._minimap_hover_x, 6)
+    assert_equal(ed._minimap_hover_y, 1)
+
+
+fn test_editor_minimap_hover_keeps_above_left_anchor() raises:
+    """Minimap-source hovers must keep their original above-left
+    anchoring — the new below-the-underline behavior is text-area-only.
+    A hover on the right-edge minimap column should leave
+    ``_minimap_hover_below`` at False so paint uses the legacy
+    placement."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_minimap_anchor.py"))
+    assert_true(write_file(path, String("# helo world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    var view = Rect(0, 0, 40, 5)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(39, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 2)
+    assert_false(ed._minimap_hover_below)
+    # Minimap path stores cursor pos verbatim.
+    assert_equal(ed._minimap_hover_x, 39)
+    assert_equal(ed._minimap_hover_y, 0)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -10900,6 +11372,7 @@ fn main() raises:
     test_editor_right_gutter_paints_gray_square_for_changes()
     test_editor_right_gutter_projects_full_file_when_scrolled()
     test_local_changes_open_records_status_when_clean()
+    test_local_changes_sidebar_splitter_drag_resizes_right_pane()
     test_docked_panel_stack_layout_normal_split()
     test_docked_panel_stack_max_collapses_others()
     test_docked_panel_stack_max_then_restore_resets_all()
@@ -11221,6 +11694,14 @@ fn main() raises:
     test_lsp_framer_extract_one_message()
     test_lsp_drop_prefix_helper()
     test_lsp_classify_message()
+    test_lsp_parse_diagnostics_array_minimum_fields()
+    test_lsp_parse_diagnostics_array_full_fields()
+    test_lsp_parse_diagnostics_skips_malformed_entries()
+    test_editor_set_diagnostics_builds_per_row_severity_index()
+    test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
+    test_editor_minimap_warning_outranks_git_change()
+    test_editor_minimap_hint_loses_to_spell()
+    test_editor_clear_diagnostics_drops_per_row_index()
     test_lsp_subprocess_round_trip_via_cat()
     test_lsp_initialize_against_mojo_lsp_server()
     test_dap_classify_response()
@@ -11330,6 +11811,14 @@ fn main() raises:
     test_editor_minimap_click_scrolls_to_marked_line()
     test_editor_minimap_hover_records_spell_word()
     test_editor_minimap_hover_paints_tooltip()
+    test_editor_text_hover_over_diagnostic_records_kind_and_message()
+    test_editor_text_hover_off_diagnostic_clears_state()
+    test_editor_text_hover_picks_most_severe_diagnostic_on_overlap()
+    test_editor_text_hover_over_spell_word_records_word()
+    test_editor_text_hover_past_eol_clears_state()
+    test_editor_text_hover_diagnostic_renders_tooltip()
+    test_editor_text_hover_anchor_aligns_with_underline_left()
+    test_editor_minimap_hover_keeps_above_left_anchor()
     test_attr_to_sgr_plain_underline()
     test_attr_to_sgr_curly_colored_underline()
     test_text_log_incremental_layout_matches_full_rewrap()

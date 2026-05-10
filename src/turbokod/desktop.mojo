@@ -3465,6 +3465,25 @@ struct Desktop(Movable):
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
                 )
+        # Diagnostics fan-out: one LSP server can publish for many
+        # files, so we walk every editor and ask the matching manager
+        # whether a fresh set has landed for that file. The bucket
+        # remembers ``consumed``, so editors whose set hasn't changed
+        # since the last frame are no-ops.
+        for w in range(len(self.windows.windows)):
+            if not self.windows.windows[w].is_editor:
+                continue
+            var path = self.windows.windows[w].editor.file_path
+            if len(path.as_bytes()) == 0:
+                continue
+            var li = self._lsp_for_path(path)
+            if li < 0:
+                continue
+            if not self.lsp_managers[li].has_unconsumed_diagnostics_for(path):
+                continue
+            self.windows.windows[w].editor.set_diagnostics(
+                self.lsp_managers[li].take_diagnostics_for(path),
+            )
         # Drive the background LSP-install runner from the same per-frame
         # tick. When the install completes we either flash a status-bar
         # success or open the captured output as a new editor window.

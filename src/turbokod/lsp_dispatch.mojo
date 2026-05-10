@@ -1,5 +1,5 @@
 """High-level LSP wiring: state machine, didOpen/didChange tracking,
-definition requests + responses.
+definition requests + responses, diagnostics.
 
 ``LspManager`` owns one LSP server (right now: ``mojo-lsp-server`` for
 ``.mojo`` files). It:
@@ -10,12 +10,14 @@ definition requests + responses.
   counter, and bumps a ``didChange`` (full-document sync) just before
   every ``textDocument/definition`` so the server sees the buffer's
   current state;
+* parses ``textDocument/publishDiagnostics`` notifications and parks
+  them keyed by URI so the host can drain per-buffer in ``lsp_tick``;
 * lets the host poll a single ``tick`` per frame, returning one
   ``DefinitionResolved`` when the matching response arrives.
 
-Limitations on purpose: no semantic tokens yet, no diagnostics yet, no
-cancellation, no concurrent definition requests (a fresh request shadows
-the previous one's id). Add when needed.
+Limitations on purpose: no semantic tokens yet, no cancellation, no
+concurrent definition requests (a fresh request shadows the previous
+one's id). Add when needed.
 """
 
 from std.collections.list import List
@@ -28,7 +30,7 @@ from .json import (
 )
 from .file_io import read_file, stat_file, write_file
 from .lsp import (
-    LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
+    LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
 )
 from .posix import getenv_value, realpath, which
@@ -95,6 +97,64 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
     var character: Int
 
 
+# LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
+# at call sites instead of bare ints so the priority order is obvious.
+comptime DIAG_SEVERITY_ERROR   = Int(1)
+comptime DIAG_SEVERITY_WARNING = Int(2)
+comptime DIAG_SEVERITY_INFO    = Int(3)
+comptime DIAG_SEVERITY_HINT    = Int(4)
+
+
+@fieldwise_init
+struct Diagnostic(ImplicitlyCopyable, Movable):
+    """One ``textDocument/publishDiagnostics`` entry, normalized to
+    buffer-relative coordinates the editor can paint directly.
+
+    ``start_row`` / ``start_col`` and ``end_row`` / ``end_col`` are
+    0-based, like ``Editor.cursor_row``. ``severity`` is the LSP
+    integer (1=Error, 2=Warning, 3=Info, 4=Hint) — keep it as the raw
+    int so unknown future severities don't get silently dropped.
+    ``source`` is the diagnostic-producing tool ("pyright", "rustc",
+    "ruff", …) or empty when the server didn't supply one.
+    """
+    var start_row: Int
+    var start_col: Int
+    var end_row: Int
+    var end_col: Int
+    var severity: Int
+    var message: String
+    var source: String
+
+
+struct _DiagnosticBucket(Copyable, Movable):
+    """Latest published diagnostic set for one URI.
+
+    The server publishes the *complete* current state every time, so we
+    overwrite (not append) on each notification. ``consumed`` flips True
+    after the host calls ``take_diagnostics_for(path)`` so a buffer's
+    diagnostics aren't re-applied every frame — but the latest list
+    stays parked so a *new* editor opened against the same file (e.g.
+    a reload after an external edit) can pull the cached set without
+    waiting for a fresh publish.
+    """
+    var path: String
+    var diags: List[Diagnostic]
+    var consumed: Bool
+
+    fn __init__(
+        out self, var path: String, var diags: List[Diagnostic],
+        consumed: Bool,
+    ):
+        self.path = path^
+        self.diags = diags^
+        self.consumed = consumed
+
+    fn __copyinit__(out self, copy: Self):
+        self.path = copy.path
+        self.diags = copy.diags.copy()
+        self.consumed = copy.consumed
+
+
 struct LspManager(Copyable, Movable):
     """One LSP server's worth of state plus the transport (``LspClient``).
 
@@ -134,6 +194,11 @@ struct LspManager(Copyable, Movable):
     var _pending_open_paths: List[String]
     var _pending_open_texts: List[String]
 
+    # Latest published diagnostics keyed by URI-resolved path. The list
+    # holds at most one bucket per path — a fresh publishDiagnostics
+    # overwrites the prior bucket's list and resets ``consumed``.
+    var _diagnostic_buckets: List[_DiagnosticBucket]
+
     fn __init__(out self):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
@@ -153,6 +218,7 @@ struct LspManager(Copyable, Movable):
         self._doc_versions = List[Int]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
+        self._diagnostic_buckets = List[_DiagnosticBucket]()
 
     fn __copyinit__(out self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
@@ -180,6 +246,7 @@ struct LspManager(Copyable, Movable):
         self._doc_versions = List[Int]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
+        self._diagnostic_buckets = List[_DiagnosticBucket]()
 
     fn is_active(self) -> Bool:
         return self.state == _STATE_READY \
@@ -230,6 +297,45 @@ struct LspManager(Copyable, Movable):
 
     fn language_id(self) -> String:
         return self._language_id
+
+    # --- diagnostics -------------------------------------------------------
+
+    fn has_unconsumed_diagnostics_for(self, path: String) -> Bool:
+        """True iff a fresh publishDiagnostics for ``path`` has landed
+        since the last ``take_diagnostics_for`` call. Lets the host
+        avoid re-running the apply path every frame for buffers whose
+        diagnostic set is unchanged."""
+        for k in range(len(self._diagnostic_buckets)):
+            if self._diagnostic_buckets[k].path == path \
+                    and not self._diagnostic_buckets[k].consumed:
+                return True
+        return False
+
+    fn take_diagnostics_for(mut self, path: String) -> List[Diagnostic]:
+        """Return the latest published diagnostic list for ``path`` and
+        mark the bucket consumed so the host doesn't re-apply on every
+        frame. Returns an empty list when nothing has been published
+        for ``path`` (or it was already consumed). The bucket itself
+        stays around so a re-opened buffer can pull it via
+        ``peek_diagnostics_for`` without waiting for a fresh publish."""
+        for k in range(len(self._diagnostic_buckets)):
+            if self._diagnostic_buckets[k].path == path:
+                if self._diagnostic_buckets[k].consumed:
+                    return List[Diagnostic]()
+                var out = self._diagnostic_buckets[k].diags.copy()
+                self._diagnostic_buckets[k].consumed = True
+                return out^
+        return List[Diagnostic]()
+
+    fn peek_diagnostics_for(self, path: String) -> List[Diagnostic]:
+        """Return the latest published diagnostic list for ``path``
+        without flipping the consumed flag. Used when a fresh editor
+        opens against an already-published path so it picks up the
+        cached set without round-tripping the server."""
+        for k in range(len(self._diagnostic_buckets)):
+            if self._diagnostic_buckets[k].path == path:
+                return self._diagnostic_buckets[k].diags.copy()
+        return List[Diagnostic]()
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -450,10 +556,12 @@ struct LspManager(Copyable, Movable):
         """Drive the state machine one step.
 
         Drains every framed message currently available, advancing the
-        handshake on ``initialize`` responses and surfacing the first
-        ``DefinitionResolved`` from the in-flight request id. Other
-        messages (publishDiagnostics notifications, log messages, etc.)
-        are silently dropped — this layer doesn't model them yet.
+        handshake on ``initialize`` responses, surfacing the first
+        ``DefinitionResolved`` from the in-flight request id, and
+        parking ``textDocument/publishDiagnostics`` payloads on the
+        per-URI bucket list. Other notifications (window/logMessage,
+        $/progress, …) are silently dropped — this layer doesn't model
+        them yet.
         """
         if self.state == _STATE_NOT_STARTED or self.state == _STATE_FAILED:
             return Optional[DefinitionResolved]()
@@ -469,6 +577,12 @@ struct LspManager(Copyable, Movable):
             if not maybe:
                 return resolved
             var msg = maybe.value()
+            if msg.kind == LSP_NOTIFICATION:
+                if msg.method and msg.params:
+                    var method = msg.method.value()
+                    if method == String("textDocument/publishDiagnostics"):
+                        self._on_publish_diagnostics(msg.params.value())
+                continue
             if msg.kind != LSP_RESPONSE:
                 continue
             if not msg.id:
@@ -520,6 +634,39 @@ struct LspManager(Copyable, Movable):
         return resolved
 
     # --- internals ---------------------------------------------------------
+
+    fn _on_publish_diagnostics(mut self, params: JsonValue):
+        """Replace (not merge) the bucket for the published URI. The
+        spec is clear: ``publishDiagnostics`` is the *current* set, not
+        an incremental update — empty array means "all clear."""
+        if not params.is_object():
+            return
+        var uri_opt = params.object_get(String("uri"))
+        var diags_opt = params.object_get(String("diagnostics"))
+        if not uri_opt or not diags_opt:
+            return
+        if not uri_opt.value().is_string():
+            return
+        if not diags_opt.value().is_array():
+            return
+        var path = _uri_to_path(uri_opt.value().as_str())
+        if len(path.as_bytes()) == 0:
+            return
+        var diags = _parse_diagnostics_array(diags_opt.value())
+        _lsp_debug_log(
+            String("← publishDiagnostics lang=") + self._language_id
+            + String(" path=") + path
+            + String(" count=") + String(len(diags)),
+        )
+        # Replace existing bucket if any; else append.
+        for k in range(len(self._diagnostic_buckets)):
+            if self._diagnostic_buckets[k].path == path:
+                self._diagnostic_buckets[k].diags = diags^
+                self._diagnostic_buckets[k].consumed = False
+                return
+        self._diagnostic_buckets.append(
+            _DiagnosticBucket(path, diags^, False),
+        )
 
     fn _on_initialize_response(mut self, msg: LspIncoming):
         # Spec: send the ``initialized`` notification before any other request,
@@ -743,6 +890,57 @@ fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     if pos[0] < 0:
         return
     out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+
+
+fn _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
+    """Parse the ``diagnostics`` array of a ``publishDiagnostics``
+    notification into normalized buffer-relative entries. Skips
+    malformed entries (missing range/severity is not fatal — the
+    spec actually allows omitting severity, in which case we default
+    to ``DIAG_SEVERITY_INFO`` so the diagnostic still surfaces)."""
+    var out = List[Diagnostic]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var entry = v.array_at(i)
+        if not entry.is_object():
+            continue
+        var range_opt = entry.object_get(String("range"))
+        if not range_opt:
+            continue
+        var rng = range_opt.value()
+        var start_opt = rng.object_get(String("start"))
+        var end_opt = rng.object_get(String("end"))
+        if not start_opt or not end_opt:
+            continue
+        var sl_opt = start_opt.value().object_get(String("line"))
+        var sc_opt = start_opt.value().object_get(String("character"))
+        var el_opt = end_opt.value().object_get(String("line"))
+        var ec_opt = end_opt.value().object_get(String("character"))
+        if not sl_opt or not sc_opt or not el_opt or not ec_opt:
+            continue
+        if not sl_opt.value().is_int() or not sc_opt.value().is_int() \
+                or not el_opt.value().is_int() \
+                or not ec_opt.value().is_int():
+            continue
+        var severity = DIAG_SEVERITY_INFO
+        var sev_opt = entry.object_get(String("severity"))
+        if sev_opt and sev_opt.value().is_int():
+            severity = sev_opt.value().as_int()
+        var message = String("")
+        var msg_opt = entry.object_get(String("message"))
+        if msg_opt and msg_opt.value().is_string():
+            message = msg_opt.value().as_str()
+        var source = String("")
+        var src_opt = entry.object_get(String("source"))
+        if src_opt and src_opt.value().is_string():
+            source = src_opt.value().as_str()
+        out.append(Diagnostic(
+            sl_opt.value().as_int(), sc_opt.value().as_int(),
+            el_opt.value().as_int(), ec_opt.value().as_int(),
+            severity, message^, source^,
+        ))
+    return out^
 
 
 fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:

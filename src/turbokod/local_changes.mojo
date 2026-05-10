@@ -63,9 +63,7 @@ from .painter import Painter
 from .file_io import join_path, read_file
 from .window import (
     DockChromeHit, DockedPanelStack,
-    PANEL_STATE_MAXIMIZED, PANEL_STATE_NORMAL,
-    PanelChromeHits,
-    paint_drop_shadow, paint_panel_window_buttons, paint_window_title,
+    paint_drop_shadow, paint_window_title,
 )
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
@@ -899,15 +897,6 @@ struct LocalChanges(Movable):
     var overlay_input: TextField
     var overlay_message: String
     var overlay_ok: Bool
-    # Framework window state. ``PANEL_STATE_MAXIMIZED`` (default) gives
-    # the original full-screen modal; ``PANEL_STATE_NORMAL`` shrinks to
-    # an inset rect with margins so the workspace + chrome stay visible
-    # behind the panel. MINIMIZED isn't meaningful here — the modal
-    # intercepts all input, so a one-row strip wouldn't be reachable —
-    # which is why ``paint_panel_window_buttons`` is called below with
-    # ``show_minimize=False``.
-    var state: UInt8
-    var _chrome_hits: PanelChromeHits
     # The three sidebar panels (Modified files / Branches / Commits)
     # share the framework ``DockedPanelStack`` for min/max state, layout
     # and chrome dispatch. Section indices match the ``_PANE_FILES`` /
@@ -946,8 +935,6 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
-        self.state = PANEL_STATE_MAXIMIZED
-        self._chrome_hits = PanelChromeHits()
         self.sidebar_dock = DockedPanelStack()
         # Order must match ``_PANE_FILES`` / ``_PANE_BRANCHES`` /
         # ``_PANE_COMMITS`` (0/1/2).
@@ -1065,37 +1052,30 @@ struct LocalChanges(Movable):
     # --- geometry ---------------------------------------------------------
 
     fn _panel_rect(self, screen: Rect) -> Rect:
-        """Where the panel actually paints. ``MAXIMIZED`` covers the
-        whole screen (the original full-screen modal); ``NORMAL``
-        insets so the menu bar, status bar, and surrounding desktop
-        chrome stay visible behind the panel. Below a usable size the
-        inset rect collapses back to the full screen — a tiny terminal
-        is better off with a fullscreen modal than a 12-cell strip."""
-        if self.state != PANEL_STATE_NORMAL:
-            return screen
-        var top = screen.a.y + 2
-        var bottom = screen.b.y - 2
-        var left = screen.a.x + 4
-        var right = screen.b.x - 4
-        if right - left < 32 or bottom - top < 8:
-            return screen
-        return Rect(left, top, right, bottom)
+        """The modal always paints fullscreen — it intercepts every
+        input event, so a non-fullscreen "windowed" mode wouldn't gain
+        anything visible behind it that the user could interact with."""
+        return screen
 
     fn _sidebar_width(self, screen: Rect) -> Int:
-        var max_w = screen.width() // 2
-        if max_w > _SIDEBAR_MAX:
-            max_w = _SIDEBAR_MAX
-        if max_w < 16:
-            max_w = 16
+        """Sidebar width in cells. The auto-default (no user drag yet)
+        targets ~⅓ of the window with the ``_SIDEBAR_MIN``/``MAX``
+        comfort range. Once the user drags, only natural bounds apply
+        — the splitter must stay one cell inside the box on each side
+        so the borders don't get clobbered, but otherwise the user can
+        crush the sidebar (or the right side) all the way to 1 cell."""
+        var hard_max = screen.width() - 2
+        if hard_max < 1:
+            hard_max = 1
         var w: Int
-        if self.sidebar_width_user > 0:
+        if self.sidebar_width_user >= 0:
             w = self.sidebar_width_user
         else:
             w = screen.width() // 3
             if w < _SIDEBAR_MIN: w = _SIDEBAR_MIN
             if w > _SIDEBAR_MAX: w = _SIDEBAR_MAX
-        if w < 16: w = 16
-        if w > max_w: w = max_w
+        if w < 1: w = 1
+        if w > hard_max: w = hard_max
         return w
 
     fn _list_top(self, screen: Rect) -> Int:
@@ -1418,27 +1398,15 @@ struct LocalChanges(Movable):
         var rem_attr    = Attr(LIGHT_RED,   BLUE)
         var hunk_attr   = Attr(CYAN,  BLUE)
         var header_attr = Attr(WHITE, BLUE)
-        # Resolve where the panel actually paints. ``MAXIMIZED`` is the
-        # original full-screen modal; ``NORMAL`` shrinks to an inset
-        # rect so the workspace stays visible behind it. Every internal
-        # geometry helper takes this rect as ``screen``, so the rest of
-        # the paint code can stay unchanged.
+        # The modal always covers the full screen — it intercepts every
+        # input event, so a windowed mode wouldn't gain any interactive
+        # surface area behind it.
         var bounds = self._panel_rect(screen)
-        if self.state != PANEL_STATE_MAXIMIZED:
-            paint_drop_shadow(canvas, bounds)
         canvas.fill(bounds, String(" "), bg)
         canvas.draw_box(bounds, border, True)
         # Title row — framework helper enforces title bg = body bg.
         paint_window_title(
             canvas, bounds, String(" Local changes "), title_attr, bg,
-        )
-        # Framework chrome: maximize/restore button. No minimize for
-        # this panel — the modal intercepts all input, so a one-row
-        # strip would be unreachable.
-        var chrome_painter = Painter(bounds)
-        self._chrome_hits = paint_panel_window_buttons(
-            canvas, chrome_painter, bounds.a.y, bounds, self.state, border,
-            show_minimize=False,
         )
         # Sub-title: project root (or status banner).
         var sub_y = bounds.a.y + 1
@@ -2693,9 +2661,12 @@ struct LocalChanges(Movable):
     # --- mouse / drag helpers ---------------------------------------------
 
     fn _hit_splitter(self, pos: Point, screen: Rect) -> Int:
-        """Return ``_DRAG_*`` for the splitter at ``pos`` (1-cell hit
-        zone), or ``_DRAG_NONE`` if the position isn't on any splitter.
-        Vertical splitter is the ``│`` column at ``sep_x``; horizontal
+        """Return ``_DRAG_*`` for the splitter at ``pos``, or
+        ``_DRAG_NONE`` if the position isn't on any splitter. The
+        vertical sidebar/right splitter takes a 2-cell hit zone (the
+        ``│`` column plus the last sidebar column, which is padding)
+        so the drag is discoverable; widening the hit zone over the
+        right side would steal clicks from diff body rows. Horizontal
         splitters are the ``─`` rows between sidebar/right sub-panels."""
         var top = self._list_top(screen)
         var bottom = self._list_bottom(screen)
@@ -2704,7 +2675,7 @@ struct LocalChanges(Movable):
         var sw = self._sidebar_width(screen)
         var sep_x = screen.a.x + sw
         # Vertical sidebar/right splitter.
-        if pos.x == sep_x:
+        if pos.x >= sep_x - 1 and pos.x <= sep_x:
             return _DRAG_SIDEBAR
         var rows = self._pane_rows(screen)
         var split1_y = rows[0] + rows[1]
@@ -2735,10 +2706,14 @@ struct LocalChanges(Movable):
         var top = self._list_top(screen)
         var bottom = self._list_bottom(screen)
         if self._drag_kind == _DRAG_SIDEBAR:
+            # Only natural bounds: the splitter must stay one cell
+            # inside the box on either side so the borders survive.
+            # The user can drag the sidebar all the way down to 1 or
+            # all the way up to ``screen.width() - 2``.
             var w = pos.x - screen.a.x
-            if w < 16: w = 16
-            var max_w = screen.width() // 2
-            if max_w > _SIDEBAR_MAX: max_w = _SIDEBAR_MAX
+            if w < 1: w = 1
+            var max_w = screen.width() - 2
+            if max_w < 1: max_w = 1
             if w > max_w: w = max_w
             self.sidebar_width_user = w
             return
@@ -2857,20 +2832,9 @@ struct LocalChanges(Movable):
                 self._drag_kind = _DRAG_NONE
                 return True
             return True
-        # Framework chrome buttons (max/restore). Take priority over
-        # splitter drag-start so the maximize toggle never accidentally
+        # Sidebar panel min/max chrome buttons. Take priority over
+        # splitter drag-start so a header click never accidentally
         # initiates a sidebar resize.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and self._chrome_hits.on_max(pos):
-            if self.state == PANEL_STATE_MAXIMIZED:
-                self.state = PANEL_STATE_NORMAL
-            else:
-                self.state = PANEL_STATE_MAXIMIZED
-            return True
-        # Sidebar panel min/max chrome buttons. Take the same priority
-        # as the modal-level chrome — clicking a header button never
-        # starts a splitter drag or shifts the row selection.
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
             var dock_hit = self.sidebar_dock.hit_chrome(pos)

@@ -16,8 +16,9 @@ from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
-    LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
+    LIGHT_RED, LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
+    WHITE, YELLOW,
 )
 from .diff import MergeResult, diff3_merge, unified_diff
 from .events import (
@@ -39,6 +40,10 @@ from .highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_comment_attr, highlight_for_extension,
     highlight_incremental, highlight_string_attr, word_at,
+)
+from .lsp_dispatch import (
+    DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT, DIAG_SEVERITY_INFO,
+    DIAG_SEVERITY_WARNING, Diagnostic,
 )
 from .spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
@@ -86,6 +91,100 @@ fn _rtrim(s: String) -> String:
     if n == len(bytes):
         return s
     return _slice(s, 0, n)
+
+
+fn _diag_intersects_row(diag: Diagnostic, row: Int) -> Bool:
+    """True iff ``diag`` covers any byte on ``row``. LSP ranges can
+    span multiple rows (e.g. an unclosed bracket marked from open to
+    EOF), so the renderer needs to project per row."""
+    return diag.start_row <= row and row <= diag.end_row
+
+
+fn _diag_byte_start_for_row(diag: Diagnostic, row: Int) -> Int:
+    """Buffer-byte start column for ``diag`` *on row ``row``*. For the
+    first row of a multi-row diagnostic this is ``diag.start_col``; for
+    a continuation row the diagnostic starts at column 0 of that row."""
+    if row == diag.start_row:
+        return diag.start_col
+    return 0
+
+
+fn _diag_byte_end_for_row(diag: Diagnostic, row: Int, line_len: Int) -> Int:
+    """Buffer-byte end column for ``diag`` *on row ``row``*. For rows
+    strictly between start and end, the diagnostic occupies the whole
+    line; ``end_col`` only applies on ``end_row``. ``line_len`` is the
+    underlying byte length of the line so a multi-row range can clip to
+    the actual line end on continuation rows. We also force a one-cell
+    minimum span on a single-row range with start==end so empty
+    diagnostics (e.g. "missing semicolon at end-of-line") still paint
+    a visible squiggle on at least one column."""
+    if row < diag.end_row:
+        var n = line_len
+        if n < 1:
+            n = 1
+        return n
+    # row == diag.end_row
+    var hi = diag.end_col
+    if row == diag.start_row and hi <= diag.start_col:
+        hi = diag.start_col + 1
+    return hi
+
+
+fn _diag_covers_cell(diag: Diagnostic, row: Int, byte_col: Int) -> Bool:
+    """True iff ``(row, byte_col)`` falls inside ``diag``'s range.
+
+    Continuation rows (rows strictly between start and end) are treated
+    as fully covered — that mirrors how the underline pass paints them.
+    Zero-width single-row diagnostics ("missing semicolon at end of
+    line") cover the one cell at ``start_col`` so the user can still
+    hover them."""
+    if not _diag_intersects_row(diag, row):
+        return False
+    if row > diag.start_row and row < diag.end_row:
+        return byte_col >= 0
+    var lo = _diag_byte_start_for_row(diag, row)
+    if byte_col < lo:
+        return False
+    if row < diag.end_row:
+        # On the start row of a multi-row range — diagnostic continues
+        # to end of line, so any byte at or past ``lo`` qualifies.
+        return True
+    # row == diag.end_row.
+    var hi = diag.end_col
+    if row == diag.start_row and hi <= diag.start_col:
+        hi = diag.start_col + 1
+    return byte_col < hi
+
+
+fn _diag_severity_to_minimap_kind(severity: Int) -> Int:
+    """Map LSP severity → the minimap-hover ``kind`` discriminant the
+    tooltip-paint pass already understands. Errors=3, warnings=4,
+    info=5, hints=6; unknown severities fall through to info so the
+    tooltip still surfaces. Matches ``_minimap_kind_in_slice``'s
+    numbering exactly so the rendering branches don't need to know
+    where the hit came from."""
+    if severity == DIAG_SEVERITY_ERROR:
+        return 3
+    if severity == DIAG_SEVERITY_WARNING:
+        return 4
+    if severity == DIAG_SEVERITY_HINT:
+        return 6
+    return 5
+
+
+fn _diag_underline_color(severity: Int) -> UInt8:
+    """Map LSP severity → squiggle color. Errors = LIGHT_RED, warnings
+    = LIGHT_YELLOW, info = LIGHT_BLUE, hints = DARK_GRAY (subtle so
+    they don't compete with real problems). Unknown severities default
+    to LIGHT_BLUE — the spec says clients can ignore unknowns, but
+    "color them as info" is friendlier than dropping them."""
+    if severity == DIAG_SEVERITY_ERROR:
+        return LIGHT_RED
+    if severity == DIAG_SEVERITY_WARNING:
+        return LIGHT_YELLOW
+    if severity == DIAG_SEVERITY_HINT:
+        return DARK_GRAY
+    return LIGHT_BLUE
 
 
 fn _lists_equal(a: List[String], b: List[String]) -> Bool:
@@ -483,6 +582,17 @@ struct Editor(ImplicitlyCopyable, Movable):
     # the user can scan the file at a glance.
     var spell_highlights: List[Highlight]
     var spell_lines: List[Bool]
+    # LSP diagnostics overlay. ``diagnostics`` is the most recent set
+    # routed in by ``Desktop.lsp_tick`` from
+    # ``LspManager.take_diagnostics_for(file_path)``; the editor itself
+    # never speaks LSP. Painted on top of syntax + spell as a third
+    # underline pass — color keyed on severity (red curly = error,
+    # yellow curly = warning, blue = info, dim gray = hint).
+    # ``diagnostic_lines[i]`` is the highest severity present on
+    # buffer row ``i`` (1=Error wins, 2=Warning, 3=Info, 4=Hint, 0=clean)
+    # so the right-side minimap can color-code the marker.
+    var diagnostics: List[Diagnostic]
+    var diagnostic_lines: List[Int]
     # ``pending_spell_action`` is set when the user hits Alt+Enter on
     # a misspelled word — the host polls
     # ``consume_spell_action_request`` and forwards to whichever popup
@@ -630,20 +740,32 @@ struct Editor(ImplicitlyCopyable, Movable):
     # Cleared by any other key, click, or edit so the stack only ever
     # describes a contiguous Cmd+Up run.
     var _smart_select_stack: List[Caret]
-    # Right-side minimap hover state. ``_minimap_hover_kind`` is 0 when
-    # nothing is hovered, 1 for an uncommitted-change mark, 2 for a
-    # spelling mark; ``_minimap_hover_buf_row`` is the buffer row the
-    # tooltip describes; ``_minimap_hover_word`` is the offending word
-    # for spell hovers (empty otherwise); ``_minimap_hover_x/y`` are
-    # the screen coordinates the cursor was last at, used to anchor the
-    # tooltip box. Updated by hover events flowing through
-    # ``handle_mouse``; consumed by ``paint_minimap_tooltip`` after the
-    # main editor paint pass.
+    # Hover-tooltip state. Originally minimap-only (hence the field
+    # prefix), now also drives in-text hover popups for spell flags and
+    # LSP diagnostic underlines: hovering over a misspelled word or a
+    # warning/error squiggle in the editor surface produces the same
+    # tooltip box as the minimap-mark hover.
+    # ``_minimap_hover_kind`` is 0 when nothing is hovered,
+    # 1=git-change mark, 2=spell flag, 3..6=LSP diagnostic
+    # (error/warning/info/hint).
+    # ``_minimap_hover_buf_row`` is the buffer row the tooltip describes;
+    # ``_minimap_hover_word`` is the label payload (misspelled word for
+    # kind=2, full diagnostic message for kind=3..6, empty for kind=1);
+    # ``_minimap_hover_x/y`` are the screen coords used to anchor the
+    # tooltip box — for minimap-source hovers that's the cursor pos
+    # (tooltip floats above-left); for text-area-source hovers that's
+    # the leftmost cell of the underlined span and the row immediately
+    # below it (tooltip floats below the underline, left-aligned).
+    # ``_minimap_hover_below`` selects which fallback the paint code
+    # uses if the preferred placement doesn't fit. Updated by hover
+    # events flowing through ``handle_mouse``; consumed by
+    # ``paint_minimap_tooltip`` after the main editor paint pass.
     var _minimap_hover_kind: Int
     var _minimap_hover_buf_row: Int
     var _minimap_hover_word: String
     var _minimap_hover_x: Int
     var _minimap_hover_y: Int
+    var _minimap_hover_below: Bool
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -666,6 +788,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = 0
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
+        self.diagnostics = List[Diagnostic]()
+        self.diagnostic_lines = List[Int]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
@@ -710,6 +834,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_word = String("")
         self._minimap_hover_x = 0
         self._minimap_hover_y = 0
+        self._minimap_hover_below = False
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -732,6 +857,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = 0
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
+        self.diagnostics = List[Diagnostic]()
+        self.diagnostic_lines = List[Int]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.gutter_width = 0
@@ -776,6 +903,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_word = String("")
         self._minimap_hover_x = 0
         self._minimap_hover_y = 0
+        self._minimap_hover_below = False
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -819,6 +947,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._hl_dirty_row = copy._hl_dirty_row
         self.spell_highlights = copy.spell_highlights.copy()
         self.spell_lines = copy.spell_lines.copy()
+        self.diagnostics = copy.diagnostics.copy()
+        self.diagnostic_lines = copy.diagnostic_lines.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.gutter_width = copy.gutter_width
@@ -868,6 +998,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_word = copy._minimap_hover_word
         self._minimap_hover_x = copy._minimap_hover_x
         self._minimap_hover_y = copy._minimap_hover_y
+        self._minimap_hover_below = copy._minimap_hover_below
 
     fn flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -1015,6 +1146,41 @@ struct Editor(ImplicitlyCopyable, Movable):
         cache so the extra cost is microseconds."""
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+
+    fn set_diagnostics(mut self, var diags: List[Diagnostic]):
+        """Replace the diagnostic set with ``diags`` and rebuild the
+        per-row severity index used by the minimap.
+
+        The host owns when this fires — typically once per frame from
+        ``Desktop.lsp_tick`` after draining ``LspManager.take_diagnostics_for``.
+        Severity priority on a single row: error > warning > info >
+        hint; ``diagnostic_lines[i]`` carries the winning severity
+        (or 0 for "clean") so the right-side minimap can color a row
+        without re-scanning the whole list."""
+        var n_lines = self.buffer.line_count()
+        var per_row = List[Int]()
+        for _ in range(n_lines):
+            per_row.append(0)
+        for i in range(len(diags)):
+            var d = diags[i]
+            if d.start_row < 0 or d.start_row >= n_lines:
+                continue
+            var sev = d.severity
+            if sev <= 0:
+                continue
+            # Lower numeric value wins (1=Error beats 2=Warning).
+            var prev = per_row[d.start_row]
+            if prev == 0 or sev < prev:
+                per_row[d.start_row] = sev
+        self.diagnostics = diags^
+        self.diagnostic_lines = per_row^
+
+    fn clear_diagnostics(mut self):
+        """Drop all diagnostics and the per-row severity index. Used
+        when an LSP server fails / restarts and the prior diagnostics
+        no longer reflect reality."""
+        self.diagnostics = List[Diagnostic]()
+        self.diagnostic_lines = List[Int]()
 
     fn invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
@@ -2053,20 +2219,28 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Width of the right-side gutter in cells. A single column
         reserved on the right edge of the editor for at-a-glance row
         annotations: gray squares for uncommitted-change lines, yellow
-        squares for rows with spelling issues. Zero when no annotation
-        source is active, so editors that have nothing to show give the
-        full width back to text."""
+        squares for spell issues, plus red/yellow/blue/dim squares for
+        LSP diagnostics. Zero when no annotation source is active so
+        editors with nothing to show give the full width back to text."""
         if not self.minimap_visible:
             return 0
         if len(self.git_change_lines) > 0:
             return 1
         if self._has_spell_issues():
             return 1
+        if self._has_diagnostic_lines():
+            return 1
         return 0
 
     fn _has_spell_issues(self) -> Bool:
         for i in range(len(self.spell_lines)):
             if self.spell_lines[i]:
+                return True
+        return False
+
+    fn _has_diagnostic_lines(self) -> Bool:
+        for i in range(len(self.diagnostic_lines)):
+            if self.diagnostic_lines[i] != 0:
                 return True
         return False
 
@@ -2079,6 +2253,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         var n = len(self.git_change_lines)
         if len(self.spell_lines) > n:
             n = len(self.spell_lines)
+        if len(self.diagnostic_lines) > n:
+            n = len(self.diagnostic_lines)
         return n
 
     fn _minimap_buf_range_for_screen_row(
@@ -2112,8 +2288,26 @@ struct Editor(ImplicitlyCopyable, Movable):
         return (start, end)
 
     fn _minimap_kind_in_slice(self, start: Int, end: Int) -> Int:
-        """Return the priority-winning source kind for the slice:
-        ``1`` (git change), ``2`` (spell), or ``0`` (no mark)."""
+        """Return the priority-winning source kind for the slice.
+
+        Kinds: ``0`` (clean), ``1`` (git change), ``2`` (spell),
+        ``3`` (LSP error), ``4`` (LSP warning), ``5`` (LSP info),
+        ``6`` (LSP hint). Priority order, highest first:
+        error → warning → git → spell → info → hint. Errors and
+        warnings outrank git/spell so a real problem isn't hidden
+        behind a 1-character whitespace edit; info / hint sit below
+        spell so a 'consider renaming' hint doesn't overpower a
+        real misspelling."""
+        var n_diag = len(self.diagnostic_lines)
+        var ds = start if start < n_diag else n_diag
+        var de = end if end < n_diag else n_diag
+        # Walk once for severity 1 (error), then 2 (warning).
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_ERROR:
+                return 3
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
+                return 4
         var n_git = len(self.git_change_lines)
         var s = start if start < n_git else n_git
         var e = end if end < n_git else n_git
@@ -2126,12 +2320,27 @@ struct Editor(ImplicitlyCopyable, Movable):
         for li in range(s, e):
             if self.spell_lines[li]:
                 return 2
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_INFO:
+                return 5
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_HINT:
+                return 6
         return 0
 
     fn _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
         """First buffer row in ``[start, end)`` that carries a mark,
-        preferring git changes over spell issues. Returns ``-1`` when
-        the slice has no marks."""
+        in the same priority order as ``_minimap_kind_in_slice``.
+        Returns ``-1`` when the slice has no marks."""
+        var n_diag = len(self.diagnostic_lines)
+        var ds = start if start < n_diag else n_diag
+        var de = end if end < n_diag else n_diag
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_ERROR:
+                return li
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
+                return li
         var n_git = len(self.git_change_lines)
         var s = start if start < n_git else n_git
         var e = end if end < n_git else n_git
@@ -2144,6 +2353,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         for li in range(s, e):
             if self.spell_lines[li]:
                 return li
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_INFO:
+                return li
+        for li in range(ds, de):
+            if self.diagnostic_lines[li] == DIAG_SEVERITY_HINT:
+                return li
         return -1
 
     fn _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
@@ -2154,6 +2369,14 @@ struct Editor(ImplicitlyCopyable, Movable):
             return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
         if kind == 2:
             return Optional[Attr](Attr(CYAN, BLUE))
+        if kind == 3:
+            return Optional[Attr](Attr(LIGHT_RED, BLUE))
+        if kind == 4:
+            return Optional[Attr](Attr(LIGHT_YELLOW, BLUE))
+        if kind == 5:
+            return Optional[Attr](Attr(LIGHT_BLUE, BLUE))
+        if kind == 6:
+            return Optional[Attr](Attr(DARK_GRAY, BLUE))
         return Optional[Attr]()
 
     fn _minimap_first_misspelled_word(self, row: Int) -> String:
@@ -2165,6 +2388,22 @@ struct Editor(ImplicitlyCopyable, Movable):
             if hl.row == row:
                 var line = self.buffer.line(row)
                 return _slice(line, hl.col_start, hl.col_end)
+        return String("")
+
+    fn _minimap_first_diagnostic_message(self, row: Int) -> String:
+        """The first diagnostic message that intersects ``row``, with
+        the source name prepended in brackets when present (so the user
+        can distinguish "[pyright] …" from "[ruff] …" when both
+        servers contribute). Empty string if no diagnostic covers that
+        row."""
+        for d in range(len(self.diagnostics)):
+            var diag = self.diagnostics[d]
+            if not _diag_intersects_row(diag, row):
+                continue
+            var msg = diag.message
+            if len(diag.source.as_bytes()) > 0:
+                msg = String("[") + diag.source + String("] ") + msg
+            return msg^
         return String("")
 
     fn _is_minimap_hit(self, pos: Point, view: Rect) -> Bool:
@@ -2184,14 +2423,32 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_kind = 0
         self._minimap_hover_buf_row = -1
         self._minimap_hover_word = String("")
+        self._minimap_hover_below = False
 
     fn _update_minimap_hover(mut self, pos: Point, view: Rect):
-        """Refresh hover state from a mouse position. Sets
-        ``_minimap_hover_*`` when ``pos`` is over a marked row in the
-        minimap column; clears them otherwise."""
+        """Refresh hover-tooltip state from a mouse position.
+
+        Two hit surfaces, in order:
+        1. The right-edge minimap column — kind/buf_row/label come from
+           the projection (existing behavior).
+        2. The text area itself — if the cursor sits on a cell covered
+           by a diagnostic span or a spell-highlight underline, surface
+           the same tooltip we'd show for a minimap mark of that kind,
+           anchored at the cursor's screen position.
+
+        Anything else (gutters, blank space past EOL, plain text) clears
+        the hover state. The tooltip-paint code reads these fields in
+        both cases, so the user gets one consistent visual."""
         self.clear_minimap_hover()
-        if not self._is_minimap_hit(pos, view):
+        if self._is_minimap_hit(pos, view):
+            self._update_minimap_hover_from_minimap(pos, view)
             return
+        self._update_minimap_hover_from_text_area(pos, view)
+
+    fn _update_minimap_hover_from_minimap(
+        mut self, pos: Point, view: Rect,
+    ):
+        """Minimap-column branch of ``_update_minimap_hover``."""
         var sy = pos.y - view.a.y
         var rng = self._minimap_buf_range_for_screen_row(sy, view.height())
         var kind = self._minimap_kind_in_slice(rng[0], rng[1])
@@ -2208,6 +2465,174 @@ struct Editor(ImplicitlyCopyable, Movable):
             self._minimap_hover_word = self._minimap_first_misspelled_word(
                 buf_row
             )
+        elif kind == 3 or kind == 4 or kind == 5 or kind == 6:
+            self._minimap_hover_word = self._minimap_first_diagnostic_message(
+                buf_row,
+            )
+
+    fn _update_minimap_hover_from_text_area(
+        mut self, pos: Point, view: Rect,
+    ):
+        """Text-area branch of ``_update_minimap_hover``: hit-test the
+        cursor against per-cell diagnostic ranges and spell highlights,
+        and (when something hits) anchor the tooltip immediately below
+        the underlined span with the box's left edge aligned to the
+        leftmost cell of the underline.
+
+        Diagnostic ranges win over spell when both cover the same cell —
+        a real warning is more important to surface than a misspelling
+        in a comment. Within diagnostics, lower numeric severity wins
+        (error > warning > info > hint) so the most actionable popup
+        gets shown when ranges overlap.
+        """
+        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        if not resolved:
+            return
+        var rc = resolved.value()
+        var row = rc[0]
+        var byte_col = rc[1]
+        var seg_byte_start = rc[2]
+        var seg_byte_end = rc[3]
+        var seg_x0 = rc[4]
+        # Diagnostic hit test. Pick the lowest-severity-numbered (most
+        # severe) match on this cell so an error squiggle isn't masked
+        # by an info hint that happens to overlap it.
+        var best_diag_idx = -1
+        var best_diag_sev = 0
+        for d in range(len(self.diagnostics)):
+            var diag = self.diagnostics[d]
+            if not _diag_covers_cell(diag, row, byte_col):
+                continue
+            if best_diag_idx < 0 or diag.severity < best_diag_sev:
+                best_diag_idx = d
+                best_diag_sev = diag.severity
+        if best_diag_idx >= 0:
+            var diag = self.diagnostics[best_diag_idx]
+            var kind = _diag_severity_to_minimap_kind(diag.severity)
+            var span_start = _diag_byte_start_for_row(diag, row)
+            self._set_text_hover_anchor(
+                row, span_start, seg_byte_start, seg_byte_end, seg_x0,
+                pos.y,
+            )
+            self._minimap_hover_kind = kind
+            self._minimap_hover_buf_row = row
+            var label = diag.message
+            if len(diag.source.as_bytes()) > 0:
+                label = String("[") + diag.source + String("] ") + label
+            self._minimap_hover_word = label^
+            return
+        # Spell hit test. Spell highlights are stored as
+        # ``Highlight(row, col_start, col_end, attr)`` so the same
+        # byte-range cover check works.
+        for h in range(len(self.spell_highlights)):
+            var sh = self.spell_highlights[h]
+            if sh.row != row:
+                continue
+            if byte_col < sh.col_start or byte_col >= sh.col_end:
+                continue
+            self._set_text_hover_anchor(
+                row, sh.col_start, seg_byte_start, seg_byte_end, seg_x0,
+                pos.y,
+            )
+            self._minimap_hover_kind = 2
+            self._minimap_hover_buf_row = row
+            self._minimap_hover_word = _slice(
+                self.buffer.line(row), sh.col_start, sh.col_end,
+            )
+            return
+
+    fn _set_text_hover_anchor(
+        mut self, row: Int, span_start: Int,
+        seg_byte_start: Int, seg_byte_end: Int, seg_x0: Int,
+        screen_y: Int,
+    ):
+        """Compute and store the tooltip anchor for an in-text hover.
+
+        The tooltip's top-left should land at the leftmost cell of the
+        underlined span on this visual segment, one row below the
+        underline. ``span_start`` is the diagnostic / spell highlight's
+        leftmost byte on this buffer row; if it sits before the visible
+        segment (e.g. the underline starts on a previous wrapped line),
+        clamp to ``seg_byte_start`` so the tooltip still aligns to
+        whatever is on screen rather than scrolling out of view."""
+        var line = self.buffer.line(row)
+        var line_n = len(line.as_bytes())
+        var byte_in_seg: Int
+        if span_start < seg_byte_start:
+            byte_in_seg = 0
+        else:
+            byte_in_seg = span_start - seg_byte_start
+        var visible: String
+        if seg_byte_start >= line_n:
+            visible = String("")
+        else:
+            var clip_end = seg_byte_end
+            if clip_end > line_n:
+                clip_end = line_n
+            visible = _slice(line, seg_byte_start, clip_end)
+        var cell_off = _utf8_cell_of_byte(visible, byte_in_seg)
+        self._minimap_hover_x = seg_x0 + cell_off
+        self._minimap_hover_y = screen_y + 1
+        self._minimap_hover_below = True
+
+    fn _resolve_text_area_buf_pos(
+        self, pos: Point, view: Rect,
+    ) -> Optional[Tuple[Int, Int, Int, Int, Int]]:
+        """Map a screen position onto buffer + segment info if it lands
+        inside the editor's text area. Returns
+        ``(buf_row, byte_col, seg_byte_start, seg_byte_end, seg_x0)``
+        — enough to convert any other byte position on the same visual
+        segment back to its screen x via ``_utf8_cell_of_byte``, which
+        is what the hover path needs to anchor its tooltip to the
+        leftmost cell of an underlined span.
+
+        Returns ``None`` for the gutters, the right-side minimap
+        column, positions outside the view, and positions past the end
+        of the visible content row. Past-EOL hovers are reported as
+        ``None`` rather than clamping so a tooltip doesn't fire on
+        blank space whose 'nearest' diagnostic might be far away."""
+        var miss = Optional[Tuple[Int, Int, Int, Int, Int]]()
+        if not view.contains(pos):
+            return miss
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var rel_x = pos.x - view.a.x
+        if total_gutter > 0 and rel_x < total_gutter:
+            return miss
+        if right_gutter > 0 and pos.x >= view.b.x - right_gutter:
+            return miss
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            return miss
+        var layout = self._layout_lines(content_h, content_w)
+        var screen_row = pos.y - view.a.y
+        if screen_row < 0 or screen_row >= len(layout):
+            return miss
+        var row = layout[screen_row].line_idx
+        var seg_start = layout[screen_row].byte_start
+        var seg_end = layout[screen_row].byte_end
+        var seg_indent = layout[screen_row].indent_cells
+        var seg_x0 = view.a.x + total_gutter + seg_indent
+        var cell_x = rel_x - total_gutter - seg_indent
+        if cell_x < 0:
+            return miss
+        var line = self.buffer.line(row)
+        var line_n = len(line.as_bytes())
+        var visible: String
+        if seg_start >= line_n:
+            visible = String("")
+        else:
+            visible = _slice(line, seg_start, seg_end)
+        var visible_cells = utf8_codepoint_count(visible)
+        if cell_x >= visible_cells:
+            return miss
+        var col = seg_start + _utf8_byte_of_cell(visible, cell_x)
+        if col > line_n:
+            col = line_n
+        return Optional[Tuple[Int, Int, Int, Int, Int]](
+            (row, col, seg_start, seg_end, seg_x0)
+        )
 
     fn _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
         """Handle a left-click on the minimap column: scroll the editor
@@ -2239,6 +2664,13 @@ struct Editor(ImplicitlyCopyable, Movable):
                 if hl.row == buf_row:
                     col = hl.col_end
                     break
+        elif kind == 3 or kind == 4 or kind == 5 or kind == 6:
+            for d in range(len(self.diagnostics)):
+                var diag = self.diagnostics[d]
+                if not _diag_intersects_row(diag, buf_row):
+                    continue
+                col = _diag_byte_start_for_row(diag, buf_row)
+                break
         self.move_to(buf_row, col, False)
         var target = buf_row - content_h // 2
         var max_y = n_lines - content_h
@@ -2272,6 +2704,24 @@ struct Editor(ImplicitlyCopyable, Movable):
             else:
                 label = String("Suspected spelling error on line ") \
                     + String(self._minimap_hover_buf_row + 1)
+        elif self._minimap_hover_kind == 3 \
+                or self._minimap_hover_kind == 4 \
+                or self._minimap_hover_kind == 5 \
+                or self._minimap_hover_kind == 6:
+            var prefix: String
+            if self._minimap_hover_kind == 3:
+                prefix = String("Error: ")
+            elif self._minimap_hover_kind == 4:
+                prefix = String("Warning: ")
+            elif self._minimap_hover_kind == 5:
+                prefix = String("Info: ")
+            else:
+                prefix = String("Hint: ")
+            if len(self._minimap_hover_word.as_bytes()) > 0:
+                label = prefix + self._minimap_hover_word
+            else:
+                label = prefix + String("line ") \
+                    + String(self._minimap_hover_buf_row + 1)
         else:
             return
         var label_w = utf8_codepoint_count(label)
@@ -2285,18 +2735,44 @@ struct Editor(ImplicitlyCopyable, Movable):
         var max_h = view.height()
         if max_h < 3:
             return
-        # Anchor: prefer left of the minimap column. Fall back to right
-        # if there isn't enough room (small windows).
-        var bx = self._minimap_hover_x - w
-        if bx < view.a.x:
-            bx = view.a.x
-        if bx + w > view.b.x:
-            bx = view.b.x - w
-        var by = self._minimap_hover_y - 1
-        if by < view.a.y:
-            by = view.a.y
-        if by + h > view.b.y:
-            by = view.b.y - h
+        # Two anchor modes, selected by ``_minimap_hover_below``:
+        #
+        # * Text-area hover (below=True): tooltip top-left is the
+        #   anchor — the leftmost cell of the underlined span on the
+        #   row immediately below the underline. Falls back upward
+        #   (above the underline) when there's no room below; clamps
+        #   horizontally so the box always fits within ``view``.
+        # * Minimap hover (below=False): tooltip is anchored *above
+        #   and to the left of* the cursor — preserves the original
+        #   right-edge minimap behavior so the popup floats away from
+        #   the cursor toward the text body.
+        var bx: Int
+        var by: Int
+        if self._minimap_hover_below:
+            bx = self._minimap_hover_x
+            by = self._minimap_hover_y
+            # No room below? Flip above the underline. The underline
+            # itself sits at hover_y - 1, so the tooltip's bottom must
+            # land at hover_y - 2 (one row of padding above the line).
+            if by + h > view.b.y:
+                by = self._minimap_hover_y - 1 - h
+            if by < view.a.y:
+                by = view.a.y
+            if bx + w > view.b.x:
+                bx = view.b.x - w
+            if bx < view.a.x:
+                bx = view.a.x
+        else:
+            bx = self._minimap_hover_x - w
+            if bx < view.a.x:
+                bx = view.a.x
+            if bx + w > view.b.x:
+                bx = view.b.x - w
+            by = self._minimap_hover_y - 1
+            if by < view.a.y:
+                by = view.a.y
+            if by + h > view.b.y:
+                by = view.b.y - h
         var r = Rect(bx, by, bx + w, by + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
         # Bind to the tooltip's own rect — anchored inside ``view`` by
@@ -2695,6 +3171,56 @@ struct Editor(ImplicitlyCopyable, Movable):
                     if sx_sh >= content_right:
                         break
                     painter.set_attr(canvas, sx_sh, sy_hl, sh.attr)
+            # Diagnostic overlay: third underline pass. Unlike spell —
+            # which already knows the host attr from the syntax
+            # highlight it sits on — diagnostics can land anywhere
+            # (operators, identifiers, even whitespace), so we read
+            # the existing cell attr, OR in the underline + set the
+            # underline_color, and write back. That preserves the
+            # syntax color underneath while making severity readable
+            # via the squiggle color.
+            var diag_extended = terminal_supports_extended_underline()
+            for d in range(len(self.diagnostics)):
+                var diag = self.diagnostics[d]
+                if not _diag_intersects_row(diag, buf_row):
+                    continue
+                var d_lo = _diag_byte_start_for_row(diag, buf_row)
+                var d_hi = _diag_byte_end_for_row(
+                    diag, buf_row, len(line.as_bytes()),
+                )
+                var d_byte_start = d_lo - start_byte
+                var d_byte_end = d_hi - start_byte
+                if d_byte_start < 0:
+                    d_byte_start = 0
+                if d_byte_end > visible_byte_count:
+                    d_byte_end = visible_byte_count
+                if d_byte_start >= d_byte_end:
+                    continue
+                var d_cell_start = visible_cell_map[d_byte_start]
+                var d_cell_end: Int
+                if d_byte_end < visible_byte_count:
+                    d_cell_end = visible_cell_map[d_byte_end]
+                else:
+                    d_cell_end = visible_cell_count
+                var underline_color = _diag_underline_color(diag.severity)
+                var add_style: UInt8
+                if diag_extended:
+                    add_style = STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY
+                else:
+                    add_style = STYLE_UNDERLINE
+                for cell_off in range(d_cell_start, d_cell_end):
+                    var sx_d = seg_x0 + cell_off
+                    if sx_d >= content_right:
+                        break
+                    var existing = canvas.get(sx_d, sy_hl).attr
+                    var new_attr = existing.add_style(add_style) \
+                        .with_underline_color(Int16(underline_color))
+                    if not diag_extended:
+                        # Legacy underline picks up the foreground
+                        # color, so override fg to make the severity
+                        # visible on its own.
+                        new_attr = new_attr.with_fg(underline_color)
+                    painter.set_attr(canvas, sx_d, sy_hl, new_attr)
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty
