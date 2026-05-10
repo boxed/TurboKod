@@ -28,7 +28,7 @@ every query change cancel the previous child via ``SIGTERM``.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
@@ -42,7 +42,7 @@ from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .text_field import TextField
-from .window import paint_drop_shadow, paint_window_title
+from .window import paint_window_title
 
 
 comptime _ENTRIES_CAP: Int = 500

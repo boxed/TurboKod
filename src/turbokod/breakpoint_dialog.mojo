@@ -25,7 +25,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton, paint_checkbox,
     paint_shadow_button,
 )
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
@@ -43,7 +43,6 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .text_field import TextField, text_field_bg
-from .window import paint_drop_shadow
 
 
 comptime _DLG_WIDTH = 64

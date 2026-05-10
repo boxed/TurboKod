@@ -1880,6 +1880,12 @@
     "candidates": [
       {
         "argv": [
+          "ty",
+          "server"
+        ]
+      },
+      {
+        "argv": [
           "pyright-langserver",
           "--stdio"
         ]
@@ -1888,12 +1894,6 @@
         "argv": [
           "basedpyright-langserver",
           "--stdio"
-        ]
-      },
-      {
-        "argv": [
-          "ty",
-          "server"
         ]
       },
       {
@@ -1907,7 +1907,7 @@
         ]
       }
     ],
-    "install_hint": "pip install pyright"
+    "install_hint": "pip install ty"
   },
   {
     "language_id": "qml",

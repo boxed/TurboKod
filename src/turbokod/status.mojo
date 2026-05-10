@@ -51,7 +51,13 @@ struct StatusBar(Movable):
     var active_tab: Int          # index into ``tabs``, or -1
     var message: String          # right-aligned diagnostic / status text
     var message_attr: Attr       # color for the diagnostic; default = subtle
+    var message_clickable: Bool  # True when caller marked the message as click-receiving
     var _tab_hits: List[_TabHit] # captured by ``paint`` for ``hit_test``
+    # Painted bounds of the right-aligned message — captured by ``paint``
+    # so a subsequent click can hit-test it without recomputing layout.
+    # Inclusive ``a_x`` / exclusive ``b_x`` column bounds.
+    var _msg_a_x: Int
+    var _msg_b_x: Int
 
     fn __init__(out self):
         self.items = List[StatusItem]()
@@ -59,15 +65,27 @@ struct StatusBar(Movable):
         self.active_tab = -1
         self.message = String("")
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
+        self.message_clickable = False
         self._tab_hits = List[_TabHit]()
+        self._msg_a_x = 0
+        self._msg_b_x = 0
 
     fn add(mut self, var key: String, var desc: String):
         self.items.append(StatusItem(key^, desc^))
 
-    fn set_message(mut self, var text: String, attr: Attr):
-        """Set the right-aligned status text (LSP state, errors, etc.)."""
+    fn set_message(
+        mut self, var text: String, attr: Attr, clickable: Bool = False,
+    ):
+        """Set the right-aligned status text (LSP state, errors, etc.).
+
+        ``clickable`` flags the message as a click target — clicks on
+        the painted message rect are reported via ``hit_test_message``.
+        Defaults to False so casual status updates (find/replace counts,
+        DAP state, etc.) don't accidentally pick up a click handler when
+        the LSP indicator was the previous tenant of this slot."""
         self.message = text^
         self.message_attr = attr
+        self.message_clickable = clickable
 
     fn set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,
@@ -135,12 +153,29 @@ struct StatusBar(Movable):
                 x += w + 1
         # Right-aligned status message — clamped so it never collides with
         # the F-key list on narrow terminals (left side wins).
+        self._msg_a_x = 0
+        self._msg_b_x = 0
         if len(self.message.as_bytes()) > 0:
             var msg_w = len(self.message.as_bytes())
             var mx = screen.b.x - msg_w - 1
             if mx < x + 1:
                 return
             _ = painter.put_text(canvas, Point(mx, y), self.message, self.message_attr)
+            self._msg_a_x = mx
+            self._msg_b_x = mx + msg_w
+
+    fn hit_test_message(self, pos: Point, screen: Rect) -> Bool:
+        """True if ``pos`` lands on a click-marked message. Returns False
+        for non-clickable messages even when the geometry matches, so
+        non-LSP messages can sit in the same slot without claiming
+        clicks meant for whatever's underneath."""
+        if not self.message_clickable:
+            return False
+        if pos.y != screen.b.y - 1:
+            return False
+        if self._msg_a_x >= self._msg_b_x:
+            return False
+        return self._msg_a_x <= pos.x and pos.x < self._msg_b_x
 
     fn hit_test_tab(self, pos: Point, screen: Rect) -> Int:
         """Return the index of the tab clicked at ``pos``, or -1 if no

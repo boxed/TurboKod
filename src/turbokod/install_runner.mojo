@@ -21,12 +21,12 @@ copy is preserved as a fallback path for that case.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .window import paint_drop_shadow, paint_window_title_at
+from .window import paint_window_title_at
 from .posix import (
     alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
     untrack_child, waitpid_nohang,

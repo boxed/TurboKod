@@ -17,7 +17,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE,
     ShadowButton, paint_shadow_button,
 )
-from .canvas import Canvas, wrap_to_width
+from .canvas import Canvas, paint_drop_shadow, wrap_to_width
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE,
@@ -27,7 +27,6 @@ from .events import (
     KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB,
 )
 from .geometry import Rect
-from .window import paint_drop_shadow
 
 
 comptime _DEFAULT_WIDTH = 60

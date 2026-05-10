@@ -5,7 +5,7 @@ Public surface — re-export the most common types so users can write
 """
 
 from .app import Application
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .cell import Cell, blank_cell, cell_width
 from .colors import (
     Attr,
@@ -174,4 +174,4 @@ from .tab_bar import TabBar, TabBarItem
 from .terminal import Terminal
 from .text_field import TextFieldKeyResult, text_field_clipboard_key
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
-from .window import Window, WindowManager, paint_drop_shadow
+from .window import Window, WindowManager

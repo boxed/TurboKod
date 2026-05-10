@@ -13,7 +13,7 @@ the same fuzzy-with-word-boundary feel they're already used to.
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
@@ -27,7 +27,7 @@ from .lsp_dispatch import SymbolItem
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
 from .text_field import TextField
-from .window import paint_drop_shadow, paint_window_title
+from .window import paint_window_title
 
 
 struct SymbolPick(Movable):

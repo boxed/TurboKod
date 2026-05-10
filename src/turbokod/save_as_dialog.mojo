@@ -20,7 +20,7 @@ On submit, ``submitted=True`` and ``selected_path`` holds the joined
 
 from std.collections.optional import Optional
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
@@ -35,7 +35,7 @@ from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import TextField
 from .window import (
-    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+    hit_close_button, paint_close_button, paint_window_title,
 )
 
 

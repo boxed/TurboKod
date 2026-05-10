@@ -185,6 +185,7 @@ struct LspManager(Copyable, Movable):
     var _symbols_empty: Bool                 # latched when the last response was empty
     var _root_uri: String
     var _language_id: String
+    var _argv: List[String]      # captured argv from start_with for the info dialog
 
     # Per-document tracking for didOpen / didChange.
     var _doc_paths: List[String]      # absolute paths
@@ -214,6 +215,7 @@ struct LspManager(Copyable, Movable):
         self._symbols_empty = False
         self._root_uri = String("")
         self._language_id = String("")
+        self._argv = List[String]()
         self._doc_paths = List[String]()
         self._doc_versions = List[Int]()
         self._pending_open_paths = List[String]()
@@ -242,6 +244,7 @@ struct LspManager(Copyable, Movable):
         self._symbols_empty = False
         self._root_uri = String("")
         self._language_id = String("")
+        self._argv = List[String]()
         self._doc_paths = List[String]()
         self._doc_versions = List[Int]()
         self._pending_open_paths = List[String]()
@@ -297,6 +300,12 @@ struct LspManager(Copyable, Movable):
 
     fn language_id(self) -> String:
         return self._language_id
+
+    fn argv(self) -> List[String]:
+        return self._argv.copy()
+
+    fn root_uri(self) -> String:
+        return self._root_uri
 
     # --- diagnostics -------------------------------------------------------
 
@@ -354,6 +363,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_NOT_STARTED:
             return
         self._language_id = language_id
+        self._argv = argv.copy()
         self._root_uri = _path_to_uri(root_path) if len(root_path.as_bytes()) > 0 else String("")
         try:
             self.client = LspClient.spawn(argv, root_path)
@@ -410,14 +420,22 @@ struct LspManager(Copyable, Movable):
         the LSP-related status messages — there's no point spamming
         "still starting up" if the user never installed a server.
 
-        Order: ``pyright-langserver --stdio`` → ``basedpyright-langserver
-        --stdio`` → ``pylsp``. Pyright is the de-facto modern default;
-        basedpyright is the community fork; pylsp covers older setups.
+        Order: ``ty server`` → ``pyright-langserver --stdio`` →
+        ``basedpyright-langserver --stdio`` → ``pylsp``. ty (from Astral)
+        is much faster than pyright at the cost of being less
+        full-featured, so we prefer it; pyright/basedpyright/pylsp are
+        the fallbacks for users who haven't installed ty yet.
         """
         if self.state != _STATE_NOT_STARTED:
             return True
-        # ``pyright-langserver --stdio`` is what the official VS Code /
-        # Neovim integrations use; mirror that wire-up.
+        # ``ty server`` is Astral's fast type-checker LSP — preferred
+        # default. Falls through to pyright et al. if ty isn't on PATH.
+        if len(which(String("ty")).as_bytes()) > 0:
+            var argv = List[String]()
+            argv.append(String("ty"))
+            argv.append(String("server"))
+            self.start_with(String("python"), argv, root_path)
+            return True
         if len(which(String("pyright-langserver")).as_bytes()) > 0:
             var argv = List[String]()
             argv.append(String("pyright-langserver"))

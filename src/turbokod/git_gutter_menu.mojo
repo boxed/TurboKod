@@ -10,7 +10,7 @@ mouse events to it before any other widget.
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
@@ -22,7 +22,6 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
-from .window import paint_drop_shadow
 
 
 # Hit-test result codes for ``GitGutterMenu.handle_mouse``. Mirrors the

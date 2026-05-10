@@ -27,7 +27,7 @@ dialog widget so the popup overlays them — same pattern as
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE
@@ -38,7 +38,6 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .type_ahead import TypeAhead, starts_with_ci
-from .window import paint_drop_shadow
 
 
 # Hit-test result codes for ``Dropdown.handle_mouse``.

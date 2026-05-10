@@ -13,7 +13,7 @@ of the picker.
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
@@ -26,7 +26,7 @@ from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .project import walk_project_files
 from .text_field import TextField
-from .window import paint_drop_shadow, paint_window_title
+from .window import paint_window_title
 
 
 struct QuickOpen(Movable):

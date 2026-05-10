@@ -157,10 +157,11 @@ from turbokod.settings import Settings
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
+from turbokod.canvas import paint_drop_shadow
 from turbokod.window import (
     DockedPanelStack,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
-    TitleCommand, WindowManager, hit_title_command, paint_drop_shadow,
+    TitleCommand, WindowManager, hit_title_command,
     paint_title_commands,
 )
 from turbokod.events import (
@@ -11041,6 +11042,220 @@ fn test_editor_text_hover_diagnostic_renders_tooltip() raises:
     assert_true(found)
 
 
+fn test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
+    """Pyright (and other LSPs) often emit diagnostics with literal
+    newlines inside the message — an explanation block, an offending
+    snippet, then a conclusion. Rendering must honour those breaks
+    rather than writing the ``\\n`` as a cell glyph and leaving holes
+    of editor blue inside the popup."""
+    var ed = Editor(String("alpha beta gamma\nlambda omega\n"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 6, 0, 10, DIAG_SEVERITY_ERROR,
+        # Real-shape pyright diagnostic: header line, indented
+        # snippet of the code under review, conclusion line.
+        String(
+            "\"Meta\" overrides symbol of same name in class \"Table\"\n"
+            "  \"dryft.iommi.Table.Meta\" = [\n"
+            "  ] is not assignable to "
+            "\"dryft.prospects.views.StartProjectQueue.Meta\""
+        ),
+        String("pyright"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 80, 20)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(7, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    var canvas = Canvas(80, 20)
+    canvas.fill(view, String(" "), default_attr())
+    ed.paint(canvas, view, False)
+    # Locate popup interior.
+    var top_y = -1
+    var left_x = -1
+    var right_x = -1
+    for y in range(view.b.y):
+        for x in range(view.b.x):
+            if canvas.get(x, y).glyph == String("┌"):
+                top_y = y
+                left_x = x
+                var xi = x + 1
+                while xi < view.b.x:
+                    if canvas.get(xi, y).glyph == String("┐"):
+                        right_x = xi
+                        break
+                    xi += 1
+                break
+        if top_y >= 0:
+            break
+    assert_true(top_y >= 0)
+    var bottom_y = -1
+    var by = top_y + 1
+    while by < view.b.y:
+        if canvas.get(left_x, by).glyph == String("└"):
+            bottom_y = by
+            break
+        by += 1
+    assert_true(bottom_y > top_y)
+    # Every cell in the popup interior must (a) carry the popup's
+    # gray background — the fill must not have left any cells on the
+    # editor's blue — and (b) carry a printable glyph, not a stray
+    # control char (``\n``, ``\r``, ``\t``) that would render as a
+    # weird gap.
+    for y in range(top_y + 1, bottom_y):
+        for x in range(left_x + 1, right_x):
+            var cell = canvas.get(x, y)
+            assert_true(cell.attr.bg != BLUE)
+            var g = cell.glyph
+            assert_true(g != String("\n"))
+            assert_true(g != String("\r"))
+            assert_true(g != String("\t"))
+    # The header line must appear verbatim in some popup row.
+    var found_header = False
+    for y in range(top_y + 1, bottom_y):
+        var row_text = String("")
+        for x in range(left_x + 1, right_x):
+            row_text = row_text + canvas.get(x, y).glyph
+        if _contains(row_text, String("\"Meta\" overrides symbol")):
+            found_header = True
+            break
+    assert_true(found_header)
+
+
+fn test_editor_long_diagnostic_tooltip_through_window() raises:
+    """Same scenario as ``..._fills_popup_interior``, but painted via
+    ``Window.paint`` so the window's body fill (LIGHT_GRAY on BLUE)
+    runs first and the editor paints into the window's interior. The
+    popup must still cover all interior cells with its own gray
+    background — no blue (or window-bg) bleed-through past the text."""
+    var w = Window.editor_window(
+        String("scratch.py"), Rect(0, 0, 64, 14),
+        String("alpha beta gamma\n"),
+    )
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 6, 0, 10, DIAG_SEVERITY_ERROR,
+        String(
+            "Cannot access attribute \"objects\" for class "
+            "\"type[Action]\""
+        ),
+        String("pyright"),
+    ))
+    w.editor.set_diagnostics(diags^)
+    var hover = Event.mouse_event(
+        Point(8, 1), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = w.handle_mouse_in_body(hover)
+    assert_equal(w.editor._minimap_hover_kind, 3)
+    var canvas = Canvas(64, 14)
+    canvas.fill(Rect(0, 0, 64, 14), String(" "), default_attr())
+    w.paint(canvas, String("scratch.py"), True, 1)
+    # Locate popup by scanning for ┌
+    var top_y = -1
+    var left_x = -1
+    var right_x = -1
+    for y in range(14):
+        for x in range(64):
+            if canvas.get(x, y).glyph == String("┌"):
+                top_y = y
+                left_x = x
+                var xi = x + 1
+                while xi < 64:
+                    if canvas.get(xi, y).glyph == String("┐"):
+                        right_x = xi
+                        break
+                    xi += 1
+                break
+        if top_y >= 0:
+            break
+    assert_true(top_y >= 0)
+    var bottom_y = -1
+    var by = top_y + 1
+    while by < 14:
+        if canvas.get(left_x, by).glyph == String("└"):
+            bottom_y = by
+            break
+        by += 1
+    assert_true(bottom_y > top_y)
+    for y in range(top_y + 1, bottom_y):
+        for x in range(left_x + 1, right_x):
+            var bg = canvas.get(x, y).attr.bg
+            assert_true(bg != BLUE)
+
+
+fn test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
+    """A diagnostic message longer than the editor view forces the
+    tooltip to wrap onto multiple rows. Every cell inside the popup's
+    interior must come from the popup's own paint pass — light-gray
+    background, not the editor's blue. Catches regressions where the
+    wrap leaves the trailing tail of a wrapped row on the editor's
+    blue fill instead of the popup's gray."""
+    # Long enough that ``Error: <message>`` ends up wider than the
+    # 60-cell view, forcing a wrap.
+    var ed = Editor(String("alpha beta gamma"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 6, 0, 10, DIAG_SEVERITY_ERROR,
+        String(
+            "Cannot access attribute \"objects\" for class "
+            "\"type[Action]\""
+        ),
+        String("pyright"),
+    ))
+    ed.set_diagnostics(diags^)
+    # Squeeze the view so the message has to wrap.
+    var view = Rect(0, 0, 60, 12)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(7, 0), MOUSE_BUTTON_NONE, True, True),
+        view,
+    )
+    assert_equal(ed._minimap_hover_kind, 3)
+    var canvas = Canvas(60, 12)
+    canvas.fill(view, String(" "), default_attr())
+    ed.paint(canvas, view, False)
+    # Find the popup by scanning for the top border row (a run of
+    # ``─`` glyphs starting with ``┌``).
+    var top_y = -1
+    var left_x = -1
+    var right_x = -1
+    for y in range(view.b.y):
+        for x in range(view.b.x):
+            if canvas.get(x, y).glyph == String("┌"):
+                top_y = y
+                left_x = x
+                # Walk right to find the matching ``┐``.
+                var xi = x + 1
+                while xi < view.b.x:
+                    if canvas.get(xi, y).glyph == String("┐"):
+                        right_x = xi
+                        break
+                    xi += 1
+                break
+        if top_y >= 0:
+            break
+    assert_true(top_y >= 0)
+    assert_true(right_x > left_x + 2)
+    # Find the bottom row — first ``└`` in the same column as ``┌``.
+    var bottom_y = -1
+    var by = top_y + 1
+    while by < view.b.y:
+        if canvas.get(left_x, by).glyph == String("└"):
+            bottom_y = by
+            break
+        by += 1
+    assert_true(bottom_y > top_y)
+    # Every interior cell (the padding ring + content rows) must have
+    # the popup's gray background, never the editor's blue. Border
+    # rows are skipped — those carry frame glyphs whose attr we don't
+    # constrain here.
+    for y in range(top_y + 1, bottom_y):
+        for x in range(left_x + 1, right_x):
+            var bg = canvas.get(x, y).attr.bg
+            assert_true(bg != BLUE)
+
+
 fn test_editor_text_hover_anchor_aligns_with_underline_left() raises:
     """The tooltip must sit one row below the underlined span with its
     left edge aligned to the underline's leftmost cell — not anchored
@@ -11817,6 +12032,9 @@ fn main() raises:
     test_editor_text_hover_over_spell_word_records_word()
     test_editor_text_hover_past_eol_clears_state()
     test_editor_text_hover_diagnostic_renders_tooltip()
+    test_editor_long_diagnostic_tooltip_fills_popup_interior()
+    test_editor_multiline_diagnostic_tooltip_renders_each_line()
+    test_editor_long_diagnostic_tooltip_through_window()
     test_editor_text_hover_anchor_aligns_with_underline_left()
     test_editor_minimap_hover_keeps_above_left_anchor()
     test_attr_to_sgr_plain_underline()

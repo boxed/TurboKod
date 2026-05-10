@@ -9,7 +9,7 @@ returns the action string of any clicked item.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE
@@ -19,7 +19,6 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
-from .window import paint_drop_shadow
 
 
 struct MenuItem(ImplicitlyCopyable, Movable):

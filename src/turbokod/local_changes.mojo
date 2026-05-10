@@ -41,7 +41,7 @@ from collections import Optional
 
 from std.collections.list import List
 
-from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from .canvas import Canvas, paint_drop_shadow, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
@@ -63,7 +63,7 @@ from .painter import Painter
 from .file_io import join_path, read_file
 from .window import (
     DockChromeHit, DockedPanelStack,
-    paint_drop_shadow, paint_window_title,
+    paint_window_title,
 )
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,

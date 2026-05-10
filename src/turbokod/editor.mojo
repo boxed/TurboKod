@@ -11,7 +11,10 @@ inserting / removing a line. Fine for source files up to a few thousand lines.
 
 from std.collections.list import List
 
-from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from .canvas import (
+    Canvas, paint_drop_shadow, popup_size_for_text,
+    utf8_byte_to_cell, utf8_codepoint_count,
+)
 from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy, clipboard_paste
@@ -2687,10 +2690,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         self, mut canvas: Canvas, view: Rect,
     ):
         """Render the hover tooltip for the right-side minimap. Called
-        after the editor's main paint pass so it overlays the text. The
-        box floats to the LEFT of the minimap column with one row of
-        padding above and below the label so the tooltip never sits
-        directly beneath the pointer."""
+        after the editor's main paint pass so it overlays the text.
+
+        Built on the framework's standard popup chrome — drop shadow,
+        boxed border, light-gray background, soft-wrapped body text —
+        so a long diagnostic message wraps inside the box instead of
+        bleeding past its right edge."""
         if self._minimap_hover_kind == 0:
             return
         var label: String
@@ -2724,16 +2729,16 @@ struct Editor(ImplicitlyCopyable, Movable):
                     + String(self._minimap_hover_buf_row + 1)
         else:
             return
-        var label_w = utf8_codepoint_count(label)
-        var w = label_w + 4
-        var max_w = view.width()
-        if max_w < 4:
-            return
-        if w > max_w:
-            w = max_w
-        var h = 3
-        var max_h = view.height()
-        if max_h < 3:
+        # Reserve 2 cells on the right of ``view`` for the drop-shadow
+        # strip so the shadow doesn't bleed past the editor area when
+        # the popup is anchored near the right edge.
+        var max_box_w = view.width() - 2
+        if max_box_w < 5:
+            max_box_w = view.width()
+        var size = popup_size_for_text(label, max_box_w, view.height())
+        var w = size[0]
+        var h = size[1]
+        if w == 0 or h == 0:
             return
         # Two anchor modes, selected by ``_minimap_hover_below``:
         #
@@ -2775,15 +2780,21 @@ struct Editor(ImplicitlyCopyable, Movable):
                 by = view.b.y - h
         var r = Rect(bx, by, bx + w, by + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
-        # Bind to the tooltip's own rect — anchored inside ``view`` by
-        # the math above, but the painter makes that bound enforced
-        # rather than just intended.
+        # Drop shadow first (compositing under ``r``), then the box
+        # itself: fill bg, draw border, soft-wrap body text inside the
+        # 1-cell padding ring. ``put_wrapped_text`` wraps to the
+        # interior width and clips to its rect, so the message can't
+        # overflow the popup.
+        paint_drop_shadow(canvas, r)
         var tt_painter = Painter(r)
         tt_painter.fill(canvas, r, String(" "), attr)
         tt_painter.draw_box(canvas, r, attr, False)
-        _ = tt_painter.put_text(
-            canvas, Point(r.a.x + 2, r.a.y + 1), label, attr,
+        var msg_rect = Rect(
+            r.a.x + 2, r.a.y + 1,
+            r.b.x - 2, r.b.y - 1,
         )
+        if msg_rect.width() > 0 and msg_rect.height() > 0:
+            _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
     fn _paint_right_gutter(
         self, mut canvas: Canvas, painter: Painter,

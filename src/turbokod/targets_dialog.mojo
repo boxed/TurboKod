@@ -40,7 +40,7 @@ from .buttons import (
     BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
     ShadowButton, paint_shadow_button,
 )
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
@@ -61,7 +61,7 @@ from .language_config import built_in_servers
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import TextField
 from .window import (
-    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+    hit_close_button, paint_close_button, paint_window_title,
 )
 
 

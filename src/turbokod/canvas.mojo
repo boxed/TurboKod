@@ -255,15 +255,83 @@ struct Canvas(Copyable, Movable):
         return rows
 
 
+fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
+    """Paint a Turbo Vision–style drop shadow under ``rect``.
+
+    The shadow is two cells wide on the right and one cell tall
+    along the bottom, offset so the diagonal "lifted" effect lands
+    in the same direction as the per-button shadows
+    (``paint_shadow_button``): right strip starts one row below the
+    top edge, bottom strip starts two cells right of the left edge.
+
+    This is a *compositing* operation, not an overpaint: the shadow
+    cells keep whatever glyph was already underneath the dialog and
+    only get their colours swapped to dim-on-black via
+    ``Canvas.darken_rect``. Callers therefore must invoke this
+    after the workspace and any other widgets the dialog is meant
+    to "float above" have been painted, and before drawing the
+    dialog body itself (drawing order inside the dialog's own
+    rect doesn't matter — the shadow strips never overlap it).
+    """
+    if rect.is_empty():
+        return
+    # Right-side strip: 2 cells wide starting one row below the top.
+    canvas.darken_rect(Rect(rect.b.x, rect.a.y + 1, rect.b.x + 2, rect.b.y))
+    # Bottom strip: 1 row tall, shifted right by 2 so the corner
+    # below-and-right of the dialog gets the full 2×1 + 1×2 hook.
+    canvas.darken_rect(Rect(rect.a.x + 2, rect.b.y, rect.b.x + 2, rect.b.y + 1))
+
+
+fn popup_size_for_text(
+    text: String, max_w: Int, max_h: Int,
+) -> Tuple[Int, Int]:
+    """Compute the (width, height) a popup needs to host ``text``.
+
+    The popup hosts a soft-wrapped paragraph: width is capped at
+    ``max_w`` so the box never spills past the host view, and height
+    grows with however many wrapped lines the text needs (capped at
+    ``max_h``). Returned dimensions include the 1-cell border on all
+    four sides plus a 1-cell horizontal padding inside the border —
+    callers can lay out the box at these dimensions and trust that
+    ``paint_drop_shadow`` + ``draw_box`` + ``put_wrapped_text`` inside
+    the same rect will land within those bounds.
+
+    Returns ``(0, 0)`` when the available space is too small to host
+    any text (``< 5`` cells of width or ``< 3`` cells of height —
+    border + one inner row + border).
+    """
+    if max_w < 5 or max_h < 3:
+        return (0, 0)
+    var ideal_inner = utf8_codepoint_count(text)
+    var inner_w: Int
+    if ideal_inner + 4 <= max_w:
+        inner_w = ideal_inner
+        if inner_w < 1:
+            inner_w = 1
+    else:
+        inner_w = max_w - 4
+    var lines = wrap_to_width(text, inner_w)
+    var n = len(lines)
+    if n < 1:
+        n = 1
+    var h = n + 2
+    if h > max_h:
+        h = max_h
+    return (inner_w + 4, h)
+
+
 fn wrap_to_width(text: String, width: Int) -> List[String]:
     """Soft-wrap ``text`` to lines of at most ``width`` codepoint cells.
 
     Breaks at the last space inside the budget; words longer than
-    ``width`` hard-break at exactly ``width`` cells. Empty input
-    returns an empty list. Trailing whitespace on each line is
-    preserved verbatim — callers that paint a cursor or other glyph
-    immediately after a wrapped line rely on the trailing space to
-    keep their visual spacing consistent with the un-wrapped layout.
+    ``width`` hard-break at exactly ``width`` cells. Hard line breaks
+    at ``\\n`` always end the current line, so multi-line input (LSP
+    diagnostics, formatted help text) is preserved structurally —
+    a ``\\n`` doesn't leak into a wrapped line as a non-printable cell
+    that the canvas writer would emit verbatim. ``\\r`` and ``\\t`` are
+    folded to spaces so they participate in soft-break placement
+    instead of producing stray cells. Empty input returns an empty
+    list.
 
     The framework primitive that lets popups and dialogs honour the
     "don't paint outside your area" rule: a dialog can either size
@@ -279,11 +347,22 @@ fn wrap_to_width(text: String, width: Int) -> List[String]:
         return lines^
     # Decode UTF-8 into per-codepoint glyphs so we can measure line
     # width in cells, not bytes (multi-byte sequences would otherwise
-    # blow up the budget on the first non-ASCII character).
+    # blow up the budget on the first non-ASCII character). Newlines
+    # are kept as their own marker codepoint; other ASCII whitespace
+    # (\r, \t) is folded to a regular space so wrap-break logic and
+    # the canvas writer both treat it as plain whitespace.
     var cps = List[String]()
     var i = 0
     while i < n:
         var b = Int(bytes[i])
+        if b == 0x0A:
+            cps.append(String("\n"))
+            i += 1
+            continue
+        if b == 0x0D or b == 0x09:
+            cps.append(String(" "))
+            i += 1
+            continue
         var seq_len: Int
         if b < 0x80:
             seq_len = 1
@@ -311,13 +390,25 @@ fn wrap_to_width(text: String, width: Int) -> List[String]:
             if pos >= nc:
                 break
         # Walk forward up to ``width`` cells; remember the last space
-        # we passed so we can fall back to a soft break.
+        # we passed so we can fall back to a soft break. A ``\n``
+        # ends the line immediately even when more budget is left.
         var end = pos
         var last_space = -1
+        var hard_break = False
         while end < nc and end - pos < width:
+            if cps[end] == String("\n"):
+                hard_break = True
+                break
             if cps[end] == String(" "):
                 last_space = end
             end += 1
+        if hard_break:
+            var line = String("")
+            for j in range(pos, end):
+                line = line + cps[j]
+            lines.append(line)
+            pos = end + 1   # skip the \n itself
+            continue
         if end >= nc:
             var tail = String("")
             for j in range(pos, nc):

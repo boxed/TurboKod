@@ -24,7 +24,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE,
     ShadowButton, paint_shadow_button,
 )
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
@@ -36,7 +36,7 @@ from .events import (
 from .file_io import join_path
 from .geometry import Point, Rect, compute_dialog_rect
 from .window import (
-    hit_close_button, paint_close_button, paint_drop_shadow, paint_window_title,
+    hit_close_button, paint_close_button, paint_window_title,
 )
 
 

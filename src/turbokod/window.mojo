@@ -12,7 +12,7 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
@@ -634,33 +634,6 @@ struct DockedPanelStack(Movable):
                 out.is_max = False
                 return out^
         return out^
-
-
-fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
-    """Paint a Turbo Vision–style drop shadow under ``rect``.
-
-    The shadow is two cells wide on the right and one cell tall
-    along the bottom, offset so the diagonal "lifted" effect lands
-    in the same direction as the per-button shadows
-    (``paint_shadow_button``): right strip starts one row below the
-    top edge, bottom strip starts two cells right of the left edge.
-
-    This is a *compositing* operation, not an overpaint: the shadow
-    cells keep whatever glyph was already underneath the dialog and
-    only get their colours swapped to dim-on-black via
-    ``Canvas.darken_rect``. Callers therefore must invoke this
-    after the workspace and any other widgets the dialog is meant
-    to "float above" have been painted, and before drawing the
-    dialog body itself (drawing order inside the dialog's own
-    rect doesn't matter — the shadow strips never overlap it).
-    """
-    if rect.is_empty():
-        return
-    # Right-side strip: 2 cells wide starting one row below the top.
-    canvas.darken_rect(Rect(rect.b.x, rect.a.y + 1, rect.b.x + 2, rect.b.y))
-    # Bottom strip: 1 row tall, shifted right by 2 so the corner
-    # below-and-right of the dialog gets the full 2×1 + 1×2 hook.
-    canvas.darken_rect(Rect(rect.a.x + 2, rect.b.y, rect.b.x + 2, rect.b.y + 1))
 
 
 struct Window(ImplicitlyCopyable, Movable):

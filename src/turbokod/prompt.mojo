@@ -19,7 +19,7 @@ positioning all behave the same as in any editor field.
 from .buttons import (
     BUTTON_FIRED, OptionToggle, paint_option_toggle,
 )
-from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
+from .canvas import Canvas, paint_drop_shadow, utf8_codepoint_count, wrap_to_width
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, LIGHT_GRAY, WHITE, YELLOW
@@ -29,7 +29,6 @@ from .events import (
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
-from .window import paint_drop_shadow
 
 
 comptime _DEFAULT_WIDTH = 60

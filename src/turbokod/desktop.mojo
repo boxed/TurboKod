@@ -2874,6 +2874,14 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 TARGET_SELECT_PREFIX + String(tab_idx), screen,
             )
+        # Click on the right-aligned LSP indicator opens an info window
+        # listing all running language servers, their argv, and state.
+        if event.kind == EVENT_MOUSE \
+                and event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion \
+                and self.status_bar.hit_test_message(event.pos, screen):
+            self._open_lsp_info_window(screen)
+            return Optional[String]()
         # Window tab bar (one row above status bar). Same rationale as
         # the status-bar tabs: route the click to the named window
         # before the workspace gets a shot at it.
@@ -3617,6 +3625,89 @@ struct Desktop(Movable):
                 String("LSP: still starting up — try again"),
                 Attr(BLACK, LIGHT_GRAY),
             )
+
+    fn _open_lsp_info_window(mut self, screen: Rect):
+        """Open a window summarizing every spawned LSP — language id,
+        actual command line, state, root, and (for python) which
+        candidates were considered. Triggered by clicking the LSP
+        indicator on the right of the status bar."""
+        var lines = List[String]()
+        if len(self.lsp_managers) == 0:
+            lines.append(String("No language servers are running."))
+        else:
+            for i in range(len(self.lsp_managers)):
+                if i > 0:
+                    lines.append(String(""))
+                ref m = self.lsp_managers[i]
+                var state: String
+                if m.is_failed():
+                    state = String("FAILED — ") + m.failure_reason
+                elif m.is_initializing():
+                    state = String("starting…")
+                elif m.is_ready():
+                    state = String("ready")
+                elif m.is_not_started():
+                    state = String("not started")
+                else:
+                    state = String("unknown")
+                lines.append(self.lsp_languages[i])
+                var argv = m.argv()
+                var cmd = String("")
+                for k in range(len(argv)):
+                    if k > 0:
+                        cmd += String(" ")
+                    cmd += argv[k]
+                var resolved = String("")
+                if len(argv) > 0:
+                    resolved = which(argv[0])
+                if len(resolved.as_bytes()) == 0:
+                    resolved = String("(not on PATH)")
+                lines.append(String("  command: ") + cmd)
+                lines.append(String("  path:    ") + resolved)
+                lines.append(String("  state:   ") + state)
+                lines.append(String("  root:    ") + m.root_uri())
+        # Show what python candidates are on $PATH so the user can
+        # tell why ty (or pyright) was selected.
+        for i in range(len(self.lsp_specs)):
+            if self.lsp_specs[i].language_id == String("python"):
+                var spec = self.lsp_specs[i]
+                lines.append(String(""))
+                lines.append(String("Python LSP candidates:"))
+                for c in range(len(spec.candidates)):
+                    var cand = spec.candidates[c]
+                    if len(cand.argv) == 0:
+                        continue
+                    var bin = cand.argv[0]
+                    var path = which(bin)
+                    var marker: String
+                    if len(path.as_bytes()) > 0:
+                        marker = String("[found] ") + path
+                    else:
+                        marker = String("[missing]")
+                    var argline = String("")
+                    for k in range(len(cand.argv)):
+                        if k > 0:
+                            argline += String(" ")
+                        argline += cand.argv[k]
+                    lines.append(
+                        String("  ") + marker + String("  ") + argline,
+                    )
+                break
+        var body = String("")
+        for i in range(len(lines)):
+            if i > 0:
+                body += String("\n")
+            body += lines[i]
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        self.windows.add(Window.editor_window(
+            String("Language servers"), rect, body^,
+        ))
+        self._open_count += 1
+        if was_max:
+            var idx = len(self.windows.windows) - 1
+            self.windows.windows[idx].toggle_maximize(workspace)
 
     fn _refresh_lsp_status(mut self):
         """Show the focused editor's language-server state on the right
@@ -5643,7 +5734,7 @@ struct Desktop(Movable):
         downgrades to a quiet skip rather than an error popup.
 
         The install command is derived from the LSP spec's
-        ``install_hint`` — typically ``pip install pyright`` — rewritten
+        ``install_hint`` — typically ``pip install ty`` — rewritten
         to call the venv's pip module directly. That keeps the package
         landing inside the venv regardless of the user's ambient PATH.
         """
@@ -5654,10 +5745,15 @@ struct Desktop(Movable):
         var info_py = stat_file(py)
         if not info_py.ok or info_py.is_dir():
             return
-        # Already installed?  Probe for the canonical pyright binary
-        # plus a couple of fallbacks; any hit means the venv has *some*
-        # Python LSP and we leave the user's choice alone.
+        # Already installed?  Probe for the canonical ty binary plus a
+        # couple of fallbacks; any hit means the venv has *some* Python
+        # LSP and we leave the user's choice alone. We also probe the
+        # ambient ``$PATH`` so that a system-wide install (e.g. ``uv tool
+        # install ty``) blocks the venv install — otherwise we'd
+        # uselessly install ty into every venv even though one is
+        # already reachable.
         var probes = List[String]()
+        probes.append(String("ty"))
         probes.append(String("pyright-langserver"))
         probes.append(String("basedpyright-langserver"))
         probes.append(String("pylsp"))
@@ -5668,6 +5764,8 @@ struct Desktop(Movable):
             ))
             if info.ok and not info.is_dir():
                 return
+            if len(which(probes[i]).as_bytes()) > 0:
+                return
         # Already kicked off in this session?
         for i in range(len(self._venv_lsp_installed)):
             if self._venv_lsp_installed[i] == venv_dir:
@@ -5675,10 +5773,10 @@ struct Desktop(Movable):
         if self.install_runner.is_active():
             return
         # Resolve the package name from the spec's install_hint
-        # (currently "pip install pyright"). Fall back to "pyright" if
-        # the hint is empty or shaped differently — better to install
-        # the canonical default than to do nothing.
-        var package = String("pyright")
+        # (currently "pip install ty"). Fall back to "ty" if the hint
+        # is empty or shaped differently — better to install the
+        # canonical default than to do nothing.
+        var package = String("ty")
         for i in range(len(self.lsp_specs)):
             if self.lsp_specs[i].language_id == String("python"):
                 var hint = self.lsp_specs[i].install_hint
@@ -6739,17 +6837,23 @@ fn _refresh_status_for(
     """Free function so the caller can pass ``self.status_bar`` and one
     of ``self.lsp_*`` without tripping Mojo's exclusivity check (a
     method receiver implicitly aliases the whole struct, which conflicts
-    with passing one of its fields as a separate argument)."""
+    with passing one of its fields as a separate argument).
+
+    All branches mark the message clickable=True so a click on the
+    indicator opens the LSP info dialog regardless of state — useful
+    precisely when the state is FAILED and the user wants to see why."""
     if m.is_failed():
         sb.set_message(
             prefix + m.failure_reason,
             Attr(LIGHT_RED, LIGHT_GRAY),
+            clickable=True,
         )
         return
     if m.is_initializing():
         sb.set_message(
             prefix + String("starting..."),
             Attr(BLACK, LIGHT_GRAY),
+            clickable=True,
         )
         return
     if m.is_ready():
@@ -6758,17 +6862,20 @@ fn _refresh_status_for(
             sb.set_message(
                 prefix + String("looking up ") + word + String("..."),
                 Attr(BLACK, LIGHT_GRAY),
+                clickable=True,
             )
             return
         if m.last_empty():
             sb.set_message(
                 prefix + String("no definition found"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
+                clickable=True,
             )
             return
         sb.set_message(
             prefix + String("ready"),
             Attr(BLACK, LIGHT_GRAY),
+            clickable=True,
         )
 
 
