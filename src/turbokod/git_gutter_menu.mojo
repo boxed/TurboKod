@@ -22,6 +22,14 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .view import RowCursor
+
+
+fn _row_y(rect: Rect) -> Int:
+    """Y of the menu's single action row. Driven by ``RowCursor`` so
+    paint and hit-testing share one source of truth."""
+    var cursor = RowCursor(rect.a.y + 1)
+    return cursor.place()
 
 
 # Hit-test result codes for ``GitGutterMenu.handle_mouse``. Mirrors the
@@ -111,7 +119,7 @@ struct GitGutterMenu(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter.draw_box(canvas, rect, attr, False)
-        var y0 = rect.a.y + 1
+        var y0 = _row_y(rect)
         var is_sel = (self.selected == 0)
         var row_attr = sel_attr if is_sel else attr
         if is_sel:
@@ -153,7 +161,7 @@ struct GitGutterMenu(Movable):
         if not rect.contains(event.pos):
             self._resolve(GUTTER_ACTION_NONE)
             return GUTTER_HIT_OUTSIDE
-        var row = event.pos.y - (rect.a.y + 1)
+        var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
             return GUTTER_HIT_INSIDE
         self.selected = row

@@ -50,7 +50,7 @@ from .events import (
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
-from .geometry import Point, Rect
+from .geometry import Point, Rect, compute_dialog_rect
 from .language_config import built_in_servers
 from .text_field import TextField
 from .view import RowCursor
@@ -82,23 +82,7 @@ row so the editable strip doesn't overrun the button."""
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    var width = _DIALOG_W
-    var height = _DIALOG_H
-    if width > screen.b.x - 4: width = screen.b.x - 4
-    if height > screen.b.y - 4: height = screen.b.y - 4
-    var x: Int
-    var y: Int
-    if pos:
-        x = pos.value().x
-        y = pos.value().y
-        if x < 0: x = 0
-        if y < 0: y = 0
-        if x + width > screen.b.x: x = screen.b.x - width
-        if y + height > screen.b.y: y = screen.b.y - height
-    else:
-        x = (screen.b.x - width) // 2
-        y = (screen.b.y - height) // 2
-    return Rect(x, y, x + width, y + height)
+    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 @fieldwise_init
@@ -564,10 +548,29 @@ struct ActionEditor(Movable):
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
             return True
+        # Every mouse event goes through every text field. Each field
+        # consumes only when a press lands inside its strip or when
+        # it's currently mid-drag — so at most one claims any given
+        # event. The TextField framework owns drag tracking, click
+        # counting, focus-on-press, and motion / release dispatch
+        # internally; the dialog just enumerates its fields. Return
+        # value drives ``self.focus`` so a fresh press promotes the
+        # clicked field; for motion / release the field that already
+        # had focus stays focused (focus assignment is idempotent).
+        if self.program_tf.handle_mouse(event, layout.program_rect):
+            self.focus = _FOCUS_PROGRAM
+            return True
+        if self.args_tf.handle_mouse(event, layout.args_rect):
+            self.focus = _FOCUS_ARGS
+            return True
+        if self.cwd_tf.handle_mouse(event, layout.cwd_rect):
+            self.focus = _FOCUS_CWD
+            return True
+        # Remaining widgets are press-only (no drag semantics): the
+        # lang dropdown opens on a left press, nothing else.
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
-        # Click into a form input.
         if layout.lang_rect.contains(event.pos):
             # Closed dropdown clicked: forward to dd.handle_mouse so the
             # popup actually opens. Without this the strip just took
@@ -579,18 +582,6 @@ struct ActionEditor(Movable):
             if hit != DROPDOWN_HIT_NONE:
                 self.entry.language_id = self.lang_dropdown.value()
             self.focus = _FOCUS_LANG
-            return True
-        if layout.program_rect.contains(event.pos):
-            self.focus = _FOCUS_PROGRAM
-            _ = self.program_tf.handle_mouse(event, layout.program_rect)
-            return True
-        if layout.args_rect.contains(event.pos):
-            self.focus = _FOCUS_ARGS
-            _ = self.args_tf.handle_mouse(event, layout.args_rect)
-            return True
-        if layout.cwd_rect.contains(event.pos):
-            self.focus = _FOCUS_CWD
-            _ = self.cwd_tf.handle_mouse(event, layout.cwd_rect)
             return True
         return True
 

@@ -28,6 +28,15 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .view import RowCursor
+
+
+fn _rows_top(rect: Rect) -> Int:
+    """Y of the first menu row. Driven by ``RowCursor`` so paint and
+    hit-testing share one source of truth — the original code had
+    ``rect.a.y + 1`` hardcoded in both ``paint`` and ``handle_mouse``."""
+    var cursor = RowCursor(rect.a.y + 1)
+    return cursor.place()
 
 
 # Hit-test result codes for ``SpellMenu.handle_mouse``. Mirrors the
@@ -184,7 +193,7 @@ struct SpellMenu(Movable):
         painter.fill(canvas, rect, String(" "), attr)
         painter.draw_box(canvas, rect, attr, False)
         # Row 0: user dict (always enabled).
-        var y0 = rect.a.y + 1
+        var y0 = _rows_top(rect)
         var is_sel0 = (self.selected == 0)
         var row_attr0 = sel_attr if is_sel0 else attr
         if is_sel0:
@@ -196,7 +205,7 @@ struct SpellMenu(Movable):
             canvas, Point(rect.a.x + 2, y0), _LABEL_USER, row_attr0,
         )
         # Row 1: project dict — disabled when no project is open.
-        var y1 = rect.a.y + 2
+        var y1 = y0 + 1
         var is_sel1 = (self.selected == 1)
         var enabled1 = self.has_project
         var row_attr1: Attr
@@ -257,7 +266,7 @@ struct SpellMenu(Movable):
         if not rect.contains(event.pos):
             self._resolve(SPELL_ACTION_NONE)
             return SPELL_HIT_OUTSIDE
-        var row = event.pos.y - (rect.a.y + 1)
+        var row = event.pos.y - _rows_top(rect)
         if row < 0 or row >= self._row_count():
             return SPELL_HIT_INSIDE
         self.selected = row

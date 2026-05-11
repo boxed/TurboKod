@@ -245,6 +245,11 @@ struct TargetsDialog(Movable):
     ``selected`` — so wheel-scrolling moves the viewport independently
     and isn't snapped back on the next frame."""
     var _buttons: List[_PlacedButton]
+    """Persistent button table. Each entry's ``ShadowButton`` carries
+    its own press latch (see ``ShadowButton.handle_mouse``), so the
+    table must outlive paint cycles — ``_paint_buttons`` repositions
+    in place rather than rebuilding from scratch. Layout indices are
+    stable: entries 0..3 are Add / Remove / Save / Cancel in order."""
     # Editable input strips for the currently-selected entry. The
     # field text is the canonical source of truth while the dialog
     # is open; ``_sync_fields_into_entries`` writes them back into
@@ -259,16 +264,6 @@ struct TargetsDialog(Movable):
     rebuild-each-paint dropdown silently drops the toggle, making
     clicks feel like no-ops. Re-seeded from the selected target's
     ``debug_language`` whenever the selection changes."""
-    # Cached input rects for mouse routing (captured during paint).
-    var _name_rect: Rect
-    var _program_rect: Rect
-    var _args_rect: Rect
-    var _cwd_rect: Rect
-    """Persistent button table. Each entry's ``ShadowButton`` carries
-    its own press latch (see ``ShadowButton.handle_mouse``), so the
-    table must outlive paint cycles — ``_paint_buttons`` repositions
-    in place rather than rebuilding from scratch. Layout indices are
-    stable: entries 0..3 are Add / Remove / Save / Cancel in order."""
 
     fn __init__(out self):
         self.active = False
@@ -286,10 +281,6 @@ struct TargetsDialog(Movable):
         self.args_tf = TextField()
         self.cwd_tf = TextField()
         self.lang_dropdown = _build_lang_dropdown(String(""))
-        self._name_rect = Rect(0, 0, 0, 0)
-        self._program_rect = Rect(0, 0, 0, 0)
-        self._args_rect = Rect(0, 0, 0, 0)
-        self._cwd_rect = Rect(0, 0, 0, 0)
         # Build the persistent button table once — ``_paint_buttons``
         # repositions and updates ``enabled`` per frame, but the press
         # latch on each ShadowButton has to survive across paints.
@@ -657,22 +648,19 @@ struct TargetsDialog(Movable):
             canvas, _label_pt_for(layout, _FOCUS_LANG),
             String("Debug language:"), bg,
         )
-        # Stash strip rects so ``handle_mouse`` can route a click back
-        # to the right field. Then paint each field's ``TextField``
-        # directly — ``TextField.paint`` mutates the field (it owns
-        # the horizontal scroll offset and reconciles it against the
-        # strip width), so we have to call it on the owned
-        # ``self.<field>`` rather than on a copy.
-        self._name_rect = layout.name_rect
-        self._program_rect = layout.program_rect
-        self._args_rect = layout.args_rect
-        self._cwd_rect = layout.cwd_rect
-        self.name_tf.paint(canvas, self._name_rect, self.focus == _FOCUS_NAME)
+        # Paint each field's ``TextField`` directly — ``TextField.paint``
+        # mutates the field (it owns the horizontal scroll offset and
+        # reconciles it against the strip width), so we have to call
+        # it on the owned ``self.<field>`` rather than on a copy.
+        # ``TextField`` caches its own input_rect internally for
+        # ``consume_pending_drag``, so the dialog no longer needs to
+        # stash per-field rects.
+        self.name_tf.paint(canvas, layout.name_rect, self.focus == _FOCUS_NAME)
         self.program_tf.paint(
-            canvas, self._program_rect, self.focus == _FOCUS_PROGRAM,
+            canvas, layout.program_rect, self.focus == _FOCUS_PROGRAM,
         )
-        self.args_tf.paint(canvas, self._args_rect, self.focus == _FOCUS_ARGS)
-        self.cwd_tf.paint(canvas, self._cwd_rect, self.focus == _FOCUS_CWD)
+        self.args_tf.paint(canvas, layout.args_rect, self.focus == _FOCUS_ARGS)
+        self.cwd_tf.paint(canvas, layout.cwd_rect, self.focus == _FOCUS_CWD)
         self._paint_lang_dropdown(canvas, layout)
 
     fn _paint_lang_dropdown(self, mut canvas: Canvas, layout: _Layout):
@@ -988,26 +976,30 @@ struct TargetsDialog(Movable):
                 and layout.list_rect.contains(event.pos):
             self._list_scroll += 1
             return True
-        # Continue an in-flight TextField drag (motion / release) on
-        # whichever field has focus, so a drag-select that wanders
-        # outside the strip still extends the selection and the
-        # eventual release clears the field's drag state. Without
-        # this, the pressed-only early-return below swallows every
-        # motion event and click-drag selection silently fails.
-        if event.motion or not event.pressed:
-            var ir = _input_rect_for(layout, self.focus)
-            if self.focus == _FOCUS_NAME:
-                if self.name_tf.handle_mouse(event, ir):
-                    return True
-            elif self.focus == _FOCUS_PROGRAM:
-                if self.program_tf.handle_mouse(event, ir):
-                    return True
-            elif self.focus == _FOCUS_ARGS:
-                if self.args_tf.handle_mouse(event, ir):
-                    return True
-            elif self.focus == _FOCUS_CWD:
-                if self.cwd_tf.handle_mouse(event, ir):
-                    return True
+        # Every mouse event goes through every text field. Each
+        # field consumes only when a press lands inside its strip or
+        # when it's mid-drag — at most one claims any given event.
+        # Drag tracking, click counting, focus-on-press, and
+        # motion / release dispatch all live inside ``TextField``.
+        # Gated on ``self.selected >= 0`` because the fields aren't
+        # painted in the empty-state (no selected row), and clicking
+        # phantom geometry shouldn't position a cursor that's not
+        # visible.
+        if self.selected >= 0:
+            if self.name_tf.handle_mouse(event, layout.name_rect):
+                self.focus = _FOCUS_NAME
+                return True
+            if self.program_tf.handle_mouse(event, layout.program_rect):
+                self.focus = _FOCUS_PROGRAM
+                return True
+            if self.args_tf.handle_mouse(event, layout.args_rect):
+                self.focus = _FOCUS_ARGS
+                return True
+            if self.cwd_tf.handle_mouse(event, layout.cwd_rect):
+                self.focus = _FOCUS_CWD
+                return True
+        # Remaining widgets are press-only (the candidate list and
+        # the lang dropdown have no drag semantics here).
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
@@ -1026,33 +1018,10 @@ struct TargetsDialog(Movable):
                 self.selected = idx
             self.focus = _FOCUS_LIST
             return True
-        # Click into a form input.
-        var fields = List[UInt8]()
-        fields.append(_FOCUS_NAME)
-        fields.append(_FOCUS_PROGRAM)
-        fields.append(_FOCUS_ARGS)
-        fields.append(_FOCUS_CWD)
-        fields.append(_FOCUS_LANG)
-        for i in range(len(fields)):
-            var ir = _input_rect_for(layout, fields[i])
-            if ir.contains(event.pos):
-                if self.selected < 0:
-                    return True
-                self.focus = fields[i]
-                if fields[i] == _FOCUS_LANG:
-                    self._click_lang(ir, screen, event)
-                else:
-                    # Forward the click to the field for cursor
-                    # positioning / drag-extend.
-                    if fields[i] == _FOCUS_NAME:
-                        _ = self.name_tf.handle_mouse(event, ir)
-                    elif fields[i] == _FOCUS_PROGRAM:
-                        _ = self.program_tf.handle_mouse(event, ir)
-                    elif fields[i] == _FOCUS_ARGS:
-                        _ = self.args_tf.handle_mouse(event, ir)
-                    elif fields[i] == _FOCUS_CWD:
-                        _ = self.cwd_tf.handle_mouse(event, ir)
-                return True
+        if self.selected >= 0 and layout.lang_rect.contains(event.pos):
+            self.focus = _FOCUS_LANG
+            self._click_lang(layout.lang_rect, screen, event)
+            return True
         return True
 
     fn _click_lang(mut self, ir: Rect, screen: Rect, event: Event):

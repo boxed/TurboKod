@@ -45,7 +45,7 @@ from .events import (
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .view import RowCursor
@@ -145,23 +145,7 @@ fn _build_layout(rect: Rect) -> _Layout:
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    var width = _DIALOG_W
-    var height = _DIALOG_H
-    if width > screen.b.x - 4: width = screen.b.x - 4
-    if height > screen.b.y - 4: height = screen.b.y - 4
-    var x: Int
-    var y: Int
-    if pos:
-        x = pos.value().x
-        y = pos.value().y
-        if x < 0: x = 0
-        if y < 0: y = 0
-        if x + width > screen.b.x: x = screen.b.x - width
-        if y + height > screen.b.y: y = screen.b.y - height
-    else:
-        x = (screen.b.x - width) // 2
-        y = (screen.b.y - height) // 2
-    return Rect(x, y, x + width, y + height)
+    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 @fieldwise_init
@@ -363,7 +347,7 @@ struct LanguageEditor(Movable):
         for i in range(_BTN_ADD, _BTN_DOWN + 1):
             self._paint_button(canvas, i)
         # Save / Cancel pinned to the bottom-right.
-        self._layout_commit_buttons(rect)
+        self._layout_commit_buttons(rect, layout)
         self._paint_button(canvas, _BTN_SAVE)
         self._paint_button(canvas, _BTN_CANCEL)
         # Hint line for the read-only built-in case so the UI explains
@@ -435,8 +419,8 @@ struct LanguageEditor(Movable):
             self._buttons[i].button.move_to(x, y)
             x = x + self._buttons[i].button.total_width() + 1
 
-    fn _layout_commit_buttons(mut self, rect: Rect):
-        var bottom_y = rect.b.y - 3
+    fn _layout_commit_buttons(mut self, rect: Rect, layout: _Layout):
+        var bottom_y = layout.commit_y
         var cancel_w = self._buttons[_BTN_CANCEL].button.face_width()
         var cancel_x = rect.b.x - 2 - (cancel_w + 1)
         var save_w = self._buttons[_BTN_SAVE].button.face_width()
@@ -663,39 +647,32 @@ struct LanguageEditor(Movable):
             if layout.list_rect.contains(event.pos):
                 self._list_scroll += 1
                 return True
-        # Continue an in-flight TextField drag (motion / release) on
-        # whichever field has focus, so a drag-select that wanders
-        # outside the strip still extends the selection and the
-        # eventual release clears the field's drag state. Without
-        # this, the pressed-only early-return below swallows every
-        # motion event and click-drag selection silently fails.
-        if event.motion or not event.pressed:
-            if self.focus == _FOCUS_LANG and not self.is_existing:
-                if self.lang_tf.handle_mouse(event, layout.lang_rect):
-                    return True
-            elif self.focus == _FOCUS_FILE_TYPES and not self.is_existing:
-                if self.file_types_tf.handle_mouse(event, layout.ft_rect):
-                    return True
-            elif self.focus == _FOCUS_ARGV:
-                if self.argv_tf.handle_mouse(event, layout.argv_rect):
-                    if self.selected >= 0 \
-                            and self.selected < len(self.candidates):
-                        self.candidates[self.selected] = self.argv_tf.text
-                    return True
+        # Every mouse event goes through every text field. Each
+        # field consumes only when a press lands inside its strip or
+        # when it's currently mid-drag — at most one claims any given
+        # event. The TextField framework owns drag tracking, click
+        # counting, focus-on-press, and motion / release dispatch.
+        # The argv-edit mirror runs after the call: the field's text
+        # may have changed via drag-select-then-delete-paste, and
+        # the per-candidate copy needs to stay in sync.
+        if not self.is_existing \
+                and self.lang_tf.handle_mouse(event, layout.lang_rect):
+            self.focus = _FOCUS_LANG
+            return True
+        if not self.is_existing \
+                and self.file_types_tf.handle_mouse(event, layout.ft_rect):
+            self.focus = _FOCUS_FILE_TYPES
+            return True
+        if self.argv_tf.handle_mouse(event, layout.argv_rect):
+            self.focus = _FOCUS_ARGV
+            if self.selected >= 0 \
+                    and self.selected < len(self.candidates):
+                self.candidates[self.selected] = self.argv_tf.text
+            return True
+        # Remaining widgets are press-only (the candidate list).
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
-        # Click into the lang / file-types fields when editable.
-        if not self.is_existing:
-            if layout.lang_rect.contains(event.pos):
-                self.focus = _FOCUS_LANG
-                _ = self.lang_tf.handle_mouse(event, layout.lang_rect)
-                return True
-            if layout.ft_rect.contains(event.pos):
-                self.focus = _FOCUS_FILE_TYPES
-                _ = self.file_types_tf.handle_mouse(event, layout.ft_rect)
-                return True
-        # Click into the candidate list selects the row.
         if layout.list_rect.contains(event.pos):
             var idx = self._list_scroll + (event.pos.y - layout.list_rect.a.y)
             if 0 <= idx and idx < len(self.candidates):
@@ -704,14 +681,6 @@ struct LanguageEditor(Movable):
                     self.argv_tf = TextField()
                     self.argv_tf.set_text(self.candidates[self.selected])
             self.focus = _FOCUS_LIST
-            return True
-        # Click into the argv strip.
-        if layout.argv_rect.contains(event.pos):
-            self.focus = _FOCUS_ARGV
-            _ = self.argv_tf.handle_mouse(event, layout.argv_rect)
-            if self.selected >= 0 \
-                    and self.selected < len(self.candidates):
-                self.candidates[self.selected] = self.argv_tf.text
             return True
         return True
 

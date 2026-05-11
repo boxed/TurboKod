@@ -35,37 +35,50 @@ from .events import (
 )
 from .file_io import join_path
 from .geometry import Point, Rect, compute_dialog_rect
+from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
 
 
-# Geometry must stay in sync between ``paint`` and ``handle_mouse`` —
-# kept here so a tweak to one updates the other.
 comptime _DIALOG_W = 60
 comptime _DIALOG_H = 18
+comptime _LIST_HEIGHT = _DIALOG_H - 7
+"""Visible rows in the directory listing. The -7 budget covers:
+1 top border + 1 current-dir + 1 gap above list + 1 gap below list +
+1 button face + 1 button shadow + 1 hint/bottom-border."""
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
-fn _list_rect(dialog: Rect) -> Rect:
-    # Below the listing we reserve four rows: a 1-row visual gap
-    # (so the listing's selection bar doesn't appear to bleed into
-    # the green button face), the button face, the button shadow,
-    # and the bottom-edge hint.
-    var list_top = dialog.a.y + 3
-    var list_bottom = dialog.b.y - 4
-    return Rect(dialog.a.x + 2, list_top, dialog.b.x - 1, list_bottom)
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects + row anchors for the file dialog.
+
+    Top section (current-dir line) flows through ``RowCursor``; the
+    list + bottom button strip + hint are anchored to the bottom so
+    the listing grows with the dialog. Shared by ``paint`` and
+    ``handle_mouse`` so geometry doesn't drift.
+    """
+    var current_dir_y: Int
+    var list_rect: Rect
+    var buttons_rect: Rect
+    var hint_y: Int
 
 
-fn _buttons_rect(dialog: Rect) -> Rect:
-    # Two rows tall: ``b.y-3`` is the green button face, ``b.y-2``
-    # the half-block drop shadow underneath. ``b.y-1`` is left for
-    # the hint line painted over the bottom border.
-    var y = dialog.b.y - 3
-    return Rect(dialog.a.x + 2, y, dialog.b.x - 1, y + 2)
+fn _build_layout(rect: Rect) -> _Layout:
+    var cursor = RowCursor(rect.a.y + 1)
+    var current_dir_y = cursor.place()
+    var list_y = cursor.place()
+    var buttons_y = rect.b.y - 3
+    return _Layout(
+        current_dir_y,
+        Rect(rect.a.x + 2, list_y, rect.b.x - 1, rect.b.y - 4),
+        Rect(rect.a.x + 2, buttons_y, rect.b.x - 1, buttons_y + 2),
+        rect.b.y - 1,
+    )
 
 
 struct FileDialog(Movable):
@@ -178,6 +191,7 @@ struct FileDialog(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Drop shadow first — it darkens cells *outside* ``rect`` so
         # whatever workspace content sits behind the dialog reads as
         # dim-on-black underneath the right and bottom edges.
@@ -190,25 +204,25 @@ struct FileDialog(Movable):
         # editor windows — the framework helper paints all three cells.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 1),
+            canvas, Point(rect.a.x + 2, layout.current_dir_y),
             self.browser.dir, dir_attr,
         )
-        self.browser.paint(canvas, _list_rect(rect), True)
+        self.browser.paint(canvas, layout.list_rect, True)
         # Desktop / Home / Root quick-jump strip just above the hint
         # — green TV-style buttons with shadows; colours are owned
         # by ``paint_jump_buttons`` so all dialogs stay consistent.
-        var buttons = _buttons_rect(rect)
-        self.browser.paint_jump_buttons(canvas, buttons)
+        self.browser.paint_jump_buttons(canvas, layout.buttons_rect)
         # Directory-pick mode adds a right-aligned " Open <X> " button
         # in the same row. The jump buttons leave the right edge
         # untouched, so the submit button sits there without colliding.
         if self.dirs_only:
             var face = Attr(BLACK, GREEN)
             var bw = self._open_button.face_width()
-            var bx = buttons.b.x - bw - 1
-            self._open_button.move_to(bx, buttons.a.y)
+            var bx = layout.buttons_rect.b.x - bw - 1
+            self._open_button.move_to(bx, layout.buttons_rect.a.y)
             paint_shadow_button(
-                canvas, self._open_button, face, LIGHT_GRAY, buttons.b.x,
+                canvas, self._open_button, face, LIGHT_GRAY,
+                layout.buttons_rect.b.x,
             )
         var hint = (
             String(" Enter: enter dir  ⌫: parent  ESC: cancel ")
@@ -216,9 +230,7 @@ struct FileDialog(Movable):
             else String(" Enter: open  ⌫: parent  ESC: cancel ")
         )
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.b.y - 1),
-            hint,
-            dir_attr,
+            canvas, Point(rect.a.x + 2, layout.hint_y), hint, dir_attr,
         )
 
     # --- events ------------------------------------------------------------
@@ -229,12 +241,7 @@ struct FileDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
-        # ``list_h`` is recovered from the canonical layout — keeping the
-        # geometry computation in one place means navigation can't drift
-        # against painting. ``-7`` accounts for: 1 (top border) + 1
-        # (current-dir line) + 1 (gap above list) + 1 (gap below list) +
-        # 1 (button face) + 1 (button shadow / hint share) + 1 (bottom).
-        var list_h = _DIALOG_H - 7
+        var list_h = _LIST_HEIGHT
         if k == KEY_ESC:
             self.close()
             return True
@@ -293,6 +300,7 @@ struct FileDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # --- title-bar drag: start / continue / end ---------------
         # Resolved before any other mouse handling so a click that
         # *starts* on the title row never also triggers list / button
@@ -326,15 +334,15 @@ struct FileDialog(Movable):
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
             return True
-        var list_rect = _list_rect(rect)
-        var buttons = _buttons_rect(rect)
         # Directory-pick mode's submit button shares the buttons row.
         # Route the event through it before the jump-button strip so a
         # click on the right-aligned " Open Project " face doesn't get
         # swallowed by the row's outer hit logic.
         if self.dirs_only:
             var bw = self._open_button.face_width()
-            self._open_button.move_to(buttons.b.x - bw - 1, buttons.a.y)
+            self._open_button.move_to(
+                layout.buttons_rect.b.x - bw - 1, layout.buttons_rect.a.y,
+            )
             var status = self._open_button.handle_mouse(event)
             if status == BUTTON_FIRED:
                 self.selected_path = self.browser.dir
@@ -346,15 +354,14 @@ struct FileDialog(Movable):
         # one row above it, so a click landing on the buttons would
         # otherwise fall through ``handle_list_mouse`` as
         # out-of-list and be silently swallowed.
-        if self.browser.handle_jump_click(event, buttons):
+        if self.browser.handle_jump_click(event, layout.buttons_rect):
             return True
-        var idx = self.browser.handle_list_mouse(event, list_rect)
+        var idx = self.browser.handle_list_mouse(event, layout.list_rect)
         if idx == -2:
             return True   # wheel handled
         if idx < 0:
             # Outside the list (or wrong button) — swallow regardless,
             # since the dialog is modal and shouldn't leak clicks.
-            _ = rect       # silence unused warning if compiler reports it
             return True
         # ``..`` activates on a single click — matches the "parent
         # shortcut" expectation.
@@ -370,5 +377,5 @@ struct FileDialog(Movable):
                 self.selected_path = join_path(self.browser.dir, name)
                 self.submitted = True
             return True
-        self.browser.set_selection(idx, list_rect.height())
+        self.browser.set_selection(idx, layout.list_rect.height())
         return True

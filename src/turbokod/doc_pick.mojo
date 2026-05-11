@@ -31,7 +31,42 @@ from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
 from .text_field import TextField
+from .view import RowCursor
 from .window import paint_window_title
+
+
+comptime _LABEL = String(" Find: ")
+comptime _LABEL_W = 7
+"""Columns occupied by the inline search label (``" Find: "``)."""
+
+
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects for the picker. Shared by ``paint`` and
+    ``handle_mouse`` so list hit-testing and list rendering see the
+    exact same top/height — previously each side recomputed
+    ``_list_top`` / ``_list_height`` independently.
+    """
+    var input_rect: Rect
+    var input_label_pt: Point
+    var list_top: Int
+    var list_height: Int
+    var hint_y: Int
+
+
+fn _build_layout(rect: Rect, label_w: Int) -> _Layout:
+    var cursor = RowCursor(rect.a.y + 1)
+    var input_y = cursor.place()
+    var list_y = cursor.place()
+    var hint_y = rect.b.y - 1
+    var list_h = hint_y - list_y
+    if list_h < 0:
+        list_h = 0
+    return _Layout(
+        Rect(rect.a.x + 2 + label_w, input_y, rect.b.x - 1, input_y + 1),
+        Point(rect.a.x + 2, input_y),
+        list_y, list_h, hint_y,
+    )
 
 
 struct DocPick(Movable):
@@ -124,20 +159,11 @@ struct DocPick(Movable):
         var y = (screen.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    fn _list_top(self, rect: Rect) -> Int:
-        return rect.a.y + 3
-
-    fn _list_height(self, rect: Rect) -> Int:
-        var h = (rect.b.y - 1) - self._list_top(rect)
-        if h < 0:
-            return 0
-        return h
-
     fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
         if not self.active:
             return False
         var rect = self._rect(screen)
-        return Rect(rect.a.x + 2, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2).contains(pos)
+        return _build_layout(rect, _LABEL_W).input_rect.contains(pos)
 
     # --- paint ------------------------------------------------------------
 
@@ -150,6 +176,7 @@ struct DocPick(Movable):
         var type_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_type    = Attr(BLUE,   YELLOW)
         var rect = self._rect(screen)
+        var layout = _build_layout(rect, _LABEL_W)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -159,17 +186,12 @@ struct DocPick(Movable):
             bg, bg,
         )
         # Search line.
-        var label = String(" Find: ")
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 1), label, bg,
-        )
-        var qx = rect.a.x + 2 + len(label.as_bytes())
-        var input_rect = Rect(qx, rect.a.y + 1, rect.b.x - 1, rect.a.y + 2)
-        self._input_rect = input_rect
-        self.query.paint(canvas, input_rect, True)
+        _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
+        self._input_rect = layout.input_rect
+        self.query.paint(canvas, layout.input_rect, True)
         # Listing.
-        var top = self._list_top(rect)
-        var h = self._list_height(rect)
+        var top = layout.list_top
+        var h = layout.list_height
         if len(self.matched) == 0:
             var msg: String
             if len(self.entries) == 0:
@@ -204,7 +226,7 @@ struct DocPick(Movable):
                     )
         # Bottom hint.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.b.y - 1),
+            canvas, Point(rect.a.x + 2, layout.hint_y),
             String(" Enter: open  ESC: cancel "),
             hint_attr,
         )
@@ -242,13 +264,14 @@ struct DocPick(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(screen)
+        var layout = _build_layout(rect, _LABEL_W)
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):
             return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.matched),
-                self._list_height(rect),
+                layout.list_height,
             ):
                 return True
         if event.button != MOUSE_BUTTON_LEFT:
@@ -257,11 +280,10 @@ struct DocPick(Movable):
             return True
         if not rect.contains(event.pos):
             return True
-        var top = self._list_top(rect)
-        var h = self._list_height(rect)
-        if event.pos.y < top or event.pos.y >= top + h:
+        if event.pos.y < layout.list_top \
+                or event.pos.y >= layout.list_top + layout.list_height:
             return True
-        var idx = self.scroll + (event.pos.y - top)
+        var idx = self.scroll + (event.pos.y - layout.list_top)
         if idx < 0 or idx >= len(self.matched):
             return True
         if idx == self.selected:
