@@ -60,7 +60,7 @@ from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
 from .onig import OnigRegex
-from .posix import monotonic_ms
+from .posix import append_string_bytes, monotonic_ms
 from .search_options import (
     SearchOptions, build_search_regex, default_search_options,
 )
@@ -86,6 +86,30 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     if s_end > len(bytes): s_end = len(bytes)
     if s_start >= s_end: return String("")
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+
+
+fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
+    """True iff typing the ASCII byte ``k`` should kick off an
+    as-you-type completion request.
+
+    Word codepoints (letters, digits, underscore) extend the current
+    identifier; ``.`` is the canonical member-access trigger across
+    every language server we ship. We deliberately don't include
+    ``(``, ``,``, ``=`` etc. — those tend to fire signature-help /
+    auto-import suggestions that are noisy when invoked on every
+    keystroke.
+    """
+    if UInt32(0x30) <= k and k <= UInt32(0x39):  # 0-9
+        return True
+    if UInt32(0x41) <= k and k <= UInt32(0x5A):  # A-Z
+        return True
+    if UInt32(0x61) <= k and k <= UInt32(0x7A):  # a-z
+        return True
+    if k == UInt32(0x5F):  # underscore
+        return True
+    if k == UInt32(0x2E):  # .
+        return True
+    return False
 
 
 fn _completion_kind_icon(kind: Int) -> String:
@@ -1679,6 +1703,29 @@ struct Editor(ImplicitlyCopyable, Movable):
             col = prev
         return col
 
+    fn _cursor_after_word_codepoint(self) -> Bool:
+        """True iff the codepoint immediately to the left of the cursor
+        is a word codepoint (letter, digit, or underscore). Used by the
+        as-you-type completion auto-trigger to decide whether the
+        cursor is still inside an identifier after a backspace."""
+        if self.cursor_col == 0:
+            return False
+        var line = self.buffer.line(self.cursor_row)
+        if len(line.as_bytes()) == 0:
+            return False
+        var prev = prev_codepoint_start(line, self.cursor_col)
+        var info = codepoint_at(line, prev)
+        return is_word_codepoint(info[0])
+
+    fn _stamp_completion_request(mut self):
+        """Stamp ``pending_completion_request`` at the current cursor.
+        Helper for the as-you-type auto-trigger paths so they don't
+        each duplicate the prefix-start lookup."""
+        var start_col = self.completion_prefix_start()
+        self.pending_completion_request = Optional[CompletionRequest](
+            CompletionRequest(self.cursor_row, self.cursor_col, start_col),
+        )
+
     fn accept_completion(mut self) -> Bool:
         """Apply the currently highlighted completion to the buffer.
 
@@ -1994,14 +2041,25 @@ struct Editor(ImplicitlyCopyable, Movable):
         ``_disk_text`` instead so editorconfig transforms (line endings,
         trailing-whitespace trim, final newline) are only applied on disk
         — the LSP server should see the buffer as-is.
+
+        Accumulates into a byte buffer to keep this O(N): ``String +
+        String`` allocates a fresh String each call, so the obvious
+        loop is O(N²) and a single snapshot of a 10k-line file is
+        multi-GB of churn — felt as a perceptible hang on the UI
+        thread because the LSP completion path calls this on every
+        keystroke.
         """
-        var out = String("")
         var n = self.buffer.line_count()
+        if n == 0:
+            return String("")
+        var buf = List[UInt8]()
         for i in range(n):
             if i > 0:
-                out = out + String("\n")
-            out = out + self.buffer.line(i)
-        return out
+                buf.append(UInt8(0x0A))
+            append_string_bytes(buf, self.buffer.line(i))
+        return String(StringSlice(
+            ptr=buf.unsafe_ptr(), length=len(buf),
+        ))
 
     fn _disk_text(self) -> String:
         """Build the byte sequence to write to disk for the current buffer,
@@ -4222,9 +4280,11 @@ struct Editor(ImplicitlyCopyable, Movable):
             return False
         # LSP completion-popup intercept. While the popup is visible
         # the navigation keys steer it rather than the cursor;
-        # Enter/Tab accept; Esc dismisses. Typing / arrow-left /
-        # arrow-right / backspace etc. close the popup *and* fall
-        # through to the normal handler so the user keeps editing.
+        # Enter/Tab accept; Esc dismisses. Typing / backspace / arrow
+        # keys fall through to the normal handler — the as-you-type
+        # auto-trigger at the bottom of ``handle_key`` decides
+        # whether to re-stamp a request (keeping the popup alive) or
+        # close it.
         if self.completion_popup_visible:
             var ck = event.key
             var no_mods = event.mods == MOD_NONE
@@ -4248,9 +4308,6 @@ struct Editor(ImplicitlyCopyable, Movable):
                     self._scroll_to_cursor(view)
                     return True
                 return True
-            # Any other key: close the popup and fall through so it
-            # also gets handled normally (typing, arrow keys, etc.).
-            self.close_completion_popup()
         # Ctrl+Space — request completions from the LSP server. The
         # actual round-trip is the host's job; we just emit the
         # request payload. Terminals canonicalize to
@@ -4273,6 +4330,12 @@ struct Editor(ImplicitlyCopyable, Movable):
         var was_typing = self._typing_active
         var prev_typing_ms = self._typing_last_ms
         self._typing_active = False
+        # As-you-type completion: set to True by the typing / backspace
+        # branches when they stamp a fresh ``pending_completion_request``.
+        # At the bottom of this method, ``False`` + a still-visible
+        # popup means the user did something that should dismiss the
+        # popup (moved the cursor, typed a non-word char, etc.).
+        var did_auto_trigger = False
         # Capture the lowest pre-edit row that any selection or
         # cursor-line edit could touch. The dirty-row marker the
         # tokenizer reads must be ``<=`` the actual lowest changed
@@ -4418,6 +4481,15 @@ struct Editor(ImplicitlyCopyable, Movable):
                     self.move_to(p[0], p[1], False)
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
+            # As-you-type completion: when the popup is visible and
+            # the cursor is still inside an identifier after the
+            # backspace, re-stamp a request so the filtered list
+            # refreshes. Stepping out of the word lets the
+            # end-of-handler check close the popup naturally.
+            if self.completion_popup_visible \
+                    and self._cursor_after_word_codepoint():
+                self._stamp_completion_request()
+                did_auto_trigger = True
         elif k == KEY_DELETE:
             if self.read_only:
                 return True
@@ -4606,9 +4678,35 @@ struct Editor(ImplicitlyCopyable, Movable):
                 self._typing_last_ms = now
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
+            # As-you-type completion. Stamp a fresh request whenever
+            # the typed byte extends an identifier (ASCII letter,
+            # digit, or underscore) or is a member-access trigger
+            # (``.``). Non-word punctuation falls through to the
+            # bottom-of-handler logic, which closes any visible popup.
+            if _is_completion_autotrigger_byte(k):
+                self._stamp_completion_request()
+                did_auto_trigger = True
         else:
             return False
         self._scroll_to_cursor(view)
+        # As-you-type popup management. ``did_auto_trigger`` is True
+        # iff this keystroke explicitly re-stamped a completion
+        # request (typing an identifier char or backspacing inside
+        # one). For other paths (cursor moves, etc.), keep the popup
+        # alive as long as the cursor is still inside the *same*
+        # identifier we anchored on — left/right arrow inside the
+        # prefix re-filters the popup rather than dismissing it,
+        # which matches every modern IDE. Leaving the identifier
+        # (jumping rows, moving past the anchor, landing on a non-
+        # word char) closes the popup.
+        if self.completion_popup_visible and not did_auto_trigger:
+            if self.cursor_row == self.completion_anchor_row \
+                    and self.cursor_col >= self.completion_anchor_col \
+                    and self.completion_prefix_start() \
+                        == self.completion_anchor_col:
+                self._stamp_completion_request()
+            else:
+                self.close_completion_popup()
         # Re-tokenize only when this keystroke actually mutated the
         # buffer. Mutating branches set ``_highlights_dirty`` via
         # ``_mark_hl_dirty`` next to their existing ``self.dirty =

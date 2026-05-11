@@ -258,6 +258,15 @@ struct LspProcess(Movable):
     var stderr_fd: Int32
     var alive: Bool
     var _read_buffer: List[UInt8]
+    # Outbound queue. ``write_message`` frames a payload onto here and
+    # then best-effort drains via a non-blocking ``write(2)``; whatever
+    # the kernel didn't accept stays queued for ``pump_writes`` to
+    # flush on subsequent ticks. The whole point is that the UI thread
+    # never blocks on a stuck server: if the child stops reading its
+    # stdin, our writes pile up here (capped) instead of stalling the
+    # editor inside a syscall.
+    var _pending_write: List[UInt8]
+    var _write_overflowed: Bool
     # Optional trace log. When ``trace_fd >= 0`` every wire-level event
     # (writes, reads, message extractions) is appended to that fd as a
     # single line. The whole point of streaming the log is so that a
@@ -274,6 +283,8 @@ struct LspProcess(Movable):
         self.stderr_fd = -1
         self.alive = False
         self._read_buffer = List[UInt8]()
+        self._pending_write = List[UInt8]()
+        self._write_overflowed = False
         self.trace_fd = -1
 
     @staticmethod
@@ -376,6 +387,12 @@ struct LspProcess(Movable):
         proc.alive = True
         # Reading the stdout/stderr pipes non-blocking lets ``poll_message``
         # drain whatever's available in one shot without risking a hang.
+        # ``stdin_fd`` is also non-blocking — writes are framed onto
+        # ``_pending_write`` and flushed via ``_try_flush_writes`` /
+        # ``pump_writes``. A stuck server can never block the UI thread
+        # inside ``write(2)``; bytes pile up in the queue (capped) and
+        # drain on subsequent ticks.
+        _ = set_nonblocking(proc.stdin_fd)
         _ = set_nonblocking(proc.stdout_fd)
         _ = set_nonblocking(proc.stderr_fd)
         return proc^
@@ -397,13 +414,19 @@ struct LspProcess(Movable):
         f.write_bytes(bytes)
 
     fn write_message(mut self, payload: String) raises:
-        """Frame ``payload`` with ``Content-Length: N\\r\\n\\r\\n`` and write
-        the whole thing to the child's stdin in one syscall."""
+        """Frame ``payload`` with ``Content-Length: N\\r\\n\\r\\n`` and
+        queue it for non-blocking delivery to the child's stdin.
+
+        Never blocks on a stuck server: the framed bytes are appended
+        to ``_pending_write`` and we then best-effort drain via
+        ``_try_flush_writes``. Anything the kernel didn't accept stays
+        queued; ``pump_writes`` (called from the manager's tick)
+        continues the drain on subsequent frames. Past the overflow
+        cap we drop the queue and latch ``_write_overflowed`` so the
+        manager can mark the server failed.
+        """
         var n = len(payload.as_bytes())
         var hdr = String("Content-Length: ") + String(n) + String("\r\n\r\n")
-        var buf = List[UInt8]()
-        append_string_bytes(buf, hdr)
-        append_string_bytes(buf, payload)
         if self.trace_fd >= 0:
             # Truncate huge payloads in the trace — full breakpoint
             # lists, big stack traces etc. can run to several KB and
@@ -415,7 +438,67 @@ struct LspProcess(Movable):
                     ptr=pb.unsafe_ptr(), length=400,
                 )) + String("…")
             self.trace(String("> ") + String(n) + String("B ") + preview)
-        write_buffer(self.stdin_fd, buf)
+        append_string_bytes(self._pending_write, hdr)
+        append_string_bytes(self._pending_write, payload)
+        if len(self._pending_write) > _BUF_CAP_GUARD:
+            if self.trace_fd >= 0:
+                self.trace(
+                    String("> overflow: pending_write=")
+                    + String(len(self._pending_write))
+                    + String("B exceeded cap; dropping queue"),
+                )
+            self._pending_write = List[UInt8]()
+            self._write_overflowed = True
+            return
+        self._try_flush_writes()
+
+    fn _try_flush_writes(mut self):
+        """Drain ``_pending_write`` via non-blocking ``write(2)`` until
+        either the queue is empty or the kernel returns < 0 (EAGAIN /
+        EPIPE / etc.). The remaining bytes stay queued for the next
+        call. No-op when the fd is gone."""
+        if self.stdin_fd < 0:
+            return
+        while len(self._pending_write) > 0:
+            var rc = external_call["tk_write_nb", Int](
+                self.stdin_fd,
+                self._pending_write.unsafe_ptr(),
+                UInt(len(self._pending_write)),
+            )
+            if rc == 0:
+                # Kernel would block (EAGAIN / EWOULDBLOCK) — try
+                # again next tick. Leave the queue intact.
+                return
+            if rc < 0:
+                # Real I/O failure (EPIPE etc.). ``try_reap`` /
+                # crash detection in the manager covers the truly
+                # dead-server case; here we just drop the queue so
+                # we don't spin trying to write to a broken pipe.
+                self._pending_write = List[UInt8]()
+                return
+            if rc >= len(self._pending_write):
+                self._pending_write = List[UInt8]()
+                return
+            self._pending_write = _drop_prefix(self._pending_write^, Int(rc))
+
+    fn pump_writes(mut self):
+        """Continue draining any queued outbound bytes.
+
+        Called every manager tick so a backlog left after the
+        in-line drain in ``write_message`` (because the pipe was
+        momentarily full) still flushes within a frame or two of
+        the server catching up.
+        """
+        if len(self._pending_write) == 0:
+            return
+        self._try_flush_writes()
+
+    fn write_overflowed(self) -> Bool:
+        """True if the outbound queue overflowed since the last reset.
+        ``LspManager.tick`` uses this to latch FAILED instead of
+        letting silent message loss accumulate.
+        """
+        return self._write_overflowed
 
     fn poll_message(mut self, timeout_ms: Int32) -> Optional[String]:
         """Try to return one complete framed payload.
@@ -549,6 +632,10 @@ struct LspProcess(Movable):
         if self.stderr_fd >= 0:
             _ = close_fd(self.stderr_fd)
             self.stderr_fd = -1
+        # Drop any queued outbound bytes — they'd be writing to a
+        # closed fd next time around.
+        self._pending_write = List[UInt8]()
+        self._write_overflowed = False
 
     @staticmethod
     fn from_socket(fd: Int32) -> Self:

@@ -6584,6 +6584,70 @@ fn test_editor_set_completions_opens_popup() raises:
     assert_false(ed.completion_popup_visible)
 
 
+fn test_editor_typing_word_char_stamps_autotrigger_request() raises:
+    """Typing an identifier char (letter, digit, underscore) auto-stamps
+    ``pending_completion_request`` so the desktop dispatches a fresh
+    LSP query without the user having to press the completion key."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x66))  # 'f'
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_completion_request()
+    assert_true(Bool(req))
+    assert_equal(req.value().col, 1)
+    # ``.`` is also a trigger so member-access pops up the popup.
+    var ev2 = Event.key_event(UInt32(0x2E))  # '.'
+    _ = ed.handle_key(ev2, Rect(0, 0, 40, 5))
+    var req2 = ed.consume_completion_request()
+    assert_true(Bool(req2))
+
+
+fn test_editor_typing_non_word_char_skips_autotrigger() raises:
+    """Typing punctuation that doesn't extend an identifier (space,
+    ``(``, ``=``, …) must NOT auto-stamp a completion request — that
+    would fire LSP queries on every keystroke."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x28))  # '('
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_completion_request()
+    assert_false(Bool(req))
+
+
+fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
+    """Pressing Left/Right while the cursor stays inside the anchored
+    identifier must NOT close the popup — it re-stamps a request so
+    the filter follows. Pressing Left past the anchor (or jumping to
+    another row) closes."""
+    var ed = Editor(String("foo"))
+    ed.move_to(0, 3, False)  # park at end of "foo"
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("foobar"), String("foobar"), 6, String(""),
+    ))
+    ed.set_completions(items^, 0, 0)
+    # Left arrow from col 3 → col 2 keeps cursor inside "foo".
+    var ev = Event.key_event(KEY_LEFT)
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    assert_true(ed.completion_popup_visible)
+    # A fresh request was stamped (filter refresh).
+    var req = ed.consume_completion_request()
+    assert_true(Bool(req))
+
+
+fn test_editor_typing_non_word_char_closes_visible_popup() raises:
+    """A visible popup gets dismissed when the user types a char that
+    doesn't extend the in-progress identifier (e.g. space)."""
+    var ed = Editor(String(""))
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("foo"), String("foo"), 6, String(""),
+    ))
+    ed.set_completions(items^, 0, 0)
+    assert_true(ed.completion_popup_visible)
+    var ev = Event.key_event(UInt32(0x20))  # space
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    assert_false(ed.completion_popup_visible)
+
+
 fn test_editor_accept_completion_replaces_prefix() raises:
     """Accepting a completion replaces ``[anchor_col, cursor_col)``
     with the chosen ``insert_text`` and leaves the cursor at the end
@@ -6757,6 +6821,44 @@ fn test_lsp_subprocess_round_trip_via_cat() raises:
     assert_true(Bool(got2))
     assert_equal(got2.value(), String("pong"))
     p.terminate()
+
+
+fn test_lsp_write_message_queues_bytes_when_fd_is_unavailable() raises:
+    """The queued path means ``write_message`` never blocks: with no
+    real stdin (default-constructed ``LspProcess``, ``stdin_fd == -1``)
+    the framed bytes accumulate in ``_pending_write`` instead of
+    racing into a syscall. This is the same invariant that protects
+    the UI thread when an LSP server stops draining its stdin —
+    bytes pile up in the queue, never inside ``write(2)``.
+    """
+    var p = LspProcess()
+    p.write_message(String("hello"))
+    # 21-byte ``Content-Length: 5\r\n\r\n`` header + 5-byte payload.
+    assert_equal(len(p._pending_write), 26)
+    assert_false(p.write_overflowed())
+    # A second message accumulates on top of the first.
+    p.write_message(String("world"))
+    assert_equal(len(p._pending_write), 52)
+    assert_false(p.write_overflowed())
+
+
+fn test_lsp_write_overflow_resets_queue_and_latches_flag() raises:
+    """Past the 16 MB safety cap, the queue is dropped and
+    ``write_overflowed`` latches True so the manager can fail the
+    session rather than silently lose bytes mid-frame.
+    """
+    var p = LspProcess()
+    # Seed the queue at exactly the 16 MB cap by hand — much faster
+    # than building a >32 MB payload byte by byte through
+    # ``append_string_bytes``. Then any further ``write_message``
+    # tips us past the strict ``>`` cap and trips the overflow latch.
+    comptime CAP_AT: Int = 16 * 1024 * 1024
+    for _ in range(CAP_AT):
+        p._pending_write.append(UInt8(0))
+    assert_false(p.write_overflowed())
+    p.write_message(String("tipover"))
+    assert_true(p.write_overflowed())
+    assert_equal(len(p._pending_write), 0)
 
 
 fn test_install_runner_last_lines_picks_tail_skipping_blanks() raises:
@@ -12339,6 +12441,13 @@ fn main() raises:
     _ = external_call["setenv", Int32](
         c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
     )
+    # Bypass the system clipboard so cut/copy tests don't stomp the
+    # developer's real pbcopy/xclip contents with test fixtures.
+    var c_fake = String("TURBOKOD_FAKE_CLIPBOARD\0")
+    var c_one = String("1\0")
+    _ = external_call["setenv", Int32](
+        c_fake.unsafe_ptr(), c_one.unsafe_ptr(), Int32(1),
+    )
 
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
@@ -12723,6 +12832,10 @@ fn main() raises:
     test_lsp_parse_completion_result_snippet_falls_back_to_label()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
+    test_editor_typing_word_char_stamps_autotrigger_request()
+    test_editor_typing_non_word_char_skips_autotrigger()
+    test_editor_cursor_move_inside_word_keeps_popup_alive()
+    test_editor_typing_non_word_char_closes_visible_popup()
     test_editor_accept_completion_replaces_prefix()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
@@ -12730,6 +12843,8 @@ fn main() raises:
     test_editor_minimap_hint_loses_to_spell()
     test_editor_clear_diagnostics_drops_per_row_index()
     test_lsp_subprocess_round_trip_via_cat()
+    test_lsp_write_message_queues_bytes_when_fd_is_unavailable()
+    test_lsp_write_overflow_resets_queue_and_latches_flag()
     test_lsp_initialize_against_mojo_lsp_server()
     test_dap_classify_response()
     test_dap_classify_event()

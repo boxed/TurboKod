@@ -3937,6 +3937,12 @@ struct Desktop(Movable):
         if not self.lsp_managers[lsp_idx].is_ready():
             return
         var text = self.windows.windows[win_idx].editor.text_snapshot()
+        # ``request_completion`` flushes the latest text via
+        # ``_send_open_or_change``; tell the editor not to send the
+        # bulk-sync didChange again later this same tick. Without
+        # this we ship two identical didChange notifications per
+        # keystroke and the server full-parses the buffer twice.
+        _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
         _ = self.lsp_managers[lsp_idx].request_completion(
             path, req.row, req.col, text^,
         )

@@ -18,6 +18,7 @@ from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
 from .events import Event, EVENT_KEY, MOD_CTRL, MOD_META
+from .posix import getenv_value
 
 
 # Result tags for ``clipboard_chord``. Plain ``UInt8`` constants in the
@@ -74,7 +75,14 @@ fn _paste_command() -> String:
 
 
 fn clipboard_copy(text: String):
-    """Push ``text`` to the system clipboard. Silent failure on error."""
+    """Push ``text`` to the system clipboard. Silent failure on error.
+
+    Bypassed when ``TURBOKOD_FAKE_CLIPBOARD`` is set so the test suite
+    doesn't shell out to ``pbcopy`` and clobber the developer's real
+    system clipboard with test fixtures.
+    """
+    if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
+        return
     var cmd = _copy_command() + String("\0")
     var mode = String("w\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())
@@ -90,6 +98,8 @@ fn clipboard_copy(text: String):
 
 fn clipboard_paste() -> String:
     """Read the system clipboard. Returns empty string on error."""
+    if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
+        return String("")
     var cmd = _paste_command() + String("\0")
     var mode = String("r\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())

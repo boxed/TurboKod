@@ -690,6 +690,26 @@ struct LspManager(Copyable, Movable):
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))
         params.put(String("context"), ctx^)
+        # If a previous completion is still in flight, tell the server
+        # to stop computing it via ``$/cancelRequest``. Without this
+        # the server keeps a worker pinned on a stale prefix and our
+        # fresh request queues behind it — felt as laggy "type two
+        # chars, wait for the first response to land before the popup
+        # updates" behavior. The cancel is a notification (no
+        # response), so it costs us nothing on the read side. We
+        # already shadow the old id below, so the response (cancelled
+        # or not) is dropped on arrival.
+        if self._inflight_completion_id != 0:
+            var cancel_params = json_object()
+            cancel_params.put(
+                String("id"), json_int(self._inflight_completion_id),
+            )
+            try:
+                self.client.send_notification(
+                    String("$/cancelRequest"), cancel_params,
+                )
+            except:
+                pass
         try:
             self._inflight_completion_id = self.client.send_request(
                 String("textDocument/completion"), params,
@@ -742,6 +762,28 @@ struct LspManager(Copyable, Movable):
         them yet.
         """
         if self.state == _STATE_NOT_STARTED or self.state == _STATE_FAILED:
+            return Optional[DefinitionResolved]()
+        # Continue draining any outbound bytes that the previous
+        # ``write_message`` couldn't push in one shot (server stopped
+        # reading stdin mid-frame). Without this a backlog never
+        # flushes until the next ``write_message`` call, which may be
+        # far enough in the future that the server has already given
+        # up.
+        self.client.process.pump_writes()
+        # If the outbound queue overflowed, the server isn't draining
+        # its stdin and we've lost framing alignment — there's no
+        # recovery short of restarting. Latch FAILED so the host
+        # surfaces the state and stops sending more.
+        if self.client.process.write_overflowed():
+            self.state = _STATE_FAILED
+            self.failure_reason = String(
+                "outbound queue overflowed (server not reading stdin)",
+            )
+            _lsp_debug_log(
+                String("✗ lsp ") + self._language_id
+                + String(" outbound overflow; ")
+                + String("failure_reason=") + self.failure_reason,
+            )
             return Optional[DefinitionResolved]()
         # Capture anything the server has written to stderr since the
         # last tick — useful diagnostic context for the info window even

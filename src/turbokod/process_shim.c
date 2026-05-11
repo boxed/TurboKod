@@ -32,10 +32,32 @@
  * mechanism is a pipe-watchdog inside the child — out of scope here.
  */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+/* Non-blocking write helper for the LSP / DAP outbound queue.
+ *
+ * Mojo can't reach ``write(2)`` directly via ``external_call`` —
+ * the stdlib registers a builtin named ``write`` with a fixed
+ * signature, so the FFI declaration collides at compile time. The
+ * shim sidesteps that by exposing the syscall under a unique name.
+ *
+ * Returns the byte count on success, 0 if the fd is non-blocking
+ * and the kernel would have blocked (``EAGAIN`` / ``EWOULDBLOCK``)
+ * — the caller treats this as "try again later". Returns -1 for
+ * any other failure (e.g. ``EPIPE`` when the peer closed its read
+ * end). The fd is expected to already be in ``O_NONBLOCK`` mode;
+ * this helper does not set it. */
+long tk_write_nb(int fd, const void *buf, unsigned long count) {
+    if (fd < 0 || count == 0) return 0;
+    ssize_t n = write(fd, buf, (size_t) count);
+    if (n >= 0) return (long) n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+    return -1;
+}
 
 static int *g_pids = NULL;
 static size_t g_count = 0;

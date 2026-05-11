@@ -1631,6 +1631,19 @@ struct DapManager(Copyable, Movable):
                 or self.state == _STATE_FAILED \
                 or self.state == _STATE_TERMINATED:
             return
+        # Continue draining the outbound queue. ``write_message``
+        # now never blocks — whatever the kernel didn't accept in
+        # one shot is parked here and flushed on subsequent ticks.
+        self.client.process.pump_writes()
+        if self.client.process.write_overflowed():
+            self.state = _STATE_FAILED
+            self.failure_reason = String(
+                "outbound queue overflowed (adapter not reading stdin)"
+            )
+            self.client.process.trace(String(
+                "FAIL: outbound queue overflow",
+            ))
+            return
         # Crash-detection: ``try_reap`` returns True iff the child has
         # exited. While the session is supposed to be live, that means
         # the adapter crashed — most often because the python it was
