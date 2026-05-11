@@ -34,6 +34,7 @@ from .events import (
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import TextField
+from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -41,6 +42,10 @@ from .window import (
 
 comptime _DIALOG_W = 60
 comptime _DIALOG_H = 20
+comptime _LIST_HEIGHT = _DIALOG_H - 9
+"""Visible rows in the directory listing. The -9 budget covers:
+1 top border + 1 padding + 1 input + 1 padding + 1 current-dir +
+1 trailing gap + 1 buttons face + 1 buttons shadow + 1 hint/bottom."""
 
 # Focus modes — kept as small ints since Mojo enums aren't widely used in
 # this codebase yet.
@@ -52,29 +57,43 @@ fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
-fn _input_rect(dialog: Rect) -> Rect:
-    """One-row strip that holds the editable filename. Sits at y+2 so y+1
-    can carry the static ``File:`` label."""
-    return Rect(dialog.a.x + 8, dialog.a.y + 2, dialog.b.x - 1, dialog.a.y + 3)
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects + row anchors for the save-as dialog.
+
+    The top section (``File:`` label + input + current-dir line) is
+    laid out through ``RowCursor`` so each pair of distinct controls
+    is separated by a blank row. The listing + bottom button strip
+    + hint line are anchored to the bottom so the listing grows
+    with the dialog.
+    """
+    var label_pt: Point
+    var input_rect: Rect
+    var current_dir_y: Int
+    var list_rect: Rect
+    var buttons_rect: Rect
+    var hint_y: Int
 
 
-fn _list_rect(dialog: Rect) -> Rect:
-    """Listing starts at y+5; the four rows below it carry a 1-row
-    visual gap, the green button face, the half-block drop shadow,
-    and the hint line painted over the bottom border — in that
-    order. The gap keeps the selection bar from looking like it's
-    bleeding into the button face."""
-    return Rect(
-        dialog.a.x + 2, dialog.a.y + 5,
-        dialog.b.x - 1, dialog.b.y - 4,
+fn _build_layout(rect: Rect) -> _Layout:
+    var cursor = RowCursor(rect.a.y + 2)
+    var input_y = cursor.place()
+    var current_dir_y = cursor.place()
+    var left = rect.a.x + 2
+    var right = rect.b.x - 1
+    var buttons_y = rect.b.y - 3
+    return _Layout(
+        Point(left, input_y),
+        # Input strip starts after the 5-char "File:" label plus one
+        # column of breathing room.
+        Rect(rect.a.x + 8, input_y, right, input_y + 1),
+        current_dir_y,
+        # List sits one row below the current-dir line (it's the
+        # content of that header — no gap).
+        Rect(left, current_dir_y + 1, right, rect.b.y - 4),
+        Rect(left, buttons_y, right, buttons_y + 2),
+        rect.b.y - 1,
     )
-
-
-fn _buttons_rect(dialog: Rect) -> Rect:
-    # Two rows tall — face row + shadow row — so the TV-style 3D
-    # button effect has somewhere to land.
-    var y = dialog.b.y - 3
-    return Rect(dialog.a.x + 2, y, dialog.b.x - 1, y + 2)
 
 
 struct SaveAsDialog(Movable):
@@ -146,6 +165,7 @@ struct SaveAsDialog(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -155,24 +175,21 @@ struct SaveAsDialog(Movable):
         # Close button shares the same chrome as editor windows.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Filename label + editable strip.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 2), String("File:"), bg,
-        )
-        var input_rect = _input_rect(rect)
+        _ = painter.put_text(canvas, layout.label_pt, String("File:"), bg)
         self.filename.paint(
-            canvas, input_rect, self.focus == _FOCUS_INPUT,
+            canvas, layout.input_rect, self.focus == _FOCUS_INPUT,
         )
         # Current-directory line above the listing.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 4),
+            canvas, Point(rect.a.x + 2, layout.current_dir_y),
             self.browser.dir, dir_attr,
         )
         # Listing.
         self.browser.paint(
-            canvas, _list_rect(rect), self.focus == _FOCUS_LISTING,
+            canvas, layout.list_rect, self.focus == _FOCUS_LISTING,
         )
         # Desktop / Home / Root quick-jump strip just above the hint.
-        self.browser.paint_jump_buttons(canvas, _buttons_rect(rect))
+        self.browser.paint_jump_buttons(canvas, layout.buttons_rect)
         # Hint at the bottom — varies with focus to nudge the user toward
         # the right key for the thing they're trying to do.
         var hint: String
@@ -181,8 +198,7 @@ struct SaveAsDialog(Movable):
         else:
             hint = String(" Enter: open  ⌫: parent  Tab: edit name  ESC: cancel ")
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.b.y - 1),
-            hint, dir_attr,
+            canvas, Point(rect.a.x + 2, layout.hint_y), hint, dir_attr,
         )
 
     # --- key handling -----------------------------------------------------
@@ -193,10 +209,7 @@ struct SaveAsDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
-        # ``-9`` accounts for: 1 (top border) + 1 (gap) + 1 (input)
-        # + 1 (gap) + 1 (current-dir line) + 1 (gap below list) +
-        # 1 (button face) + 1 (button shadow) + 1 (hint / bottom).
-        var list_h = _DIALOG_H - 9
+        var list_h = _LIST_HEIGHT
         if k == KEY_ESC:
             self.close()
             return True
@@ -274,7 +287,9 @@ struct SaveAsDialog(Movable):
         default arrow over the listing and buttons."""
         if not self.active:
             return False
-        return _input_rect(_dialog_rect(screen, self.pos)).contains(pos)
+        return _build_layout(
+            _dialog_rect(screen, self.pos),
+        ).input_rect.contains(pos)
 
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
@@ -282,6 +297,7 @@ struct SaveAsDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Title-bar drag: same handling as ``FileDialog`` — a press on
         # the title row begins a move, motion repositions, release
         # ends. Resolved before any input/listing dispatch so a click
@@ -313,25 +329,23 @@ struct SaveAsDialog(Movable):
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
             return True
-        var input_rect = _input_rect(rect)
-        var list_rect = _list_rect(rect)
         # Click in the filename strip steals focus and routes the
         # event to the field so the cursor lands at the click point
         # (with drag-extend selection if the user keeps holding).
         if event.button == MOUSE_BUTTON_LEFT \
-                and input_rect.contains(event.pos):
+                and layout.input_rect.contains(event.pos):
             if event.pressed and not event.motion:
                 self.focus = _FOCUS_INPUT
             if self.focus == _FOCUS_INPUT \
-                    and self.filename.handle_mouse(event, input_rect):
+                    and self.filename.handle_mouse(event, layout.input_rect):
                 return True
         # Quick-jump strip lives between the listing and the hint —
         # check it before the listing's mouse handler so the jump
         # buttons' row doesn't get swallowed as out-of-list.
-        if self.browser.handle_jump_click(event, _buttons_rect(rect)):
+        if self.browser.handle_jump_click(event, layout.buttons_rect):
             self.focus = _FOCUS_LISTING
             return True
-        var idx = self.browser.handle_list_mouse(event, list_rect)
+        var idx = self.browser.handle_list_mouse(event, layout.list_rect)
         if idx == -2:
             return True   # wheel scroll
         if idx < 0:
@@ -351,5 +365,5 @@ struct SaveAsDialog(Movable):
                 var name = self.browser.entries[idx]
                 self.browser.descend(name)
             return True
-        self.browser.set_selection(idx, list_rect.height())
+        self.browser.set_selection(idx, layout.list_rect.height())
         return True

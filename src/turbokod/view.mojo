@@ -114,3 +114,56 @@ fn centered(outer: Rect, width: Int, height: Int) -> Rect:
     var x = outer.a.x + (outer.width() - width) // 2
     var y = outer.a.y + (outer.height() - height) // 2
     return Rect(x, y, x + width, y + height)
+
+
+struct RowCursor(Copyable, Movable):
+    """Vertical layout cursor that automatically inserts a blank row
+    between consecutive control placements.
+
+    Dialogs that hand-code Y offsets routinely end up gluing controls
+    together — the next placement is `y + height`, with no breathing
+    room — and the bug surfaces as a labelled field sitting directly on
+    top of the list below it. ``RowCursor`` makes the gap the default:
+    every ``place()`` after the first reserves ``gap`` rows of vertical
+    whitespace *before* the new control's start. Callers get correct
+    spacing by writing the obvious thing.
+
+    Use ``place(height)`` for normal controls (label + field row, list,
+    button row). Use ``place_tight(height)`` for a follow-on that's part
+    of the same logical unit as the previous placement (e.g. a block
+    label glued to the list it heads). Use ``skip(rows)`` for explicit
+    extra whitespace beyond the automatic gap.
+
+    ```
+    var c = RowCursor(rect.a.y + 1)
+    var lang_y = c.place()              # rect.a.y + 1
+    var ft_y   = c.place()              # rect.a.y + 3 — one row gap
+    var lbl_y  = c.place()              # rect.a.y + 5
+    var list_y = c.place_tight(5)       # rect.a.y + 6 — no gap from label
+    ```
+    """
+    var y: Int
+    var gap: Int
+    var _first: Bool
+
+    fn __init__(out self, start_y: Int, gap: Int = 1):
+        self.y = start_y
+        self.gap = gap
+        self._first = True
+
+    fn place(mut self, height: Int = 1) -> Int:
+        if not self._first:
+            self.y = self.y + self.gap
+        self._first = False
+        var start = self.y
+        self.y = self.y + height
+        return start
+
+    fn place_tight(mut self, height: Int = 1) -> Int:
+        self._first = False
+        var start = self.y
+        self.y = self.y + height
+        return start
+
+    fn skip(mut self, rows: Int):
+        self.y = self.y + rows

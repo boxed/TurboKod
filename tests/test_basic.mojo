@@ -750,6 +750,32 @@ fn test_editor_cmd_arrow_line_navigation() raises:
     assert_equal(ed2.cursor_col, 0)
 
 
+fn test_editor_cmd_letter_does_not_insert() raises:
+    """Cmd+B (or any unbound Cmd chord) used to fall through the
+    editor's modifier guard and insert ``b`` into the buffer — the
+    check only excluded MOD_CTRL / MOD_ALT. The editor now reports
+    the event as unconsumed so the desktop can beep instead, and the
+    buffer is left untouched."""
+    var ed = Editor(String("hello"))
+    var consumed = ed.handle_key(_key(UInt32(ord("b")), MOD_META), _VIEW)
+    assert_false(consumed)
+    assert_equal(ed.buffer.line(0), String("hello"))
+
+
+fn test_editor_cmd_a_selects_all() raises:
+    """Cmd+A should select the whole buffer — same as Ctrl+A on
+    Linux/Windows. Without MOD_META in ``clipboard_chord`` only
+    Ctrl+A worked, and Cmd+A inserted ``a`` instead."""
+    var ed = Editor(String("line one\nline two"))
+    var consumed = ed.handle_key(_key(UInt32(ord("a")), MOD_META), _VIEW)
+    assert_true(consumed)
+    assert_true(ed.has_selection())
+    assert_equal(ed.anchor_row, 0)
+    assert_equal(ed.anchor_col, 0)
+    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.cursor_col, 8)
+
+
 fn test_editor_typing_replaces_selection() raises:
     var ed = Editor(String("hello"))
     # Select first 4 chars
@@ -11856,6 +11882,64 @@ fn test_text_field_click_maps_to_text_byte_via_scroll() raises:
     assert_equal(tf.cursor, 12)
 
 
+fn test_text_field_cmd_a_selects_all() raises:
+    """Cmd+A should select the entire field on macOS — the same chord
+    that triggers select-all in every other native input. Without the
+    MOD_META branch in ``clipboard_chord``, only Ctrl+A worked."""
+    var tf = TextField()
+    tf.set_text(String("hello"))
+    # Move cursor away from end so we can assert a real selection
+    # change rather than an empty one.
+    _ = tf.handle_key(_key(KEY_HOME))
+    var r = tf.handle_key(_key(UInt32(ord("a")), MOD_META))
+    assert_true(r.consumed)
+    assert_true(tf.has_selection())
+    assert_equal(tf.anchor, 0)
+    assert_equal(tf.cursor, 5)
+
+
+fn test_text_field_ctrl_a_still_selects_all() raises:
+    """The Cmd+A fix must not regress the existing Ctrl+A behavior —
+    both modifiers map to select-all (Linux/Windows + macOS muscle
+    memory)."""
+    var tf = TextField()
+    tf.set_text(String("hello"))
+    _ = tf.handle_key(_key(KEY_HOME))
+    var r = tf.handle_key(_key(UInt32(ord("a")), MOD_CTRL))
+    assert_true(r.consumed)
+    assert_true(tf.has_selection())
+    assert_equal(tf.anchor, 0)
+    assert_equal(tf.cursor, 5)
+
+
+fn test_text_field_cmd_letter_does_not_insert() raises:
+    """Cmd+B (or any unbound Cmd chord) used to fall through the
+    modifier check and insert ``b`` as plain text — the check at the
+    bottom of ``handle_key`` only excluded MOD_CTRL / MOD_ALT and
+    silently ignored MOD_META. Now Cmd+letter is always consumed and
+    the field stays unchanged."""
+    var tf = TextField()
+    tf.set_text(String("hi"))
+    var before = tf.text
+    var r = tf.handle_key(_key(UInt32(ord("b")), MOD_META))
+    assert_true(r.consumed)
+    assert_true(not r.changed)
+    assert_equal(tf.text, before)
+
+
+fn test_text_field_ctrl_letter_does_not_insert() raises:
+    """Ctrl+B with no clipboard / select-all chord match should also
+    leave the field untouched — same reasoning as the Cmd+letter
+    case, but on Linux/Windows the modifier is Ctrl."""
+    var tf = TextField()
+    tf.set_text(String("hi"))
+    var before = tf.text
+    var r = tf.handle_key(_key(UInt32(ord("b")), MOD_CTRL))
+    assert_true(r.consumed)
+    assert_true(not r.changed)
+    assert_equal(tf.text, before)
+
+
 fn test_text_field_paints_visible_window_after_scroll() raises:
     """When scrolled, ``paint`` must render the slice of text starting
     at ``_scroll`` and not draw the leading characters that fall
@@ -12392,8 +12476,14 @@ fn main() raises:
     test_text_log_incremental_layout_handles_trim()
     test_text_log_full_rewrap_on_width_change()
     test_editor_paint_collapsed_view_is_cheap()
+    test_editor_cmd_letter_does_not_insert()
+    test_editor_cmd_a_selects_all()
     test_text_field_scrolls_to_keep_cursor_visible()
     test_text_field_scrolls_back_when_cursor_moves_left_of_view()
     test_text_field_click_maps_to_text_byte_via_scroll()
+    test_text_field_cmd_a_selects_all()
+    test_text_field_ctrl_a_still_selects_all()
+    test_text_field_cmd_letter_does_not_insert()
+    test_text_field_ctrl_letter_does_not_insert()
     test_text_field_paints_visible_window_after_scroll()
     print("all tests passed")

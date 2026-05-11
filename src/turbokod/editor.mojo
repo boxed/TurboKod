@@ -4109,8 +4109,11 @@ struct Editor(ImplicitlyCopyable, Movable):
             # the caller wants to do with them (e.g., a hotkey table).
             # MOD_SHIFT is fine: capitals already arrive with a different
             # codepoint, so a leftover SHIFT bit just means a shifted
-            # printable that the terminal pre-folded.
-            if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
+            # printable that the terminal pre-folded. ``MOD_META`` has
+            # to be in the check too — without it, Cmd+B (which isn't
+            # bound to any hotkey or editor command) used to fall
+            # through and insert ``b`` into the buffer.
+            if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0:
                 return False
             if self.read_only:
                 return True

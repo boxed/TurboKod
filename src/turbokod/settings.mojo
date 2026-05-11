@@ -1341,6 +1341,10 @@ struct Settings(Movable):
                 if 0 <= idx and idx < len(self.languages_view):
                     self.selected_language = idx
                 self.focus = _FOCUS_LANG_LIST
+                if Int(event.click_count) >= 2 \
+                        and 0 <= self.selected_language \
+                        and self.selected_language < len(self.languages_view):
+                    self._edit_language()
                 return True
         return True
 

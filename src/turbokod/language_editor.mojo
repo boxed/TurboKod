@@ -48,6 +48,7 @@ from .events import (
 from .geometry import Point, Rect
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -68,8 +69,13 @@ comptime _FOCUS_CANCEL     = UInt8(9)
 
 # --- layout ---------------------------------------------------------------
 comptime _DIALOG_W = 70
-comptime _DIALOG_H = 19
+comptime _DIALOG_H = 21
+"""Dialog height. Controls flow top-down with a blank row between
+each via ``RowCursor``; the bottom four rows are pinned to host the
+hint line + Save/Cancel + bottom-border padding."""
 comptime _LABEL_COL_W = 14
+comptime _ARGV_LABEL_W = 6
+"""Columns reserved for the inline ``Argv:`` label (5 chars + space)."""
 comptime _LIST_HEIGHT = 5
 
 # Button table indices.
@@ -79,6 +85,63 @@ comptime _BTN_UP     = 2
 comptime _BTN_DOWN   = 3
 comptime _BTN_SAVE   = 4
 comptime _BTN_CANCEL = 5
+
+
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed Y rows and rects for the language editor dialog.
+
+    Computed once from the dialog rect and shared by ``paint`` and
+    ``handle_mouse`` so painted geometry and hit-test geometry can't
+    drift out of sync as the layout evolves.
+    """
+    var lang_y: Int
+    """Row for the language-id label + text field."""
+    var ft_y: Int
+    """Row for the file-types label + text field."""
+    var priority_label_y: Int
+    """Row for the ``Server priority`` block label."""
+    var list_rect: Rect
+    """Multi-row rect of the candidate list, sitting directly under
+    the priority label (no gap — label and list are one logical
+    control)."""
+    var argv_y: Int
+    """Row for the ``Argv:`` label + text field."""
+    var actions_y: Int
+    """Row for the Add / Remove / Up / Down button strip."""
+    var hint_y: Int
+    """Row for the built-in-language hint line, pinned to the bottom
+    region above the commit buttons."""
+    var commit_y: Int
+    """Row for the Save / Cancel buttons, pinned to ``rect.b.y - 3``."""
+    var lang_rect: Rect
+    var ft_rect: Rect
+    var argv_rect: Rect
+
+
+fn _build_layout(rect: Rect) -> _Layout:
+    """Lay the dialog out top-down with automatic gaps between
+    controls, plus the bottom-anchored commit/hint rows."""
+    var cursor = RowCursor(rect.a.y + 1)
+    var lang_y = cursor.place()
+    var ft_y = cursor.place()
+    var priority_y = cursor.place()
+    # The priority label is conceptually part of the list — sit them
+    # flush (no gap) so the label visibly heads the rows it labels.
+    var list_y = cursor.place_tight(_LIST_HEIGHT)
+    var argv_y = cursor.place()
+    var actions_y = cursor.place()
+    var left = rect.a.x + 2
+    var right = rect.b.x - 2
+    return _Layout(
+        lang_y, ft_y, priority_y,
+        Rect(left, list_y, right, list_y + _LIST_HEIGHT),
+        argv_y, actions_y,
+        rect.b.y - 5, rect.b.y - 3,
+        Rect(left + _LABEL_COL_W, lang_y, right, lang_y + 1),
+        Rect(left + _LABEL_COL_W, ft_y, right, ft_y + 1),
+        Rect(left + _ARGV_LABEL_W, argv_y, right, argv_y + 1),
+    )
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
@@ -246,6 +309,7 @@ struct LanguageEditor(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -254,66 +318,48 @@ struct LanguageEditor(Movable):
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Labels.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 2),
+            canvas, Point(rect.a.x + 2, layout.lang_y),
             String("Language id:"), bg,
         )
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 3),
+            canvas, Point(rect.a.x + 2, layout.ft_y),
             String("File types:"), bg,
         )
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 5),
+            canvas, Point(rect.a.x + 2, layout.priority_label_y),
             String("Server priority (top = highest):"), bg,
-        )
-        # Editable / display strips for id + file_types.
-        var lang_rect = Rect(
-            rect.a.x + 2 + _LABEL_COL_W, rect.a.y + 2,
-            rect.b.x - 2, rect.a.y + 3,
-        )
-        var ft_rect = Rect(
-            rect.a.x + 2 + _LABEL_COL_W, rect.a.y + 3,
-            rect.b.x - 2, rect.a.y + 4,
         )
         if self.is_existing:
             # Render the read-only fields as plain text, no input frame
             # or focus indicator — clarifies that the user can't change
             # them on a built-in language.
             _ = painter.put_text(
-                canvas, Point(lang_rect.a.x, lang_rect.a.y),
+                canvas, Point(layout.lang_rect.a.x, layout.lang_rect.a.y),
                 self.lang_tf.text, bg,
             )
             _ = painter.put_text(
-                canvas, Point(ft_rect.a.x, ft_rect.a.y),
+                canvas, Point(layout.ft_rect.a.x, layout.ft_rect.a.y),
                 self.file_types_tf.text, bg,
             )
         else:
             self.lang_tf.paint(
-                canvas, lang_rect, self.focus == _FOCUS_LANG,
+                canvas, layout.lang_rect, self.focus == _FOCUS_LANG,
             )
             self.file_types_tf.paint(
-                canvas, ft_rect, self.focus == _FOCUS_FILE_TYPES,
+                canvas, layout.ft_rect, self.focus == _FOCUS_FILE_TYPES,
             )
         # Candidate list.
-        var list_rect = Rect(
-            rect.a.x + 2, rect.a.y + 6,
-            rect.b.x - 2, rect.a.y + 6 + _LIST_HEIGHT,
-        )
-        self._paint_list(canvas, painter, list_rect)
+        self._paint_list(canvas, painter, layout.list_rect)
         # Argv strip.
-        var argv_label_y = list_rect.b.y
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, argv_label_y),
+            canvas, Point(rect.a.x + 2, layout.argv_y),
             String("Argv:"), bg,
         )
-        var argv_rect = Rect(
-            rect.a.x + 2 + 6, argv_label_y,
-            rect.b.x - 2, argv_label_y + 1,
-        )
         self.argv_tf.paint(
-            canvas, argv_rect, self.focus == _FOCUS_ARGV,
+            canvas, layout.argv_rect, self.focus == _FOCUS_ARGV,
         )
         # Buttons row under the argv strip.
-        self._layout_action_buttons(rect, argv_label_y + 1)
+        self._layout_action_buttons(rect, layout.actions_y)
         for i in range(_BTN_ADD, _BTN_DOWN + 1):
             self._paint_button(canvas, i)
         # Save / Cancel pinned to the bottom-right.
@@ -324,7 +370,7 @@ struct LanguageEditor(Movable):
         # itself — otherwise users wonder why they can't edit the id.
         if self.is_existing:
             _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, rect.b.y - 4),
+                canvas, Point(rect.a.x + 2, layout.hint_y),
                 String(
                     "Built-in language; only server priority is editable."
                 ),
@@ -578,6 +624,7 @@ struct LanguageEditor(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Buttons first.
         if self._dispatch_buttons(event):
             return True
@@ -606,44 +653,51 @@ struct LanguageEditor(Movable):
             ))
             return True
         # Wheel scrolls the candidate list when the cursor is over it.
-        var list_rect = Rect(
-            rect.a.x + 2, rect.a.y + 6,
-            rect.b.x - 2, rect.a.y + 6 + _LIST_HEIGHT,
-        )
         if event.button == MOUSE_WHEEL_UP:
-            if list_rect.contains(event.pos):
+            if layout.list_rect.contains(event.pos):
                 self._list_scroll -= 1
                 if self._list_scroll < 0:
                     self._list_scroll = 0
                 return True
         if event.button == MOUSE_WHEEL_DOWN:
-            if list_rect.contains(event.pos):
+            if layout.list_rect.contains(event.pos):
                 self._list_scroll += 1
                 return True
+        # Continue an in-flight TextField drag (motion / release) on
+        # whichever field has focus, so a drag-select that wanders
+        # outside the strip still extends the selection and the
+        # eventual release clears the field's drag state. Without
+        # this, the pressed-only early-return below swallows every
+        # motion event and click-drag selection silently fails.
+        if event.motion or not event.pressed:
+            if self.focus == _FOCUS_LANG and not self.is_existing:
+                if self.lang_tf.handle_mouse(event, layout.lang_rect):
+                    return True
+            elif self.focus == _FOCUS_FILE_TYPES and not self.is_existing:
+                if self.file_types_tf.handle_mouse(event, layout.ft_rect):
+                    return True
+            elif self.focus == _FOCUS_ARGV:
+                if self.argv_tf.handle_mouse(event, layout.argv_rect):
+                    if self.selected >= 0 \
+                            and self.selected < len(self.candidates):
+                        self.candidates[self.selected] = self.argv_tf.text
+                    return True
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
         # Click into the lang / file-types fields when editable.
         if not self.is_existing:
-            var lang_rect = Rect(
-                rect.a.x + 2 + _LABEL_COL_W, rect.a.y + 2,
-                rect.b.x - 2, rect.a.y + 3,
-            )
-            if lang_rect.contains(event.pos):
+            if layout.lang_rect.contains(event.pos):
                 self.focus = _FOCUS_LANG
-                _ = self.lang_tf.handle_mouse(event, lang_rect)
+                _ = self.lang_tf.handle_mouse(event, layout.lang_rect)
                 return True
-            var ft_rect = Rect(
-                rect.a.x + 2 + _LABEL_COL_W, rect.a.y + 3,
-                rect.b.x - 2, rect.a.y + 4,
-            )
-            if ft_rect.contains(event.pos):
+            if layout.ft_rect.contains(event.pos):
                 self.focus = _FOCUS_FILE_TYPES
-                _ = self.file_types_tf.handle_mouse(event, ft_rect)
+                _ = self.file_types_tf.handle_mouse(event, layout.ft_rect)
                 return True
         # Click into the candidate list selects the row.
-        if list_rect.contains(event.pos):
-            var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+        if layout.list_rect.contains(event.pos):
+            var idx = self._list_scroll + (event.pos.y - layout.list_rect.a.y)
             if 0 <= idx and idx < len(self.candidates):
                 if idx != self.selected:
                     self.selected = idx
@@ -652,14 +706,9 @@ struct LanguageEditor(Movable):
             self.focus = _FOCUS_LIST
             return True
         # Click into the argv strip.
-        var argv_y = rect.a.y + 6 + _LIST_HEIGHT
-        var argv_rect = Rect(
-            rect.a.x + 2 + 6, argv_y,
-            rect.b.x - 2, argv_y + 1,
-        )
-        if argv_rect.contains(event.pos):
+        if layout.argv_rect.contains(event.pos):
             self.focus = _FOCUS_ARGV
-            _ = self.argv_tf.handle_mouse(event, argv_rect)
+            _ = self.argv_tf.handle_mouse(event, layout.argv_rect)
             if self.selected >= 0 \
                     and self.selected < len(self.candidates):
                 self.candidates[self.selected] = self.argv_tf.text

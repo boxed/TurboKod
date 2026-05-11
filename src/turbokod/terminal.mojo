@@ -81,11 +81,27 @@ comptime SEQ_MODIFY_KEYS_OFF = String("\x1b[>1m\x1b[>2m\x1b[>4m")
 # new OSC. The shape names map to ``winit::CursorIcon`` variants.
 comptime POINTER_SHAPE_PREFIX = String("\x1b]2;__mvc_cursor:")
 comptime POINTER_SHAPE_SUFFIX = String("\x07")
+# C0 BEL — emitted as feedback for an unhandled chord (Ctrl+/Cmd+letter
+# that isn't bound to anything). Real terminals honour their user's
+# bell preference (audible / visible / off); the native host wrapper
+# eats the byte without effect today but does no harm.
+comptime SEQ_BELL = String("\x07")
 
 
 fn move_cursor(x: Int, y: Int) -> String:
     """1-based row;col cursor positioning."""
     return CSI + String(y + 1) + String(";") + String(x + 1) + String("H")
+
+
+fn beep():
+    """Emit the terminal bell.
+
+    Used as audible / visible feedback when the user presses a chord
+    (Ctrl+letter, Cmd+letter, …) that isn't bound to anything. The
+    alternative — silently dropping the keystroke — leaves the user
+    wondering whether the app saw it.
+    """
+    write_string(STDOUT_FD, SEQ_BELL)
 
 
 fn _contains(haystack: String, needle: String) -> Bool:

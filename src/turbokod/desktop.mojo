@@ -44,7 +44,8 @@ from .events import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
     OnSaveAction,
-    TurbokodConfig, load_config, record_recent_project, save_config,
+    TurbokodConfig, load_config, record_recent_file,
+    record_recent_project, save_config,
 )
 from .diff import unified_diff
 from .file_io import (
@@ -144,6 +145,7 @@ from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .find_symbol import FindSymbol
+from .terminal import beep
 from .window import (
     MIN_WIN_H, MIN_WIN_W,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
@@ -720,10 +722,13 @@ struct Desktop(Movable):
     # doesn't clobber a teammate's set.
     var _last_breakpoints_json: String
     # Recently focused file-backed editor paths, most-recent first.
-    # Updated each ``paint`` from the focused window's ``file_path``;
-    # the front entry is whichever file currently has focus, so the
-    # "Open Recent" picker skips index 0 to avoid offering the user
-    # the file they're already on. Capped at ``_RECENT_FILES_MAX``.
+    # Mirrors ``config.recent_files`` (which is the persistent copy);
+    # both are kept in sync by ``_track_recent_focus``. Stores canonical
+    # absolute paths (``realpath``-resolved) so dedup is reliable across
+    # symlinked / relative spellings. The front entry is whichever file
+    # currently has focus, so the "Open Recent" picker skips index 0 to
+    # avoid offering the user the file they're already on. Capped at
+    # ``_RECENT_FILES_MAX``.
     var _recent_files: List[String]
     # Cross-file navigation history. ``_nav_stack`` is a chronological
     # list of visited (file, row, col) positions; ``_nav_pos`` indexes
@@ -2137,6 +2142,12 @@ struct Desktop(Movable):
         ``__init__`` deliberately doesn't, so tests get deterministic
         defaults instead of inheriting the developer's local config."""
         self.config = load_config()
+        # Seed the in-memory recents from the persisted list so the
+        # File ▸ "Open recent..." picker has entries to show on the
+        # very first invocation of a fresh process — otherwise the
+        # session-only tracking would leave it empty until the user
+        # focus-switched across at least two file-backed windows.
+        self._recent_files = self.config.recent_files.copy()
         self._rebuild_lsp_specs()
 
     fn _rebuild_lsp_specs(mut self):
@@ -3000,7 +3011,15 @@ struct Desktop(Movable):
         # macOS terminals with "Use Option as Meta key" enabled).
         if event.mods == MOD_ALT and self._open_menu_by_mnemonic(event.key):
             return Optional[String]()
-        _ = self.windows.handle_key(event)
+        var consumed = self.windows.handle_key(event)
+        # An unbound Ctrl/Cmd chord that nothing claimed (no hotkey
+        # match above, no menu mnemonic, focused editor returned False)
+        # should beep rather than disappear. Without this, pressing
+        # Cmd+B with no binding produces no feedback at all — the user
+        # can't tell whether the key was seen.
+        if not consumed \
+                and (event.mods & (MOD_CTRL | MOD_META)) != 0:
+            beep()
         # The editor may have stamped a ``pending_spell_action`` while
         # handling Alt+Enter on a misspelled word — surface the popup
         # before the next paint so it renders on the same frame the
@@ -4873,8 +4892,16 @@ struct Desktop(Movable):
 
     fn _track_recent_focus(mut self):
         """Promote the focused editor's file path to the front of
-        ``_recent_files``. Untitled / file-less buffers are skipped —
-        they have no path that ``open_file`` could later restore.
+        ``_recent_files`` and persist the change to ``config.recent_files``
+        so the "Open Recent" picker keeps the list across sessions.
+
+        Paths are canonicalized through ``realpath`` so dedup catches
+        symlinks and relative/absolute spellings of the same file (the
+        session restore path stores rects against project-relative
+        paths, which would otherwise compare unequal to the absolute
+        paths ``open_file`` writes). Untitled / file-less buffers are
+        skipped — they have no path that ``open_file`` could later
+        restore.
         """
         var idx = self._focused_editor_idx()
         if idx < 0:
@@ -4882,21 +4909,19 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
+        var canon = realpath(path)
+        if len(canon.as_bytes()) == 0:
+            canon = path
         # Already at the front — no change.
-        if len(self._recent_files) > 0 and self._recent_files[0] == path:
+        if len(self._recent_files) > 0 and self._recent_files[0] == canon:
             return
-        # Remove an existing copy (anywhere in the list) before
-        # re-inserting at the front, so each path appears at most once.
-        var new_list = List[String]()
-        new_list.append(path)
-        for i in range(len(self._recent_files)):
-            if self._recent_files[i] != path:
-                new_list.append(self._recent_files[i])
-        # Cap the list so a long-running session doesn't grow unbounded.
-        var cap = 100
-        while len(new_list) > cap:
-            _ = new_list.pop(len(new_list) - 1)
-        self._recent_files = new_list^
+        var changed = record_recent_file(self.config, canon)
+        if not changed:
+            return
+        # Mirror the persisted list into the in-memory cache so the
+        # picker can read from a single source.
+        self._recent_files = self.config.recent_files.copy()
+        _ = save_config(self.config)
 
     # --- navigation history ---------------------------------------------
 
@@ -5015,35 +5040,84 @@ struct Desktop(Movable):
 
     fn _open_recent_picker(mut self):
         """Open the QuickOpen picker over the recents list, skipping the
-        currently focused file. No-op when there's nothing to show
-        (single open file, or no file-backed editors at all)."""
-        if len(self._recent_files) <= 1:
-            return
-        # Display labels: project-relative when the file lives under the
-        # active project root, absolute otherwise. Parallel ``abs_entries``
-        # carries the absolute path used to actually open the file.
+        currently focused file.
+
+        Sources two pools, in this priority order:
+        1. Other open file-backed editor windows. These always belong
+           in the picker — even on a freshly restored session before
+           any focus has changed (which would otherwise leave the
+           in-memory recents at a single entry and silently no-op).
+           Walked in reverse z-order so the most-recently-focused
+           non-current window lands at the top.
+        2. ``self._recent_files`` (persisted to ``config.recent_files``)
+           with already-listed and currently-focused entries filtered
+           out. Catches files the user opened in a past session that
+           aren't currently open.
+
+        No-op when neither pool yields anything (e.g. only one editor
+        open and a fresh config with no history).
+        """
+        var focused_canon = String("")
+        var fidx = self._focused_editor_idx()
+        if fidx >= 0:
+            var fp = self.windows.windows[fidx].editor.file_path
+            if len(fp.as_bytes()) > 0:
+                focused_canon = realpath(fp)
+                if len(focused_canon.as_bytes()) == 0:
+                    focused_canon = fp
         var root = String("")
         if self.project:
             root = self.project.value()
-        var rb = root.as_bytes()
         var rel_entries = List[String]()
         var abs_entries = List[String]()
-        # Skip index 0 — that's the file the user is currently on.
-        for i in range(1, len(self._recent_files)):
+        # Pool 1: currently-open file-backed editor windows. Walk
+        # ``z_order`` from top (last) to bottom so the user's most
+        # recently focused window (other than the current one) appears
+        # first in the picker.
+        var seen = List[String]()
+        var zi = len(self.windows.z_order) - 1
+        while zi >= 0:
+            var widx = self.windows.z_order[zi]
+            zi -= 1
+            if widx < 0 or widx >= len(self.windows.windows):
+                continue
+            if not self.windows.windows[widx].is_editor:
+                continue
+            var p = self.windows.windows[widx].editor.file_path
+            if len(p.as_bytes()) == 0:
+                continue
+            var canon = realpath(p)
+            if len(canon.as_bytes()) == 0:
+                canon = p
+            if canon == focused_canon:
+                continue
+            # Dedup if the same path was already added (shouldn't
+            # normally happen — one window per path is enforced by
+            # ``_find_window_for_path`` — but cheap to defend).
+            var dup = False
+            for s in range(len(seen)):
+                if seen[s] == canon:
+                    dup = True
+                    break
+            if dup:
+                continue
+            seen.append(canon)
+            rel_entries.append(_recent_display_label(canon, root))
+            abs_entries.append(canon)
+        # Pool 2: persisted ``_recent_files`` not already covered above.
+        for i in range(len(self._recent_files)):
             var p = self._recent_files[i]
-            var pb = p.as_bytes()
-            var label = p
-            if len(rb) > 0 and len(pb) > len(rb) + 1:
-                var matches_root = True
-                for k in range(len(rb)):
-                    if pb[k] != rb[k]:
-                        matches_root = False
-                        break
-                if matches_root and pb[len(rb)] == 0x2F:
-                    label = String(StringSlice(
-                        unsafe_from_utf8=pb[len(rb) + 1:],
-                    ))
-            rel_entries.append(label)
+            if p == focused_canon:
+                continue
+            var dup = False
+            for s in range(len(seen)):
+                if seen[s] == p:
+                    dup = True
+                    break
+            if dup:
+                continue
+            seen.append(p)
+            rel_entries.append(_recent_display_label(p, root))
             abs_entries.append(p)
         if len(rel_entries) == 0:
             return
@@ -6753,6 +6827,25 @@ fn _expand_save_placeholders(arg: String, saved_path: String) -> String:
     return out
 
 
+
+
+fn _recent_display_label(path: String, project_root: String) -> String:
+    """Return ``path`` formatted for display in the "Open Recent" picker:
+    project-relative when ``path`` lives under ``project_root``, absolute
+    otherwise. An empty ``project_root`` (no project open) returns the
+    input path verbatim."""
+    var pb = path.as_bytes()
+    var rb = project_root.as_bytes()
+    if len(rb) == 0:
+        return path
+    if len(pb) <= len(rb) + 1:
+        return path
+    for k in range(len(rb)):
+        if pb[k] != rb[k]:
+            return path
+    if pb[len(rb)] != 0x2F:
+        return path
+    return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
 fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:

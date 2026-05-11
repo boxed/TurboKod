@@ -17,7 +17,7 @@ from std.collections.list import List
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
-from .events import Event, EVENT_KEY, MOD_CTRL
+from .events import Event, EVENT_KEY, MOD_CTRL, MOD_META
 
 
 # Result tags for ``clipboard_chord``. Plain ``UInt8`` constants in the
@@ -31,14 +31,21 @@ comptime CLIP_SELECT_ALL = UInt8(4)
 
 
 fn clipboard_chord(event: Event) -> UInt8:
-    """Classify a key event as a clipboard hotkey: Ctrl+A / C / X / V.
-    Everything else (non-key events, missing Ctrl, other letters) maps
-    to ``CLIP_NONE``. Centralizing this here keeps the Editor and
-    TextField handlers from each re-spelling the same four ``mods &
-    MOD_CTRL && key == ord(...)`` checks."""
+    """Classify a key event as a clipboard hotkey: Ctrl/Cmd + A / C / X / V.
+
+    Either Ctrl or Cmd (``MOD_META``) counts as the chord modifier —
+    Ctrl is the Linux/Windows convention; Cmd is the macOS one. Both
+    map to the same select-all / copy / cut / paste actions so a text
+    field behaves the way the user's muscle memory expects regardless
+    of platform.
+
+    Everything else (non-key events, neither modifier, other letters)
+    maps to ``CLIP_NONE``. Centralizing this here keeps the Editor and
+    TextField handlers from each re-spelling the same modifier check.
+    """
     if event.kind != EVENT_KEY:
         return CLIP_NONE
-    if (event.mods & MOD_CTRL) == 0:
+    if (event.mods & (MOD_CTRL | MOD_META)) == 0:
         return CLIP_NONE
     var k = event.key
     if k == UInt32(ord("a")):

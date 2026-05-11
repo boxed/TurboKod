@@ -25,6 +25,11 @@ from .posix import getenv_value
 # this is dropped when ``_set_project`` records a new entry, so the
 # "Open recent project..." picker stays a manageable list.
 comptime _RECENT_PROJECTS_MAX = 20
+# Same idea for recently focused files, surfaced via the File ▸
+# "Open recent..." picker. Kept larger than the project cap because
+# users open far more individual files than projects in a typical
+# session.
+comptime _RECENT_FILES_MAX = 50
 
 
 fn _config_dir() -> String:
@@ -155,6 +160,11 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
     var recent_projects: List[String]
+    # Canonical absolute paths of recently focused file-backed editors,
+    # most-recent first. Updated by ``Desktop._track_recent_focus``
+    # whenever the focused file changes, and surfaced via the File ▸
+    # "Open recent..." picker so the entries persist across sessions.
+    var recent_files: List[String]
     # User-configured on-save actions (Settings ▸ Actions on save). The
     # editor scans this list after every successful ``_do_save`` and
     # spawns each matching entry as a one-shot subprocess. Empty by
@@ -174,6 +184,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.minimap = True
         self.auto_save = False
         self.recent_projects = List[String]()
+        self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
         self.language_servers = List[LanguageServerOverride]()
 
@@ -187,6 +198,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.minimap = copy.minimap
         self.auto_save = copy.auto_save
         self.recent_projects = copy.recent_projects.copy()
+        self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
         self.language_servers = copy.language_servers.copy()
 
@@ -207,6 +219,29 @@ fn record_recent_project(
     while len(new_list) > _RECENT_PROJECTS_MAX:
         _ = new_list.pop(len(new_list) - 1)
     config.recent_projects = new_list^
+
+
+fn record_recent_file(
+    mut config: TurbokodConfig, var path: String,
+) -> Bool:
+    """Promote ``path`` to the front of ``config.recent_files``, dedup
+    any existing entry, and cap at ``_RECENT_FILES_MAX``. Returns True
+    iff the list actually changed — callers use this to skip a redundant
+    ``save_config`` write when the focused file is already at the
+    front. Empty paths are ignored."""
+    if len(path.as_bytes()) == 0:
+        return False
+    if len(config.recent_files) > 0 and config.recent_files[0] == path:
+        return False
+    var new_list = List[String]()
+    new_list.append(path)
+    for i in range(len(config.recent_files)):
+        if config.recent_files[i] != path:
+            new_list.append(config.recent_files[i])
+    while len(new_list) > _RECENT_FILES_MAX:
+        _ = new_list.pop(len(new_list) - 1)
+    config.recent_files = new_list^
+    return True
 
 
 fn load_config() -> TurbokodConfig:
@@ -239,6 +274,9 @@ fn load_config() -> TurbokodConfig:
         )
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
+        )
+        cfg.recent_files = json_get_string_array(
+            root, String("recent_files"),
         )
         var osa = root.object_get(String("on_save_actions"))
         if osa and osa.value().is_array():
@@ -309,6 +347,10 @@ fn save_config(config: TurbokodConfig) -> Bool:
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))
     root.put(String("recent_projects"), rp^)
+    var rf = json_array()
+    for i in range(len(config.recent_files)):
+        rf.append(json_str(config.recent_files[i]))
+    root.put(String("recent_files"), rf^)
     var osa = json_array()
     for i in range(len(config.on_save_actions)):
         var act = config.on_save_actions[i]

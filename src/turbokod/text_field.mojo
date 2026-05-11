@@ -56,10 +56,40 @@ from .events import (
     KEY_HOME, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT,
 )
+from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
-    codepoint_at, is_word_codepoint, prev_codepoint_start, word_char_step,
+    codepoint_at, is_word_codepoint, leading_indent_bytes,
+    prev_codepoint_start, word_char_step,
 )
+
+
+# How long a second mouse press can lag the first and still be treated
+# as a double-click. 500 ms matches the editor's own threshold (see
+# ``editor._DOUBLE_CLICK_MS``) so multi-line and single-line input
+# feel the same.
+comptime _DOUBLE_CLICK_MS = 500
+from .terminal import beep
+
+
+# How long a typing run can pause before the next keystroke starts a
+# fresh undo group. Matches the editor's debounce so single-line input
+# undo grouping feels the same as multi-line. Non-typing mutations
+# (backspace, paste, cut, delete-forward) always break the run, so this
+# only applies to consecutive printable inserts.
+comptime _TYPING_DEBOUNCE_MS = 800
+# Cap on the per-field undo stack. Single-line inputs don't accumulate
+# state the way an editor buffer does, so a small ceiling is plenty.
+comptime _UNDO_STACK_LIMIT = 200
+
+
+@fieldwise_init
+struct _Snapshot(ImplicitlyCopyable, Movable):
+    """One reversible step of a ``TextField``. Captures the text and the
+    caret / anchor so undo restores both content and selection."""
+    var text: String
+    var cursor: Int
+    var anchor: Int
 
 
 @fieldwise_init
@@ -106,6 +136,34 @@ struct TextField(Copyable, Movable):
     # before translating a click coordinate, so clicks on the
     # currently-visible portion land on the right codepoint.
     var _scroll: Int
+    # Linear undo / redo history. Snapshots are pushed *before* a
+    # mutation so ``undo`` rewinds to the pre-edit state; a fresh
+    # mutation after an undo clears ``_redo`` (standard linear model).
+    # Consecutive printable inserts are coalesced into one snapshot
+    # via ``_typing_active`` + ``_typing_last_ms`` so one Cmd+Z
+    # rolls back a whole typed word rather than letter-by-letter.
+    var _undo: List[_Snapshot]
+    var _redo: List[_Snapshot]
+    var _typing_active: Bool
+    var _typing_last_ms: Int
+    # Multi-click tracking for double-click-to-word / triple-click-to-all.
+    # ``_last_click_ms`` is the timestamp of the most recent left-button
+    # press; ``_last_click_byte`` is the byte offset it landed on.
+    # ``_click_count`` counts consecutive presses at the same cell within
+    # ``_DOUBLE_CLICK_MS`` (1 = single, 2 = word, 3 = whole field; then
+    # resets). During a multi-click drag, ``_dc_active`` /
+    # ``_tc_active`` flag which mode the drag-extend is anchored on so
+    # the moving end snaps to word / line boundaries.
+    var _last_click_ms: Int
+    var _last_click_byte: Int
+    var _click_count: Int
+    var _dc_active: Bool
+    var _tc_active: Bool
+    # Word range that anchored the most recent double-click. Drag-extend
+    # in double-click mode unions the moving end's word with this anchor
+    # range so dragging past whole words snaps to whole-word selections.
+    var _dc_anchor_start: Int
+    var _dc_anchor_end: Int
 
     fn __init__(out self):
         self.text = String("")
@@ -113,6 +171,17 @@ struct TextField(Copyable, Movable):
         self.anchor = 0
         self._drag = False
         self._scroll = 0
+        self._undo = List[_Snapshot]()
+        self._redo = List[_Snapshot]()
+        self._typing_active = False
+        self._typing_last_ms = 0
+        self._last_click_ms = 0
+        self._last_click_byte = -1
+        self._click_count = 0
+        self._dc_active = False
+        self._tc_active = False
+        self._dc_anchor_start = 0
+        self._dc_anchor_end = 0
 
     fn __copyinit__(out self, copy: Self):
         self.text = copy.text
@@ -120,6 +189,17 @@ struct TextField(Copyable, Movable):
         self.anchor = copy.anchor
         self._drag = copy._drag
         self._scroll = copy._scroll
+        self._undo = copy._undo.copy()
+        self._redo = copy._redo.copy()
+        self._typing_active = copy._typing_active
+        self._typing_last_ms = copy._typing_last_ms
+        self._last_click_ms = copy._last_click_ms
+        self._last_click_byte = copy._last_click_byte
+        self._click_count = copy._click_count
+        self._dc_active = copy._dc_active
+        self._tc_active = copy._tc_active
+        self._dc_anchor_start = copy._dc_anchor_start
+        self._dc_anchor_end = copy._dc_anchor_end
 
     fn copy(self) -> Self:
         var out = Self()
@@ -128,6 +208,17 @@ struct TextField(Copyable, Movable):
         out.anchor = self.anchor
         out._drag = self._drag
         out._scroll = self._scroll
+        out._undo = self._undo.copy()
+        out._redo = self._redo.copy()
+        out._typing_active = self._typing_active
+        out._typing_last_ms = self._typing_last_ms
+        out._last_click_ms = self._last_click_ms
+        out._last_click_byte = self._last_click_byte
+        out._click_count = self._click_count
+        out._dc_active = self._dc_active
+        out._tc_active = self._tc_active
+        out._dc_anchor_start = self._dc_anchor_start
+        out._dc_anchor_end = self._dc_anchor_end
         return out^
 
     # --- programmatic mutation -----------------------------------------
@@ -136,7 +227,11 @@ struct TextField(Copyable, Movable):
         """Replace the text; place the cursor at the end and clear
         any selection. The most common pattern when seeding a field
         from a prefill — the user typically wants to keep typing
-        from where the existing text leaves off."""
+        from where the existing text leaves off.
+
+        Undo history is dropped: a prefill is a fresh starting state,
+        not an edit the user should be able to rewind through.
+        """
         self.text = t^
         self.cursor = len(self.text.as_bytes())
         self.anchor = self.cursor
@@ -146,6 +241,10 @@ struct TextField(Copyable, Movable):
         # text's scroll offset could leave the new (possibly short)
         # text drawn off-screen until the cursor moves.
         self._scroll = 0
+        self._undo = List[_Snapshot]()
+        self._redo = List[_Snapshot]()
+        self._typing_active = False
+        self._typing_last_ms = 0
 
     fn clear(mut self):
         self.text = String("")
@@ -153,6 +252,65 @@ struct TextField(Copyable, Movable):
         self.anchor = 0
         self._drag = False
         self._scroll = 0
+        self._undo = List[_Snapshot]()
+        self._redo = List[_Snapshot]()
+        self._typing_active = False
+        self._typing_last_ms = 0
+
+    # --- undo / redo --------------------------------------------------
+
+    fn _snapshot(self) -> _Snapshot:
+        return _Snapshot(self.text, self.cursor, self.anchor)
+
+    fn _push_undo(mut self):
+        """Record the current state on the undo stack and clear redo.
+
+        Call this *before* applying a mutation so ``undo`` rewinds to
+        the pre-edit state. Any new edit invalidates the redo branch —
+        standard linear-history model. Also breaks any typing run
+        that was in flight; the printable-insert path explicitly
+        re-arms the flag afterwards when it wants the new char to
+        anchor a fresh group.
+        """
+        self._undo.append(self._snapshot())
+        if len(self._undo) > _UNDO_STACK_LIMIT:
+            var trimmed = List[_Snapshot]()
+            for i in range(
+                len(self._undo) - _UNDO_STACK_LIMIT, len(self._undo),
+            ):
+                trimmed.append(self._undo[i])
+            self._undo = trimmed^
+        self._redo = List[_Snapshot]()
+        self._typing_active = False
+
+    fn _restore(mut self, snap: _Snapshot):
+        self.text = snap.text
+        self.cursor = snap.cursor
+        self.anchor = snap.anchor
+        # Restoring lands on a saved state; the next keystroke should
+        # start a fresh undo group rather than extend whatever ran
+        # before.
+        self._typing_active = False
+
+    fn undo(mut self) -> Bool:
+        """Roll back the last mutation. Returns False when the stack
+        is empty (no edits since ``set_text`` / construction)."""
+        if len(self._undo) == 0:
+            return False
+        var snap = self._undo.pop()
+        self._redo.append(self._snapshot())
+        self._restore(snap)
+        return True
+
+    fn redo(mut self) -> Bool:
+        """Replay the most recently undone mutation. False when
+        nothing to redo."""
+        if len(self._redo) == 0:
+            return False
+        var snap = self._redo.pop()
+        self._undo.append(self._snapshot())
+        self._restore(snap)
+        return True
 
     # --- selection -----------------------------------------------------
 
@@ -176,6 +334,15 @@ struct TextField(Copyable, Movable):
         self.cursor = len(self.text.as_bytes())
 
     fn delete_selection(mut self) -> Bool:
+        """Delete the active selection (if any), collapsing the cursor
+        to where the selection started. Returns True if anything was
+        removed.
+
+        Doesn't push undo by itself — callers wrap this in their own
+        ``_push_undo`` so a single user action (Backspace,
+        Cut, ``insert`` that replaces a selection, …) ends up as one
+        undo step rather than two stacked entries.
+        """
         if not self.has_selection():
             return False
         var rng = self._sel_range()
@@ -215,13 +382,31 @@ struct TextField(Copyable, Movable):
     fn _end(mut self, extend: Bool):
         self._move(len(self.text.as_bytes()), extend)
 
+    fn _smart_home(mut self, extend: Bool):
+        """Mirror the editor's Cmd+Left: jump to the first non-space
+        column; if the cursor is already at or before that column,
+        fall all the way to byte 0. Two presses from anywhere in the
+        body land at the margin — same muscle memory as the editor."""
+        var first_ns = leading_indent_bytes(self.text)
+        var target = first_ns if self.cursor > first_ns else 0
+        self._move(target, extend)
+
     # --- mutation ------------------------------------------------------
 
     fn insert(mut self, s: String) -> Bool:
         """Insert ``s`` at the cursor (replacing the selection if any).
         Returns True if anything actually changed (text grew or a
-        selection was deleted)."""
+        selection was deleted).
+
+        Pushes one undo snapshot for the combined replace + insert so
+        undo rolls back the whole operation in one step. The typing
+        path is special-cased in ``handle_key`` and bypasses this
+        snapshotting to coalesce consecutive keystrokes.
+        """
         var had_sel = self.has_selection()
+        var will_change = had_sel or len(s.as_bytes()) > 0
+        if will_change:
+            self._push_undo()
         if had_sel:
             _ = self.delete_selection()
         if len(s.as_bytes()) == 0:
@@ -233,9 +418,11 @@ struct TextField(Copyable, Movable):
 
     fn backspace(mut self) -> Bool:
         if self.has_selection():
+            self._push_undo()
             return self.delete_selection()
         if self.cursor == 0:
             return False
+        self._push_undo()
         var prev = _utf8_step_backward(self.text, self.cursor)
         self.text = _splice(self.text, prev, self.cursor, String(""))
         self.cursor = prev
@@ -244,10 +431,12 @@ struct TextField(Copyable, Movable):
 
     fn delete_forward(mut self) -> Bool:
         if self.has_selection():
+            self._push_undo()
             return self.delete_selection()
         var n = len(self.text.as_bytes())
         if self.cursor >= n:
             return False
+        self._push_undo()
         var nxt = _utf8_step_forward(self.text, self.cursor)
         self.text = _splice(self.text, self.cursor, nxt, String(""))
         return True
@@ -271,15 +460,27 @@ struct TextField(Copyable, Movable):
         # terminals deliver Ctrl+Arrow + MOD_CTRL.
         var word_jump = (event.mods & MOD_CTRL) != 0 \
             or (event.mods & MOD_ALT) != 0
+        # Cmd+Left / Cmd+Right — line-level horizontal navigation
+        # mirroring the editor. Same shared muscle memory: Cmd+Right
+        # jumps to end of (single-line) text; Cmd+Left smart-homes
+        # to the first non-space, or to byte 0 if already there.
+        # Shift extends the selection. Cmd takes precedence over the
+        # Ctrl/Alt word-jump fallback so MOD_CTRL+MOD_META (the editor
+        # also accepts this combo) still picks the line-level path.
+        var line_jump = (event.mods & MOD_META) != 0
         # --- cursor / selection movement ---
         if k == KEY_LEFT:
-            if word_jump:
+            if line_jump:
+                self._smart_home(extend)
+            elif word_jump:
                 self._word_left(extend)
             else:
                 self._step_left(extend)
             return TextFieldKeyResult(True, False)
         if k == KEY_RIGHT:
-            if word_jump:
+            if line_jump:
+                self._end(extend)
+            elif word_jump:
                 self._word_right(extend)
             else:
                 self._step_right(extend)
@@ -311,11 +512,19 @@ struct TextField(Copyable, Movable):
         if chord == CLIP_CUT:
             if self.has_selection():
                 clipboard_copy(self.selection_text())
+                self._push_undo()
                 _ = self.delete_selection()
                 return TextFieldKeyResult(True, True)
             clipboard_copy(self.text)
             var had = len(self.text.as_bytes()) > 0
-            self.clear()
+            if had:
+                # Whole-field cut: snapshot before clearing so undo
+                # restores the deleted text.
+                self._push_undo()
+                self.text = String("")
+                self.cursor = 0
+                self.anchor = 0
+                self._scroll = 0
             return TextFieldKeyResult(True, had)
         if chord == CLIP_PASTE:
             var pasted = _sanitize_single_line(clipboard_paste())
@@ -324,14 +533,67 @@ struct TextField(Copyable, Movable):
                 # / control bytes shouldn't fall through to the
                 # caller's printable branch and inject a literal V).
                 return TextFieldKeyResult(True, False)
+            # ``insert`` already snapshots once for the whole
+            # replace-and-insert, so undo rolls back the full paste
+            # in a single step.
             return TextFieldKeyResult(True, self.insert(pasted))
-        # Modified printables are commands (e.g. a hotkey table) —
-        # leave them alone for the caller to dispatch.
-        if (event.mods & MOD_CTRL) != 0 or (event.mods & MOD_ALT) != 0:
-            return TextFieldKeyResult(False, False)
-        # Plain printable ASCII: insert at cursor.
+        # --- undo / redo ---
+        # Cmd+Z / Ctrl+Z = undo; Cmd+Shift+Z or Cmd+Y / Ctrl+Y = redo.
+        # Both modifier families work so the binding matches whatever
+        # the host's editor accepts (the editor binds these on
+        # MOD_META; Linux/Windows users typing with MOD_CTRL get the
+        # same affordance inside dialog fields).
+        var chord_mod = (event.mods & (MOD_CTRL | MOD_META)) != 0
+        var is_shift = (event.mods & MOD_SHIFT) != 0
+        if chord_mod and k == UInt32(ord("z")):
+            if is_shift:
+                return TextFieldKeyResult(True, self.redo())
+            return TextFieldKeyResult(True, self.undo())
+        if chord_mod and not is_shift and k == UInt32(ord("y")):
+            return TextFieldKeyResult(True, self.redo())
+        # Any chord modifier (Ctrl / Cmd / Alt) reaching this point
+        # means the keystroke wasn't a clipboard / select-all / undo
+        # chord and isn't editing the field. Modal text fields are
+        # leaf input handlers — there's no global hotkey table behind
+        # them, so falling through to the printable-insert branch
+        # below would smuggle the letter into the buffer (Cmd+B
+        # inserting ``b``). Consume the event instead; beep on
+        # Ctrl/Cmd so the user knows the chord wasn't bound. Alt is
+        # silently swallowed because some terminals deliver
+        # ``MOD_ALT`` for Option-as-Meta and Unicode-compose dead
+        # keys, where beeping on every press would be obnoxious.
+        if (event.mods & (MOD_CTRL | MOD_META)) != 0:
+            beep()
+            return TextFieldKeyResult(True, False)
+        if (event.mods & MOD_ALT) != 0:
+            return TextFieldKeyResult(True, False)
+        # Plain printable ASCII: insert at cursor. Coalesce consecutive
+        # presses into one undo group so Cmd+Z rolls back a whole typed
+        # word rather than one character at a time. A selection
+        # replacement or a paused-then-resumed run breaks the group:
+        # the user expects undo to stop at those natural boundaries.
         if UInt32(0x20) <= k and k < UInt32(0x7F):
-            return TextFieldKeyResult(True, self.insert(chr(Int(k))))
+            var now = monotonic_ms()
+            var in_run = self._typing_active \
+                and now - self._typing_last_ms <= _TYPING_DEBOUNCE_MS \
+                and not self.has_selection()
+            var ch = chr(Int(k))
+            var changed: Bool
+            if in_run:
+                # Bypass ``insert`` entirely so we don't push a per-key
+                # snapshot. The first key in the run already snapshotted.
+                self.text = _splice(self.text, self.cursor, self.cursor, ch)
+                self.cursor = self.cursor + len(ch.as_bytes())
+                self.anchor = self.cursor
+                changed = True
+            else:
+                # First key of a (potentially) new run: ``insert``
+                # pushes one snapshot covering this key — and the
+                # selection-delete if any.
+                changed = self.insert(ch)
+            self._typing_active = True
+            self._typing_last_ms = now
+            return TextFieldKeyResult(True, changed)
         return TextFieldKeyResult(False, False)
 
     # --- mouse --------------------------------------------------------
@@ -339,16 +601,21 @@ struct TextField(Copyable, Movable):
     fn handle_mouse(
         mut self, event: Event, input_rect: Rect,
     ) -> Bool:
-        """Position the cursor for a click inside ``input_rect``;
-        extend the selection while dragging. Returns True if the
-        event was consumed (click landed in the strip, or a drag
-        from a previous press is in progress).
+        """Position the cursor for a click inside ``input_rect`` and
+        run the drag / multi-click gestures on top of it. Returns True
+        if the event was consumed (click landed in the strip, or a
+        drag from a previous press is in progress).
 
         ``input_rect`` is the one-row strip where ``self.text`` is
-        drawn, in screen coordinates. The handler maps cells inside
-        it to byte offsets — UTF-8 aware so a click on a multi-byte
-        glyph lands at the codepoint start, not in the middle of its
-        sequence.
+        drawn, in screen coordinates. Cell-to-byte translation is
+        UTF-8 aware so a click on a multi-byte glyph lands at the
+        codepoint start.
+
+        Multi-click cycle (matches the editor's): single click parks
+        the cursor; second press within 500 ms at the same cell
+        selects the surrounding word; third selects the whole field.
+        Holding the button after a double / triple snaps the moving
+        end of the selection to whole-word / whole-field boundaries.
         """
         if event.kind != EVENT_MOUSE:
             return False
@@ -365,19 +632,76 @@ struct TextField(Copyable, Movable):
         var inside = input_rect.contains(event.pos)
         if event.pressed and not event.motion:
             # Press outside the strip: not our event. Press inside:
-            # park the cursor and arm drag-to-extend.
+            # park the cursor and (if appropriate) bump the click
+            # counter for word / line selection.
             if not inside:
                 return False
-            self.cursor = self._byte_at_x(event.pos.x - input_rect.a.x)
-            self.anchor = self.cursor
+            var byte = self._byte_at_x(event.pos.x - input_rect.a.x)
+            var now = monotonic_ms()
+            var same_cell = (
+                now - self._last_click_ms <= _DOUBLE_CLICK_MS
+                and byte == self._last_click_byte
+            )
+            if same_cell:
+                self._click_count += 1
+                if self._click_count > 3:
+                    self._click_count = 1
+            else:
+                self._click_count = 1
+            self._last_click_ms = now
+            self._last_click_byte = byte
             self._drag = True
+            self._dc_active = False
+            self._tc_active = False
+            if self._click_count == 2:
+                # Word select: anchor the surrounding word range so a
+                # following drag snaps to whole-word boundaries.
+                var wrng = _word_range_at(self.text, byte)
+                self._dc_active = True
+                self._dc_anchor_start = wrng[0]
+                self._dc_anchor_end = wrng[1]
+                self.anchor = wrng[0]
+                self.cursor = wrng[1]
+            elif self._click_count == 3:
+                # Whole-field select. Cancels the multi-click cycle so
+                # a fourth quick press starts fresh as a single click.
+                self._tc_active = True
+                self.anchor = 0
+                self.cursor = len(self.text.as_bytes())
+                self._last_click_ms = 0
+                self._click_count = 0
+            else:
+                self.cursor = byte
+                self.anchor = byte
             return True
         if event.motion and self._drag:
             # Drag extends the selection; clamp to the field bounds.
             var x = event.pos.x - input_rect.a.x
             if x < 0:
                 x = 0
-            self.cursor = self._byte_at_x(x)
+            var byte = self._byte_at_x(x)
+            if self._tc_active:
+                # Whole-field gesture: nothing to extend, the whole
+                # field is already selected.
+                pass
+            elif self._dc_active:
+                # Snap to word boundaries unioned with the anchor word.
+                var wrng = _word_range_at(self.text, byte)
+                var lo = wrng[0]
+                var hi = wrng[1]
+                if self._dc_anchor_start < lo:
+                    lo = self._dc_anchor_start
+                if self._dc_anchor_end > hi:
+                    hi = self._dc_anchor_end
+                # Direction follows the drag: cursor on the moving end.
+                if byte >= self._dc_anchor_end:
+                    self.anchor = lo
+                    self.cursor = hi
+                else:
+                    self.anchor = hi
+                    self.cursor = lo
+            else:
+                self.cursor = byte
             return True
         if not event.pressed and self._drag:
             self._drag = False
@@ -634,6 +958,46 @@ fn _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
         i += _utf8_codepoint_size(Int(bytes[i]))
         cell += 1
     return i
+
+
+fn _char_class(cp: Int) -> Int:
+    """Three-way character class used by ``_word_range_at``. Word
+    chars cluster, whitespace clusters, everything else clusters as
+    "punctuation". Mirrors the editor's grouping so double-click in
+    a dialog field picks the same span as double-click in a
+    full-buffer line."""
+    if is_word_codepoint(cp):
+        return 1
+    if cp == 0x20 or cp == 0x09:
+        return 2
+    return 3
+
+
+fn _word_range_at(text: String, byte_col: Int) -> Tuple[Int, Int]:
+    """Return the (start, end) byte range of the contiguous run of
+    same-class codepoints around ``byte_col``. Empty range when
+    ``byte_col`` is at end of text. Walks by UTF-8 codepoint so
+    multibyte letters cluster with their ASCII neighbours."""
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    if byte_col < 0 or byte_col >= n:
+        return (byte_col, byte_col)
+    var here = codepoint_at(text, byte_col)
+    var cls = _char_class(here[0])
+    var start = byte_col
+    while start > 0:
+        var prev = prev_codepoint_start(text, start)
+        var info = codepoint_at(text, prev)
+        if _char_class(info[0]) != cls:
+            break
+        start = prev
+    var end = byte_col + here[1]
+    while end < n:
+        var info = codepoint_at(text, end)
+        if _char_class(info[0]) != cls:
+            break
+        end += info[1]
+    return (start, end)
 
 
 fn _next_word_pos(text: String, col: Int) -> Int:

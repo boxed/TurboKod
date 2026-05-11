@@ -53,6 +53,7 @@ from .file_dialog import FileDialog
 from .geometry import Point, Rect
 from .language_config import built_in_servers
 from .text_field import TextField
+from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -74,6 +75,10 @@ comptime _FOCUS_COUNT    = 7
 comptime _DIALOG_W = 64
 comptime _DIALOG_H = 16
 comptime _LABEL_COL_W = 14   # width of the left-side label column
+comptime _BROWSE_BTN_W = 9
+"""Width of the Browse button (face " Browse " = 8 cols + 1-col
+shadow). Used to carve out space at the right edge of the Program
+row so the editable strip doesn't overrun the button."""
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
@@ -96,28 +101,51 @@ fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return Rect(x, y, x + width, y + height)
 
 
-fn _label_at(dialog: Rect, row: Int) -> Point:
-    return Point(dialog.a.x + 2, dialog.a.y + row)
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects + row anchors for the action editor.
+
+    Built once per paint / mouse event so painted geometry and
+    hit-test geometry can't drift apart. Form rows flow top-down
+    through ``RowCursor``; the Arguments and Working-dir fields each
+    occupy a 2-row block so the hint line glued underneath them
+    serves as the visual separator from the next control without
+    needing an extra blank row.
+    """
+    var lang_rect: Rect
+    var program_rect: Rect
+    var args_rect: Rect
+    var args_hint_y: Int
+    var cwd_rect: Rect
+    var cwd_hint_y: Int
+    var bottom_buttons_y: Int
+    var label_x: Int
 
 
-fn _row_for_focus(focus: UInt8) -> Int:
-    """Row offset inside the dialog. Browse shares the Program row."""
-    if focus == _FOCUS_LANG:    return 2
-    if focus == _FOCUS_PROGRAM: return 4
-    if focus == _FOCUS_BROWSE:  return 4
-    if focus == _FOCUS_ARGS:    return 6
-    if focus == _FOCUS_CWD:     return 8
-    return -1
-
-
-fn _input_rect(dialog: Rect, row: Int, right_pad: Int) -> Rect:
-    """One-row editable strip on the right of the label column. The
-    ``right_pad`` carves out room for an in-row button (e.g. Browse)
-    so the input doesn't overrun it."""
-    var x0 = dialog.a.x + 2 + _LABEL_COL_W
-    return Rect(
-        x0, dialog.a.y + row, dialog.b.x - 2 - right_pad,
-        dialog.a.y + row + 1,
+fn _build_layout(rect: Rect) -> _Layout:
+    var cursor = RowCursor(rect.a.y + 2)
+    var lang_y = cursor.place()
+    var program_y = cursor.place()
+    # Arguments + its $FilePath$ hint read as one logical control;
+    # place(2) reserves both rows so the next gap lands below the
+    # hint.
+    var args_y = cursor.place(2)
+    # Working dir + its (empty = project root) hint is glued under
+    # args — the hint is the visual separator, no additional gap.
+    var cwd_y = cursor.place_tight(2)
+    var label_x = rect.a.x + 2
+    var field_x = label_x + _LABEL_COL_W
+    var right_max = rect.b.x - 2
+    var program_right = right_max - (_BROWSE_BTN_W + 2)
+    return _Layout(
+        Rect(field_x, lang_y, right_max, lang_y + 1),
+        Rect(field_x, program_y, program_right, program_y + 1),
+        Rect(field_x, args_y, right_max, args_y + 1),
+        args_y + 1,
+        Rect(field_x, cwd_y, right_max, cwd_y + 1),
+        cwd_y + 1,
+        rect.b.y - 3,
+        label_x,
     )
 
 
@@ -257,6 +285,7 @@ struct ActionEditor(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -266,44 +295,47 @@ struct ActionEditor(Movable):
         )
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Labels.
-        _ = painter.put_text(canvas, _label_at(rect, 2), String("Language:"), bg)
-        _ = painter.put_text(canvas, _label_at(rect, 4), String("Program:"), bg)
-        _ = painter.put_text(canvas, _label_at(rect, 6), String("Arguments:"), bg)
         _ = painter.put_text(
-            canvas, Point(_label_at(rect, 7).x + _LABEL_COL_W, rect.a.y + 7),
+            canvas, Point(layout.label_x, layout.lang_rect.a.y),
+            String("Language:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, Point(layout.label_x, layout.program_rect.a.y),
+            String("Program:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, Point(layout.label_x, layout.args_rect.a.y),
+            String("Arguments:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, Point(layout.args_rect.a.x, layout.args_hint_y),
             String("$FilePath$ expands to the saved file path"),
             hint,
         )
-        _ = painter.put_text(canvas, _label_at(rect, 8), String("Working dir:"), bg)
         _ = painter.put_text(
-            canvas, Point(_label_at(rect, 9).x + _LABEL_COL_W, rect.a.y + 9),
+            canvas, Point(layout.label_x, layout.cwd_rect.a.y),
+            String("Working dir:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, Point(layout.cwd_rect.a.x, layout.cwd_hint_y),
             String("(empty = project root)"), hint,
         )
         # Inputs. ``TextField.paint`` mutates the field (it owns the
         # horizontal scroll offset), so call it directly on ``self.*``
         # rather than via a helper that would force a by-value copy.
-        self._paint_lang(canvas, rect)
-        var browse_w = self._buttons[0].button.total_width()
-        var program_ir = _input_rect(
-            rect, _row_for_focus(_FOCUS_PROGRAM), browse_w + 2,
-        )
+        self._paint_lang(canvas, layout)
         self.program_tf.paint(
-            canvas, program_ir, self.focus == _FOCUS_PROGRAM,
+            canvas, layout.program_rect, self.focus == _FOCUS_PROGRAM,
         )
-        var args_ir = _input_rect(rect, _row_for_focus(_FOCUS_ARGS), 0)
-        self.args_tf.paint(canvas, args_ir, self.focus == _FOCUS_ARGS)
-        var cwd_ir = _input_rect(rect, _row_for_focus(_FOCUS_CWD), 0)
-        self.cwd_tf.paint(canvas, cwd_ir, self.focus == _FOCUS_CWD)
+        self.args_tf.paint(canvas, layout.args_rect, self.focus == _FOCUS_ARGS)
+        self.cwd_tf.paint(canvas, layout.cwd_rect, self.focus == _FOCUS_CWD)
         # Buttons.
-        self._paint_buttons(canvas, rect)
+        self._paint_buttons(canvas, rect, layout)
         # Dropdown popup overlays the form when open. Paint after the
         # form so it sits on top, but before the file dialog so a Browse
         # popup wins over it.
         if self.lang_dropdown.is_open:
-            var lang_ir = _input_rect(
-                rect, _row_for_focus(_FOCUS_LANG), 0,
-            )
-            self.lang_dropdown.paint_popup(canvas, lang_ir, screen)
+            self.lang_dropdown.paint_popup(canvas, layout.lang_rect, screen)
         # The file dialog floats on top when open — paint last so it
         # overlays the edit form.
         if self.file_dialog.active:
@@ -315,22 +347,21 @@ struct ActionEditor(Movable):
         ``self.lang_dropdown`` directly so the open state persists."""
         return _build_lang_dropdown(current)
 
-    fn _paint_lang(self, mut canvas: Canvas, rect: Rect):
-        var ir = _input_rect(rect, _row_for_focus(_FOCUS_LANG), 0)
+    fn _paint_lang(self, mut canvas: Canvas, layout: _Layout):
         var has_focus = self.focus == _FOCUS_LANG
         self.lang_dropdown.paint(
-            canvas, ir, has_focus,
+            canvas, layout.lang_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
 
-    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect):
+    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
         # Browse sits at the right edge of the Program row.
-        var browse_y = rect.a.y + _row_for_focus(_FOCUS_BROWSE)
+        var browse_y = layout.program_rect.a.y
         var browse_w = self._buttons[0].button.face_width()
         var browse_x = rect.b.x - 2 - (browse_w + 1)
         self._buttons[0].button.move_to(browse_x, browse_y)
         # Save / Cancel pinned to the bottom-right.
-        var bottom_y = rect.b.y - 3
+        var bottom_y = layout.bottom_buttons_y
         var cancel_w = self._buttons[2].button.face_width()
         var cancel_x = rect.b.x - 2 - (cancel_w + 1)
         var save_w = self._buttons[1].button.face_width()
@@ -490,13 +521,15 @@ struct ActionEditor(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Open dropdown popup gets first dibs on the click — same as
         # the keyboard branch. ``handle_mouse`` toggles open on body
         # click, commits + closes on a popup-row click, and closes on
         # an outside click.
-        var lang_ir = _input_rect(rect, _row_for_focus(_FOCUS_LANG), 0)
         if self.lang_dropdown.is_open:
-            var hit = self.lang_dropdown.handle_mouse(lang_ir, screen, event)
+            var hit = self.lang_dropdown.handle_mouse(
+                layout.lang_rect, screen, event,
+            )
             if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
                 self.entry.language_id = self.lang_dropdown.value()
                 self.focus = _FOCUS_LANG
@@ -535,33 +568,29 @@ struct ActionEditor(Movable):
                 or event.motion:
             return True
         # Click into a form input.
-        var browse_w = self._buttons[0].button.total_width()
-        if lang_ir.contains(event.pos):
+        if layout.lang_rect.contains(event.pos):
             # Closed dropdown clicked: forward to dd.handle_mouse so the
             # popup actually opens. Without this the strip just took
             # focus and the user had no way to discover the options
             # short of pressing arrow keys.
-            var hit = self.lang_dropdown.handle_mouse(lang_ir, screen, event)
+            var hit = self.lang_dropdown.handle_mouse(
+                layout.lang_rect, screen, event,
+            )
             if hit != DROPDOWN_HIT_NONE:
                 self.entry.language_id = self.lang_dropdown.value()
             self.focus = _FOCUS_LANG
             return True
-        var program_ir = _input_rect(
-            rect, _row_for_focus(_FOCUS_PROGRAM), browse_w + 2,
-        )
-        if program_ir.contains(event.pos):
+        if layout.program_rect.contains(event.pos):
             self.focus = _FOCUS_PROGRAM
-            _ = self.program_tf.handle_mouse(event, program_ir)
+            _ = self.program_tf.handle_mouse(event, layout.program_rect)
             return True
-        var args_ir = _input_rect(rect, _row_for_focus(_FOCUS_ARGS), 0)
-        if args_ir.contains(event.pos):
+        if layout.args_rect.contains(event.pos):
             self.focus = _FOCUS_ARGS
-            _ = self.args_tf.handle_mouse(event, args_ir)
+            _ = self.args_tf.handle_mouse(event, layout.args_rect)
             return True
-        var cwd_ir = _input_rect(rect, _row_for_focus(_FOCUS_CWD), 0)
-        if cwd_ir.contains(event.pos):
+        if layout.cwd_rect.contains(event.pos):
             self.focus = _FOCUS_CWD
-            _ = self.cwd_tf.handle_mouse(event, cwd_ir)
+            _ = self.cwd_tf.handle_mouse(event, layout.cwd_rect)
             return True
         return True
 

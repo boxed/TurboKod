@@ -60,6 +60,7 @@ from .geometry import Point, Rect, compute_dialog_rect
 from .language_config import built_in_servers
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import TextField
+from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -87,45 +88,88 @@ comptime _FOCUS_COUNT    = 10
 comptime _DIALOG_W = 76
 comptime _DIALOG_H = 22
 comptime _LIST_W   = 18
-"""Width of the left-side targets list (including its border)."""
-comptime _LIST_TOP = 3   # rows from dialog top to list top
-comptime _LIST_BOT = 4   # rows from dialog bottom to list bottom (room for buttons)
+"""Width of the left-side targets list."""
+comptime _LIST_TOP = 3
+"""Rows from the dialog top to the list top — the row above is the
+``Targets:`` label, on the same row as the first form field."""
+comptime _LIST_BOT = 4
+"""Rows from the dialog bottom to the list bottom — leaves room for
+the bottom button strip plus border."""
+comptime _LABEL_W = 18
+"""Column width reserved for right-side form labels."""
 
 
 fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
-fn _list_rect(dialog: Rect) -> Rect:
-    """Inner area of the targets list (inside the framing border)."""
-    return Rect(
-        dialog.a.x + 2, dialog.a.y + _LIST_TOP,
-        dialog.a.x + 2 + _LIST_W, dialog.b.y - _LIST_BOT,
+@fieldwise_init
+struct _Layout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects + row anchors for the targets dialog.
+
+    Built once per paint / mouse event from the dialog rect via
+    ``_build_layout``, so painted geometry and hit-test geometry
+    can't drift out of sync. The right-column form rows flow
+    top-down through ``RowCursor`` with one blank row between them;
+    the cwd help line is glued to the cwd field (no gap) and the
+    left-column list is anchored against ``_LIST_TOP`` /
+    ``_LIST_BOT`` independently of the form flow.
+    """
+    var list_rect: Rect
+    var list_label_pt: Point
+    """Where the ``Targets:`` label sits — on the same row as the
+    first form field, in the left column."""
+    var name_rect: Rect
+    var program_rect: Rect
+    var args_rect: Rect
+    var cwd_rect: Rect
+    var cwd_hint_y: Int
+    var lang_rect: Rect
+    var buttons_y: Int
+    var label_x: Int
+
+
+fn _build_layout(rect: Rect) -> _Layout:
+    var cursor = RowCursor(rect.a.y + 2)
+    var name_y = cursor.place()
+    var program_y = cursor.place()
+    var args_y = cursor.place()
+    var cwd_y = cursor.place()
+    # Hint line is glued to the cwd field (label-and-its-help-text
+    # read as one logical control) — no gap, then consume the row.
+    var cwd_hint_y = cwd_y + 1
+    cursor.skip(1)
+    var lang_y = cursor.place()
+    var list_left = rect.a.x + 2
+    var list_right = list_left + _LIST_W
+    var label_x = list_right + 2
+    var field_x = label_x + _LABEL_W
+    var right_max = rect.b.x - 2
+    return _Layout(
+        Rect(list_left, rect.a.y + _LIST_TOP, list_right, rect.b.y - _LIST_BOT),
+        Point(rect.a.x + 2, name_y),
+        Rect(field_x, name_y, right_max, name_y + 1),
+        Rect(field_x, program_y, right_max, program_y + 1),
+        Rect(field_x, args_y, right_max, args_y + 1),
+        Rect(field_x, cwd_y, right_max, cwd_y + 1),
+        cwd_hint_y,
+        Rect(field_x, lang_y, right_max, lang_y + 1),
+        rect.b.y - 3,
+        label_x,
     )
 
 
-fn _input_rect(dialog: Rect, row: Int, label_w: Int = 18) -> Rect:
-    """One-row editable strip on the right side of the dialog. ``row``
-    is the offset from the dialog top (so the layout is described in
-    one place rather than scattered). ``label_w`` carves out the
-    column the label occupies; the strip starts after it."""
-    var x0 = dialog.a.x + 2 + _LIST_W + 2 + label_w
-    return Rect(x0, dialog.a.y + row, dialog.b.x - 2, dialog.a.y + row + 1)
+fn _input_rect_for(layout: _Layout, focus: UInt8) -> Rect:
+    if focus == _FOCUS_NAME:    return layout.name_rect
+    if focus == _FOCUS_PROGRAM: return layout.program_rect
+    if focus == _FOCUS_ARGS:    return layout.args_rect
+    if focus == _FOCUS_CWD:     return layout.cwd_rect
+    if focus == _FOCUS_LANG:    return layout.lang_rect
+    return Rect(0, 0, 0, 0)
 
 
-fn _label_at(dialog: Rect, row: Int) -> Point:
-    return Point(dialog.a.x + 2 + _LIST_W + 2, dialog.a.y + row)
-
-
-# Per-field row offset within the dialog. The cwd hint (row 9)
-# carries no input — it's a static help line below the cwd field.
-fn _row_for_focus(focus: UInt8) -> Int:
-    if focus == _FOCUS_NAME:    return 2
-    if focus == _FOCUS_PROGRAM: return 4
-    if focus == _FOCUS_ARGS:    return 6
-    if focus == _FOCUS_CWD:     return 8
-    if focus == _FOCUS_LANG:    return 11
-    return -1
+fn _label_pt_for(layout: _Layout, focus: UInt8) -> Point:
+    return Point(layout.label_x, _input_rect_for(layout, focus).a.y)
 
 
 @fieldwise_init
@@ -486,6 +530,7 @@ struct TargetsDialog(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(WHITE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -496,20 +541,17 @@ struct TargetsDialog(Movable):
         # editor windows, drawn by the framework helper.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Section labels.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 2), String("Targets:"), bg,
-        )
+        _ = painter.put_text(canvas, layout.list_label_pt, String("Targets:"), bg)
         # Render the targets list.
-        self._paint_list(canvas, painter, _list_rect(rect))
+        self._paint_list(canvas, painter, layout.list_rect)
         # Right-pane labels and inputs.
-        self._paint_form(canvas, painter, rect)
+        self._paint_form(canvas, painter, layout)
         # Bottom button row.
-        self._paint_buttons(canvas, rect)
+        self._paint_buttons(canvas, rect, layout)
         # Language dropdown popup overlays the rest of the dialog when
         # open — paint last so it sits on top of the form and buttons.
         if self.lang_dropdown.is_open:
-            var lang_ir = _input_rect(rect, _row_for_focus(_FOCUS_LANG))
-            self.lang_dropdown.paint_popup(canvas, lang_ir, screen)
+            self.lang_dropdown.paint_popup(canvas, layout.lang_rect, screen)
 
     fn _paint_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
@@ -574,7 +616,7 @@ struct TargetsDialog(Movable):
             )
 
     fn _paint_form(
-        mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
+        mut self, mut canvas: Canvas, painter: Painter, layout: _Layout,
     ):
         """Paint the labels + editable strips for the selected target.
         When nothing is selected, paint a centered hint — the form
@@ -587,58 +629,65 @@ struct TargetsDialog(Movable):
         var hint_attr = Attr(BLUE, LIGHT_GRAY)
         if self.selected < 0:
             var hint = String("(no target selected — use [+ Add])")
-            var hx = _label_at(rect, 6).x
-            _ = painter.put_text(canvas, Point(hx, rect.a.y + 6), hint, hint_attr)
+            _ = painter.put_text(
+                canvas, Point(layout.label_x, layout.args_rect.a.y),
+                hint, hint_attr,
+            )
             return
-        _ = painter.put_text(canvas, _label_at(rect, 2), String("Name:"), bg)
-        _ = painter.put_text(canvas, _label_at(rect, 4), String("Program:"), bg)
-        _ = painter.put_text(canvas, _label_at(rect, 6), String("Args:"), bg)
-        _ = painter.put_text(canvas, _label_at(rect, 8), String("Working dir:"), bg)
+        _ = painter.put_text(
+            canvas, _label_pt_for(layout, _FOCUS_NAME), String("Name:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, _label_pt_for(layout, _FOCUS_PROGRAM), String("Program:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, _label_pt_for(layout, _FOCUS_ARGS), String("Args:"), bg,
+        )
+        _ = painter.put_text(
+            canvas, _label_pt_for(layout, _FOCUS_CWD), String("Working dir:"), bg,
+        )
         # Helper line under the cwd input — same column as the input
         # so the connection reads at a glance.
         _ = painter.put_text(
-            canvas, Point(_input_rect(rect, 8).a.x, rect.a.y + 9),
+            canvas, Point(layout.cwd_rect.a.x, layout.cwd_hint_y),
             String("(empty = project root; relative paths join the project)"),
             hint_attr,
         )
         _ = painter.put_text(
-            canvas, _label_at(rect, 11), String("Debug language:"), bg,
+            canvas, _label_pt_for(layout, _FOCUS_LANG),
+            String("Debug language:"), bg,
         )
-        # Compute and stash strip rects so ``handle_mouse`` can route
-        # a click back to the right field. Then paint each field's
-        # ``TextField`` directly — ``TextField.paint`` mutates the
-        # field (it owns the horizontal scroll offset and reconciles
-        # it against the strip width), so we have to call it on the
-        # owned ``self.<field>`` rather than on a copy.
-        self._name_rect = _input_rect(rect, _row_for_focus(_FOCUS_NAME))
-        self._program_rect = _input_rect(rect, _row_for_focus(_FOCUS_PROGRAM))
-        self._args_rect = _input_rect(rect, _row_for_focus(_FOCUS_ARGS))
-        self._cwd_rect = _input_rect(rect, _row_for_focus(_FOCUS_CWD))
+        # Stash strip rects so ``handle_mouse`` can route a click back
+        # to the right field. Then paint each field's ``TextField``
+        # directly — ``TextField.paint`` mutates the field (it owns
+        # the horizontal scroll offset and reconciles it against the
+        # strip width), so we have to call it on the owned
+        # ``self.<field>`` rather than on a copy.
+        self._name_rect = layout.name_rect
+        self._program_rect = layout.program_rect
+        self._args_rect = layout.args_rect
+        self._cwd_rect = layout.cwd_rect
         self.name_tf.paint(canvas, self._name_rect, self.focus == _FOCUS_NAME)
         self.program_tf.paint(
             canvas, self._program_rect, self.focus == _FOCUS_PROGRAM,
         )
         self.args_tf.paint(canvas, self._args_rect, self.focus == _FOCUS_ARGS)
         self.cwd_tf.paint(canvas, self._cwd_rect, self.focus == _FOCUS_CWD)
-        self._paint_lang_dropdown(canvas, rect)
+        self._paint_lang_dropdown(canvas, layout)
 
-    fn _paint_lang_dropdown(self, mut canvas: Canvas, dialog: Rect):
+    fn _paint_lang_dropdown(self, mut canvas: Canvas, layout: _Layout):
         """Render the debug-language dropdown using the same focus
         colours as ``_paint_input`` so the form reads as a uniform
         row of editable strips. Reads from the persistent
         ``lang_dropdown`` so its open / scroll / highlight state
         survives across paints."""
-        var row = _row_for_focus(_FOCUS_LANG)
-        if row < 0:
-            return
-        var ir = _input_rect(dialog, row)
         var has_focus = self.focus == _FOCUS_LANG
         self.lang_dropdown.paint(
-            canvas, ir, has_focus,
+            canvas, layout.lang_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
 
-    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect):
+    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
         """Layout: Add and Remove on the bottom-left, Save and Cancel
         on the bottom-right. Each button is painted with the shared
         ``ShadowButton`` widget so the drop-shadow look matches the
@@ -657,7 +706,7 @@ struct TargetsDialog(Movable):
         # Lay out left-to-right from the body's left margin; each
         # button claims face + 1 shadow column, plus 1 column gap
         # before the next so adjacent shadows don't collide.
-        var y = rect.b.y - 3
+        var y = layout.buttons_y
         var add_x = rect.a.x + 2
         var rm_x = add_x + self._buttons[0].button.total_width() + 1
         var cancel_w = self._buttons[3].button.face_width()
@@ -864,19 +913,14 @@ struct TargetsDialog(Movable):
         if not self.active:
             return False
         var rect = _dialog_rect(screen, self.pos)
-        var rows = List[UInt8]()
-        rows.append(_FOCUS_NAME)
-        rows.append(_FOCUS_PROGRAM)
-        rows.append(_FOCUS_ARGS)
-        rows.append(_FOCUS_CWD)
-        rows.append(_FOCUS_LANG)
-        for i in range(len(rows)):
-            var row = _row_for_focus(rows[i])
-            if row < 0:
-                continue
-            if _input_rect(rect, row).contains(pos):
-                return True
-        return False
+        var layout = _build_layout(rect)
+        return (
+            layout.name_rect.contains(pos)
+            or layout.program_rect.contains(pos)
+            or layout.args_rect.contains(pos)
+            or layout.cwd_rect.contains(pos)
+            or layout.lang_rect.contains(pos)
+        )
 
     fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
@@ -884,15 +928,15 @@ struct TargetsDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = _dialog_rect(screen, self.pos)
+        var layout = _build_layout(rect)
         # Open dropdown popup gets first dibs on the click — same as the
         # keyboard branch. ``handle_mouse`` toggles open on body click,
         # commits + closes on a popup-row click, and closes on an
         # outside click.
-        var lang_row = _row_for_focus(_FOCUS_LANG)
-        var lang_ir = _input_rect(rect, lang_row) if lang_row >= 0 \
-                else Rect(0, 0, 0, 0)
         if self.lang_dropdown.is_open:
-            var hit = self.lang_dropdown.handle_mouse(lang_ir, screen, event)
+            var hit = self.lang_dropdown.handle_mouse(
+                layout.lang_rect, screen, event,
+            )
             if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
                 self._commit_lang_dropdown()
                 self.focus = _FOCUS_LANG
@@ -934,25 +978,44 @@ struct TargetsDialog(Movable):
             ))
             return True
         # Wheel scroll inside the list.
-        var list_rect = _list_rect(rect)
         if event.button == MOUSE_WHEEL_UP \
-                and list_rect.contains(event.pos):
+                and layout.list_rect.contains(event.pos):
             self._list_scroll -= 1
             if self._list_scroll < 0:
                 self._list_scroll = 0
             return True
         if event.button == MOUSE_WHEEL_DOWN \
-                and list_rect.contains(event.pos):
+                and layout.list_rect.contains(event.pos):
             self._list_scroll += 1
             return True
+        # Continue an in-flight TextField drag (motion / release) on
+        # whichever field has focus, so a drag-select that wanders
+        # outside the strip still extends the selection and the
+        # eventual release clears the field's drag state. Without
+        # this, the pressed-only early-return below swallows every
+        # motion event and click-drag selection silently fails.
+        if event.motion or not event.pressed:
+            var ir = _input_rect_for(layout, self.focus)
+            if self.focus == _FOCUS_NAME:
+                if self.name_tf.handle_mouse(event, ir):
+                    return True
+            elif self.focus == _FOCUS_PROGRAM:
+                if self.program_tf.handle_mouse(event, ir):
+                    return True
+            elif self.focus == _FOCUS_ARGS:
+                if self.args_tf.handle_mouse(event, ir):
+                    return True
+            elif self.focus == _FOCUS_CWD:
+                if self.cwd_tf.handle_mouse(event, ir):
+                    return True
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
         # Click inside the list: select the row that was hit. With
         # the framing border gone, every row of ``list_rect`` is a
         # data row — no inset to skip past.
-        if list_rect.contains(event.pos):
-            var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+        if layout.list_rect.contains(event.pos):
+            var idx = self._list_scroll + (event.pos.y - layout.list_rect.a.y)
             if 0 <= idx and idx < len(self.entries) and idx != self.selected:
                 # Save the right-side fields back into the previous
                 # row before swapping, then load the clicked row.
@@ -971,10 +1034,7 @@ struct TargetsDialog(Movable):
         fields.append(_FOCUS_CWD)
         fields.append(_FOCUS_LANG)
         for i in range(len(fields)):
-            var row = _row_for_focus(fields[i])
-            if row < 0:
-                continue
-            var ir = _input_rect(rect, row)
+            var ir = _input_rect_for(layout, fields[i])
             if ir.contains(event.pos):
                 if self.selected < 0:
                     return True

@@ -43,6 +43,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .text_field import TextField, text_field_bg
+from .view import RowCursor
 
 
 comptime _DLG_WIDTH = 64
@@ -65,6 +66,44 @@ comptime _FOCUS_CANCEL    = UInt8(4)
 # popup readable; the dialog translates between this label and the
 # empty string when reading/writing the value.
 comptime _WAIT_FOR_NONE = String("(none)")
+
+
+@fieldwise_init
+struct _MenuLayout(ImplicitlyCopyable, Movable):
+    """Pre-computed row anchors + rects for the BreakpointMenu.
+
+    Top-flowing controls (title, Enabled checkbox, wait-for, condition)
+    are placed via ``RowCursor`` so each pair of distinct controls is
+    separated by a blank row. The labels for wait-for and condition
+    sit one row above their inputs (place_tight) — label + input read
+    as a single logical control.
+    """
+    var title_y: Int
+    var checkbox_y: Int
+    var wait_for_label_y: Int
+    var wait_for_rect: Rect
+    var condition_label_y: Int
+    var condition_rect: Rect
+    var buttons_y: Int
+
+
+fn _build_menu_layout(rect: Rect) -> _MenuLayout:
+    var cursor = RowCursor(rect.a.y + 1)
+    var title_y = cursor.place()
+    var checkbox_y = cursor.place()
+    var wait_for_label_y = cursor.place()
+    var wait_for_y = cursor.place_tight()
+    var condition_label_y = cursor.place()
+    var condition_y = cursor.place_tight()
+    var left = rect.a.x + 2
+    var right = rect.b.x - 2
+    return _MenuLayout(
+        title_y, checkbox_y, wait_for_label_y,
+        Rect(left, wait_for_y, right, wait_for_y + 1),
+        condition_label_y,
+        Rect(left, condition_y, right, condition_y + 1),
+        rect.b.y - 3,
+    )
 
 
 @fieldwise_init
@@ -202,28 +241,19 @@ struct BreakpointMenu(Movable):
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn _wait_for_rect(self, dlg: Rect) -> Rect:
-        # Dropdown row sits on row 6 of the dialog (label on row 5).
-        var y = dlg.a.y + 6
-        return Rect(dlg.a.x + 2, y, dlg.b.x - 2, y + 1)
-
-    fn _input_rect(self, dlg: Rect) -> Rect:
-        # Condition field row, with the label on the row above.
-        var y = dlg.a.y + 9
-        return Rect(dlg.a.x + 2, y, dlg.b.x - 2, y + 1)
-
-    fn _position_checkbox(mut self, dlg: Rect):
+    fn _position_checkbox(mut self, layout: _MenuLayout, dlg: Rect):
         """Repoint the checkbox at the dialog's current position. Run
         from both ``paint`` and ``handle_mouse`` so the chip's
         ``hit_rect`` is in sync with where it was last drawn even if
         the dialog has since moved/resized."""
-        self.enabled.move_to(dlg.a.x + 2, dlg.a.y + 3)
+        self.enabled.move_to(dlg.a.x + 2, layout.checkbox_y)
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var rect = self._layout(screen)
+        var layout = _build_menu_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
@@ -248,12 +278,12 @@ struct BreakpointMenu(Movable):
                 length=visible,
             ))
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 1), title + loc, attr,
+            canvas, Point(rect.a.x + 2, layout.title_y), title + loc, attr,
         )
         # Enabled checkbox: render the box+label on a contrasting
         # chip so the click target reads as wider than just the 3-cell
         # ``[x]`` glyph.
-        self._position_checkbox(rect)
+        self._position_checkbox(layout, rect)
         paint_checkbox(
             canvas, self.enabled,
             Attr(BLACK, CYAN), Attr(BLACK, GREEN),
@@ -262,25 +292,25 @@ struct BreakpointMenu(Movable):
         )
         # Wait-for label + dropdown.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 5),
+            canvas, Point(rect.a.x + 2, layout.wait_for_label_y),
             String("Enable after another breakpoint is hit:"), attr,
         )
-        var wf_rect = self._wait_for_rect(rect)
         self.wait_for.paint(
-            canvas, wf_rect, self._focus == _FOCUS_WAIT_FOR,
+            canvas, layout.wait_for_rect, self._focus == _FOCUS_WAIT_FOR,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
             _WAIT_FOR_NONE,
         )
         # Condition label + field.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 8),
+            canvas, Point(rect.a.x + 2, layout.condition_label_y),
             String("Condition:"), attr,
         )
-        var ir = self._input_rect(rect)
-        self.condition.paint(canvas, ir, self._focus == _FOCUS_CONDITION)
+        self.condition.paint(
+            canvas, layout.condition_rect, self._focus == _FOCUS_CONDITION,
+        )
         # Button row — bottom of dialog, two cells above the bottom
         # border to leave room for the shadow.
-        var by = rect.b.y - 3
+        var by = layout.buttons_y
         var ok_w = self._ok.total_width()
         var cancel_w = self._cancel.total_width()
         var gap = 2
@@ -311,8 +341,8 @@ struct BreakpointMenu(Movable):
         if not self.active or not self.wait_for.is_open:
             return
         var rect = self._layout(screen)
-        var anchor = self._wait_for_rect(rect)
-        self.wait_for.paint_popup(canvas, anchor, screen)
+        var layout = _build_menu_layout(rect)
+        self.wait_for.paint_popup(canvas, layout.wait_for_rect, screen)
 
     fn _resolve(mut self, confirmed: Bool):
         self.submitted = True
@@ -413,13 +443,15 @@ struct BreakpointMenu(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._layout(screen)
-        self._position_checkbox(rect)
-        var wf_anchor = self._wait_for_rect(rect)
+        var layout = _build_menu_layout(rect)
+        self._position_checkbox(layout, rect)
         # Run the dropdown first when its popup is open: the popup
         # overlays everything else, so a click that lands on it must
         # not also flip checkbox / text-field focus underneath.
         if self.wait_for.is_open:
-            var hit = self.wait_for.handle_mouse(wf_anchor, screen, event)
+            var hit = self.wait_for.handle_mouse(
+                layout.wait_for_rect, screen, event,
+            )
             if hit == DROPDOWN_HIT_BODY or hit == DROPDOWN_HIT_POPUP:
                 self._focus = _FOCUS_WAIT_FOR
                 return True
@@ -446,20 +478,18 @@ struct BreakpointMenu(Movable):
         # captures mouse and would otherwise win on overlapping rows.
         if not self.wait_for.is_open:
             var hit2 = self.wait_for.handle_mouse(
-                wf_anchor, screen, event,
+                layout.wait_for_rect, screen, event,
             )
             if hit2 == DROPDOWN_HIT_BODY:
                 self._focus = _FOCUS_WAIT_FOR
                 return True
         if event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
-            var ir = self._input_rect(rect)
-            if ir.contains(event.pos):
+            if layout.condition_rect.contains(event.pos):
                 self._focus = _FOCUS_CONDITION
         # Forward to the text field while focused.
         if self._focus == _FOCUS_CONDITION:
-            var ir2 = self._input_rect(rect)
-            if self.condition.handle_mouse(event, ir2):
+            if self.condition.handle_mouse(event, layout.condition_rect):
                 return True
         # Then to buttons.
         var s = self._ok.handle_mouse(event)
@@ -482,6 +512,46 @@ comptime _ERR_FOCUS_CONDITION = UInt8(0)
 comptime _ERR_FOCUS_TRY       = UInt8(1)
 comptime _ERR_FOCUS_DISABLE   = UInt8(2)
 comptime _ERR_FOCUS_CANCEL    = UInt8(3)
+
+
+@fieldwise_init
+struct _ErrorLayout(ImplicitlyCopyable, Movable):
+    """Pre-computed row anchors + rects for the error dialog.
+
+    Top of the dialog flows through ``RowCursor`` (title, error,
+    locals label + rows); the condition field + buttons are
+    anchored to the bottom so the locals section can stretch in
+    between without disturbing them.
+    """
+    var title_y: Int
+    var error_y: Int
+    var locals_label_y: Int
+    var locals_start_y: Int
+    var condition_label_y: Int
+    var condition_rect: Rect
+    var buttons_y: Int
+
+
+fn _build_error_layout(rect: Rect) -> _ErrorLayout:
+    var cursor = RowCursor(rect.a.y + 1)
+    var title_y = cursor.place()
+    var error_y = cursor.place()
+    var locals_label_y = cursor.place()
+    # Locals rows sit directly under the label (the label heads the
+    # block — no gap).
+    var locals_start_y = locals_label_y + 1
+    # Bottom-anchored chrome:
+    var buttons_y = rect.b.y - 3
+    var condition_y = rect.b.y - 5
+    var condition_label_y = condition_y - 1
+    var left = rect.a.x + 2
+    var right = rect.b.x - 2
+    return _ErrorLayout(
+        title_y, error_y, locals_label_y, locals_start_y,
+        condition_label_y,
+        Rect(left, condition_y, right, condition_y + 1),
+        buttons_y,
+    )
 
 
 # Result codes returned by the error dialog on submit. The host
@@ -605,18 +675,13 @@ struct BreakpointConditionErrorDialog(Movable):
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn _input_rect(self, dlg: Rect) -> Rect:
-        # Condition row sits two rows above the button strip + shadow +
-        # bottom border (3 rows of bottom chrome, one blank above input).
-        var y = dlg.b.y - 5
-        return Rect(dlg.a.x + 2, y, dlg.b.x - 2, y + 1)
-
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var err_attr = Attr(LIGHT_RED, LIGHT_GRAY)
         var rect = self._layout(screen)
+        var layout = _build_error_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
@@ -644,40 +709,42 @@ struct BreakpointConditionErrorDialog(Movable):
                 length=visible,
             ))
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 1),
+            canvas, Point(rect.a.x + 2, layout.title_y),
             title + loc, attr,
         )
         # Error line.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 3),
+            canvas, Point(rect.a.x + 2, layout.error_y),
             String("Error: ") + self.error, err_attr,
         )
         # Locals.
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.a.y + 5),
+            canvas, Point(rect.a.x + 2, layout.locals_label_y),
             String("Locals:"), attr,
         )
         var max_rows = len(self.locals_)
         if max_rows > 6: max_rows = 6
         for i in range(max_rows):
             _ = painter.put_text(
-                canvas, Point(rect.a.x + 4, rect.a.y + 6 + i),
+                canvas, Point(rect.a.x + 4, layout.locals_start_y + i),
                 self.locals_[i], attr,
             )
         if len(self.locals_) == 0:
             _ = painter.put_text(
-                canvas, Point(rect.a.x + 4, rect.a.y + 6),
+                canvas, Point(rect.a.x + 4, layout.locals_start_y),
                 String("(no locals — not paused at this BP)"), attr,
             )
         # Condition input — label one row above the input strip.
-        var ir = self._input_rect(rect)
         _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, ir.a.y - 1),
+            canvas, Point(rect.a.x + 2, layout.condition_label_y),
             String("Condition:"), attr,
         )
-        self.condition.paint(canvas, ir, self._focus == _ERR_FOCUS_CONDITION)
+        self.condition.paint(
+            canvas, layout.condition_rect,
+            self._focus == _ERR_FOCUS_CONDITION,
+        )
         # Buttons.
-        var by = rect.b.y - 3
+        var by = layout.buttons_y
         var tw = self._try.total_width()
         var dw = self._disable.total_width()
         var cw = self._cancel.total_width()
@@ -758,13 +825,13 @@ struct BreakpointConditionErrorDialog(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._layout(screen)
-        var ir = self._input_rect(rect)
+        var layout = _build_error_layout(rect)
         if event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
-            if ir.contains(event.pos):
+            if layout.condition_rect.contains(event.pos):
                 self._focus = _ERR_FOCUS_CONDITION
         if self._focus == _ERR_FOCUS_CONDITION:
-            if self.condition.handle_mouse(event, ir):
+            if self.condition.handle_mouse(event, layout.condition_rect):
                 return True
         var s = self._try.handle_mouse(event)
         if s != BUTTON_NONE:
