@@ -3407,7 +3407,7 @@ fn test_settings_editor_submit_appends_new_entry() raises:
     assert_true(s.editor.active)
     assert_equal(s.editor.edit_index, -1)
     s.editor.entry.language_id = String("python")
-    s.editor.program_tf.set_text(String("/usr/bin/black"))
+    s.editor.form.set_text(UInt8(1), String("/usr/bin/black"))
     s.editor.submitted = True
     s._maybe_consume_editor()
     assert_false(s.editor.active)
@@ -3431,7 +3431,7 @@ fn test_settings_editor_submit_replaces_existing_entry() raises:
     s.open(actions^, False)
     s.selected_action = 0
     s._edit_selected()
-    s.editor.program_tf.set_text(String("/opt/bin/black-edge"))
+    s.editor.form.set_text(UInt8(1), String("/opt/bin/black-edge"))
     s.editor.submitted = True
     s._maybe_consume_editor()
     assert_equal(len(s.actions), 1)
@@ -3910,7 +3910,7 @@ fn test_action_editor_consumes_browse_path() raises:
     ed.file_dialog.submitted = True
     ed._maybe_consume_browse()
     assert_false(ed.file_dialog.active)
-    assert_equal(ed.program_tf.text, String("/usr/bin/black"))
+    assert_equal(ed.form.text(UInt8(1)), String("/usr/bin/black"))
 
 
 fn test_action_editor_args_field_accepts_spaces() raises:
@@ -3927,7 +3927,7 @@ fn test_action_editor_args_field_accepts_spaces() raises:
     for i in range(len(lb)):
         var ev = Event.key_event(UInt32(Int(lb[i])), MOD_NONE)
         _ = ed.handle_key(ev)
-    assert_equal(ed.args_tf.text, String("a b c"))
+    assert_equal(ed.form.text(UInt8(3)), String("a b c"))
     # The committed list is empty until Save fires.
     assert_equal(len(ed.entry.args), 0)
     ed.focus = UInt8(5)  # _FOCUS_SAVE
@@ -3953,7 +3953,7 @@ fn test_action_editor_args_buffer_seeded_from_entry() raises:
     )
     var ed = ActionEditor()
     ed.open(existing^, 0)
-    assert_equal(ed.args_tf.text, String("--quiet $FilePath$"))
+    assert_equal(ed.form.text(UInt8(3)), String("--quiet $FilePath$"))
 
 
 fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:

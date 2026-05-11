@@ -843,6 +843,117 @@ struct TextField(Copyable, Movable):
         return base_x + utf8_codepoint_count(self.text) - self._scroll
 
 
+# --- Form: a group of TextFields keyed by focus IDs ----------------------
+
+
+struct Form(Movable):
+    """A grouped collection of ``TextField``s, keyed by caller-chosen
+    focus IDs. Owns the fields and routes every mouse / keyboard event
+    through them, so a dialog with N inputs doesn't need to enumerate
+    each one in its event handler — it instantiates a ``Form``, fills
+    it via ``add``, and forwards events with a single call.
+
+    The contract is:
+
+    * ``handle_mouse(event, rects)`` — ``rects`` is parallel to the
+      field list, indexed by registration order. Returns the focus
+      ID of whichever field claimed the event (a press inside its
+      rect, or a motion / release while mid-drag), or ``None``. The
+      dialog sets ``self.focus`` from the returned ID.
+    * ``handle_key(event, focus)`` — forwards the key to the field
+      whose focus ID matches; non-matching focus is a no-op.
+    * ``paint_field`` / ``text`` / ``set_text`` — by focus ID lookup
+      for the painting and read-back paths.
+
+    Drag tracking, click counting, undo, Cmd+arrow, double-click word
+    selection, and all the other input-field niceties live inside
+    ``TextField`` itself — the dialog never sees any of it.
+    """
+    var _fields: List[TextField]
+    var _keys: List[UInt8]
+
+    fn __init__(out self):
+        self._fields = List[TextField]()
+        self._keys = List[UInt8]()
+
+    fn __copyinit__(out self, copy: Self):
+        self._fields = copy._fields.copy()
+        self._keys = copy._keys.copy()
+
+    fn copy(self) -> Self:
+        var out = Self()
+        out._fields = self._fields.copy()
+        out._keys = self._keys.copy()
+        return out^
+
+    fn add(mut self, focus_key: UInt8):
+        """Register a fresh empty field bound to ``focus_key``. The
+        field's index in ``rects`` (passed to ``handle_mouse`` /
+        ``paint_each``) is the order of ``add`` calls."""
+        self._fields.append(TextField())
+        self._keys.append(focus_key)
+
+    fn _index_of(self, focus_key: UInt8) -> Int:
+        for i in range(len(self._keys)):
+            if self._keys[i] == focus_key:
+                return i
+        return -1
+
+    fn handle_mouse(
+        mut self, event: Event, rects: List[Rect],
+    ) -> Optional[UInt8]:
+        """Forward ``event`` to every registered field paired with its
+        rect from ``rects`` (parallel list). The first field that
+        consumes wins — press-inside arms its drag, motion / release
+        while mid-drag continue or end it. Returns the consumer's
+        focus key so the dialog can update ``self.focus``."""
+        var n = len(self._fields)
+        if len(rects) < n:
+            n = len(rects)
+        for i in range(n):
+            if self._fields[i].handle_mouse(event, rects[i]):
+                return Optional[UInt8](self._keys[i])
+        return Optional[UInt8]()
+
+    fn handle_key(
+        mut self, event: Event, focus_key: UInt8,
+    ) -> TextFieldKeyResult:
+        """Route ``event`` to the field whose registered key is
+        ``focus_key``. Returns ``TextFieldKeyResult(False, False)``
+        when ``focus_key`` isn't in the form — useful when the
+        dialog's overall focus is on a non-field widget (button,
+        dropdown) and the form has nothing to do."""
+        var idx = self._index_of(focus_key)
+        if idx < 0:
+            return TextFieldKeyResult(False, False)
+        return self._fields[idx].handle_key(event)
+
+    fn text(self, focus_key: UInt8) -> String:
+        var idx = self._index_of(focus_key)
+        if idx < 0:
+            return String("")
+        return self._fields[idx].text
+
+    fn set_text(mut self, focus_key: UInt8, var text: String):
+        var idx = self._index_of(focus_key)
+        if idx < 0:
+            return
+        self._fields[idx].set_text(text^)
+
+    fn paint_field(
+        mut self, mut canvas: Canvas, focus_key: UInt8,
+        rect: Rect, focused: Bool,
+    ):
+        """Paint the field bound to ``focus_key`` at ``rect``. Per-
+        field painting (rather than a single ``paint_each``) lets
+        dialogs interleave labels, hints, and chrome between the
+        rows however their layout requires."""
+        var idx = self._index_of(focus_key)
+        if idx < 0:
+            return
+        self._fields[idx].paint(canvas, rect, focused)
+
+
 # --- internals -----------------------------------------------------------
 
 

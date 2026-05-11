@@ -52,7 +52,7 @@ from .events import (
 from .file_dialog import FileDialog
 from .geometry import Point, Rect, compute_dialog_rect
 from .language_config import built_in_servers
-from .text_field import TextField
+from .text_field import Form
 from .view import RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
@@ -104,6 +104,16 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var cwd_hint_y: Int
     var bottom_buttons_y: Int
     var label_x: Int
+
+    fn field_rects(self) -> List[Rect]:
+        """Form-input row rects in registration order
+        (``_FOCUS_PROGRAM``, ``_FOCUS_ARGS``, ``_FOCUS_CWD``) — what
+        ``Form.handle_mouse`` expects."""
+        var rects = List[Rect]()
+        rects.append(self.program_rect)
+        rects.append(self.args_rect)
+        rects.append(self.cwd_rect)
+        return rects^
 
 
 fn _build_layout(rect: Rect) -> _Layout:
@@ -169,18 +179,19 @@ struct ActionEditor(Movable):
     drops the toggle so clicks felt like no-ops. Re-seeded from
     ``built_in_servers()`` on every ``open`` so a freshly-loaded LSP
     catalog is reflected."""
-    # Editable input strips. Each carries its own cursor + selection.
-    # Programmatic state (``entry.program``, ``entry.cwd``, args list)
-    # is recomputed from these fields on Save, so edits during the
-    # dialog's lifetime don't poke at the host snapshot.
-    var program_tf: TextField
-    var args_tf: TextField
-    """Free-form edit buffer for the Arguments field. Held as a single
-    string (in the field's ``text``) so the user can type spaces and
-    trailing whitespace without losing them to a split-on-space
-    round-trip. Committed to ``entry.args`` via ``_split_args`` only
-    when the user presses Save."""
-    var cwd_tf: TextField
+    # Editable input strips, grouped as a ``Form`` so the dialog
+    # never touches mouse / keyboard / drag plumbing for individual
+    # fields. Three fields registered in order:
+    # ``_FOCUS_PROGRAM`` (idx 0), ``_FOCUS_ARGS`` (idx 1),
+    # ``_FOCUS_CWD`` (idx 2). Programmatic state (``entry.program``,
+    # ``entry.cwd``, args list) is recomputed from these on Save, so
+    # edits during the dialog's lifetime don't poke at the host
+    # snapshot.
+    #
+    # The Args field's text is kept as a single free-form string
+    # (with spaces / trailing whitespace preserved) and is only
+    # committed to ``entry.args`` via ``_split_args`` on Save.
+    var form: Form
     var _buttons: List[_PlacedButton]
 
     fn __init__(out self):
@@ -193,9 +204,10 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog = FileDialog()
         self.lang_dropdown = _build_lang_dropdown(String(""))
-        self.program_tf = TextField()
-        self.args_tf = TextField()
-        self.cwd_tf = TextField()
+        self.form = Form()
+        self.form.add(_FOCUS_PROGRAM)
+        self.form.add(_FOCUS_ARGS)
+        self.form.add(_FOCUS_CWD)
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Browse "), 0, 0), _FOCUS_BROWSE, True,
@@ -225,12 +237,13 @@ struct ActionEditor(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self.lang_dropdown = _build_lang_dropdown(seed_lang^)
-        self.program_tf = TextField()
-        self.program_tf.set_text(seed_program^)
-        self.args_tf = TextField()
-        self.args_tf.set_text(seed_args^)
-        self.cwd_tf = TextField()
-        self.cwd_tf.set_text(seed_cwd^)
+        self.form = Form()
+        self.form.add(_FOCUS_PROGRAM)
+        self.form.add(_FOCUS_ARGS)
+        self.form.add(_FOCUS_CWD)
+        self.form.set_text(_FOCUS_PROGRAM, seed_program^)
+        self.form.set_text(_FOCUS_ARGS, seed_args^)
+        self.form.set_text(_FOCUS_CWD, seed_cwd^)
 
     fn close(mut self):
         self.active = False
@@ -242,9 +255,10 @@ struct ActionEditor(Movable):
         self._drag = Optional[Point]()
         self.file_dialog.close()
         self.lang_dropdown = _build_lang_dropdown(String(""))
-        self.program_tf = TextField()
-        self.args_tf = TextField()
-        self.cwd_tf = TextField()
+        self.form = Form()
+        self.form.add(_FOCUS_PROGRAM)
+        self.form.add(_FOCUS_ARGS)
+        self.form.add(_FOCUS_CWD)
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
@@ -255,9 +269,9 @@ struct ActionEditor(Movable):
         # TextFields; ``entry`` is the host-facing record, populated
         # only on ``value()`` (and read by Save).
         var out = self.entry
-        out.program = self.program_tf.text
-        out.cwd = self.cwd_tf.text
-        out.args = _split_args(self.args_tf.text)
+        out.program = self.form.text(_FOCUS_PROGRAM)
+        out.cwd = self.form.text(_FOCUS_CWD)
+        out.args = _split_args(self.form.text(_FOCUS_ARGS))
         return out^
 
     # --- painting ---------------------------------------------------
@@ -304,15 +318,25 @@ struct ActionEditor(Movable):
             canvas, Point(layout.cwd_rect.a.x, layout.cwd_hint_y),
             String("(empty = project root)"), hint,
         )
-        # Inputs. ``TextField.paint`` mutates the field (it owns the
-        # horizontal scroll offset), so call it directly on ``self.*``
-        # rather than via a helper that would force a by-value copy.
+        # Inputs are painted through the ``Form`` widget — one call
+        # per row so labels and hints can interleave between them.
+        # ``Form.paint_field`` looks the field up by focus ID and
+        # forwards to its internal ``TextField.paint`` (which owns
+        # the horizontal scroll offset, hence why the form takes
+        # ``mut self``).
         self._paint_lang(canvas, layout)
-        self.program_tf.paint(
-            canvas, layout.program_rect, self.focus == _FOCUS_PROGRAM,
+        self.form.paint_field(
+            canvas, _FOCUS_PROGRAM, layout.program_rect,
+            self.focus == _FOCUS_PROGRAM,
         )
-        self.args_tf.paint(canvas, layout.args_rect, self.focus == _FOCUS_ARGS)
-        self.cwd_tf.paint(canvas, layout.cwd_rect, self.focus == _FOCUS_CWD)
+        self.form.paint_field(
+            canvas, _FOCUS_ARGS, layout.args_rect,
+            self.focus == _FOCUS_ARGS,
+        )
+        self.form.paint_field(
+            canvas, _FOCUS_CWD, layout.cwd_rect,
+            self.focus == _FOCUS_CWD,
+        )
         # Buttons.
         self._paint_buttons(canvas, rect, layout)
         # Dropdown popup overlays the form when open. Paint after the
@@ -414,21 +438,13 @@ struct ActionEditor(Movable):
         if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
             self._cycle_lang(event)
             return True
-        # Route to the focused editable strip. Save / Cancel / Browse
-        # have no field, so the inner branches fall through and we
-        # swallow-by-default at the bottom.
-        if self.focus == _FOCUS_PROGRAM:
-            var r = self.program_tf.handle_key(event)
-            if r.consumed:
-                return True
-        elif self.focus == _FOCUS_ARGS:
-            var r = self.args_tf.handle_key(event)
-            if r.consumed:
-                return True
-        elif self.focus == _FOCUS_CWD:
-            var r = self.cwd_tf.handle_key(event)
-            if r.consumed:
-                return True
+        # Route to the focused editable strip via the ``Form``. The
+        # form looks up the field by focus key and runs its key
+        # handler; non-field focus (Save / Cancel / Browse) returns
+        # ``consumed=False`` and falls through to the swallow below.
+        var r = self.form.handle_key(event, self.focus)
+        if r.consumed:
+            return True
         return True
 
     fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
@@ -452,9 +468,9 @@ struct ActionEditor(Movable):
         if self.focus == _FOCUS_SAVE:
             # Snapshot the field-backed values into ``entry`` so the
             # host (which reads ``value()``) sees what the user typed.
-            self.entry.program = self.program_tf.text
-            self.entry.cwd = self.cwd_tf.text
-            self.entry.args = _split_args(self.args_tf.text)
+            self.entry.program = self.form.text(_FOCUS_PROGRAM)
+            self.entry.cwd = self.form.text(_FOCUS_CWD)
+            self.entry.args = _split_args(self.form.text(_FOCUS_ARGS))
             self.submitted = True
             return True
         if self.focus == _FOCUS_CANCEL:
@@ -469,7 +485,7 @@ struct ActionEditor(Movable):
         path, or at the user's home when that's empty. The picker is
         modal-on-top of this dialog — events route to it until it
         submits or cancels."""
-        var seed = self.program_tf.text
+        var seed = self.form.text(_FOCUS_PROGRAM)
         if len(seed.as_bytes()) == 0:
             seed = String("/")
         else:
@@ -490,7 +506,7 @@ struct ActionEditor(Movable):
             return
         var path = self.file_dialog.selected_path
         self.file_dialog.close()
-        self.program_tf.set_text(path^)
+        self.form.set_text(_FOCUS_PROGRAM, path^)
         self.focus = _FOCUS_PROGRAM
 
     # --- mouse ------------------------------------------------------
@@ -548,23 +564,15 @@ struct ActionEditor(Movable):
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
             return True
-        # Every mouse event goes through every text field. Each field
-        # consumes only when a press lands inside its strip or when
-        # it's currently mid-drag — so at most one claims any given
-        # event. The TextField framework owns drag tracking, click
-        # counting, focus-on-press, and motion / release dispatch
-        # internally; the dialog just enumerates its fields. Return
-        # value drives ``self.focus`` so a fresh press promotes the
-        # clicked field; for motion / release the field that already
-        # had focus stays focused (focus assignment is idempotent).
-        if self.program_tf.handle_mouse(event, layout.program_rect):
-            self.focus = _FOCUS_PROGRAM
-            return True
-        if self.args_tf.handle_mouse(event, layout.args_rect):
-            self.focus = _FOCUS_ARGS
-            return True
-        if self.cwd_tf.handle_mouse(event, layout.cwd_rect):
-            self.focus = _FOCUS_CWD
+        # All input-field mouse handling lives inside the ``Form``
+        # widget — drag tracking, click counting, motion / release
+        # dispatch, focus-on-press: every input affordance is
+        # internal to the framework. The dialog hands the form the
+        # event and its current row rects (in registration order)
+        # and reads back whichever field's focus key was hit.
+        var hit = self.form.handle_mouse(event, layout.field_rects())
+        if hit:
+            self.focus = hit.value()
             return True
         # Remaining widgets are press-only (no drag semantics): the
         # lang dropdown opens on a left press, nothing else.
