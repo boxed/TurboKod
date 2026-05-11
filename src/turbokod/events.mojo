@@ -43,11 +43,9 @@ comptime MOD_NONE  = UInt8(0)
 comptime MOD_SHIFT = UInt8(1 << 0)
 comptime MOD_ALT   = UInt8(1 << 1)
 comptime MOD_CTRL  = UInt8(1 << 2)
-# macOS ⌘ / Windows ❖ / Linux Super. Folded onto MOD_CTRL by the
-# terminal parser when paired with a letter, so hotkey tables don't
-# need a Cmd-vs-Ctrl branch — Ctrl+S and Cmd+S deliver the same event.
-# The bit is preserved on non-letter keys (Cmd+Enter, etc.) for hosts
-# that want to bind to it explicitly.
+# macOS ⌘ / Windows ❖ / Linux Super. A distinct modifier — Cmd+S and
+# Ctrl+S deliver different events, so hotkey tables can bind them to
+# different actions.
 comptime MOD_META  = UInt8(1 << 3)
 
 

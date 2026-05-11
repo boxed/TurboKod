@@ -25,10 +25,6 @@ movement so a dialog field behaves like a tiny one-line editor:
 The ``handle_key`` entrypoint returns a ``TextFieldKeyResult`` so
 the caller can branch on consumed-vs-changed without re-checking
 the keystroke (existing pickers gate their refilter on ``changed``).
-
-The legacy ``text_field_clipboard_key`` helper is preserved for
-callers that haven't migrated yet — it delegates to a tiny stub
-that operates on a raw ``String`` (no cursor model).
 """
 
 from std.collections.list import List
@@ -36,7 +32,10 @@ from std.collections.list import List
 from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from .painter import Painter
 from .cell import Cell
-from .clipboard import clipboard_copy, clipboard_paste
+from .clipboard import (
+    CLIP_COPY, CLIP_CUT, CLIP_PASTE, CLIP_SELECT_ALL, clipboard_chord,
+    clipboard_copy, clipboard_paste,
+)
 from .colors import Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE
 
 
@@ -54,7 +53,7 @@ fn text_field_sel_attr() -> Attr:
     return Attr(WHITE, BLUE)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DELETE, KEY_END,
-    KEY_HOME, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL, MOD_SHIFT,
+    KEY_HOME, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
@@ -65,8 +64,7 @@ from .string_utils import (
 
 @fieldwise_init
 struct TextFieldKeyResult(Copyable, Movable):
-    """Outcome of ``TextField.handle_key`` (and the legacy
-    ``text_field_clipboard_key`` helper).
+    """Outcome of ``TextField.handle_key``.
 
     ``consumed`` — True if the helper handled the event; the caller
     should ``return True`` from its own ``handle_key`` and skip its
@@ -101,18 +99,27 @@ struct TextField(Copyable, Movable):
     var cursor: Int       # byte offset of caret in text
     var anchor: Int       # byte offset of selection anchor
     var _drag: Bool       # True between mouse-down and mouse-up
+    # Cell offset of the leftmost visible cell within ``text``. Only
+    # nonzero when the text is wider than the strip and the cursor has
+    # walked past what fits — see ``_ensure_visible``. Mutated by
+    # ``paint`` (which knows the strip width) and by ``handle_mouse``
+    # before translating a click coordinate, so clicks on the
+    # currently-visible portion land on the right codepoint.
+    var _scroll: Int
 
     fn __init__(out self):
         self.text = String("")
         self.cursor = 0
         self.anchor = 0
         self._drag = False
+        self._scroll = 0
 
     fn __copyinit__(out self, copy: Self):
         self.text = copy.text
         self.cursor = copy.cursor
         self.anchor = copy.anchor
         self._drag = copy._drag
+        self._scroll = copy._scroll
 
     fn copy(self) -> Self:
         var out = Self()
@@ -120,6 +127,7 @@ struct TextField(Copyable, Movable):
         out.cursor = self.cursor
         out.anchor = self.anchor
         out._drag = self._drag
+        out._scroll = self._scroll
         return out^
 
     # --- programmatic mutation -----------------------------------------
@@ -133,12 +141,18 @@ struct TextField(Copyable, Movable):
         self.cursor = len(self.text.as_bytes())
         self.anchor = self.cursor
         self._drag = False
+        # Reset scroll; ``paint`` will adjust on the next call once it
+        # knows the strip width. Without the reset, a previous long
+        # text's scroll offset could leave the new (possibly short)
+        # text drawn off-screen until the cursor moves.
+        self._scroll = 0
 
     fn clear(mut self):
         self.text = String("")
         self.cursor = 0
         self.anchor = 0
         self._drag = False
+        self._scroll = 0
 
     # --- selection -----------------------------------------------------
 
@@ -282,19 +296,19 @@ struct TextField(Copyable, Movable):
         if k == KEY_DELETE:
             return TextFieldKeyResult(True, self.delete_forward())
         # --- clipboard / select-all ---
-        # Ctrl+letter is canonicalized by the parser to
-        # ``(lowercase letter, MOD_CTRL)``.
-        var is_ctrl = (event.mods & MOD_CTRL) != 0
-        if is_ctrl and k == UInt32(ord("a")):    # Ctrl+A — select all
+        # Chord recognition lives in clipboard.mojo so the editor and
+        # this field can't drift on which keystrokes count.
+        var chord = clipboard_chord(event)
+        if chord == CLIP_SELECT_ALL:
             self.select_all()
             return TextFieldKeyResult(True, False)
-        if is_ctrl and k == UInt32(ord("c")):    # Ctrl+C — copy
+        if chord == CLIP_COPY:
             if self.has_selection():
                 clipboard_copy(self.selection_text())
             else:
                 clipboard_copy(self.text)
             return TextFieldKeyResult(True, False)
-        if is_ctrl and k == UInt32(ord("x")):    # Ctrl+X — cut
+        if chord == CLIP_CUT:
             if self.has_selection():
                 clipboard_copy(self.selection_text())
                 _ = self.delete_selection()
@@ -303,7 +317,7 @@ struct TextField(Copyable, Movable):
             var had = len(self.text.as_bytes()) > 0
             self.clear()
             return TextFieldKeyResult(True, had)
-        if is_ctrl and k == UInt32(ord("v")):    # Ctrl+V — paste
+        if chord == CLIP_PASTE:
             var pasted = _sanitize_single_line(clipboard_paste())
             if len(pasted.as_bytes()) == 0:
                 # Still consume the chord (a paste of pure whitespace
@@ -342,6 +356,12 @@ struct TextField(Copyable, Movable):
             # A wheel event etc. on the strip isn't ours to handle —
             # let the caller route it elsewhere.
             return False
+        # Reconcile scroll with the strip width *before* translating a
+        # click. If the field has been resized or the text mutated
+        # since the last paint, ``_scroll`` may be stale; the
+        # translation below adds it to the click cell, so correctness
+        # depends on it matching what's actually drawn.
+        self._ensure_visible(input_rect.b.x - input_rect.a.x)
         var inside = input_rect.contains(event.pos)
         if event.pressed and not event.motion:
             # Press outside the strip: not our event. Press inside:
@@ -366,15 +386,20 @@ struct TextField(Copyable, Movable):
 
     fn _byte_at_x(self, cell_x: Int) -> Int:
         """Translate a cell offset within the strip to a byte offset
-        in ``self.text``. Past-text cells map to ``len(text)`` so a
-        click well past the last character parks the cursor at the
-        end."""
+        in ``self.text``, accounting for ``_scroll`` (the cell at
+        strip column 0 is text cell ``_scroll``). Past-text cells map
+        to ``len(text)`` so a click well past the last character
+        parks the cursor at the end. Caller must have called
+        ``_ensure_visible`` first so ``_scroll`` matches the strip
+        width."""
+        var local_x = cell_x
+        if local_x < 0:
+            local_x = 0
+        var text_cell = self._scroll + local_x
         var n_cells = utf8_codepoint_count(self.text)
-        if cell_x < 0:
-            return 0
-        if cell_x >= n_cells:
+        if text_cell >= n_cells:
             return len(self.text.as_bytes())
-        return _utf8_byte_of_cell(self.text, cell_x)
+        return _utf8_byte_of_cell(self.text, text_cell)
 
     # --- rendering helpers --------------------------------------------
 
@@ -383,8 +408,34 @@ struct TextField(Copyable, Movable):
         ``self.text``."""
         return _utf8_cell_of_byte(self.text, self.cursor)
 
+    fn _ensure_visible(mut self, width: Int):
+        """Adjust ``_scroll`` so that the cursor sits within the
+        ``width``-cell visible window. Also pulls scroll back to the
+        left when shrinking text would otherwise leave empty cells at
+        the right end of the strip — we'd rather show leading text
+        than blanks. ``width`` is the cell width of the strip
+        (``rect.b.x - rect.a.x``)."""
+        if width <= 0:
+            self._scroll = 0
+            return
+        var c = self.cursor_cell()
+        if c < self._scroll:
+            self._scroll = c
+        elif c >= self._scroll + width:
+            self._scroll = c - width + 1
+        # If text + caret-cell don't fill the window, slide left so we
+        # show as much leading text as possible.
+        var n_cells = utf8_codepoint_count(self.text)
+        var max_useful = n_cells + 1 - width
+        if max_useful < 0:
+            max_useful = 0
+        if self._scroll > max_useful:
+            self._scroll = max_useful
+        if self._scroll < 0:
+            self._scroll = 0
+
     fn paint(
-        self, mut canvas: Canvas, rect: Rect, focused: Bool,
+        mut self, mut canvas: Canvas, rect: Rect, focused: Bool,
     ):
         """Render ``self.text`` into ``rect`` (one row) using the
         standard input-field colors: cyan background, white-on-blue
@@ -397,6 +448,11 @@ struct TextField(Copyable, Movable):
         ``rect.b.y - rect.a.y`` is 1; the helper renders only the
         first row regardless.
 
+        When the text is wider than the strip the field scrolls
+        horizontally so the caret stays visible — see
+        ``_ensure_visible``. Takes ``mut self`` to update the scroll
+        offset.
+
         Every dialog with an editable input strip routes through this
         method so the cyan-field idiom is consistent across the app.
         """
@@ -404,25 +460,39 @@ struct TextField(Copyable, Movable):
         var sel_attr = text_field_sel_attr()
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
-        _ = painter.put_text(
-            canvas, Point(rect.a.x, rect.a.y), self.text, attr,
-        )
-        # Selection overlay: recolor the selected cells without
-        # rewriting glyphs (``set_attr`` keeps put_text's UTF-8
-        # decoding work).
+        var width = rect.b.x - rect.a.x
+        if width <= 0:
+            return
+        self._ensure_visible(width)
+        # Render only the visible slice of text so a long string
+        # doesn't spill UTF-8 past the strip — and so scroll > 0
+        # actually shifts the visible characters left.
+        var bytes = self.text.as_bytes()
+        var start_byte = _utf8_byte_of_cell(self.text, self._scroll)
+        if start_byte < len(bytes):
+            var visible = String(
+                StringSlice(unsafe_from_utf8=bytes[start_byte:])
+            )
+            _ = painter.put_text(
+                canvas, Point(rect.a.x, rect.a.y), visible, attr,
+            )
+        # Selection overlay: recolor the visible portion of the
+        # selection without rewriting glyphs.
         if self.has_selection():
             var rng = self._sel_range()
             var start_cell = _utf8_cell_of_byte(self.text, rng[0])
             var end_cell = _utf8_cell_of_byte(self.text, rng[1])
-            var x = rect.a.x + start_cell
-            var stop = rect.a.x + end_cell
+            var x = rect.a.x + start_cell - self._scroll
+            var stop = rect.a.x + end_cell - self._scroll
+            if x < rect.a.x:
+                x = rect.a.x
             if stop > rect.b.x:
                 stop = rect.b.x
             while x < stop:
                 painter.set_attr(canvas, x, rect.a.y, sel_attr)
                 x += 1
         if focused:
-            var cur_x = rect.a.x + self.cursor_cell()
+            var cur_x = rect.a.x + self.cursor_cell() - self._scroll
             if cur_x < rect.b.x and cur_x >= rect.a.x:
                 # Reverse-video block over the current cell. Inside
                 # a selection we still paint it — the user expects to
@@ -430,7 +500,7 @@ struct TextField(Copyable, Movable):
                 var glyph: String
                 # Use the existing glyph at that cell if we painted one
                 # (so a selected char shows under the caret), else " ".
-                if cur_x < self.text_end_cell(rect.a.x):
+                if cur_x < self._text_end_x(rect.a.x):
                     glyph = canvas.get(cur_x, rect.a.y).glyph
                 else:
                     glyph = String(" ")
@@ -439,52 +509,14 @@ struct TextField(Copyable, Movable):
                     Cell(glyph, Attr(LIGHT_GRAY, BLACK), 1),
                 )
 
-    fn text_end_cell(self, base_x: Int) -> Int:
-        """Cell column just past the last codepoint of ``self.text``,
-        anchored at ``base_x``. Used by ``paint`` to decide whether
-        the cursor sits over a glyph (preserve it under the inverted
-        cell) or past EOL (paint a space)."""
-        return base_x + utf8_codepoint_count(self.text)
-
-
-# --- Backwards-compat shim -----------------------------------------------
-
-
-fn text_field_clipboard_key(
-    event: Event, mut text: String,
-) -> TextFieldKeyResult:
-    """Apply Ctrl+C / Ctrl+X / Ctrl+V to a single-line ``text`` field.
-
-    Legacy entrypoint kept for callers that haven't migrated to the
-    full ``TextField`` model. Only handles clipboard; cursor moves,
-    selection, and mouse all require the full model.
-
-    ``Cmd+A`` (select-all) is also recognised here — without a cursor
-    model selecting "all" is a no-op, so the helper just consumes the
-    chord so it doesn't fall through to a hotkey table.
-    """
-    if event.kind != EVENT_KEY:
-        return TextFieldKeyResult(False, False)
-    var k = event.key
-    if (event.mods & MOD_CTRL) == 0:
-        return TextFieldKeyResult(False, False)
-    if k == UInt32(ord("a")):    # Ctrl+A — no-op without a cursor
-        return TextFieldKeyResult(True, False)
-    if k == UInt32(ord("c")):    # Ctrl+C — copy whole field
-        clipboard_copy(text)
-        return TextFieldKeyResult(True, False)
-    if k == UInt32(ord("x")):    # Ctrl+X — copy then clear
-        clipboard_copy(text)
-        var had_text = len(text.as_bytes()) > 0
-        text = String("")
-        return TextFieldKeyResult(True, had_text)
-    if k == UInt32(ord("v")):    # Ctrl+V — append clipboard at end
-        var pasted = _sanitize_single_line(clipboard_paste())
-        if len(pasted.as_bytes()) == 0:
-            return TextFieldKeyResult(True, False)
-        text = text + pasted
-        return TextFieldKeyResult(True, True)
-    return TextFieldKeyResult(False, False)
+    fn _text_end_x(self, base_x: Int) -> Int:
+        """Strip column just past the last visible codepoint of
+        ``self.text``, anchored at ``base_x``. Used by ``paint`` to
+        decide whether the caret sits over a glyph (preserve it under
+        the inverted cell) or past EOL (paint a space). Accounts for
+        ``_scroll`` so a scrolled field's caret-on-glyph check uses
+        the visible position."""
+        return base_x + utf8_codepoint_count(self.text) - self._scroll
 
 
 # --- internals -----------------------------------------------------------

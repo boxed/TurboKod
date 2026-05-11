@@ -172,6 +172,6 @@ from .prompt import Prompt
 from .status import StatusBar, StatusItem, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .terminal import Terminal
-from .text_field import TextFieldKeyResult, text_field_clipboard_key
+from .text_field import TextFieldKeyResult
 from .view import Drawable, EventHandler, Fill, Frame, Label, centered
 from .window import Window, WindowManager

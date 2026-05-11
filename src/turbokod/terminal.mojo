@@ -692,9 +692,7 @@ fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
         terminal that uppercased the letter (rare) still matches a
         binding registered with ``ord("s")``.
 
-    Cmd / Alt / Shift events are passed through unchanged. ``Cmd+letter``
-    (``MOD_META``) is a separate, distinct event from ``Ctrl+letter`` —
-    no cross-modifier fold.
+    Cmd / Alt / Shift events are passed through unchanged.
     """
     if mods != MOD_CTRL:
         return (UInt32(cp), mods)

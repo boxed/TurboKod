@@ -17,7 +17,10 @@ from .canvas import (
 )
 from .painter import Painter
 from .cell import Cell
-from .clipboard import clipboard_copy, clipboard_paste
+from .clipboard import (
+    CLIP_COPY, CLIP_CUT, CLIP_PASTE, CLIP_SELECT_ALL, clipboard_chord,
+    clipboard_copy, clipboard_paste,
+)
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
     LIGHT_RED, LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
@@ -3834,6 +3837,10 @@ struct Editor(ImplicitlyCopyable, Movable):
         if self.anchor_row < pre_dirty_row:
             pre_dirty_row = self.anchor_row
         var k = event.key
+        # Single source of truth for the clipboard chords (Ctrl+A / C /
+        # X / V). The four branches further down read this instead of
+        # re-checking ``mods & MOD_CTRL && key == ord(...)`` each time.
+        var chord = clipboard_chord(event)
         var extend = (event.mods & MOD_SHIFT) != 0
         # Either Ctrl or Alt triggers word jumps. Ctrl is the Linux/Windows
         # convention; Alt is the macOS convention (and what iTerm2/Terminal.app
@@ -4067,7 +4074,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     )
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi)
-        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("a")):
+        elif chord == CLIP_SELECT_ALL:
             # Ctrl+A — select whole buffer.
             # Pure selection move: no buffer mutation, no undo, no
             # extras (a select-all on top of multi-cursor would
@@ -4081,19 +4088,17 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var last = n_rows - 1
                 self.move_to(0, 0, False)
                 self.move_to(last, self.buffer.line_length(last), True)
-        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("c")):
+        elif chord == CLIP_COPY:
             # Ctrl+C — non-mutating copy. No undo snapshot needed.
             self.clear_extra_carets()
             self.copy_to_clipboard()
-        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("x")):
-            # Ctrl+X — cut.
+        elif chord == CLIP_CUT:
             if self.read_only:
                 return True
             self._collapse_extras_with_undo()
             self.cut_to_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
-        elif (event.mods & MOD_CTRL) != 0 and k == UInt32(ord("v")):
-            # Ctrl+V — paste.
+        elif chord == CLIP_PASTE:
             if self.read_only:
                 return True
             self._collapse_extras_with_undo()

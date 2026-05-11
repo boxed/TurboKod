@@ -855,9 +855,8 @@ struct Desktop(Movable):
         self._window_menu_idx = len(self.menu_bar.menus) - 1
         # Command bindings. By convention in this app: ``Cmd+letter``
         # invokes commands (Save / Open / Cut / …); ``Ctrl+`` is reserved
-        # for navigation (window / panel focus, menu access). Cmd and
-        # Ctrl are kept distinct by ``_normalize_ctrl_letter`` — no
-        # cross-modifier fold — so each shortcut binds to MOD_META alone.
+        # for navigation (window / panel focus, menu access). Each command
+        # shortcut binds to MOD_META alone.
         self._hotkeys.append(Hotkey(
             UInt32(ord("q")), MOD_META, APP_QUIT_ACTION,
         ))
@@ -986,8 +985,7 @@ struct Desktop(Movable):
         # MOD_CTRL so they stay distinct from the Ctrl+0..9 window /
         # panel-focus bindings above — terminals report Cmd+digit and
         # Ctrl+digit with different modifier bits, and the parser keeps
-        # them distinct (only Cmd+letter folds to Ctrl+letter). So
-        # Cmd+2 → step over, Ctrl+2 → focus window 2.
+        # them distinct. So Cmd+2 → step over, Ctrl+2 → focus window 2.
         self._hotkeys.append(Hotkey(
             UInt32(ord("0")), MOD_META, DEBUG_START_OR_CONTINUE,
         ))
@@ -1035,9 +1033,9 @@ struct Desktop(Movable):
         ))
         # Cmd+Shift+Right / Cmd+Shift+Left — switch tabs forward / backward.
         # Arrows go through the bare CSI path in the terminal parser, which
-        # preserves MOD_META (no letter-fold to MOD_CTRL), so these bind to
-        # the meta bit directly. Emitted by the bundled native app; terminals
-        # that don't report meta on arrows simply won't trigger this.
+        # preserves MOD_META, so these bind to the meta bit directly. Emitted
+        # by the bundled native app; terminals that don't report meta on
+        # arrows simply won't trigger this.
         self._hotkeys.append(Hotkey(
             KEY_RIGHT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
         ))

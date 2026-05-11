@@ -17,6 +17,40 @@ from std.collections.list import List
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
+from .events import Event, EVENT_KEY, MOD_CTRL
+
+
+# Result tags for ``clipboard_chord``. Plain ``UInt8`` constants in the
+# Event-discriminant style — we don't get enums, and a returned struct
+# would force every caller through a copy.
+comptime CLIP_NONE       = UInt8(0)
+comptime CLIP_COPY       = UInt8(1)
+comptime CLIP_CUT        = UInt8(2)
+comptime CLIP_PASTE      = UInt8(3)
+comptime CLIP_SELECT_ALL = UInt8(4)
+
+
+fn clipboard_chord(event: Event) -> UInt8:
+    """Classify a key event as a clipboard hotkey: Ctrl+A / C / X / V.
+    Everything else (non-key events, missing Ctrl, other letters) maps
+    to ``CLIP_NONE``. Centralizing this here keeps the Editor and
+    TextField handlers from each re-spelling the same four ``mods &
+    MOD_CTRL && key == ord(...)`` checks."""
+    if event.kind != EVENT_KEY:
+        return CLIP_NONE
+    if (event.mods & MOD_CTRL) == 0:
+        return CLIP_NONE
+    var k = event.key
+    if k == UInt32(ord("a")):
+        return CLIP_SELECT_ALL
+    if k == UInt32(ord("c")):
+        return CLIP_COPY
+    if k == UInt32(ord("x")):
+        return CLIP_CUT
+    if k == UInt32(ord("v")):
+        return CLIP_PASTE
+    return CLIP_NONE
+
 
 fn _copy_command() -> String:
     comptime if CompilationTarget.is_macos():

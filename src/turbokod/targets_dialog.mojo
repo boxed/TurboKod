@@ -593,37 +593,23 @@ struct TargetsDialog(Movable):
         _ = painter.put_text(
             canvas, _label_at(rect, 11), String("Debug language:"), bg,
         )
-        # Copy each field out before the call: ``_paint_input_tf``
-        # takes ``mut self``, so an aliased ``self.name_tf`` reference
-        # would fail Mojo's exclusivity check.
-        var name_tf = self.name_tf.copy()
-        self._paint_input_tf(canvas, rect, _FOCUS_NAME, name_tf)
-        var program_tf = self.program_tf.copy()
-        self._paint_input_tf(canvas, rect, _FOCUS_PROGRAM, program_tf)
-        var args_tf = self.args_tf.copy()
-        self._paint_input_tf(canvas, rect, _FOCUS_ARGS, args_tf)
-        var cwd_tf = self.cwd_tf.copy()
-        self._paint_input_tf(canvas, rect, _FOCUS_CWD, cwd_tf)
+        # Compute and stash strip rects so ``handle_mouse`` can route
+        # a click back to the right field. Then paint each field's
+        # ``TextField`` directly — ``TextField.paint`` mutates the
+        # field (it owns the horizontal scroll offset and reconciles
+        # it against the strip width), so we have to call it on the
+        # owned ``self.<field>`` rather than on a copy.
+        self._name_rect = _input_rect(rect, _row_for_focus(_FOCUS_NAME))
+        self._program_rect = _input_rect(rect, _row_for_focus(_FOCUS_PROGRAM))
+        self._args_rect = _input_rect(rect, _row_for_focus(_FOCUS_ARGS))
+        self._cwd_rect = _input_rect(rect, _row_for_focus(_FOCUS_CWD))
+        self.name_tf.paint(canvas, self._name_rect, self.focus == _FOCUS_NAME)
+        self.program_tf.paint(
+            canvas, self._program_rect, self.focus == _FOCUS_PROGRAM,
+        )
+        self.args_tf.paint(canvas, self._args_rect, self.focus == _FOCUS_ARGS)
+        self.cwd_tf.paint(canvas, self._cwd_rect, self.focus == _FOCUS_CWD)
         self._paint_lang_dropdown(canvas, rect)
-
-    fn _paint_input_tf(
-        mut self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
-        tf: TextField,
-    ):
-        """Single-line input strip — colors come from ``TextField.paint``
-        (cyan field bg, white-on-blue selection), so every dialog with
-        an editable strip looks the same."""
-        var row = _row_for_focus(focus)
-        if row < 0:
-            return
-        var ir = _input_rect(dialog, row)
-        # Stash the strip rect so ``handle_mouse`` can route a click
-        # back to ``tf.handle_mouse`` for cursor placement.
-        if focus == _FOCUS_NAME:    self._name_rect = ir
-        elif focus == _FOCUS_PROGRAM: self._program_rect = ir
-        elif focus == _FOCUS_ARGS:    self._args_rect = ir
-        elif focus == _FOCUS_CWD:     self._cwd_rect = ir
-        tf.paint(canvas, ir, self.focus == focus)
 
     fn _paint_lang_dropdown(self, mut canvas: Canvas, dialog: Rect):
         """Render the debug-language dropdown using the same focus

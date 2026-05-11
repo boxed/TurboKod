@@ -279,14 +279,21 @@ struct ActionEditor(Movable):
             canvas, Point(_label_at(rect, 9).x + _LABEL_COL_W, rect.a.y + 9),
             String("(empty = project root)"), hint,
         )
-        # Inputs.
+        # Inputs. ``TextField.paint`` mutates the field (it owns the
+        # horizontal scroll offset), so call it directly on ``self.*``
+        # rather than via a helper that would force a by-value copy.
         self._paint_lang(canvas, rect)
         var browse_w = self._buttons[0].button.total_width()
-        self._paint_input(
-            canvas, rect, _FOCUS_PROGRAM, self.program_tf, browse_w + 2,
+        var program_ir = _input_rect(
+            rect, _row_for_focus(_FOCUS_PROGRAM), browse_w + 2,
         )
-        self._paint_input(canvas, rect, _FOCUS_ARGS, self.args_tf, 0)
-        self._paint_input(canvas, rect, _FOCUS_CWD, self.cwd_tf, 0)
+        self.program_tf.paint(
+            canvas, program_ir, self.focus == _FOCUS_PROGRAM,
+        )
+        var args_ir = _input_rect(rect, _row_for_focus(_FOCUS_ARGS), 0)
+        self.args_tf.paint(canvas, args_ir, self.focus == _FOCUS_ARGS)
+        var cwd_ir = _input_rect(rect, _row_for_focus(_FOCUS_CWD), 0)
+        self.cwd_tf.paint(canvas, cwd_ir, self.focus == _FOCUS_CWD)
         # Buttons.
         self._paint_buttons(canvas, rect)
         # Dropdown popup overlays the form when open. Paint after the
@@ -315,16 +322,6 @@ struct ActionEditor(Movable):
             canvas, ir, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
-
-    fn _paint_input(
-        self, mut canvas: Canvas, dialog: Rect, focus: UInt8,
-        tf: TextField, right_pad: Int,
-    ):
-        var row = _row_for_focus(focus)
-        if row < 0:
-            return
-        var ir = _input_rect(dialog, row, right_pad)
-        tf.paint(canvas, ir, self.focus == focus)
 
     fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect):
         # Browse sits at the right edge of the Program row.

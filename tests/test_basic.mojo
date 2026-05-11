@@ -82,6 +82,7 @@ from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import slice_codepoints
 from turbokod.targets_dialog import TargetsDialog
+from turbokod.text_field import TextField
 from turbokod.text_view import Selection, TextLog, VisualLine, wrap_lines
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
@@ -184,7 +185,6 @@ from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
 from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
-from turbokod.text_field import text_field_clipboard_key
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
@@ -2515,19 +2515,18 @@ fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
 
 
 fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
-    """Sanity-check: the terminal parser must NOT fold Cmd+[ down
-    to ESC, AND must keep Cmd+ distinct from Ctrl+ on non-letter
+    """Sanity-check: the terminal parser must NOT collapse Cmd+[
+    down to ESC, AND must keep Cmd+ distinct from Ctrl+ on non-letter
     keys — otherwise we couldn't bind Cmd+2 (step over) separately
     from Ctrl+2 (focus window 2)."""
     # CSI 27 ; 9 ; 91 ~  — modifyOtherKeys=2 form for Cmd+[. Lands
-    # as (0x5B, MOD_META): Cmd preserved (not folded to Ctrl on a
-    # non-letter), and not collapsed to ESC.
+    # as (0x5B, MOD_META): Cmd preserved, and not collapsed to ESC.
     var seq = String("\x1b[27;9;91~")
     var ev_consumed = parse_input(seq)
     assert_equal(ev_consumed[0].kind, EVENT_KEY)
     assert_equal(ev_consumed[0].key, UInt32(ord("[")))
     assert_equal(ev_consumed[0].mods, MOD_META)
-    # Cmd+2 stays MOD_META too — no fold to Ctrl+2 on digits.
+    # Cmd+2 stays MOD_META.
     var seq_two = String("\x1b[27;9;50~")
     var ev_two = parse_input(seq_two)
     assert_equal(ev_two[0].key, UInt32(ord("2")))
@@ -2537,9 +2536,9 @@ fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
     var ev_ctrl_two = parse_input(seq_ctrl_two)
     assert_equal(ev_ctrl_two[0].key, UInt32(ord("2")))
     assert_equal(ev_ctrl_two[0].mods, MOD_CTRL)
-    # Cmd+S surfaces as (ord('s'), MOD_META) — no META→CTRL fold, so
-    # Cmd and Ctrl bindings stay separate. Ctrl+S (the bare control
-    # byte, see test below) is intentionally not bound by default.
+    # Cmd+S surfaces as (ord('s'), MOD_META) so Cmd and Ctrl bindings
+    # stay separate. Ctrl+S (the bare control byte, see test below) is
+    # intentionally not bound by default.
     var seq_s = String("\x1b[27;9;115~")
     var ev_s = parse_input(seq_s)
     assert_equal(ev_s[0].key, UInt32(ord("s")))
@@ -2579,8 +2578,8 @@ fn test_ctrl_n_focuses_window_by_number() raises:
     order across focus changes so the bindings remain stable.
 
     The digits 0/2/4/5/6 ALSO have Cmd+ (MOD_META) bindings on the debug
-    actions; those stay distinct from Ctrl+ thanks to ``_normalize_ctrl_letter``
-    suppressing the META→CTRL fold for non-letters."""
+    actions; those stay distinct from Ctrl+ since MOD_META and MOD_CTRL
+    are separate modifier bits."""
     var d = Desktop()
     d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
@@ -2801,10 +2800,9 @@ fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
 
 fn test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta() raises:
     """``ESC[27;10;102~`` is the meta-bit form (mod = 1 + 1 + 8) of
-    Cmd+Shift+F. With no META→CTRL fold, this surfaces as
-    ``(ord('f'), MOD_META|MOD_SHIFT)`` and binds to PROJECT_FIND
-    (Cmd+Shift+F). Ctrl+Shift+F is *not* bound — Ctrl is reserved for
-    navigation."""
+    Cmd+Shift+F. This surfaces as ``(ord('f'), MOD_META|MOD_SHIFT)``
+    and binds to PROJECT_FIND (Cmd+Shift+F). Ctrl+Shift+F is *not*
+    bound — Ctrl is reserved for navigation."""
     var ev = parse_input(String("\x1b[27;10;102~"))
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), Int(ord("f")))
@@ -2883,9 +2881,9 @@ fn test_parse_osc_partial_defers() raises:
 
 fn test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
     """``ESC[27;9;115~`` is the meta-bit form (mod = 1 + 8) of Cmd+S that
-    the native Rust host emits for ``super_key()``. After we removed the
-    META→CTRL fold, the parser surfaces it as ``(ord('s'), MOD_META)``
-    so Cmd+S and Ctrl+S can be bound to different actions."""
+    the native Rust host emits for ``super_key()``. The parser surfaces
+    it as ``(ord('s'), MOD_META)`` so Cmd+S and Ctrl+S can be bound to
+    different actions."""
     var ev = parse_input(String("\x1b[27;9;115~"))
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), Int(ord("s")))
@@ -2894,11 +2892,8 @@ fn test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
 
 fn test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
     """Cmd+\\` arrives as ``ESC[27;9;96~`` (mod=9 → meta-only, cp=0x60).
-    Backtick is *not* a letter, so the Ctrl+letter→control-byte fold
-    must skip it — otherwise it would collapse to ``(0, MOD_NONE)``,
-    indistinguishable from KEY_NONE. The event keeps its 0x60 key code
-    with MOD_META intact (no fold to MOD_CTRL on non-letters), so
-    hotkey tables can bind Cmd+\\` separately from Ctrl+\\`."""
+    The event keeps its 0x60 key code with MOD_META intact, so hotkey
+    tables can bind Cmd+\\` separately from Ctrl+\\`."""
     var ev = parse_input(String("\x1b[27;9;96~"))
     assert_true(ev[0].kind == EVENT_KEY)
     assert_equal(Int(ev[0].key), 0x60)
@@ -8609,58 +8604,6 @@ fn test_html_to_text_table_escapes_pipes_in_cells() raises:
     assert_true(found)
 
 
-fn test_text_field_clipboard_key_ignores_non_key_event() raises:
-    var text = String("hello")
-    var ev = Event.mouse_event(Point(0, 0), MOUSE_BUTTON_LEFT)
-    var r = text_field_clipboard_key(ev, text)
-    assert_false(r.consumed)
-    assert_false(r.changed)
-    assert_equal(text, String("hello"))
-
-
-fn test_text_field_clipboard_key_ignores_printable() raises:
-    var text = String("abc")
-    var r = text_field_clipboard_key(Event.key_event(UInt32(ord("d"))), text)
-    assert_false(r.consumed)
-    assert_false(r.changed)
-    assert_equal(text, String("abc"))
-
-
-fn test_text_field_clipboard_key_ctrl_x_clears_text() raises:
-    var text = String("delete me")
-    var r = text_field_clipboard_key(
-        Event.key_event(UInt32(ord("x")), MOD_CTRL), text,
-    )
-    assert_true(r.consumed)
-    assert_true(r.changed)
-    assert_equal(text, String(""))
-    # A second Ctrl+X on the now-empty field still consumes the keystroke
-    # but reports nothing changed (no spurious refilters / dirty marks).
-    var r2 = text_field_clipboard_key(
-        Event.key_event(UInt32(ord("x")), MOD_CTRL), text,
-    )
-    assert_true(r2.consumed)
-    assert_false(r2.changed)
-
-
-fn test_text_field_clipboard_key_round_trips_through_clipboard() raises:
-    """Ctrl+X copies to the system clipboard; a subsequent Ctrl+V on a
-    fresh field should restore the same payload. Validates the
-    end-to-end framework path; relies on the platform's clipboard
-    helper (pbcopy/pbpaste on macOS) being available."""
-    var src = String("payload-from-ctrl-x")
-    _ = text_field_clipboard_key(
-        Event.key_event(UInt32(ord("x")), MOD_CTRL), src,
-    )
-    var dst = String("")
-    var r = text_field_clipboard_key(
-        Event.key_event(UInt32(ord("v")), MOD_CTRL), dst,
-    )
-    assert_true(r.consumed)
-    assert_true(r.changed)
-    assert_equal(dst, String("payload-from-ctrl-x"))
-
-
 fn test_session_round_trip() raises:
     """A persisted session should decode to the same fields it was
     encoded from. Covers the full ``encode_session`` → ``parse_json``
@@ -11851,6 +11794,88 @@ fn test_text_log_full_rewrap_on_width_change() raises:
     assert_true(len(log.last_visual) < len(first_pass))
 
 
+fn test_text_field_scrolls_to_keep_cursor_visible() raises:
+    """Typing past the strip width must scroll horizontally so the
+    caret stays inside the strip — otherwise the user can't see what
+    they're typing once the field overflows."""
+    var tf = TextField()
+    tf.set_text(String("abcdefghijklmnop"))   # 16 chars
+    var canvas = Canvas(20, 1)
+    var rect = Rect(0, 0, 10, 1)
+    tf.paint(canvas, rect, True)
+    # Cursor sits at the end of the text. Strip is 10 wide, so the
+    # cursor must be at the rightmost cell (col 9) and the visible
+    # window must show the *trailing* 10 cells of text.
+    assert_equal(canvas.get(0, 0).glyph, String("h"))   # text cell 7
+    assert_equal(canvas.get(8, 0).glyph, String("p"))   # last char
+    # The caret cell sits past the last char (cursor at end-of-text).
+    # Just assert the field hasn't scrolled past where text is visible.
+    assert_true(tf._scroll > 0)
+    assert_equal(tf._scroll, 7)   # 16 cells - 10 width + 1 caret cell
+
+
+fn test_text_field_scrolls_back_when_cursor_moves_left_of_view() raises:
+    """Pressing Home on an overflowed field jumps the cursor to byte
+    0; the visible window must follow so the user lands on the start
+    of the text rather than staring at the (now-invisible) caret."""
+    var tf = TextField()
+    tf.set_text(String("abcdefghijklmnop"))
+    var canvas = Canvas(20, 1)
+    var rect = Rect(0, 0, 10, 1)
+    tf.paint(canvas, rect, True)
+    assert_true(tf._scroll > 0)
+    _ = tf.handle_key(_key(KEY_HOME))
+    tf.paint(canvas, rect, True)
+    assert_equal(tf._scroll, 0)
+    assert_equal(canvas.get(0, 0).glyph, String("a"))
+    assert_equal(canvas.get(9, 0).glyph, String("j"))
+
+
+fn test_text_field_click_maps_to_text_byte_via_scroll() raises:
+    """A click on a scrolled field must land on the codepoint that's
+    *visually* under the cursor — i.e. text cell = strip cell +
+    scroll. If we ignored scroll the click would always land in the
+    first chunk of the text regardless of how far it had scrolled."""
+    var tf = TextField()
+    tf.set_text(String("abcdefghijklmnop"))
+    var canvas = Canvas(20, 1)
+    var rect = Rect(0, 0, 10, 1)
+    tf.paint(canvas, rect, True)
+    # The strip is now scrolled (cursor at end). Click on strip cell
+    # 0 (which displays text cell 7 = 'h').
+    _ = tf.handle_mouse(
+        Event.mouse_event(Point(0, 0), MOUSE_BUTTON_LEFT, True, False),
+        rect,
+    )
+    assert_equal(tf.cursor, 7)
+    # Click on strip cell 5 (text cell 12 = 'm').
+    _ = tf.handle_mouse(
+        Event.mouse_event(Point(5, 0), MOUSE_BUTTON_LEFT, True, False),
+        rect,
+    )
+    assert_equal(tf.cursor, 12)
+
+
+fn test_text_field_paints_visible_window_after_scroll() raises:
+    """When scrolled, ``paint`` must render the slice of text starting
+    at ``_scroll`` and not draw the leading characters that fall
+    before the strip — otherwise the off-screen text would smear into
+    the strip's left edge."""
+    var tf = TextField()
+    tf.set_text(String("0123456789ABCDEF"))
+    var canvas = Canvas(20, 1)
+    var rect = Rect(2, 0, 10, 1)   # 8-wide strip starting at col 2
+    tf.paint(canvas, rect, True)
+    # Cursor at end; scroll = 16 - 8 + 1 = 9. Visible text cells are
+    # [9, 17), so strip col 2 shows text cell 9 = '9', strip col 9
+    # shows text cell 16 = caret-only space.
+    assert_equal(canvas.get(2, 0).glyph, String("9"))
+    assert_equal(canvas.get(8, 0).glyph, String("F"))
+    # Outside the strip on the left: untouched (still default blank).
+    assert_equal(canvas.get(0, 0).glyph, String(" "))
+    assert_equal(canvas.get(1, 0).glyph, String(" "))
+
+
 fn main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
     # (which writes to ``~/.config/turbokod/config.json`` via
@@ -12309,10 +12334,6 @@ fn main() raises:
     test_targets_dialog_save_button_submits()
     test_targets_dialog_esc_discards_edits()
     test_run_session_lifecycle()
-    test_text_field_clipboard_key_ignores_non_key_event()
-    test_text_field_clipboard_key_ignores_printable()
-    test_text_field_clipboard_key_ctrl_x_clears_text()
-    test_text_field_clipboard_key_round_trips_through_clipboard()
     test_session_round_trip()
     test_session_load_missing_returns_empty()
     test_breakpoint_store_round_trip()
@@ -12371,4 +12392,8 @@ fn main() raises:
     test_text_log_incremental_layout_handles_trim()
     test_text_log_full_rewrap_on_width_change()
     test_editor_paint_collapsed_view_is_cheap()
+    test_text_field_scrolls_to_keep_cursor_visible()
+    test_text_field_scrolls_back_when_cursor_moves_left_of_view()
+    test_text_field_click_maps_to_text_byte_via_scroll()
+    test_text_field_paints_visible_window_after_scroll()
     print("all tests passed")
