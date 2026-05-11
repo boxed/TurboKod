@@ -3681,6 +3681,29 @@ struct Desktop(Movable):
                 lines.append(String("  path:    ") + resolved)
                 lines.append(String("  state:   ") + state)
                 lines.append(String("  root:    ") + m.root_uri())
+                # Surface the server's stderr if it printed anything —
+                # critical for understanding *why* a server is stuck at
+                # "starting…" or has latched FAILED. Many LSPs print a
+                # Python traceback or "error: unrecognized option …"
+                # there before exiting, which is otherwise invisible.
+                var err = m.captured_stderr()
+                if len(err.as_bytes()) > 0:
+                    lines.append(String("  stderr:"))
+                    var start = 0
+                    var eb = err.as_bytes()
+                    for k in range(len(eb)):
+                        if eb[k] == 0x0A:
+                            var seg = String(StringSlice(
+                                ptr=eb.unsafe_ptr() + start, length=k - start,
+                            ))
+                            lines.append(String("    ") + seg)
+                            start = k + 1
+                    if start < len(eb):
+                        var tail = String(StringSlice(
+                            ptr=eb.unsafe_ptr() + start,
+                            length=len(eb) - start,
+                        ))
+                        lines.append(String("    ") + tail)
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
         for i in range(len(self.lsp_specs)):

@@ -195,6 +195,11 @@ struct TargetsDialog(Movable):
     var pos: Optional[Point]
     var _drag: Optional[Point]
     var _list_scroll: Int
+    var _last_scroll_sel: Int
+    """Last ``selected`` value snapped into view by paint. The list
+    paint only scrolls to the selection when this differs from
+    ``selected`` — so wheel-scrolling moves the viewport independently
+    and isn't snapped back on the next frame."""
     var _buttons: List[_PlacedButton]
     # Editable input strips for the currently-selected entry. The
     # field text is the canonical source of truth while the dialog
@@ -231,6 +236,7 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self._last_scroll_sel = -2
         self.name_tf = TextField()
         self.program_tf = TextField()
         self.args_tf = TextField()
@@ -274,6 +280,7 @@ struct TargetsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self._last_scroll_sel = -2
         self._load_fields_from_selected()
 
     fn close(mut self):
@@ -522,12 +529,16 @@ struct TargetsDialog(Movable):
         painter.fill(canvas, inner, String(" "), body_attr)
         var visible = inner.height()
         # Re-clip scroll so an entry-add or -remove can't leave us
-        # showing past the end of the list.
-        if self.selected >= 0:
+        # showing past the end of the list. Snap-to-selection only
+        # fires when ``selected`` has changed since the previous paint,
+        # so the mouse wheel can move the viewport independently
+        # without being snapped back on the next frame.
+        if self.selected >= 0 and self.selected != self._last_scroll_sel:
             if self.selected < self._list_scroll:
                 self._list_scroll = self.selected
             elif self.selected >= self._list_scroll + visible:
                 self._list_scroll = self.selected - visible + 1
+        self._last_scroll_sel = self.selected
         if self._list_scroll < 0:
             self._list_scroll = 0
         var max_scroll = len(self.entries) - visible

@@ -127,6 +127,11 @@ struct LanguageEditor(Movable):
     var pos: Optional[Point]
     var _drag: Optional[Point]
     var _list_scroll: Int
+    var _last_scroll_sel: Int
+    """Last ``selected`` value snapped into view by paint. The
+    candidates-list paint only scrolls to the selection when this
+    differs from ``selected`` — so wheel-scrolling moves the viewport
+    independently and isn't snapped back on the next frame."""
     var _buttons: List[_PlacedButton]
     var _type_ahead: TypeAhead
     """Type-to-jump prefix buffer for the candidates list. Reset on
@@ -146,6 +151,7 @@ struct LanguageEditor(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self._last_scroll_sel = -2
         self._type_ahead = TypeAhead()
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
@@ -196,6 +202,7 @@ struct LanguageEditor(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
+        self._last_scroll_sel = -2
         self._type_ahead.reset()
 
     fn close(mut self):
@@ -336,13 +343,17 @@ struct LanguageEditor(Movable):
                 String("(no servers — press [+ Add])"), hint,
             )
             return
-        # Scroll bookkeeping mirroring Settings._paint_actions_list.
+        # Scroll bookkeeping mirroring Settings._paint_actions_list:
+        # snap-to-selection only on a selection change since the last
+        # paint, so the wheel can move the viewport without the next
+        # frame undoing it.
         var visible = list_rect.height()
-        if self.selected >= 0:
+        if self.selected >= 0 and self.selected != self._last_scroll_sel:
             if self.selected < self._list_scroll:
                 self._list_scroll = self.selected
             elif self.selected >= self._list_scroll + visible:
                 self._list_scroll = self.selected - visible + 1
+        self._last_scroll_sel = self.selected
         if self._list_scroll < 0:
             self._list_scroll = 0
         var max_scroll = len(self.candidates) - visible
@@ -680,17 +691,62 @@ fn _join_space(items: List[String]) -> String:
 
 
 fn _split_space(text: String) -> List[String]:
+    """Shell-style argv tokenizer: split on whitespace, but treat
+    ``"..."`` and ``'...'`` as a single token whose interior whitespace
+    is preserved (the quote characters themselves are stripped). Adjacent
+    quoted/unquoted runs concatenate, mirroring POSIX shell — so
+    ``foo"a b"`` becomes one token ``fooa b``. Crucial for LSP commands
+    like ``iommi-lsp --ty-command "/path/to/ty server"`` where the
+    second flag's value must reach the child as one argv entry.
+    """
     var out = List[String]()
     var b = text.as_bytes()
     var n = len(b)
-    var start = 0
     var i = 0
     while i < n:
-        if b[i] == 0x20 or b[i] == 0x09:
-            if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-        i += 1
-    if start < n:
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:n])))
+        # Skip leading whitespace between tokens.
+        while i < n and (b[i] == 0x20 or b[i] == 0x09):
+            i += 1
+        if i >= n:
+            break
+        # Accumulate one token, honoring quotes.
+        var token = List[UInt8]()
+        var has_content = False
+        while i < n:
+            var c = b[i]
+            if c == 0x20 or c == 0x09:
+                break
+            if c == 0x22:  # double quote
+                i += 1
+                has_content = True
+                while i < n and b[i] != 0x22:
+                    # Inside ``"…"`` only ``\"`` and ``\\`` are escapes;
+                    # leave other backslashes literal so a Windows path
+                    # like ``"C:\\Users\\…"`` isn't mangled.
+                    if b[i] == 0x5C and i + 1 < n \
+                            and (b[i + 1] == 0x22 or b[i + 1] == 0x5C):
+                        token.append(b[i + 1])
+                        i += 2
+                        continue
+                    token.append(b[i])
+                    i += 1
+                if i < n:  # consume closing quote
+                    i += 1
+                continue
+            if c == 0x27:  # single quote
+                i += 1
+                has_content = True
+                while i < n and b[i] != 0x27:
+                    token.append(b[i])
+                    i += 1
+                if i < n:
+                    i += 1
+                continue
+            token.append(c)
+            has_content = True
+            i += 1
+        if has_content:
+            out.append(String(StringSlice(
+                ptr=token.unsafe_ptr(), length=len(token),
+            )))
     return out^

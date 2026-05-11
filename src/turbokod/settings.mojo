@@ -170,6 +170,15 @@ struct Settings(Movable):
     var focus: UInt8
     var editor: ActionEditor
     var _list_scroll: Int
+    var _last_scroll_action: Int
+    """Last ``selected_action`` value snapped into view by paint. The
+    actions-list paint only scrolls to the selection when this differs
+    from ``selected_action`` — so wheel-scrolling moves the viewport
+    independently and isn't snapped back on the next frame."""
+    var _last_scroll_dict: Int
+    """Counterpart for ``selected_dict``."""
+    var _last_scroll_language: Int
+    """Counterpart for ``selected_language``."""
     var _buttons: List[_PlacedButton]
     """Persistent button table — Add / Edit / Remove / Close, in order."""
     var _save_dropdown: Dropdown
@@ -224,6 +233,9 @@ struct Settings(Movable):
         self.focus = _FOCUS_SECTIONS
         self.editor = ActionEditor()
         self._list_scroll = 0
+        self._last_scroll_action = -2
+        self._last_scroll_dict = -2
+        self._last_scroll_language = -2
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" + Add "), 0, 0), _FOCUS_ADD, True,
@@ -279,6 +291,9 @@ struct Settings(Movable):
         self.selected_action = 0 if len(self.actions) > 0 else -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
+        self._last_scroll_action = -2
+        self._last_scroll_dict = -2
+        self._last_scroll_language = -2
         self._save_dropdown = Dropdown(
             _save_behavior_options(), 1 if auto_save else 0,
         )
@@ -481,11 +496,17 @@ struct Settings(Movable):
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         var visible = list_rect.height()
-        if self.selected_action >= 0:
+        # Only snap the viewport to the selection when the selection
+        # has actually changed since the previous paint — otherwise the
+        # mouse wheel could never move the viewport without immediately
+        # being snapped back.
+        if self.selected_action >= 0 \
+                and self.selected_action != self._last_scroll_action:
             if self.selected_action < self._list_scroll:
                 self._list_scroll = self.selected_action
             elif self.selected_action >= self._list_scroll + visible:
                 self._list_scroll = self.selected_action - visible + 1
+        self._last_scroll_action = self.selected_action
         if self._list_scroll < 0:
             self._list_scroll = 0
         var max_scroll = len(self.actions) - visible
@@ -628,11 +649,15 @@ struct Settings(Movable):
         Uses the same scroll bookkeeping as the actions list so a long
         catalog stays usable in a short window."""
         var visible = list_rect.height()
-        if self.selected_dict >= 0:
+        # See _paint_actions_list for the rationale behind the
+        # change-only snap.
+        if self.selected_dict >= 0 \
+                and self.selected_dict != self._last_scroll_dict:
             if self.selected_dict < self._list_scroll:
                 self._list_scroll = self.selected_dict
             elif self.selected_dict >= self._list_scroll + visible:
                 self._list_scroll = self.selected_dict - visible + 1
+        self._last_scroll_dict = self.selected_dict
         if self._list_scroll < 0:
             self._list_scroll = 0
         var max_scroll = len(self.dict_specs) - visible
@@ -746,11 +771,15 @@ struct Settings(Movable):
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         var visible = list_rect.height()
-        if self.selected_language >= 0:
+        # See _paint_actions_list for the rationale behind the
+        # change-only snap.
+        if self.selected_language >= 0 \
+                and self.selected_language != self._last_scroll_language:
             if self.selected_language < self._list_scroll:
                 self._list_scroll = self.selected_language
             elif self.selected_language >= self._list_scroll + visible:
                 self._list_scroll = self.selected_language - visible + 1
+        self._last_scroll_language = self.selected_language
         if self._list_scroll < 0:
             self._list_scroll = 0
         var max_scroll = len(self.languages_view) - visible
@@ -1389,12 +1418,49 @@ fn _format_language(spec: LanguageSpec, has_override: Bool) -> String:
 
 
 fn _join_argv(argv: List[String]) -> String:
+    """Round-trip-safe join: wrap tokens with shell-significant
+    characters (spaces, tabs, or pre-existing quotes) in double quotes
+    so the re-parser in ``language_editor._split_space`` reconstructs
+    the same argv. Without the re-quoting, editing a saved
+    ``--ty-command "/path/to/ty server"`` would silently lose the
+    grouping the next time the dialog opened.
+    """
     var out = String("")
     for i in range(len(argv)):
         if i > 0:
             out = out + String(" ")
-        out = out + argv[i]
+        out = out + _shell_quote(argv[i])
     return out^
+
+
+fn _shell_quote(s: String) -> String:
+    """Return ``s`` unchanged when it contains no shell-significant
+    bytes; otherwise wrap it in double quotes with embedded ``"`` and
+    ``\\`` escaped. Single quotes are passed through inside ``"…"``
+    so they don't need their own handling. Empty input is rendered as
+    ``""`` so it survives a re-split as a real (empty) token rather
+    than getting dropped."""
+    var b = s.as_bytes()
+    if len(b) == 0:
+        return String("\"\"")
+    var needs_quote = False
+    for i in range(len(b)):
+        var c = b[i]
+        if c == 0x20 or c == 0x09 or c == 0x22 or c == 0x27 \
+                or c == 0x5C:
+            needs_quote = True
+            break
+    if not needs_quote:
+        return s
+    var buf = List[UInt8]()
+    buf.append(0x22)  # opening "
+    for i in range(len(b)):
+        var c = b[i]
+        if c == 0x22 or c == 0x5C:
+            buf.append(0x5C)
+        buf.append(c)
+    buf.append(0x22)  # closing "
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
 
 fn _format_action(act: OnSaveAction) -> String:

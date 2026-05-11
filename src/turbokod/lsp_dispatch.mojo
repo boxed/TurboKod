@@ -186,6 +186,14 @@ struct LspManager(Copyable, Movable):
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
+    # Rolling capture of the server's stderr. Drained every tick (and one
+    # last time after the child reaps) so the info window can show *why*
+    # a server died — many language servers print a Python traceback /
+    # ``error: unrecognized option`` line to stderr before exiting, and
+    # without surfacing that the user sees only an indefinite "starting…"
+    # state. Capped at 16 KB to bound memory; once full, new bytes are
+    # dropped (the head usually has the most useful diagnostic line).
+    var _stderr_log: String
 
     # Per-document tracking for didOpen / didChange.
     var _doc_paths: List[String]      # absolute paths
@@ -221,6 +229,7 @@ struct LspManager(Copyable, Movable):
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
+        self._stderr_log = String("")
 
     fn __copyinit__(out self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
@@ -250,6 +259,7 @@ struct LspManager(Copyable, Movable):
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
+        self._stderr_log = String("")
 
     fn is_active(self) -> Bool:
         return self.state == _STATE_READY \
@@ -306,6 +316,12 @@ struct LspManager(Copyable, Movable):
 
     fn root_uri(self) -> String:
         return self._root_uri
+
+    fn captured_stderr(self) -> String:
+        """Everything we've drained from the server's stderr since spawn,
+        capped at 16 KB. Surfaced in the info window so the user can see
+        what the server printed before exiting / hanging."""
+        return self._stderr_log
 
     # --- diagnostics -------------------------------------------------------
 
@@ -586,6 +602,32 @@ struct LspManager(Copyable, Movable):
         """
         if self.state == _STATE_NOT_STARTED or self.state == _STATE_FAILED:
             return Optional[DefinitionResolved]()
+        # Capture anything the server has written to stderr since the
+        # last tick — useful diagnostic context for the info window even
+        # while alive, and the *only* clue we have when the server dies
+        # mid-handshake (no JSON-RPC response coming, just a Python
+        # traceback or "error: unrecognized option" on stderr).
+        self._absorb_stderr()
+        # Crash-detection: if the child has exited while we still
+        # consider the session live, latch FAILED with whatever stderr
+        # carried. Without this the manager stays in INITIALIZING
+        # forever and the user sees an indefinite "starting…" with no
+        # explanation. Mirror of the DAP manager's crash-detect.
+        if self.client.process.try_reap():
+            # One last drain — between the previous absorb and the
+            # reap the child may have flushed its final stderr line.
+            self._absorb_stderr()
+            self.state = _STATE_FAILED
+            var why = String("server exited")
+            var first = _first_nonempty_line(self._stderr_log)
+            if len(first.as_bytes()) > 0:
+                why = why + String(": ") + first
+            self.failure_reason = why^
+            _lsp_debug_log(
+                String("✗ lsp ") + self._language_id
+                + String(" exited; failure_reason=") + self.failure_reason,
+            )
+            return Optional[DefinitionResolved]()
         var resolved = Optional[DefinitionResolved]()
         var i = 0
         while i < 16:
@@ -655,6 +697,27 @@ struct LspManager(Copyable, Movable):
         return resolved
 
     # --- internals ---------------------------------------------------------
+
+    fn _absorb_stderr(mut self):
+        """Drain whatever's available on the server's stderr pipe and
+        append it to the rolling capture. Bounded at 16 KB so a chatty
+        server can't blow up our memory; once at the cap, new bytes are
+        dropped (the head usually has the actionable diagnostic)."""
+        var chunk = self.client.process.drain_stderr()
+        if len(chunk.as_bytes()) == 0:
+            return
+        comptime CAP: Int = 16 * 1024
+        var have = len(self._stderr_log.as_bytes())
+        if have >= CAP:
+            return
+        var room = CAP - have
+        var cb = chunk.as_bytes()
+        if len(cb) <= room:
+            self._stderr_log = self._stderr_log + chunk
+        else:
+            self._stderr_log = self._stderr_log + String(StringSlice(
+                ptr=cb.unsafe_ptr(), length=room,
+            ))
 
     fn _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The
@@ -983,6 +1046,49 @@ fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
 
 
 # --- URI <-> path ----------------------------------------------------------
+
+
+fn _first_nonempty_line(s: String) -> String:
+    """Return the first line of ``s`` that has at least one non-whitespace
+    byte. Lets the FAILED state row in the LSP info window show a punchy
+    one-liner from a multi-line stderr blob (the full thing is rendered
+    in a dedicated block below)."""
+    var b = s.as_bytes()
+    var start = 0
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            var seg = String(StringSlice(
+                ptr=b.unsafe_ptr() + start, length=i - start,
+            ))
+            var trimmed = _trim_trailing_newline(seg)
+            var tb = trimmed.as_bytes()
+            var has_text = False
+            for k in range(len(tb)):
+                if tb[k] != 0x20 and tb[k] != 0x09 \
+                        and tb[k] != 0x0D and tb[k] != 0x0A:
+                    has_text = True
+                    break
+            if has_text:
+                return trimmed^
+            start = i + 1
+    if start < len(b):
+        return _trim_trailing_newline(String(StringSlice(
+            ptr=b.unsafe_ptr() + start, length=len(b) - start,
+        )))
+    return String("")
+
+
+fn _trim_trailing_newline(s: String) -> String:
+    """Drop trailing ``\\r``/``\\n`` so a one-line failure_reason from a
+    stderr blob doesn't end with a dangling newline that confuses the
+    info-window join."""
+    var b = s.as_bytes()
+    var end = len(b)
+    while end > 0 and (b[end - 1] == 0x0A or b[end - 1] == 0x0D):
+        end -= 1
+    if end == len(b):
+        return s
+    return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
 
 
 fn _path_to_uri(path: String) -> String:
