@@ -1414,6 +1414,10 @@ struct Desktop(Movable):
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
         self.windows.paint(canvas)
+        # Title-bar full-path tooltip: floats above every window but
+        # below the side panes / chrome, so the popup never gets
+        # painted over by the editor it's describing.
+        self.windows.paint_title_tooltip(canvas, ws)
         self.file_tree.paint(canvas, screen)
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         self.menu_bar.paint(canvas, screen)
@@ -1925,30 +1929,19 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
-        """Spawn (or look up) an LSP manager for files with extension
-        ``ext``. Returns the index into ``lsp_managers`` of the manager,
-        or ``-1`` for unsupported file types or when no candidate
-        binary is installed. Idempotent — re-calling for an already-
-        spawned language returns the existing index.
-
-        ``ext`` is matched against the registry's ``file_types``; the
-        matching ``LanguageSpec`` then drives binary selection. The
-        first candidate in ``spec.candidates`` whose binary exists on
-        ``$PATH`` (per ``which()``) wins. Mojo gets special-cased to
-        thread ``-I`` include flags through the LSP argv.
-        """
-        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
-        if spec_idx < 0:
-            return -1
-        var lang = self.lsp_specs[spec_idx].language_id
-        for i in range(len(self.lsp_languages)):
-            if self.lsp_languages[i] == lang:
-                return i
-        # Pick the first installed candidate.
+    fn _pick_lsp_argv(self, spec_idx: Int) -> List[String]:
+        """The argv we would spawn for ``lsp_specs[spec_idx]`` *right
+        now* — first candidate whose binary is on ``$PATH``, with the
+        Mojo ``-I`` include flags appended for the Mojo case. Returns
+        an empty list when no candidate is installed. Shared by
+        ``_ensure_lsp_for_extension`` (which spawns) and
+        ``_rebuild_lsp_specs`` (which compares against an already-
+        spawned manager's argv to decide whether to restart)."""
         var argv = List[String]()
-        var argv_found = False
+        if spec_idx < 0 or spec_idx >= len(self.lsp_specs):
+            return argv^
         var spec = self.lsp_specs[spec_idx]
+        var argv_found = False
         for c in range(len(spec.candidates)):
             var cand = spec.candidates[c]
             if len(cand.argv) == 0:
@@ -1959,20 +1952,44 @@ struct Desktop(Movable):
                 argv_found = True
                 break
         if not argv_found:
-            return -1
-        var root = String("")
-        if self.project:
-            root = self.project.value()
-        # Mojo wants ``-I <root> -I <root>/src`` injected so the server
-        # can resolve project imports. Other languages take their argv
-        # straight from the registry.
-        if lang == String("mojo"):
+            return List[String]()
+        if spec.language_id == String("mojo"):
+            var root = String("")
+            if self.project:
+                root = self.project.value()
             var includes = _mojo_include_dirs(root)
             for i in range(len(includes)):
                 argv.append(String("-I"))
                 argv.append(includes[i])
+        return argv^
+
+    fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
+        """Spawn (or look up) an LSP manager for files with extension
+        ``ext``. Returns the index into ``lsp_managers`` of the manager,
+        or ``-1`` for unsupported file types or when no candidate
+        binary is installed. Idempotent — re-calling for an already-
+        spawned language returns the existing index.
+
+        ``ext`` is matched against the registry's ``file_types``; the
+        matching ``LanguageSpec`` then drives binary selection via
+        ``_pick_lsp_argv`` (first installed candidate wins; Mojo gets
+        ``-I`` include flags threaded in).
+        """
+        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        if spec_idx < 0:
+            return -1
+        var lang = self.lsp_specs[spec_idx].language_id
+        for i in range(len(self.lsp_languages)):
+            if self.lsp_languages[i] == lang:
+                return i
+        var argv = self._pick_lsp_argv(spec_idx)
+        if len(argv) == 0:
+            return -1
+        var root = String("")
+        if self.project:
+            root = self.project.value()
         var manager = LspManager()
-        manager.start_with(lang, argv, root)
+        manager.start_with(lang, argv^, root)
         self.lsp_managers.append(manager^)
         self.lsp_languages.append(lang)
         return len(self.lsp_managers) - 1
@@ -2152,12 +2169,50 @@ struct Desktop(Movable):
 
     fn _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
-        overrides in ``config.language_servers``. Already-spawned
-        ``lsp_managers`` keep running with their old binary —
-        re-routing only takes effect for newly opened files."""
+        overrides in ``config.language_servers``. For any already-
+        spawned manager whose argv no longer matches the new
+        top-installed candidate (typically because the user
+        re-ordered the candidate list in the Languages settings),
+        shut it down, drop it, and re-attach the editors of that
+        language so a fresh manager is spawned with the new binary."""
         self.lsp_specs = apply_language_overrides(
             built_in_servers(), self.config.language_servers,
         )
+        # Walk a snapshot of the language list — restarting a manager
+        # pops it from the parallel lists and (via _retry_lsp_for_language)
+        # appends a new one at the end, so iterating live would either
+        # skip entries or recheck the freshly-spawned replacement.
+        var langs_snapshot = self.lsp_languages.copy()
+        for s in range(len(langs_snapshot)):
+            var lang = langs_snapshot[s]
+            var spec_idx = -1
+            for k in range(len(self.lsp_specs)):
+                if self.lsp_specs[k].language_id == lang:
+                    spec_idx = k
+                    break
+            if spec_idx < 0:
+                continue
+            var new_argv = self._pick_lsp_argv(spec_idx)
+            if len(new_argv) == 0:
+                # No installed candidate under the new ordering — leave
+                # the running manager alone rather than tearing down a
+                # working server just because the user added a paper
+                # candidate that isn't actually on PATH.
+                continue
+            var mgr_idx = -1
+            for k in range(len(self.lsp_languages)):
+                if self.lsp_languages[k] == lang:
+                    mgr_idx = k
+                    break
+            if mgr_idx < 0:
+                continue
+            var current_argv = self.lsp_managers[mgr_idx].argv()
+            if _argv_equal(current_argv, new_argv):
+                continue
+            self.lsp_managers[mgr_idx].shutdown()
+            _ = self.lsp_managers.pop(mgr_idx)
+            _ = self.lsp_languages.pop(mgr_idx)
+            self._retry_lsp_for_language(lang)
 
     fn open_project(mut self, path: String):
         """Pick a project root for ``path``.
@@ -6935,6 +6990,19 @@ fn _same_file(a: String, b: String) -> Bool:
     return len(ra.as_bytes()) > 0 and ra == rb
 
 
+
+
+fn _argv_equal(a: List[String], b: List[String]) -> Bool:
+    """Element-wise equality for two argv lists. Used to detect when a
+    settings change (server re-ordering, candidate add/remove) means
+    a spawned LSP manager's argv no longer matches the now-preferred
+    binary and we should restart it."""
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
 
 
 fn _mojo_include_dirs(root: String) -> List[String]:

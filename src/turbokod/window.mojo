@@ -12,7 +12,7 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
+from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
@@ -1025,6 +1025,15 @@ struct WindowManager(Movable):
     var _resize_bottom: Bool
     var _drag_dx: Int
     var _drag_dy: Int
+    # Bare-hover tracker for the title-bar full-path tooltip. ``-1``
+    # means nothing is hovered; otherwise the index of the editor
+    # window whose title row the pointer is currently over (and whose
+    # ``editor.file_path`` is non-empty). ``_title_hover_x/y`` are the
+    # cursor cell used to anchor the popup. Cleared on any non-hover
+    # mouse event so a click doesn't leave a stale tooltip behind.
+    var _title_hover_idx: Int
+    var _title_hover_x: Int
+    var _title_hover_y: Int
 
     fn __init__(out self):
         self.windows = List[Window]()
@@ -1042,6 +1051,9 @@ struct WindowManager(Movable):
         self._resize_bottom = False
         self._drag_dx = 0
         self._drag_dy = 0
+        self._title_hover_idx = -1
+        self._title_hover_x = 0
+        self._title_hover_y = 0
 
     fn add(mut self, var window: Window):
         self.windows.append(window^)
@@ -1198,6 +1210,56 @@ struct WindowManager(Movable):
             var i = self.z_order[k]
             self.windows[i].paint(canvas, titles[i], i == self.focused, i + 1)
 
+    fn paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):
+        """Overlay the full-path tooltip for whichever editor window's
+        title bar is currently being hovered, if any. Painted by the
+        host after ``paint`` so the popup z-orders above every window.
+        """
+        if self._title_hover_idx < 0:
+            return
+        if self._title_hover_idx >= len(self.windows):
+            return
+        var win = self.windows[self._title_hover_idx]
+        if not win.is_editor:
+            return
+        var path = win.editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var max_box_w = workspace.width() - 2
+        if max_box_w < 5:
+            max_box_w = workspace.width()
+        var size = popup_size_for_text(path, max_box_w, workspace.height())
+        var w = size[0]
+        var h = size[1]
+        if w == 0 or h == 0:
+            return
+        # Anchor one row below the hovered cell so the popup doesn't
+        # cover the title text the user is pointing at. Flip above
+        # when there's no room below; clamp horizontally so the box
+        # always fits inside ``workspace``.
+        var bx = self._title_hover_x
+        var by = self._title_hover_y + 1
+        if by + h > workspace.b.y:
+            by = self._title_hover_y - h
+        if by < workspace.a.y:
+            by = workspace.a.y
+        if bx + w > workspace.b.x:
+            bx = workspace.b.x - w
+        if bx < workspace.a.x:
+            bx = workspace.a.x
+        var r = Rect(bx, by, bx + w, by + h)
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        paint_drop_shadow(canvas, r)
+        var tt_painter = Painter(r)
+        tt_painter.fill(canvas, r, String(" "), attr)
+        tt_painter.draw_box(canvas, r, attr, False)
+        var msg_rect = Rect(
+            r.a.x + 2, r.a.y + 1,
+            r.b.x - 2, r.b.y - 1,
+        )
+        if msg_rect.width() > 0 and msg_rect.height() > 0:
+            _ = canvas.put_wrapped_text(msg_rect, path, attr)
+
     fn handle_key(mut self, event: Event) -> Bool:
         """Forward a key event to the focused window's editor (if it has one)."""
         if 0 <= self.focused and self.focused < len(self.windows):
@@ -1211,6 +1273,7 @@ struct WindowManager(Movable):
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
             if not event.pressed:
                 return True
+            self._title_hover_idx = -1
             var k = len(self.z_order) - 1
             while k >= 0:
                 var i = self.z_order[k]
@@ -1236,6 +1299,18 @@ struct WindowManager(Movable):
             for j in range(len(self.windows)):
                 if self.windows[j].is_editor and j != hit:
                     self.windows[j].editor.clear_minimap_hover()
+            # Title-bar full-path tooltip: arm only when the pointer is
+            # on the topmost window's title row AND that window is a
+            # file-backed editor. The body forwards to handle_mouse_in_body
+            # below for minimap-hover state, so the two trackers stay
+            # independent.
+            self._title_hover_idx = -1
+            if hit >= 0 and self.windows[hit].is_editor \
+                    and self.windows[hit].title_bar_hit(event.pos) \
+                    and len(self.windows[hit].editor.file_path.as_bytes()) > 0:
+                self._title_hover_idx = hit
+                self._title_hover_x = event.pos.x
+                self._title_hover_y = event.pos.y
             if hit >= 0 and self.windows[hit].is_editor:
                 _ = self.windows[hit].handle_mouse_in_body(event)
             return True
@@ -1247,6 +1322,7 @@ struct WindowManager(Movable):
         if event.button == MOUSE_BUTTON_RIGHT:
             if not event.pressed:
                 return True
+            self._title_hover_idx = -1
             var k3 = len(self.z_order) - 1
             while k3 >= 0:
                 var i3 = self.z_order[k3]
@@ -1256,6 +1332,9 @@ struct WindowManager(Movable):
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False
+        # Any left-button activity (press, drag, release) drops the
+        # title-bar tooltip. Bare hover re-arms it on the next motion.
+        self._title_hover_idx = -1
         if event.pressed and not event.motion:
             return self._handle_press(event, workspace)
         elif event.pressed and event.motion:

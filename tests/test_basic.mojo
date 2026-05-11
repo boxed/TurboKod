@@ -5399,6 +5399,59 @@ fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
     assert_true(wm.windows[0].rect == smaller)
 
 
+fn test_window_manager_title_hover_arms_for_editor_with_path() raises:
+    """Bare hover over the title bar of a file-backed editor window
+    arms the title-tooltip tracker; hovering elsewhere clears it. A
+    left-click anywhere also drops the tracker so a stale popup
+    doesn't outlive the click."""
+    var wm = WindowManager()
+    var w = Window.editor_window(
+        String("hello.mojo"), Rect(2, 2, 30, 12), String("body"),
+    )
+    w.editor.file_path = String("/tmp/proj/hello.mojo")
+    wm.add(w^)
+    # Hover on the title row (y == rect.a.y == 2), at a column that
+    # isn't the close button or the maximize/number indicator.
+    var hover = Event.mouse_event(
+        Point(15, 2), MOUSE_BUTTON_NONE, pressed=True, motion=True,
+    )
+    _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, 0)
+    assert_equal(wm._title_hover_x, 15)
+    assert_equal(wm._title_hover_y, 2)
+    # Hover off the title row — body cell at y=5 — clears it.
+    var off = Event.mouse_event(
+        Point(15, 5), MOUSE_BUTTON_NONE, pressed=True, motion=True,
+    )
+    _ = wm.handle_mouse(off, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, -1)
+    # Re-arm, then a left-click clears it.
+    _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, 0)
+    var click = Event.mouse_event(
+        Point(15, 2), MOUSE_BUTTON_LEFT, pressed=True, motion=False,
+    )
+    _ = wm.handle_mouse(click, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, -1)
+
+
+fn test_window_manager_title_hover_skips_unbacked_buffers() raises:
+    """Untitled / file-less editor windows must not arm the tooltip —
+    a centered ``Untitled`` title with no path has nothing useful to
+    show in a popup."""
+    var wm = WindowManager()
+    var w = Window.editor_window(
+        String("Untitled"), Rect(2, 2, 30, 12), String(""),
+    )
+    # editor.file_path is empty by default for editor_window().
+    wm.add(w^)
+    var hover = Event.mouse_event(
+        Point(15, 2), MOUSE_BUTTON_NONE, pressed=True, motion=True,
+    )
+    _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, -1)
+
+
 fn test_painter_clips_text_at_right_edge() raises:
     """Long text passed to ``Painter.put_text`` must not bleed past the
     clip's right edge — every cell beyond ``clip.b.x`` stays untouched."""
