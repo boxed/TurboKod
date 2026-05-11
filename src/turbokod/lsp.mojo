@@ -804,6 +804,18 @@ fn lsp_initialize_params(
     var workspace_caps = json_object()
     workspace_caps.put(String("workspaceFolders"), json_bool(True))
     capabilities.put(String("workspace"), workspace_caps^)
+    # Advertise textDocument/completion so servers know to honor our
+    # requests. ``snippetSupport: False`` keeps responses to plain-text
+    # inserts — the editor doesn't render snippet placeholders, so a
+    # snippet body would otherwise land in the buffer with literal
+    # ``${1:foo}`` markers.
+    var text_doc_caps = json_object()
+    var completion_caps = json_object()
+    var completion_item_caps = json_object()
+    completion_item_caps.put(String("snippetSupport"), json_bool(False))
+    completion_caps.put(String("completionItem"), completion_item_caps^)
+    text_doc_caps.put(String("completion"), completion_caps^)
+    capabilities.put(String("textDocument"), text_doc_caps^)
     params.put(String("capabilities"), capabilities^)
     return params^
 

@@ -29,9 +29,9 @@ from .colors import (
 from .diff import MergeResult, diff3_merge, unified_diff
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
-    MOD_ALT, MOD_CTRL, MOD_SHIFT,
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
@@ -43,13 +43,14 @@ from .git_changes import (
     GitRevertBlock, GitRevertRequest, compute_revert_block,
 )
 from .highlight import (
-    DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
-    extension_of, highlight_comment_attr, highlight_for_extension,
-    highlight_incremental, highlight_string_attr, word_at,
+    CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
+    HighlightCache, extension_of, highlight_comment_attr,
+    highlight_for_extension, highlight_incremental, highlight_string_attr,
+    word_at,
 )
 from .lsp_dispatch import (
-    DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT, DIAG_SEVERITY_INFO,
-    DIAG_SEVERITY_WARNING, Diagnostic,
+    CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
 )
 from .spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
@@ -85,6 +86,52 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     if s_end > len(bytes): s_end = len(bytes)
     if s_start >= s_end: return String("")
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+
+
+fn _completion_kind_icon(kind: Int) -> String:
+    """Map an LSP ``CompletionItemKind`` integer to a one-character icon.
+
+    The icons are letters rather than unicode glyphs so the column
+    aligns cleanly in any monospace font and doesn't require glyph
+    fallback. Unknown kinds get ``?`` so the column is never blank.
+    """
+    if kind == 2 or kind == 3:  # Method / Function
+        return String("ƒ")
+    if kind == 4:  # Constructor
+        return String("c")
+    if kind == 5:  # Field
+        return String("·")
+    if kind == 6:  # Variable
+        return String("v")
+    if kind == 7:  # Class
+        return String("C")
+    if kind == 8:  # Interface
+        return String("I")
+    if kind == 9:  # Module
+        return String("m")
+    if kind == 10:  # Property
+        return String("p")
+    if kind == 12:  # Value
+        return String("=")
+    if kind == 13:  # Enum
+        return String("E")
+    if kind == 14:  # Keyword
+        return String("k")
+    if kind == 15:  # Snippet
+        return String("s")
+    if kind == 17:  # File
+        return String("F")
+    if kind == 18:  # Reference
+        return String("&")
+    if kind == 21:  # Constant
+        return String("K")
+    if kind == 22:  # Struct
+        return String("S")
+    if kind == 25:  # TypeParameter
+        return String("T")
+    if kind == 1:   # Text
+        return String("t")
+    return String("?")
 
 
 fn _rtrim(s: String) -> String:
@@ -419,6 +466,17 @@ comptime _DOUBLE_CLICK_MS = 500
 second one to be treated as a double-click."""
 
 
+comptime _COMPLETION_POPUP_ROWS = 8
+"""How many completion entries fit in the popup before scrolling."""
+
+comptime _COMPLETION_POPUP_WIDTH_MIN = 18
+"""Minimum popup width; the actual width grows to fit the longest
+visible label."""
+
+comptime _COMPLETION_POPUP_WIDTH_MAX = 60
+"""Maximum popup width; longer labels get truncated with an ellipsis."""
+
+
 # --- External-change status codes ------------------------------------------
 #
 # Returned by ``Editor.check_for_external_change`` so callers (Window /
@@ -702,6 +760,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     var _git_head_loaded: Bool
     var _git_head_present: Bool
     var _git_changes_dirty: Bool
+    # ``_lsp_dirty`` is True when the buffer has mutated since the last
+    # didChange we sent to the LSP server. Set in ``_mark_hl_dirty``
+    # (every edit path) and consumed by ``Desktop.lsp_tick`` which sends
+    # a didChange and clears it. Without this the server's view of the
+    # file freezes at didOpen time, so its published diagnostics
+    # describe stale text — old issues stick to lines the user has
+    # since edited and new issues never appear.
+    var _lsp_dirty: Bool
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -772,6 +838,29 @@ struct Editor(ImplicitlyCopyable, Movable):
     var _minimap_hover_x: Int
     var _minimap_hover_y: Int
     var _minimap_hover_below: Bool
+    # LSP completion popup. ``pending_completion_request`` is set when
+    # the user invokes completion (Ctrl+Space) — the host polls
+    # ``consume_completion_request`` and dispatches to its LSP
+    # manager. When a response lands, ``set_completions`` populates
+    # the list and flips ``completion_popup_visible`` on; key events
+    # then route through the popup (Up/Down/Enter/Tab/Esc/typing) so
+    # the user can pick an entry without taking their hands off the
+    # keyboard.
+    #
+    # ``completion_anchor_row`` / ``completion_anchor_col`` is the
+    # cursor position when the popup was opened *minus the length of
+    # the in-progress identifier*: accepting an entry replaces
+    # ``[anchor_col, cursor_col)`` with the chosen ``insert_text``,
+    # so a user who typed "fo" before invoking and then picks ``foo``
+    # ends up with just ``foo`` rather than ``fofoo``. The host also
+    # uses these to position the popup below the start of the word.
+    var pending_completion_request: Optional[CompletionRequest]
+    var completion_popup_visible: Bool
+    var completion_items: List[CompletionItem]
+    var completion_highlight: Int
+    var completion_scroll: Int
+    var completion_anchor_row: Int
+    var completion_anchor_col: Int
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -819,6 +908,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_loaded = False
         self._git_head_present = False
         self._git_changes_dirty = True
+        self._lsp_dirty = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -841,6 +931,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_x = 0
         self._minimap_hover_y = 0
         self._minimap_hover_below = False
+        self.pending_completion_request = Optional[CompletionRequest]()
+        self.completion_popup_visible = False
+        self.completion_items = List[CompletionItem]()
+        self.completion_highlight = 0
+        self.completion_scroll = 0
+        self.completion_anchor_row = 0
+        self.completion_anchor_col = 0
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -888,6 +985,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_loaded = False
         self._git_head_present = False
         self._git_changes_dirty = True
+        self._lsp_dirty = False
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -910,6 +1008,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_x = 0
         self._minimap_hover_y = 0
         self._minimap_hover_below = False
+        self.pending_completion_request = Optional[CompletionRequest]()
+        self.completion_popup_visible = False
+        self.completion_items = List[CompletionItem]()
+        self.completion_highlight = 0
+        self.completion_scroll = 0
+        self.completion_anchor_row = 0
+        self.completion_anchor_col = 0
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -978,6 +1083,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_loaded = copy._git_head_loaded
         self._git_head_present = copy._git_head_present
         self._git_changes_dirty = copy._git_changes_dirty
+        self._lsp_dirty = copy._lsp_dirty
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -1005,6 +1111,13 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._minimap_hover_x = copy._minimap_hover_x
         self._minimap_hover_y = copy._minimap_hover_y
         self._minimap_hover_below = copy._minimap_hover_below
+        self.pending_completion_request = copy.pending_completion_request
+        self.completion_popup_visible = copy.completion_popup_visible
+        self.completion_items = copy.completion_items.copy()
+        self.completion_highlight = copy.completion_highlight
+        self.completion_scroll = copy.completion_scroll
+        self.completion_anchor_row = copy.completion_anchor_row
+        self.completion_anchor_col = copy.completion_anchor_col
 
     fn flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -1188,6 +1301,15 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
 
+    fn consume_lsp_dirty(mut self) -> Bool:
+        """Return whether the buffer has been edited since the last
+        time this was called, and clear the flag. The host drives this
+        from ``Desktop.lsp_tick`` to send a didChange and keep the
+        server's text in sync with what's on screen."""
+        var was_dirty = self._lsp_dirty
+        self._lsp_dirty = False
+        return was_dirty
+
     fn invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
         retokenize on the next ``flush_highlights``. Used after a
@@ -1218,6 +1340,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # we don't need to thread a separate "buffer changed" signal
         # to every edit handler.
         self._git_changes_dirty = True
+        self._lsp_dirty = True
 
     fn refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
@@ -1499,6 +1622,143 @@ struct Editor(ImplicitlyCopyable, Movable):
         var req = self.pending_definition
         self.pending_definition = Optional[DefinitionRequest]()
         return req
+
+    fn consume_completion_request(mut self) -> Optional[CompletionRequest]:
+        """Return any pending ``CompletionRequest`` and clear the slot.
+
+        Set by ``handle_key`` when the user invokes completion
+        (Ctrl+Space). The host forwards to its LSP manager and routes
+        the response back via ``set_completions``."""
+        var req = self.pending_completion_request
+        self.pending_completion_request = Optional[CompletionRequest]()
+        return req
+
+    fn close_completion_popup(mut self):
+        """Hide and clear the completion popup. Idempotent."""
+        self.completion_popup_visible = False
+        self.completion_items = List[CompletionItem]()
+        self.completion_highlight = 0
+        self.completion_scroll = 0
+
+    fn set_completions(
+        mut self, var items: List[CompletionItem],
+        anchor_row: Int, anchor_col: Int,
+    ):
+        """Park ``items`` on the popup and make it visible.
+
+        ``anchor_row`` / ``anchor_col`` is the start of the identifier
+        the completion will replace — usually a few cells left of the
+        cursor when the user invoked completion partway through a
+        word. Accepting an entry replaces ``[anchor_col, cursor_col)``
+        on ``anchor_row`` with the chosen ``insert_text``. Empty
+        ``items`` closes the popup (a server response with no matches
+        is identical, UX-wise, to dismissing the popup).
+        """
+        if len(items) == 0:
+            self.close_completion_popup()
+            return
+        self.completion_items = items^
+        self.completion_popup_visible = True
+        self.completion_highlight = 0
+        self.completion_scroll = 0
+        self.completion_anchor_row = anchor_row
+        self.completion_anchor_col = anchor_col
+
+    fn completion_prefix_start(self) -> Int:
+        """Cursor's identifier start col on the current line. Walks
+        backward through word codepoints until hitting a non-word char
+        or the start of the line. Used to anchor the completion popup
+        so accepting an entry replaces what the user already typed."""
+        var line = self.buffer.line(self.cursor_row)
+        var col = self.cursor_col
+        while col > 0:
+            var prev = prev_codepoint_start(line, col)
+            var info = codepoint_at(line, prev)
+            if not is_word_codepoint(info[0]):
+                break
+            col = prev
+        return col
+
+    fn accept_completion(mut self) -> Bool:
+        """Apply the currently highlighted completion to the buffer.
+
+        Replaces ``[anchor_col, cursor_col)`` on ``anchor_row`` with the
+        selected item's ``insert_text`` and parks the cursor at the end
+        of the replacement. Closes the popup. Returns False (no-op)
+        when the popup isn't visible, the highlight is out of range,
+        or the anchor row no longer matches the cursor row (the user
+        clicked away to another row while the popup was up)."""
+        if self.read_only:
+            self.close_completion_popup()
+            return False
+        if not self.completion_popup_visible:
+            return False
+        if self.completion_highlight < 0 \
+                or self.completion_highlight >= len(self.completion_items):
+            self.close_completion_popup()
+            return False
+        if self.completion_anchor_row != self.cursor_row:
+            self.close_completion_popup()
+            return False
+        var item = self.completion_items[self.completion_highlight]
+        var pre = self.cursor_row
+        var start = self.completion_anchor_col
+        var end = self.cursor_col
+        if start < 0:
+            start = 0
+        if end < start:
+            end = start
+        var line = self.buffer.line(self.cursor_row)
+        var ln = len(line.as_bytes())
+        if end > ln:
+            end = ln
+        self._push_undo()
+        self._typing_active = False
+        # Delete the existing prefix span, then insert.
+        if end > start:
+            self.move_to(self.cursor_row, end, False)
+            for _ in range(end - start):
+                var p = self.buffer.delete_before(
+                    self.cursor_row, self.cursor_col,
+                )
+                self.move_to(p[0], p[1], False)
+        self.buffer.insert(
+            self.cursor_row, self.cursor_col, item.insert_text,
+        )
+        self.move_to(
+            self.cursor_row,
+            self.cursor_col + len(item.insert_text.as_bytes()),
+            False,
+        )
+        self.dirty = True
+        self._mark_hl_dirty(pre)
+        self.close_completion_popup()
+        return True
+
+    fn _completion_step(mut self, delta: Int):
+        """Move the popup highlight by ``delta`` (clamped). No-op when
+        the popup isn't visible."""
+        if not self.completion_popup_visible:
+            return
+        var n = len(self.completion_items)
+        if n == 0:
+            return
+        var i = self.completion_highlight + delta
+        if i < 0:
+            i = 0
+        elif i >= n:
+            i = n - 1
+        self.completion_highlight = i
+        # Keep the highlight in view. Popup renders _COMPLETION_POPUP_ROWS
+        # rows at a time; scroll the window when the highlight steps
+        # outside it.
+        if self.completion_highlight < self.completion_scroll:
+            self.completion_scroll = self.completion_highlight
+        elif self.completion_highlight \
+                >= self.completion_scroll + _COMPLETION_POPUP_ROWS:
+            self.completion_scroll = (
+                self.completion_highlight - _COMPLETION_POPUP_ROWS + 1
+            )
 
     fn consume_spell_action_request(
         mut self,
@@ -2689,6 +2949,112 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.scroll_y = target
         return True
 
+    fn _paint_completion_popup_at(
+        self, mut canvas: Canvas, view: Rect, anchor_x: Int, anchor_y: Int,
+    ):
+        """Render the completion popup anchored at the start of the
+        identifier being completed (``anchor_x`` / ``anchor_y`` are
+        screen cells). Floats one row below the anchor when there's
+        room, flips above when not. Width = longest visible label + 4
+        (1 left pad + label + 1 right pad + 2 borders), clamped to
+        ``[_COMPLETION_POPUP_WIDTH_MIN, _COMPLETION_POPUP_WIDTH_MAX]``.
+        """
+        var n_items = len(self.completion_items)
+        if n_items == 0:
+            return
+        var visible_rows = n_items
+        if visible_rows > _COMPLETION_POPUP_ROWS:
+            visible_rows = _COMPLETION_POPUP_ROWS
+        var height = visible_rows + 2
+        # Width grows to the longest *visible* label (windowed by
+        # scroll), so a 100-item list with one huge entry doesn't
+        # force a giant popup the user can't easily scan.
+        var longest = _COMPLETION_POPUP_WIDTH_MIN - 4
+        var first = self.completion_scroll
+        var last = first + visible_rows
+        if last > n_items:
+            last = n_items
+        for i in range(first, last):
+            var lw = len(self.completion_items[i].label.as_bytes())
+            if lw > longest:
+                longest = lw
+        var width = longest + 4
+        if width < _COMPLETION_POPUP_WIDTH_MIN:
+            width = _COMPLETION_POPUP_WIDTH_MIN
+        if width > _COMPLETION_POPUP_WIDTH_MAX:
+            width = _COMPLETION_POPUP_WIDTH_MAX
+        var x = anchor_x
+        if x + width > view.b.x:
+            x = view.b.x - width
+            if x < view.a.x:
+                x = view.a.x
+        # Prefer below the cursor row; flip above when it'd run off
+        # the bottom of the editor's view.
+        var y = anchor_y + 1
+        if y + height > view.b.y:
+            y = anchor_y - height
+            if y < view.a.y:
+                y = view.a.y
+        # Final clamp horizontally + vertically — popup can't be
+        # bigger than the view.
+        if width > view.width():
+            width = view.width()
+        if height > view.height():
+            height = view.height()
+        if x + width > view.b.x:
+            x = view.b.x - width
+        if x < view.a.x:
+            x = view.a.x
+        if y + height > view.b.y:
+            y = view.b.y - height
+        if y < view.a.y:
+            y = view.a.y
+        var rect = Rect(x, y, x + width, y + height)
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        var sel_attr = Attr(BLACK, LIGHT_GREEN)
+        paint_drop_shadow(canvas, rect)
+        var pop_painter = Painter(rect)
+        pop_painter.fill(canvas, rect, String(" "), attr)
+        pop_painter.draw_box(canvas, rect, attr, False)
+        var inner_left = rect.a.x + 1
+        var inner_right = rect.b.x - 1
+        var inner_w = inner_right - inner_left
+        for r in range(visible_rows):
+            var idx = self.completion_scroll + r
+            if idx >= n_items:
+                break
+            var ty = rect.a.y + 1 + r
+            var item = self.completion_items[idx]
+            var is_hl = (idx == self.completion_highlight)
+            var row_attr = sel_attr if is_hl else attr
+            if is_hl:
+                pop_painter.fill(
+                    canvas, Rect(inner_left, ty, inner_right, ty + 1),
+                    String(" "), row_attr,
+                )
+            # ``<icon> <label>`` — single-character kind hint, then a
+            # space, then the label truncated to fit. The icon column
+            # gives the user a fast type-vs-keyword-vs-function read
+            # without having to parse text.
+            var icon = _completion_kind_icon(item.kind)
+            var label = item.label
+            # Truncate label to inner width minus the leading "I ".
+            var max_label = inner_w - 2
+            if max_label < 1:
+                max_label = 1
+            var lb = label.as_bytes()
+            if len(lb) > max_label:
+                if max_label >= 1:
+                    label = String(StringSlice(
+                        unsafe_from_utf8=lb[0:max_label - 1],
+                    )) + String("…")
+                else:
+                    label = String("…")
+            _ = pop_painter.put_text(
+                canvas, Point(inner_left, ty),
+                icon + String(" ") + label, row_attr,
+            )
+
     fn paint_minimap_tooltip(
         self, mut canvas: Canvas, view: Rect,
     ):
@@ -3271,6 +3637,43 @@ struct Editor(ImplicitlyCopyable, Movable):
         # by ``_update_minimap_hover`` on bare-hover events; when no
         # mark is hovered this is a no-op.
         self.paint_minimap_tooltip(canvas, view)
+        # Completion popup: floats just below (or above) the column
+        # where the in-progress identifier starts. Painted last so it
+        # overlays both the text and the minimap tooltip. ``focused``
+        # gates it — when the user clicked away the popup gets
+        # painted by whichever editor is focused now (none, in this
+        # case) rather than the stale frame.
+        if focused and self.completion_popup_visible \
+                and len(self.completion_items) > 0:
+            var sr = self._screen_row_for(
+                layout, self.completion_anchor_row,
+                self.completion_anchor_col,
+            )
+            if sr >= 0:
+                var seg_start = layout[sr].byte_start
+                var indent = layout[sr].indent_cells
+                var seg_x0 = text_x0 + indent
+                var line = self.buffer.line(self.completion_anchor_row)
+                var line_n = len(line.as_bytes())
+                var vis: String
+                if seg_start >= line_n:
+                    vis = String("")
+                else:
+                    vis = _slice(line, seg_start, layout[sr].byte_end)
+                var cm = utf8_byte_to_cell(vis)
+                var cc = utf8_codepoint_count(vis)
+                var vbc = len(vis.as_bytes())
+                var anchor_byte = self.completion_anchor_col - seg_start
+                var cell_off: Int
+                if anchor_byte < 0:
+                    cell_off = 0
+                elif anchor_byte < vbc:
+                    cell_off = cm[anchor_byte]
+                else:
+                    cell_off = cc + (anchor_byte - vbc)
+                var sx = seg_x0 + cell_off
+                var sy = view.a.y + sr
+                self._paint_completion_popup_at(canvas, view, sx, sy)
 
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
@@ -3817,6 +4220,50 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn handle_key(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_KEY:
             return False
+        # LSP completion-popup intercept. While the popup is visible
+        # the navigation keys steer it rather than the cursor;
+        # Enter/Tab accept; Esc dismisses. Typing / arrow-left /
+        # arrow-right / backspace etc. close the popup *and* fall
+        # through to the normal handler so the user keeps editing.
+        if self.completion_popup_visible:
+            var ck = event.key
+            var no_mods = event.mods == MOD_NONE
+            if no_mods and ck == KEY_ESC:
+                self.close_completion_popup()
+                return True
+            if no_mods and ck == KEY_UP:
+                self._completion_step(-1)
+                return True
+            if no_mods and ck == KEY_DOWN:
+                self._completion_step(1)
+                return True
+            if no_mods and ck == KEY_PAGEUP:
+                self._completion_step(-_COMPLETION_POPUP_ROWS)
+                return True
+            if no_mods and ck == KEY_PAGEDOWN:
+                self._completion_step(_COMPLETION_POPUP_ROWS)
+                return True
+            if no_mods and (ck == KEY_ENTER or ck == KEY_TAB):
+                if self.accept_completion():
+                    self._scroll_to_cursor(view)
+                    return True
+                return True
+            # Any other key: close the popup and fall through so it
+            # also gets handled normally (typing, arrow keys, etc.).
+            self.close_completion_popup()
+        # Ctrl+Space — request completions from the LSP server. The
+        # actual round-trip is the host's job; we just emit the
+        # request payload. Terminals canonicalize to
+        # ``(KEY_SPACE, MOD_CTRL)``; the bare NUL byte some terminals
+        # send for Ctrl+Space arrives as ``KEY_NONE`` with no mods,
+        # so accept that too.
+        if (event.mods == MOD_CTRL and event.key == KEY_SPACE) \
+                or (event.mods == MOD_NONE and event.key == UInt32(0)):
+            var start_col = self.completion_prefix_start()
+            self.pending_completion_request = Optional[CompletionRequest](
+                CompletionRequest(self.cursor_row, self.cursor_col, start_col),
+            )
+            return True
         # Capture the typing-group flag before any branch touches it, then
         # default to "broken" — every non-typing path (cursor moves, edits,
         # clipboard ops, …) leaves the flag false so the next keystroke

@@ -62,7 +62,7 @@ from turbokod import (
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_OPEN_RECENT, PROJECT_REPLACE,
+    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE,
     TARGET_RUN, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
     stat_file,
 )
@@ -137,7 +137,6 @@ fn main() raises:
             (String("Open project..."), PROJECT_OPEN),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
             (String("Open recent..."), EDITOR_OPEN_RECENT),
-            (String("Open recent project..."), PROJECT_OPEN_RECENT),
             (String("Close"), WINDOW_CLOSE),
             (String("Close all"), WINDOW_CLOSE_ALL),
             (String("Save"), EDITOR_SAVE),

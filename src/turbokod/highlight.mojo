@@ -557,6 +557,21 @@ struct DefinitionRequest(ImplicitlyCopyable, Movable):
     var word: String
 
 
+@fieldwise_init
+struct CompletionRequest(ImplicitlyCopyable, Movable):
+    """Payload emitted by the editor when the user invokes completion
+    (Ctrl+Space). Hosts poll ``Editor.consume_completion_request()`` and
+    forward to whichever LSP client owns the file's language.
+
+    ``row`` / ``col`` are the cursor position when the request was
+    triggered; ``prefix_start_col`` is where the identifier currently
+    under the cursor begins, so the host can replace that span with
+    the selected completion text without re-scanning the line."""
+    var row: Int
+    var col: Int
+    var prefix_start_col: Int
+
+
 # --- generic registry-driven tokenizer ------------------------------------
 #
 # Pragmatic stand-in for a TextMate / tree-sitter integration: a tiny

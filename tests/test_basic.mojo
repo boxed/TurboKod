@@ -37,6 +37,9 @@ from turbokod.session_store import (
 from turbokod.breakpoint_store import (
     StoredBreakpoint, encode_breakpoints, load_breakpoints, save_breakpoints,
 )
+from turbokod.view_state_store import (
+    StoredViewState, encode_view_states, load_view_states, save_view_states,
+)
 from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
@@ -44,8 +47,8 @@ from turbokod.desktop import (
     EDITOR_NEW, EDITOR_OPEN, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
-    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND, PROJECT_REPLACE,
-    PROJECT_TREE_ACTION,
+    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
+    PROJECT_OPEN_RECENT, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
     _expand_save_placeholders,
     _find_doc_entry_for_word,
@@ -112,8 +115,9 @@ from turbokod.lsp import (
     classify_message,
 )
 from turbokod.lsp_dispatch import (
-    DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT, DIAG_SEVERITY_INFO,
-    DIAG_SEVERITY_WARNING, Diagnostic, _parse_diagnostics_array,
+    CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
+    _parse_completion_result, _parse_diagnostics_array,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -1408,36 +1412,50 @@ fn test_right_aligned_menu_layout() raises:
 fn test_desktop_project_lifecycle() raises:
     var d = Desktop()
     assert_false(d.project)
-    d.detect_project_from(String("examples/hello.mojo"))
-    assert_true(d.project)
-    # Project menu is now in menu_bar.menus, right-aligned and visible.
+    # The project menu is created at construction time so the recents
+    # picker is reachable even before any project has been opened. Its
+    # label reads "project" and its only entry is "Open recent project...".
     var idx = d._project_menu_idx
     assert_true(idx >= 0)
     assert_true(d.menu_bar.menus[idx].visible)
     assert_true(d.menu_bar.menus[idx].right_aligned)
+    assert_equal(d.menu_bar.menus[idx].label, String("project"))
+    assert_equal(len(d.menu_bar.menus[idx].items), 1)
+    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT)
+    d.detect_project_from(String("examples/hello.mojo"))
+    assert_true(d.project)
+    assert_true(d.menu_bar.menus[idx].visible)
     # Label is the project root's basename — for this repo, "turbokod".
     assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
-    # The project menu has: tree-toggle, configure-targets, separator,
-    # close. The separator counts as an item but carries no action.
-    assert_equal(len(d.menu_bar.menus[idx].items), 4)
+    # Active-project items: tree-toggle, configure-targets, separator,
+    # open-recent-project, separator, close. Separators carry no action.
+    assert_equal(len(d.menu_bar.menus[idx].items), 6)
     assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
     assert_equal(
         d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_TARGETS,
     )
     assert_true(d.menu_bar.menus[idx].items[2].is_separator)
-    assert_equal(d.menu_bar.menus[idx].items[3].action, PROJECT_CLOSE_ACTION)
+    assert_equal(d.menu_bar.menus[idx].items[3].action, PROJECT_OPEN_RECENT)
+    assert_true(d.menu_bar.menus[idx].items[4].is_separator)
+    assert_equal(d.menu_bar.menus[idx].items[5].action, PROJECT_CLOSE_ACTION)
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
     d.detect_project_from(String("src/turbokod/desktop.mojo"))
     assert_equal(d.project.value(), first)
-    # close_project clears state and hides the menu.
+    # close_project clears project state but keeps the menu visible — the
+    # label resets to "project" and the item list shrinks back to the
+    # single recents-picker entry.
     d.close_project()
     assert_false(d.project)
-    assert_false(d.menu_bar.menus[idx].visible)
+    assert_true(d.menu_bar.menus[idx].visible)
+    assert_equal(d.menu_bar.menus[idx].label, String("project"))
+    assert_equal(len(d.menu_bar.menus[idx].items), 1)
+    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT)
     # After closing, detection works again.
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
+    assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
 
 
 fn test_file_tree_expand_collapse() raises:
@@ -6482,6 +6500,108 @@ fn test_lsp_parse_diagnostics_array_full_fields() raises:
     assert_equal(diags[3].severity, DIAG_SEVERITY_HINT)
 
 
+fn test_lsp_parse_completion_result_array_shape() raises:
+    """A bare ``CompletionItem[]`` array (one of the two shapes the
+    LSP spec allows) parses to one item per entry. Each item carries
+    its label, kind, and detail; ``insert_text`` defaults to the
+    label when no explicit ``insertText`` / ``textEdit`` is given."""
+    var v = parse_json(String(
+        "["
+        + "{\"label\":\"foo\",\"kind\":3,\"detail\":\"() -> int\"},"
+        + "{\"label\":\"bar\",\"kind\":6,\"insertText\":\"bar_\"}"
+        + "]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 2)
+    assert_equal(items[0].label, String("foo"))
+    assert_equal(items[0].insert_text, String("foo"))
+    assert_equal(items[0].kind, 3)
+    assert_equal(items[0].detail, String("() -> int"))
+    assert_equal(items[1].label, String("bar"))
+    assert_equal(items[1].insert_text, String("bar_"))
+    assert_equal(items[1].kind, 6)
+
+
+fn test_lsp_parse_completion_result_list_shape() raises:
+    """The CompletionList shape ``{isIncomplete,items:[...]}`` parses
+    the same as a bare array. Servers like pyright return this form."""
+    var v = parse_json(String(
+        "{\"isIncomplete\":false,\"items\":["
+        + "{\"label\":\"x\",\"kind\":6}"
+        + "]}"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(items[0].label, String("x"))
+
+
+fn test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
+    """``insertTextFormat == 2`` (snippet) means the body has
+    placeholders we don't render. Drop the snippet body and use the
+    label as the inserted text — otherwise ``${1:arg}`` markers would
+    land in the buffer verbatim."""
+    var v = parse_json(String(
+        "[{\"label\":\"print\",\"kind\":3,"
+        + "\"insertText\":\"print(${1:value})\","
+        + "\"insertTextFormat\":2}]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(items[0].label, String("print"))
+    assert_equal(items[0].insert_text, String("print"))
+
+
+fn test_editor_completion_prefix_start_walks_back_through_word() raises:
+    """``completion_prefix_start`` returns the col where the in-progress
+    identifier begins. Used to anchor the popup so accepting an entry
+    replaces what the user already typed."""
+    var ed = Editor(String("foo + abcde"))
+    ed.move_to(0, 9, False)  # park inside "abcde", 3 bytes in
+    var s = ed.completion_prefix_start()
+    assert_equal(s, 6)
+
+
+fn test_editor_set_completions_opens_popup() raises:
+    """``set_completions`` flips the popup visible and parks items.
+    An empty list closes (or stays closed) so a server response with
+    zero matches doesn't paint an empty popup."""
+    var ed = Editor(String("foo"))
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("foo_bar"), String("foo_bar"), 6, String(""),
+    ))
+    items.append(CompletionItem(
+        String("foo_baz"), String("foo_baz"), 6, String(""),
+    ))
+    ed.set_completions(items^, 0, 0)
+    assert_true(ed.completion_popup_visible)
+    assert_equal(len(ed.completion_items), 2)
+    assert_equal(ed.completion_highlight, 0)
+    ed.close_completion_popup()
+    assert_false(ed.completion_popup_visible)
+    # Empty list is treated as "close" — no stale state lingers.
+    ed.set_completions(List[CompletionItem](), 0, 0)
+    assert_false(ed.completion_popup_visible)
+
+
+fn test_editor_accept_completion_replaces_prefix() raises:
+    """Accepting a completion replaces ``[anchor_col, cursor_col)``
+    with the chosen ``insert_text`` and leaves the cursor at the end
+    of the replacement."""
+    var ed = Editor(String("foo + abc"))
+    ed.move_to(0, 9, False)
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("abcdef"), String("abcdef"), 6, String(""),
+    ))
+    ed.set_completions(items^, 0, 6)
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    assert_equal(ed.buffer.line(0), String("foo + abcdef"))
+    assert_equal(ed.cursor_col, 12)
+    assert_false(ed.completion_popup_visible)
+
+
 fn test_lsp_parse_diagnostics_skips_malformed_entries() raises:
     """Entries missing ``range`` are dropped; malformed ones don't
     poison neighbors. The good entries either side must parse."""
@@ -8966,6 +9086,79 @@ fn test_breakpoint_store_per_user_path() raises:
     ))
     assert_true(save_breakpoints(root, bps))
     var expected = root + String("/.turbokod/per_user/alice_test/breakpoints.json")
+    assert_true(stat_file(expected).ok)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+fn test_view_state_store_round_trip() raises:
+    """Persisted per-file view states decode back to the same fields.
+    Inside-project paths are stored project-relative so the file
+    survives moving the project; absolute paths pass through. The
+    store keys by absolute path and load reattaches the project root
+    to project-relative entries on the way back."""
+    var root = String("/tmp/turbokod_vs_test_round_trip")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var views = List[StoredViewState]()
+    views.append(StoredViewState(
+        root + String("/src/foo.mojo"), 42, 4, 0, 30,
+    ))
+    views.append(StoredViewState(
+        String("/etc/hosts"), 0, 0, 0, 0,
+    ))
+    assert_true(save_view_states(root, views))
+    var loaded = load_view_states(root)
+    assert_equal(len(loaded), 2)
+    assert_equal(loaded[0].path, root + String("/src/foo.mojo"))
+    assert_equal(loaded[0].cursor_row, 42)
+    assert_equal(loaded[0].cursor_col, 4)
+    assert_equal(loaded[0].scroll_x, 0)
+    assert_equal(loaded[0].scroll_y, 30)
+    assert_equal(loaded[1].path, String("/etc/hosts"))
+    assert_equal(loaded[1].cursor_row, 0)
+    assert_equal(loaded[1].scroll_y, 0)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+fn test_view_state_store_load_missing_returns_empty() raises:
+    """No file → empty list. Same contract as the sibling stores so
+    the Desktop can blindly load on every project open."""
+    var vs = load_view_states(
+        String("/tmp/turbokod_vs_does_not_exist_xyz"),
+    )
+    assert_equal(len(vs), 0)
+
+
+fn test_view_state_store_per_user_path() raises:
+    """The on-disk file lives under ``per_user/<USER>/`` next to
+    breakpoints.json — keeps each developer's scroll positions
+    separate, so an accidental ``git add .turbokod`` doesn't replace
+    a teammate's set."""
+    var root = String("/tmp/turbokod_vs_per_user_test")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var user_env = String("USER=bob_test\0")
+    _ = external_call["putenv", Int32](user_env.unsafe_ptr())
+    var views = List[StoredViewState]()
+    views.append(StoredViewState(
+        root + String("/main.py"), 12, 0, 0, 5,
+    ))
+    assert_true(save_view_states(root, views))
+    var expected = root + String(
+        "/.turbokod/per_user/bob_test/view_states.json"
+    )
     assert_true(stat_file(expected).ok)
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
@@ -12525,6 +12718,12 @@ fn main() raises:
     test_lsp_parse_diagnostics_array_minimum_fields()
     test_lsp_parse_diagnostics_array_full_fields()
     test_lsp_parse_diagnostics_skips_malformed_entries()
+    test_lsp_parse_completion_result_array_shape()
+    test_lsp_parse_completion_result_list_shape()
+    test_lsp_parse_completion_result_snippet_falls_back_to_label()
+    test_editor_completion_prefix_start_walks_back_through_word()
+    test_editor_set_completions_opens_popup()
+    test_editor_accept_completion_replaces_prefix()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
     test_editor_minimap_warning_outranks_git_change()
@@ -12599,6 +12798,9 @@ fn main() raises:
     test_breakpoint_store_round_trip()
     test_breakpoint_store_load_missing_returns_empty()
     test_breakpoint_store_per_user_path()
+    test_view_state_store_round_trip()
+    test_view_state_store_load_missing_returns_empty()
+    test_view_state_store_per_user_path()
     test_session_relative_path_round_trip()
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_restores_session_from_disk()

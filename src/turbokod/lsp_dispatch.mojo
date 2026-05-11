@@ -97,6 +97,26 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
     var character: Int
 
 
+@fieldwise_init
+struct CompletionItem(ImplicitlyCopyable, Movable):
+    """One entry in a ``textDocument/completion`` response.
+
+    ``label`` is what we display in the popup; ``insert_text`` is what
+    actually gets typed into the buffer when the user accepts (often
+    equal to ``label`` but for snippet servers may differ, and we still
+    fall back to ``label`` when only that is provided). ``kind`` is
+    the raw LSP ``CompletionItemKind`` integer (1=Text, 2=Method,
+    3=Function, 5=Field, 6=Variable, 7=Class, 14=Keyword, 21=Constant,
+    22=Struct, 25=TypeParameter, …); consumers map it to a short icon.
+    ``detail`` is the server-supplied type / signature hint shown on
+    the highlighted row when the popup is wide enough.
+    """
+    var label: String
+    var insert_text: String
+    var kind: Int
+    var detail: String
+
+
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
 # at call sites instead of bare ints so the priority order is obvious.
 comptime DIAG_SEVERITY_ERROR   = Int(1)
@@ -183,6 +203,17 @@ struct LspManager(Copyable, Movable):
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
     var _symbols_empty: Bool                 # latched when the last response was empty
+    # Pending ``textDocument/completion`` request state. ``_completion_path``
+    # / ``_completion_row`` / ``_completion_col`` are echoed back via
+    # ``pending_completion_*`` accessors so the host can drop a stale
+    # response when the cursor has moved (or the user has switched
+    # buffers) by the time it lands.
+    var _inflight_completion_id: Int
+    var _completion_path: String
+    var _completion_row: Int
+    var _completion_col: Int
+    var _resolved_completions: List[CompletionItem]
+    var _has_resolved_completions: Bool
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
@@ -221,6 +252,12 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_completion_id = 0
+        self._completion_path = String("")
+        self._completion_row = 0
+        self._completion_col = 0
+        self._resolved_completions = List[CompletionItem]()
+        self._has_resolved_completions = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -251,6 +288,12 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_completion_id = 0
+        self._completion_path = String("")
+        self._completion_row = 0
+        self._completion_col = 0
+        self._resolved_completions = List[CompletionItem]()
+        self._has_resolved_completions = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -504,6 +547,17 @@ struct LspManager(Copyable, Movable):
             return
         self._send_open_or_change(path, text^)
 
+    fn notify_changed(mut self, path: String, var text: String):
+        """Send a didChange for ``path`` carrying the latest buffer
+        text. No-op when the server isn't READY — for INITIALIZING the
+        pending didOpen will eventually deliver some snapshot, and the
+        next post-READY tick will resend the *current* text via this
+        path, so the server's view converges to the live buffer
+        regardless of timing."""
+        if self.state != _STATE_READY:
+            return
+        self._send_open_or_change(path, text^)
+
     fn request_definition(
         mut self, path: String, line: Int, character: Int,
         var word: String, var text: String,
@@ -593,6 +647,85 @@ struct LspManager(Copyable, Movable):
         var out = self._resolved_symbols^
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
+        return out^
+
+    fn request_completion(
+        mut self, path: String, line: Int, character: Int,
+        var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/completion`` at
+        ``(line, character)``.
+
+        Like ``request_definition``, pre-flights with didOpen/didChange
+        so the server's view matches the buffer at request time. Returns
+        False when the server isn't ready (caller can simply skip — a
+        completion request that arrives late is not useful). A fresh
+        request shadows any earlier in-flight completion id — no
+        concurrent completion model.
+
+        The request coordinates are echoed back through
+        ``pending_completion_*`` so the host can verify the cursor
+        hasn't moved by the time the response arrives.
+        """
+        if self.state != _STATE_READY:
+            return False
+        _lsp_debug_log(
+            String("→ request_completion lang=") + self._language_id
+            + String(" path=") + path
+            + String(" line=") + String(line)
+            + String(" character=") + String(character),
+        )
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        var doc = json_object()
+        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        params.put(String("textDocument"), doc)
+        var pos = json_object()
+        pos.put(String("line"), json_int(line))
+        pos.put(String("character"), json_int(character))
+        params.put(String("position"), pos)
+        # ``CompletionContext.triggerKind`` 1 = Invoked (manual / Ctrl+Space).
+        # Most servers ignore the field but pyright/pylsp use it to suppress
+        # auto-import suggestions when the user explicitly invoked.
+        var ctx = json_object()
+        ctx.put(String("triggerKind"), json_int(1))
+        params.put(String("context"), ctx^)
+        try:
+            self._inflight_completion_id = self.client.send_request(
+                String("textDocument/completion"), params,
+            )
+        except:
+            self._inflight_completion_id = 0
+            return False
+        self._completion_path = path
+        self._completion_row = line
+        self._completion_col = character
+        self._resolved_completions = List[CompletionItem]()
+        self._has_resolved_completions = False
+        return True
+
+    fn has_pending_completions(self) -> Bool:
+        """True iff a parsed completion response is parked for ``take``."""
+        return self._has_resolved_completions
+
+    fn pending_completion_path(self) -> String:
+        return self._completion_path
+
+    fn pending_completion_row(self) -> Int:
+        return self._completion_row
+
+    fn pending_completion_col(self) -> Int:
+        return self._completion_col
+
+    fn take_completions(mut self) -> List[CompletionItem]:
+        """Move the parked completion list out of the manager.
+
+        Pair with ``has_pending_completions()``. The flag is cleared
+        either way so a subsequent call returns empty.
+        """
+        var out = self._resolved_completions^
+        self._resolved_completions = List[CompletionItem]()
+        self._has_resolved_completions = False
         return out^
 
     # --- frame-tick driver -------------------------------------------------
@@ -702,6 +835,18 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_symbols = True
                 self._symbols_empty = (len(self._resolved_symbols) == 0)
                 self._inflight_symbol_id = 0
+            if id == self._inflight_completion_id:
+                var comps = List[CompletionItem]()
+                if msg.result:
+                    comps = _parse_completion_result(msg.result.value())
+                _lsp_debug_log(
+                    String("← completion response id=") + String(id)
+                    + String(" lang=") + self._language_id
+                    + String(" count=") + String(len(comps)),
+                )
+                self._resolved_completions = comps^
+                self._has_resolved_completions = True
+                self._inflight_completion_id = 0
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -982,6 +1127,66 @@ fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     if pos[0] < 0:
         return
     out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+
+
+fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
+    """``textDocument/completion`` returns either ``CompletionItem[]``
+    directly, or a ``CompletionList`` object whose ``items`` field holds
+    the array. Accept either, skip malformed entries.
+
+    Snippet items (``insertTextFormat == 2``) are downgraded to plain
+    text inserts here — we don't render placeholders, so a snippet
+    body with ``${1:arg}`` markers would look like garbage when
+    inserted verbatim. ``label`` falls back as the inserted text in
+    that case (already what the user sees in the popup).
+    """
+    var out = List[CompletionItem]()
+    var arr: JsonValue
+    if v.is_array():
+        arr = v
+    elif v.is_object():
+        var items_opt = v.object_get(String("items"))
+        if not items_opt or not items_opt.value().is_array():
+            return out^
+        arr = items_opt.value()
+    else:
+        return out^
+    var n = arr.array_len()
+    for i in range(n):
+        var entry = arr.array_at(i)
+        if not entry.is_object():
+            continue
+        var label_opt = entry.object_get(String("label"))
+        if not label_opt or not label_opt.value().is_string():
+            continue
+        var label = label_opt.value().as_str()
+        var kind = 0
+        var kind_opt = entry.object_get(String("kind"))
+        if kind_opt and kind_opt.value().is_int():
+            kind = kind_opt.value().as_int()
+        var detail = String("")
+        var detail_opt = entry.object_get(String("detail"))
+        if detail_opt and detail_opt.value().is_string():
+            detail = detail_opt.value().as_str()
+        var insert_text = label
+        var fmt = 1
+        var fmt_opt = entry.object_get(String("insertTextFormat"))
+        if fmt_opt and fmt_opt.value().is_int():
+            fmt = fmt_opt.value().as_int()
+        if fmt != 2:
+            # Plain-text item: prefer explicit insertText, then textEdit.newText,
+            # else the label. (Servers vary in which they populate.)
+            var it_opt = entry.object_get(String("insertText"))
+            if it_opt and it_opt.value().is_string():
+                insert_text = it_opt.value().as_str()
+            else:
+                var te_opt = entry.object_get(String("textEdit"))
+                if te_opt and te_opt.value().is_object():
+                    var nt_opt = te_opt.value().object_get(String("newText"))
+                    if nt_opt and nt_opt.value().is_string():
+                        insert_text = nt_opt.value().as_str()
+        out.append(CompletionItem(label, insert_text, kind, detail))
+    return out^
 
 
 fn _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:

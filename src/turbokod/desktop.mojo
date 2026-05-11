@@ -66,8 +66,8 @@ from .posix import close_fd, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
-    DefinitionRequest, GrammarRegistry, embedded_language_extensions,
-    extension_of, word_at,
+    CompletionRequest, DefinitionRequest, GrammarRegistry,
+    embedded_language_extensions, extension_of, word_at,
 )
 from .spell import Speller
 from .spell_menu import (
@@ -139,6 +139,9 @@ from .session_store import (
 from .breakpoint_store import (
     StoredBreakpoint, encode_breakpoints, load_breakpoints, save_breakpoints,
 )
+from .view_state_store import (
+    StoredViewState, encode_view_states, load_view_states, save_view_states,
+)
 from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
@@ -204,6 +207,11 @@ comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
 # then asks the LSP to follow that usage to its definition. See
 # ``find_symbol.mojo`` for the rationale.
 comptime EDITOR_FIND_SYMBOL   = String("edit:find_symbol")
+# LSP completion request. Default-bound to Ctrl+Space, but routed
+# through the action table so users can rebind via the action editor
+# — macOS hijacks Ctrl+Space for "Select previous input source" by
+# default, so many users will want Ctrl+J / Alt+/ / Cmd+. instead.
+comptime EDITOR_COMPLETE      = String("edit:complete")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
@@ -721,6 +729,16 @@ struct Desktop(Movable):
     # ``per_user/<username>/`` so accidentally committing ``.turbokod``
     # doesn't clobber a teammate's set.
     var _last_breakpoints_json: String
+    # Per-user, per-file view-state persistence (scroll + cursor),
+    # separate from ``session.json``. Survives window close: a session
+    # only carries currently-open windows, so closing then reopening a
+    # file would land at the top of the buffer without this. Stored in
+    # ``.turbokod/per_user/<username>/view_states.json``. The in-memory
+    # list holds the union of disk-loaded entries plus refreshed state
+    # for currently-open editors, refreshed on the same paint cadence
+    # as the session.
+    var _view_states: List[StoredViewState]
+    var _last_view_states_json: String
     # Recently focused file-backed editor paths, most-recent first.
     # Mirrors ``config.recent_files`` (which is the persistent copy);
     # both are kept in sync by ``_track_recent_focus``. Stores canonical
@@ -848,6 +866,8 @@ struct Desktop(Movable):
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
         self._last_breakpoints_json = String("")
+        self._view_states = List[StoredViewState]()
+        self._last_view_states_json = String("")
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
@@ -858,6 +878,19 @@ struct Desktop(Movable):
         # ``_rebuild_window_menu`` repopulates its items every paint.
         self.menu_bar.add(Menu(_WINDOW_MENU_LABEL, List[MenuItem]()))
         self._window_menu_idx = len(self.menu_bar.menus) - 1
+        # Right-aligned project menu. Always visible: when no project is
+        # open the label reads "project" and the only entry is the
+        # recent-projects picker, so the user can switch back to a recent
+        # project from a fresh launch. ``_set_project`` swaps in the
+        # project basename and the full item list.
+        var initial_project_items = List[MenuItem]()
+        initial_project_items.append(MenuItem(
+            String("Open recent project..."), PROJECT_OPEN_RECENT,
+        ))
+        self.menu_bar.add(Menu(
+            String("project"), initial_project_items^, right_aligned=True,
+        ))
+        self._project_menu_idx = len(self.menu_bar.menus) - 1
         # Command bindings. By convention in this app: ``Cmd+letter``
         # invokes commands (Save / Open / Cut / …); ``Ctrl+`` is reserved
         # for navigation (window / panel focus, menu access). Each command
@@ -967,6 +1000,24 @@ struct Desktop(Movable):
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
         self._hotkeys.append(Hotkey(
             ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
+        ))
+        # LSP completion request. Three default triggers so at least
+        # one survives macOS's input-source hijack of Ctrl+Space:
+        #   * Ctrl+Space — IDE-conventional, on terminals that pass it
+        #   * Ctrl+J — terminal-friendly fallback (LF is otherwise
+        #     unbound here)
+        #   * F2 — function-key fallback for keyboards / wrappers that
+        #     intercept the control chords above
+        # The action editor can drop any of these in favor of a user
+        # binding (e.g. Alt+/ or Cmd+.) — first match wins.
+        self._hotkeys.append(Hotkey(
+            KEY_SPACE, MOD_CTRL, EDITOR_COMPLETE,
+        ))
+        self._hotkeys.append(Hotkey(
+            ctrl_key("j"), MOD_CTRL, EDITOR_COMPLETE,
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F2, MOD_NONE, EDITOR_COMPLETE,
         ))
         # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
         # the de facto standard set across VS Code, JetBrains, and most
@@ -1492,6 +1543,11 @@ struct Desktop(Movable):
         # the user toggled a breakpoint or set a condition this paint,
         # capture it now so a window-close doesn't lose the change.
         self._save_breakpoints_if_changed()
+        # Persist per-file scroll/cursor too. Refreshes the in-memory
+        # cache from any currently-open editors first so a window
+        # closed earlier in the same paint still wrote its final state
+        # via ``_capture_view_state_for_window``.
+        self._save_view_states_if_changed()
 
     fn _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -1547,6 +1603,28 @@ struct Desktop(Movable):
         var rect = self._default_window_rect(workspace)
         var was_max = self._frontmost_maximized()
         var w = Window.from_file(basename(path), rect, path)
+        # Re-apply any saved view state for this file (scroll + cursor).
+        # Survives across window close, project close, and process
+        # restart via ``.turbokod/per_user/<username>/view_states.json``;
+        # ``_set_project`` loaded the entries already, so a hit here
+        # means the user lands back where they left off rather than at
+        # the top of the buffer. Cursor row is clamped to the buffer so
+        # a stale row from a since-truncated file doesn't put the caret
+        # off the end.
+        var vs_idx = self._find_view_state(path)
+        if vs_idx >= 0:
+            var line_count = w.editor.buffer.line_count()
+            var cr = self._view_states[vs_idx].cursor_row
+            if cr < 0:
+                cr = 0
+            if line_count > 0 and cr >= line_count:
+                cr = line_count - 1
+            w.editor.cursor_row = cr
+            w.editor.anchor_row = cr
+            w.editor.cursor_col = self._view_states[vs_idx].cursor_col
+            w.editor.anchor_col = self._view_states[vs_idx].cursor_col
+            w.editor.scroll_x = self._view_states[vs_idx].scroll_x
+            w.editor.scroll_y = self._view_states[vs_idx].scroll_y
         self.windows.add(w^)
         self._open_count += 1
         if was_max:
@@ -2234,15 +2312,27 @@ struct Desktop(Movable):
             self._set_project(path)
 
     fn close_project(mut self):
+        # Flush any pending view-state changes for the still-open editor
+        # windows while we still know the project root. After
+        # ``self.project`` is cleared (and the windows themselves
+        # dropped), the save path bails — and the open windows' final
+        # scroll positions would never make it to disk.
+        self._save_view_states_if_changed()
         self.project = Optional[String]()
         self.speller.set_project(String(""))
         self.file_tree.close()
-        if self._project_menu_idx >= 0:
-            self.menu_bar.menus[self._project_menu_idx].visible = False
-            if self.menu_bar.open_idx == self._project_menu_idx:
-                self.menu_bar.open_idx = -1
-            # Reset the tree-toggle label for the next project.
-            self.menu_bar.menus[self._project_menu_idx].items[0].label = _SHOW_TREE_LABEL
+        # Reset the project menu to its no-project state: label "project"
+        # and a single "Open recent project..." entry, so the user can
+        # still reach the recents picker without an active project.
+        var items = List[MenuItem]()
+        items.append(MenuItem(
+            String("Open recent project..."), PROJECT_OPEN_RECENT,
+        ))
+        self.menu_bar.menus[self._project_menu_idx].label = String("project")
+        self.menu_bar.menus[self._project_menu_idx].items = items^
+        self.menu_bar.menus[self._project_menu_idx].visible = True
+        if self.menu_bar.open_idx == self._project_menu_idx:
+            self.menu_bar.open_idx = -1
         # Drop the targets list and stop any in-flight run — the
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
@@ -2262,6 +2352,10 @@ struct Desktop(Movable):
             List[String](), List[Int](), List[String](), List[Bool](),
             List[String](),
         )
+        # Forget any per-file view-state cache so the next project
+        # reloads its own view_states.json fresh.
+        self._view_states = List[StoredViewState]()
+        self._last_view_states_json = String("")
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
         # guard and leaves the on-disk session.json intact. Reopening
@@ -2272,6 +2366,11 @@ struct Desktop(Movable):
         """Drop every editor window from the manager, leaving non-editor
         windows (host-added panels / demo content) alone. Rebuilds
         ``z_order`` and ``focused`` against the surviving windows."""
+        # Capture each editor's view state before its window is dropped
+        # — once removed, the next paint can't read scroll off it.
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self._capture_view_state_for_window(i)
         var kept = List[Window]()
         var remap = List[Int]()
         for i in range(len(self.windows.windows)):
@@ -2313,19 +2412,20 @@ struct Desktop(Movable):
         record_recent_project(self.config, canonical)
         _ = save_config(self.config)
         var label = basename(canonical)
-        if self._project_menu_idx < 0:
-            var items = List[MenuItem]()
-            items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
-            items.append(MenuItem(
-                String("Configure targets..."), PROJECT_CONFIG_TARGETS,
-            ))
-            items.append(MenuItem.separator())
-            items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
-            self.menu_bar.add(Menu(label, items^, right_aligned=True))
-            self._project_menu_idx = len(self.menu_bar.menus) - 1
-        else:
-            self.menu_bar.menus[self._project_menu_idx].label = label
-            self.menu_bar.menus[self._project_menu_idx].visible = True
+        var items = List[MenuItem]()
+        items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
+        items.append(MenuItem(
+            String("Configure targets..."), PROJECT_CONFIG_TARGETS,
+        ))
+        items.append(MenuItem.separator())
+        items.append(MenuItem(
+            String("Open recent project..."), PROJECT_OPEN_RECENT,
+        ))
+        items.append(MenuItem.separator())
+        items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
+        self.menu_bar.menus[self._project_menu_idx].label = label
+        self.menu_bar.menus[self._project_menu_idx].items = items^
+        self.menu_bar.menus[self._project_menu_idx].visible = True
         # Load the per-project target list now that we know the root.
         # Empty/missing config yields an empty ``targets`` list, which
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
@@ -2360,6 +2460,14 @@ struct Desktop(Movable):
         # re-write the file with the same bytes.
         self._last_breakpoints_json = encode_breakpoints(
             canonical, self._snapshot_breakpoints(),
+        )
+        # Load per-file view states. The Desktop refreshes entries for
+        # open editors on every paint and writes the file when the
+        # encoding changes, so a closed-then-reopened file lands back
+        # at the saved scroll position.
+        self._view_states = load_view_states(canonical)
+        self._last_view_states_json = encode_view_states(
+            canonical, self._view_states,
         )
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
@@ -2467,6 +2575,96 @@ struct Desktop(Movable):
             return
         if save_breakpoints(self.project.value(), snapshot):
             self._last_breakpoints_json = encoded
+
+    fn _find_view_state(self, path: String) -> Int:
+        """Index of the ``_view_states`` entry whose ``path`` equals
+        ``path``, or ``-1`` if absent. Paths in the list are absolute
+        (the loader resolves project-relative paths against the project
+        root at load time) and ``open_file`` looks up using the same
+        absolute path it passes to ``Window.from_file``."""
+        for i in range(len(self._view_states)):
+            if self._view_states[i].path == path:
+                return i
+        return -1
+
+    fn _capture_view_state_for_window(mut self, idx: Int):
+        """Update ``_view_states`` from window ``idx`` right before that
+        window is removed. Without this the next paint's refresh would
+        see the window already gone and the user's last scroll position
+        would be lost. No-op for non-editors and Untitled buffers."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[idx].is_editor:
+            return
+        var fp = self.windows.windows[idx].editor.file_path
+        if len(fp.as_bytes()) == 0:
+            return
+        var vs_idx = self._find_view_state(fp)
+        if vs_idx >= 0:
+            self._view_states[vs_idx].cursor_row = \
+                self.windows.windows[idx].editor.cursor_row
+            self._view_states[vs_idx].cursor_col = \
+                self.windows.windows[idx].editor.cursor_col
+            self._view_states[vs_idx].scroll_x = \
+                self.windows.windows[idx].editor.scroll_x
+            self._view_states[vs_idx].scroll_y = \
+                self.windows.windows[idx].editor.scroll_y
+        else:
+            self._view_states.append(StoredViewState(
+                fp,
+                self.windows.windows[idx].editor.cursor_row,
+                self.windows.windows[idx].editor.cursor_col,
+                self.windows.windows[idx].editor.scroll_x,
+                self.windows.windows[idx].editor.scroll_y,
+            ))
+
+    fn _refresh_view_states_from_windows(mut self):
+        """Copy scroll + cursor off every file-backed editor window into
+        ``_view_states`` so the next ``save_view_states_if_changed``
+        captures the latest values. Untitled buffers (no ``file_path``)
+        are skipped — they have no path the on-disk record could key
+        against. Existing entries for other files are kept untouched so
+        a closed-then-reopened file still finds its saved scroll."""
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var fp = self.windows.windows[i].editor.file_path
+            if len(fp.as_bytes()) == 0:
+                continue
+            var idx = self._find_view_state(fp)
+            if idx >= 0:
+                self._view_states[idx].cursor_row = \
+                    self.windows.windows[i].editor.cursor_row
+                self._view_states[idx].cursor_col = \
+                    self.windows.windows[i].editor.cursor_col
+                self._view_states[idx].scroll_x = \
+                    self.windows.windows[i].editor.scroll_x
+                self._view_states[idx].scroll_y = \
+                    self.windows.windows[i].editor.scroll_y
+            else:
+                self._view_states.append(StoredViewState(
+                    fp,
+                    self.windows.windows[i].editor.cursor_row,
+                    self.windows.windows[i].editor.cursor_col,
+                    self.windows.windows[i].editor.scroll_x,
+                    self.windows.windows[i].editor.scroll_y,
+                ))
+
+    fn _save_view_states_if_changed(mut self):
+        """Refresh entries from the live editors, then re-encode and
+        write the per-user view-states file only when the encoding
+        differs from the previously-written one. Skipped when no
+        project is open — there's nowhere to write."""
+        if not self.project:
+            return
+        self._refresh_view_states_from_windows()
+        var encoded = encode_view_states(
+            self.project.value(), self._view_states,
+        )
+        if encoded == self._last_view_states_json:
+            return
+        if save_view_states(self.project.value(), self._view_states):
+            self._last_view_states_json = encoded
 
     fn _save_session_if_changed(mut self):
         """Re-encode the current session and write it to disk only when
@@ -3216,6 +3414,19 @@ struct Desktop(Movable):
         if action == EDITOR_FIND_SYMBOL:
             self._open_find_symbol()
             return Optional[String]()
+        if action == EDITOR_COMPLETE:
+            var fidx = self._focused_editor_idx()
+            if fidx >= 0:
+                # Stamp the same pending request the editor's own
+                # Ctrl+Space binding would emit. Doing it here means
+                # the action editor can rebind the trigger to any key
+                # without us needing to teach each handler.
+                ref ed = self.windows.windows[fidx].editor
+                var start_col = ed.completion_prefix_start()
+                ed.pending_completion_request = Optional[CompletionRequest](
+                    CompletionRequest(ed.cursor_row, ed.cursor_col, start_col),
+                )
+            return Optional[String]()
         if action == EDITOR_LOOKUP_DOCS:
             self._open_doc_pick(screen)
             return Optional[String]()
@@ -3393,6 +3604,7 @@ struct Desktop(Movable):
             self.windows.restore_all()
             return Optional[String]()
         if action == WINDOW_CLOSE:
+            self._capture_view_state_for_window(self.windows.focused)
             _ = self.windows.close_focused()
             return Optional[String]()
         if action == WINDOW_CLOSE_ALL:
@@ -3515,6 +3727,9 @@ struct Desktop(Movable):
             var req_opt = self.windows.windows[idx].editor.consume_definition_request()
             if req_opt:
                 self._dispatch_definition_request(idx, req_opt.value())
+            var comp_opt = self.windows.windows[idx].editor.consume_completion_request()
+            if comp_opt:
+                self._dispatch_completion_request(idx, comp_opt.value())
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
         # focused.
@@ -3570,11 +3785,38 @@ struct Desktop(Movable):
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
                 )
-        # Diagnostics fan-out: one LSP server can publish for many
-        # files, so we walk every editor and ask the matching manager
-        # whether a fresh set has landed for that file. The bucket
-        # remembers ``consumed``, so editors whose set hasn't changed
-        # since the last frame are no-ops.
+            # Route completion responses back to the focused editor —
+            # but only if the request's file matches what's currently
+            # focused. The user may have switched buffers between
+            # request and response; in that case drop the parked list
+            # rather than dumping it onto an unrelated editor.
+            if self.lsp_managers[i].has_pending_completions():
+                var fidx = self._focused_editor_idx()
+                var comp_path = self.lsp_managers[i].pending_completion_path()
+                var items = self.lsp_managers[i].take_completions()
+                if fidx >= 0 \
+                        and self.windows.windows[fidx].editor.file_path == comp_path:
+                    # Anchor at the start of the in-progress identifier
+                    # rather than the bare cursor — accepting an item
+                    # should replace what the user already typed.
+                    var start_col = self.windows.windows[fidx] \
+                        .editor.completion_prefix_start()
+                    self.windows.windows[fidx].editor.set_completions(
+                        items^,
+                        self.windows.windows[fidx].editor.cursor_row,
+                        start_col,
+                    )
+        # Per-editor LSP sync: walk every editor window once and (a) push
+        # a didChange to the matching server when the buffer has been
+        # edited since the last sync, and (b) pull any freshly-published
+        # diagnostics back out. Without (a) the server keeps reporting
+        # against the text we sent at didOpen — stale issues stick to
+        # edited lines and new ones never appear until the file is
+        # closed and reopened. ``consume_lsp_dirty`` only returns True
+        # once per edit batch, so the snapshot+send only fires on
+        # frames that actually had edits. The bucket's ``consumed``
+        # flag in (b) means we don't re-apply the same diagnostic set
+        # every frame.
         for w in range(len(self.windows.windows)):
             if not self.windows.windows[w].is_editor:
                 continue
@@ -3584,6 +3826,10 @@ struct Desktop(Movable):
             var li = self._lsp_for_path(path)
             if li < 0:
                 continue
+            if self.lsp_managers[li].is_ready() \
+                    and self.windows.windows[w].editor.consume_lsp_dirty():
+                var text = self.windows.windows[w].editor.text_snapshot()
+                self.lsp_managers[li].notify_changed(path, text^)
             if not self.lsp_managers[li].has_unconsumed_diagnostics_for(path):
                 continue
             self.windows.windows[w].editor.set_diagnostics(
@@ -3670,6 +3916,30 @@ struct Desktop(Movable):
             if self.lsp_specs[spec_idx].language_id != lang:
                 continue
             self._maybe_lsp_open(i)
+
+    fn _dispatch_completion_request(
+        mut self, win_idx: Int, var req: CompletionRequest,
+    ):
+        """Forward a Ctrl+Space completion request to the right server.
+
+        Quiet on failure: an unstarted / mid-init server just drops
+        the request. The cursor position is captured in ``req`` so a
+        late response can still anchor correctly (the manager echoes
+        ``pending_completion_*`` back so the host can decide whether
+        the response is still relevant).
+        """
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
+            return
+        if not self.lsp_managers[lsp_idx].is_ready():
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[lsp_idx].request_completion(
+            path, req.row, req.col, text^,
+        )
 
     fn _dispatch_definition_request(
         mut self, win_idx: Int, var req: DefinitionRequest,
