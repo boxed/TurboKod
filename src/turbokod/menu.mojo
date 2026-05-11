@@ -19,6 +19,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
+from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
 struct MenuItem(ImplicitlyCopyable, Movable):
@@ -124,12 +125,17 @@ struct MenuBar(Movable):
     var open_idx: Int
     var selected_item: Int   # row index inside the open dropdown (kbd nav / hover)
     var tracking: Bool       # True between mouse press and release — drag-select gesture
+    var _type_ahead: TypeAhead
+    """Type-to-jump prefix buffer for the open dropdown. Reset on
+    open / close so each fresh dropdown starts with a clean buffer
+    and the leading keystroke isn't misrouted by a stale prefix."""
 
     fn __init__(out self):
         self.menus = List[Menu]()
         self.open_idx = -1
         self.selected_item = 0
         self.tracking = False
+        self._type_ahead = TypeAhead()
 
     fn add(mut self, var menu: Menu):
         self.menus.append(menu^)
@@ -165,6 +171,7 @@ struct MenuBar(Movable):
         selection on the first non-separator item. Use this rather than
         writing to ``open_idx`` directly so the highlight stays in sync."""
         self.open_idx = idx
+        self._type_ahead.reset()
         if idx >= 0:
             self.selected_item = self._first_non_separator(idx)
         else:
@@ -487,6 +494,27 @@ struct MenuBar(Movable):
             return MenuResult(Optional[String](), True)
         if k == KEY_ENTER:
             return self._activate_selected()
+        # Framework type-to-jump: bare letters jump the highlight to
+        # the first item whose label starts with the typed prefix.
+        # Mnemonics use Alt+letter (handled in Desktop), so plain
+        # letters are free to drive an in-dropdown search.
+        if event.mods == 0 and is_printable_ascii(k) \
+                and self.open_idx >= 0:
+            var menu = self.menus[self.open_idx]
+            var labels = List[String]()
+            for i in range(len(menu.items)):
+                # Separators get an empty label so the helper
+                # skips them — matches the dropdown sentinel rule.
+                if menu.items[i].is_separator:
+                    labels.append(String(""))
+                else:
+                    labels.append(menu.items[i].label)
+            var hit = type_ahead_pick(
+                self._type_ahead, labels, chr(Int(k)),
+            )
+            if hit >= 0:
+                self.selected_item = hit
+            return MenuResult(Optional[String](), True)
         return MenuResult(Optional[String](), False)
 
     # --- events ------------------------------------------------------------

@@ -37,7 +37,9 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .type_ahead import TypeAhead, starts_with_ci
+from .type_ahead import (
+    TypeAhead, is_printable_ascii, starts_with_ci, type_ahead_pick,
+)
 
 
 # Hit-test result codes for ``Dropdown.handle_mouse``.
@@ -163,31 +165,17 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         Stale-prefix recovery: when no option matches the full buffer,
         retry with just ``ch`` so a fresh letter after a stale chain
         lands somewhere useful.
-        """
-        var prefix = self._type_ahead.append(ch)
-        if self._jump_to_prefix(prefix^):
-            return True
-        if len(self._type_ahead.buf.as_bytes()) > 1:
-            var solo = self._type_ahead.solo_fallback(ch)
-            if self._jump_to_prefix(solo^):
-                return True
-        return False
 
-    fn _jump_to_prefix(mut self, var prefix: String) -> Bool:
-        """Move ``highlight`` to the first non-empty option whose
-        label starts with ``prefix`` (case-insensitive). Returns
-        whether a match was found."""
-        var pb = prefix.as_bytes()
-        if len(pb) == 0:
+        Implementation lives in ``type_ahead_pick`` — Dropdown is one
+        of several list-style consumers and they all share the same
+        prefix walk.
+        """
+        var hit = type_ahead_pick(self._type_ahead, self.options, ch)
+        if hit < 0:
             return False
-        for i in range(len(self.options)):
-            if len(self.options[i].as_bytes()) == 0:
-                continue
-            if starts_with_ci(self.options[i], prefix):
-                self.highlight = i
-                self._scroll_to_highlight()
-                return True
-        return False
+        self.highlight = hit
+        self._scroll_to_highlight()
+        return True
 
     fn toggle(mut self):
         if self.is_open:

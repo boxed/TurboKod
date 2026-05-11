@@ -41,11 +41,16 @@ from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
 )
-from .config import OnSaveAction
+from .config import LanguageServerOverride, OnSaveAction
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
     user_dictionary_installed,
 )
+from .language_config import (
+    LanguageSpec, ServerCandidate, apply_language_overrides,
+    built_in_servers, find_language_by_id,
+)
+from .language_editor import LanguageEditor
 from .dropdown import (
     DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
     DROPDOWN_HIT_POPUP, Dropdown,
@@ -57,6 +62,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .window import paint_window_title
 
 
@@ -72,13 +78,18 @@ comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
 comptime _FOCUS_DICT_LIST     = UInt8(7)
 comptime _FOCUS_DICT_INSTALL  = UInt8(8)
 comptime _FOCUS_DICT_REMOVE   = UInt8(9)
+comptime _FOCUS_LANG_LIST     = UInt8(10)
+comptime _FOCUS_LANG_ADD      = UInt8(11)
+comptime _FOCUS_LANG_EDIT     = UInt8(12)
+comptime _FOCUS_LANG_REMOVE   = UInt8(13)
 
 
 # --- section indices ------------------------------------------------------
 
-comptime _SECTION_ACTIONS = 0
-comptime _SECTION_EDITOR  = 1
-comptime _SECTION_SPELL   = 2
+comptime _SECTION_ACTIONS   = 0
+comptime _SECTION_EDITOR    = 1
+comptime _SECTION_SPELL     = 2
+comptime _SECTION_LANGUAGES = 3
 
 
 # --- layout ---------------------------------------------------------------
@@ -97,6 +108,9 @@ comptime _BTN_REMOVE       = 2
 comptime _BTN_CLOSE        = 3
 comptime _BTN_DICT_INSTALL = 4
 comptime _BTN_DICT_REMOVE  = 5
+comptime _BTN_LANG_ADD     = 6
+comptime _BTN_LANG_EDIT    = 7
+comptime _BTN_LANG_REMOVE  = 8
 
 # Width of the inline dropdown strip in the Editor section. Wide enough
 # for "Automatic" plus the right-edge ``▼`` indicator.
@@ -111,6 +125,7 @@ fn _section_labels() -> List[String]:
     out.append(String("Actions on save"))
     out.append(String("Editor"))
     out.append(String("Spell check"))
+    out.append(String("Languages"))
     return out^
 
 
@@ -180,6 +195,24 @@ struct Settings(Movable):
     """When non-empty, host should remove the on-disk wordlist for this
     language on the next ``paint`` and reload the speller. Host clears
     after picking up."""
+    var language_overrides: List[LanguageServerOverride]
+    """Working copy of ``TurbokodConfig.language_servers`` — the
+    Languages section's authoritative state. Edits commit immediately
+    on Save in the language editor; the host writes back to config on
+    every paint when ``self.dirty`` is True."""
+    var languages_view: List[LanguageSpec]
+    """Effective per-paint snapshot of all languages: built-in plus
+    user overrides applied. Rebuilt on ``open`` and after every
+    language editor commit so the right pane reflects the user's
+    latest priority list."""
+    var selected_language: Int
+    """Row in ``languages_view`` that's highlighted in the right pane."""
+    var language_editor: LanguageEditor
+    var _type_ahead: TypeAhead
+    """Shared type-to-jump prefix buffer for whichever section list
+    currently owns focus. Reset on focus / section changes so a
+    stale buffer doesn't misroute the first keystroke after the
+    user moves between panes."""
 
     fn __init__(out self):
         self.active = False
@@ -212,14 +245,32 @@ struct Settings(Movable):
             ShadowButton(String(" - Remove "), 0, 0),
             _FOCUS_DICT_REMOVE, True,
         ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" + Add "), 0, 0), _FOCUS_LANG_ADD, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" Edit "), 0, 0), _FOCUS_LANG_EDIT, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" - Remove "), 0, 0),
+            _FOCUS_LANG_REMOVE, True,
+        ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
         self.pending_dict_remove_lang = String("")
+        self.language_overrides = List[LanguageServerOverride]()
+        self.languages_view = List[LanguageSpec]()
+        self.selected_language = -1
+        self.language_editor = LanguageEditor()
+        self._type_ahead = TypeAhead()
 
-    fn open(mut self, var actions: List[OnSaveAction], auto_save: Bool):
+    fn open(
+        mut self, var actions: List[OnSaveAction], auto_save: Bool,
+        var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
+    ):
         self.actions = actions^
         self.auto_save = auto_save
         self.active = True
@@ -235,6 +286,16 @@ struct Settings(Movable):
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
         self.pending_dict_install_lang = String("")
         self.pending_dict_remove_lang = String("")
+        self.language_overrides = language_overrides^
+        self._rebuild_languages_view()
+        self.selected_language = (
+            0 if len(self.languages_view) > 0 else -1
+        )
+
+    fn _rebuild_languages_view(mut self):
+        self.languages_view = apply_language_overrides(
+            built_in_servers(), self.language_overrides,
+        )
 
     fn close(mut self):
         self.active = False
@@ -250,6 +311,11 @@ struct Settings(Movable):
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
         self.pending_dict_remove_lang = String("")
+        self.language_overrides = List[LanguageServerOverride]()
+        self.languages_view = List[LanguageSpec]()
+        self.selected_language = -1
+        self.language_editor.close()
+        self._type_ahead.reset()
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
@@ -291,6 +357,8 @@ struct Settings(Movable):
         # Editor floats on top.
         if self.editor.active:
             self.editor.paint(canvas, screen)
+        if self.language_editor.active:
+            self.language_editor.paint(canvas, screen)
 
     fn _workspace_rect(self, screen: Rect) -> Rect:
         """Settings takes the workspace area — ``screen`` minus the
@@ -360,6 +428,8 @@ struct Settings(Movable):
             self._paint_editor_section(canvas, sub, inner)
         elif self.section == _SECTION_SPELL:
             self._paint_spell_section(canvas, sub, inner)
+        elif self.section == _SECTION_LANGUAGES:
+            self._paint_languages_section(canvas, sub, inner)
 
     fn _paint_actions_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -598,6 +668,124 @@ struct Settings(Movable):
                 line, attr,
             )
 
+    fn _paint_languages_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
+        """List of languages (built-in + user) with their effective
+        server priority. Add / Edit / Remove buttons mirror the
+        Actions section layout."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var list_top = inner.a.y + 2
+        var list_bottom = inner.b.y - 5
+        if list_bottom <= list_top:
+            return
+        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+        var body_attr = Attr(BLACK, CYAN)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
+        if len(self.languages_view) == 0:
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
+                String("(no languages — press [+ Add])"),
+                hint,
+            )
+        else:
+            self._paint_languages_list(canvas, painter, list_rect)
+        # Helper line.
+        var help: String
+        if self.selected_language >= 0 \
+                and self.selected_language < len(self.languages_view):
+            var spec = self.languages_view[self.selected_language]
+            if _has_override(self.language_overrides, spec.language_id):
+                help = String(
+                    "Edit to change priority. Remove restores defaults."
+                )
+            else:
+                help = String(
+                    "Edit to override the built-in server priority."
+                )
+        else:
+            help = String(
+                "Edit a language to change its server priority."
+            )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, list_bottom), help, hint,
+        )
+        # Buttons row.
+        var btn_y = list_bottom + 2
+        var add_x = inner.a.x
+        self._buttons[_BTN_LANG_ADD].button.move_to(add_x, btn_y)
+        var edit_x = (
+            add_x
+            + self._buttons[_BTN_LANG_ADD].button.total_width() + 1
+        )
+        self._buttons[_BTN_LANG_EDIT].button.move_to(edit_x, btn_y)
+        var rm_x = (
+            edit_x
+            + self._buttons[_BTN_LANG_EDIT].button.total_width() + 1
+        )
+        self._buttons[_BTN_LANG_REMOVE].button.move_to(rm_x, btn_y)
+        var has_sel = (
+            self.selected_language >= 0
+            and self.selected_language < len(self.languages_view)
+        )
+        self._buttons[_BTN_LANG_EDIT].enabled = has_sel
+        # Remove only meaningful for languages with a user override —
+        # there's no built-in "default" to revert to otherwise.
+        var remove_enabled = False
+        if has_sel:
+            var spec = self.languages_view[self.selected_language]
+            remove_enabled = _has_override(
+                self.language_overrides, spec.language_id,
+            )
+        self._buttons[_BTN_LANG_REMOVE].enabled = remove_enabled
+        self._paint_button(canvas, _BTN_LANG_ADD)
+        self._paint_button(canvas, _BTN_LANG_EDIT)
+        self._paint_button(canvas, _BTN_LANG_REMOVE)
+
+    fn _paint_languages_list(
+        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
+    ):
+        var visible = list_rect.height()
+        if self.selected_language >= 0:
+            if self.selected_language < self._list_scroll:
+                self._list_scroll = self.selected_language
+            elif self.selected_language >= self._list_scroll + visible:
+                self._list_scroll = self.selected_language - visible + 1
+        if self._list_scroll < 0:
+            self._list_scroll = 0
+        var max_scroll = len(self.languages_view) - visible
+        if max_scroll < 0:
+            max_scroll = 0
+        if self._list_scroll > max_scroll:
+            self._list_scroll = max_scroll
+        var body_attr = Attr(BLACK, CYAN)
+        for r in range(visible):
+            var idx = self._list_scroll + r
+            if idx >= len(self.languages_view):
+                break
+            var spec = self.languages_view[idx]
+            var attr = body_attr
+            if idx == self.selected_language:
+                attr = (
+                    Attr(WHITE, BLUE) if self.focus == _FOCUS_LANG_LIST
+                    else Attr(BLACK, GREEN)
+                )
+                painter.fill(
+                    canvas,
+                    Rect(list_rect.a.x, list_rect.a.y + r,
+                         list_rect.b.x, list_rect.a.y + r + 1),
+                    String(" "), attr,
+                )
+            var line = _format_language(
+                spec, _has_override(
+                    self.language_overrides, spec.language_id,
+                ),
+            )
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
+                line, attr,
+            )
+
     fn _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
         var close = self._buttons[_BTN_CLOSE]
         var btn_w = close.button.face_width()
@@ -627,6 +815,10 @@ struct Settings(Movable):
             _ = self.editor.handle_key(event)
             self._maybe_consume_editor()
             return True
+        if self.language_editor.active:
+            _ = self.language_editor.handle_key(event)
+            self._maybe_consume_language_editor()
+            return True
         if event.kind != EVENT_KEY:
             return True
         # Save-behavior dropdown swallows keys while open (the popup
@@ -655,6 +847,8 @@ struct Settings(Movable):
                 self._step_action(-1)
             elif self.focus == _FOCUS_DICT_LIST:
                 self._step_dict(-1)
+            elif self.focus == _FOCUS_LANG_LIST:
+                self._step_language(-1)
             return True
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
@@ -663,6 +857,8 @@ struct Settings(Movable):
                 self._step_action(1)
             elif self.focus == _FOCUS_DICT_LIST:
                 self._step_dict(1)
+            elif self.focus == _FOCUS_LANG_LIST:
+                self._step_language(1)
             elif self.focus == _FOCUS_SAVE_BEHAVIOR:
                 # Closed: open the popup. Forward the keystroke so
                 # the highlight starts on the committed row.
@@ -670,7 +866,42 @@ struct Settings(Movable):
                 _ = self._save_dropdown.handle_key(event)
                 self._sync_dropdown_commit(prev_idx)
             return True
+        # Type-to-jump on whichever section list currently owns focus.
+        # Each section produces its own row labels so the user can
+        # type "py" to land on the python row regardless of which
+        # list (actions / dictionaries / languages) is in front of
+        # them.
+        if is_printable_ascii(k):
+            self._handle_type_to_jump(chr(Int(k)))
+            return True
         return True
+
+    fn _handle_type_to_jump(mut self, ch: String):
+        """Route a printable keystroke into the type-to-jump helper
+        and update the focused list's selection. No-op when focus is
+        on a non-list widget; the keystroke is still consumed by the
+        caller so it doesn't leak back to the underlying workspace."""
+        if self.focus == _FOCUS_LIST:
+            var labels = List[String]()
+            for i in range(len(self.actions)):
+                labels.append(_format_action(self.actions[i]))
+            var hit = type_ahead_pick(self._type_ahead, labels, ch)
+            if hit >= 0:
+                self.selected_action = hit
+        elif self.focus == _FOCUS_DICT_LIST:
+            var labels = List[String]()
+            for i in range(len(self.dict_specs)):
+                labels.append(self.dict_specs[i].display)
+            var hit = type_ahead_pick(self._type_ahead, labels, ch)
+            if hit >= 0:
+                self.selected_dict = hit
+        elif self.focus == _FOCUS_LANG_LIST:
+            var labels = List[String]()
+            for i in range(len(self.languages_view)):
+                labels.append(self.languages_view[i].language_id)
+            var hit = type_ahead_pick(self._type_ahead, labels, ch)
+            if hit >= 0:
+                self.selected_language = hit
 
     fn _sync_dropdown_commit(mut self, prev_idx: Int):
         """If the dropdown's committed index moved, propagate it back
@@ -717,6 +948,18 @@ struct Settings(Movable):
                 ordered.append(_FOCUS_DICT_INSTALL)
             if self.selected_dict >= 0 and sel_installed:
                 ordered.append(_FOCUS_DICT_REMOVE)
+        elif self.section == _SECTION_LANGUAGES:
+            if len(self.languages_view) > 0:
+                ordered.append(_FOCUS_LANG_LIST)
+            ordered.append(_FOCUS_LANG_ADD)
+            if self.selected_language >= 0 \
+                    and self.selected_language < len(self.languages_view):
+                ordered.append(_FOCUS_LANG_EDIT)
+                var spec = self.languages_view[self.selected_language]
+                if _has_override(
+                    self.language_overrides, spec.language_id,
+                ):
+                    ordered.append(_FOCUS_LANG_REMOVE)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -744,6 +987,9 @@ struct Settings(Movable):
             # the previous section — close it so a stale popup doesn't
             # paint over the new pane.
             self._save_dropdown.close()
+            # Drop any in-flight type-to-jump prefix so the first
+            # keystroke after the jump starts a fresh search.
+            self._type_ahead.reset()
         self.section = s
 
     fn _step_action(mut self, delta: Int):
@@ -765,6 +1011,87 @@ struct Settings(Movable):
         if s >= len(self.dict_specs):
             s = len(self.dict_specs) - 1
         self.selected_dict = s
+
+    fn _step_language(mut self, delta: Int):
+        if len(self.languages_view) == 0:
+            return
+        var s = self.selected_language + delta
+        if s < 0:
+            s = 0
+        if s >= len(self.languages_view):
+            s = len(self.languages_view) - 1
+        self.selected_language = s
+
+    fn _add_language(mut self):
+        var argvs = List[String]()
+        var ft = List[String]()
+        self.language_editor.open(
+            String(""), ft^, argvs^, False,
+        )
+
+    fn _edit_language(mut self):
+        if self.selected_language < 0 \
+                or self.selected_language >= len(self.languages_view):
+            return
+        var spec = self.languages_view[self.selected_language]
+        var argvs = List[String]()
+        for i in range(len(spec.candidates)):
+            argvs.append(_join_argv(spec.candidates[i].argv))
+        var built_in = built_in_servers()
+        var is_existing = find_language_by_id(
+            built_in, spec.language_id,
+        ) >= 0
+        var file_types = spec.file_types.copy()
+        self.language_editor.open(
+            spec.language_id, file_types^, argvs^, is_existing,
+        )
+
+    fn _remove_language_override(mut self):
+        if self.selected_language < 0 \
+                or self.selected_language >= len(self.languages_view):
+            return
+        var spec = self.languages_view[self.selected_language]
+        var rebuilt = List[LanguageServerOverride]()
+        for i in range(len(self.language_overrides)):
+            if self.language_overrides[i].language_id == spec.language_id:
+                continue
+            rebuilt.append(self.language_overrides[i])
+        self.language_overrides = rebuilt^
+        self.dirty = True
+        self._rebuild_languages_view()
+        if self.selected_language >= len(self.languages_view):
+            self.selected_language = len(self.languages_view) - 1
+
+    fn _maybe_consume_language_editor(mut self):
+        if not self.language_editor.submitted:
+            return
+        var entry = self.language_editor.value()
+        self.language_editor.close()
+        if len(entry.language_id.as_bytes()) == 0:
+            return
+        # Splice the override into ``language_overrides``: replace if a
+        # row already exists for this language id, append otherwise.
+        var rebuilt = List[LanguageServerOverride]()
+        var replaced = False
+        for i in range(len(self.language_overrides)):
+            if self.language_overrides[i].language_id \
+                    == entry.language_id:
+                rebuilt.append(entry)
+                replaced = True
+            else:
+                rebuilt.append(self.language_overrides[i])
+        if not replaced:
+            rebuilt.append(entry)
+        self.language_overrides = rebuilt^
+        self.dirty = True
+        self._rebuild_languages_view()
+        # Keep the cursor on the just-edited language so a follow-up
+        # Enter / Edit lands back on it.
+        for i in range(len(self.languages_view)):
+            if self.languages_view[i].language_id == entry.language_id:
+                self.selected_language = i
+                break
+        self.focus = _FOCUS_LANG_LIST
 
     fn _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
@@ -805,6 +1132,18 @@ struct Settings(Movable):
                     self._request_dict_remove()
                 else:
                     self._request_dict_install()
+            return True
+        if self.focus == _FOCUS_LANG_ADD:
+            self._add_language()
+            return True
+        if self.focus == _FOCUS_LANG_EDIT:
+            self._edit_language()
+            return True
+        if self.focus == _FOCUS_LANG_REMOVE:
+            self._remove_language_override()
+            return True
+        if self.focus == _FOCUS_LANG_LIST:
+            self._edit_language()
             return True
         return True
 
@@ -888,6 +1227,10 @@ struct Settings(Movable):
             _ = self.editor.handle_mouse(event, screen)
             self._maybe_consume_editor()
             return True
+        if self.language_editor.active:
+            _ = self.language_editor.handle_mouse(event, screen)
+            self._maybe_consume_language_editor()
+            return True
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._workspace_rect(screen)
@@ -959,6 +1302,17 @@ struct Settings(Movable):
                     self.selected_dict = idx
                 self.focus = _FOCUS_DICT_LIST
                 return True
+        elif self.section == _SECTION_LANGUAGES:
+            var list_top = rect.a.y + 2 + 2
+            var list_bottom = rect.b.y - 2 - 5
+            var inner = self._right_rect(rect)
+            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+            if list_rect.contains(event.pos):
+                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+                if 0 <= idx and idx < len(self.languages_view):
+                    self.selected_language = idx
+                self.focus = _FOCUS_LANG_LIST
+                return True
         return True
 
     fn _dispatch_buttons(mut self, event: Event) -> Bool:
@@ -987,10 +1341,60 @@ struct Settings(Movable):
             return idx == _BTN_ADD or idx == _BTN_EDIT or idx == _BTN_REMOVE
         if self.section == _SECTION_SPELL:
             return idx == _BTN_DICT_INSTALL or idx == _BTN_DICT_REMOVE
+        if self.section == _SECTION_LANGUAGES:
+            return (
+                idx == _BTN_LANG_ADD or idx == _BTN_LANG_EDIT
+                or idx == _BTN_LANG_REMOVE
+            )
         return False
 
 
 # --- helpers --------------------------------------------------------------
+
+
+fn _has_override(
+    overrides: List[LanguageServerOverride], language_id: String,
+) -> Bool:
+    for i in range(len(overrides)):
+        if overrides[i].language_id == language_id:
+            return True
+    return False
+
+
+fn _format_language(spec: LanguageSpec, has_override: Bool) -> String:
+    """One-line label: ``<id>  <ext1 ext2>  <count> server(s)``.
+
+    A ``*`` prefix marks languages with a user override so the section
+    list doubles as a "what have I customized" dashboard.
+    """
+    var prefix = String("* ") if has_override else String("  ")
+    var line = prefix + spec.language_id
+    var ft_text = String("")
+    for i in range(len(spec.file_types)):
+        if i > 0:
+            ft_text = ft_text + String(" ")
+        ft_text = ft_text + spec.file_types[i]
+    if len(ft_text.as_bytes()) > 0:
+        line = line + String("  (") + ft_text + String(")")
+    var count = len(spec.candidates)
+    var count_str: String
+    if count == 0:
+        count_str = String("no servers")
+    elif count == 1:
+        count_str = String("1 server")
+    else:
+        count_str = String(count) + String(" servers")
+    line = line + String("  — ") + count_str
+    return line^
+
+
+fn _join_argv(argv: List[String]) -> String:
+    var out = String("")
+    for i in range(len(argv)):
+        if i > 0:
+            out = out + String(" ")
+        out = out + argv[i]
+    return out^
 
 
 fn _format_action(act: OnSaveAction) -> String:

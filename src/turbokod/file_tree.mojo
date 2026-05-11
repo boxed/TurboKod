@@ -27,6 +27,7 @@ from .file_io import (
     basename, join_path, list_directory, sort_directory_listing, stat_file,
 )
 from .geometry import Point, Rect
+from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
 comptime FILE_TREE_WIDTH: Int = 28
@@ -66,6 +67,10 @@ struct FileTree(Movable):
     """True while the user holds the left button after pressing on
     the panel's left border. Mouse motion in this state updates
     ``width``; the next non-pressed event clears the flag."""
+    var _type_ahead: TypeAhead
+    """Type-to-jump prefix buffer. Auto-resets after the
+    ``_SEARCH_RESET_MS`` pause; explicit reset on ``open`` /
+    ``close`` so a fresh tree starts with a clean slate."""
 
     fn __init__(out self):
         self.visible = False
@@ -78,6 +83,7 @@ struct FileTree(Movable):
         self.submitted = False
         self.focused = False
         self._resizing = False
+        self._type_ahead = TypeAhead()
 
     fn open(mut self, var root: String):
         self.root = root^
@@ -90,6 +96,7 @@ struct FileTree(Movable):
         self.scroll = 0
         self.opened_path = String("")
         self.submitted = False
+        self._type_ahead.reset()
 
     fn close(mut self):
         self.visible = False
@@ -97,6 +104,7 @@ struct FileTree(Movable):
         self.root = String("")
         self.selected = -1
         self.scroll = 0
+        self._type_ahead.reset()
         self.opened_path = String("")
         self.submitted = False
         self.focused = False
@@ -315,6 +323,21 @@ struct FileTree(Movable):
             else:
                 self.opened_path = self.entries[self.selected].path
                 self.submitted = True
+            return True
+        # Framework type-to-jump: any printable letter jumps the
+        # selection to the first visible entry whose name starts
+        # with the typed prefix. Matches the convention every list
+        # widget uses (Settings, dropdowns, dir browser, …).
+        if is_printable_ascii(event.key):
+            var labels = List[String]()
+            for i in range(len(self.entries)):
+                labels.append(self.entries[i].name)
+            var hit = type_ahead_pick(
+                self._type_ahead, labels, chr(Int(event.key)),
+            )
+            if hit >= 0:
+                self.selected = hit
+                self._scroll_to_selection()
             return True
         return False
 

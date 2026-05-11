@@ -26,7 +26,7 @@ HELIX_URL = "https://raw.githubusercontent.com/helix-editor/helix/master/languag
 # language_id; languages not listed here get an empty hint, which the
 # Mojo side treats as "don't prompt the user to install."
 INSTALL_HINTS: dict[str, str] = {
-    "python":     "pip install pyright",
+    "python":     "pip install ty",
     "rust":       "rustup component add rust-analyzer",
     "go":         "go install golang.org/x/tools/gopls@latest",
     "typescript": "npm install -g typescript-language-server typescript",
@@ -65,6 +65,14 @@ INSTALL_HINTS: dict[str, str] = {
     "php":        "npm install -g intelephense",
     "java":       "see https://github.com/eclipse-jdtls/eclipse.jdt.ls",
     "csharp":     "dotnet tool install -g csharp-ls",
+}
+
+# Per-language preferred-server overrides. After Helix's order is
+# resolved, we promote any candidate whose first argv token is in the
+# list below to the front (preserving relative order). Helix tends to
+# lead with pyright for python; we prefer ty (Astral) for speed.
+PREFERRED_FIRST: dict[str, list[str]] = {
+    "python": ["ty"],
 }
 
 
@@ -143,6 +151,12 @@ def build_specs(toml_text: bytes) -> list[dict]:
 
         if not candidates:
             continue  # no servers — nothing for our LSP layer to spawn
+
+        preferred = PREFERRED_FIRST.get(lang_id)
+        if preferred:
+            promoted = [c for c in candidates if c["argv"] and c["argv"][0] in preferred]
+            rest = [c for c in candidates if not (c["argv"] and c["argv"][0] in preferred)]
+            candidates = promoted + rest
 
         out.append({
             "language_id": lang_id,

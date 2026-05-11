@@ -24,6 +24,7 @@ Why this shape:
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .config import LanguageServerOverride
 from .file_io import read_file
 from .json import (
     JsonValue, json_get_string, json_get_string_array, parse_json,
@@ -159,3 +160,40 @@ fn find_language_by_id(specs: List[LanguageSpec], language_id: String) -> Int:
         if specs[i].language_id == language_id:
             return i
     return -1
+
+
+fn apply_language_overrides(
+    var specs: List[LanguageSpec],
+    overrides: List[LanguageServerOverride],
+) -> List[LanguageSpec]:
+    """Merge user ``overrides`` into the built-in ``specs``.
+
+    For each override:
+    * If the language id matches a built-in, replace its ``candidates``
+      with the user's ``argvs`` (in the priority order given). The
+      built-in's ``file_types`` and ``install_hint`` are preserved —
+      we only override what the user explicitly chose.
+    * Otherwise treat it as a new language: append a fresh
+      ``LanguageSpec`` built from the override's ``language_id``,
+      ``file_types``, and ``argvs``. ``install_hint`` is empty for
+      user-added languages — there's no canonical install command.
+
+    Empty ``argvs`` is allowed and means "no server" (all candidates
+    removed). Routing by extension still works; a missing server just
+    means no LSP gets spawned.
+    """
+    for i in range(len(overrides)):
+        var ov = overrides[i]
+        if len(ov.language_id.as_bytes()) == 0:
+            continue
+        var cands = List[ServerCandidate]()
+        for k in range(len(ov.argvs)):
+            cands.append(ServerCandidate(ov.argvs[k].copy()))
+        var idx = find_language_by_id(specs, ov.language_id)
+        if idx >= 0:
+            specs[idx].candidates = cands^
+        else:
+            specs.append(LanguageSpec(
+                ov.language_id, ov.file_types.copy(), cands^, String(""),
+            ))
+    return specs^

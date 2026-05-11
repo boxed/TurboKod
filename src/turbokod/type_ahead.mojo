@@ -15,17 +15,35 @@ Each consumer brings its own match-and-select logic (file lists skip
 ``..``, dropdowns skip the empty ``(none)`` sentinel, etc.), so the
 shared piece is just the buffer and the case-insensitive prefix test.
 
-Standard usage::
+Two consumption surfaces:
 
-    var prefix = self.type_ahead.append(ch)
-    if try_select(prefix):
+* ``TypeAhead.append`` / ``solo_fallback`` for widgets whose match
+  logic needs custom skip rules (DirBrowser, Dropdown), or whose
+  options aren't already in a flat ``List[String]``.
+
+* ``type_ahead_pick`` (this module) for widgets that already paint
+  one row per ``List[String]`` entry — the common case for Settings
+  panes, candidate lists, and any new list widget. One call,
+  current-index in / new-index out, no per-site reimplementation
+  of the prefix walk.
+
+Standard usage of the helper::
+
+    if is_printable_ascii(event.key) and self.focus == _FOCUS_LIST:
+        var hit = type_ahead_pick(
+            self._type_ahead, self._row_labels(),
+            chr(Int(event.key)),
+        )
+        if hit >= 0:
+            self.selected = hit
         return True
-    if len(prefix.as_bytes()) > 1:
-        var solo = self.type_ahead.solo_fallback(ch)
-        if try_select(solo):
-            return True
-    return False
+
+The helper returns ``-1`` on a no-match keystroke so the caller's
+selection survives accidental Shift-letter / AltGr presses that
+fall through to no row.
 """
+
+from std.collections.list import List
 
 from .posix import monotonic_ms
 
@@ -79,6 +97,54 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
         accumulated prefix, retry with a fresh single character."""
         self.buf = ch
         return self.buf
+
+
+fn is_printable_ascii(key: UInt32) -> Bool:
+    """True for ``key`` codes a list widget should treat as "user is
+    typing a search prefix". Matches the dropdown/dir-browser gate so
+    every list widget agrees on what counts as a search keystroke."""
+    return UInt32(0x20) <= key and key < UInt32(0x7F)
+
+
+fn _find_prefix_in(options: List[String], prefix: String) -> Int:
+    """First index in ``options`` whose entry starts with ``prefix``
+    (case-insensitive), or -1 on no match. Empty entries are skipped
+    so a stray printable key doesn't snap to the leading sentinel
+    rows that some lists prepend (e.g. dropdown's ``""`` "any"
+    option)."""
+    var pb = prefix.as_bytes()
+    if len(pb) == 0:
+        return -1
+    for i in range(len(options)):
+        if len(options[i].as_bytes()) == 0:
+            continue
+        if starts_with_ci(options[i], prefix):
+            return i
+    return -1
+
+
+fn type_ahead_pick(
+    mut type_ahead: TypeAhead, options: List[String], ch: String,
+) -> Int:
+    """Append ``ch`` to ``type_ahead`` and return the index of the
+    first option whose label starts with the accumulated prefix
+    (case-insensitive). On no match, fall back to a solo-letter
+    retry — typing a fresh letter after a stale chain still lands
+    somewhere useful. Returns ``-1`` if neither attempt matches so
+    the caller can preserve its existing selection.
+
+    This is the framework feature: any list widget that owns a
+    ``TypeAhead`` field and can produce a ``List[String]`` of its
+    visible row labels gets type-to-jump in one call.
+    """
+    var prefix = type_ahead.append(ch)
+    var idx = _find_prefix_in(options, prefix)
+    if idx >= 0:
+        return idx
+    if len(type_ahead.buf.as_bytes()) > 1:
+        var solo = type_ahead.solo_fallback(ch)
+        return _find_prefix_in(options, solo)
+    return -1
 
 
 fn starts_with_ci(name: String, prefix: String) -> Bool:

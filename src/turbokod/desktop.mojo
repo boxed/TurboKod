@@ -93,7 +93,8 @@ from .doc_config import (
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
-    LanguageSpec, built_in_servers, find_language_for_extension,
+    LanguageSpec, apply_language_overrides, built_in_servers,
+    find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .dap_dispatch import (
@@ -1451,7 +1452,11 @@ struct Desktop(Movable):
         if self.settings.active and self.settings.dirty:
             self.config.on_save_actions = self.settings.actions.copy()
             self.config.auto_save = self.settings.auto_save
+            self.config.language_servers = (
+                self.settings.language_overrides.copy()
+            )
             _ = save_config(self.config)
+            self._rebuild_lsp_specs()
             self.settings.ack_dirty()
         # Drain pending dictionary install / remove requests emitted by
         # the Spell-check pane. Install routes through the shared
@@ -2134,6 +2139,16 @@ struct Desktop(Movable):
         ``__init__`` deliberately doesn't, so tests get deterministic
         defaults instead of inheriting the developer's local config."""
         self.config = load_config()
+        self._rebuild_lsp_specs()
+
+    fn _rebuild_lsp_specs(mut self):
+        """Refresh ``lsp_specs`` from the bundled catalog plus user
+        overrides in ``config.language_servers``. Already-spawned
+        ``lsp_managers`` keep running with their old binary —
+        re-routing only takes effect for newly opened files."""
+        self.lsp_specs = apply_language_overrides(
+            built_in_servers(), self.config.language_servers,
+        )
 
     fn open_project(mut self, path: String):
         """Pick a project root for ``path``.
@@ -3047,7 +3062,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == APP_SETTINGS:
             self.settings.open(
-                self.config.on_save_actions.copy(), self.config.auto_save,
+                self.config.on_save_actions.copy(),
+                self.config.auto_save,
+                self.config.language_servers.copy(),
             )
             return Optional[String]()
         if action == EDITOR_NEW:

@@ -77,6 +77,7 @@ from .git_changes import (
 )
 from .string_utils import split_lines_no_trailing, starts_with
 from .text_field import TextField
+from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -903,6 +904,12 @@ struct LocalChanges(Movable):
     # ``_PANE_BRANCHES`` / ``_PANE_COMMITS`` ordering — same identifiers
     # used elsewhere for focus tracking.
     var sidebar_dock: DockedPanelStack
+    # Type-to-jump prefix buffer for whichever sidebar pane currently
+    # owns focus. The Files pane keeps its bare-letter git shortcuts
+    # (c / A / d / p / P), so type-to-jump only fires on Branches /
+    # Commits — wiring the Files pane would silently steal those
+    # action shortcuts from active git workflows.
+    var _type_ahead: TypeAhead
 
     fn __init__(out self):
         self.active = False
@@ -941,6 +948,7 @@ struct LocalChanges(Movable):
         _ = self.sidebar_dock.add(String("Modified files"))
         _ = self.sidebar_dock.add(String("Branches"))
         _ = self.sidebar_dock.add(String("Commits"))
+        self._type_ahead = TypeAhead()
 
     fn open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -975,6 +983,7 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_ok = False
         self.sidebar_dock.reset()
+        self._type_ahead.reset()
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1048,6 +1057,7 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_ok = False
         self.sidebar_dock.reset()
+        self._type_ahead.reset()
 
     # --- geometry ---------------------------------------------------------
 
@@ -2145,6 +2155,10 @@ struct LocalChanges(Movable):
             self._tab_forward()
         else:
             self._tab_backward()
+        # Each pane has its own row labels — drop any stale type-ahead
+        # buffer on a focus change so the next keystroke starts a
+        # fresh search against the new pane's items.
+        self._type_ahead.reset()
 
     fn _tab_forward(mut self):
         var f = self.focus
@@ -2383,6 +2397,26 @@ struct LocalChanges(Movable):
                 self._focused_selection() + self._focused_panel_height(bounds),
                 bounds,
             )
+            return True
+        # Framework type-to-jump on the Branches / Commits panes.
+        # Files pane is intentionally excluded so its bare-letter git
+        # shortcuts (c / A / d / p / P) keep working — see the
+        # ``_type_ahead`` field comment for the rationale.
+        if is_printable_ascii(k) and (
+            self.focus == _PANE_BRANCHES or self.focus == _PANE_COMMITS
+        ):
+            var labels = List[String]()
+            if self.focus == _PANE_BRANCHES:
+                for i in range(len(self.branches)):
+                    labels.append(self.branches[i].name)
+            else:
+                for i in range(len(self.commits)):
+                    labels.append(self.commits[i].subject)
+            var hit = type_ahead_pick(
+                self._type_ahead, labels, chr(Int(k)),
+            )
+            if hit >= 0:
+                self._set_focused_selection(hit, bounds)
             return True
         if k == KEY_ENTER:
             # Enter only does something for file rows — open the file.

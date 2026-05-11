@@ -60,7 +60,7 @@ from turbokod.git_changes import (
     compute_revert_block, diff_buffer_against_head, parse_unified_diff_files,
 )
 from turbokod.local_changes import LocalChanges, build_minimal_patch
-from turbokod.file_tree import FILE_TREE_WIDTH, FileTree
+from turbokod.file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
     GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
@@ -96,7 +96,12 @@ from turbokod.json import (
     json_object, json_str, parse_json,
 )
 from turbokod.language_config import (
-    built_in_servers, find_language_by_id, find_language_for_extension,
+    LanguageSpec, apply_language_overrides, built_in_servers,
+    find_language_by_id, find_language_for_extension,
+)
+from turbokod.language_editor import LanguageEditor
+from turbokod.type_ahead import (
+    TypeAhead, is_printable_ascii, type_ahead_pick,
 )
 from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
@@ -151,7 +156,7 @@ from turbokod.grammar_install import (
     grammar_install_command, user_grammar_path, user_grammar_path_for_ext,
 )
 from turbokod.action_editor import ActionEditor
-from turbokod.config import OnSaveAction
+from turbokod.config import LanguageServerOverride, OnSaveAction
 from turbokod.dropdown import Dropdown
 from turbokod.settings import Settings
 from turbokod.onig import OnigRegex, onig_global_init
@@ -3456,6 +3461,315 @@ fn test_settings_save_behavior_no_change_no_dirty() raises:
     s._sync_dropdown_commit(prev_idx)
     assert_false(s.auto_save)
     assert_false(s.dirty)
+
+
+fn test_apply_language_overrides_replaces_candidates() raises:
+    """An override matching a built-in language replaces the candidate
+    list verbatim and preserves the built-in's ``file_types`` (we only
+    override what the user explicitly chose)."""
+    var specs = built_in_servers()
+    if find_language_by_id(specs, String("python")) < 0:
+        # Bundled JSON missing — skip rather than fail; the unit test
+        # for built_in_servers handles that case.
+        return
+    var argvs = List[List[String]]()
+    var argv = List[String]()
+    argv.append(String("my-pyright"))
+    argv.append(String("--stdio"))
+    argvs.append(argv^)
+    var ov = LanguageServerOverride(
+        String("python"), List[String](), argvs^,
+    )
+    var overrides = List[LanguageServerOverride]()
+    overrides.append(ov^)
+    var merged = apply_language_overrides(specs.copy(), overrides)
+    var idx = find_language_by_id(merged, String("python"))
+    assert_true(idx >= 0)
+    assert_equal(len(merged[idx].candidates), 1)
+    assert_equal(merged[idx].candidates[0].argv[0], String("my-pyright"))
+    # File types kept from built-in (override didn't supply any).
+    assert_true(len(merged[idx].file_types) > 0)
+
+
+fn test_apply_language_overrides_adds_new_language() raises:
+    """A user override for a language id absent from the catalog adds
+    a brand-new ``LanguageSpec`` whose file_types come from the
+    override."""
+    var argvs = List[List[String]]()
+    var argv = List[String]()
+    argv.append(String("custom-lsp"))
+    argvs.append(argv^)
+    var fts = List[String]()
+    fts.append(String("xyz"))
+    var ov = LanguageServerOverride(
+        String("xyzlang"), fts^, argvs^,
+    )
+    var overrides = List[LanguageServerOverride]()
+    overrides.append(ov^)
+    var merged = apply_language_overrides(
+        List[LanguageSpec](), overrides,
+    )
+    assert_equal(len(merged), 1)
+    assert_equal(merged[0].language_id, String("xyzlang"))
+    assert_equal(len(merged[0].file_types), 1)
+    assert_equal(merged[0].file_types[0], String("xyz"))
+    assert_equal(len(merged[0].candidates), 1)
+
+
+fn test_settings_languages_section_seeded() raises:
+    """``open(... , language_overrides)`` must populate
+    ``language_overrides`` and rebuild the effective ``languages_view``
+    so the right pane has rows on first paint."""
+    var s = Settings()
+    var argvs = List[List[String]]()
+    var argv = List[String]()
+    argv.append(String("custom"))
+    argvs.append(argv^)
+    var ov = LanguageServerOverride(
+        String("xyzlang"), List[String](), argvs^,
+    )
+    var overrides = List[LanguageServerOverride]()
+    overrides.append(ov^)
+    s.open(List[OnSaveAction](), False, overrides^)
+    assert_equal(len(s.language_overrides), 1)
+    # ``xyzlang`` should appear in the effective view.
+    var found = False
+    for i in range(len(s.languages_view)):
+        if s.languages_view[i].language_id == String("xyzlang"):
+            found = True
+            break
+    assert_true(found)
+
+
+fn test_settings_remove_language_override_marks_dirty() raises:
+    """Removing the override for a custom language drops it from
+    ``language_overrides``, marks ``dirty``, and rebuilds the view so
+    the row disappears (since the language has no built-in fallback)."""
+    var s = Settings()
+    var argvs = List[List[String]]()
+    var argv = List[String]()
+    argv.append(String("custom"))
+    argvs.append(argv^)
+    var ov = LanguageServerOverride(
+        String("xyzlang"), List[String](), argvs^,
+    )
+    var overrides = List[LanguageServerOverride]()
+    overrides.append(ov^)
+    s.open(List[OnSaveAction](), False, overrides^)
+    # Find and select the custom row.
+    for i in range(len(s.languages_view)):
+        if s.languages_view[i].language_id == String("xyzlang"):
+            s.selected_language = i
+            break
+    s._remove_language_override()
+    assert_true(s.dirty)
+    assert_equal(len(s.language_overrides), 0)
+    for i in range(len(s.languages_view)):
+        assert_true(s.languages_view[i].language_id != String("xyzlang"))
+
+
+fn test_language_editor_save_emits_override() raises:
+    """The editor's ``value()`` after Save must surface the user's
+    fields verbatim — language id, file types, and the joined argv
+    list split back into argv arrays."""
+    var ed = LanguageEditor()
+    var argvs = List[String]()
+    argvs.append(String("foo --bar baz"))
+    ed.open(
+        String("xyzlang"), List[String](), argvs^, False,
+    )
+    # Type a second server.
+    ed._add_candidate()
+    ed.argv_tf.set_text(String("other --quiet"))
+    ed.candidates[ed.selected] = ed.argv_tf.text
+    var out = ed.value()
+    assert_equal(out.language_id, String("xyzlang"))
+    assert_equal(len(out.argvs), 2)
+    assert_equal(len(out.argvs[0]), 3)
+    assert_equal(out.argvs[0][0], String("foo"))
+    assert_equal(out.argvs[1][0], String("other"))
+
+
+fn test_type_ahead_pick_returns_index_or_minus_one() raises:
+    """The framework helper any list widget can call: append the
+    keystroke, return the matching index, or -1 on no match. Empty
+    sentinel rows are skipped so a typed letter doesn't snap to the
+    leading "(none)" entry."""
+    var ta = TypeAhead()
+    var opts = List[String]()
+    opts.append(String(""))
+    opts.append(String("apple"))
+    opts.append(String("banana"))
+    opts.append(String("cherry"))
+    assert_equal(type_ahead_pick(ta, opts, String("b")), 2)
+    assert_equal(type_ahead_pick(ta, opts, String("z")), -1)
+
+
+fn test_type_ahead_pick_solo_fallback() raises:
+    """When the accumulated prefix doesn't match, retry with just
+    the new char so a stale chain doesn't make the next keystroke
+    feel like a dead key."""
+    var ta = TypeAhead()
+    var opts = List[String]()
+    opts.append(String("apple"))
+    opts.append(String("banana"))
+    opts.append(String("zebra"))
+    assert_equal(type_ahead_pick(ta, opts, String("b")), 1)
+    # 'bz' matches nothing; solo 'z' wins.
+    assert_equal(type_ahead_pick(ta, opts, String("z")), 2)
+
+
+fn test_settings_languages_list_type_to_jump() raises:
+    """The Languages section list is type-to-jump. After focusing the
+    list, typing a letter must move ``selected_language`` to the
+    first language whose id starts with the typed prefix — no
+    explicit hookup per list, the framework helper drives it."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    # Park the user on the Languages section list.
+    s.section = 3
+    s.focus = UInt8(10)  # _FOCUS_LANG_LIST
+    # Find the index where 'r' would land — the first language id
+    # starting with "r" — so the assert is independent of catalog
+    # order changes.
+    var expected = -1
+    for i in range(len(s.languages_view)):
+        var lid = s.languages_view[i].language_id
+        if len(lid.as_bytes()) > 0:
+            var first = lid.as_bytes()[0]
+            if first == 0x72 or first == 0x52:  # 'r' / 'R'
+                expected = i
+                break
+    if expected < 0:
+        # Bundled JSON missing or no 'r' language — skip rather than
+        # fail; ``built_in_servers`` returning an empty list is
+        # already tested elsewhere.
+        return
+    var consumed = s.handle_key(_key(UInt32(ord("r"))))
+    assert_true(consumed)
+    assert_equal(s.selected_language, expected)
+
+
+fn test_settings_actions_list_type_to_jump() raises:
+    """Same framework feature in the Actions section: typing a letter
+    moves ``selected_action`` to the first row whose label
+    (language id + program) starts with that letter."""
+    var s = Settings()
+    var actions = List[OnSaveAction]()
+    actions.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    actions.append(OnSaveAction(
+        String("rust"), String("/usr/bin/rustfmt"),
+        List[String](), String(""),
+    ))
+    s.open(actions^, False)
+    s.section = 0  # Actions on save
+    s.focus = UInt8(1)  # _FOCUS_LIST
+    # The action label format starts with the language id.
+    _ = s.handle_key(_key(UInt32(ord("r"))))
+    assert_equal(s.selected_action, 1)
+    # No-match keystroke: selection survives.
+    s._type_ahead.reset()
+    _ = s.handle_key(_key(UInt32(ord("z"))))
+    assert_equal(s.selected_action, 1)
+
+
+fn test_language_editor_list_type_to_jump() raises:
+    """The candidate list in the LanguageEditor is also a list
+    widget — typing 'p' lands on the first server whose argv starts
+    with 'p'. Argv strip mirrors the new selection so the user
+    can keep editing."""
+    var ed = LanguageEditor()
+    var argvs = List[String]()
+    argvs.append(String("apple-lsp"))
+    argvs.append(String("banana-lsp"))
+    argvs.append(String("pyright"))
+    ed.open(
+        String("xyzlang"), List[String](), argvs^, False,
+    )
+    ed.focus = UInt8(2)  # _FOCUS_LIST
+    _ = ed.handle_key(_key(UInt32(ord("p"))))
+    assert_equal(ed.selected, 2)
+    assert_equal(ed.argv_tf.text, String("pyright"))
+
+
+fn test_file_tree_type_to_jump() raises:
+    """File tree picks up the framework feature: typing a letter
+    while the pane has keyboard focus jumps the highlight to the
+    first entry whose name starts with that letter."""
+    var tree = FileTree()
+    tree.visible = True
+    tree.focused = True
+    tree.entries = List[FileTreeEntry]()
+    tree.entries.append(FileTreeEntry(
+        String("alpha"), String("/a/alpha"), 0, False, False,
+    ))
+    tree.entries.append(FileTreeEntry(
+        String("beta"), String("/a/beta"), 0, False, False,
+    ))
+    tree.entries.append(FileTreeEntry(
+        String("gamma"), String("/a/gamma"), 0, False, False,
+    ))
+    tree.selected = 0
+    var consumed = tree.handle_key(_key(UInt32(ord("g"))))
+    assert_true(consumed)
+    assert_equal(tree.selected, 2)
+
+
+fn test_menu_open_dropdown_type_to_jump() raises:
+    """An open menu dropdown jumps to the first item whose label
+    starts with the typed letter. Mnemonics use Alt+letter and run
+    at the Desktop layer, so plain letters are free for in-dropdown
+    search."""
+    var bar = MenuBar()
+    var items = List[MenuItem]()
+    items.append(MenuItem(String("New"),    String("file.new")))
+    items.append(MenuItem(String("Open"),   String("file.open")))
+    items.append(MenuItem(String("Save"),   String("file.save")))
+    items.append(MenuItem(String("Save as"), String("file.saveas")))
+    bar.add(Menu(String("File"), items^))
+    bar.open_menu(0)
+    assert_equal(bar.selected_item, 0)  # New
+    var result = bar.handle_key(_key(UInt32(ord("s"))))
+    assert_true(result.consumed)
+    assert_equal(bar.selected_item, 2)  # Save
+
+
+fn test_is_printable_ascii_gates_search_keys() raises:
+    """The framework predicate that decides "is this a search
+    keystroke or a control key" — must include letters / digits /
+    punctuation and exclude DEL, NUL, arrow-key codes, etc."""
+    assert_true(is_printable_ascii(UInt32(ord("a"))))
+    assert_true(is_printable_ascii(UInt32(ord("Z"))))
+    assert_true(is_printable_ascii(UInt32(ord("0"))))
+    assert_true(is_printable_ascii(UInt32(0x20)))   # space
+    assert_false(is_printable_ascii(UInt32(0x1F)))  # below printable
+    assert_false(is_printable_ascii(UInt32(0x7F)))  # DEL
+
+
+fn test_language_editor_move_candidate_reorders() raises:
+    """Up/Down buttons swap the selected entry with its neighbour,
+    keeping the cursor on the just-moved row."""
+    var ed = LanguageEditor()
+    var argvs = List[String]()
+    argvs.append(String("a"))
+    argvs.append(String("b"))
+    argvs.append(String("c"))
+    ed.open(
+        String("xyzlang"), List[String](), argvs^, False,
+    )
+    ed.selected = 0
+    ed._move_candidate(1)
+    assert_equal(ed.candidates[0], String("b"))
+    assert_equal(ed.candidates[1], String("a"))
+    assert_equal(ed.selected, 1)
+    # Out-of-bounds is a no-op.
+    ed.selected = 2
+    ed._move_candidate(1)
+    assert_equal(ed.selected, 2)
+    assert_equal(ed.candidates[2], String("c"))
 
 
 fn test_action_editor_lang_dropdown_has_options() raises:
@@ -11725,6 +12039,20 @@ fn main() raises:
     test_settings_open_seeds_save_behavior_dropdown()
     test_settings_save_behavior_commit_marks_dirty()
     test_settings_save_behavior_no_change_no_dirty()
+    test_apply_language_overrides_replaces_candidates()
+    test_apply_language_overrides_adds_new_language()
+    test_settings_languages_section_seeded()
+    test_settings_remove_language_override_marks_dirty()
+    test_language_editor_save_emits_override()
+    test_language_editor_move_candidate_reorders()
+    test_type_ahead_pick_returns_index_or_minus_one()
+    test_type_ahead_pick_solo_fallback()
+    test_settings_languages_list_type_to_jump()
+    test_settings_actions_list_type_to_jump()
+    test_language_editor_list_type_to_jump()
+    test_file_tree_type_to_jump()
+    test_menu_open_dropdown_type_to_jump()
+    test_is_printable_ascii_gates_search_keys()
     test_action_editor_lang_dropdown_has_options()
     test_action_editor_enter_opens_lang_popup()
     test_dropdown_type_to_search_jumps_to_prefix()
