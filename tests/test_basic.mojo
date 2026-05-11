@@ -14,8 +14,9 @@ from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY,
+    LIGHT_GREEN, LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
+    WHITE, YELLOW,
     attr_to_sgr, default_attr,
 )
 from turbokod.diff import MergeResult, diff3_merge, diff_lines, unified_diff
@@ -101,6 +102,7 @@ from turbokod.language_config import (
     find_language_by_id, find_language_for_extension,
 )
 from turbokod.language_editor import LanguageEditor
+from turbokod.list_box import ListBox
 from turbokod.type_ahead import (
     TypeAhead, is_printable_ascii, type_ahead_pick,
 )
@@ -3602,13 +3604,130 @@ fn test_language_editor_save_emits_override() raises:
     # Type a second server.
     ed._add_candidate()
     ed.argv_tf.set_text(String("other --quiet"))
-    ed.candidates[ed.selected] = ed.argv_tf.text
+    ed.candidates[ed._list.selected] = ed.argv_tf.text
     var out = ed.value()
     assert_equal(out.language_id, String("xyzlang"))
     assert_equal(len(out.argvs), 2)
     assert_equal(len(out.argvs[0]), 3)
     assert_equal(out.argvs[0][0], String("foo"))
     assert_equal(out.argvs[1][0], String("other"))
+
+
+fn test_list_box_paint_never_overflows_bounds() raises:
+    """Framework guarantee: a ``ListBox`` whose item text is wider than
+    its rect must clip at the rect boundary on every side. No paint
+    pixel may land outside the list's ``bounds`` — that's what saves
+    the surrounding dialog chrome (frame, padding, neighbour controls)
+    from being damaged by a too-long entry.
+
+    The test paints into a canvas pre-filled with a sentinel glyph,
+    runs ``ListBox.paint`` on a 6-wide × 3-tall rect surrounded by the
+    sentinel, and asserts every cell outside the rect still shows the
+    sentinel. The selected-row fill, the row text, and a row that
+    overflows on the right are all included so the assertion covers
+    every code path that writes a cell.
+    """
+    var c = Canvas(20, 7)
+    var sentinel = Cell(String("·"), Attr(WHITE, BLACK), 1)
+    for y in range(c.height):
+        for x in range(c.width):
+            c.set(x, y, sentinel)
+    var bounds = Rect(2, 2, 8, 5)
+    var items = List[String]()
+    items.append(String("short"))
+    items.append(String("this-is-way-too-long-for-the-list"))
+    items.append(String("mid"))
+    var lb = ListBox()
+    lb.set_selected(1)
+    lb.paint(c, bounds, items, True, Attr(BLACK, CYAN))
+    for y in range(c.height):
+        for x in range(c.width):
+            var inside = (
+                bounds.a.x <= x and x < bounds.b.x
+                and bounds.a.y <= y and y < bounds.b.y
+            )
+            if not inside:
+                assert_equal(c.get(x, y).glyph, String("·"))
+
+
+fn test_list_box_paint_empty_hint_clipped() raises:
+    """``paint_empty_hint`` writes a single line inside the list rect;
+    a hint longer than the rect must still not leak into the cells on
+    the right."""
+    var c = Canvas(20, 3)
+    var sentinel = Cell(String("·"), Attr(WHITE, BLACK), 1)
+    for y in range(c.height):
+        for x in range(c.width):
+            c.set(x, y, sentinel)
+    var bounds = Rect(4, 1, 10, 2)
+    var lb = ListBox()
+    lb.paint_empty_hint(
+        c, bounds,
+        String("hint-far-too-wide-to-fit"),
+        Attr(BLUE, LIGHT_GRAY),
+    )
+    for y in range(c.height):
+        for x in range(c.width):
+            var inside = (
+                bounds.a.x <= x and x < bounds.b.x
+                and bounds.a.y <= y and y < bounds.b.y
+            )
+            if not inside:
+                assert_equal(c.get(x, y).glyph, String("·"))
+
+
+fn test_list_box_mouse_wheel_clamps_to_item_count() raises:
+    """Wheel-down past the last visible row must not advance the
+    scroll origin past ``items - height`` — otherwise the next paint
+    sees an out-of-range index and silently shows nothing."""
+    var lb = ListBox()
+    var items = List[String]()
+    var i = 0
+    while i < 5:
+        items.append(String("row"))
+        i += 1
+    var bounds = Rect(0, 0, 10, 3)
+    # Five wheel-downs on a 3-row view over 5 items: clamp at 2.
+    var down = Event.mouse_event(Point(5, 1), MOUSE_WHEEL_DOWN, True, False)
+    i = 0
+    while i < 5:
+        _ = lb.handle_mouse_press(down, bounds, len(items))
+        i += 1
+    assert_equal(lb._scroll, 2)
+
+
+fn test_language_editor_paint_does_not_damage_dialog_border() raises:
+    """End-to-end regression: open the editor with an argv string that
+    exceeds the list width, paint it, and assert the dialog's right
+    border at every list row is still a vertical bar — proving the
+    candidate text was clipped before it could reach the frame."""
+    var screen = Rect(0, 0, 100, 40)
+    var ed = LanguageEditor()
+    var argvs = List[String]()
+    # A line longer than the dialog interior — used to overflow into
+    # the dialog right border.
+    argvs.append(String(
+        "some-language-server --very-long-flag /very/long/path/to/binary"
+        " --extra-args-that-keep-going-and-going"
+    ))
+    argvs.append(String("short"))
+    ed.open(
+        String("xyzlang"), List[String](), argvs^, False,
+    )
+    var c = Canvas(screen.b.x, screen.b.y)
+    ed.paint(c, screen)
+    # Dialog right border lives at ``rect.b.x - 1``. Walk the dialog
+    # rows that overlap the list rect and confirm the border glyph is
+    # still the double-line vertical we drew at frame time. ``║`` is
+    # the only legal value; anything else means a candidate string
+    # leaked past the list's right edge.
+    var dialog = Rect(
+        (screen.b.x - 70) // 2, (screen.b.y - 21) // 2,
+        (screen.b.x - 70) // 2 + 70, (screen.b.y - 21) // 2 + 21,
+    )
+    for y in range(dialog.a.y + 1, dialog.b.y - 1):
+        var glyph = c.get(dialog.b.x - 1, y).glyph
+        assert_equal(glyph, String("║"))
 
 
 fn test_type_ahead_pick_returns_index_or_minus_one() raises:
@@ -3712,7 +3831,7 @@ fn test_language_editor_list_type_to_jump() raises:
     )
     ed.focus = UInt8(2)  # _FOCUS_LIST
     _ = ed.handle_key(_key(UInt32(ord("p"))))
-    assert_equal(ed.selected, 2)
+    assert_equal(ed._list.selected, 2)
     assert_equal(ed.argv_tf.text, String("pyright"))
 
 
@@ -3781,15 +3900,15 @@ fn test_language_editor_move_candidate_reorders() raises:
     ed.open(
         String("xyzlang"), List[String](), argvs^, False,
     )
-    ed.selected = 0
+    ed._list.selected = 0
     ed._move_candidate(1)
     assert_equal(ed.candidates[0], String("b"))
     assert_equal(ed.candidates[1], String("a"))
-    assert_equal(ed.selected, 1)
+    assert_equal(ed._list.selected, 1)
     # Out-of-bounds is a no-op.
-    ed.selected = 2
+    ed._list.selected = 2
     ed._move_candidate(1)
-    assert_equal(ed.selected, 2)
+    assert_equal(ed._list.selected, 2)
     assert_equal(ed.candidates[2], String("c"))
 
 
@@ -12153,6 +12272,10 @@ fn main() raises:
     test_settings_languages_section_seeded()
     test_settings_remove_language_override_marks_dirty()
     test_language_editor_save_emits_override()
+    test_list_box_paint_never_overflows_bounds()
+    test_list_box_paint_empty_hint_clipped()
+    test_list_box_mouse_wheel_clamps_to_item_count()
+    test_language_editor_paint_does_not_damage_dialog_border()
     test_language_editor_move_candidate_reorders()
     test_type_ahead_pick_returns_index_or_minus_one()
     test_type_ahead_pick_solo_fallback()

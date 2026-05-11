@@ -33,7 +33,7 @@ from .lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
 )
-from .posix import getenv_value, realpath, which
+from .posix import getcwd_path, getenv_value, realpath, which
 
 
 fn _lsp_debug_log(line: String):
@@ -380,9 +380,17 @@ struct LspManager(Copyable, Movable):
             return
         self._language_id = language_id
         self._argv = argv.copy()
-        self._root_uri = _path_to_uri(root_path) if len(root_path.as_bytes()) > 0 else String("")
+        # Always give the server a workspace root: a project dir if the
+        # host has one open, otherwise the editor's own cwd. Pyright and
+        # friends key module resolution off ``rootUri``/``workspaceFolders``
+        # and the child's cwd; leaving any of them blank causes silent
+        # "module not found" failures on first didOpen.
+        var resolved_root = root_path \
+            if len(root_path.as_bytes()) > 0 else getcwd_path()
+        self._root_uri = _path_to_uri(resolved_root) \
+            if len(resolved_root.as_bytes()) > 0 else String("")
         try:
-            self.client = LspClient.spawn(argv, root_path)
+            self.client = LspClient.spawn(argv, resolved_root)
         except e:
             self.state = _STATE_FAILED
             self.failure_reason = String("spawn failed: ") + String(e)
@@ -403,8 +411,8 @@ struct LspManager(Copyable, Movable):
                     hdr = hdr + String(" ") + argv[k]
                 self.client.process.trace(hdr)
         try:
-            var ws_name = basename(root_path) if len(root_path.as_bytes()) > 0 \
-                else String("")
+            var ws_name = basename(resolved_root) \
+                if len(resolved_root.as_bytes()) > 0 else String("")
             self._init_id = self.client.send_request(
                 String("initialize"),
                 lsp_initialize_params(self._root_uri, ws_name),

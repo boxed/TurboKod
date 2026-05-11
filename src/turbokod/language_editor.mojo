@@ -34,18 +34,16 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
-from .colors import (
-    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
-)
+from .colors import Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, WHITE
 from .config import LanguageServerOverride
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP,
-    MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    KEY_ENTER, KEY_ESC, KEY_TAB,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect, compute_dialog_rect
+from .list_box import ListBox
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .view import RowCursor
@@ -168,17 +166,15 @@ struct LanguageEditor(Movable):
     """Joined argv strings (space-separated). Edited via the bottom
     ``argv_tf`` strip — selecting a row copies it into the strip;
     typing into the strip writes back to the selected row."""
-    var selected: Int
+    var _list: ListBox
+    """Standard scrollable list widget. Owns the selection index and
+    scroll state for the candidates list; ``selected`` flows through
+    its ``selected`` field. Painting is clipped to the list rect by
+    the widget itself."""
     var argv_tf: TextField
     var focus: UInt8
     var pos: Optional[Point]
     var _drag: Optional[Point]
-    var _list_scroll: Int
-    var _last_scroll_sel: Int
-    """Last ``selected`` value snapped into view by paint. The
-    candidates-list paint only scrolls to the selection when this
-    differs from ``selected`` — so wheel-scrolling moves the viewport
-    independently and isn't snapped back on the next frame."""
     var _buttons: List[_PlacedButton]
     var _type_ahead: TypeAhead
     """Type-to-jump prefix buffer for the candidates list. Reset on
@@ -192,13 +188,11 @@ struct LanguageEditor(Movable):
         self.lang_tf = TextField()
         self.file_types_tf = TextField()
         self.candidates = List[String]()
-        self.selected = -1
+        self._list = ListBox()
         self.argv_tf = TextField()
         self.focus = _FOCUS_LANG
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
-        self._list_scroll = 0
-        self._last_scroll_sel = -2
         self._type_ahead = TypeAhead()
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
@@ -236,10 +230,11 @@ struct LanguageEditor(Movable):
         self.file_types_tf.set_text(ft_text^)
         self.candidates = candidates^
         _ = file_types  # consumed via _join_space copy
-        self.selected = 0 if len(self.candidates) > 0 else -1
+        self._list.reset()
+        self._list.set_selected(0 if len(self.candidates) > 0 else -1)
         self.argv_tf = TextField()
-        if self.selected >= 0:
-            self.argv_tf.set_text(self.candidates[self.selected])
+        if self._list.selected >= 0:
+            self.argv_tf.set_text(self.candidates[self._list.selected])
         self.is_existing = is_existing
         self.active = True
         self.submitted = False
@@ -248,8 +243,6 @@ struct LanguageEditor(Movable):
         )
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
-        self._list_scroll = 0
-        self._last_scroll_sel = -2
         self._type_ahead.reset()
 
     fn close(mut self):
@@ -259,12 +252,11 @@ struct LanguageEditor(Movable):
         self.lang_tf = TextField()
         self.file_types_tf = TextField()
         self.candidates = List[String]()
-        self.selected = -1
+        self._list.reset()
         self.argv_tf = TextField()
         self.focus = _FOCUS_LANG
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
-        self._list_scroll = 0
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
@@ -333,7 +325,7 @@ struct LanguageEditor(Movable):
                 canvas, layout.ft_rect, self.focus == _FOCUS_FILE_TYPES,
             )
         # Candidate list.
-        self._paint_list(canvas, painter, layout.list_rect)
+        self._paint_list(canvas, layout.list_rect)
         # Argv strip.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.argv_y),
@@ -362,56 +354,26 @@ struct LanguageEditor(Movable):
             )
 
     fn _paint_list(
-        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
+        mut self, mut canvas: Canvas, list_rect: Rect,
     ):
         var bg = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), bg)
         if len(self.candidates) == 0:
-            var hint = Attr(BLUE, LIGHT_GRAY)
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
-                String("(no servers — press [+ Add])"), hint,
+            # The empty hint sits on the dialog-body background, but
+            # paint through the list-rect-clipped helper so even a
+            # too-narrow dialog can't push the hint past the list's
+            # right edge.
+            var painter = Painter(list_rect)
+            painter.fill(canvas, list_rect, String(" "), bg)
+            self._list.paint_empty_hint(
+                canvas, list_rect,
+                String("(no servers — press [+ Add])"),
+                Attr(BLUE, LIGHT_GRAY),
             )
             return
-        # Scroll bookkeeping mirroring Settings._paint_actions_list:
-        # snap-to-selection only on a selection change since the last
-        # paint, so the wheel can move the viewport without the next
-        # frame undoing it.
-        var visible = list_rect.height()
-        if self.selected >= 0 and self.selected != self._last_scroll_sel:
-            if self.selected < self._list_scroll:
-                self._list_scroll = self.selected
-            elif self.selected >= self._list_scroll + visible:
-                self._list_scroll = self.selected - visible + 1
-        self._last_scroll_sel = self.selected
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.candidates) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.candidates):
-                break
-            var attr = bg
-            if idx == self.selected:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas,
-                    Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
-            var line = self.candidates[idx]
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr,
-            )
+        self._list.paint(
+            canvas, list_rect, self.candidates,
+            self.focus == _FOCUS_LIST, bg,
+        )
 
     fn _layout_action_buttons(mut self, rect: Rect, y: Int):
         var x = rect.a.x + 2
@@ -459,13 +421,14 @@ struct LanguageEditor(Movable):
             return True
         if k == KEY_ENTER:
             return self._activate_focus()
-        if k == KEY_UP:
-            if self.focus == _FOCUS_LIST:
-                self._step_list(-1)
-                return True
-        if k == KEY_DOWN:
-            if self.focus == _FOCUS_LIST:
-                self._step_list(1)
+        if self.focus == _FOCUS_LIST:
+            var prev = self._list.selected
+            if self._list.handle_nav_key(event, len(self.candidates)):
+                if self._list.selected != prev and self._list.selected >= 0:
+                    self.argv_tf = TextField()
+                    self.argv_tf.set_text(
+                        self.candidates[self._list.selected]
+                    )
                 return True
         # Type-to-jump on the candidates list. Gated on focus so the
         # argv text field below it still consumes letters as text
@@ -478,9 +441,9 @@ struct LanguageEditor(Movable):
                 self._type_ahead, labels, chr(Int(k)),
             )
             if hit >= 0:
-                self.selected = hit
+                self._list.selected = hit
                 self.argv_tf = TextField()
-                self.argv_tf.set_text(self.candidates[self.selected])
+                self.argv_tf.set_text(self.candidates[self._list.selected])
             return True
         # Route to the focused field.
         if self.focus == _FOCUS_LANG and not self.is_existing:
@@ -496,9 +459,9 @@ struct LanguageEditor(Movable):
             if r.consumed:
                 # Mirror the strip text into the selected list row so
                 # the list updates live as the user types.
-                if self.selected >= 0 \
-                        and self.selected < len(self.candidates):
-                    self.candidates[self.selected] = self.argv_tf.text
+                if self._list.selected >= 0 \
+                        and self._list.selected < len(self.candidates):
+                    self.candidates[self._list.selected] = self.argv_tf.text
                 return True
         return True
 
@@ -510,7 +473,7 @@ struct LanguageEditor(Movable):
         ordered.append(_FOCUS_LIST)
         ordered.append(_FOCUS_ARGV)
         ordered.append(_FOCUS_ADD)
-        if self.selected >= 0:
+        if self._list.selected >= 0:
             ordered.append(_FOCUS_REMOVE)
             ordered.append(_FOCUS_UP)
             ordered.append(_FOCUS_DOWN)
@@ -527,19 +490,6 @@ struct LanguageEditor(Movable):
         if backward:
             return ordered[(pos - 1 + n) % n]
         return ordered[(pos + 1) % n]
-
-    fn _step_list(mut self, delta: Int):
-        if len(self.candidates) == 0:
-            return
-        var s = self.selected + delta
-        if s < 0:
-            s = 0
-        if s >= len(self.candidates):
-            s = len(self.candidates) - 1
-        if s != self.selected:
-            self.selected = s
-            self.argv_tf = TextField()
-            self.argv_tf.set_text(self.candidates[self.selected])
 
     fn _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
@@ -566,39 +516,39 @@ struct LanguageEditor(Movable):
 
     fn _add_candidate(mut self):
         self.candidates.append(String(""))
-        self.selected = len(self.candidates) - 1
+        self._list.selected = len(self.candidates) - 1
         self.argv_tf = TextField()
         self.focus = _FOCUS_ARGV
 
     fn _remove_candidate(mut self):
-        if self.selected < 0 or self.selected >= len(self.candidates):
+        if self._list.selected < 0 or self._list.selected >= len(self.candidates):
             return
         var rebuilt = List[String]()
         for i in range(len(self.candidates)):
-            if i == self.selected:
+            if i == self._list.selected:
                 continue
             rebuilt.append(self.candidates[i])
         self.candidates = rebuilt^
         if len(self.candidates) == 0:
-            self.selected = -1
+            self._list.selected = -1
             self.argv_tf = TextField()
             self.focus = _FOCUS_ADD
-        elif self.selected >= len(self.candidates):
-            self.selected = len(self.candidates) - 1
-        if self.selected >= 0:
+        elif self._list.selected >= len(self.candidates):
+            self._list.selected = len(self.candidates) - 1
+        if self._list.selected >= 0:
             self.argv_tf = TextField()
-            self.argv_tf.set_text(self.candidates[self.selected])
+            self.argv_tf.set_text(self.candidates[self._list.selected])
 
     fn _move_candidate(mut self, delta: Int):
-        if self.selected < 0:
+        if self._list.selected < 0:
             return
-        var target = self.selected + delta
+        var target = self._list.selected + delta
         if target < 0 or target >= len(self.candidates):
             return
-        var tmp = self.candidates[self.selected]
-        self.candidates[self.selected] = self.candidates[target]
+        var tmp = self.candidates[self._list.selected]
+        self.candidates[self._list.selected] = self.candidates[target]
         self.candidates[target] = tmp
-        self.selected = target
+        self._list.selected = target
 
     # --- mouse ------------------------------------------------------
 
@@ -637,15 +587,12 @@ struct LanguageEditor(Movable):
             ))
             return True
         # Wheel scrolls the candidate list when the cursor is over it.
-        if event.button == MOUSE_WHEEL_UP:
-            if layout.list_rect.contains(event.pos):
-                self._list_scroll -= 1
-                if self._list_scroll < 0:
-                    self._list_scroll = 0
-                return True
-        if event.button == MOUSE_WHEEL_DOWN:
-            if layout.list_rect.contains(event.pos):
-                self._list_scroll += 1
+        # ``handle_mouse_press`` clamps scroll to the item count so the
+        # viewport can't run past the end of the list.
+        if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
+            if self._list.handle_mouse_press(
+                event, layout.list_rect, len(self.candidates),
+            ):
                 return True
         # Every mouse event goes through every text field. Each
         # field consumes only when a press lands inside its strip or
@@ -665,21 +612,22 @@ struct LanguageEditor(Movable):
             return True
         if self.argv_tf.handle_mouse(event, layout.argv_rect):
             self.focus = _FOCUS_ARGV
-            if self.selected >= 0 \
-                    and self.selected < len(self.candidates):
-                self.candidates[self.selected] = self.argv_tf.text
+            if self._list.selected >= 0 \
+                    and self._list.selected < len(self.candidates):
+                self.candidates[self._list.selected] = self.argv_tf.text
             return True
         # Remaining widgets are press-only (the candidate list).
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion:
             return True
         if layout.list_rect.contains(event.pos):
-            var idx = self._list_scroll + (event.pos.y - layout.list_rect.a.y)
-            if 0 <= idx and idx < len(self.candidates):
-                if idx != self.selected:
-                    self.selected = idx
-                    self.argv_tf = TextField()
-                    self.argv_tf.set_text(self.candidates[self.selected])
+            var prev = self._list.selected
+            _ = self._list.handle_mouse_press(
+                event, layout.list_rect, len(self.candidates),
+            )
+            if self._list.selected != prev and self._list.selected >= 0:
+                self.argv_tf = TextField()
+                self.argv_tf.set_text(self.candidates[self._list.selected])
             self.focus = _FOCUS_LIST
             return True
         return True
