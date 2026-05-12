@@ -5439,6 +5439,193 @@ fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
     assert_true(wm.windows[0].rect == smaller)
 
 
+fn test_window_manager_fit_into_scales_side_by_side_on_grow() raises:
+    """Two windows tiled side by side covering the workspace must still
+    cover it after the terminal grows, with their shared edge staying
+    seamless and the width ratio between them preserved."""
+    var wm = WindowManager()
+    # Workspace is 100x24 (y in [1, 25)); two windows split it 40/60.
+    wm.add(Window(String("L"), Rect(0, 1, 40, 25), List[String]()))
+    wm.add(Window(String("R"), Rect(40, 1, 100, 25), List[String]()))
+    # First call baselines at the original workspace without scaling.
+    wm.fit_into(Rect(0, 1, 100, 25))
+    # Grow the terminal: width 100 → 200, height stays at 24.
+    wm.fit_into(Rect(0, 1, 200, 25))
+    # Left edge of L pinned to workspace left edge.
+    assert_equal(wm.windows[0].rect.a.x, 0)
+    # Right edge of R pinned to workspace right edge — full coverage.
+    assert_equal(wm.windows[1].rect.b.x, 200)
+    # The seam is seamless: L.b.x == R.a.x.
+    assert_equal(wm.windows[0].rect.b.x, wm.windows[1].rect.a.x)
+    # Width ratio preserved at 40:60 → 80:120 in a 200-wide workspace.
+    assert_equal(wm.windows[0].rect.width(), 80)
+    assert_equal(wm.windows[1].rect.width(), 120)
+    # y-axis untouched because workspace height didn't change.
+    assert_equal(wm.windows[0].rect.a.y, 1)
+    assert_equal(wm.windows[0].rect.b.y, 25)
+
+
+fn test_window_manager_fit_into_scales_side_by_side_on_shrink() raises:
+    """Same as the grow test, but the terminal shrinks. The shared seam
+    and the full-coverage invariant must still hold."""
+    var wm = WindowManager()
+    wm.add(Window(String("L"), Rect(0, 1, 40, 25), List[String]()))
+    wm.add(Window(String("R"), Rect(40, 1, 100, 25), List[String]()))
+    wm.fit_into(Rect(0, 1, 100, 25))
+    # Shrink: width 100 → 50.
+    wm.fit_into(Rect(0, 1, 50, 25))
+    assert_equal(wm.windows[0].rect.a.x, 0)
+    assert_equal(wm.windows[1].rect.b.x, 50)
+    assert_equal(wm.windows[0].rect.b.x, wm.windows[1].rect.a.x)
+    # 40:60 of 50 → 20:30.
+    assert_equal(wm.windows[0].rect.width(), 20)
+    assert_equal(wm.windows[1].rect.width(), 30)
+
+
+fn test_window_manager_fit_into_scales_stacked_on_resize() raises:
+    """Same proportional behavior on the y-axis: two windows stacked
+    vertically and covering the workspace stay covering it."""
+    var wm = WindowManager()
+    # Workspace 80x20 (y in [1, 21)); split top 8 rows, bottom 12 rows.
+    wm.add(Window(String("T"), Rect(0, 1, 80, 9), List[String]()))
+    wm.add(Window(String("B"), Rect(0, 9, 80, 21), List[String]()))
+    wm.fit_into(Rect(0, 1, 80, 21))
+    # Grow height: 20 → 40 rows (y in [1, 41)).
+    wm.fit_into(Rect(0, 1, 80, 41))
+    assert_equal(wm.windows[0].rect.a.y, 1)
+    assert_equal(wm.windows[1].rect.b.y, 41)
+    assert_equal(wm.windows[0].rect.b.y, wm.windows[1].rect.a.y)
+    # 8:12 of 40 → 16:24.
+    assert_equal(wm.windows[0].rect.height(), 16)
+    assert_equal(wm.windows[1].rect.height(), 24)
+
+
+fn test_window_manager_fit_into_proportional_2x2_grid() raises:
+    """A 2x2 tile fully covering the workspace stays fully covering it
+    after a resize; all four interior seams stay aligned."""
+    var wm = WindowManager()
+    # Workspace 100x20 (y in [1, 21)); split 50/50 horizontally and
+    # 8/12 vertically.
+    wm.add(Window(String("TL"), Rect(0, 1, 50, 9), List[String]()))
+    wm.add(Window(String("TR"), Rect(50, 1, 100, 9), List[String]()))
+    wm.add(Window(String("BL"), Rect(0, 9, 50, 21), List[String]()))
+    wm.add(Window(String("BR"), Rect(50, 9, 100, 21), List[String]()))
+    wm.fit_into(Rect(0, 1, 100, 21))
+    # Grow both axes: 100x20 → 200x40 (y in [1, 41)).
+    wm.fit_into(Rect(0, 1, 200, 41))
+    # Outer edges cover the new workspace exactly.
+    assert_equal(wm.windows[0].rect.a.x, 0)
+    assert_equal(wm.windows[0].rect.a.y, 1)
+    assert_equal(wm.windows[3].rect.b.x, 200)
+    assert_equal(wm.windows[3].rect.b.y, 41)
+    # Horizontal seam: TL.b.x == TR.a.x == BL.b.x == BR.a.x.
+    assert_equal(wm.windows[0].rect.b.x, wm.windows[1].rect.a.x)
+    assert_equal(wm.windows[2].rect.b.x, wm.windows[3].rect.a.x)
+    assert_equal(wm.windows[0].rect.b.x, wm.windows[2].rect.b.x)
+    # Vertical seam: TL.b.y == BL.a.y == TR.b.y == BR.a.y.
+    assert_equal(wm.windows[0].rect.b.y, wm.windows[2].rect.a.y)
+    assert_equal(wm.windows[1].rect.b.y, wm.windows[3].rect.a.y)
+    assert_equal(wm.windows[0].rect.b.y, wm.windows[1].rect.b.y)
+
+
+fn test_window_manager_fit_into_baseline_no_scale_on_first_call() raises:
+    """The first ``fit_into`` after construction has no baseline to scale
+    against, so it falls back to clip-and-move — preserves the move-only
+    behavior the existing test suite (and session restore startup) rely
+    on."""
+    var wm = WindowManager()
+    # Window past the new right edge — should slide left, not scale.
+    wm.add(Window(String("A"), Rect(70, 5, 90, 15), List[String]()))
+    wm.fit_into(Rect(0, 1, 80, 25))
+    assert_equal(wm.windows[0].rect.width(), 20)   # width preserved
+    assert_equal(wm.windows[0].rect.b.x, 80)       # slid against right edge
+
+
+fn test_window_manager_note_workspace_suppresses_next_scale() raises:
+    """``note_workspace`` rebases the snapshot without touching rects,
+    so a workspace change reported via ``note_workspace`` followed by a
+    matching ``fit_into`` doesn't trigger proportional scaling — this is
+    what session restore relies on after manually assigning rects."""
+    var wm = WindowManager()
+    wm.add(Window(String("A"), Rect(10, 5, 30, 15), List[String]()))
+    # First fit baselines at workspace 80x24.
+    wm.fit_into(Rect(0, 1, 80, 25))
+    var before = wm.windows[0].rect
+    # Restore handler "reapplied" rects to fit a larger workspace, then
+    # told the manager about the new workspace.
+    wm.note_workspace(Rect(0, 1, 160, 50))
+    # Next paint sees the same workspace as the baseline → no scaling.
+    wm.fit_into(Rect(0, 1, 160, 50))
+    assert_true(wm.windows[0].rect == before)
+
+
+fn test_window_manager_fit_into_round_trip_is_lossless() raises:
+    """Two windows split 50/50 covering the workspace must come back to
+    exactly 50/50 after a shrink-then-grow round trip. The naive
+    "scale the current rect every time" approach accumulates integer
+    rounding error and ends up with asymmetric widths; this test pins
+    the per-window-baseline path that avoids that drift."""
+    var wm = WindowManager()
+    # Workspace 101 wide so the half-point doesn't divide evenly —
+    # rounding-error accumulation is most visible at odd widths.
+    wm.add(Window(String("L"), Rect(0, 1, 50, 25), List[String]()))
+    wm.add(Window(String("R"), Rect(50, 1, 101, 25), List[String]()))
+    wm.fit_into(Rect(0, 1, 101, 25))
+    # Shrink to about half the width.
+    wm.fit_into(Rect(0, 1, 50, 25))
+    # Grow back to the original.
+    wm.fit_into(Rect(0, 1, 101, 25))
+    assert_equal(wm.windows[0].rect.a.x, 0)
+    assert_equal(wm.windows[0].rect.b.x, 50)
+    assert_equal(wm.windows[1].rect.a.x, 50)
+    assert_equal(wm.windows[1].rect.b.x, 101)
+
+
+fn test_window_manager_fit_into_user_drag_rebases_baseline() raises:
+    """A user edge-drag captured between paints must rebase the
+    baseline. Without that, resizing the terminal after the drag would
+    scale from the stale pre-drag baseline, undoing the drag."""
+    var wm = WindowManager()
+    wm.add(Window(String("L"), Rect(0, 1, 50, 25), List[String]()))
+    wm.add(Window(String("R"), Rect(50, 1, 100, 25), List[String]()))
+    wm.fit_into(Rect(0, 1, 100, 25))
+    # Simulate a user drag of L's right edge: rect mutates between
+    # paints with the workspace unchanged.
+    wm.windows[0].rect = Rect(0, 1, 60, 25)
+    # Next paint with the same workspace — manager observes the user
+    # change and rebases the baseline.
+    wm.fit_into(Rect(0, 1, 100, 25))
+    # Now resize the terminal: scaling must come from the rebased
+    # baseline (60 wide of 100) not from the original (50 wide of 100).
+    wm.fit_into(Rect(0, 1, 200, 25))
+    # 60 of 100 → 120 of 200 for the left edge of R / right edge of L.
+    assert_equal(wm.windows[0].rect.b.x, 120)
+
+
+fn test_window_manager_fit_into_scales_restore_rect_for_maximized() raises:
+    """A maximized window's ``_restore_rect`` is scaled along with the
+    workspace so un-maximizing after a terminal resize lands at the
+    proportionally-correct place rather than reverting to the
+    pre-resize coordinates."""
+    var wm = WindowManager()
+    var w = Window(String("M"), Rect(0, 1, 100, 25), List[String]())
+    w._restore_rect = Rect(10, 5, 50, 15)
+    w.is_maximized = True
+    wm.add(w^)
+    wm.fit_into(Rect(0, 1, 100, 25))
+    # Double both axes: width 100→200, height 24→48.
+    wm.fit_into(Rect(0, 1, 200, 49))
+    # Rect pinned to the new workspace.
+    assert_true(wm.windows[0].rect == Rect(0, 1, 200, 49))
+    # _restore_rect scaled proportionally: x doubled, y doubled (from
+    # the y origin at 1): a.y = 1 + (5-1)*48/24 = 1 + 8 = 9; b.y = 1 +
+    # (15-1)*48/24 = 1 + 28 = 29.
+    assert_equal(wm.windows[0]._restore_rect.a.x, 20)
+    assert_equal(wm.windows[0]._restore_rect.b.x, 100)
+    assert_equal(wm.windows[0]._restore_rect.a.y, 9)
+    assert_equal(wm.windows[0]._restore_rect.b.y, 29)
+
+
 fn test_window_manager_title_hover_arms_for_editor_with_path() raises:
     """Bare hover over the title bar of a file-backed editor window
     arms the title-tooltip tracker; hovering elsewhere clears it. A
@@ -12636,6 +12823,15 @@ fn main() raises:
     test_desktop_workspace_shrinks_with_file_tree()
     test_window_manager_fit_into_moves_then_resizes()
     test_window_manager_fit_into_keeps_maximized_pinned()
+    test_window_manager_fit_into_scales_side_by_side_on_grow()
+    test_window_manager_fit_into_scales_side_by_side_on_shrink()
+    test_window_manager_fit_into_scales_stacked_on_resize()
+    test_window_manager_fit_into_proportional_2x2_grid()
+    test_window_manager_fit_into_baseline_no_scale_on_first_call()
+    test_window_manager_note_workspace_suppresses_next_scale()
+    test_window_manager_fit_into_round_trip_is_lossless()
+    test_window_manager_fit_into_user_drag_rebases_baseline()
+    test_window_manager_fit_into_scales_restore_rect_for_maximized()
     test_write_file_round_trip()
     test_editor_save_clears_dirty()
     test_editor_save_as_adopts_path()

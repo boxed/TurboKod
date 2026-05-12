@@ -33,6 +33,53 @@ comptime MIN_WIN_W: Int = 12
 comptime MIN_WIN_H: Int = 4
 
 
+fn _scale_coord(c: Int, old_origin: Int, old_size: Int, new_origin: Int, new_size: Int) -> Int:
+    """Map ``c`` from ``[old_origin, old_origin + old_size]`` to
+    ``[new_origin, new_origin + new_size]`` with round-half-up. Two
+    inputs at the same value map to the same output, which is what
+    keeps adjacent-window seams seamless after a workspace rescale."""
+    var offset = c - old_origin
+    var scaled: Int
+    if offset >= 0:
+        scaled = (offset * new_size + old_size // 2) // old_size
+    else:
+        # Negative offsets (windows positioned outside the old workspace)
+        # are vanishingly rare but possible during edge transitions —
+        # mirror the round-half-up rule symmetrically around zero so the
+        # mapping stays monotonic.
+        scaled = -((-offset * new_size + old_size // 2) // old_size)
+    return new_origin + scaled
+
+
+fn _scale_rect(r: Rect, old_ws: Rect, new_ws: Rect) -> Rect:
+    """Apply ``_scale_coord`` to all four edges of ``r``, then clamp
+    inside ``new_ws`` and guarantee at least one cell along each axis
+    so the result is always a non-empty rect."""
+    var old_w = old_ws.width()
+    var old_h = old_ws.height()
+    var new_w = new_ws.width()
+    var new_h = new_ws.height()
+    var ax = _scale_coord(r.a.x, old_ws.a.x, old_w, new_ws.a.x, new_w)
+    var bx = _scale_coord(r.b.x, old_ws.a.x, old_w, new_ws.a.x, new_w)
+    var ay = _scale_coord(r.a.y, old_ws.a.y, old_h, new_ws.a.y, new_h)
+    var by = _scale_coord(r.b.y, old_ws.a.y, old_h, new_ws.a.y, new_h)
+    if ax < new_ws.a.x: ax = new_ws.a.x
+    if ay < new_ws.a.y: ay = new_ws.a.y
+    if bx > new_ws.b.x: bx = new_ws.b.x
+    if by > new_ws.b.y: by = new_ws.b.y
+    if bx <= ax: bx = ax + 1
+    if by <= ay: by = ay + 1
+    if bx > new_ws.b.x:
+        bx = new_ws.b.x
+        if ax >= bx: ax = bx - 1
+        if ax < new_ws.a.x: ax = new_ws.a.x
+    if by > new_ws.b.y:
+        by = new_ws.b.y
+        if ay >= by: ay = by - 1
+        if ay < new_ws.a.y: ay = new_ws.a.y
+    return Rect(ax, ay, bx, by)
+
+
 fn paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
     """Draw the ``[■]`` close-button decoration at a frame's top-LEFT
     corner. ``top_left`` is the frame's top-left cell — the bracket
@@ -644,6 +691,22 @@ struct Window(ImplicitlyCopyable, Movable):
     var is_editor: Bool
     var is_maximized: Bool
     var _restore_rect: Rect
+    # Proportional-resize baselines. ``_baseline_rect`` is the rect we
+    # want to preserve as the workspace changes, expressed in
+    # ``_baseline_ws``; on each terminal resize we scale from this pair
+    # (not from the current rect) so a shrink-then-grow round trip
+    # lands back exactly where we started instead of accumulating
+    # rounding error. ``_has_baseline`` is false until ``WindowManager``
+    # observes the workspace for the first time and seeds the baseline
+    # — newly-constructed windows don't know what workspace they were
+    # created in. ``_last_observed_rect`` is the rect at the end of the
+    # previous ``fit_into`` pass; if it differs at the start of the
+    # next pass (and the workspace hasn't changed), a user action has
+    # mutated the rect and the baseline gets rebased.
+    var _baseline_rect: Rect
+    var _baseline_ws: Rect
+    var _has_baseline: Bool
+    var _last_observed_rect: Rect
 
     fn __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
@@ -653,6 +716,10 @@ struct Window(ImplicitlyCopyable, Movable):
         self.is_editor = False
         self.is_maximized = False
         self._restore_rect = rect
+        self._baseline_rect = rect
+        self._baseline_ws = Rect.empty()
+        self._has_baseline = False
+        self._last_observed_rect = rect
 
     @staticmethod
     fn editor_window(var title: String, rect: Rect, var text: String) -> Self:
@@ -678,6 +745,10 @@ struct Window(ImplicitlyCopyable, Movable):
         self.is_editor = copy.is_editor
         self.is_maximized = copy.is_maximized
         self._restore_rect = copy._restore_rect
+        self._baseline_rect = copy._baseline_rect
+        self._baseline_ws = copy._baseline_ws
+        self._has_baseline = copy._has_baseline
+        self._last_observed_rect = copy._last_observed_rect
 
     fn interior(self) -> Rect:
         """Region inside the border where content / editor paints. Public
@@ -1034,6 +1105,14 @@ struct WindowManager(Movable):
     var _title_hover_idx: Int
     var _title_hover_x: Int
     var _title_hover_y: Int
+    # The workspace last seen by ``fit_into`` — used to scale every
+    # window's rect proportionally when the workspace changes (terminal
+    # resize, side-panel toggle, …). Unset on a freshly-constructed
+    # manager so the first ``fit_into`` falls back to the move-and-clip
+    # path; ``note_workspace`` resets the baseline after a manual rect
+    # assignment (session restore) so the next scale doesn't act on it.
+    var _last_workspace: Rect
+    var _has_last_workspace: Bool
 
     fn __init__(out self):
         self.windows = List[Window]()
@@ -1054,6 +1133,8 @@ struct WindowManager(Movable):
         self._title_hover_idx = -1
         self._title_hover_x = 0
         self._title_hover_y = 0
+        self._last_workspace = Rect.empty()
+        self._has_last_workspace = False
 
     fn add(mut self, var window: Window):
         self.windows.append(window^)
@@ -1062,18 +1143,91 @@ struct WindowManager(Movable):
         self.focused = idx
 
     fn fit_into(mut self, workspace: Rect):
-        """Move (and resize when necessary) every window to fit ``workspace``.
+        """Reflow every window into ``workspace`` after it changes.
 
-        Used when the workspace shrinks — file tree shown, terminal resized,
-        any other change that narrows the floating-window area. Movement is
-        preferred; a window is only resized when it's larger than the
-        workspace along that axis. Maximized windows are pinned to the new
-        workspace so they keep covering it.
+        The workspace changes for three reasons: terminal resize, a side
+        panel (file tree / debug pane) toggling, or a session restore
+        rewriting rects from saved positions. The first two should
+        preserve the user's layout — two windows tiled side by side
+        covering the screen must still cover it after the terminal grows
+        — so each non-maximized window's rect is scaled proportionally
+        when the workspace differs from the last one seen.
+
+        Crucially, the scale is computed from a **baseline** per window
+        (``_baseline_rect`` in ``_baseline_ws``) rather than from the
+        window's current rect. This makes shrink-then-grow round trips
+        lossless: scaling from the original baseline straight to the
+        new workspace dodges the rounding error that would accumulate
+        across two integer rescales. The baseline is rebased only when
+        a user action (drag, edge resize, maximize toggle, …) changes
+        the rect between paints; we detect that by comparing the
+        current rect against ``_last_observed_rect`` (the rect at the
+        end of the previous pass), and only inside the
+        workspace-unchanged branch — a rect that changed because of a
+        workspace transition must not pollute the baseline.
+
+        Maximized windows pin to the new workspace; their
+        ``_restore_rect`` is scaled along with the workspace so
+        un-maximizing after a resize lands proportionally.
+
+        The very first call has no baseline yet (a freshly-constructed
+        manager whose windows were created in some unknown workspace),
+        so it falls back to a clip-and-move pass that only resizes when
+        a window is larger than the workspace along an axis. After that
+        pass the baseline is seeded from the resulting rects.
 
         After fitting, every editor window's scroll offsets get clamped
         against its (possibly resized) interior — a window that was
         scrolled right while narrow must not leave leading text wedged
         off-screen once it's wide enough that the scrollbar disappears.
+        """
+        if not self._has_last_workspace:
+            self._clip_into(workspace)
+            for i in range(len(self.windows)):
+                self.windows[i]._baseline_rect = self.windows[i].rect
+                self.windows[i]._baseline_ws = workspace
+                self.windows[i]._has_baseline = True
+                self.windows[i]._last_observed_rect = self.windows[i].rect
+        elif self._last_workspace != workspace:
+            var prev_ws = self._last_workspace
+            self._scale_from_baselines(prev_ws, workspace)
+        else:
+            self._rebase_user_changes(workspace)
+        # Always clamp scrolls: layout might be unchanged but a buffer
+        # could have shrunk underneath us between paints.
+        for i in range(len(self.windows)):
+            if self.windows[i].is_editor:
+                self.windows[i].editor.clamp_scroll(self.windows[i].interior())
+        self._last_workspace = workspace
+        self._has_last_workspace = True
+
+    fn note_workspace(mut self, workspace: Rect):
+        """Reset the workspace + every window's baseline without touching
+        any rect.
+
+        Called by the desktop after it has manually assigned rects to
+        windows (e.g. session restore) so that the next ``fit_into``
+        doesn't see the workspace as "changed since last time" and
+        scale the just-restored positions away. Re-seeding the per-
+        window baselines here means subsequent terminal resizes scale
+        from the restored layout instead of from whatever baseline was
+        cached pre-restore.
+        """
+        self._last_workspace = workspace
+        self._has_last_workspace = True
+        for i in range(len(self.windows)):
+            self.windows[i]._baseline_rect = self.windows[i].rect
+            self.windows[i]._baseline_ws = workspace
+            self.windows[i]._has_baseline = True
+            self.windows[i]._last_observed_rect = self.windows[i].rect
+
+    fn _clip_into(mut self, workspace: Rect):
+        """Move-and-clip fallback used on the first ``fit_into`` call,
+        before there's a baseline workspace to scale relative to.
+
+        Movement is preferred over resizing: a window only shrinks when
+        it's larger than the workspace along an axis. Maximized windows
+        pin to the workspace.
         """
         for i in range(len(self.windows)):
             if self.windows[i].is_maximized:
@@ -1092,8 +1246,57 @@ struct WindowManager(Movable):
                 if ax + w > workspace.b.x: ax = workspace.b.x - w
                 if ay + h > workspace.b.y: ay = workspace.b.y - h
                 self.windows[i].rect = Rect(ax, ay, ax + w, ay + h)
-            if self.windows[i].is_editor:
-                self.windows[i].editor.clamp_scroll(self.windows[i].interior())
+
+    fn _scale_from_baselines(mut self, prev_ws: Rect, new_ws: Rect):
+        """Workspace just changed. Scale every non-maximized window's
+        rect from its own baseline pair to ``new_ws``; pin maximized
+        windows to ``new_ws`` and proportionally scale their
+        ``_restore_rect``. Baselines are not touched here — they are
+        the source of truth for the *next* resize.
+
+        Windows whose baseline workspace is empty (created between the
+        manager's first ``fit_into`` and now) inherit the previous
+        workspace as a fallback baseline so they still scale sensibly
+        on this transition.
+        """
+        for i in range(len(self.windows)):
+            if not self.windows[i]._has_baseline:
+                self.windows[i]._baseline_rect = self.windows[i].rect
+                self.windows[i]._baseline_ws = prev_ws
+                self.windows[i]._has_baseline = True
+            var base_ws = self.windows[i]._baseline_ws
+            if base_ws.width() <= 0 or base_ws.height() <= 0:
+                base_ws = prev_ws
+            if self.windows[i].is_maximized:
+                self.windows[i].rect = new_ws
+                self.windows[i]._restore_rect = _scale_rect(
+                    self.windows[i]._restore_rect, base_ws, new_ws,
+                )
+            else:
+                self.windows[i].rect = _scale_rect(
+                    self.windows[i]._baseline_rect, base_ws, new_ws,
+                )
+            self.windows[i]._last_observed_rect = self.windows[i].rect
+
+    fn _rebase_user_changes(mut self, workspace: Rect):
+        """Workspace unchanged since last pass. Any window whose rect
+        differs from ``_last_observed_rect`` was mutated by user action
+        (drag, edge resize, maximize toggle, new-window insertion) —
+        capture its new rect as the baseline for the next workspace
+        change. Untouched windows have their baseline left alone so
+        round-trip resizes can still scale from their original
+        precision-preserving anchor.
+        """
+        for i in range(len(self.windows)):
+            if self.windows[i].rect != self.windows[i]._last_observed_rect:
+                self.windows[i]._baseline_rect = self.windows[i].rect
+                self.windows[i]._baseline_ws = workspace
+                self.windows[i]._has_baseline = True
+            elif not self.windows[i]._has_baseline:
+                self.windows[i]._baseline_rect = self.windows[i].rect
+                self.windows[i]._baseline_ws = workspace
+                self.windows[i]._has_baseline = True
+            self.windows[i]._last_observed_rect = self.windows[i].rect
 
     fn focus_by_title(mut self, title: String):
         for i in range(len(self.windows)):

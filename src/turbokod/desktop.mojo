@@ -2867,6 +2867,12 @@ struct Desktop(Movable):
                 self.windows.windows[existing].rect = rect
             self.windows.windows[existing].is_maximized = sw.is_maximized
             self.windows.windows[existing]._restore_rect = restore
+        # Re-baseline the window manager's workspace snapshot to the
+        # workspace we just restored against — otherwise the next paint
+        # would see "workspace changed since last fit" (the startup
+        # paint baselined the 80x24 default) and proportionally rescale
+        # the just-restored rects, defeating the restore.
+        self.windows.note_workspace(workspace)
         # Re-seed the change-detection cache so the post-refit paint
         # doesn't re-write the file with the now-correctly-fit bytes.
         self._last_session_json = encode_session(self._snapshot_session())
