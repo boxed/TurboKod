@@ -88,6 +88,39 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
+fn _completion_kind_name(kind: Int) -> String:
+    """Map an LSP ``CompletionItemKind`` integer to its human-readable
+    name. Unknown kinds get an empty string so the column stays blank
+    rather than rendering noise.
+    """
+    if kind == 1:   return String("text")
+    if kind == 2:   return String("method")
+    if kind == 3:   return String("function")
+    if kind == 4:   return String("constructor")
+    if kind == 5:   return String("field")
+    if kind == 6:   return String("variable")
+    if kind == 7:   return String("class")
+    if kind == 8:   return String("interface")
+    if kind == 9:   return String("module")
+    if kind == 10:  return String("property")
+    if kind == 11:  return String("unit")
+    if kind == 12:  return String("value")
+    if kind == 13:  return String("enum")
+    if kind == 14:  return String("keyword")
+    if kind == 15:  return String("snippet")
+    if kind == 16:  return String("color")
+    if kind == 17:  return String("file")
+    if kind == 18:  return String("reference")
+    if kind == 19:  return String("folder")
+    if kind == 20:  return String("enum member")
+    if kind == 21:  return String("constant")
+    if kind == 22:  return String("struct")
+    if kind == 23:  return String("event")
+    if kind == 24:  return String("operator")
+    if kind == 25:  return String("type parameter")
+    return String("")
+
+
 fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     """True iff typing the ASCII byte ``k`` should kick off an
     as-you-type completion request.
@@ -110,52 +143,6 @@ fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     if k == UInt32(0x2E):  # .
         return True
     return False
-
-
-fn _completion_kind_icon(kind: Int) -> String:
-    """Map an LSP ``CompletionItemKind`` integer to a one-character icon.
-
-    The icons are letters rather than unicode glyphs so the column
-    aligns cleanly in any monospace font and doesn't require glyph
-    fallback. Unknown kinds get ``?`` so the column is never blank.
-    """
-    if kind == 2 or kind == 3:  # Method / Function
-        return String("ƒ")
-    if kind == 4:  # Constructor
-        return String("c")
-    if kind == 5:  # Field
-        return String("·")
-    if kind == 6:  # Variable
-        return String("v")
-    if kind == 7:  # Class
-        return String("C")
-    if kind == 8:  # Interface
-        return String("I")
-    if kind == 9:  # Module
-        return String("m")
-    if kind == 10:  # Property
-        return String("p")
-    if kind == 12:  # Value
-        return String("=")
-    if kind == 13:  # Enum
-        return String("E")
-    if kind == 14:  # Keyword
-        return String("k")
-    if kind == 15:  # Snippet
-        return String("s")
-    if kind == 17:  # File
-        return String("F")
-    if kind == 18:  # Reference
-        return String("&")
-    if kind == 21:  # Constant
-        return String("K")
-    if kind == 22:  # Struct
-        return String("S")
-    if kind == 25:  # TypeParameter
-        return String("T")
-    if kind == 1:   # Text
-        return String("t")
-    return String("?")
 
 
 fn _rtrim(s: String) -> String:
@@ -3013,8 +3000,9 @@ struct Editor(ImplicitlyCopyable, Movable):
         """Render the completion popup anchored at the start of the
         identifier being completed (``anchor_x`` / ``anchor_y`` are
         screen cells). Floats one row below the anchor when there's
-        room, flips above when not. Width = longest visible label + 4
-        (1 left pad + label + 1 right pad + 2 borders), clamped to
+        room, flips above when not. The width fits the longest visible
+        label plus a right-aligned kind column that's sized for the
+        longest visible kind name, clamped to
         ``[_COMPLETION_POPUP_WIDTH_MIN, _COMPLETION_POPUP_WIDTH_MAX]``.
         """
         var n_items = len(self.completion_items)
@@ -3024,19 +3012,30 @@ struct Editor(ImplicitlyCopyable, Movable):
         if visible_rows > _COMPLETION_POPUP_ROWS:
             visible_rows = _COMPLETION_POPUP_ROWS
         var height = visible_rows + 2
-        # Width grows to the longest *visible* label (windowed by
-        # scroll), so a 100-item list with one huge entry doesn't
-        # force a giant popup the user can't easily scan.
-        var longest = _COMPLETION_POPUP_WIDTH_MIN - 4
+        # Scan visible items to size both columns. Label column grows
+        # to the longest *visible* label so a single huge entry far
+        # offscreen doesn't bloat the popup; the kind column grows to
+        # the longest visible kind name and stays empty (width 0) if
+        # nothing has a known kind.
+        var longest_label = 0
+        var longest_kind = 0
         var first = self.completion_scroll
         var last = first + visible_rows
         if last > n_items:
             last = n_items
         for i in range(first, last):
             var lw = len(self.completion_items[i].label.as_bytes())
-            if lw > longest:
-                longest = lw
-        var width = longest + 4
+            if lw > longest_label:
+                longest_label = lw
+            var kw = len(_completion_kind_name(
+                self.completion_items[i].kind
+            ).as_bytes())
+            if kw > longest_kind:
+                longest_kind = kw
+        # Kind column layout: [1 left pad][name][1 right pad].
+        var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
+        # Width = 2 borders + label + kind column.
+        var width = longest_label + kind_col_w + 2
         if width < _COMPLETION_POPUP_WIDTH_MIN:
             width = _COMPLETION_POPUP_WIDTH_MIN
         if width > _COMPLETION_POPUP_WIDTH_MAX:
@@ -3070,13 +3069,23 @@ struct Editor(ImplicitlyCopyable, Movable):
         var rect = Rect(x, y, x + width, y + height)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, LIGHT_GREEN)
+        # The right-edge kind column gets its own background so the
+        # kind name doesn't visually merge with the label text. It
+        # stays the same colour across all rows (including the
+        # selected one), forming a continuous stripe down the popup.
+        var kind_attr = Attr(WHITE, DARK_GRAY)
         paint_drop_shadow(canvas, rect)
         var pop_painter = Painter(rect)
         pop_painter.fill(canvas, rect, String(" "), attr)
         pop_painter.draw_box(canvas, rect, attr, False)
         var inner_left = rect.a.x + 1
         var inner_right = rect.b.x - 1
-        var inner_w = inner_right - inner_left
+        var kind_col_left = inner_right - kind_col_w
+        if kind_col_left < inner_left:
+            kind_col_left = inner_left
+        var label_left = inner_left
+        var label_right = kind_col_left
+        var label_w = label_right - label_left
         for r in range(visible_rows):
             var idx = self.completion_scroll + r
             if idx >= n_items:
@@ -3087,17 +3096,16 @@ struct Editor(ImplicitlyCopyable, Movable):
             var row_attr = sel_attr if is_hl else attr
             if is_hl:
                 pop_painter.fill(
-                    canvas, Rect(inner_left, ty, inner_right, ty + 1),
+                    canvas, Rect(label_left, ty, label_right, ty + 1),
                     String(" "), row_attr,
                 )
-            # ``<icon> <label>`` — single-character kind hint, then a
-            # space, then the label truncated to fit. The icon column
-            # gives the user a fast type-vs-keyword-vs-function read
-            # without having to parse text.
-            var icon = _completion_kind_icon(item.kind)
+            if kind_col_w > 0:
+                pop_painter.fill(
+                    canvas, Rect(kind_col_left, ty, inner_right, ty + 1),
+                    String(" "), kind_attr,
+                )
             var label = item.label
-            # Truncate label to inner width minus the leading "I ".
-            var max_label = inner_w - 2
+            var max_label = label_w
             if max_label < 1:
                 max_label = 1
             var lb = label.as_bytes()
@@ -3109,9 +3117,14 @@ struct Editor(ImplicitlyCopyable, Movable):
                 else:
                     label = String("…")
             _ = pop_painter.put_text(
-                canvas, Point(inner_left, ty),
-                icon + String(" ") + label, row_attr,
+                canvas, Point(label_left, ty),
+                label, row_attr,
             )
+            if kind_col_w > 0:
+                _ = pop_painter.put_text(
+                    canvas, Point(kind_col_left + 1, ty),
+                    _completion_kind_name(item.kind), kind_attr,
+                )
 
     fn paint_minimap_tooltip(
         self, mut canvas: Canvas, view: Rect,
