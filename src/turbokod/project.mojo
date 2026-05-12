@@ -2,8 +2,9 @@
 
 Operates on the directory returned by ``find_git_project``; consumers don't
 need to know whether it's a Git checkout or just a parent of ``.git``. We
-skip dotfile entries (``.git``, ``.pixi``, etc.) and any file whose first 4 KB
-contains a NUL byte (treated as binary).
+always skip the ``.git`` directory and any file whose first 4 KB contains a
+NUL byte (treated as binary). Everything else — including dotfiles like
+``.gitignore`` — is included unless ``.gitignore`` excludes it.
 """
 
 from std.collections.list import List
@@ -209,7 +210,7 @@ fn _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
     return False
 
 
-fn _maybe_load_gitignore(root: String) -> GitignoreMatcher:
+fn load_project_gitignore(root: String) -> GitignoreMatcher:
     var path = join_path(root, String(".gitignore"))
     var info = stat_file(path)
     if not info.ok:
@@ -227,12 +228,14 @@ fn walk_project_files(
 ) -> List[String]:
     """Iterative DFS — absolute paths of every regular file under ``root``.
 
-    Always skips dotfile entries (so ``.git``, ``.pixi``, ``.gitignore``
-    itself, etc. never enter the result). With ``respect_gitignore=True``
-    (the default) the project's ``.gitignore`` is parsed and any path that
-    matches is excluded; an ignored *directory* skips its entire subtree.
+    The ``.git`` directory is always skipped (git never tracks its own
+    metadata, and walking it would balloon the result by orders of
+    magnitude). Other dotfiles — ``.gitignore``, ``.editorconfig``, etc. —
+    are included. With ``respect_gitignore=True`` (the default) the
+    project's ``.gitignore`` is parsed and any path that matches is
+    excluded; an ignored *directory* skips its entire subtree.
     """
-    var matcher = _maybe_load_gitignore(root) if respect_gitignore \
+    var matcher = load_project_gitignore(root) if respect_gitignore \
         else GitignoreMatcher()
     var out = List[String]()
     var rel_dirs = List[String]()
@@ -244,10 +247,8 @@ fn walk_project_files(
         var raw = list_directory(dir)
         for i in range(len(raw)):
             var name = raw[i]
-            if name == String(".") or name == String(".."):
-                continue
-            var nbytes = name.as_bytes()
-            if len(nbytes) > 0 and nbytes[0] == 0x2E:
+            if name == String(".") or name == String("..") \
+                    or name == String(".git"):
                 continue
             var rel = name if len(rel_dir.as_bytes()) == 0 \
                 else join_path(rel_dir, name)

@@ -1485,11 +1485,27 @@ fn test_file_tree_expand_collapse() raises:
 fn test_file_tree_filters_dotfiles() raises:
     var t = FileTree()
     t.open(String("."))
-    # Repo root contains a .git directory; it must not appear in entries.
+    # ``.git`` must always be hidden, and ``.gitignore``'d entries
+    # (``.pixi``, ``.build``) shouldn't leak through. ``.gitignore``
+    # itself *should* be visible.
+    var saw_git = False
+    var saw_pixi = False
+    var saw_build = False
+    var saw_gitignore = False
     for i in range(len(t.entries)):
-        var nbytes = t.entries[i].name.as_bytes()
-        if len(nbytes) > 0:
-            assert_true(Int(nbytes[0]) != 0x2E)
+        var n = t.entries[i].name
+        if n == String(".git"):
+            saw_git = True
+        if n == String(".pixi"):
+            saw_pixi = True
+        if n == String(".build"):
+            saw_build = True
+        if n == String(".gitignore"):
+            saw_gitignore = True
+    assert_false(saw_git)
+    assert_false(saw_pixi)
+    assert_false(saw_build)
+    assert_true(saw_gitignore)
 
 
 fn test_desktop_workspace_shrinks_with_file_tree() raises:
@@ -2041,7 +2057,10 @@ fn test_editor_save_uses_editorconfig_line_endings() raises:
 
 
 fn test_walk_project_files_finds_known_files() raises:
-    """The repo root has examples/, src/, tests/ — all should be reachable."""
+    """The repo root has examples/, src/, tests/ — all should be reachable.
+
+    ``.gitignore`` itself must be reachable (quick open lists it), but
+    nothing under ``.git`` or gitignored trees like ``.pixi`` may leak."""
     var root = find_git_project(String("examples/hello.mojo"))
     assert_true(root)
     var paths = walk_project_files(root.value())
@@ -2049,17 +2068,20 @@ fn test_walk_project_files_finds_known_files() raises:
     var saw_hello = False
     var saw_test = False
     var saw_dotfile = False
+    var saw_gitignore = False
     for i in range(len(paths)):
         if _ends_with(paths[i], String("examples/hello.mojo")):
             saw_hello = True
         if _ends_with(paths[i], String("tests/test_basic.mojo")):
             saw_test = True
-        # Anything under ``.git`` or ``.pixi`` would be a leak.
+        if _ends_with(paths[i], String("/.gitignore")):
+            saw_gitignore = True
         if _contains(paths[i], String("/.git/")) \
                 or _contains(paths[i], String("/.pixi/")):
             saw_dotfile = True
     assert_true(saw_hello)
     assert_true(saw_test)
+    assert_true(saw_gitignore)
     assert_false(saw_dotfile)
 
 

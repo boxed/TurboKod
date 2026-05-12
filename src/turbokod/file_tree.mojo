@@ -27,6 +27,7 @@ from .file_io import (
     basename, join_path, list_directory, sort_directory_listing, stat_file,
 )
 from .geometry import Point, Rect
+from .project import GitignoreMatcher, load_project_gitignore
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
@@ -47,6 +48,24 @@ struct FileTreeEntry(ImplicitlyCopyable, Movable):
     var depth: Int
     var is_dir: Bool
     var is_expanded: Bool
+
+
+fn _strip_root_prefix(root: String, full: String) -> String:
+    """Return ``full`` minus the ``root + "/"`` prefix, or ``""`` when they
+    coincide. Falls back to ``full`` if the prefix doesn't match, so the
+    caller still gets a usable path."""
+    var rb = root.as_bytes()
+    var fb = full.as_bytes()
+    if len(fb) == len(rb):
+        return String("")
+    if len(fb) < len(rb) + 1:
+        return full
+    for k in range(len(rb)):
+        if fb[k] != rb[k]:
+            return full
+    if fb[len(rb)] != 0x2F:
+        return full
+    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
 struct FileTree(Movable):
@@ -71,6 +90,11 @@ struct FileTree(Movable):
     """Type-to-jump prefix buffer. Auto-resets after the
     ``_SEARCH_RESET_MS`` pause; explicit reset on ``open`` /
     ``close`` so a fresh tree starts with a clean slate."""
+    var _gitignore: GitignoreMatcher
+    """Loaded once from the project root's ``.gitignore`` on ``open``
+    so listings hide ``.pixi``/``.build``/etc. without re-parsing per
+    directory. ``.git`` is always hidden — it's not in ``.gitignore``
+    but git itself treats it as implicitly ignored."""
 
     fn __init__(out self):
         self.visible = False
@@ -84,9 +108,11 @@ struct FileTree(Movable):
         self.focused = False
         self._resizing = False
         self._type_ahead = TypeAhead()
+        self._gitignore = GitignoreMatcher()
 
     fn open(mut self, var root: String):
         self.root = root^
+        self._gitignore = load_project_gitignore(self.root)
         self.entries = List[FileTreeEntry]()
         var children = self._list_dir(self.root, 0)
         for i in range(len(children)):
@@ -109,6 +135,7 @@ struct FileTree(Movable):
         self.submitted = False
         self.focused = False
         self._resizing = False
+        self._gitignore = GitignoreMatcher()
 
     fn consume_open(mut self) -> Optional[String]:
         """If a file was just opened, return its path and clear the flag."""
@@ -123,8 +150,9 @@ struct FileTree(Movable):
 
     fn _list_dir(self, path: String, depth: Int) -> List[FileTreeEntry]:
         """Return the immediate children of ``path``, dirs first then files,
-        each group sorted case-insensitively by name. Hidden entries
-        (dotfiles) are filtered out.
+        each group sorted case-insensitively by name. ``.git`` is hidden
+        and ``.gitignore``-matched entries are dropped; other dotfiles
+        (``.gitignore`` itself, ``.editorconfig``, …) are shown.
 
         ``readdir`` order is filesystem-defined (often inode order on
         ext4, alphabetical on APFS) — ``sort_directory_listing`` is the
@@ -134,16 +162,19 @@ struct FileTree(Movable):
         var raw = list_directory(path)
         var names = List[String]()
         var is_dirs = List[Bool]()
+        var rel_prefix = _strip_root_prefix(self.root, path)
         for i in range(len(raw)):
             var name = raw[i]
-            if name == String(".") or name == String(".."):
-                continue
-            var nbytes = name.as_bytes()
-            if len(nbytes) > 0 and nbytes[0] == 0x2E:
+            if name == String(".") or name == String("..") \
+                    or name == String(".git"):
                 continue
             var full = join_path(path, name)
             var info = stat_file(full)
             var is_dir = info.is_dir() if info.ok else False
+            var rel = name if len(rel_prefix.as_bytes()) == 0 \
+                else join_path(rel_prefix, name)
+            if self._gitignore.ignored(rel, is_dir):
+                continue
             names.append(name)
             is_dirs.append(is_dir)
         sort_directory_listing(names, is_dirs)
