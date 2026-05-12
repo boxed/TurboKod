@@ -12,7 +12,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "amber",
@@ -26,7 +27,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "astro",
@@ -41,7 +43,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g @astrojs/language-server"
+    "install_hint": "npm install -g @astrojs/language-server",
+    "comment_token": ""
   },
   {
     "language_id": "awk",
@@ -58,7 +61,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "bash",
@@ -93,7 +97,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g bash-language-server"
+    "install_hint": "npm install -g bash-language-server",
+    "comment_token": "#"
   },
   {
     "language_id": "bass",
@@ -108,7 +113,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "beancount",
@@ -123,7 +129,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "bibtex",
@@ -137,7 +144,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "%"
   },
   {
     "language_id": "bicep",
@@ -152,7 +160,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "bitbake",
@@ -168,7 +177,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "blueprint",
@@ -183,7 +193,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "c",
@@ -197,7 +208,8 @@
         ]
       }
     ],
-    "install_hint": "brew install llvm  # or apt install clangd"
+    "install_hint": "brew install llvm  # or apt install clangd",
+    "comment_token": "//"
   },
   {
     "language_id": "c-sharp",
@@ -226,7 +238,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "c3",
@@ -242,7 +255,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "cabal",
@@ -257,7 +271,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "cairo",
@@ -271,7 +286,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "circom",
@@ -285,7 +301,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "clarity",
@@ -300,7 +317,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "clojure",
@@ -321,7 +339,8 @@
         ]
       }
     ],
-    "install_hint": "brew install clojure-lsp/brew/clojure-lsp-native"
+    "install_hint": "brew install clojure-lsp/brew/clojure-lsp-native",
+    "comment_token": ";"
   },
   {
     "language_id": "cmake",
@@ -341,7 +360,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "codeql",
@@ -359,7 +379,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "common-lisp",
@@ -381,7 +402,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "cpp",
@@ -415,7 +437,8 @@
         ]
       }
     ],
-    "install_hint": "brew install llvm  # or apt install clangd"
+    "install_hint": "brew install llvm  # or apt install clangd",
+    "comment_token": "//"
   },
   {
     "language_id": "crystal",
@@ -435,7 +458,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "css",
@@ -450,7 +474,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g vscode-langservers-extracted"
+    "install_hint": "npm install -g vscode-langservers-extracted",
+    "comment_token": ""
   },
   {
     "language_id": "cue",
@@ -466,7 +491,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "d",
@@ -481,7 +507,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "dart",
@@ -497,7 +524,8 @@
         ]
       }
     ],
-    "install_hint": "ships with the Dart SDK"
+    "install_hint": "ships with the Dart SDK",
+    "comment_token": "//"
   },
   {
     "language_id": "devicetree",
@@ -512,7 +540,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "dhall",
@@ -526,7 +555,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "dockerfile",
@@ -551,7 +581,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g dockerfile-language-server-nodejs"
+    "install_hint": "npm install -g dockerfile-language-server-nodejs",
+    "comment_token": "#"
   },
   {
     "language_id": "dot",
@@ -566,7 +597,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "drools",
@@ -580,7 +612,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "ebnf",
@@ -594,7 +627,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "eiffel",
@@ -608,7 +642,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "elixir",
@@ -629,7 +664,8 @@
         ]
       }
     ],
-    "install_hint": "mix escript.install hex elixir_ls  # or see github.com/elixir-lsp/elixir-ls"
+    "install_hint": "mix escript.install hex elixir_ls  # or see github.com/elixir-lsp/elixir-ls",
+    "comment_token": "#"
   },
   {
     "language_id": "elm",
@@ -643,7 +679,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g @elm-tooling/elm-language-server"
+    "install_hint": "npm install -g @elm-tooling/elm-language-server",
+    "comment_token": "--"
   },
   {
     "language_id": "elvish",
@@ -658,7 +695,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "erlang",
@@ -680,7 +718,8 @@
         ]
       }
     ],
-    "install_hint": "see https://github.com/erlang-ls/erlang_ls"
+    "install_hint": "see https://github.com/erlang-ls/erlang_ls",
+    "comment_token": "%%"
   },
   {
     "language_id": "fennel",
@@ -695,7 +734,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "fish",
@@ -710,7 +750,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "forth",
@@ -727,7 +768,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "\\"
   },
   {
     "language_id": "fortran",
@@ -750,7 +792,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "!"
   },
   {
     "language_id": "fsharp",
@@ -767,7 +810,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "gas",
@@ -781,7 +825,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "gjs",
@@ -808,7 +853,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "gleam",
@@ -823,7 +869,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "glsl",
@@ -849,7 +896,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "go",
@@ -868,7 +916,8 @@
         ]
       }
     ],
-    "install_hint": "go install golang.org/x/tools/gopls@latest"
+    "install_hint": "go install golang.org/x/tools/gopls@latest",
+    "comment_token": "//"
   },
   {
     "language_id": "gotmpl",
@@ -882,7 +931,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "gpr",
@@ -897,7 +947,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "graphql",
@@ -916,7 +967,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g graphql-language-service-cli"
+    "install_hint": "npm install -g graphql-language-service-cli",
+    "comment_token": "#"
   },
   {
     "language_id": "gts",
@@ -943,7 +995,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "hare",
@@ -958,7 +1011,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "haskell",
@@ -975,7 +1029,8 @@
         ]
       }
     ],
-    "install_hint": "ghcup install hls"
+    "install_hint": "ghcup install hls",
+    "comment_token": "--"
   },
   {
     "language_id": "haskell-literate",
@@ -990,7 +1045,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "hcl",
@@ -1007,7 +1063,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "hdl",
@@ -1021,7 +1078,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "heex",
@@ -1041,7 +1099,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "html",
@@ -1073,7 +1132,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g vscode-langservers-extracted"
+    "install_hint": "npm install -g vscode-langservers-extracted",
+    "comment_token": ""
   },
   {
     "language_id": "hy",
@@ -1087,7 +1147,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "idris",
@@ -1101,7 +1162,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "java",
@@ -1117,7 +1179,8 @@
         ]
       }
     ],
-    "install_hint": "see https://github.com/eclipse-jdtls/eclipse.jdt.ls"
+    "install_hint": "see https://github.com/eclipse-jdtls/eclipse.jdt.ls",
+    "comment_token": "//"
   },
   {
     "language_id": "javascript",
@@ -1138,7 +1201,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g typescript-language-server typescript"
+    "install_hint": "npm install -g typescript-language-server typescript",
+    "comment_token": "//"
   },
   {
     "language_id": "jq",
@@ -1152,7 +1216,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "json",
@@ -1192,7 +1257,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g vscode-langservers-extracted"
+    "install_hint": "npm install -g vscode-langservers-extracted",
+    "comment_token": ""
   },
   {
     "language_id": "json-ld",
@@ -1207,7 +1273,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "jsonc",
@@ -1222,7 +1289,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "jsonnet",
@@ -1239,7 +1307,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "jsx",
@@ -1254,7 +1323,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g typescript-language-server typescript"
+    "install_hint": "npm install -g typescript-language-server typescript",
+    "comment_token": "//"
   },
   {
     "language_id": "julia",
@@ -1273,7 +1343,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "just",
@@ -1287,7 +1358,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "kcl",
@@ -1303,7 +1375,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "koka",
@@ -1319,7 +1392,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "kotlin",
@@ -1334,7 +1408,8 @@
         ]
       }
     ],
-    "install_hint": "brew install kotlin-language-server"
+    "install_hint": "brew install kotlin-language-server",
+    "comment_token": "//"
   },
   {
     "language_id": "koto",
@@ -1348,7 +1423,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "latex",
@@ -1369,7 +1445,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "%"
   },
   {
     "language_id": "lean",
@@ -1384,7 +1461,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "less",
@@ -1399,7 +1477,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "lua",
@@ -1414,7 +1493,8 @@
         ]
       }
     ],
-    "install_hint": "brew install lua-language-server"
+    "install_hint": "brew install lua-language-server",
+    "comment_token": "--"
   },
   {
     "language_id": "luau",
@@ -1429,7 +1509,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "markdoc",
@@ -1444,7 +1525,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "markdown",
@@ -1481,7 +1563,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g marksman  # or see github.com/artempyanykh/marksman"
+    "install_hint": "npm install -g marksman  # or see github.com/artempyanykh/marksman",
+    "comment_token": ""
   },
   {
     "language_id": "mint",
@@ -1497,7 +1580,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "mojo",
@@ -1514,7 +1598,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "nasm",
@@ -1530,7 +1615,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "nickel",
@@ -1544,7 +1630,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "nim",
@@ -1560,7 +1647,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "nix",
@@ -1579,7 +1667,8 @@
         ]
       }
     ],
-    "install_hint": "nix-env -iA nixpkgs.nil  # or nixd"
+    "install_hint": "nix-env -iA nixpkgs.nil  # or nixd",
+    "comment_token": "#"
   },
   {
     "language_id": "nu",
@@ -1601,7 +1690,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "ocaml",
@@ -1615,7 +1705,8 @@
         ]
       }
     ],
-    "install_hint": "opam install ocaml-lsp-server"
+    "install_hint": "opam install ocaml-lsp-server",
+    "comment_token": ""
   },
   {
     "language_id": "ocaml-interface",
@@ -1629,7 +1720,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "(**)"
   },
   {
     "language_id": "odin",
@@ -1643,7 +1735,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "opencl",
@@ -1657,7 +1750,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "openscad",
@@ -1672,7 +1766,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "pascal",
@@ -1690,7 +1785,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "perl",
@@ -1716,7 +1812,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "pest",
@@ -1730,7 +1827,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "php",
@@ -1750,7 +1848,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g intelephense"
+    "install_hint": "npm install -g intelephense",
+    "comment_token": "//"
   },
   {
     "language_id": "pkl",
@@ -1765,7 +1864,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "ponylang",
@@ -1780,7 +1880,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "prisma",
@@ -1795,7 +1896,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "prolog",
@@ -1818,7 +1920,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "%"
   },
   {
     "language_id": "protobuf",
@@ -1847,7 +1950,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "purescript",
@@ -1862,7 +1966,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "python",
@@ -1886,14 +1991,8 @@
       },
       {
         "argv": [
-          "pyright-langserver",
-          "--stdio"
-        ]
-      },
-      {
-        "argv": [
-          "basedpyright-langserver",
-          "--stdio"
+          "ruff",
+          "server"
         ]
       },
       {
@@ -1907,7 +2006,8 @@
         ]
       }
     ],
-    "install_hint": "pip install ty"
+    "install_hint": "pip install ty",
+    "comment_token": "#"
   },
   {
     "language_id": "qml",
@@ -1921,7 +2021,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "quint",
@@ -1936,7 +2037,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "r",
@@ -1954,7 +2056,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "racket",
@@ -1974,7 +2077,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";"
   },
   {
     "language_id": "rego",
@@ -1988,7 +2092,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "rescript",
@@ -2003,7 +2108,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "ripple",
@@ -2018,7 +2124,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "rmarkdown",
@@ -2036,7 +2143,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "robot",
@@ -2058,7 +2166,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "ron",
@@ -2072,7 +2181,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "ruby",
@@ -2102,7 +2212,8 @@
         ]
       }
     ],
-    "install_hint": "gem install solargraph"
+    "install_hint": "gem install solargraph",
+    "comment_token": "#"
   },
   {
     "language_id": "rust",
@@ -2116,7 +2227,8 @@
         ]
       }
     ],
-    "install_hint": "rustup component add rust-analyzer"
+    "install_hint": "rustup component add rust-analyzer",
+    "comment_token": "//"
   },
   {
     "language_id": "scala",
@@ -2132,7 +2244,8 @@
         ]
       }
     ],
-    "install_hint": "coursier install metals"
+    "install_hint": "coursier install metals",
+    "comment_token": "//"
   },
   {
     "language_id": "scss",
@@ -2147,7 +2260,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "slang",
@@ -2161,7 +2275,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "slint",
@@ -2175,7 +2290,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "smali",
@@ -2189,7 +2305,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "smithy",
@@ -2208,7 +2325,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "snakemake",
@@ -2222,7 +2340,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "solidity",
@@ -2237,7 +2356,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "sourcepawn",
@@ -2252,7 +2372,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "spade",
@@ -2266,7 +2387,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "starlark",
@@ -2282,7 +2404,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "styx",
@@ -2297,7 +2420,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "svelte",
@@ -2312,7 +2436,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g svelte-language-server"
+    "install_hint": "npm install -g svelte-language-server",
+    "comment_token": "//"
   },
   {
     "language_id": "sway",
@@ -2327,7 +2452,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "swift",
@@ -2342,7 +2468,8 @@
         ]
       }
     ],
-    "install_hint": "ships with the Swift toolchain (sourcekit-lsp)"
+    "install_hint": "ships with the Swift toolchain (sourcekit-lsp)",
+    "comment_token": "//"
   },
   {
     "language_id": "systemd",
@@ -2373,7 +2500,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "systemverilog",
@@ -2393,7 +2521,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "teal",
@@ -2407,7 +2536,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "templ",
@@ -2422,7 +2552,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "tfvars",
@@ -2437,7 +2568,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "tilt",
@@ -2453,7 +2585,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "#"
   },
   {
     "language_id": "toml",
@@ -2475,7 +2608,8 @@
         ]
       }
     ],
-    "install_hint": "cargo install taplo-cli --features lsp"
+    "install_hint": "cargo install taplo-cli --features lsp",
+    "comment_token": "#"
   },
   {
     "language_id": "tsx",
@@ -2490,7 +2624,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g typescript-language-server typescript"
+    "install_hint": "npm install -g typescript-language-server typescript",
+    "comment_token": "//"
   },
   {
     "language_id": "typescript",
@@ -2507,7 +2642,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g typescript-language-server typescript"
+    "install_hint": "npm install -g typescript-language-server typescript",
+    "comment_token": "//"
   },
   {
     "language_id": "typespec",
@@ -2522,7 +2658,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "typst",
@@ -2537,7 +2674,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "v",
@@ -2553,7 +2691,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "vala",
@@ -2568,7 +2707,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "verilog",
@@ -2583,7 +2723,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "vhdl",
@@ -2598,7 +2739,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "--"
   },
   {
     "language_id": "vue",
@@ -2613,7 +2755,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g @vue/language-server"
+    "install_hint": "npm install -g @vue/language-server",
+    "comment_token": ""
   },
   {
     "language_id": "wat",
@@ -2627,7 +2770,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ";;"
   },
   {
     "language_id": "wgsl",
@@ -2641,7 +2785,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": "//"
   },
   {
     "language_id": "wikitext",
@@ -2658,7 +2803,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "yaml",
@@ -2682,7 +2828,8 @@
         ]
       }
     ],
-    "install_hint": "npm install -g yaml-language-server"
+    "install_hint": "npm install -g yaml-language-server",
+    "comment_token": "#"
   },
   {
     "language_id": "yara",
@@ -2698,7 +2845,8 @@
         ]
       }
     ],
-    "install_hint": ""
+    "install_hint": "",
+    "comment_token": ""
   },
   {
     "language_id": "zig",
@@ -2713,6 +2861,7 @@
         ]
       }
     ],
-    "install_hint": "brew install zls  # or see https://github.com/zigtools/zls"
+    "install_hint": "brew install zls  # or see https://github.com/zigtools/zls",
+    "comment_token": "//"
   }
 ]

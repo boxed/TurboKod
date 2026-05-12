@@ -46,7 +46,7 @@ from .highlight import (
     CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
     HighlightCache, extension_of, highlight_comment_attr,
     highlight_for_extension, highlight_incremental, highlight_string_attr,
-    word_at,
+    line_comment_for_extension, word_at,
 )
 from .lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
@@ -3011,7 +3011,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         var visible_rows = n_items
         if visible_rows > _COMPLETION_POPUP_ROWS:
             visible_rows = _COMPLETION_POPUP_ROWS
-        var height = visible_rows + 2
+        var height = visible_rows
         # Scan visible items to size both columns. Label column grows
         # to the longest *visible* label so a single huge entry far
         # offscreen doesn't bloat the popup; the kind column grows to
@@ -3034,7 +3034,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 longest_kind = kw
         # Kind column layout: [1 left pad][name][1 right pad].
         var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
-        # Width = 2 borders + label + kind column.
+        # Width = 1 left pad + label + kind column + 1 right pad.
         var width = longest_label + kind_col_w + 2
         if width < _COMPLETION_POPUP_WIDTH_MIN:
             width = _COMPLETION_POPUP_WIDTH_MIN
@@ -3074,10 +3074,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         # stays the same colour across all rows (including the
         # selected one), forming a continuous stripe down the popup.
         var kind_attr = Attr(WHITE, DARK_GRAY)
-        paint_drop_shadow(canvas, rect)
         var pop_painter = Painter(rect)
         pop_painter.fill(canvas, rect, String(" "), attr)
-        pop_painter.draw_box(canvas, rect, attr, False)
         var inner_left = rect.a.x + 1
         var inner_right = rect.b.x - 1
         var kind_col_left = inner_right - kind_col_w
@@ -3090,7 +3088,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             var idx = self.completion_scroll + r
             if idx >= n_items:
                 break
-            var ty = rect.a.y + 1 + r
+            var ty = rect.a.y + r
             var item = self.completion_items[idx]
             var is_hl = (idx == self.completion_highlight)
             var row_attr = sel_attr if is_hl else attr
@@ -5073,12 +5071,24 @@ struct Editor(ImplicitlyCopyable, Movable):
                 r -= 1
         return False
 
-    fn toggle_comment(mut self, prefix: String = String("// ")):
+    fn toggle_comment(mut self, prefix: String = String("")):
         """Toggle a line-comment prefix on every line touched by the selection
         (or the current line if no selection). No-op when the editor is
-        read-only."""
+        read-only.
+
+        When ``prefix`` is empty (the default), the prefix is derived from
+        the buffer's file extension via ``line_comment_for_extension`` —
+        ``# `` for Python/Mojo/YAML/shell, ``-- `` for SQL/Lua, etc. Falls
+        back to ``// `` for unknown / file-less buffers."""
         if self.read_only:
             return
+        var effective_prefix = prefix
+        if len(effective_prefix.as_bytes()) == 0:
+            effective_prefix = line_comment_for_extension(
+                extension_of(self.file_path)
+            )
+            if len(effective_prefix.as_bytes()) == 0:
+                effective_prefix = String("// ")
         self._push_undo()
         var sel = self.selection()
         var sr = sel[0]
@@ -5086,7 +5096,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         if not self.has_selection():
             sr = self.cursor_row
             er = self.cursor_row
-        var pn = len(prefix.as_bytes())
+        var pn = len(effective_prefix.as_bytes())
         # If every line begins with the prefix, strip; else add.
         var all_commented = True
         for r in range(sr, er + 1):
@@ -5095,7 +5105,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             if len(lb) < pn:
                 all_commented = False
                 break
-            var pb = prefix.as_bytes()
+            var pb = effective_prefix.as_bytes()
             for k in range(pn):
                 if lb[k] != pb[k]:
                     all_commented = False
@@ -5107,7 +5117,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             if all_commented:
                 self.buffer.lines[r] = _slice(line, pn, len(line.as_bytes()))
             else:
-                self.buffer.lines[r] = prefix + line
+                self.buffer.lines[r] = effective_prefix + line
         self.dirty = True
         # Toggle-comment touches rows ``sr..er``; mark dirty from
         # the lowest one. The early-exit logic in

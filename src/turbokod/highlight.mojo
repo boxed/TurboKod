@@ -518,6 +518,61 @@ fn extension_of(path: String) -> String:
     return lower
 
 
+fn line_comment_for_extension(ext: String) -> String:
+    """Return the line-comment prefix (with trailing space) for ``ext``,
+    or empty when the language has no single-line comment syntax.
+
+    Covers the languages our highlighter knows about plus the common
+    config-file extensions. Empty result is a signal — callers fall
+    back to a sensible default rather than producing invalid syntax.
+    """
+    # `//` family — C, C++, Rust, Go, JS/TS, Zig, JVM family, Swift, etc.
+    if ext == String("rs") or ext == String("c") or ext == String("h") \
+            or ext == String("cc") or ext == String("cpp") \
+            or ext == String("cxx") or ext == String("hpp") \
+            or ext == String("hh") or ext == String("hxx") \
+            or ext == String("go") or ext == String("ts") \
+            or ext == String("tsx") or ext == String("js") \
+            or ext == String("jsx") or ext == String("mjs") \
+            or ext == String("cjs") or ext == String("zig") \
+            or ext == String("java") or ext == String("kt") \
+            or ext == String("kts") or ext == String("scala") \
+            or ext == String("swift") or ext == String("dart") \
+            or ext == String("cs") or ext == String("m") \
+            or ext == String("mm") or ext == String("php") \
+            or ext == String("jsonc") or ext == String("groovy"):
+        return String("// ")
+    # `#` family — Python, Mojo, shells, Ruby, Perl, R, YAML, TOML, configs.
+    if ext == String("py") or ext == String("mojo") \
+            or ext == String("sh") or ext == String("bash") \
+            or ext == String("zsh") or ext == String("fish") \
+            or ext == String("rb") or ext == String("pl") \
+            or ext == String("pm") or ext == String("r") \
+            or ext == String("yaml") or ext == String("yml") \
+            or ext == String("toml") or ext == String("conf") \
+            or ext == String("ini") or ext == String("cfg") \
+            or ext == String("dockerfile") or ext == String("mk") \
+            or ext == String("makefile") or ext == String("gitignore") \
+            or ext == String("ps1"):
+        return String("# ")
+    # `--` family — SQL, Lua, Haskell, Elm, Ada.
+    if ext == String("sql") or ext == String("lua") \
+            or ext == String("hs") or ext == String("elm") \
+            or ext == String("ada"):
+        return String("-- ")
+    # `;` family — Lisp dialects, Scheme, assembly.
+    if ext == String("clj") or ext == String("cljs") \
+            or ext == String("edn") or ext == String("lisp") \
+            or ext == String("scm") or ext == String("rkt") \
+            or ext == String("asm") or ext == String("s"):
+        return String("; ")
+    # `%` — TeX/LaTeX, Erlang, Prolog.
+    if ext == String("tex") or ext == String("latex") \
+            or ext == String("erl") or ext == String("prolog"):
+        return String("% ")
+    return String("")
+
+
 fn word_at(line: String, col: Int) -> String:
     """Return the identifier surrounding ``col`` (start ≤ col ≤ end), or
     empty string when ``col`` isn't on an identifier codepoint. Walks

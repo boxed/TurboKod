@@ -55,28 +55,35 @@ struct LanguageSpec(ImplicitlyCopyable, Movable):
     command we suggest to the user when none of the candidates are on
     ``$PATH`` — empty string means "no canonical install command, don't
     bother prompting" (e.g. ``mojo-lsp-server`` ships with the toolchain).
+    ``comment_token`` is the line-comment marker (sans trailing space)
+    sourced from Helix's ``comment-token`` / ``comment-tokens`` fields;
+    empty when the language has no line-comment form (HTML, XML).
     """
     var language_id: String
     var file_types: List[String]
     var candidates: List[ServerCandidate]
     var install_hint: String
+    var comment_token: String
 
     fn __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var candidates: List[ServerCandidate],
         var install_hint: String = String(""),
+        var comment_token: String = String(""),
     ):
         self.language_id = language_id^
         self.file_types = file_types^
         self.candidates = candidates^
         self.install_hint = install_hint^
+        self.comment_token = comment_token^
 
     fn __copyinit__(out self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.candidates = copy.candidates.copy()
         self.install_hint = copy.install_hint
+        self.comment_token = copy.comment_token
 
 
 fn _candidate_from_json(v: JsonValue) -> ServerCandidate:
@@ -106,9 +113,10 @@ fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
             candidates.append(_candidate_from_json(arr.array_at(i)))
 
     var install_hint = json_get_string(v, String("install_hint"))
+    var comment_token = json_get_string(v, String("comment_token"))
 
     return Optional[LanguageSpec](LanguageSpec(
-        language_id^, file_types^, candidates^, install_hint^,
+        language_id^, file_types^, candidates^, install_hint^, comment_token^,
     ))
 
 

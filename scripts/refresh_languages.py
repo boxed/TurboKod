@@ -152,6 +152,17 @@ def build_specs(toml_text: bytes) -> list[dict]:
         if not candidates:
             continue  # no servers — nothing for our LSP layer to spawn
 
+        # ``comment-token`` is a single-string field; ``comment-tokens``
+        # is a list (some languages have multiple acceptable markers).
+        # We take the first as the canonical line-comment prefix.
+        comment_token = lang.get("comment-token")
+        if not isinstance(comment_token, str):
+            tokens = lang.get("comment-tokens")
+            if isinstance(tokens, list) and tokens and isinstance(tokens[0], str):
+                comment_token = tokens[0]
+            else:
+                comment_token = ""
+
         preferred = PREFERRED_FIRST.get(lang_id)
         if preferred:
             promoted = [c for c in candidates if c["argv"] and c["argv"][0] in preferred]
@@ -163,6 +174,7 @@ def build_specs(toml_text: bytes) -> list[dict]:
             "file_types": file_types,
             "candidates": candidates,
             "install_hint": INSTALL_HINTS.get(lang_id, ""),
+            "comment_token": comment_token,
         })
 
     out.sort(key=lambda s: s["language_id"])

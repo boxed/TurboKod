@@ -1098,6 +1098,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             KEY_LEFT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
         ))
+        # Cmd+/ — toggle line comments on the current line or every line
+        # touched by the selection. Prefix is derived from the file
+        # extension (``# `` for Python, ``// `` for Rust, …) so the same
+        # binding works across languages.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("/")), MOD_META, EDITOR_TOGGLE_COMMENT,
+        ))
         # Cmd+[ / Cmd+] — back / forward through the navigation history.
         self._hotkeys.append(Hotkey(
             UInt32(ord("[")), MOD_META, EDITOR_NAV_BACK,
@@ -3439,7 +3446,18 @@ struct Desktop(Movable):
         if action == EDITOR_TOGGLE_COMMENT:
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
-                self.windows.windows[self.windows.focused].editor.toggle_comment()
+                ref ed = self.windows.windows[self.windows.focused].editor
+                # Prefer the catalog-derived comment marker (sourced from
+                # Helix's languages.toml — there is no LSP method for
+                # comment syntax) over the editor's hard-coded fallback.
+                var ext = extension_of(ed.file_path)
+                var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+                var prefix = String("")
+                if spec_idx >= 0:
+                    var tok = self.lsp_specs[spec_idx].comment_token
+                    if len(tok.as_bytes()) > 0:
+                        prefix = tok + String(" ")
+                ed.toggle_comment(prefix)
             return Optional[String]()
         if action == EDITOR_TOGGLE_CASE:
             if self.windows.focused >= 0 \

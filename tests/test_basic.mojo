@@ -1214,6 +1214,36 @@ fn test_editor_toggle_comment_selection() raises:
     assert_equal(ed.buffer.line(2), String("c"))
 
 
+fn test_editor_toggle_comment_language_aware() raises:
+    # Python: `# ` prefix derived from .py extension.
+    var py = Editor(String("hello"))
+    py.file_path = String("foo.py")
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("# hello"))
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("hello"))
+
+    # SQL: `-- ` prefix.
+    var sql = Editor(String("select 1"))
+    sql.file_path = String("query.sql")
+    sql.toggle_comment()
+    assert_equal(sql.buffer.line(0), String("-- select 1"))
+    sql.toggle_comment()
+    assert_equal(sql.buffer.line(0), String("select 1"))
+
+    # Rust: `// ` prefix — confirms the C-family path.
+    var rs = Editor(String("let x = 1;"))
+    rs.file_path = String("lib.rs")
+    rs.toggle_comment()
+    assert_equal(rs.buffer.line(0), String("// let x = 1;"))
+
+    # Unknown extension falls back to `// `.
+    var unknown = Editor(String("data"))
+    unknown.file_path = String("file.xyz")
+    unknown.toggle_comment()
+    assert_equal(unknown.buffer.line(0), String("// data"))
+
+
 fn test_editor_toggle_case() raises:
     var ed = Editor(String("Hello World"))
     ed.move_to(0, 0, False)
@@ -3524,6 +3554,24 @@ fn test_settings_save_behavior_no_change_no_dirty() raises:
     s._sync_dropdown_commit(prev_idx)
     assert_false(s.auto_save)
     assert_false(s.dirty)
+
+
+fn test_language_catalog_carries_comment_tokens() raises:
+    """Helix's ``languages.toml`` defines ``comment-token`` per language;
+    the refresh script lifts it into ``languages.json`` and the loader
+    populates ``LanguageSpec.comment_token``. This is what drives the
+    Cmd+/ binding so the right marker is used per file type."""
+    var specs = built_in_servers()
+    var py_idx = find_language_by_id(specs, String("python"))
+    if py_idx < 0:
+        return  # bundled JSON missing — covered by its own test
+    assert_equal(specs[py_idx].comment_token, String("#"))
+    var rs_idx = find_language_by_id(specs, String("rust"))
+    if rs_idx >= 0:
+        assert_equal(specs[rs_idx].comment_token, String("//"))
+    var sql_idx = find_language_by_id(specs, String("sql"))
+    if sql_idx >= 0:
+        assert_equal(specs[sql_idx].comment_token, String("--"))
 
 
 fn test_apply_language_overrides_replaces_candidates() raises:
@@ -12805,6 +12853,7 @@ fn main() raises:
     test_find_in_project_options_smoke()
     test_editor_toggle_comment_single_line()
     test_editor_toggle_comment_selection()
+    test_editor_toggle_comment_language_aware()
     test_editor_toggle_case()
     test_editor_dirty_flag()
     test_file_io_read_and_stat()
@@ -12871,6 +12920,7 @@ fn main() raises:
     test_settings_open_seeds_save_behavior_dropdown()
     test_settings_save_behavior_commit_marks_dirty()
     test_settings_save_behavior_no_change_no_dirty()
+    test_language_catalog_carries_comment_tokens()
     test_apply_language_overrides_replaces_candidates()
     test_apply_language_overrides_adds_new_language()
     test_settings_languages_section_seeded()
