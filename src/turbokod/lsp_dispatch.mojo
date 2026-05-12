@@ -109,12 +109,16 @@ struct CompletionItem(ImplicitlyCopyable, Movable):
     3=Function, 5=Field, 6=Variable, 7=Class, 14=Keyword, 21=Constant,
     22=Struct, 25=TypeParameter, …); consumers map it to a short icon.
     ``detail`` is the server-supplied type / signature hint shown on
-    the highlighted row when the popup is wide enough.
+    the highlighted row when the popup is wide enough. ``sort_text``
+    is the LSP ``sortText`` field used to order items in the popup —
+    when the server omits it we copy the label so sortText-bearing
+    entries can still sort cleanly against label-only ones.
     """
     var label: String
     var insert_text: String
     var kind: Int
     var detail: String
+    var sort_text: String
 
 
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
@@ -1181,6 +1185,11 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     body with ``${1:arg}`` markers would look like garbage when
     inserted verbatim. ``label`` falls back as the inserted text in
     that case (already what the user sees in the popup).
+
+    Items are reordered by ``sortText`` (falling back to ``label`` when
+    the server omits it, per LSP spec) so the popup respects the
+    server's preferred order rather than the wire order. Stable insertion
+    sort — ties keep the server's original relative order.
     """
     var out = List[CompletionItem]()
     var arr: JsonValue
@@ -1227,7 +1236,21 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
                     var nt_opt = te_opt.value().object_get(String("newText"))
                     if nt_opt and nt_opt.value().is_string():
                         insert_text = nt_opt.value().as_str()
-        out.append(CompletionItem(label, insert_text, kind, detail))
+        var sort_text = label
+        var sort_opt = entry.object_get(String("sortText"))
+        if sort_opt and sort_opt.value().is_string():
+            sort_text = sort_opt.value().as_str()
+        out.append(CompletionItem(label, insert_text, kind, detail, sort_text))
+    # Stable insertion sort by sort_text — typical completion lists are
+    # under ~200 items so quadratic worst-case is fine here.
+    var m = len(out)
+    for i in range(1, m):
+        var j = i
+        while j > 0 and out[j].sort_text < out[j - 1].sort_text:
+            var tmp = out[j]
+            out[j] = out[j - 1]
+            out[j - 1] = tmp
+            j -= 1
     return out^
 
 

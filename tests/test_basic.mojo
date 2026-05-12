@@ -6504,7 +6504,9 @@ fn test_lsp_parse_completion_result_array_shape() raises:
     """A bare ``CompletionItem[]`` array (one of the two shapes the
     LSP spec allows) parses to one item per entry. Each item carries
     its label, kind, and detail; ``insert_text`` defaults to the
-    label when no explicit ``insertText`` / ``textEdit`` is given."""
+    label when no explicit ``insertText`` / ``textEdit`` is given.
+    With no ``sortText`` on either entry the items sort by label,
+    so ``bar`` lands first even though it was second on the wire."""
     var v = parse_json(String(
         "["
         + "{\"label\":\"foo\",\"kind\":3,\"detail\":\"() -> int\"},"
@@ -6513,13 +6515,13 @@ fn test_lsp_parse_completion_result_array_shape() raises:
     ))
     var items = _parse_completion_result(v)
     assert_equal(len(items), 2)
-    assert_equal(items[0].label, String("foo"))
-    assert_equal(items[0].insert_text, String("foo"))
-    assert_equal(items[0].kind, 3)
-    assert_equal(items[0].detail, String("() -> int"))
-    assert_equal(items[1].label, String("bar"))
-    assert_equal(items[1].insert_text, String("bar_"))
-    assert_equal(items[1].kind, 6)
+    assert_equal(items[0].label, String("bar"))
+    assert_equal(items[0].insert_text, String("bar_"))
+    assert_equal(items[0].kind, 6)
+    assert_equal(items[1].label, String("foo"))
+    assert_equal(items[1].insert_text, String("foo"))
+    assert_equal(items[1].kind, 3)
+    assert_equal(items[1].detail, String("() -> int"))
 
 
 fn test_lsp_parse_completion_result_list_shape() raises:
@@ -6533,6 +6535,30 @@ fn test_lsp_parse_completion_result_list_shape() raises:
     var items = _parse_completion_result(v)
     assert_equal(len(items), 1)
     assert_equal(items[0].label, String("x"))
+
+
+fn test_lsp_parse_completion_result_honors_sort_text() raises:
+    """``sortText`` overrides the wire order in the parsed list. The
+    server here flags ``zzz`` as the preferred match by giving it a
+    leading ``0`` while ``aaa`` gets ``2`` — sorting puts ``zzz`` first
+    even though it would otherwise sort last. An entry with no
+    ``sortText`` falls back to its label, so ``mmm`` lands last in the
+    natural lexicographic slot (``m`` > digits in ASCII)."""
+    var v = parse_json(String(
+        "["
+        + "{\"label\":\"aaa\",\"sortText\":\"2-aaa\"},"
+        + "{\"label\":\"mmm\"},"
+        + "{\"label\":\"zzz\",\"sortText\":\"0-zzz\"}"
+        + "]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 3)
+    assert_equal(items[0].label, String("zzz"))
+    assert_equal(items[0].sort_text, String("0-zzz"))
+    assert_equal(items[1].label, String("aaa"))
+    assert_equal(items[1].sort_text, String("2-aaa"))
+    assert_equal(items[2].label, String("mmm"))
+    assert_equal(items[2].sort_text, String("mmm"))
 
 
 fn test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
@@ -6569,9 +6595,11 @@ fn test_editor_set_completions_opens_popup() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foo_bar"), String("foo_bar"), 6, String(""),
+        String("foo_bar"),
     ))
     items.append(CompletionItem(
         String("foo_baz"), String("foo_baz"), 6, String(""),
+        String("foo_baz"),
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -6622,6 +6650,7 @@ fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foobar"), String("foobar"), 6, String(""),
+        String("foobar"),
     ))
     ed.set_completions(items^, 0, 0)
     # Left arrow from col 3 → col 2 keeps cursor inside "foo".
@@ -6640,6 +6669,7 @@ fn test_editor_typing_non_word_char_closes_visible_popup() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foo"), String("foo"), 6, String(""),
+        String("foo"),
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -6657,6 +6687,7 @@ fn test_editor_accept_completion_replaces_prefix() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("abcdef"), String("abcdef"), 6, String(""),
+        String("abcdef"),
     ))
     ed.set_completions(items^, 0, 6)
     var ok = ed.accept_completion()
@@ -12829,6 +12860,7 @@ fn main() raises:
     test_lsp_parse_diagnostics_skips_malformed_entries()
     test_lsp_parse_completion_result_array_shape()
     test_lsp_parse_completion_result_list_shape()
+    test_lsp_parse_completion_result_honors_sort_text()
     test_lsp_parse_completion_result_snippet_falls_back_to_label()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
