@@ -5076,6 +5076,14 @@ struct Editor(ImplicitlyCopyable, Movable):
         (or the current line if no selection). No-op when the editor is
         read-only.
 
+        The prefix is inserted at the start of the non-whitespace content
+        on each line. When multiple lines are selected the column is the
+        shared leading whitespace across all non-blank lines, so a block
+        like ``    foo()`` / ``        bar()`` keeps the inner indentation
+        intact: the outer four spaces are preserved and the prefix lands
+        at column 4 on both rows. Blank / whitespace-only lines are
+        skipped — there is no non-whitespace position to mark.
+
         When ``prefix`` is empty (the default), the prefix is derived from
         the buffer's file extension via ``line_comment_for_extension`` —
         ``# `` for Python/Mojo/YAML/shell, ``-- `` for SQL/Lua, etc. Falls
@@ -5097,27 +5105,65 @@ struct Editor(ImplicitlyCopyable, Movable):
             sr = self.cursor_row
             er = self.cursor_row
         var pn = len(effective_prefix.as_bytes())
-        # If every line begins with the prefix, strip; else add.
-        var all_commented = True
+        var pb = effective_prefix.as_bytes()
+
+        # Common leading-whitespace bytes across all non-blank lines in
+        # the range. Tracked as (reference byte vector, current shared
+        # length) so we can shrink to the longest matching prefix as new
+        # lines are encountered. Mixed tabs/spaces collapse the shared
+        # prefix at the first byte that diverges.
+        var common_bytes = List[UInt8]()
+        var common_len = 0
+        var saw_nonblank = False
         for r in range(sr, er + 1):
             var line = self.buffer.line(r)
             var lb = line.as_bytes()
-            if len(lb) < pn:
-                all_commented = False
-                break
-            var pb = effective_prefix.as_bytes()
-            for k in range(pn):
-                if lb[k] != pb[k]:
-                    all_commented = False
-                    break
+            var lws = leading_indent_bytes(line)
+            if lws == len(lb):
+                continue  # blank / whitespace-only
+            if not saw_nonblank:
+                for k in range(lws):
+                    common_bytes.append(lb[k])
+                common_len = lws
+                saw_nonblank = True
+            else:
+                var maxk = common_len if common_len < lws else lws
+                var k = 0
+                while k < maxk and common_bytes[k] == lb[k]:
+                    k += 1
+                common_len = k
+
+        # If every non-blank line already carries the prefix at the
+        # shared-indent column, the toggle strips; otherwise it adds.
+        var all_commented = saw_nonblank
+        for r in range(sr, er + 1):
             if not all_commented:
                 break
+            var line = self.buffer.line(r)
+            var lb = line.as_bytes()
+            if leading_indent_bytes(line) == len(lb):
+                continue  # blank: doesn't participate in the vote
+            if len(lb) < common_len + pn:
+                all_commented = False
+                break
+            for k in range(pn):
+                if lb[common_len + k] != pb[k]:
+                    all_commented = False
+                    break
+
         for r in range(sr, er + 1):
             var line = self.buffer.line(r)
+            var lb_len = len(line.as_bytes())
+            if leading_indent_bytes(line) == lb_len:
+                continue  # leave blank lines alone
             if all_commented:
-                self.buffer.lines[r] = _slice(line, pn, len(line.as_bytes()))
+                var before = _slice(line, 0, common_len)
+                var after = _slice(line, common_len + pn, lb_len)
+                self.buffer.lines[r] = before + after
             else:
-                self.buffer.lines[r] = effective_prefix + line
+                var before = _slice(line, 0, common_len)
+                var after = _slice(line, common_len, lb_len)
+                self.buffer.lines[r] = before + effective_prefix + after
         self.dirty = True
         # Toggle-comment touches rows ``sr..er``; mark dirty from
         # the lowest one. The early-exit logic in

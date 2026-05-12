@@ -1244,6 +1244,51 @@ fn test_editor_toggle_comment_language_aware() raises:
     assert_equal(unknown.buffer.line(0), String("// data"))
 
 
+fn test_editor_toggle_comment_indented() raises:
+    # Single line: prefix lands at the first non-whitespace column,
+    # preserving the line's leading indent.
+    var py = Editor(String("    foo()"))
+    py.file_path = String("snippet.py")
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    # foo()"))
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    foo()"))
+
+
+fn test_editor_toggle_comment_common_indent() raises:
+    # Multi-line: prefix uses the shared leading whitespace, so the
+    # deeper inner line keeps its extra indent visible after the marker.
+    var py = Editor(String("    foo()\n        bar()\n    baz()"))
+    py.file_path = String("snippet.py")
+    py.move_to(0, 0, False)
+    py.move_to(2, 1, True)
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    # foo()"))
+    assert_equal(py.buffer.line(1), String("    #     bar()"))
+    assert_equal(py.buffer.line(2), String("    # baz()"))
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    foo()"))
+    assert_equal(py.buffer.line(1), String("        bar()"))
+    assert_equal(py.buffer.line(2), String("    baz()"))
+
+
+fn test_editor_toggle_comment_skips_blank_lines() raises:
+    # Blank lines in the range are left untouched and don't block the
+    # "all commented" vote — uncommenting still works around them.
+    var py = Editor(String("    foo()\n\n    bar()"))
+    py.file_path = String("snippet.py")
+    py.move_to(0, 0, False)
+    py.move_to(2, 1, True)
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    # foo()"))
+    assert_equal(py.buffer.line(1), String(""))
+    assert_equal(py.buffer.line(2), String("    # bar()"))
+    py.toggle_comment()
+    assert_equal(py.buffer.line(0), String("    foo()"))
+    assert_equal(py.buffer.line(1), String(""))
+    assert_equal(py.buffer.line(2), String("    bar()"))
+
+
 fn test_editor_toggle_case() raises:
     var ed = Editor(String("Hello World"))
     ed.move_to(0, 0, False)
@@ -12854,6 +12899,9 @@ fn main() raises:
     test_editor_toggle_comment_single_line()
     test_editor_toggle_comment_selection()
     test_editor_toggle_comment_language_aware()
+    test_editor_toggle_comment_indented()
+    test_editor_toggle_comment_common_indent()
+    test_editor_toggle_comment_skips_blank_lines()
     test_editor_toggle_case()
     test_editor_dirty_flag()
     test_file_io_read_and_stat()
