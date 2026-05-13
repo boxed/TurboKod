@@ -22,6 +22,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .view import RowCursor
 
 
@@ -95,7 +96,7 @@ struct GitGutterMenu(Movable):
         self.submitted = True
 
     fn _rect(self, screen: Rect) -> Rect:
-        var width = len(_LABEL_REVERT.as_bytes()) + 4
+        var width = display_columns(_LABEL_REVERT) + 4
         var height = self._row_count() + 2
         var x = self.anchor_x
         if x + width > screen.b.x:

@@ -33,6 +33,7 @@ from .cell import Cell
 from .colors import Attr, BLACK
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
+from .string_utils import display_columns
 
 
 # --- handle_mouse return values -----------------------------------------
@@ -93,7 +94,7 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         self.pressed_inside = False
 
     fn face_width(self) -> Int:
-        return len(self.label.as_bytes())
+        return display_columns(self.label)
 
     fn total_width(self) -> Int:
         """Cells the button claims horizontally: face + the 1-column
@@ -283,7 +284,7 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
     fn width(self) -> Int:
         """Cells the toggle paints horizontally (label plus 1-cell pad
         on each side)."""
-        return len(self.label.as_bytes()) + 2
+        return display_columns(self.label) + 2
 
     fn hit_rect(self) -> Rect:
         return Rect(self.x, self.y, self.x + self.width(), self.y + 1)
@@ -392,7 +393,7 @@ struct Checkbox(ImplicitlyCopyable, Movable):
         + 1 trailing pad — so the colored strip extends one cell past
         the box and label on each side and reads as a button-shaped
         chip rather than tinted text."""
-        return 6 + len(self.label.as_bytes())
+        return 6 + display_columns(self.label)
 
     fn hit_rect(self) -> Rect:
         return Rect(self.x, self.y, self.x + self.width(), self.y + 1)

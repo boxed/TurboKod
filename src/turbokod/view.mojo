@@ -17,6 +17,7 @@ from .painter import Painter
 from .colors import Attr, default_attr, WHITE, BLUE, BLACK, LIGHT_GRAY
 from .events import Event
 from .geometry import Point, Rect
+from .string_utils import display_columns
 
 
 trait Drawable:
@@ -48,7 +49,7 @@ struct Label(Copyable, Movable, Drawable):
         if bounds.is_empty():
             return
         # Center horizontally, top-align vertically.
-        var text_len = len(self.text.as_bytes())
+        var text_len = display_columns(self.text)
         var x = bounds.a.x + (bounds.width() - text_len) // 2
         if x < bounds.a.x:
             x = bounds.a.x
@@ -81,9 +82,9 @@ struct Frame(Copyable, Movable, Drawable):
         if not interior.is_empty():
             painter.fill(canvas, interior, String(" "), self.attr)
         painter.draw_box(canvas, bounds, self.attr, self.double_line)
-        if len(self.title) > 0 and bounds.width() >= len(self.title.as_bytes()) + 4:
+        if len(self.title) > 0 and bounds.width() >= display_columns(self.title) + 4:
             var label = String(" ") + self.title + String(" ")
-            var label_len = len(label.as_bytes())
+            var label_len = display_columns(label)
             var x = bounds.a.x + (bounds.width() - label_len) // 2
             _ = painter.put_text(canvas, Point(x, bounds.a.y), label, self.attr)
 

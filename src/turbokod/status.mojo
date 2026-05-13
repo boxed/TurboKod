@@ -16,6 +16,7 @@ from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 
 
 @fieldwise_init
@@ -117,9 +118,9 @@ struct StatusBar(Movable):
             var k = self.items[i].key
             var d = self.items[i].desc
             _ = painter.put_text(canvas, Point(x, y), k, key_attr)
-            x += len(k.as_bytes()) + 1
+            x += display_columns(k) + 1
             _ = painter.put_text(canvas, Point(x, y), d, desc_attr)
-            x += len(d.as_bytes()) + 2
+            x += display_columns(d) + 2
         # Target tabs: painted in the gap between F-key shortcuts and
         # the right-aligned status message. The active tab is
         # reverse-video so the user can see at a glance which target
@@ -139,7 +140,7 @@ struct StatusBar(Movable):
                 elif tab.debugging:
                     label = String("◆ ") + label
                 var rendered = String(" ") + label + String(" ")
-                var w = len(rendered.as_bytes())
+                var w = display_columns(rendered)
                 var attr: Attr
                 if i == self.active_tab:
                     # Reverse: white-on-blue tells the eye "this is selected"
@@ -156,7 +157,7 @@ struct StatusBar(Movable):
         self._msg_a_x = 0
         self._msg_b_x = 0
         if len(self.message.as_bytes()) > 0:
-            var msg_w = len(self.message.as_bytes())
+            var msg_w = display_columns(self.message)
             var mx = screen.b.x - msg_w - 1
             if mx < x + 1:
                 return

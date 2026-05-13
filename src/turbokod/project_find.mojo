@@ -43,7 +43,7 @@ from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .project import ProjectMatch
 from .search_options import SearchOptions
-from .string_utils import split_lines
+from .string_utils import display_columns, split_lines
 from .text_field import TextField
 from .window import paint_window_title
 
@@ -414,7 +414,7 @@ struct ProjectFind(Movable):
         _ = painter.put_text(
             canvas, Point(screen.a.x + 1, input_y), label, label_attr,
         )
-        var qx = screen.a.x + 1 + len(label.as_bytes())
+        var qx = screen.a.x + 1 + display_columns(label)
         # Reserve room on the right edge of the input row for the
         # three search-mode toggles. Lay them out right-aligned with
         # one cell of gap between each chip — same idiom the Find
@@ -514,7 +514,7 @@ struct ProjectFind(Movable):
         for x in range(screen.a.x + 1, screen.b.x - 1):
             painter.set(canvas, x, ctx_top, Cell(String("─"), sep_attr, 1))
         var ctx_label = String(" Context ")
-        var lx = screen.a.x + (screen.width() - len(ctx_label.as_bytes())) // 2
+        var lx = screen.a.x + (screen.width() - display_columns(ctx_label)) // 2
         _ = painter.put_text(canvas, Point(lx, ctx_top), ctx_label, title_attr)
         # Context body. Lazy-tokenize the loaded file using the shared
         # registry so the grammar's regexes only get compiled once per
@@ -525,7 +525,7 @@ struct ProjectFind(Movable):
         )
         # Hint at the very bottom (overlays the bottom border).
         var hint = String(" Enter: open  ESC: cancel  Up/Down: navigate ")
-        var hx = screen.b.x - len(hint.as_bytes()) - 1
+        var hx = screen.b.x - display_columns(hint) - 1
         if hx < screen.a.x + 1:
             hx = screen.a.x + 1
         _ = painter.put_text(canvas, Point(hx, screen.b.y - 1), hint, hint_attr)
@@ -549,7 +549,7 @@ struct ProjectFind(Movable):
         )
         # Right-aligned ``rel:line``.
         var path_label = m.rel + String(":") + String(m.line_no)
-        var path_len = len(path_label.as_bytes())
+        var path_len = display_columns(path_label)
         var path_x = inner_right - path_len - 1
         if path_x < inner_left + 1:
             path_x = inner_left + 1
@@ -670,9 +670,9 @@ struct ProjectFind(Movable):
             var lineno = String(src + 1) + String(": ")
             var x = inner_left + 1
             _ = painter.put_text(canvas, Point(x, y), marker, marker_attr)
-            x += len(marker.as_bytes())
+            x += display_columns(marker)
             _ = painter.put_text(canvas, Point(x, y), lineno, ctx_attr)
-            x += len(lineno.as_bytes())
+            x += display_columns(lineno)
             # Plain text pass — establishes glyph + base attr per cell.
             var line = self._context_lines[src]
             var bytes = line.as_bytes()

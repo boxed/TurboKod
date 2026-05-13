@@ -33,7 +33,7 @@ from .colors import (
     Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
 )
 from .events import (
-    Event, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
+    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
@@ -353,6 +353,17 @@ comptime _NAV_COL_THRESHOLD = 100
 # Cap on how many entries we keep — purely a memory bound; older
 # entries fall off the back when the cap is hit.
 comptime _NAV_STACK_CAP = 100
+
+# Keyboard-focus discriminants for the docked-pane stack. Editor
+# windows have their own ``windows.focused`` index; the panes are
+# conceptually a parallel set of "docked windows" and we keep their
+# focus state in a single discriminant so exactly one pane (or the
+# floating-window stack) is keyboard-live at a time. ``DOCK_NONE``
+# means the windows own keyboard focus.
+comptime DOCK_NONE        = UInt8(0)
+comptime DOCK_FILE_TREE   = UInt8(1)
+comptime DOCK_DEBUG_PANE  = UInt8(2)
+comptime DOCK_TERMINAL    = UInt8(3)
 
 # Throttle for the external-git polling in ``_apply_view_config``. One
 # second is fast enough that ``git commit`` / ``git checkout`` outside
@@ -1580,7 +1591,10 @@ struct Desktop(Movable):
         self._refresh_target_tabs()
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
-        self.windows.paint(canvas, self._compute_subdued_windows())
+        self.windows.paint(
+            canvas, self._compute_subdued_windows(),
+            not self._any_dock_focused(),
+        )
         # Title-bar full-path tooltip: floats above every window but
         # below the side panes / chrome, so the popup never gets
         # painted over by the editor it's describing.
@@ -3075,6 +3089,13 @@ struct Desktop(Movable):
         # editor happens here, before any caller-routed handling.
         if event.kind == EVENT_FOCUS_OUT and self.config.auto_save:
             self._autosave_all_dirty()
+        # Host focus-in/out also forwards to every docked terminal —
+        # children that have enabled ``?1004`` (vim's FocusGained /
+        # FocusLost autocmds) need to see it.
+        if event.kind == EVENT_FOCUS_IN or event.kind == EVENT_FOCUS_OUT:
+            var fwd = event.kind == EVENT_FOCUS_IN
+            for i in range(len(self.terminal_panes)):
+                self.terminal_panes[i].notify_focus_change(fwd)
         if self.spell_menu.active:
             # Spell-action popup is the topmost modal: it opens
             # contextually over the cursor, so any other modal
@@ -3385,20 +3406,25 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 WINDOW_FOCUS_PREFIX + String(win_tab), screen,
             )
+        # Pane routing: each pane's ``handle_mouse`` flips its own
+        # ``focused`` flag when a click lands inside its rect; we then
+        # rebroadcast through ``_focus_dock`` so every other dock drops
+        # focus in one shot — keeps "exactly one dock is keyboard-live"
+        # as a single invariant rather than per-route plumbing.
         for i in range(len(self.terminal_panes)):
             if self.terminal_panes[i].handle_mouse(
                 event, self.terminal_pane_rect(screen, i),
             ):
-                # Clicking on one pane defocuses the others so only one
-                # terminal is keyboard-live at a time.
                 if self.terminal_panes[i].focused:
-                    for j in range(len(self.terminal_panes)):
-                        if j != i:
-                            self.terminal_panes[j].focused = False
+                    self._focus_dock(DOCK_TERMINAL, i)
                 return Optional[String]()
         if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
+            if self.debug_pane.focused:
+                self._focus_dock(DOCK_DEBUG_PANE)
             return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
+            if self.file_tree.focused:
+                self._focus_dock(DOCK_FILE_TREE)
             return Optional[String]()
         _ = self.windows.handle_mouse(event, self.workspace_rect(screen))
         # A click on the per-line bar in the git-changes gutter stamps a
@@ -3447,9 +3473,13 @@ struct Desktop(Movable):
                     and not self.run_session.is_active():
                 # Dismiss the held run-output pane. The status text
                 # advertises this binding so the user knows ESC works
-                # here regardless of whether the pane has focus.
+                # here regardless of whether the pane has focus —
+                # only route through ``_focus_dock`` when the pane
+                # actually held focus, otherwise we'd clobber a
+                # different dock's focus.
                 self._run_output_held = False
-                self.debug_pane.focused = False
+                if self.debug_pane.focused:
+                    self._focus_dock(DOCK_NONE)
             elif self.windows.focused_is_editor() \
                     and self.windows.windows[self.windows.focused] \
                         .editor.has_extra_carets():
@@ -3898,21 +3928,15 @@ struct Desktop(Movable):
             # Switching to a window means leaving the side panels —
             # otherwise their handle_key keeps swallowing arrows
             # when the user expects them at the editor cursor.
-            self.debug_pane.focused = False
-            self.file_tree.focused = False
-            self._defocus_terminal_panes()
+            self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == WINDOW_ROTATE_NEXT:
             self.windows.rotate_focus(True)
-            self.debug_pane.focused = False
-            self.file_tree.focused = False
-            self._defocus_terminal_panes()
+            self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == WINDOW_ROTATE_PREV:
             self.windows.rotate_focus(False)
-            self.debug_pane.focused = False
-            self.file_tree.focused = False
-            self._defocus_terminal_panes()
+            self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == EDITOR_NAV_BACK:
             self.navigate_back(screen)
@@ -3964,17 +3988,12 @@ struct Desktop(Movable):
         if action == DEBUG_FOCUS_PANE:
             # Ctrl+9 from anywhere should *focus* the pane, not
             # toggle blindly — toggling-off would land the user
-            # nowhere predictable. Force-on, and steal focus from
-            # the file tree so only one side panel is keyboard-live
-            # at a time.
-            self.debug_pane.focused = True
-            self.file_tree.focused = False
-            self._defocus_terminal_panes()
+            # nowhere predictable. ``_focus_dock`` ensures every
+            # other dock drops focus in the same call.
+            self._focus_dock(DOCK_DEBUG_PANE)
             return Optional[String]()
         if action == FILE_TREE_FOCUS:
-            self.file_tree.focused = True
-            self.debug_pane.focused = False
-            self._defocus_terminal_panes()
+            self._focus_dock(DOCK_FILE_TREE)
             return Optional[String]()
         if action == TERMINAL_NEW:
             self._open_terminal_pane()
@@ -3994,11 +4013,7 @@ struct Desktop(Movable):
             # the user is most likely to be looking at after pressing
             # the hotkey from somewhere else in the UI.
             if len(self.terminal_panes) > 0:
-                var last = len(self.terminal_panes) - 1
-                self._defocus_terminal_panes()
-                self.terminal_panes[last].focused = True
-                self.debug_pane.focused = False
-                self.file_tree.focused = False
+                self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
             return Optional[String]()
         if action == TARGET_RUN:
             self._target_run()
@@ -4819,7 +4834,7 @@ struct Desktop(Movable):
         pending chrome-command click. Called once per frame by the
         host loop alongside ``lsp_tick`` / ``dap_tick``.
 
-        Cheap no-op when the stack is empty. The ``[X]`` close button
+        Cheap no-op when the stack is empty. The ``[■]`` close button
         on any pane removes that pane from the list (rest of the
         stack reflows on the next paint)."""
         if len(self.terminal_panes) == 0:
@@ -4840,24 +4855,49 @@ struct Desktop(Movable):
                 _ = self.terminal_panes[i].handle_command(cmd)
             i += 1
 
-    fn _defocus_terminal_panes(mut self):
-        """Clear ``focused`` on every terminal pane. Used wherever the
-        host hands focus elsewhere (window focus changes, side-panel
-        focus actions) — keyboard input must land on exactly one
-        widget per frame."""
+    fn _focus_dock(mut self, kind: UInt8, idx: Int = 0):
+        """Single source of truth for which docked pane owns keyboard
+        focus. Sets the matching pane's ``focused`` flag and clears
+        every other one so exactly one widget is keyboard-live per
+        frame. ``DOCK_NONE`` hands focus back to the floating-window
+        stack — all panes drop their ``focused`` flag. ``idx`` is
+        only consulted for ``DOCK_TERMINAL`` (which terminal pane in
+        the stack)."""
+        self.file_tree.focused = kind == DOCK_FILE_TREE
+        self.debug_pane.focused = kind == DOCK_DEBUG_PANE
         for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].focused = False
+            self.terminal_panes[i].focused = (
+                kind == DOCK_TERMINAL and i == idx
+            )
+
+    fn _any_dock_focused(self) -> Bool:
+        """True when any docked pane currently owns keyboard focus —
+        used to dim the editor-window chrome so the visible focus
+        matches the keyboard target."""
+        if self.file_tree.focused or self.debug_pane.focused:
+            return True
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused:
+                return True
+        return False
 
     fn _open_terminal_pane(mut self):
-        """Append a fresh ``TerminalPane`` to the stack, focus it, and
-        defocus its siblings + the other side panels so the new pane
-        is keyboard-live immediately."""
+        """Append a fresh ``TerminalPane`` to the stack and route
+        focus to it through ``_focus_dock`` so the new pane is
+        keyboard-live immediately and every other dock + sibling
+        pane drops focus in one shot.
+
+        The pane's shell starts in the project root when a project is
+        open — that's the cwd the user almost always wants. With no
+        project we leave ``pane.cwd`` empty so the child inherits the
+        editor's launch directory (just like double-clicking a
+        terminal from any other tool would)."""
         var pane = TerminalPane()
+        if self.project:
+            pane.cwd = self.project.value()
         pane.open()
-        self._defocus_terminal_panes()
-        self.debug_pane.focused = False
-        self.file_tree.focused = False
         self.terminal_panes.append(pane^)
+        self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
 
     fn _close_all_terminal_panes(mut self):
         """Tear down every terminal pane (SIGTERM + close fds via

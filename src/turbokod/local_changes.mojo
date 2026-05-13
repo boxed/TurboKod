@@ -75,7 +75,7 @@ from .git_changes import (
     git_amend_no_edit, git_commit, git_pull, git_push, git_revert_file,
     stage_file, unstage_file,
 )
-from .string_utils import split_lines_no_trailing, starts_with
+from .string_utils import display_columns, split_lines_no_trailing, starts_with
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
@@ -1493,7 +1493,7 @@ struct LocalChanges(Movable):
             hint = String(
                 " Tab: pane  Up/Down: select  Right: diff  Space: stage  Enter: open  ESC: close ",
             )
-        var hx = bounds.b.x - len(hint.as_bytes()) - 1
+        var hx = bounds.b.x - display_columns(hint) - 1
         if hx < bounds.a.x + 1:
             hx = bounds.a.x + 1
         _ = canvas.put_text(Point(hx, bounds.b.y - 1), hint, hint_attr)
@@ -1549,7 +1549,7 @@ struct LocalChanges(Movable):
             _ = body_p.put_text(
                 canvas, Point(bx + 2, by + 2), prompt_text, body,
             )
-            var input_x = bx + 2 + len(prompt_text.as_bytes())
+            var input_x = bx + 2 + display_columns(prompt_text)
             var input_rect = Rect(
                 input_x, by + 2, bx + box_w - 1, by + 3,
             )

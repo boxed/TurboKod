@@ -21,6 +21,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .view import RowCursor
 
 
@@ -81,7 +82,7 @@ struct LspStatusMenu(Movable):
         self.submitted = True
 
     fn _rect(self, screen: Rect) -> Rect:
-        var width = len(_LABEL_RESTART.as_bytes()) + 4
+        var width = display_columns(_LABEL_RESTART) + 4
         var height = self._row_count() + 2
         # Anchor sits on the status bar (bottom row); open the menu
         # *above* it by default so it doesn't try to render off-screen.

@@ -26,6 +26,7 @@ from .geometry import Point, Rect
 from .lsp_dispatch import SymbolItem
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
+from .string_utils import display_columns
 from .text_field import TextField
 from .view import RowCursor
 from .window import paint_window_title
@@ -223,12 +224,12 @@ struct SymbolPick(Movable):
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, top + i), kind_label, k_attr,
             )
-            var name_x = rect.a.x + 2 + len(kind_label.as_bytes()) + 1
+            var name_x = rect.a.x + 2 + display_columns(kind_label) + 1
             _ = painter.put_text(
                 canvas, Point(name_x, top + i), sym.name, row_attr,
             )
             if len(sym.container.as_bytes()) > 0:
-                var cx = name_x + len(sym.name.as_bytes()) + 2
+                var cx = name_x + display_columns(sym.name) + 2
                 if cx < rect.b.x - 2:
                     _ = painter.put_text(
                         canvas, Point(cx, top + i),

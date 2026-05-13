@@ -96,6 +96,19 @@ These are deliberate departures from C++ Turbo Vision. Don't "fix" them by rever
 6. **No `Uses_XXXX` macro mechanism.** Each `.mojo` file does normal `from .module import Name` imports.
 7. **Snake_case methods, no T-prefix on types.** `put_text`, `next_event`, `Point`, `Frame` — not `putText`, `getEvent`, `TPoint`, `TFrame`.
 
+## Text width is codepoints, not bytes
+
+`Canvas.put_text` paints one cell per UTF-8 codepoint. Layout code that asks "how many cells does this label take?" must do the same. Use `display_columns(s)` from `string_utils.mojo` — never `len(s.as_bytes())` — for any of:
+
+- Dropdown / popup / dialog width that has to fit a label.
+- `put_text` start positions computed by subtracting label width from a right edge (status bar right-alignment, shortcut alignment in menus).
+- Title-bar offsets, tab widths, anywhere a label is centered or right-aligned.
+- Loops that paint a string cell-by-cell to apply per-character styling (hotkey-first coloring, etc.) — walk codepoints, not bytes; one cell per codepoint. See `MenuBar._paint_label_hotkey` for the canonical pattern.
+
+`len(s.as_bytes())` is still correct for byte-level work: parsing, slicing into byte buffers, hashing, JSON encoding, `as_bytes()`-keyed comparisons. The distinction is *display column count vs. byte count*. If your `len(...as_bytes())` result is fed into a column index or a width reservation, it's wrong for any multi-byte glyph (an em dash counts as 3, ``ä`` as 2). The bug usually hides on ASCII-only test inputs and only shows up when a non-ASCII label slides in.
+
+East-Asian width is not modeled — both `put_text` and `display_columns` treat every codepoint as one cell. Wide CJK glyphs will visually over-advance the cursor; if that ever needs fixing, add it once in both places.
+
 ## Mojo-version sensitivity
 
 Mojo's syntax has churned. The code targets a recent (~25.x) release and relies on:

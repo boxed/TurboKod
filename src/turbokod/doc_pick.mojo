@@ -30,6 +30,7 @@ from .events import (
 from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
+from .string_utils import display_columns
 from .text_field import TextField
 from .view import RowCursor
 from .window import paint_window_title
@@ -217,7 +218,7 @@ struct DocPick(Movable):
                 canvas, Point(rect.a.x + 2, top + i), ent.name, row_attr,
             )
             if len(ent.type_name.as_bytes()) > 0:
-                var tx2 = rect.a.x + 2 + len(ent.name.as_bytes()) + 2
+                var tx2 = rect.a.x + 2 + display_columns(ent.name) + 2
                 if tx2 < rect.b.x - 2:
                     _ = painter.put_text(
                         canvas, Point(tx2, top + i),

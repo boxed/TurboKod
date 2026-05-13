@@ -19,6 +19,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
@@ -230,14 +231,14 @@ struct MenuBar(Movable):
         var x = 3                                   # past `≡ `
         for k in range(len(left)):
             var i = left[k]
-            var w = len(self.menus[i].label.as_bytes()) + 2
+            var w = display_columns(self.menus[i].label) + 2
             rects[i] = Rect(x, 0, x + w, 1)
             x += w + 1
         var rx = screen_width
         for i in range(len(self.menus)):
             if not self.menus[i].visible or not self.menus[i].right_aligned:
                 continue
-            var w = len(self.menus[i].label.as_bytes()) + 2
+            var w = display_columns(self.menus[i].label) + 2
             rects[i] = Rect(rx - w, 0, rx, 1)
             rx -= w + 1
         return rects^
@@ -267,8 +268,8 @@ struct MenuBar(Movable):
         for i in range(len(menu.items)):
             if menu.items[i].is_separator:
                 continue
-            var label_w = len(menu.items[i].label.as_bytes())
-            var sc_w = len(menu.items[i].shortcut.as_bytes())
+            var label_w = display_columns(menu.items[i].label)
+            var sc_w = display_columns(menu.items[i].shortcut)
             var w = indent + label_w + 4
             if sc_w > 0:
                 w = indent + label_w + sc_w + 6
@@ -323,14 +324,47 @@ struct MenuBar(Movable):
                 bar_p.set(canvas, r.a.x + 1, 0, Cell(String("≡"), key, 1))
                 continue
             bar_p.set(canvas, r.a.x, 0, Cell(String(" "), bg, 1))
-            var label_bytes = self.menus[i].label.as_bytes()
-            for j in range(len(label_bytes)):
-                var ch = String(chr(Int(label_bytes[j])))
-                var attr = key if j == 0 else bg
-                bar_p.set(canvas, r.a.x + 1 + j, 0, Cell(ch, attr, 1))
+            self._paint_label_hotkey(
+                canvas, bar_p, r.a.x + 1, 0, self.menus[i].label, key, bg,
+            )
             bar_p.set(canvas, r.b.x - 1, 0, Cell(String(" "), bg, 1))
         if self.open_idx >= 0:
             self._paint_dropdown(canvas, screen.b.x)
+
+    fn _paint_label_hotkey(
+        self, mut canvas: Canvas, painter: Painter, x: Int, y: Int,
+        label: String, hotkey_attr: Attr, body_attr: Attr,
+    ):
+        """Paint ``label`` starting at ``(x, y)`` with Turbo-Vision-style
+        hotkey coloring: the first codepoint gets ``hotkey_attr``, the
+        rest get ``body_attr``. Walks UTF-8 one codepoint at a time so
+        non-ASCII labels render as a single cell per glyph rather than
+        one cell per continuation byte (which used to split an em dash
+        across three cells)."""
+        var b = label.as_bytes()
+        var n = len(b)
+        var i = 0
+        var col = 0
+        while i < n:
+            var c0 = Int(b[i])
+            var seq = 1
+            if (c0 & 0xE0) == 0xC0:
+                seq = 2
+            elif (c0 & 0xF0) == 0xE0:
+                seq = 3
+            elif (c0 & 0xF8) == 0xF0:
+                seq = 4
+            if i + seq > n:
+                seq = 1
+            var glyph: String
+            if seq == 1:
+                glyph = String(chr(c0))
+            else:
+                glyph = String(StringSlice(unsafe_from_utf8=b[i:i + seq]))
+            var a = hotkey_attr if col == 0 else body_attr
+            painter.set(canvas, x + col, y, Cell(glyph, a, 1))
+            i += seq
+            col += 1
 
     fn _paint_dropdown(self, mut canvas: Canvas, screen_width: Int):
         var rect = self._dropdown_rect(screen_width)
@@ -370,17 +404,16 @@ struct MenuBar(Movable):
             if menu.items[i].checkable and menu.items[i].checked:
                 painter.set(canvas, rect.a.x + 2, y, Cell(String("✓"), row_attr, 1))
             var label_x = rect.a.x + 2 + indent
-            var label_bytes = menu.items[i].label.as_bytes()
-            for j in range(len(label_bytes)):
-                var ch = String(chr(Int(label_bytes[j])))
-                var a = row_key if j == 0 else row_attr
-                painter.set(canvas, label_x + j, y, Cell(ch, a, 1))
+            self._paint_label_hotkey(
+                canvas, painter, label_x, y, menu.items[i].label,
+                row_key, row_attr,
+            )
             # Right-aligned shortcut text — last cell sits at rect.b.x - 2
             # (one in from the right border), so the start x is computed
             # backwards from there. ``_dropdown_rect`` already widened the
             # rect to guarantee no overlap with the label.
             var sc = menu.items[i].shortcut
-            var sc_w = len(sc.as_bytes())
+            var sc_w = display_columns(sc)
             if sc_w > 0:
                 var sx = rect.b.x - 1 - sc_w
                 _ = painter.put_text(canvas, Point(sx, y), sc, row_attr)

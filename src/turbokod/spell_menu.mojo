@@ -28,6 +28,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .view import RowCursor
 
 
@@ -163,9 +164,9 @@ struct SpellMenu(Movable):
         Sits one row below the anchor when there's room; flips above
         when the anchor is too close to the bottom edge. Snaps left
         when the anchor is too close to the right edge."""
-        var width = len(_LABEL_PROJECT.as_bytes()) + 4
-        if len(_LABEL_USER.as_bytes()) + 4 > width:
-            width = len(_LABEL_USER.as_bytes()) + 4
+        var width = display_columns(_LABEL_PROJECT) + 4
+        if display_columns(_LABEL_USER) + 4 > width:
+            width = display_columns(_LABEL_USER) + 4
         var height = self._row_count() + 2
         var x = self.anchor_x
         if x + width > screen.b.x:

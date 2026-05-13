@@ -14,6 +14,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, WHITE
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
+from .string_utils import display_columns
 
 
 @fieldwise_init
@@ -66,7 +67,7 @@ struct TabBar(Movable):
             if x >= max_x:
                 break
             var label = String(" ") + items[i].label + String(" ")
-            var w = len(label.as_bytes())
+            var w = display_columns(label)
             var attr: Attr
             if items[i].window_idx == active_idx:
                 attr = active_attr

@@ -42,6 +42,7 @@ from .events import (
     KEY_UP, KEY_DOWN, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .text_field import TextField, text_field_bg
 from .view import RowCursor
 
@@ -263,7 +264,7 @@ struct BreakpointMenu(Movable):
         var loc = self.path + String(":") + String(self.line + 1)
         # Cap the location to the dialog interior so it can't bleed
         # past the right border on a long path.
-        var avail = rect.width() - 2 - len(title.as_bytes()) - 1
+        var avail = rect.width() - 2 - display_columns(title) - 1
         var loc_b = loc.as_bytes()
         if avail < 0: avail = 0
         if len(loc_b) > avail:

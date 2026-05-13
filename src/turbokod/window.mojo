@@ -27,6 +27,7 @@ from .events import (
 from .file_io import basename, parent_path
 from .geometry import Point, Rect
 from .scrollbar import HScrollbar, VScrollbar
+from .string_utils import display_columns
 
 
 comptime MIN_WIN_W: Int = 10
@@ -180,7 +181,7 @@ fn paint_window_title(
     bg from copy-paste.
     """
     var enforced = Attr(title_attr.fg, body_bg.bg, title_attr.style)
-    var title_len = len(title.as_bytes())
+    var title_len = display_columns(title)
     if rect.width() < title_len + 2:
         return
     var tx = rect.a.x + (rect.width() - title_len) // 2
@@ -346,19 +347,25 @@ fn paint_panel_button(
 
 @fieldwise_init
 struct PanelChromeHits(ImplicitlyCopyable, Movable):
-    """Painted-rect record for the panel min/max chrome buttons. ``-1``
-    on either x means that button wasn't painted this frame (panel too
-    narrow, or caller asked for max-only) — hit-tests against ``-1``
-    always miss. Callers store one of these per paint and consult it
-    from ``handle_mouse``."""
+    """Painted-rect record for the panel min/max/close chrome buttons.
+    ``-1`` on any x means that button wasn't painted this frame (panel
+    too narrow, caller asked for max-only, or close not enabled) —
+    hit-tests against ``-1`` always miss. Callers store one of these
+    per paint and consult it from ``handle_mouse``."""
     var top_y: Int
     var min_btn_x: Int
     var max_btn_x: Int
+    var close_btn_x: Int
+    """X of the leading ``[`` cell of a window-style ``[■]`` close
+    button painted at the top-LEFT of a bottom-docked panel. ``-1``
+    when the panel doesn't render one — see ``BottomDockedPanel.
+    close_button_id``."""
 
     fn __init__(out self):
         self.top_y = -1
         self.min_btn_x = -1
         self.max_btn_x = -1
+        self.close_btn_x = -1
 
     fn on_min(self, pos: Point) -> Bool:
         return self.min_btn_x >= 0 \
@@ -372,8 +379,14 @@ struct PanelChromeHits(ImplicitlyCopyable, Movable):
             and pos.x >= self.max_btn_x \
             and pos.x < self.max_btn_x + 3
 
+    fn on_close(self, pos: Point) -> Bool:
+        return self.close_btn_x >= 0 \
+            and pos.y == self.top_y \
+            and pos.x >= self.close_btn_x \
+            and pos.x < self.close_btn_x + 3
+
     fn on_any(self, pos: Point) -> Bool:
-        return self.on_min(pos) or self.on_max(pos)
+        return self.on_min(pos) or self.on_max(pos) or self.on_close(pos)
 
 
 fn paint_panel_window_buttons(
@@ -484,6 +497,12 @@ struct BottomDockedPanel(ImplicitlyCopyable, Movable):
     """True while the user holds the left button after pressing on the
     panel's top border. Mouse motion in this state updates
     ``preferred_height``; the next non-pressed event clears it."""
+    var close_button_id: String
+    """When non-empty, paint a window-style ``[■]`` close button at the
+    panel's top-LEFT and dispatch clicks on it by setting
+    ``pending_command_id`` to this string. Empty (default) disables the
+    button — panels that aren't user-dismissible (e.g. the debug pane,
+    which the host owns) leave this unset."""
 
     fn __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
@@ -493,6 +512,7 @@ struct BottomDockedPanel(ImplicitlyCopyable, Movable):
         self.chrome_hits = PanelChromeHits()
         self.last_cmd_hits = List[TitleCommandHit]()
         self.resizing = False
+        self.close_button_id = String("")
 
     fn __copyinit__(out self, copy: Self):
         self.state = copy.state
@@ -502,6 +522,7 @@ struct BottomDockedPanel(ImplicitlyCopyable, Movable):
         self.chrome_hits = copy.chrome_hits
         self.last_cmd_hits = copy.last_cmd_hits.copy()
         self.resizing = copy.resizing
+        self.close_button_id = copy.close_button_id
 
     fn is_minimized(self) -> Bool:
         return self.state == PANEL_STATE_MINIMIZED
@@ -597,15 +618,27 @@ fn paint_bottom_dock_chrome(
     var top_glyph = String("═") if focused else String("─")
     for x in range(panel.a.x, panel.b.x):
         painter.set(canvas, x, top, Cell(top_glyph, border, 1))
+    # Optional window-style ``[■]`` close button at the top-LEFT — same
+    # affordance as ``Window``'s close button so a user that recognises
+    # it on one will recognise it on the other. Painted only when the
+    # caller opted in (``dock.close_button_id`` non-empty); without
+    # opt-in the title text starts where it always has.
+    var title_x = panel.a.x + 2
+    var has_close = False
+    if len(dock.close_button_id.as_bytes()) > 0 \
+            and panel.b.x - panel.a.x >= 5:
+        paint_close_button(canvas, Point(panel.a.x, top), border)
+        has_close = True
+        title_x = panel.a.x + 5
     var title_text = String(" ") + title + String(" ")
     var title_advanced = painter.put_text(
-        canvas, Point(panel.a.x + 2, top), title_text, title_attr,
+        canvas, Point(title_x, top), title_text, title_attr,
     )
     # Command strip after the title with a ``- `` separator. Reserve
     # 11 cells on the right for chrome (3 + 3 buttons + a hotkey
     # hint + a breathing cell).
     dock.last_cmd_hits = List[TitleCommandHit]()
-    var cmd_x = panel.a.x + 2 + title_advanced
+    var cmd_x = title_x + title_advanced
     var hint_cells = 0
     var hint_bytes = hotkey_label.as_bytes()
     if len(hint_bytes) > 0:
@@ -624,6 +657,11 @@ fn paint_bottom_dock_chrome(
         canvas, painter, top, panel, dock.state, border,
         trailing_reserve=hint_cells,
     )
+    # ``paint_panel_window_buttons`` resets ``chrome_hits``, so record
+    # the close-button x after it returns.
+    if has_close:
+        dock.chrome_hits.close_btn_x = panel.a.x + 1
+        dock.chrome_hits.top_y = top
     var pane_w = panel.b.x - panel.a.x
     if len(hint_bytes) > 0:
         if pane_w >= 12:
@@ -685,6 +723,12 @@ fn handle_bottom_dock_chrome_mouse(
         )
         return DockChromeMouseResult(True, False)
     if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
+        if dock.chrome_hits.on_close(event.pos):
+            # Window-style ``[■]`` close. Dispatched through the same
+            # ``pending_command_id`` channel as the title-command strip
+            # so the host only needs to poll one slot per tick.
+            dock.pending_command_id = dock.close_button_id
+            return DockChromeMouseResult(True, True)
         if dock.chrome_hits.on_min(event.pos):
             if dock.state == PANEL_STATE_MINIMIZED:
                 dock.set_state(PANEL_STATE_NORMAL)
@@ -1162,7 +1206,7 @@ struct Window(ImplicitlyCopyable, Movable):
         # cells) or the number/maximize indicator (right) on small
         # windows — those always win the row.
         var title_padded = String(" ") + display_title + String(" ")
-        if self.rect.width() >= len(title_padded.as_bytes()) + 6:
+        if self.rect.width() >= display_columns(title_padded) + 6:
             paint_window_title(
                 canvas, self.rect, title_padded, border, body_bg,
             )
@@ -1177,7 +1221,7 @@ struct Window(ImplicitlyCopyable, Movable):
         # Format: ``<num>=[▲]`` while normal, ``<num>=[▼]`` while
         # maximized. Unfocused windows show only the bare number.
         var num_str = String(number)
-        var num_len = len(num_str.as_bytes())
+        var num_len = display_columns(num_str)
         if focused and self.rect.width() >= num_len + 9:
             var arrow: String
             if self.is_maximized:
@@ -1259,7 +1303,7 @@ struct Window(ImplicitlyCopyable, Movable):
         var pos_text = String(self.editor.cursor_row + 1) \
             + String(":") + String(self.editor.cursor_col + 1)
         var pos_x = self.rect.a.x + 4
-        var pos_len = len(pos_text.as_bytes())
+        var pos_len = display_columns(pos_text)
         var sb_left = pos_x + pos_len + 1
         var sb_right = self.rect.b.x - 2
         var visible = self.rect.width() - 2
@@ -1764,17 +1808,26 @@ struct WindowManager(Movable):
         new_z.append(idx)
         self.z_order = new_z^
 
-    fn paint(self, mut canvas: Canvas, subdued: List[Bool] = List[Bool]()):
+    fn paint(
+        self, mut canvas: Canvas,
+        subdued: List[Bool] = List[Bool](),
+        windows_active: Bool = True,
+    ):
         """Paint every window in z-order. ``subdued[i]`` toggles the
         dim-chrome style for ``windows[i]`` — the caller (Desktop)
         decides the policy (out-of-project, in a venv, …). An empty
-        list means "no window is subdued."""
+        list means "no window is subdued." ``windows_active=False``
+        forces every window to paint as unfocused — used when a
+        docked pane (file tree, debug pane, terminal pane) is the
+        keyboard-live widget, so the editor border / scrollbar tint
+        matches actual focus."""
         var titles = compute_display_titles(self.windows)
         for k in range(len(self.z_order)):
             var i = self.z_order[k]
             var sub = subdued[i] if i < len(subdued) else False
+            var fwin = windows_active and (i == self.focused)
             self.windows[i].paint(
-                canvas, titles[i], i == self.focused, i + 1, sub,
+                canvas, titles[i], fwin, i + 1, sub,
             )
 
     fn paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):

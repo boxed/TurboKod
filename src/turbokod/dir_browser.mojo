@@ -37,6 +37,7 @@ from .file_io import (
 from .geometry import Point, Rect
 from .painter import Painter
 from .posix import getenv_value, realpath
+from .string_utils import display_columns
 from .type_ahead import TypeAhead, starts_with_ci
 
 
@@ -98,7 +99,7 @@ fn jump_shortcuts(
         # Each button claims its label width plus one column for
         # the right-edge shadow, plus one column of separation
         # before the next button.
-        x += len(labels[i].as_bytes()) + 2
+        x += display_columns(labels[i]) + 2
     return out^
 
 

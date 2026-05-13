@@ -36,7 +36,9 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <unistd.h>
 
 /* Non-blocking write helper for the LSP / DAP outbound queue.
@@ -84,6 +86,154 @@ int tk_set_nonblock(int fd) {
     if (flags == -1) return 0;
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return 0;
     return 1;
+}
+
+/* Forward declarations for the kill-on-parent-death registry — defined
+ * a few lines below. ``tk_pty_spawn`` needs to call ``tk_track_child_add``
+ * from inside the parent post-fork, so we declare it here. */
+void tk_track_child_add(int pid);
+
+/* Spawn ``argv[0]`` with a fresh controlling pty.
+ *
+ * Returns 0 on success, -1 on failure (errno preserved). On success:
+ *   *pid_out          = the child's pid
+ *   *master_fd_out    = parent-side end of the pty (read child output,
+ *                       write child input). Bidirectional. O_NONBLOCK
+ *                       is set so the UI loop never stalls reading it.
+ *
+ * Why a fresh function rather than reusing the existing posix_spawn
+ * path: a pty child must call ``setsid()`` *and* ``ioctl(TIOCSCTTY)``
+ * on the slave fd before exec to acquire the slave as its controlling
+ * terminal. ``posix_spawn`` doesn't expose ``setsid`` portably (Apple
+ * has a private ``POSIX_SPAWN_SETSID`` extension that doesn't do
+ * TIOCSCTTY) so we fall back to plain ``fork`` + ``execvp``. The
+ * window between fork and exec is the danger zone the project
+ * comment in posix.mojo warns about — we keep that window minimal
+ * and stay inside C (no Mojo runtime calls).
+ *
+ * ``cwd`` (or NULL) is chdir'd into in the child before exec. ``term``
+ * (or NULL) is set as ``TERM`` in the child's environment so programs
+ * that key off it (``tput``, ``vim``, ``claude``) pick the right
+ * terminfo entry. Initial window size is ``cols`` × ``rows``; pass 0/0
+ * to leave it at the kernel default.
+ */
+int tk_pty_spawn(
+    const char *file,
+    char *const argv[],
+    const char *cwd,
+    int cols, int rows,
+    const char *term,
+    int *pid_out,
+    int *master_fd_out
+) {
+    if (!file || !argv || !pid_out || !master_fd_out) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* POSIX 1003.1-2008 pty opening — works on Linux + macOS without
+     * linking libutil. ``O_NOCTTY`` on the master is critical: opening
+     * the master fd shouldn't make this process the controlling
+     * terminal owner. */
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) return -1;
+    if (grantpt(master) < 0) { int e = errno; close(master); errno = e; return -1; }
+    if (unlockpt(master) < 0) { int e = errno; close(master); errno = e; return -1; }
+    const char *slave_name = ptsname(master);
+    if (!slave_name) { int e = errno; close(master); errno = e; return -1; }
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    if (slave < 0) { int e = errno; close(master); errno = e; return -1; }
+
+    /* Set the initial window size on the slave so the child's first
+     * ``tcgetwinsize`` returns the right values. Without this, programs
+     * that compute layout off ``$LINES``/``$COLUMNS`` first paint at
+     * the kernel default of 0×0 then need a SIGWINCH to repaint. */
+    if (cols > 0 && rows > 0) {
+        struct winsize ws;
+        ws.ws_col    = (unsigned short) cols;
+        ws.ws_row    = (unsigned short) rows;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+        /* Best-effort — ioctl failure on the slave isn't fatal, the
+         * child will just see 0×0 and a later SIGWINCH can fix it. */
+        (void) ioctl(slave, TIOCSWINSZ, &ws);
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        int e = errno;
+        close(slave); close(master);
+        errno = e;
+        return -1;
+    }
+    if (pid == 0) {
+        /* Child. From here until execvp we must only use
+         * async-signal-safe APIs in principle, but Mojo is
+         * single-threaded so libc state isn't racy — we permit
+         * ``setenv`` and ``chdir`` which need locking that's not
+         * fork-safe in multi-threaded programs.
+         *
+         * 1) New session so the slave can become our controlling
+         *    terminal. setsid drops any inherited controlling tty. */
+        if (setsid() < 0) _exit(127);
+        /* 2) Acquire the slave as our controlling terminal. On Linux
+         *    + macOS this is the documented ioctl; arg ``0`` means
+         *    "steal if necessary," which doesn't matter here because
+         *    we just did setsid and have no controlling tty yet. */
+        if (ioctl(slave, TIOCSCTTY, 0) < 0) {
+            /* Some BSD-derived kernels (older macOS) deliver the
+             * controlling-tty acquisition implicitly when the first
+             * tty fd is opened in a session leader. Don't abort. */
+        }
+        /* 3) Wire stdin/stdout/stderr to the slave. */
+        if (dup2(slave, 0) < 0) _exit(127);
+        if (dup2(slave, 1) < 0) _exit(127);
+        if (dup2(slave, 2) < 0) _exit(127);
+        if (slave > 2) close(slave);
+        close(master);
+        /* 4) Optional chdir. Failure isn't fatal — the child can still
+         *    run, just from the parent's cwd. */
+        if (cwd && *cwd) (void) chdir(cwd);
+        /* 5) Configure TERM. Setting it in the child means we don't
+         *    have to rebuild a full envp array — the parent's environ
+         *    is inherited verbatim, we just override one variable. */
+        if (term && *term) (void) setenv("TERM", term, 1);
+        execvp(file, argv);
+        /* Only reached on exec failure. 127 is the conventional
+         * "command not found" status used by ``sh``. */
+        _exit(127);
+    }
+    /* Parent. */
+    close(slave);
+    /* Non-blocking master so the per-tick drain in the pane never
+     * stalls. ``read(2)`` on a non-blocking pty returns ``EAGAIN`` when
+     * empty, which the drain loop interprets as "no more for now." */
+    int flags = fcntl(master, F_GETFL, 0);
+    if (flags >= 0) (void) fcntl(master, F_SETFL, flags | O_NONBLOCK);
+    /* Register the child with the kill-on-parent-death registry so
+     * quitting the host while ``claude`` (or any pty child) is alive
+     * doesn't orphan it. */
+    tk_track_child_add(pid);
+    *pid_out       = pid;
+    *master_fd_out = master;
+    return 0;
+}
+
+/* Apply a new window size to ``fd`` (the parent-side master). Sends
+ * SIGWINCH to the foreground process group of the pty as a side effect
+ * — that's how programs (vim, less, claude) learn to repaint. Returns
+ * 0 on success, -1 on failure (errno preserved). */
+int tk_pty_set_winsize(int fd, int cols, int rows) {
+    if (fd < 0 || cols <= 0 || rows <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct winsize ws;
+    ws.ws_col    = (unsigned short) cols;
+    ws.ws_row    = (unsigned short) rows;
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
+    if (ioctl(fd, TIOCSWINSZ, &ws) < 0) return -1;
+    return 0;
 }
 
 static int *g_pids = NULL;

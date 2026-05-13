@@ -37,6 +37,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .type_ahead import (
     TypeAhead, is_printable_ascii, starts_with_ci, type_ahead_pick,
 )
@@ -199,7 +200,7 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         # (1 left pad + label + 1 right pad + 2 borders).
         var width = anchor.width()
         for i in range(len(self.options)):
-            var w = len(self.options[i].as_bytes()) + 4
+            var w = display_columns(self.options[i]) + 4
             if w > width:
                 width = w
         var x = anchor.a.x

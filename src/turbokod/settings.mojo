@@ -62,6 +62,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .string_utils import display_columns
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .window import paint_window_title
 
@@ -553,7 +554,7 @@ struct Settings(Movable):
         # Anchor the strip directly to the right of the label, leaving
         # one column of padding so the value isn't flush against the
         # colon.
-        var dd_x = inner.a.x + len(label.as_bytes()) + 1
+        var dd_x = inner.a.x + display_columns(label) + 1
         var dd_w = _SAVE_DD_W
         if dd_x + dd_w > inner.b.x:
             dd_w = inner.b.x - dd_x

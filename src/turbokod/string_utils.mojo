@@ -58,6 +58,40 @@ fn split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
+fn display_columns(s: String) -> Int:
+    """Count terminal cells ``s`` occupies when painted by
+    ``Canvas.put_text`` — i.e. one cell per UTF-8 codepoint.
+
+    Use this (not ``len(s.as_bytes())``) anywhere the result is fed
+    into layout: dropdown widths, title-bar offsets, status-bar
+    right-alignment, ``put_text`` start positions computed by
+    subtracting label width from a right edge. Byte length over-counts
+    multi-byte glyphs (an em dash adds 3, ``ä`` adds 2), which used to
+    reserve too many cells for non-ASCII labels and — in the menu's
+    per-byte paint loop — emit one cell per continuation byte.
+
+    East-Asian width is not modeled (``put_text`` itself doesn't),
+    so wide CJK glyphs still over-advance the cursor by one cell."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var i = 0
+    var cols = 0
+    while i < n:
+        var c = Int(b[i])
+        if c < 0x80:
+            i += 1
+        elif (c & 0xE0) == 0xC0:
+            i += 2
+        elif (c & 0xF0) == 0xE0:
+            i += 3
+        elif (c & 0xF8) == 0xF0:
+            i += 4
+        else:
+            i += 1
+        cols += 1
+    return cols
+
+
 fn parse_int_all(s: String) -> Int:
     """Parse ``s`` as a non-negative decimal; return ``-1`` if any byte
     isn't a digit or the string is empty."""

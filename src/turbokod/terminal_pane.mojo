@@ -1,30 +1,30 @@
-"""Bottom-docked terminal pane: a long-lived shell with command input.
+"""Bottom-docked terminal pane: a long-lived shell on a real pty.
 
 Layout (when active, docked at the bottom above the status bar)::
 
-    ─ Terminal ─────────────────────────────── - [Clear] [Restart]  T
-    $ ls
-    foo.txt   bar.txt
-    $ git status
-    On branch main
-    nothing to commit, working tree clean
-    > █
+    ─[■] Terminal ───────────────────────────── - [Clear] [Restart]  T
+    $ claude
+    ✻ Welcome to Claude Code!
+       /help for help
+    ╭───────────────────────────────────────────────────────╮
+    │ >                                                     │
+    ╰───────────────────────────────────────────────────────╯
 
-The pane reuses the same chrome (title bar, min/max state, resize drag,
-ESC ladder, title-command strip, hotkey hint) as the debug pane via the
-shared ``BottomDockedPanel`` helpers in ``window.mojo``. The body is
-two stacked widgets: a ``TextLog`` showing history above a one-line
-``TextField`` for the next command.
+The pane reuses the same chrome (title bar, min/max state, resize
+drag, ESC ladder, title-command strip, hotkey hint) as the debug pane
+via the shared ``BottomDockedPanel`` helpers in ``window.mojo``. The
+body is owned by a ``Vt`` emulator that turns the pty child's output
+(including cursor-positioning escapes) into a 2D ``Cell`` grid we
+paint each frame.
 
-A single persistent shell subprocess (``$SHELL``, default ``/bin/bash``)
-backs the pane. Commands are sent via the child's stdin; stdout / stderr
-are drained per frame and appended to the log. No PTY: simple commands
-that don't depend on a controlling terminal (``ls``, ``git``, ``make``,
-…) work fine; interactive curses programs (``vim``, ``htop``) won't —
-the shell will note "not a tty" and the program will exit immediately.
-For an editor-grade docked terminal that's the right trade-off; a real
-PTY emulator is several orders of magnitude more work for the cases the
-user has open in another window anyway.
+A single persistent shell subprocess (``$SHELL`` if set, else
+``/bin/sh``) is spawned under a controlling pty (``PtyProcess`` →
+``tk_pty_spawn``). The child sees a real ``isatty(0)`` and can run
+interactive programs — ``claude``, ``vim``, ``less``, ``htop``,
+``fzf``, … — that the previous pipe-backed implementation couldn't
+host. The pane is a thin shim: drain bytes off the master fd each
+tick, feed them into the emulator, paint the grid; forward
+keystrokes the other way.
 
 UI intents flow back to ``Desktop`` through the same pattern as the
 debug pane: a ``pending_command_id`` latched by chrome clicks, polled
@@ -33,31 +33,33 @@ and cleared by the host each tick.
 
 from std.collections.list import List
 from std.ffi import external_call
+from std.memory.span import Span
 
 from .canvas import Canvas
+from .cell import Cell
 from .claude_detect import (
     CLAUDE_NONE, claude_state_label, detect_claude_state,
 )
 from .clipboard import clipboard_copy
-from .colors import (
-    Attr, BLACK, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
-    LIGHT_YELLOW, WHITE,
-)
+from .colors import Attr, BLACK, LIGHT_GRAY, WHITE
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP,
-    KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE,
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8,
+    KEY_F9, KEY_F10, KEY_F11, KEY_F12,
+    KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
+    KEY_RIGHT, KEY_TAB, KEY_UP,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .lsp import LspProcess
 from .painter import Painter
 from .posix import (
-    SIGTERM, alloc_zero_buffer, close_fd, kill_pid,
-    poll_stdin, read_into, untrack_child, waitpid_nohang,
+    alloc_zero_buffer, getenv_value, poll_stdin, read_into,
 )
-from .text_field import TextField
-from .text_view import TextLog
+from .pty import PtyProcess
+from .vt import Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
     handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
@@ -65,111 +67,108 @@ from .window import (
 )
 
 
-# --- output category -----------------------------------------------------
-# Same idiom as the debug pane: a UInt8 tag per stream so the renderer
-# can color stderr / echoes differently without a string compare on every
-# row.
-comptime TERM_OUT_STDOUT  = UInt8(0)
-comptime TERM_OUT_STDERR  = UInt8(1)
-comptime TERM_OUT_ECHO    = UInt8(2)
-"""Echoed user input — painted in a hint color so the user can tell
-their command from the shell's output."""
-
-
-comptime _MAX_OUTPUT_LINES = 1000
-"""Backlog cap. Larger than the debug pane (500) because a terminal
-session typically runs more commands than a debug session and the
-output is the only place the user can scroll back through it."""
-
 comptime _TERMINAL_CLEAR = String("terminal:clear")
 comptime _TERMINAL_RESTART = String("terminal:restart")
 comptime TERMINAL_PANE_CLOSE = String("terminal:close")
-"""Title-command id for the pane's ``[X]`` button. Public so the host
-(``Desktop.terminal_tick``) can recognize the click and remove the
-pane from its list — the pane can't pop itself off a container it
-doesn't know about."""
+"""Pending-command id dispatched when the pane's window-style ``[■]``
+close button (top-LEFT, painted by the shared bottom-dock chrome) is
+clicked. Public so the host (``Desktop.terminal_tick``) can recognize
+the click and remove the pane from its list — the pane can't pop
+itself off a container it doesn't know about."""
 
 
 struct TerminalPane(ImplicitlyCopyable, Movable):
-    """Single bottom-docked terminal. Owns one shell subprocess, a
-    ``TextLog`` for output history, and a ``TextField`` for the next
-    command. The shared chrome lives in ``dock``."""
+    """Single bottom-docked terminal. Owns one pty child, a ``Vt``
+    emulator, and a tiny grid selection state. The shared chrome
+    lives in ``dock``."""
     var visible: Bool
     var dock: BottomDockedPanel
     var focused: Bool
 
-    var process: LspProcess
-    """The shell subprocess. Spawned lazily on first ``ensure_started``;
-    a closed process re-spawns on the next command."""
-    var output: TextLog
-    var input: TextField
+    var pty: PtyProcess
+    """The shell subprocess on a controlling pty. Spawned lazily on
+    first ``ensure_started``; a closed process re-spawns on the next
+    ``ensure_started``. ``master_fd`` is bidirectional (reads child
+    output, writes child input)."""
+    var vt: Vt
+    """Terminal emulator state. The pane's body is whatever this grid
+    says, top-left anchored. Re-sized whenever the body rect changes
+    (paint catches that and calls ``vt.resize`` + ``pty.set_winsize``
+    so the child sees a SIGWINCH)."""
 
-    var _stderr_pending: String
-    """Tail-end of a stderr drain that didn't end on a newline — held
-    so we can prepend it to the next drain and split on newlines
-    cleanly. (Each ``TextLog.append`` interpreted with a trailing
-    fragment would create a stray un-terminated line.)"""
-    var _stdout_pending: String
+    # --- selection state (grid coordinates) ----------------------------
+    var sel_active: Bool
+    """True when a finished selection is on screen — drives the
+    inverted overlay during paint and the value returned by
+    ``has_selection``."""
+    var sel_dragging: Bool
+    """True between LMB-press and LMB-release while the user is
+    extending the selection by drag. Painted live."""
+    var sel_anchor_r: Int
+    var sel_anchor_c: Int
+    var sel_focus_r: Int
+    var sel_focus_c: Int
 
-    var title: String
-    """Title painted in the pane's chrome — defaults to ``"Terminal"``
-    and is updated whenever a child writes an OSC 0/1/2 escape on
-    stdout (``ESC ] 0 ; <title> BEL``). Common shells emit this via
-    ``PS1``/``precmd`` to keep tab-titles in sync with the cwd or last
-    command; we honor the same convention so the pane reads like a
-    real tab title."""
-    var _osc_partial: String
-    """Buffer for an OSC escape that spanned a drain boundary. Holds
-    everything from the ``ESC ]`` up to (but not including) the
-    terminator; flushed back into ``self.title`` once the terminator
-    arrives in a later drain. Without this, a slow shell that wrote
-    the escape across two reads would emit the raw bytes into the
-    output log instead of updating the title."""
+    # --- spawn config --------------------------------------------------
+    var cwd: String
+    """Working directory the shell starts in. Set by the host
+    (``Desktop._open_terminal_pane``) to the open project's root so
+    new terminals land where the user is editing; empty string means
+    "inherit the parent's cwd" (which is usually the directory the
+    editor was launched from). Honored on every ``ensure_started`` —
+    Restart also lands you back in the project dir."""
 
-    # --- bookkeeping for paint-time hit-tests --------------------------
-    var _last_input_y: Int       # screen y of the input strip
-    var _last_input_x0: Int      # screen x where the prompt ends
-    var _last_input_x1: Int      # screen x where the input strip ends
+    # --- paint-time hit-test bookkeeping -------------------------------
+    var _last_body: Rect
+    """Body rect from the last ``paint`` — selection mouse handlers
+    convert screen positions back to grid coords via this. ``Rect.empty``
+    means the body wasn't laid out (minimized / first frame)."""
     var _last_panel_top: Int
 
     fn __init__(out self):
         self.visible = False
         self.dock = BottomDockedPanel(preferred_height=14)
+        # Window-style ``[■]`` close button at the top-LEFT, routed
+        # back to the host as ``TERMINAL_PANE_CLOSE`` through the same
+        # ``pending_command_id`` slot the title-command strip uses.
+        self.dock.close_button_id = TERMINAL_PANE_CLOSE
         self.focused = False
-        self.process = LspProcess()
-        self.output = TextLog(
-            default_attr=Attr(WHITE, BLACK), max_lines=_MAX_OUTPUT_LINES,
-        )
-        self.input = TextField()
-        self._stderr_pending = String("")
-        self._stdout_pending = String("")
-        self.title = String("Terminal")
-        self._osc_partial = String("")
-        self._last_input_y = 0
-        self._last_input_x0 = 0
-        self._last_input_x1 = 0
+        self.pty = PtyProcess()
+        # Initial 80×24 is the universal default — programs spawned
+        # before the first paint compute their layout off this; the
+        # first paint resizes to the actual body dimensions and
+        # children get a SIGWINCH.
+        self.vt = Vt(80, 24)
+        self.sel_active = False
+        self.sel_dragging = False
+        self.sel_anchor_r = 0
+        self.sel_anchor_c = 0
+        self.sel_focus_r = 0
+        self.sel_focus_c = 0
+        self.cwd = String("")
+        self._last_body = Rect.empty()
         self._last_panel_top = 0
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
         self.dock = copy.dock
         self.focused = copy.focused
-        # ``LspProcess`` isn't copyable; we reset to a fresh process in
-        # the copy because copying live pipe fds would alias them and
-        # the destructor of either copy would close them out from under
-        # the other. Copies are only used by Mojo's value semantics in
-        # tests and internal moves; in production the pane is owned
-        # singleton-style by ``Desktop``.
-        self.process = LspProcess()
-        self.output = copy.output
-        self.input = copy.input.copy()
-        self._stderr_pending = copy._stderr_pending
-        self._stdout_pending = copy._stdout_pending
-        self.title = copy.title
-        self._osc_partial = copy._osc_partial
-        self._last_input_y = copy._last_input_y
-        self._last_input_x0 = copy._last_input_x0
-        self._last_input_x1 = copy._last_input_x1
+        # ``PtyProcess`` isn't safely copyable: the master fd is a
+        # kernel handle; if both copies' destructors closed it the
+        # original would lose the child. Production keeps the pane
+        # singleton-style on ``Desktop``; copies are only used by
+        # Mojo value semantics in tests. Reset to a fresh process in
+        # the copy so neither destructor double-closes.
+        self.pty = PtyProcess()
+        self.vt = copy.vt
+        self.sel_active = copy.sel_active
+        self.sel_dragging = copy.sel_dragging
+        self.sel_anchor_r = copy.sel_anchor_r
+        self.sel_anchor_c = copy.sel_anchor_c
+        self.sel_focus_r = copy.sel_focus_r
+        self.sel_focus_c = copy.sel_focus_c
+        self.cwd = copy.cwd
+        self._last_body = copy._last_body
         self._last_panel_top = copy._last_panel_top
 
     # --- chrome forwarders ---------------------------------------------
@@ -202,317 +201,129 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         try:
             self.ensure_started()
         except e:
-            self.output.append(
-                String("[terminal] failed to start shell: ") + String(e),
-                Attr(LIGHT_RED, BLACK),
+            # No log to write the error into anymore — the Vt grid is
+            # the only output surface. Inject a status line so the
+            # user sees what went wrong instead of an empty pane.
+            self.vt.feed_string(
+                String("[terminal] failed to start shell: ") + String(e)
+                + String("\r\n"),
             )
 
     fn close(mut self):
-        """Hide the pane and terminate the shell. The output log is
-        preserved so the user can re-open and scroll back through it."""
+        """Hide the pane and terminate the shell. The grid content is
+        preserved (Vt state is intact) so re-opening shows what was on
+        screen."""
         self.visible = False
         self.focused = False
-        self._terminate_shell()
+        self.pty.terminate()
 
     fn ensure_started(mut self) raises:
         """Spawn the shell if not already running.
 
-        Uses ``/bin/sh`` unconditionally, reading commands from stdin.
-        We don't honor ``$SHELL`` here because shell startup-flag
-        conventions diverge (``--norc`` for bash, ``-f`` for zsh,
-        nothing for fish) and a flag we pass to the wrong shell
-        triggers an immediate exit; the pane would then be unusable
-        on whichever user's machine happened to default to that
-        shell. ``sh`` is universally available, reads stdin, and has
-        no rc files to interpolate, so ``echo foo | sh`` Just Works
-        on every POSIX system. Power users that want their full shell
-        environment can ``exec $SHELL`` inside the pane.
-        """
-        if self.process.alive and self.process.pid > 0:
+        Honors ``$SHELL`` when set (most users want their login
+        shell's environment), falling back to ``/bin/sh`` if not.
+        With a real pty the child sees ``isatty(0) == True`` so rc
+        files run normally — we can pass the shell to itself without
+        worrying about shell-specific flags."""
+        if self.pty.alive and self.pty.pid > 0:
             return
-        var shell = String("/bin/sh")
+        var shell = getenv_value(String("SHELL"))
+        if len(shell.as_bytes()) == 0:
+            shell = String("/bin/sh")
         var argv = List[String]()
         argv.append(shell)
-        argv.append(String("-s"))
-        self.process = LspProcess.spawn(argv)
-        self.output.append(
-            String("[") + shell + String(" -s]"),
-            Attr(LIGHT_GREEN, BLACK),
+        # ``-l`` would make the shell run as a login shell (sourcing
+        # ~/.profile / ~/.zprofile). We deliberately don't — most users
+        # already have an interactive ~/.zshrc / ~/.bashrc that does
+        # what they want, and login mode adds startup latency.
+        self.pty = PtyProcess.spawn(
+            argv, cwd=self.cwd,
+            cols=self.vt.cols, rows=self.vt.rows,
         )
-
-    fn _terminate_shell(mut self):
-        if not self.process.alive:
-            return
-        if self.process.pid > 0:
-            _ = kill_pid(self.process.pid, SIGTERM)
-            var _pair = waitpid_nohang(self.process.pid)
-            untrack_child(self.process.pid)
-        self.process.alive = False
-        if self.process.stdin_fd >= 0:
-            _ = close_fd(self.process.stdin_fd)
-            self.process.stdin_fd = -1
-        if self.process.stdout_fd >= 0:
-            _ = close_fd(self.process.stdout_fd)
-            self.process.stdout_fd = -1
-        if self.process.stderr_fd >= 0:
-            _ = close_fd(self.process.stderr_fd)
-            self.process.stderr_fd = -1
 
     fn restart(mut self):
         """Kill the current shell and spawn a fresh one. Useful when
-        the shell ends up in a wedged state (long-running command
-        stuck waiting on a tty, runaway loop, etc.)."""
-        self._terminate_shell()
+        the shell ends up in a wedged state."""
+        self.pty.terminate()
+        # Wipe the visible grid so the new session starts clean.
+        # Equivalent to ``ESC c`` (RIS) which we honor anyway, but
+        # explicit reset is more obvious for a UI-driven restart.
+        self.vt = Vt(self.vt.cols, self.vt.rows)
         try:
             self.ensure_started()
         except e:
-            self.output.append(
-                String("[terminal] failed to restart shell: ") + String(e),
-                Attr(LIGHT_RED, BLACK),
+            self.vt.feed_string(
+                String("[terminal] failed to restart shell: ") + String(e)
+                + String("\r\n"),
             )
 
     fn clear(mut self):
-        """Wipe the output history. Doesn't touch the shell or its
-        scrollback in the kernel pipe — purely a UI clear."""
-        self.output.clear()
+        """Wipe the visible grid. Doesn't kill the shell — equivalent
+        to pressing Ctrl+L in most shells (and what the user expects
+        from a Clear button)."""
+        self.vt.feed_string(String("\x1b[H\x1b[2J"))
 
     # --- per-tick drain ------------------------------------------------
 
     fn tick(mut self):
-        """Drain whatever's available on the shell's pipes right now
-        and append it to the log. Called by ``Desktop`` each frame so
-        output appears live without the user pressing a key."""
-        if not self.process.alive or self.process.pid <= 0:
+        """Drain whatever's on the pty master right now and feed it
+        into the emulator. Called by ``Desktop`` each frame so output
+        appears live without the user pressing a key. Also flushes
+        any DSR/DA/clipboard side-effects the parse may have queued."""
+        if not self.pty.alive or self.pty.master_fd < 0:
             return
-        # Detect shell exit; surface it once.
-        var pair = waitpid_nohang(self.process.pid)
-        if Int(pair[0]) == Int(self.process.pid):
-            untrack_child(self.process.pid)
-            self.process.alive = False
-            var code = (Int(pair[1]) >> 8) & 0xFF
-            self.output.append(
-                String("[shell exited code=") + String(code) + String("]"),
-                Attr(LIGHT_GRAY, BLACK),
-            )
-            return
-        var out = _drain_fd(self.process.stdout_fd)
-        if len(out.as_bytes()) > 0:
-            # OSC title escapes (``ESC ] 0/1/2 ; <text> BEL`` or ``... ST``)
-            # only travel on stdout — strip + apply them before the
-            # chunk hits the log, otherwise the user sees raw escape
-            # bytes scroll past every time their PS1 fires.
-            var cleaned = self._consume_osc_titles(out^)
-            if len(cleaned.as_bytes()) > 0:
-                self._append_stream(cleaned^, Attr(WHITE, BLACK), True)
-        var err = _drain_fd(self.process.stderr_fd)
-        if len(err.as_bytes()) > 0:
-            self._append_stream(err^, Attr(LIGHT_RED, BLACK), False)
-
-    fn _consume_osc_titles(mut self, var chunk: String) -> String:
-        """Pull ``ESC ] 0/1/2 ; <title> (BEL | ESC \\)`` sequences out of
-        ``chunk`` and apply each to ``self.title``. Returns the chunk
-        with the matched escapes removed.
-
-        Buffers a partial escape across drain boundaries via
-        ``_osc_partial`` — the title sequence is small (well under a
-        pipe atomic write), but a busy shell can interleave it with a
-        large stdout flush such that the closing terminator lands in
-        the next read."""
-        var buf = self._osc_partial + chunk^
-        var bytes = buf.as_bytes()
-        var n = len(bytes)
-        var out = String("")
-        var i = 0
-        while i < n:
-            var b = Int(bytes[i])
-            # Looking for ESC (0x1B) followed by ']'.
-            if b != 0x1B or i + 1 >= n:
-                # Plain byte (or trailing ESC) — copy and advance.
-                if b == 0x1B and i + 1 >= n:
-                    # Trailing ESC at end of buffer — hold it; the ']' /
-                    # title / terminator might arrive on the next drain.
-                    self._osc_partial = String(StringSlice(
-                        ptr=bytes.unsafe_ptr() + i, length=n - i,
-                    ))
-                    return out^
-                out = out + String(StringSlice(
-                    ptr=bytes.unsafe_ptr() + i, length=1,
-                ))
-                i += 1
-                continue
-            if Int(bytes[i + 1]) != 0x5D:  # ']'
-                # ESC followed by something else — not OSC. Pass both
-                # bytes through; consumers downstream don't render
-                # escapes so they'll just show as garbage, but that's
-                # already true for any non-OSC escape from the shell.
-                out = out + String(StringSlice(
-                    ptr=bytes.unsafe_ptr() + i, length=1,
-                ))
-                i += 1
-                continue
-            # Walk forward to a terminator: BEL (0x07) or ST (ESC \).
-            # The number+ ';' prefix is permissive — we accept any
-            # OSC parameter and only honor titles when it's 0/1/2.
-            var term_end = -1   # exclusive end of the OSC including terminator
-            var title_term = -1 # exclusive end of just the body (before terminator)
-            var j = i + 2
-            while j < n:
-                var c = Int(bytes[j])
-                if c == 0x07:
-                    title_term = j
-                    term_end = j + 1
-                    break
-                if c == 0x1B and j + 1 < n and Int(bytes[j + 1]) == 0x5C:
-                    title_term = j
-                    term_end = j + 2
-                    break
-                j += 1
-            if term_end < 0:
-                # Unterminated — buffer everything from ESC onward and
-                # try again next drain.
-                self._osc_partial = String(StringSlice(
-                    ptr=bytes.unsafe_ptr() + i, length=n - i,
-                ))
-                return out^
-            # Parse the body: ``<param>;<title>``.
-            var body_start = i + 2
-            var sep = -1
-            var k = body_start
-            while k < title_term:
-                if Int(bytes[k]) == 0x3B:  # ';'
-                    sep = k
-                    break
-                k += 1
-            if sep >= 0:
-                var param_len = sep - body_start
-                # Accept 0, 1, 2 (single-byte params).
-                if param_len == 1:
-                    var p = Int(bytes[body_start])
-                    if p == 0x30 or p == 0x31 or p == 0x32:
-                        var t_start = sep + 1
-                        var t_len = title_term - t_start
-                        if t_len < 0:
-                            t_len = 0
-                        # Empty title means "reset to default" — honor
-                        # by restoring the static label so the chrome
-                        # doesn't blank out.
-                        if t_len == 0:
-                            self.title = String("Terminal")
-                        else:
-                            self.title = String(StringSlice(
-                                ptr=bytes.unsafe_ptr() + t_start,
-                                length=t_len,
-                            ))
-            # Skip the consumed OSC.
-            i = term_end
-        self._osc_partial = String("")
-        return out^
-
-    fn _append_stream(
-        mut self, var chunk: String, attr: Attr, is_stdout: Bool,
-    ):
-        """Append a drain chunk to the log, holding any trailing
-        non-newline fragment for the next drain. Without that buffering
-        a slow stdout write that lands mid-line would produce two short
-        log entries instead of one."""
-        var pending = self._stdout_pending if is_stdout \
-            else self._stderr_pending
-        var combined = pending + chunk^
-        var bytes = combined.as_bytes()
-        var n = len(bytes)
-        var split = n
-        var i = n - 1
-        while i >= 0:
-            if bytes[i] == 0x0A:
-                split = i + 1
+        var scratch = alloc_zero_buffer(4096)
+        var total = 0
+        # 64 KB cap per tick so a child flooding output (e.g. ``cat
+        # big.log``) doesn't lock up the UI loop — we'll drain the
+        # rest next frame.
+        while poll_stdin(self.pty.master_fd, Int32(0)) and total < 65536:
+            var n = read_into(self.pty.master_fd, scratch, 4096)
+            if n <= 0:
+                if n == 0:
+                    # EOF / EIO from the slave side closing — child
+                    # gone. The next ``ensure_started`` will respawn.
+                    self.pty.alive = False
                 break
-            i -= 1
-        if split == 0:
-            # No newline anywhere in the combined buffer — hold it all.
-            if is_stdout:
-                self._stdout_pending = combined^
-            else:
-                self._stderr_pending = combined^
-            return
-        var complete = String(StringSlice(
-            ptr=bytes.unsafe_ptr(), length=split,
-        ))
-        var leftover = String(StringSlice(
-            ptr=bytes.unsafe_ptr() + split, length=n - split,
-        ))
-        # ``TextLog.append`` trims a single trailing empty entry on the
-        # final newline; that's exactly what we want here so a chunk
-        # ending in ``\n`` doesn't append a phantom blank line.
-        self.output.append(complete^, attr)
-        if is_stdout:
-            self._stdout_pending = leftover^
-        else:
-            self._stderr_pending = leftover^
-
-    # --- command submission --------------------------------------------
-
-    fn _submit_input(mut self):
-        """Send the current input line to the shell and echo it into
-        the log. No-op when the input is empty so an accidental Enter
-        doesn't push a blank command to the shell."""
-        var cmd = self.input.text
-        var trimmed_len = _strip_trailing_ws_len(cmd)
-        if trimmed_len == 0:
-            return
-        var cmd_bytes = cmd.as_bytes()
-        var cmd_str = String(StringSlice(
-            ptr=cmd_bytes.unsafe_ptr(), length=trimmed_len,
-        ))
-        # Echo the command into the log so the user can see what they
-        # ran above its output — same affordance every real terminal
-        # provides.
-        self.output.append(
-            String("$ ") + cmd_str, Attr(LIGHT_YELLOW, BLACK),
-        )
-        # Make sure the shell is up; spawn lazily if not.
-        if not self.process.alive or self.process.pid <= 0:
-            try:
-                self.ensure_started()
-            except e:
-                self.output.append(
-                    String("[terminal] cannot run: shell not running (")
-                        + String(e) + String(")"),
-                    Attr(LIGHT_RED, BLACK),
-                )
-                self.input.clear()
-                return
-        # Write the command + newline. The shell reads from its stdin
-        # line-buffered and runs each line as a separate command. If
-        # the write fails (closed pipe), surface a hint and try to
-        # restart on the next submission.
-        var payload = cmd_str + String("\n")
-        var sent = _write_all_nb(self.process.stdin_fd, payload)
-        if not sent:
-            self.output.append(
-                String("[terminal] write failed; restarting shell"),
-                Attr(LIGHT_RED, BLACK),
+            var span = Span[UInt8, origin_of(scratch)](
+                ptr=scratch.unsafe_ptr(), length=n,
             )
-            self._terminate_shell()
-        self.input.clear()
+            self.vt.feed(span)
+            total += n
+        # Drain emulator side-effects:
+        #   * DSR / DA replies, OSC-with-reply → bytes back to child.
+        #   * OSC 52 clipboard writes → system clipboard.
+        # Without this, prompts that probe (oh-my-zsh / starship) stall,
+        # and ``vim`` / ``tmux`` yank to clipboard silently drops.
+        var reply = self.vt.take_reply()
+        if len(reply.as_bytes()) > 0:
+            self._write_to_pty(reply^)
+        var clip = self.vt.take_clipboard()
+        if len(clip.as_bytes()) > 0:
+            clipboard_copy(clip)
 
-    # --- paint ---------------------------------------------------------
+    fn notify_focus_change(mut self, focused: Bool):
+        """Forward the host's focus-in / focus-out to the child when
+        the child has enabled focus reporting (``?1004h``). Called by
+        ``Desktop`` on ``EVENT_FOCUS_IN/OUT``. The reply is queued in
+        the Vt and flushed on the next ``tick``."""
+        self.vt.notify_focus_change(focused)
+
+    # --- title strip + chrome commands ---------------------------------
 
     fn build_commands(self) -> List[TitleCommand]:
-        """Standard title-row strip — Clear, Restart, and Close.
-        Returned as a list so Desktop can copy it onto ``dock.commands``
-        each tick without poking the pane's internals. ``Close`` is
-        dispatched by the host (see ``TERMINAL_PANE_CLOSE``) because
-        only the host can remove the pane from its list."""
+        """Title-row strip — Clear and Restart. Close lives in the
+        dock's own ``[■]`` button at the top-LEFT (see
+        ``BottomDockedPanel.close_button_id``); both routes dispatch
+        through the host on ``TERMINAL_PANE_CLOSE``."""
         var out = List[TitleCommand]()
         out.append(TitleCommand(String("[Clear]"), _TERMINAL_CLEAR))
         out.append(TitleCommand(String("[Restart]"), _TERMINAL_RESTART))
-        out.append(TitleCommand(String("[X]"), TERMINAL_PANE_CLOSE))
         return out^
 
     fn handle_command(mut self, id: String) -> Bool:
         """Dispatch a title-command id that the host pulled off
-        ``consume_command_id``. Returns True if handled. Centralized
-        here so the same id strings drive paint and dispatch."""
+        ``consume_command_id``. Returns True if handled."""
         if id == _TERMINAL_CLEAR:
             self.clear()
             return True
@@ -521,6 +332,8 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
             return True
         return False
 
+    # --- paint ---------------------------------------------------------
+
     fn paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
             return
@@ -528,18 +341,17 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         var painter = Painter(panel)
         painter.fill(canvas, panel, String(" "), bg)
         self._last_panel_top = panel.a.y
-        # Refresh the command strip in case Desktop hasn't pushed one
-        # this tick — the strip is static for this pane so we own it
-        # outright (unlike the debug pane whose buttons track DAP state).
         if len(self.dock.commands) == 0:
             self.dock.commands = self.build_commands()
-        # When Claude Code's UI is visible in the tail of the output,
-        # surface its state in the title bar — handier than scanning
-        # the output to know whether the spinner is still spinning.
-        # When nothing is detected we keep whatever title the shell
-        # last pushed via OSC.
-        var displayed_title = self.title
-        var claude_state = detect_claude_state(self.output.lines)
+        # Title comes from (in order): Claude state when detected,
+        # then the OSC title the child has set, then a static default.
+        # Claude wins because users opening a Claude session care
+        # more about its state than the shell's PS1-derived title.
+        var displayed_title = String("Terminal")
+        if len(self.vt.title.as_bytes()) > 0:
+            displayed_title = self.vt.title
+        var tail = self.vt.tail_rows(12)
+        var claude_state = detect_claude_state(tail)
         if claude_state != CLAUDE_NONE:
             displayed_title = String("Claude · ") \
                 + claude_state_label(claude_state)
@@ -548,195 +360,620 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
             self.focused, self.dock, String("T"),
         )
         if body.is_empty():
-            # MINIMIZED: title row only.
-            self.output.last_y0 = panel.a.y + 1
-            self._last_input_y = panel.a.y + 1
+            self._last_body = Rect.empty()
             return
-        # Body split: one-row input strip at the bottom, output above.
-        var body_h = body.height()
-        if body_h < 1:
+        # Sync the emulator's grid size to the body. Anything other
+        # than a no-op here ALSO needs to push the new winsize to the
+        # child via TIOCSWINSZ so ``claude`` / ``vim`` / ``less``
+        # redraw at the new size — without that they'd keep writing
+        # at the old dimensions and the layout falls apart.
+        var bw = body.width()
+        var bh = body.height()
+        if bw <= 0 or bh <= 0:
+            self._last_body = Rect.empty()
             return
-        var input_y = body.b.y - 1
-        var log_bottom = input_y
-        if log_bottom <= body.a.y:
-            log_bottom = body.a.y
-        var log_rect = Rect(
-            body.a.x + 1, body.a.y, body.b.x - 1, log_bottom,
-        )
-        if log_rect.height() > 0:
-            self.output.paint(canvas, log_rect)
-        # Input strip — paint a prompt then hand the rest to the
-        # TextField so editing / selection / scrolling behave the
-        # same as any other input in the app.
-        var prompt_attr = Attr(LIGHT_BLUE, BLACK)
-        _ = painter.put_text(
-            canvas, Point(body.a.x + 1, input_y), String("> "),
-            prompt_attr,
-        )
-        var field_rect = Rect(
-            body.a.x + 3, input_y, body.b.x - 1, input_y + 1,
-        )
-        self.input.paint(canvas, field_rect, self.focused)
-        self._last_input_y = input_y
-        self._last_input_x0 = field_rect.a.x
-        self._last_input_x1 = field_rect.b.x
+        if bw != self.vt.cols or bh != self.vt.rows:
+            self.vt.resize(bw, bh)
+            if self.pty.alive:
+                _ = self.pty.set_winsize(bw, bh)
+        self._last_body = body
+        # Iterate cells, painting through the painter so the panel
+        # clip rect protects neighbors. We always paint, even unchanged
+        # cells, because ``canvas`` is the back buffer that gets diffed
+        # against the front on present — repainting an identical cell
+        # is essentially free (eq check, no SGR emit).
+        #
+        # When the user is scrolled back, the historical rows live in
+        # ``self.vt.scrollback`` as ``List[List[Cell]]``. Reading
+        # ``scrollback[abs_row]`` returns by value (Mojo can't borrow
+        # a non-implicitly-copyable nested List in this version), so
+        # we copy each scrollback row exactly ONCE per paint pass
+        # rather than once per cell. ``view_cell_at`` would copy the
+        # whole row on every cell lookup — O(rows×cols²) allocs and
+        # measurable lag when the user is scrolled back into a long
+        # history. The per-row copy here is the same total amount of
+        # data without the cell-quadratic blowup.
+        var sb_len = len(self.vt.scrollback)
+        var scrolled_back = self.vt.view_offset > 0 and not self.vt.using_alt
+        for r in range(self.vt.rows):
+            var sb_row = List[Cell]()
+            var use_sb = False
+            if scrolled_back:
+                var abs_row = (sb_len - self.vt.view_offset) + r
+                if abs_row >= 0 and abs_row < sb_len:
+                    sb_row = self.vt.scrollback[abs_row].copy()
+                    use_sb = True
+            for c in range(self.vt.cols):
+                var cell: Cell
+                if use_sb:
+                    if c < len(sb_row):
+                        cell = sb_row[c]
+                    else:
+                        cell = Cell(String(" "), Attr(WHITE, BLACK), 1)
+                elif scrolled_back:
+                    # Scrolled back into the live tail's residual rows
+                    # (when scrollback is shorter than view_offset).
+                    var abs_row = (sb_len - self.vt.view_offset) + r
+                    cell = self.vt.cell_at(abs_row - sb_len, c)
+                else:
+                    cell = self.vt.cell_at(r, c)
+                var attr = cell.attr
+                # Selection overlay: invert the selected cells. This
+                # is the same affordance every terminal uses (xterm,
+                # iTerm, alacritty) — invert fg/bg over a contiguous
+                # range from anchor to focus.
+                if self._cell_in_selection(r, c):
+                    attr = _invert_attr(attr)
+                painter.set(
+                    canvas, body.a.x + c, body.a.y + r,
+                    Cell(cell.glyph, attr, cell.width),
+                )
+        # Cursor caret: paint a reverse-video block over the cell at
+        # the cursor when the pane is focused, the child hasn't hidden
+        # the cursor (``?25l``), the cursor is in bounds, and the user
+        # isn't scrolled back. Scrolled-back view is read-only history;
+        # painting the live cursor on a historical row would be
+        # confusing because it doesn't reflect where keystrokes go.
+        if self.focused and self.vt.cursor_visible \
+                and self.vt.view_offset == 0:
+            var cr = self.vt.cur_r
+            var cc = self.vt.cur_c
+            if 0 <= cr and cr < self.vt.rows \
+                    and 0 <= cc and cc < self.vt.cols:
+                var cell = self.vt.cell_at(cr, cc)
+                painter.set(
+                    canvas, body.a.x + cc, body.a.y + cr,
+                    Cell(cell.glyph, _invert_attr(cell.attr), cell.width),
+                )
+
+    # --- selection helpers ---------------------------------------------
+
+    fn _cell_in_selection(self, r: Int, c: Int) -> Bool:
+        if not (self.sel_active or self.sel_dragging):
+            return False
+        var sr0 = self.sel_anchor_r
+        var sc0 = self.sel_anchor_c
+        var sr1 = self.sel_focus_r
+        var sc1 = self.sel_focus_c
+        # Order so (sr0, sc0) is the top-left in reading order.
+        if sr1 < sr0 or (sr1 == sr0 and sc1 < sc0):
+            var tmpr = sr0; sr0 = sr1; sr1 = tmpr
+            var tmpc = sc0; sc0 = sc1; sc1 = tmpc
+        if r < sr0 or r > sr1:
+            return False
+        if sr0 == sr1:
+            return c >= sc0 and c < sc1
+        if r == sr0:
+            return c >= sc0
+        if r == sr1:
+            return c < sc1
+        return True
+
+    fn _clear_selection(mut self):
+        self.sel_active = False
+        self.sel_dragging = False
+
+    # --- copy / selection delegates ------------------------------------
+
+    fn has_selection(self) -> Bool:
+        return self.sel_active
+
+    fn selected_text(self) -> String:
+        if not self.sel_active:
+            return String("")
+        return self._extract_selection()
+
+    fn copy_selection_to_clipboard(self) -> Bool:
+        var text = self.selected_text()
+        if len(text.as_bytes()) == 0:
+            return False
+        clipboard_copy(text)
+        return True
+
+    fn _extract_selection(self) -> String:
+        var sr0 = self.sel_anchor_r
+        var sc0 = self.sel_anchor_c
+        var sr1 = self.sel_focus_r
+        var sc1 = self.sel_focus_c
+        if sr1 < sr0 or (sr1 == sr0 and sc1 < sc0):
+            var tmpr = sr0; sr0 = sr1; sr1 = tmpr
+            var tmpc = sc0; sc0 = sc1; sc1 = tmpc
+        var out = String("")
+        for r in range(sr0, sr1 + 1):
+            var c_start = sc0 if r == sr0 else 0
+            var c_end   = sc1 if r == sr1 else self.vt.cols
+            if c_end > self.vt.cols: c_end = self.vt.cols
+            if c_start < 0: c_start = 0
+            var row_bytes = List[UInt8]()
+            for c in range(c_start, c_end):
+                # Use view-aware lookup so a selection made while
+                # scrolled-back captures the historical text, not the
+                # live tail. Selection is in view-row coordinates by
+                # construction.
+                var g = self.vt.view_cell_at(r, c).glyph.as_bytes()
+                for k in range(len(g)):
+                    row_bytes.append(g[k])
+            # Strip trailing spaces on each row — the grid is
+            # rectangular but actual content rarely fills the row to
+            # the right edge, and the user expects copy to give them
+            # the visible text without trailing padding.
+            var end = len(row_bytes)
+            while end > 0 and row_bytes[end - 1] == 0x20:
+                end -= 1
+            out = out + String(StringSlice(
+                ptr=row_bytes.unsafe_ptr(), length=end,
+            ))
+            if r < sr1:
+                out = out + String("\n")
+        return out^
 
     # --- mouse ---------------------------------------------------------
 
     fn handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
-        # Chrome gets first dibs — same rationale as the debug pane.
+        # Chrome wins first — close button, resize edge, etc.
         var cr = handle_bottom_dock_chrome_mouse(event, panel, self.dock)
         if cr.consumed:
             if cr.focus_request:
                 self.focused = True
             return True
-        # Selection drag in flight in the output log — let it consume
-        # every event until release, even outside the panel rect.
-        if self.output.selection.dragging:
-            return self.output.handle_mouse(event)
+        # In-flight drag selection keeps consuming events even past
+        # the body edge so the user can drag-select fast without the
+        # selection cutting off when they overshoot.
+        if self.sel_dragging:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._end_drag(event.pos)
+                return True
+            if event.motion:
+                self._extend_drag(event.pos)
+                return True
         if not panel.contains(event.pos):
-            if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
+            if event.button != MOUSE_BUTTON_NONE \
+                    and event.pressed and not event.motion:
                 self.focused = False
             return False
-        # Wheel routes to the log regardless of where the wheel ticked
-        # in the body — the input strip is a single line and doesn't
-        # scroll.
+        # Wheel inside the body: if the child has enabled mouse
+        # tracking we forward (apps like ``less`` interpret wheel as
+        # cursor moves); otherwise it shifts the scrollback view. The
+        # body-relative check above already excluded chrome rows.
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
-            if event.pressed:
-                _ = self.output.handle_mouse(event)
-            return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
-            self.focused = True
-            # Click on the input strip parks the caret in the field.
-            if event.pos.y == self._last_input_y:
-                var field_rect = Rect(
-                    self._last_input_x0, self._last_input_y,
-                    self._last_input_x1, self._last_input_y + 1,
-                )
-                _ = self.input.handle_mouse(event, field_rect)
+            if not event.pressed:
                 return True
-            # Anything else in the body is forwarded to the log so the
-            # user can start a selection there.
-            return self.output.handle_mouse(event)
-        # Click release / motion outside an in-flight drag is a no-op.
+            self.focused = True
+            if self.vt.tracks_mouse() \
+                    and (event.mods & MOD_SHIFT) == 0:
+                self._forward_mouse_to_pty(event, motion=False, released=False)
+                return True
+            var dir = 3 if event.button == MOUSE_WHEEL_UP else -3
+            self.vt.scroll_view_by(dir)
+            return True
+        # Press / release / motion. With tracking on and Shift not
+        # held, route the event to the child instead of selection —
+        # that's what every modern terminal does. Shift-drag is the
+        # universal "I want to select, ignore the child's tracking"
+        # override.
+        var shift_held = (event.mods & MOD_SHIFT) != 0
+        var routes_to_child = self.vt.tracks_mouse() and not shift_held
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion:
+            self.focused = True
+            if routes_to_child:
+                self._forward_mouse_to_pty(event, motion=False, released=False)
+                return True
+            self._begin_drag(event.pos)
+            return True
+        if routes_to_child:
+            # Release / motion / non-left presses. We pass motion=True
+            # when the event flag says so, released=True when the
+            # event isn't a press. The encoder filters out non-tracked
+            # motion events (e.g. plain hover when only 1000 is on).
+            if event.motion and not self.vt.mouse_track_btn_motion \
+                    and not self.vt.mouse_track_any_motion:
+                return True
+            self._forward_mouse_to_pty(
+                event,
+                motion=event.motion,
+                released=event.button != MOUSE_BUTTON_NONE \
+                    and not event.pressed,
+            )
+            return True
         return True
+
+    fn _forward_mouse_to_pty(
+        self, event: Event, motion: Bool, released: Bool,
+    ):
+        """Convert a panel-relative ``Event`` to an xterm mouse byte
+        sequence and write it to the pty master. No-op outside the
+        body or when the encoder can't represent the coordinates
+        (legacy mode at column > 223)."""
+        if self._last_body.is_empty():
+            return
+        var r = event.pos.y - self._last_body.a.y
+        var c = event.pos.x - self._last_body.a.x
+        if r < 0 or r >= self.vt.rows or c < 0 or c >= self.vt.cols:
+            return
+        var btn_for_encoder = Int(event.button) - 1
+        if event.button == MOUSE_BUTTON_NONE:
+            # Motion without a button-change — encode as button 0 with
+            # the motion bit set, matching xterm's "release-button"
+            # semantics for SGR encoding.
+            btn_for_encoder = 0
+        if Int(event.button) == 4:    # MOUSE_WHEEL_UP
+            btn_for_encoder = 4
+        elif Int(event.button) == 5:  # MOUSE_WHEEL_DOWN
+            btn_for_encoder = 5
+        var encoded = self.vt.encode_mouse(
+            button=btn_for_encoder,
+            col=c, row=r,
+            motion=motion,
+            released=released,
+            shift=(event.mods & MOD_SHIFT) != 0,
+            meta=(event.mods & MOD_ALT) != 0,
+            ctrl=(event.mods & MOD_CTRL) != 0,
+        )
+        if len(encoded.as_bytes()) > 0:
+            self._write_to_pty(encoded^)
+
+    fn _grid_xy_for_pos(self, pos: Point) -> Tuple[Int, Int]:
+        """Convert a screen position to ``(row, col)`` in the VT grid.
+        Out-of-body positions clamp to the nearest edge — that's what
+        you want for a drag that left the body."""
+        if self._last_body.is_empty():
+            return (0, 0)
+        var r = pos.y - self._last_body.a.y
+        var c = pos.x - self._last_body.a.x
+        if r < 0: r = 0
+        if r >= self.vt.rows: r = self.vt.rows - 1
+        if c < 0: c = 0
+        if c > self.vt.cols: c = self.vt.cols
+        return (r, c)
+
+    fn _begin_drag(mut self, pos: Point):
+        var rc = self._grid_xy_for_pos(pos)
+        self.sel_anchor_r = rc[0]
+        self.sel_anchor_c = rc[1]
+        self.sel_focus_r  = rc[0]
+        self.sel_focus_c  = rc[1]
+        self.sel_dragging = True
+        self.sel_active   = False
+
+    fn _extend_drag(mut self, pos: Point):
+        var rc = self._grid_xy_for_pos(pos)
+        self.sel_focus_r = rc[0]
+        self.sel_focus_c = rc[1]
+
+    fn _end_drag(mut self, pos: Point):
+        self._extend_drag(pos)
+        self.sel_dragging = False
+        # Tiny drag (or single click) → no selection. Saves the user
+        # from accidentally clobbering the clipboard with a one-cell
+        # capture when they meant to focus the pane.
+        if self.sel_anchor_r == self.sel_focus_r \
+                and self.sel_anchor_c == self.sel_focus_c:
+            self.sel_active = False
+            return
+        self.sel_active = True
 
     # --- keys ----------------------------------------------------------
 
     fn handle_key(mut self, event: Event) -> Bool:
         if not self.focused:
             return False
+        if event.kind == EVENT_PASTE:
+            # Bracketed paste (DECSET 2004): when the child has enabled
+            # it, wrap the payload with ``ESC[200~`` / ``ESC[201~`` so
+            # multi-line paste into shells / vim doesn't run each line
+            # as a command. Without it the child sees the raw text and
+            # treats embedded newlines as Enter.
+            if self.vt.bracketed_paste:
+                self._write_to_pty(
+                    String("\x1b[200~") + event.text + String("\x1b[201~")
+                )
+            else:
+                self._write_to_pty(event.text)
+            return True
         if event.kind != EVENT_KEY:
             return False
-        if event.key == KEY_ESC:
-            return handle_bottom_dock_esc(self.dock)
-        # PageUp / PageDown / Home / End scroll the log so the user
-        # can review history without taking their hands off the
-        # keyboard. The plain arrow / Home / End / Backspace still
-        # belong to the input field (caret motion + editing).
-        if event.key == KEY_PAGEUP:
-            self.output.scroll_by(-8)
+        # ESC routes through the chrome ladder first (collapses any
+        # in-flight resize / focus state); only if the chrome doesn't
+        # consume it do we forward to the child.
+        if event.key == KEY_ESC and event.mods == MOD_NONE:
+            if handle_bottom_dock_esc(self.dock):
+                return True
+            self._write_to_pty(String("\x1b"))
             return True
-        if event.key == KEY_PAGEDOWN:
-            self.output.scroll_by(8)
+        # Shift+PgUp/PgDn → scrollback navigation (keyboard-only users
+        # need this since wheel only works with a pointer). Page-sized
+        # chunks match the wheel-scrollback step pattern.
+        if event.key == KEY_PAGEUP and (event.mods & MOD_SHIFT) != 0:
+            self.vt.scroll_view_by(self.vt.rows - 2)
             return True
-        if event.key == KEY_ENTER:
-            self._submit_input()
+        if event.key == KEY_PAGEDOWN and (event.mods & MOD_SHIFT) != 0:
+            self.vt.scroll_view_by(-(self.vt.rows - 2))
             return True
-        # TextField handles printable insert, arrows-as-caret,
-        # backspace, clipboard, undo/redo, …
-        var r = self.input.handle_key(event)
-        if r.consumed:
+        # Cmd+C with an active selection copies. Without selection,
+        # fall through so the child gets a real Ctrl+C (the more
+        # likely intent when typing in a shell or in claude). The
+        # host's edit:copy dispatch in Desktop also calls
+        # ``copy_selection_to_clipboard`` directly — this branch is
+        # here so terminal-focused Cmd+C still works in code paths
+        # that don't go through that dispatcher.
+        if event.key == UInt32(ord("c")) and event.mods == MOD_META \
+                and self.sel_active:
+            _ = self.copy_selection_to_clipboard()
+            self._clear_selection()
             return True
-        # Up / Down without a binding are reserved for command-history
-        # navigation in a future iteration; for now they just consume
-        # so the underlying editor doesn't see them when this pane has
-        # focus.
-        if event.key == KEY_UP or event.key == KEY_DOWN:
-            return True
-        return False
-
-    # --- selection / copy delegations ----------------------------------
-    # Same surface as DebugPane so the host's Cmd+C path can ask the
-    # pane to copy without caring which one is focused.
-
-    fn has_selection(self) -> Bool:
-        return self.output.has_selection()
-
-    fn selected_text(self) -> String:
-        return self.output.selected_text()
-
-    fn copy_selection_to_clipboard(self) -> Bool:
-        return self.output.copy_to_clipboard()
-
-
-# --- helpers --------------------------------------------------------------
-
-
-fn _drain_fd(fd: Int32) -> String:
-    """Pull whatever's on ``fd`` right now without blocking. Bounded by
-    a 64 KB per-call cap so a flooding child can't lock up the loop."""
-    if fd < 0:
-        return String("")
-    var out = String("")
-    var scratch = alloc_zero_buffer(4096)
-    var total = 0
-    while poll_stdin(fd, Int32(0)) and total < 65536:
-        var n = read_into(fd, scratch, 4096)
-        if n <= 0:
-            break
-        out = out + String(StringSlice(
-            ptr=scratch.unsafe_ptr(), length=n,
-        ))
-        total += n
-    return out^
-
-
-fn _write_all_nb(fd: Int32, payload: String) -> Bool:
-    """Best-effort non-blocking write of every byte of ``payload``.
-
-    Returns False on EPIPE / other I/O failure (caller should treat
-    the process as dead). A short write (EAGAIN) loops back; for the
-    sub-kilobyte command payloads we send here, the pipe is never
-    full enough for EAGAIN to actually fire in practice.
-
-    Used instead of ``LspProcess.write_message`` (which adds JSON-RPC
-    framing) because the shell expects raw bytes on its stdin.
-    """
-    if fd < 0:
-        return False
-    var bytes = payload.as_bytes()
-    var n = len(bytes)
-    var sent = 0
-    while sent < n:
-        var rc = external_call["tk_write_nb", Int](
-            fd, bytes.unsafe_ptr() + sent, UInt(n - sent),
+        # Any keystroke clears a finished selection — same as every
+        # terminal app.
+        if self.sel_active:
+            self.sel_active = False
+        # Snap back to the live tail. Typing into the shell almost
+        # always means the user wants to interact with the live prompt
+        # rather than scroll history; making them manually scroll back
+        # to live every time would be annoying. iTerm / GNOME terminal
+        # / kitty all do this.
+        if self.vt.view_offset != 0:
+            self.vt.reset_view()
+        var encoded = _encode_key(
+            event.key, event.mods, self.vt.app_cursor_keys,
         )
-        if rc < 0:
-            return False
-        if rc == 0:
-            # Pipe full — give the kernel a moment by yielding the
-            # write loop and trying again. For our payload sizes this
-            # almost never fires; spin-loop is fine.
-            continue
-        sent += Int(rc)
-    return True
+        if len(encoded.as_bytes()) > 0:
+            self._write_to_pty(encoded^)
+            return True
+        return False
+
+    fn _write_to_pty(self, payload: String):
+        if not self.pty.alive or self.pty.master_fd < 0:
+            return
+        var bytes = payload.as_bytes()
+        var n = len(bytes)
+        if n == 0:
+            return
+        var sent = 0
+        # Tiny retry loop. The pty master accepts kilobytes at a time
+        # normally; a partial write only happens if the kernel's pty
+        # buffer is full (a stuck child not draining). For typical
+        # keystroke payloads (1..10 bytes) this loop runs once.
+        while sent < n:
+            var rc = self.pty.write_bytes(bytes.unsafe_ptr() + sent, n - sent)
+            if rc < 0:
+                return  # EPIPE / EBADF — child gone. Next tick reaps.
+            if rc == 0:
+                # EAGAIN. We could spin; instead drop the rest and
+                # let the user re-press. Holding the loop here risks
+                # locking the UI on a misbehaving child.
+                return
+            sent += rc
 
 
-fn _strip_trailing_ws_len(s: String) -> Int:
-    """Return the byte length of ``s`` with trailing ASCII whitespace
-    stripped. The caller slices ``s[:len]`` if it wants the trimmed
-    string — but the only caller currently just needs the length to
-    check for empty-after-trim. ``\\n`` / ``\\t`` / `` `` count.
-    """
-    var b = s.as_bytes()
-    var n = len(b)
-    while n > 0:
-        var c = Int(b[n - 1])
-        if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D:
-            n -= 1
-        else:
-            break
-    return n
+# --- key encoding ---------------------------------------------------------
+
+
+fn _encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
+    """Translate a Mojo key + modifier into the byte sequence a real
+    pty child expects on its stdin. Mirrors what xterm sends.
+
+    Modifiers:
+      * Ctrl + letter → 0x01..0x1A (the canonical "control character").
+      * Alt + key     → ESC prefix, same as xterm's meta-as-prefix.
+      * Shift / Ctrl / Alt with named keys (arrows, Home/End/PageUp/
+        PageDown, F1..F12, Tab) use the xterm CSI 1;Nc format where
+        N = 1 + shift*1 + alt*2 + ctrl*4. Without this, word-motion
+        bindings in zsh/bash and vim window-nav (Ctrl+Right etc.)
+        don't work.
+      * ``app_cursor`` honors DECCKM (``?1``) — arrow / Home / End
+        come out as SS3 (``ESC O A``) instead of CSI (``ESC [ A``).
+        ``less`` / ``man`` flip this on; without honoring it their
+        readline bindings break.
+      * Cmd/Meta is reserved for the host (Cmd+C copy, etc.)."""
+    var alt = (mods & MOD_ALT) != 0
+    var ctrl = (mods & MOD_CTRL) != 0
+    var shift = (mods & MOD_SHIFT) != 0
+    var prefix = String("\x1b") if alt else String("")
+    # xterm-style modifier byte: 1 + shift*1 + alt*2 + ctrl*4 (encoded
+    # as ASCII digits in the CSI parameter slot). 1 == no modifier;
+    # we only insert the param block when the byte > 1.
+    var mod_byte = 1
+    if shift: mod_byte += 1
+    if alt:   mod_byte += 2
+    if ctrl:  mod_byte += 4
+    var has_mods = mod_byte > 1
+    # When the modifier param is set we drop the ESC prefix — the
+    # modifier param IS the encoding for alt now; doubling it would
+    # send ESC ESC [ 1;N…, which apps would parse as alt-ESC.
+    if has_mods:
+        prefix = String("")
+
+    if key == KEY_ENTER:
+        # ``\r`` (CR). Most tty drivers translate CR → NL via
+        # ICRNL, so the child reads it as ``\n``. Sending ``\n``
+        # directly would skip that translation and confuse programs
+        # that distinguish (e.g. ``read -r`` in bash).
+        return prefix + String("\r")
+    if key == KEY_TAB:
+        # Shift+Tab → ``CSI Z`` (kcbt) so reverse-tab navigation
+        # works (fzf, completion menus, vim's window cycler).
+        if shift and not ctrl and not alt:
+            return String("\x1b[Z")
+        return prefix + String("\t")
+    if key == KEY_BACKSPACE:
+        # Most modern terminals send DEL (0x7F) for Backspace and let
+        # the line discipline translate it via ``stty erase``. Sending
+        # 0x08 (BS) here would make a lot of CLIs print ^? or eat the
+        # wrong character. Ctrl+Backspace sends BS (0x08) — many
+        # readline configs (zsh, bash) bind it to backward-kill-word.
+        if ctrl:
+            return prefix + String("\x08")
+        return prefix + String("\x7f")
+    if key == KEY_ESC:
+        return prefix + String("\x1b")
+    # Arrows / Home / End — three forms depending on DECCKM + mods:
+    #   1. modified              → ``ESC [ 1 ; N c``  (xterm modifyOtherKeys)
+    #   2. unmodified, no app    → ``ESC [ c``       (CSI form)
+    #   3. unmodified, app on    → ``ESC O c``       (SS3 form)
+    if key == KEY_UP:
+        if has_mods: return _csi_mod(String("A"), mod_byte)
+        return prefix + (String("\x1bOA") if app_cursor else String("\x1b[A"))
+    if key == KEY_DOWN:
+        if has_mods: return _csi_mod(String("B"), mod_byte)
+        return prefix + (String("\x1bOB") if app_cursor else String("\x1b[B"))
+    if key == KEY_RIGHT:
+        if has_mods: return _csi_mod(String("C"), mod_byte)
+        return prefix + (String("\x1bOC") if app_cursor else String("\x1b[C"))
+    if key == KEY_LEFT:
+        if has_mods: return _csi_mod(String("D"), mod_byte)
+        return prefix + (String("\x1bOD") if app_cursor else String("\x1b[D"))
+    if key == KEY_HOME:
+        if has_mods: return _csi_mod(String("H"), mod_byte)
+        return prefix + (String("\x1bOH") if app_cursor else String("\x1b[H"))
+    if key == KEY_END:
+        if has_mods: return _csi_mod(String("F"), mod_byte)
+        return prefix + (String("\x1bOF") if app_cursor else String("\x1b[F"))
+    # ``~``-terminated nav / function keys — modifier param goes
+    # before the tilde (``ESC [ 5 ; N ~``).
+    if key == KEY_PAGEUP:
+        if has_mods: return _csi_mod_tilde(5, mod_byte)
+        return prefix + String("\x1b[5~")
+    if key == KEY_PAGEDOWN:
+        if has_mods: return _csi_mod_tilde(6, mod_byte)
+        return prefix + String("\x1b[6~")
+    if key == KEY_INSERT:
+        if has_mods: return _csi_mod_tilde(2, mod_byte)
+        return prefix + String("\x1b[2~")
+    if key == KEY_DELETE:
+        if has_mods: return _csi_mod_tilde(3, mod_byte)
+        return prefix + String("\x1b[3~")
+    # Function keys — SS3 form for F1..F4, CSI ~ form for F5+. Matches
+    # xterm-256color's terminfo.
+    if key == KEY_F1:
+        if has_mods: return _csi_mod(String("P"), mod_byte)
+        return prefix + String("\x1bOP")
+    if key == KEY_F2:
+        if has_mods: return _csi_mod(String("Q"), mod_byte)
+        return prefix + String("\x1bOQ")
+    if key == KEY_F3:
+        if has_mods: return _csi_mod(String("R"), mod_byte)
+        return prefix + String("\x1bOR")
+    if key == KEY_F4:
+        if has_mods: return _csi_mod(String("S"), mod_byte)
+        return prefix + String("\x1bOS")
+    if key == KEY_F5:
+        if has_mods: return _csi_mod_tilde(15, mod_byte)
+        return prefix + String("\x1b[15~")
+    if key == KEY_F6:
+        if has_mods: return _csi_mod_tilde(17, mod_byte)
+        return prefix + String("\x1b[17~")
+    if key == KEY_F7:
+        if has_mods: return _csi_mod_tilde(18, mod_byte)
+        return prefix + String("\x1b[18~")
+    if key == KEY_F8:
+        if has_mods: return _csi_mod_tilde(19, mod_byte)
+        return prefix + String("\x1b[19~")
+    if key == KEY_F9:
+        if has_mods: return _csi_mod_tilde(20, mod_byte)
+        return prefix + String("\x1b[20~")
+    if key == KEY_F10:
+        if has_mods: return _csi_mod_tilde(21, mod_byte)
+        return prefix + String("\x1b[21~")
+    if key == KEY_F11:
+        if has_mods: return _csi_mod_tilde(23, mod_byte)
+        return prefix + String("\x1b[23~")
+    if key == KEY_F12:
+        if has_mods: return _csi_mod_tilde(24, mod_byte)
+        return prefix + String("\x1b[24~")
+
+    # Printable character key.
+    var ch = Int(key)
+    if ch >= 0x20 and ch < 0x10FFFF and ch < 0xE000:
+        # Ctrl + ascii letter / @ / [ / \ / ] / ^ / _ → C0 control byte.
+        if ctrl:
+            var upper = ch
+            if upper >= 0x61 and upper <= 0x7A:  # lower → upper
+                upper = upper - 0x20
+            if upper >= 0x40 and upper <= 0x5F:
+                var b = upper - 0x40
+                return prefix + _ascii_to_string(UInt8(b))
+            # Ctrl+space / Ctrl+2 → NUL.
+            if upper == 0x20 or upper == 0x32:
+                return prefix + _ascii_to_string(UInt8(0))
+            # Other Ctrl+printable → just send the character; xterm's
+            # behavior is similar (some glyphs aren't C0-mappable).
+        return prefix + _codepoint_to_utf8(UInt32(ch))
+    return String("")
+
+
+fn _csi_mod(letter: String, mod_byte: Int) -> String:
+    """xterm modifier-encoded form: ``ESC [ 1 ; N c`` where ``c`` is
+    the final letter (A/B/C/D/H/F/P/Q/R/S). Used for modified arrows,
+    Home/End, and F1..F4."""
+    return String("\x1b[1;") + String(mod_byte) + letter
+
+
+fn _csi_mod_tilde(num: Int, mod_byte: Int) -> String:
+    """xterm modifier-encoded ``~``-terminated form: ``ESC [ n ; N ~``.
+    Used for modified PageUp/PageDown/Insert/Delete and F5..F12."""
+    return String("\x1b[") + String(num) + String(";") \
+        + String(mod_byte) + String("~")
+
+
+fn _codepoint_to_utf8(cp: UInt32) -> String:
+    """Encode a Unicode codepoint to its UTF-8 byte sequence as a
+    String. The pty child reads bytes — we have to convert from
+    Mojo's codepoint-as-UInt32 representation back to wire bytes."""
+    var c = Int(cp)
+    var buf = List[UInt8]()
+    if c < 0x80:
+        buf.append(UInt8(c))
+    elif c < 0x800:
+        buf.append(UInt8(0xC0 | (c >> 6)))
+        buf.append(UInt8(0x80 | (c & 0x3F)))
+    elif c < 0x10000:
+        buf.append(UInt8(0xE0 | (c >> 12)))
+        buf.append(UInt8(0x80 | ((c >> 6) & 0x3F)))
+        buf.append(UInt8(0x80 | (c & 0x3F)))
+    else:
+        buf.append(UInt8(0xF0 | (c >> 18)))
+        buf.append(UInt8(0x80 | ((c >> 12) & 0x3F)))
+        buf.append(UInt8(0x80 | ((c >> 6) & 0x3F)))
+        buf.append(UInt8(0x80 | (c & 0x3F)))
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+
+
+fn _ascii_to_string(b: UInt8) -> String:
+    var buf = List[UInt8]()
+    buf.append(b)
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=1))
+
+
+# --- visual helpers -------------------------------------------------------
+
+
+fn _invert_attr(a: Attr) -> Attr:
+    """Swap fg/bg for selection / cursor overlay. We don't toggle
+    ``STYLE_REVERSE`` because the underlying cell may already have it
+    set (vim's status line, e.g.) — swapping fg/bg lands at the same
+    visual either way and saves the parity branch."""
+    var r = Attr(a.bg, a.fg, a.style)
+    r.underline_color = a.underline_color
+    return r

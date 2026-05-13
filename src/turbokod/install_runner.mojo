@@ -26,6 +26,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
+from .string_utils import display_columns
 from .window import paint_window_title_at
 from .posix import (
     alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
@@ -213,7 +214,7 @@ struct InstallRunner(Movable):
         var tx = rect.a.x + 1
         paint_window_title_at(canvas, Point(tx, rect.a.y), title, bg, bg)
         var sx = rect.b.x - 3
-        if sx > tx + len(title.as_bytes()):
+        if sx > tx + display_columns(title):
             _ = painter.put_text(canvas, Point(sx, rect.a.y), spin, spin_attr)
         # Last N lines of output, top-down. Truncated to the popup width
         # by the painter's clip.
