@@ -3462,7 +3462,9 @@ struct Desktop(Movable):
                 ref ed = self.windows.windows[fidx].editor
                 var start_col = ed.completion_prefix_start()
                 ed.pending_completion_request = Optional[CompletionRequest](
-                    CompletionRequest(ed.cursor_row, ed.cursor_col, start_col),
+                    CompletionRequest(
+                        ed.cursor_row, ed.cursor_col, start_col, True,
+                    ),
                 )
             return Optional[String]()
         if action == EDITOR_LOOKUP_DOCS:
@@ -3842,6 +3844,7 @@ struct Desktop(Movable):
             if self.lsp_managers[i].has_pending_completions():
                 var fidx = self._focused_editor_idx()
                 var comp_path = self.lsp_managers[i].pending_completion_path()
+                var was_manual = self.lsp_managers[i].pending_completion_manual()
                 var items = self.lsp_managers[i].take_completions()
                 if fidx >= 0 \
                         and self.windows.windows[fidx].editor.file_path == comp_path:
@@ -3850,11 +3853,19 @@ struct Desktop(Movable):
                     # should replace what the user already typed.
                     var start_col = self.windows.windows[fidx] \
                         .editor.completion_prefix_start()
-                    self.windows.windows[fidx].editor.set_completions(
-                        items^,
-                        self.windows.windows[fidx].editor.cursor_row,
-                        start_col,
-                    )
+                    var cur_row = self.windows.windows[fidx].editor.cursor_row
+                    if len(items) == 0 and was_manual:
+                        # User explicitly asked for completions and the
+                        # server had none — show "<no completion found>"
+                        # so the keypress isn't silently swallowed.
+                        self.windows.windows[fidx] \
+                            .editor.show_no_completion_message(
+                                cur_row, start_col,
+                            )
+                    else:
+                        self.windows.windows[fidx].editor.set_completions(
+                            items^, cur_row, start_col,
+                        )
         # Per-editor LSP sync: walk every editor window once and (a) push
         # a didChange to the matching server when the buffer has been
         # edited since the last sync, and (b) pull any freshly-published
@@ -3993,7 +4004,7 @@ struct Desktop(Movable):
         # keystroke and the server full-parses the buffer twice.
         _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
         _ = self.lsp_managers[lsp_idx].request_completion(
-            path, req.row, req.col, text^,
+            path, req.row, req.col, text^, req.manual,
         )
 
     fn _dispatch_definition_request(

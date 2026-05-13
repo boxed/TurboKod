@@ -872,6 +872,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     var completion_scroll: Int
     var completion_anchor_row: Int
     var completion_anchor_col: Int
+    # True when the popup is showing a synthetic message (currently only
+    # ``<no completion found>`` from a manual Ctrl+Space that returned
+    # empty). The single ``completion_items`` entry is non-acceptable —
+    # Enter/Tab dismiss the popup rather than insert.
+    var completion_is_message: Bool
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -949,6 +954,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_scroll = 0
         self.completion_anchor_row = 0
         self.completion_anchor_col = 0
+        self.completion_is_message = False
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -1026,6 +1032,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_scroll = 0
         self.completion_anchor_row = 0
         self.completion_anchor_col = 0
+        self.completion_is_message = False
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -1129,6 +1136,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_scroll = copy.completion_scroll
         self.completion_anchor_row = copy.completion_anchor_row
         self.completion_anchor_col = copy.completion_anchor_col
+        self.completion_is_message = copy.completion_is_message
 
     fn flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -1650,6 +1658,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
         self.completion_scroll = 0
+        self.completion_is_message = False
 
     fn set_completions(
         mut self, var items: List[CompletionItem],
@@ -1663,7 +1672,10 @@ struct Editor(ImplicitlyCopyable, Movable):
         word. Accepting an entry replaces ``[anchor_col, cursor_col)``
         on ``anchor_row`` with the chosen ``insert_text``. Empty
         ``items`` closes the popup (a server response with no matches
-        is identical, UX-wise, to dismissing the popup).
+        is identical, UX-wise, to dismissing the popup). Hosts that
+        want to surface "no matches" to the user (e.g. when the user
+        explicitly invoked completion) should call
+        ``show_no_completion_message`` instead.
         """
         if len(items) == 0:
             self.close_completion_popup()
@@ -1674,6 +1686,32 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_scroll = 0
         self.completion_anchor_row = anchor_row
         self.completion_anchor_col = anchor_col
+        self.completion_is_message = False
+
+    fn show_no_completion_message(
+        mut self, anchor_row: Int, anchor_col: Int,
+    ):
+        """Surface a ``<no completion found>`` popup at the anchor.
+
+        Used by hosts when a user-invoked (Ctrl+Space) completion
+        request returned no results — silently doing nothing leaves
+        the user wondering whether anything happened. The popup
+        renders a single non-acceptable entry; Enter / Tab dismiss
+        rather than insert, arrow keys are no-ops."""
+        var items = List[CompletionItem]()
+        items.append(
+            CompletionItem(
+                String("<no completion found>"),
+                String(""), 0, String(""), String(""),
+            )
+        )
+        self.completion_items = items^
+        self.completion_popup_visible = True
+        self.completion_highlight = 0
+        self.completion_scroll = 0
+        self.completion_anchor_row = anchor_row
+        self.completion_anchor_col = anchor_col
+        self.completion_is_message = True
 
     fn completion_prefix_start(self) -> Int:
         """Cursor's identifier start col on the current line. Walks
@@ -1707,10 +1745,14 @@ struct Editor(ImplicitlyCopyable, Movable):
     fn _stamp_completion_request(mut self):
         """Stamp ``pending_completion_request`` at the current cursor.
         Helper for the as-you-type auto-trigger paths so they don't
-        each duplicate the prefix-start lookup."""
+        each duplicate the prefix-start lookup. ``manual=False`` —
+        an empty response on this path silently dismisses the popup
+        rather than showing ``<no completion found>``."""
         var start_col = self.completion_prefix_start()
         self.pending_completion_request = Optional[CompletionRequest](
-            CompletionRequest(self.cursor_row, self.cursor_col, start_col),
+            CompletionRequest(
+                self.cursor_row, self.cursor_col, start_col, False,
+            ),
         )
 
     fn accept_completion(mut self) -> Bool:
@@ -1721,11 +1763,17 @@ struct Editor(ImplicitlyCopyable, Movable):
         of the replacement. Closes the popup. Returns False (no-op)
         when the popup isn't visible, the highlight is out of range,
         or the anchor row no longer matches the cursor row (the user
-        clicked away to another row while the popup was up)."""
+        clicked away to another row while the popup was up).
+
+        For the ``<no completion found>`` message popup, Enter / Tab
+        just dismiss — there is nothing to insert."""
+        if not self.completion_popup_visible:
+            return False
+        if self.completion_is_message:
+            self.close_completion_popup()
+            return True
         if self.read_only:
             self.close_completion_popup()
-            return False
-        if not self.completion_popup_visible:
             return False
         if self.completion_highlight < 0 \
                 or self.completion_highlight >= len(self.completion_items):
@@ -1771,8 +1819,12 @@ struct Editor(ImplicitlyCopyable, Movable):
 
     fn _completion_step(mut self, delta: Int):
         """Move the popup highlight by ``delta`` (clamped). No-op when
-        the popup isn't visible."""
+        the popup isn't visible or when showing a message popup (the
+        sole entry isn't selectable, so arrow keys have nothing to do).
+        """
         if not self.completion_popup_visible:
+            return
+        if self.completion_is_message:
             return
         var n = len(self.completion_items)
         if n == 0:
@@ -3032,10 +3084,21 @@ struct Editor(ImplicitlyCopyable, Movable):
             ).as_bytes())
             if kw > longest_kind:
                 longest_kind = kw
-        # Kind column layout: [1 left pad][name][1 right pad].
+        # Kind column = [1 dark-gray pad][name][1 dark-gray pad]. The
+        # internal padding shares the kind stripe's background so the
+        # stripe reads as a self-contained chip. The cell of popup-bg
+        # padding sitting between the label and the kind stripe is
+        # *outside* this column and gets overpainted by the selection
+        # bg on the highlighted row.
         var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
-        # Width = 1 left pad + label + kind column + 1 right pad.
-        var width = longest_label + kind_col_w + 2
+        # Natural width before clamps:
+        #   [1 left pad][label][1 pad before kind][kind column]  with kind
+        #   [1 left pad][label][1 right pad]                     no kind
+        var width: Int
+        if kind_col_w > 0:
+            width = longest_label + kind_col_w + 2
+        else:
+            width = longest_label + 2
         if width < _COMPLETION_POPUP_WIDTH_MIN:
             width = _COMPLETION_POPUP_WIDTH_MIN
         if width > _COMPLETION_POPUP_WIDTH_MAX:
@@ -3076,13 +3139,25 @@ struct Editor(ImplicitlyCopyable, Movable):
         var kind_attr = Attr(WHITE, DARK_GRAY)
         var pop_painter = Painter(rect)
         pop_painter.fill(canvas, rect, String(" "), attr)
-        var inner_left = rect.a.x + 1
-        var inner_right = rect.b.x - 1
-        var kind_col_left = inner_right - kind_col_w
-        if kind_col_left < inner_left:
-            kind_col_left = inner_left
-        var label_left = inner_left
-        var label_right = kind_col_left
+        # Kind column hugs the right edge — no padding after it.
+        # ``kind_col_left`` is the first cell of the dark-gray kind
+        # stripe; the cell just left of it (``kind_col_left - 1``) is
+        # the single-cell pad between label and kind, painted in the
+        # popup bg by default and overpainted by the selection bg when
+        # the row is highlighted.
+        var kind_col_left: Int
+        if kind_col_w > 0:
+            kind_col_left = rect.b.x - kind_col_w
+        else:
+            kind_col_left = rect.b.x
+        var label_left = rect.a.x + 1
+        var label_right: Int
+        if kind_col_w > 0:
+            label_right = kind_col_left - 1
+        else:
+            label_right = rect.b.x - 1
+        if label_right < label_left:
+            label_right = label_left
         var label_w = label_right - label_left
         for r in range(visible_rows):
             var idx = self.completion_scroll + r
@@ -3093,13 +3168,17 @@ struct Editor(ImplicitlyCopyable, Movable):
             var is_hl = (idx == self.completion_highlight)
             var row_attr = sel_attr if is_hl else attr
             if is_hl:
+                # Selection spans the left pad, label area, and the
+                # pad-before-kind cell. When there's no kind column we
+                # extend to the right pad so the whole row is green.
+                var sel_right = kind_col_left if kind_col_w > 0 else rect.b.x
                 pop_painter.fill(
-                    canvas, Rect(label_left, ty, label_right, ty + 1),
+                    canvas, Rect(rect.a.x, ty, sel_right, ty + 1),
                     String(" "), row_attr,
                 )
             if kind_col_w > 0:
                 pop_painter.fill(
-                    canvas, Rect(kind_col_left, ty, inner_right, ty + 1),
+                    canvas, Rect(kind_col_left, ty, rect.b.x, ty + 1),
                     String(" "), kind_attr,
                 )
             var label = item.label
@@ -4329,7 +4408,9 @@ struct Editor(ImplicitlyCopyable, Movable):
                 or (event.mods == MOD_NONE and event.key == UInt32(0)):
             var start_col = self.completion_prefix_start()
             self.pending_completion_request = Optional[CompletionRequest](
-                CompletionRequest(self.cursor_row, self.cursor_col, start_col),
+                CompletionRequest(
+                    self.cursor_row, self.cursor_col, start_col, True,
+                ),
             )
             return True
         # Capture the typing-group flag before any branch touches it, then

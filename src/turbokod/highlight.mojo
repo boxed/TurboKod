@@ -621,10 +621,18 @@ struct CompletionRequest(ImplicitlyCopyable, Movable):
     ``row`` / ``col`` are the cursor position when the request was
     triggered; ``prefix_start_col`` is where the identifier currently
     under the cursor begins, so the host can replace that span with
-    the selected completion text without re-scanning the line."""
+    the selected completion text without re-scanning the line.
+
+    ``manual`` is True when the user explicitly invoked completion
+    (Ctrl+Space / bound action), False when the request was stamped by
+    the as-you-type auto-trigger. Hosts use it to decide whether an
+    empty response should surface a ``<no completion found>`` message
+    (manual: yes — the user is waiting on feedback) or be silently
+    dropped (auto: noise)."""
     var row: Int
     var col: Int
     var prefix_start_col: Int
+    var manual: Bool
 
 
 # --- generic registry-driven tokenizer ------------------------------------

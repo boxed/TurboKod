@@ -182,7 +182,7 @@ from turbokod.events import (
     EVENT_QUIT, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_HOME,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
@@ -6980,6 +6980,55 @@ fn test_editor_typing_non_word_char_closes_visible_popup() raises:
     assert_false(ed.completion_popup_visible)
 
 
+fn test_editor_ctrl_space_marks_request_manual() raises:
+    """Ctrl+Space stamps a ``CompletionRequest`` with ``manual=True``
+    so the host can distinguish a user-invoked request (an empty
+    response should surface ``<no completion found>``) from the
+    as-you-type auto-trigger (an empty response stays silent)."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(KEY_SPACE, MOD_CTRL)
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_completion_request()
+    assert_true(Bool(req))
+    assert_true(req.value().manual)
+
+
+fn test_editor_autotrigger_request_is_not_manual() raises:
+    """The as-you-type auto-trigger marks the request ``manual=False``
+    — an empty response on this path should dismiss the popup
+    silently rather than show ``<no completion found>``."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x66))  # 'f'
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_completion_request()
+    assert_true(Bool(req))
+    assert_false(req.value().manual)
+
+
+fn test_editor_show_no_completion_message_opens_unselectable_popup() raises:
+    """``show_no_completion_message`` opens a popup with a single
+    non-acceptable ``<no completion found>`` entry. Arrow keys must
+    not move the highlight and Enter must dismiss without inserting."""
+    var ed = Editor(String("foo"))
+    ed.move_to(0, 3, False)
+    ed.show_no_completion_message(0, 0)
+    assert_true(ed.completion_popup_visible)
+    assert_true(ed.completion_is_message)
+    assert_equal(len(ed.completion_items), 1)
+    assert_equal(
+        ed.completion_items[0].label, String("<no completion found>"),
+    )
+    # Arrow keys are no-ops on a message popup.
+    ed._completion_step(1)
+    assert_equal(ed.completion_highlight, 0)
+    # Enter dismisses, does not insert anything.
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    assert_false(ed.completion_popup_visible)
+    assert_false(ed.completion_is_message)
+    assert_equal(ed.buffer.line(0), String("foo"))
+
+
 fn test_editor_accept_completion_replaces_prefix() raises:
     """Accepting a completion replaces ``[anchor_col, cursor_col)``
     with the chosen ``insert_text`` and leaves the cursor at the end
@@ -13184,6 +13233,9 @@ fn main() raises:
     test_editor_typing_non_word_char_skips_autotrigger()
     test_editor_cursor_move_inside_word_keeps_popup_alive()
     test_editor_typing_non_word_char_closes_visible_popup()
+    test_editor_ctrl_space_marks_request_manual()
+    test_editor_autotrigger_request_is_not_manual()
+    test_editor_show_no_completion_message_opens_unselectable_popup()
     test_editor_accept_completion_replaces_prefix()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()

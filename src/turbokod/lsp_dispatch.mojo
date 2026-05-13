@@ -211,11 +211,15 @@ struct LspManager(Copyable, Movable):
     # / ``_completion_row`` / ``_completion_col`` are echoed back via
     # ``pending_completion_*`` accessors so the host can drop a stale
     # response when the cursor has moved (or the user has switched
-    # buffers) by the time it lands.
+    # buffers) by the time it lands. ``_completion_manual`` records
+    # whether the request was a user-invoked Ctrl+Space (vs. the as-you-
+    # type auto-trigger) so the host can decide whether an empty
+    # response should surface a ``<no completion found>`` message.
     var _inflight_completion_id: Int
     var _completion_path: String
     var _completion_row: Int
     var _completion_col: Int
+    var _completion_manual: Bool
     var _resolved_completions: List[CompletionItem]
     var _has_resolved_completions: Bool
     var _root_uri: String
@@ -260,6 +264,7 @@ struct LspManager(Copyable, Movable):
         self._completion_path = String("")
         self._completion_row = 0
         self._completion_col = 0
+        self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
         self._root_uri = String("")
@@ -296,6 +301,7 @@ struct LspManager(Copyable, Movable):
         self._completion_path = String("")
         self._completion_row = 0
         self._completion_col = 0
+        self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
         self._root_uri = String("")
@@ -655,7 +661,7 @@ struct LspManager(Copyable, Movable):
 
     fn request_completion(
         mut self, path: String, line: Int, character: Int,
-        var text: String,
+        var text: String, manual: Bool = False,
     ) -> Bool:
         """Ask the server for ``textDocument/completion`` at
         ``(line, character)``.
@@ -669,7 +675,10 @@ struct LspManager(Copyable, Movable):
 
         The request coordinates are echoed back through
         ``pending_completion_*`` so the host can verify the cursor
-        hasn't moved by the time the response arrives.
+        hasn't moved by the time the response arrives. ``manual`` is
+        echoed via ``pending_completion_manual()`` so the host can
+        decide whether an empty response should surface a user-visible
+        ``<no completion found>`` message.
         """
         if self.state != _STATE_READY:
             return False
@@ -724,6 +733,7 @@ struct LspManager(Copyable, Movable):
         self._completion_path = path
         self._completion_row = line
         self._completion_col = character
+        self._completion_manual = manual
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
         return True
@@ -740,6 +750,12 @@ struct LspManager(Copyable, Movable):
 
     fn pending_completion_col(self) -> Int:
         return self._completion_col
+
+    fn pending_completion_manual(self) -> Bool:
+        """Echo the ``manual`` flag of the most recent completion
+        request. True when the user explicitly invoked completion
+        (Ctrl+Space), False for the as-you-type auto-trigger."""
+        return self._completion_manual
 
     fn take_completions(mut self) -> List[CompletionItem]:
         """Move the parked completion list out of the manager.
