@@ -3885,10 +3885,15 @@ struct Desktop(Movable):
         # against the text we sent at didOpen — stale issues stick to
         # edited lines and new ones never appear until the file is
         # closed and reopened. ``consume_lsp_dirty`` only returns True
-        # once per edit batch, so the snapshot+send only fires on
-        # frames that actually had edits. The bucket's ``consumed``
-        # flag in (b) means we don't re-apply the same diagnostic set
-        # every frame.
+        # once per edit batch *and* once typing has settled
+        # (``_LSP_DIDCHANGE_DEBOUNCE_MS``), so the snapshot+send only
+        # fires after the user stops typing — slow servers (ty,
+        # pyright on a Django settings module) re-type-check on every
+        # didChange, and without the debounce the squiggly underline
+        # visibly lags behind the cursor as stale ``publishDiagnostics``
+        # arrive one after another. The bucket's ``consumed`` flag in
+        # (b) means we don't re-apply the same diagnostic set every
+        # frame.
         for w in range(len(self.windows.windows)):
             if not self.windows.windows[w].is_editor:
                 continue
@@ -3899,7 +3904,8 @@ struct Desktop(Movable):
             if li < 0:
                 continue
             if self.lsp_managers[li].is_ready() \
-                    and self.windows.windows[w].editor.consume_lsp_dirty():
+                    and self.windows.windows[w] \
+                        .editor.consume_lsp_dirty(monotonic_ms()):
                 var text = self.windows.windows[w].editor.text_snapshot()
                 self.lsp_managers[li].notify_changed(path, text^)
             if not self.lsp_managers[li].has_unconsumed_diagnostics_for(path):

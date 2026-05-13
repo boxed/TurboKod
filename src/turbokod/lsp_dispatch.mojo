@@ -990,7 +990,18 @@ struct LspManager(Copyable, Movable):
     fn _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The
         spec is clear: ``publishDiagnostics`` is the *current* set, not
-        an incremental update — empty array means "all clear."""
+        an incremental update — empty array means "all clear.
+
+        When the server echoes a ``version`` field (LSP 3.15+, supported
+        by pyright / ty / rust-analyzer / typescript-language-server …)
+        we compare against the latest version we sent in didChange and
+        drop the payload when it's older. Without this gate, a slow
+        server that's still type-checking version N can publish stale
+        diagnostics after the editor has already advanced to N+3 — the
+        squiggly underline flashes back to wrong positions and only
+        snaps forward once the in-flight catches up. Servers that don't
+        send ``version`` (older builds, partial impls) fall through to
+        the accept path so we don't break them."""
         if not params.is_object():
             return
         var uri_opt = params.object_get(String("uri"))
@@ -1004,6 +1015,22 @@ struct LspManager(Copyable, Movable):
         var path = _uri_to_path(uri_opt.value().as_str())
         if len(path.as_bytes()) == 0:
             return
+        var version_opt = params.object_get(String("version"))
+        if version_opt and version_opt.value().is_int():
+            var pub_version = version_opt.value().as_int()
+            for k in range(len(self._doc_paths)):
+                if self._doc_paths[k] == path:
+                    if pub_version < self._doc_versions[k]:
+                        _lsp_debug_log(
+                            String("← publishDiagnostics (dropped stale) lang=")
+                            + self._language_id
+                            + String(" path=") + path
+                            + String(" pub_version=") + String(pub_version)
+                            + String(" latest_version=")
+                            + String(self._doc_versions[k]),
+                        )
+                        return
+                    break
         var diags = _parse_diagnostics_array(diags_opt.value())
         _lsp_debug_log(
             String("← publishDiagnostics lang=") + self._language_id

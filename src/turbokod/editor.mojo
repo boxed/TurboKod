@@ -534,6 +534,20 @@ produces a single request per word fragment. Manual (Ctrl+Space)
 requests bypass this — the user is explicitly waiting on results."""
 
 
+comptime _LSP_DIDCHANGE_DEBOUNCE_MS = 150
+"""How long the per-frame didChange sync waits for typing to settle
+before flushing the buffer to the LSP server. Without this every
+keystroke ships a full-document didChange — slow servers (pyright,
+ty/iommi-lsp on a Django settings module) re-type-check the whole
+file on every keystroke and the squiggly underline visibly lags
+behind the cursor, snapping forward through stale states as old
+``publishDiagnostics`` arrive. 150 ms keeps the server quiet through
+a typing burst and lets it run once on the settled text. User-driven
+requests (completion / definition / symbols) pre-flight their own
+``_send_open_or_change``, so this debounce only gates the background
+diagnostics sync — there's no added latency on the request paths."""
+
+
 # --- External-change status codes ------------------------------------------
 #
 # Returned by ``Editor.check_for_external_change`` so callers (Window /
@@ -825,6 +839,11 @@ struct Editor(ImplicitlyCopyable, Movable):
     # describe stale text — old issues stick to lines the user has
     # since edited and new issues never appear.
     var _lsp_dirty: Bool
+    # Wallclock (``monotonic_ms``) at which ``_lsp_dirty`` was last
+    # raised. Read by ``consume_lsp_dirty`` so the per-frame didChange
+    # sync can wait ``_LSP_DIDCHANGE_DEBOUNCE_MS`` past the last edit
+    # before flushing — see the constant's docstring for the rationale.
+    var _lsp_dirty_stamp_ms: Int
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -981,6 +1000,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_present = False
         self._git_changes_dirty = True
         self._lsp_dirty = False
+        self._lsp_dirty_stamp_ms = 0
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -1061,6 +1081,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_present = False
         self._git_changes_dirty = True
         self._lsp_dirty = False
+        self._lsp_dirty_stamp_ms = 0
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -1162,6 +1183,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         self._git_head_present = copy._git_head_present
         self._git_changes_dirty = copy._git_changes_dirty
         self._lsp_dirty = copy._lsp_dirty
+        self._lsp_dirty_stamp_ms = copy._lsp_dirty_stamp_ms
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -1382,14 +1404,28 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
 
-    fn consume_lsp_dirty(mut self) -> Bool:
+    fn consume_lsp_dirty(mut self, now_ms: Int = 0) -> Bool:
         """Return whether the buffer has been edited since the last
         time this was called, and clear the flag. The host drives this
         from ``Desktop.lsp_tick`` to send a didChange and keep the
-        server's text in sync with what's on screen."""
-        var was_dirty = self._lsp_dirty
+        server's text in sync with what's on screen.
+
+        ``now_ms`` enables the debounce gate: when non-zero, the dirty
+        flag is only consumed (and reported) once
+        ``_LSP_DIDCHANGE_DEBOUNCE_MS`` has elapsed since the last edit.
+        Within that window the flag stays raised so the next tick will
+        check again. ``now_ms == 0`` is the unconditional / test-path
+        flavor used by callers that are about to flush the buffer
+        themselves (``_dispatch_completion_request`` pre-flights its
+        own didChange and just needs the flag cleared)."""
+        if not self._lsp_dirty:
+            return False
+        if now_ms != 0 \
+                and now_ms - self._lsp_dirty_stamp_ms \
+                    < _LSP_DIDCHANGE_DEBOUNCE_MS:
+            return False
         self._lsp_dirty = False
-        return was_dirty
+        return True
 
     fn invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
@@ -1422,6 +1458,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # to every edit handler.
         self._git_changes_dirty = True
         self._lsp_dirty = True
+        self._lsp_dirty_stamp_ms = monotonic_ms()
 
     fn refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
