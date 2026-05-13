@@ -8632,7 +8632,7 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
     var pane = DebugPane()
     pane.visible = True
     var frames = List[DapStackFrame]()
-    frames.append(DapStackFrame(1, String("main"), String("/tmp/foo.py"), 41, 0))
+    frames.append(DapStackFrame(1, String("main"), String("/tmp/foo.py"), 41, 0, False))
     var locals = List[DapVariable]()
     pane.rebuild_inspect(
         frames^, String("Locals"), locals^,
@@ -8648,6 +8648,57 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
                 and c.get(5, y).glyph == String("t"):
             found = True
     assert_true(found)
+
+
+fn test_debug_pane_subtle_frame_paints_dim() raises:
+    """A frame the adapter marked subtle (library / external code)
+    paints in LIGHT_GRAY rather than WHITE so the user can still see
+    the full call chain but visually distinguish their own code. The
+    currently-inspected frame still gets the highlight regardless of
+    the subtle hint."""
+    var pane = DebugPane()
+    pane.visible = True
+    var frames = List[DapStackFrame]()
+    # User frame at top — inspected by default.
+    frames.append(DapStackFrame(
+        1, String("my_func"), String("/proj/app.py"), 9, 0, False,
+    ))
+    # Library frame below it.
+    frames.append(DapStackFrame(
+        2, String("recv"), String("/lib/sock.py"), 41, 0, True,
+    ))
+    var locals = List[DapVariable]()
+    pane.rebuild_inspect(
+        frames^, String("Locals"), locals^,
+        String("Watches"), List[String](), 0,
+    )
+    var c = Canvas(60, 16)
+    pane.paint(c, Rect(0, 0, 60, 16))
+    # Find the row containing ``recv`` — that's the subtle frame.
+    var subtle_y = -1
+    for y in range(2, 16):
+        var x = _find_glyph_x(c, y, String("r"))
+        if x >= 0 and c.get(x + 1, y).glyph == String("e") \
+                and c.get(x + 2, y).glyph == String("c") \
+                and c.get(x + 3, y).glyph == String("v"):
+            subtle_y = y
+            break
+    assert_true(subtle_y >= 0)
+    var subtle_x = _find_glyph_x(c, subtle_y, String("r"))
+    assert_equal(c.get(subtle_x, subtle_y).attr.fg, LIGHT_GRAY)
+    # And the inspected user frame stays in the highlight color, not dim.
+    var user_y = -1
+    for y in range(2, 16):
+        var x = _find_glyph_x(c, y, String("m"))
+        if x >= 0 and c.get(x + 1, y).glyph == String("y") \
+                and c.get(x + 2, y).glyph == String("_"):
+            user_y = y
+            break
+    assert_true(user_y >= 0)
+    var user_x = _find_glyph_x(c, user_y, String("m"))
+    # The current-frame highlight is BLACK on LIGHT_YELLOW — the key
+    # invariant is that it's NOT painted dim.
+    assert_true(c.get(user_x, user_y).attr.fg != LIGHT_GRAY)
 
 
 fn test_debug_pane_debug_mode_running_hides_inspect() raises:
@@ -13576,6 +13627,7 @@ fn main() raises:
     test_debug_pane_run_mode_hides_inspect_divider()
     test_debug_pane_run_mode_uses_full_height_for_output()
     test_debug_pane_debug_mode_keeps_output_divider()
+    test_debug_pane_subtle_frame_paints_dim()
     test_debug_pane_debug_mode_running_hides_inspect()
     test_debug_pane_traceback_link_underlines_span()
     test_debug_pane_plain_output_has_no_link_styling()

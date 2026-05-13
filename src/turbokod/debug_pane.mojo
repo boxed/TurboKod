@@ -142,7 +142,10 @@ struct PaneRow(ImplicitlyCopyable, Movable):
     * ``PANE_ROW_HEADER``: ``text`` is the title.
     * ``PANE_ROW_FRAME``: ``text`` is ``"name  file:line"``,
       ``ref`` is the DAP frame id, ``depth`` is the frame index
-      (used to highlight the current frame).
+      (used to highlight the current frame), ``expanded`` carries
+      the adapter's "subtle" hint (library / external code) — True
+      means paint the row dim so the user can still see it but
+      visually tell it apart from their own frames.
     * ``PANE_ROW_VARIABLE``: ``text`` is ``"name = value"``, with
       ``type_name`` painted as a colored ``" (type)"`` suffix at
       paint time. ``ref`` is ``variables_reference`` (0 = leaf),
@@ -414,7 +417,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             out.append(PaneRow(
                 PANE_ROW_FRAME,
                 name_pad + String("  ") + loc,
-                f.id, i, False, String(""),
+                f.id, i, f.subtle, String(""),
             ))
         out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False, String("")))
         out.append(PaneRow(
@@ -754,6 +757,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             elif r.kind == PANE_ROW_FRAME:
                 var marker = String(" ")
                 var attr = bg
+                # ``r.expanded`` carries the subtle hint for FRAME rows
+                # (see PaneRow docstring) — adapter said this is library
+                # / external code, so dim it. The ``current`` highlight
+                # still wins when the user is inspecting this frame so
+                # the marker stays readable.
+                if r.expanded:
+                    attr = dim
                 if r.depth == self.current_frame_index:
                     marker = String("▶")
                     attr = current

@@ -102,12 +102,20 @@ struct DapStackFrame(ImplicitlyCopyable, Movable):
     response). When the adapter only returns a ``source.name`` (e.g.,
     for builtin code with no on-disk file), ``path`` is empty and the
     UI should render ``name`` instead.
+
+    ``subtle`` is True for frames the adapter wants de-emphasized —
+    library / stdlib / external code. Set when the frame's
+    ``presentationHint`` is ``subtle`` or ``label``, or the frame's
+    ``source.presentationHint`` is ``deemphasize``. The UI paints these
+    in a dim color so the user can still see them but visually
+    distinguish them from their own code.
     """
     var id: Int
     var name: String
     var path: String
     var line: Int        # 0-based — adapter is configured ``linesStartAt1=false``
     var column: Int
+    var subtle: Bool
 
 
 @fieldwise_init
@@ -1474,6 +1482,17 @@ struct DapManager(Copyable, Movable):
         args.put(String("threadId"), json_int(thread_id))
         args.put(String("startFrame"), json_int(0))
         args.put(String("levels"), json_int(levels))
+        # ``includeAll`` overrides the adapter's default of hiding
+        # "external" frames. For adapters that mark library frames
+        # subtle (lldb-dap, delve) this is sufficient — we still get
+        # the frames, just flagged so the UI can dim them. debugpy
+        # *additionally* needs ``justMyCode: false`` in the launch
+        # config to expose stdlib / site-packages frames at all; with
+        # ``justMyCode: true`` it drops them server-side regardless of
+        # this flag. See ``_build_debugpy_launch_args``.
+        var fmt = json_object()
+        fmt.put(String("includeAll"), json_bool(True))
+        args.put(String("format"), fmt)
         # Route to the subprocess when the latched stop came from there.
         # We can't read ``self._stopped.from_subprocess`` here because
         # ``take_stopped`` typically runs *just before* this — the host's
@@ -2865,15 +2884,32 @@ fn _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
         if col > 0:
             col = col - 1
         var path = String("")
+        var subtle = False
         var src_opt = f.object_get(String("source"))
         if src_opt and src_opt.value().is_object():
             var s = src_opt.value()
             var p = s.object_get(String("path"))
             if p and p.value().is_string():
                 path = p.value().as_str()
+            # ``source.presentationHint = deemphasize`` is how lldb-dap /
+            # delve mark third-party / stdlib sources. Frame-level
+            # ``presentationHint`` (next block) is how debugpy marks them.
+            var sph = s.object_get(String("presentationHint"))
+            if sph and sph.value().is_string():
+                if sph.value().as_str() == String("deemphasize"):
+                    subtle = True
+        var fph = f.object_get(String("presentationHint"))
+        if fph and fph.value().is_string():
+            var h = fph.value().as_str()
+            # ``subtle`` is the standard "library code" hint. ``label``
+            # is for synthetic separator frames (thread-name markers);
+            # treat both as dim so they don't compete with user code
+            # for visual weight.
+            if h == String("subtle") or h == String("label"):
+                subtle = True
         out.append(DapStackFrame(
             id_opt.value().as_int(), name_opt.value().as_str(),
-            path, line, col,
+            path, line, col, subtle,
         ))
     return out^
 

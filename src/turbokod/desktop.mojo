@@ -3670,7 +3670,22 @@ struct Desktop(Movable):
                 if len(which(String("rg")).as_bytes()) == 0:
                     self.windows.add(_rg_missing_window())
                 else:
-                    self.project_find.open(self.project.value())
+                    var prefill = String("")
+                    var idx = self._focused_editor_idx()
+                    if idx >= 0:
+                        var sel = self.windows.windows[idx].editor.selection_text()
+                        var sb = sel.as_bytes()
+                        var has_newline = False
+                        for i in range(len(sb)):
+                            if sb[i] == 0x0A or sb[i] == 0x0D:
+                                has_newline = True
+                                break
+                        if not has_newline:
+                            prefill = sel
+                    self.project_find.open(
+                        self.project.value(), prefill,
+                        select_prefill=True,
+                    )
             return Optional[String]()
         if action == PROJECT_REPLACE:
             if self.project:
@@ -4305,7 +4320,7 @@ struct Desktop(Movable):
         if len(cmd.as_bytes()) > 0:
             _ = self.dispatch_action(cmd^, screen)
         if self.dap.has_stack():
-            var frames = self.dap.take_stack()
+            var frames = self._mark_subtle_frames(self.dap.take_stack())
             if len(frames) > 0:
                 self._dap_exec_path = frames[0].path
                 self._dap_exec_line = frames[0].line
@@ -4641,6 +4656,39 @@ struct Desktop(Movable):
             ))
         return out^
 
+    fn _mark_subtle_frames(
+        self, var frames: List[DapStackFrame],
+    ) -> List[DapStackFrame]:
+        """Tag every frame outside the project root as subtle so the
+        pane paints it dim.
+
+        The adapter's own ``presentationHint`` is honored first (already
+        set in ``_parse_stack_trace``); this layer adds a path-based
+        fallback for adapters that don't mark library code — debugpy
+        with ``justMyCode: false`` returns every frame as ``normal``,
+        so without this every stdlib / site-packages frame would paint
+        in the same white as user code and the visual cue would be
+        lost. A frame with no on-disk path (builtin / runtime code) is
+        also treated as subtle since there's nothing the user could
+        usefully click through to.
+        """
+        if not self.project:
+            return frames^
+        var root = self.project.value()
+        # Normalize with a trailing ``/`` so ``/proj`` doesn't
+        # accidentally match ``/projectX/...``.
+        if len(root.as_bytes()) > 0 and not _ends_with_slash(root):
+            root = root + String("/")
+        var out = List[DapStackFrame]()
+        for i in range(len(frames)):
+            var f = frames[i]
+            if not f.subtle:
+                if len(f.path.as_bytes()) == 0 \
+                        or not starts_with(f.path, root):
+                    f.subtle = True
+            out.append(f)
+        return out^
+
     fn _rebuild_pane_inspect(mut self, var locals: List[DapVariable]):
         """Rebuild the inspect rows from the cached stack + given locals
         + cached watch results. Called whenever any one of those three
@@ -4655,13 +4703,20 @@ struct Desktop(Movable):
                 self._dap_watch_exprs[k] + String(" = ") + v,
             )
         var stack_copy = self._dap_stack_cache.copy()
+        # Highlight the frame the user is currently inspecting (top of
+        # stack by default, but a frame click in the pane moves it).
+        var cur_idx = 0
+        for i in range(len(self._dap_stack_cache)):
+            if self._dap_stack_cache[i].id == self._dap_current_frame_id:
+                cur_idx = i
+                break
         self.debug_pane.rebuild_inspect(
             stack_copy^,
             String("Locals"),
             locals^,
             String("Watches"),
             watch_lines^,
-            0,  # current frame index — top of stack on initial render
+            cur_idx,
         )
 
     fn _refresh_watches(mut self):
@@ -7399,6 +7454,11 @@ fn _category_to_pane(category: String) -> UInt8:
     if category == String("console") or category == String("important"):
         return UInt8(2)   # PANE_OUT_CONSOLE
     return UInt8(0)       # PANE_OUT_STDOUT
+
+
+fn _ends_with_slash(s: String) -> Bool:
+    var b = s.as_bytes()
+    return len(b) > 0 and b[len(b) - 1] == 0x2F
 
 
 fn _same_file(a: String, b: String) -> Bool:

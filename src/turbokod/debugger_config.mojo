@@ -347,15 +347,19 @@ fn _launch_args_debugpy(
     terminal — that's what we want, since we'll surface those events
     in the editor's debug pane.
 
-    ``justMyCode: true`` matches debugpy's default. With ``false``,
-    debugpy's tracer fires on *every* Python function call — stdlib
-    and third-party included — and the per-call overhead makes
-    real-world apps (Django runserver serving an HTTP request, for
-    instance) fall over: the request handler calls thousands of
-    functions, each adds a trace event, and the server becomes
-    effectively unresponsive. ``true`` confines tracing to user code
-    so the debuggee runs at near-native speed when no breakpoint is
-    pending.
+    ``justMyCode: false`` exposes the full call chain. ``true`` (the
+    debugpy default) is faster — it confines tracing to user code so
+    the debuggee runs at near-native speed when no breakpoint is
+    pending — but it also *hides library / stdlib frames from the
+    stackTrace response*, even with ``format.includeAll: true``, so
+    when you stop in your own code you can't see who called you from
+    the framework / runtime side. The visibility loss outweighs the
+    tracing-overhead win for the IDE use case: at a breakpoint the
+    program is already paused, and the few extra milliseconds per
+    function call between breakpoints is usually invisible to a
+    human. Apps where it *does* matter (Django ``runserver`` serving
+    real traffic under the debugger) are rare enough to be worth a
+    future per-target opt-out.
 
     ``subProcess: true`` enables subprocess debugging. When the
     debuggee forks/execs, debugpy emits a ``debugpyAttach`` event
@@ -398,7 +402,7 @@ fn _launch_args_debugpy(
     o.put(String("args"), _string_list_to_json(args^))
     o.put(String("console"), json_str(String("internalConsole")))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
-    o.put(String("justMyCode"), json_bool(True))
+    o.put(String("justMyCode"), json_bool(False))
     o.put(String("subProcess"), json_bool(True))
     return o^
 

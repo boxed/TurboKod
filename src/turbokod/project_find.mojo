@@ -124,14 +124,35 @@ struct ProjectFind(Movable):
         self._context_highlights = List[Highlight]()
         self._runner = _RgRunner()
 
-    fn open(mut self, var root: String):
+    fn open(
+        mut self,
+        var root: String,
+        var prefill: String = String(""),
+        select_prefill: Bool = False,
+    ):
+        """Open the Find-in-Project dialog.
+
+        ``prefill`` seeds the query field. With ``select_prefill=True``
+        the seeded text is left fully selected so the next typed key
+        replaces it — mirrors the basic Find prompt and lets the user
+        either keep the seeded term (Enter) or overwrite it (type).
+
+        A non-empty prefill also kicks off a search on the next tick
+        so results appear immediately without a keystroke.
+        """
         self._runner.cancel()
         self.root = root^
         self.query = TextField()
+        var has_prefill = len(prefill.as_bytes()) > 0
+        if has_prefill:
+            self.query.set_text(prefill^)
+            if select_prefill:
+                self.query.select_all()
         self._input_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._last_searched_opts = SearchOptions()
-        self._query_dirty_at_ms = 0
+        # ``1`` is the "fire on next tick" sentinel (see _mark_toggle_changed).
+        self._query_dirty_at_ms = 1 if has_prefill else 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
