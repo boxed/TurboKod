@@ -4257,13 +4257,24 @@ struct Desktop(Movable):
             # just the top frame. 64 frames is plenty for typical
             # stacks and trivial in payload size.
             _ = self.dap.request_stack_trace(stopped.value().thread_id, 64)
-        # Frame click from the pane: re-fetch scopes for the chosen frame.
+        # Frame click from the pane: re-fetch scopes for the chosen frame
+        # and jump the editor to its source location.
         var fclick = self.debug_pane.consume_frame_click()
         if fclick[0] != -1:
             self._dap_current_frame_id = fclick[0]
             self._dap_var_target_kind = UInt8(0)
             _ = self.dap.request_scopes(fclick[0])
             self._refresh_watches()
+            for i in range(len(self._dap_stack_cache)):
+                if self._dap_stack_cache[i].id == fclick[0]:
+                    var fpath = self._dap_stack_cache[i].path
+                    var fline = self._dap_stack_cache[i].line
+                    if len(fpath.as_bytes()) > 0:
+                        self._jump_to(
+                            DefinitionResolved(fpath, fline, 0),
+                            screen,
+                        )
+                    break
         # Variable expand click: request children for the row's ref.
         var eclick = self.debug_pane.consume_expand()
         if eclick[0] != -1:

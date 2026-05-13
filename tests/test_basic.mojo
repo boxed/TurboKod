@@ -1609,6 +1609,29 @@ fn test_desktop_workspace_shrinks_with_file_tree() raises:
     )
 
 
+fn test_window_min_size_enforced_at_construction() raises:
+    """Framework guarantees the rect is wide enough for close + maximize
+    chrome and tall enough to hold both borders, even if the caller
+    passed a smaller rect."""
+    var w = Window(String("tiny"), Rect(0, 0, 3, 1), List[String]())
+    assert_true(w.rect.width() >= 10)
+    assert_true(w.rect.height() >= 2)
+    var ed = Window.editor_window(String("e"), Rect(5, 5, 8, 6), String(""))
+    assert_true(ed.rect.width() >= 10)
+    assert_true(ed.rect.height() >= 2)
+
+
+fn test_window_min_size_survives_workspace_shrink() raises:
+    """``fit_into`` must not produce a sub-minimum window when scaling
+    into a workspace that's smaller than the caller's original."""
+    var wm = WindowManager()
+    wm.add(Window(String("A"), Rect(0, 0, 80, 24), List[String]()))
+    wm.fit_into(Rect(0, 0, 80, 24))
+    wm.fit_into(Rect(0, 0, 12, 4))
+    assert_true(wm.windows[0].rect.width() >= 10)
+    assert_true(wm.windows[0].rect.height() >= 2)
+
+
 fn test_window_manager_fit_into_moves_then_resizes() raises:
     """``fit_into`` prefers moving over resizing; resizes only when the window
     is wider/taller than the new workspace."""
@@ -13219,6 +13242,8 @@ fn main() raises:
     test_file_tree_expand_collapse()
     test_file_tree_filters_dotfiles()
     test_desktop_workspace_shrinks_with_file_tree()
+    test_window_min_size_enforced_at_construction()
+    test_window_min_size_survives_workspace_shrink()
     test_window_manager_fit_into_moves_then_resizes()
     test_window_manager_fit_into_keeps_maximized_pinned()
     test_window_manager_fit_into_scales_side_by_side_on_grow()

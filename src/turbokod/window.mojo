@@ -29,8 +29,56 @@ from .geometry import Point, Rect
 from .scrollbar import HScrollbar, VScrollbar
 
 
-comptime MIN_WIN_W: Int = 12
-comptime MIN_WIN_H: Int = 4
+comptime MIN_WIN_W: Int = 10
+comptime MIN_WIN_H: Int = 2
+# MIN_WIN_W = 3 (close button [■]) + 5 (single-digit indicator =[▲])
+# + 2 borders, so both chrome buttons always fit in a min-width window.
+# Two-digit window numbers drop the maximize indicator down to the bare
+# number — the dynamic checks in ``Window.paint`` already handle that.
+# MIN_WIN_H = 2 is the smallest height that can render top + bottom
+# borders simultaneously; the interior is empty at that height.
+
+
+fn _grow_to_min(rect: Rect) -> Rect:
+    """Extend ``rect`` toward bottom-right so it is at least
+    ``MIN_WIN_W`` wide and ``MIN_WIN_H`` tall. Used at construction
+    time, before there's a workspace to clamp against."""
+    var bx = rect.b.x
+    var by = rect.b.y
+    if bx - rect.a.x < MIN_WIN_W:
+        bx = rect.a.x + MIN_WIN_W
+    if by - rect.a.y < MIN_WIN_H:
+        by = rect.a.y + MIN_WIN_H
+    return Rect(rect.a.x, rect.a.y, bx, by)
+
+
+fn _fit_min_in_workspace(rect: Rect, workspace: Rect) -> Rect:
+    """Return ``rect`` grown to at least ``MIN_WIN_W`` x ``MIN_WIN_H``,
+    extending toward bottom-right; if that would push past
+    ``workspace``, pull the top-left back the rest of the way.
+    When ``workspace`` itself is smaller than the minimum along an
+    axis, the result is clamped to ``workspace`` along that axis —
+    a 5-column terminal can't host a 10-column window, so the
+    invariant degrades gracefully rather than crashing."""
+    var ax = rect.a.x
+    var ay = rect.a.y
+    var bx = rect.b.x
+    var by = rect.b.y
+    if bx - ax < MIN_WIN_W:
+        bx = ax + MIN_WIN_W
+        if bx > workspace.b.x:
+            bx = workspace.b.x
+            ax = bx - MIN_WIN_W
+            if ax < workspace.a.x:
+                ax = workspace.a.x
+    if by - ay < MIN_WIN_H:
+        by = ay + MIN_WIN_H
+        if by > workspace.b.y:
+            by = workspace.b.y
+            ay = by - MIN_WIN_H
+            if ay < workspace.a.y:
+                ay = workspace.a.y
+    return Rect(ax, ay, bx, by)
 
 
 fn _scale_coord(c: Int, old_origin: Int, old_size: Int, new_origin: Int, new_size: Int) -> Int:
@@ -77,7 +125,7 @@ fn _scale_rect(r: Rect, old_ws: Rect, new_ws: Rect) -> Rect:
         by = new_ws.b.y
         if ay >= by: ay = by - 1
         if ay < new_ws.a.y: ay = new_ws.a.y
-    return Rect(ax, ay, bx, by)
+    return _fit_min_in_workspace(Rect(ax, ay, bx, by), new_ws)
 
 
 fn paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
@@ -710,16 +758,17 @@ struct Window(ImplicitlyCopyable, Movable):
 
     fn __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
-        self.rect = rect
+        var sized = _grow_to_min(rect)
+        self.rect = sized
         self.content = content^
         self.editor = Editor()
         self.is_editor = False
         self.is_maximized = False
-        self._restore_rect = rect
-        self._baseline_rect = rect
+        self._restore_rect = sized
+        self._baseline_rect = sized
         self._baseline_ws = Rect.empty()
         self._has_baseline = False
-        self._last_observed_rect = rect
+        self._last_observed_rect = sized
 
     @staticmethod
     fn editor_window(var title: String, rect: Rect, var text: String) -> Self:
@@ -1245,7 +1294,9 @@ struct WindowManager(Movable):
                 if ay < workspace.a.y: ay = workspace.a.y
                 if ax + w > workspace.b.x: ax = workspace.b.x - w
                 if ay + h > workspace.b.y: ay = workspace.b.y - h
-                self.windows[i].rect = Rect(ax, ay, ax + w, ay + h)
+                self.windows[i].rect = _fit_min_in_workspace(
+                    Rect(ax, ay, ax + w, ay + h), workspace,
+                )
 
     fn _scale_from_baselines(mut self, prev_ws: Rect, new_ws: Rect):
         """Workspace just changed. Scale every non-maximized window's
