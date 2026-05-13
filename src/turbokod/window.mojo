@@ -430,6 +430,305 @@ fn paint_panel_window_buttons(
     return hits^
 
 
+# --- bottom-docked panel --------------------------------------------------
+# A "bottom-docked panel" is a single widget pinned to the bottom of the
+# workspace above the status / tab strip. It owns:
+#
+#   * the min/max state machine (PANEL_STATE_*)
+#   * a user-resizable preferred_height for NORMAL state
+#   * a clickable command strip on the title row
+#   * the min/max chrome buttons + a single-letter hotkey hint
+#   * ESC walks the state ladder (max → normal → min)
+#
+# Both the debug pane and the docked terminal pane embed one of these to
+# avoid duplicating chrome paint, the resize-drag handling, the chrome
+# click dispatch, and the ESC ladder.
+
+comptime DOCK_MIN_HEIGHT = 4
+"""Smallest NORMAL-state height the user can drag down to — keeps the
+title row, the status row, and at least two body rows on screen."""
+
+
+struct BottomDockedPanel(ImplicitlyCopyable, Movable):
+    """Chrome state + state-machine for a bottom-docked panel.
+
+    Embedded by the debug pane and terminal pane (and any future docked
+    widget). Holds the bits that the layout helpers in this module need
+    to compute geometry and route chrome events; the pane owns its own
+    body state (and its own ``focused`` flag) separately.
+    """
+    var state: UInt8
+    """``PANEL_STATE_NORMAL`` (default), ``PANEL_STATE_MINIMIZED``
+    (header line only), or ``PANEL_STATE_MAXIMIZED`` (fills the
+    workspace above the status / tab strip)."""
+    var preferred_height: Int
+    """Rendered height when ``state == PANEL_STATE_NORMAL``. The user
+    drags the top border to update this; min/max overrides take
+    precedence at paint time without mutating it, so restoring to
+    NORMAL returns to the previously-chosen size."""
+    var commands: List[TitleCommand]
+    """Title-row command strip — populated by the host each tick so
+    visible labels track the panel's current state."""
+    var pending_command_id: String
+    """Id of the title-command the user just clicked, or empty when
+    nothing is pending. Polled and cleared by the host each tick."""
+    var chrome_hits: PanelChromeHits
+    """Painted-rect record for the min/max chrome buttons drawn by the
+    last ``paint_bottom_dock_chrome`` call. Reset every paint and
+    consulted by mouse handling."""
+    var last_cmd_hits: List[TitleCommandHit]
+    """Painted-rect record for each title-command from the last
+    paint. Used by the chrome mouse handler to map a click to a
+    command id."""
+    var resizing: Bool
+    """True while the user holds the left button after pressing on the
+    panel's top border. Mouse motion in this state updates
+    ``preferred_height``; the next non-pressed event clears it."""
+
+    fn __init__(out self, preferred_height: Int = 14):
+        self.state = PANEL_STATE_NORMAL
+        self.preferred_height = preferred_height
+        self.commands = List[TitleCommand]()
+        self.pending_command_id = String("")
+        self.chrome_hits = PanelChromeHits()
+        self.last_cmd_hits = List[TitleCommandHit]()
+        self.resizing = False
+
+    fn __copyinit__(out self, copy: Self):
+        self.state = copy.state
+        self.preferred_height = copy.preferred_height
+        self.commands = copy.commands.copy()
+        self.pending_command_id = copy.pending_command_id
+        self.chrome_hits = copy.chrome_hits
+        self.last_cmd_hits = copy.last_cmd_hits.copy()
+        self.resizing = copy.resizing
+
+    fn is_minimized(self) -> Bool:
+        return self.state == PANEL_STATE_MINIMIZED
+
+    fn is_maximized(self) -> Bool:
+        return self.state == PANEL_STATE_MAXIMIZED
+
+    fn is_resizing(self) -> Bool:
+        return self.resizing
+
+    fn set_state(mut self, s: UInt8):
+        """Mutate ``state`` and clear an in-flight resize drag if the
+        new state isn't NORMAL — the top border becomes a button strip
+        in min/max, not a draggable handle."""
+        self.state = s
+        if s != PANEL_STATE_NORMAL:
+            self.resizing = False
+
+    fn set_commands(mut self, var commands: List[TitleCommand]):
+        self.commands = commands^
+
+    fn consume_command_id(mut self) -> String:
+        var s = self.pending_command_id
+        self.pending_command_id = String("")
+        return s^
+
+    fn effective_height(self, screen: Rect, bottom_chrome_h: Int) -> Int:
+        """Rendered height accounting for the state machine.
+        NORMAL → ``preferred_height``. MINIMIZED → 1 (header only).
+        MAXIMIZED → fill the workspace above the bottom chrome."""
+        if self.state == PANEL_STATE_MINIMIZED:
+            return 1
+        if self.state == PANEL_STATE_MAXIMIZED:
+            var avail = screen.b.y - bottom_chrome_h - 1
+            if avail < DOCK_MIN_HEIGHT:
+                avail = DOCK_MIN_HEIGHT
+            return avail
+        return self.preferred_height
+
+    fn clamp_height(self, want: Int, panel: Rect) -> Int:
+        """Pin a proposed height to a usable range. Lower bound keeps
+        the title bar plus a couple of body rows on screen; upper
+        bound leaves at least 5 rows of workspace above the panel."""
+        var h = want
+        var hi = panel.b.y - 5
+        if h > hi:
+            h = hi
+        if h < DOCK_MIN_HEIGHT:
+            h = DOCK_MIN_HEIGHT
+        return h
+
+    fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
+        """Hit-test the top-border row — the drag handle. Resize is
+        only available in NORMAL state, and the button cells (top-
+        right) are excluded so the cursor stays default over them."""
+        if panel.is_empty():
+            return False
+        if self.state != PANEL_STATE_NORMAL:
+            return False
+        if pos.y != panel.a.y:
+            return False
+        if pos.x < panel.a.x or pos.x >= panel.b.x:
+            return False
+        if self.chrome_hits.on_any(pos):
+            return False
+        return True
+
+
+fn paint_bottom_dock_chrome(
+    mut canvas: Canvas, painter: Painter, panel: Rect,
+    title: String, focused: Bool,
+    mut dock: BottomDockedPanel,
+    hotkey_label: String = String("9"),
+) -> Rect:
+    """Paint the title row: top border, title text, command strip, min/
+    max chrome, and the right-edge hotkey hint. Returns the body rect
+    (the panel rows beneath the title row). When the panel is MINIMIZED
+    the returned body rect is empty — the caller stops painting after
+    the title row.
+
+    Side-effects: refreshes ``dock.chrome_hits`` and ``dock.last_cmd_hits``
+    so the chrome mouse handler can dispatch the next click.
+
+    ``hotkey_label`` is the single-letter (or empty) hint painted at
+    the right edge so the user can map a keyboard shortcut to the
+    panel — the debug pane uses ``"9"`` for Ctrl+9. Pass an empty
+    string to skip the hint entirely.
+    """
+    var border = Attr(LIGHT_GRAY, BLACK)
+    var title_attr = Attr(LIGHT_YELLOW, BLACK)
+    var body_bg = Attr(WHITE, BLACK)
+    var top = panel.a.y
+    var top_glyph = String("═") if focused else String("─")
+    for x in range(panel.a.x, panel.b.x):
+        painter.set(canvas, x, top, Cell(top_glyph, border, 1))
+    var title_text = String(" ") + title + String(" ")
+    var title_advanced = painter.put_text(
+        canvas, Point(panel.a.x + 2, top), title_text, title_attr,
+    )
+    # Command strip after the title with a ``- `` separator. Reserve
+    # 11 cells on the right for chrome (3 + 3 buttons + a hotkey
+    # hint + a breathing cell).
+    dock.last_cmd_hits = List[TitleCommandHit]()
+    var cmd_x = panel.a.x + 2 + title_advanced
+    var hint_cells = 0
+    var hint_bytes = hotkey_label.as_bytes()
+    if len(hint_bytes) > 0:
+        hint_cells = len(hint_bytes) + 1  # ` X`
+    var cmd_max = panel.b.x - 9 - hint_cells
+    if cmd_max < cmd_x:
+        cmd_max = cmd_x
+    if len(dock.commands) > 0 and cmd_max > cmd_x + 2:
+        dock.last_cmd_hits = paint_title_commands(
+            canvas, Point(cmd_x, top), dock.commands,
+            title_attr, title_attr, body_bg,
+            cmd_max,
+        )
+    # Min/max chrome buttons + the hotkey hint.
+    dock.chrome_hits = paint_panel_window_buttons(
+        canvas, painter, top, panel, dock.state, border,
+        trailing_reserve=hint_cells,
+    )
+    var pane_w = panel.b.x - panel.a.x
+    if len(hint_bytes) > 0:
+        if pane_w >= 12:
+            _ = painter.put_text(
+                canvas,
+                Point(panel.b.x - 1 - len(hint_bytes), top),
+                String(" ") + hotkey_label, title_attr,
+            )
+        elif pane_w >= 6:
+            _ = painter.put_text(
+                canvas,
+                Point(panel.b.x - len(hint_bytes), top),
+                hotkey_label, title_attr,
+            )
+    if dock.state == PANEL_STATE_MINIMIZED:
+        return Rect.empty()
+    return Rect(panel.a.x, top + 1, panel.b.x, panel.b.y)
+
+
+@fieldwise_init
+struct DockChromeMouseResult(Copyable, Movable):
+    """Outcome of ``handle_bottom_dock_chrome_mouse``.
+
+    ``consumed`` — True iff the event was handled (caller should not
+    fall through to body routing). ``focus_request`` — True when the
+    user pressed a chrome target (button, command, title row); the
+    caller should flip its ``focused`` flag to True.
+    """
+    var consumed: Bool
+    var focus_request: Bool
+
+
+fn handle_bottom_dock_chrome_mouse(
+    event: Event, panel: Rect, mut dock: BottomDockedPanel,
+) -> DockChromeMouseResult:
+    """Process a mouse event against the chrome row or an in-flight
+    resize drag.
+
+    Mutates ``dock`` (toggle state, start/end resize drag, update
+    preferred_height, set pending_command_id). Returns
+    ``(consumed, focus_request)`` so the caller can apply its own
+    focus flag without the helper needing a mut reference to it.
+
+    The pane's own handle_mouse should call this *before* its body
+    routing so chrome targets win against overlapping body widgets,
+    and *before* the body's own drag-state checks so a resize-in-flight
+    can't be hijacked by a wandering selection.
+    """
+    if event.kind != EVENT_MOUSE:
+        return DockChromeMouseResult(False, False)
+    # Resize-drag in flight owns every event until the button is
+    # released — even when the cursor wanders outside the panel rect.
+    if dock.resizing:
+        if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+            dock.resizing = False
+            return DockChromeMouseResult(True, False)
+        dock.preferred_height = dock.clamp_height(
+            panel.b.y - event.pos.y, panel,
+        )
+        return DockChromeMouseResult(True, False)
+    if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
+        if dock.chrome_hits.on_min(event.pos):
+            if dock.state == PANEL_STATE_MINIMIZED:
+                dock.set_state(PANEL_STATE_NORMAL)
+            else:
+                dock.set_state(PANEL_STATE_MINIMIZED)
+            return DockChromeMouseResult(True, True)
+        if dock.chrome_hits.on_max(event.pos):
+            if dock.state == PANEL_STATE_MAXIMIZED:
+                dock.set_state(PANEL_STATE_NORMAL)
+            else:
+                dock.set_state(PANEL_STATE_MAXIMIZED)
+            return DockChromeMouseResult(True, True)
+        var cmd_id = hit_title_command(dock.last_cmd_hits, event.pos)
+        if len(cmd_id.as_bytes()) > 0:
+            dock.pending_command_id = cmd_id^
+            return DockChromeMouseResult(True, True)
+        # Drag-to-resize is NORMAL-only; in min/max the top border is
+        # just a chrome strip — clicks there focus the pane.
+        if dock.state == PANEL_STATE_NORMAL \
+                and event.pos.y == panel.a.y \
+                and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+            dock.resizing = True
+            return DockChromeMouseResult(True, False)
+        if dock.state != PANEL_STATE_NORMAL \
+                and event.pos.y == panel.a.y \
+                and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+            return DockChromeMouseResult(True, True)
+    return DockChromeMouseResult(False, False)
+
+
+fn handle_bottom_dock_esc(mut dock: BottomDockedPanel) -> Bool:
+    """ESC walks max → normal → min. Returns True when the state
+    changed (so the pane's own ESC handling skips its further branches).
+    MINIMIZED is the terminal step — ESC there falls through so the
+    host can dismiss the pane entirely if it wants to."""
+    if dock.state == PANEL_STATE_MAXIMIZED:
+        dock.set_state(PANEL_STATE_NORMAL)
+        return True
+    if dock.state == PANEL_STATE_NORMAL:
+        dock.set_state(PANEL_STATE_MINIMIZED)
+        return True
+    return False
+
+
 # --- docked panel stack ---------------------------------------------------
 # A "docked panel stack" is a vertical column of N section panels with
 # splitters between them — used for the sidebar of a multi-section

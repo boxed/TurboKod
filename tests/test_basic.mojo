@@ -10,6 +10,10 @@ from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
 from turbokod.canvas import Canvas, wrap_to_width
+from turbokod.claude_detect import (
+    CLAUDE_ACTIVE, CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
+    claude_state_label, detect_claude_state,
+)
 from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
@@ -48,7 +52,8 @@ from turbokod.desktop import (
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
-    PROJECT_OPEN_RECENT, PROJECT_REPLACE, PROJECT_TREE_ACTION,
+    PROJECT_OPEN_RECENT, PROJECT_OPEN_RECENT_PREFIX,
+    PROJECT_REPLACE, PROJECT_TREE_ACTION,
     WINDOW_CLOSE,
     _expand_save_placeholders,
     _find_doc_entry_for_word,
@@ -193,6 +198,98 @@ from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
+
+
+fn test_claude_detect_empty_buffer_returns_none() raises:
+    var lines = List[String]()
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
+
+
+fn test_claude_detect_plain_shell_output_returns_none() raises:
+    var lines = List[String]()
+    lines.append(String("$ ls"))
+    lines.append(String("foo.txt   bar.txt"))
+    lines.append(String("$ git status"))
+    lines.append(String("On branch main"))
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
+
+
+fn test_claude_detect_spinner_row_returns_working() raises:
+    var lines = List[String]()
+    lines.append(String("> add tests for the detector"))
+    lines.append(
+        String("✻ Synthesizing… (5s · esc to interrupt · ctrl+t to show todos)")
+    )
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
+
+
+fn test_claude_detect_welcome_banner_returns_clean() raises:
+    var lines = List[String]()
+    lines.append(String("✻ Welcome to Claude Code!"))
+    lines.append(String("  /help for help, /status for your current setup"))
+    lines.append(String("  cwd: /Users/dev/proj"))
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_CLEAN))
+
+
+fn test_claude_detect_idle_prompt_returns_waiting() raises:
+    var lines = List[String]()
+    lines.append(String("╭─────────────────────────────────────────╮"))
+    lines.append(String("│ >                                       │"))
+    lines.append(String("╰─────────────────────────────────────────╯"))
+    lines.append(String("  ? for shortcuts"))
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WAITING))
+
+
+fn test_claude_detect_working_wins_over_waiting() raises:
+    # Right after the user submits, the prompt hint can briefly co-exist
+    # with the spinner row in the visible tail. Working should win — the
+    # user cares more about "is it still going?" than "is the prompt
+    # there?" in that moment.
+    var lines = List[String]()
+    lines.append(String("  ? for shortcuts"))
+    lines.append(
+        String("✻ Hatching… (1s · esc to interrupt · ctrl+r to expand)")
+    )
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
+
+
+fn test_claude_detect_generic_marker_returns_active() raises:
+    # Only the brand glyph is in view — Claude is on screen somewhere
+    # but we can't tell which precise state. Better to say ``active``
+    # than to fall back to ``none`` and let the title pretend Claude
+    # isn't running.
+    var lines = List[String]()
+    lines.append(String("● Done thinking about the layout."))
+    lines.append(String("✻ Some Claude row without other markers"))
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_ACTIVE))
+
+
+fn test_claude_detect_marker_outside_tail_window_is_ignored() raises:
+    # Only the most recent ~12 rows count — the marker must be in the
+    # currently-visible tail, not in scrollback that's drifted off.
+    var lines = List[String]()
+    lines.append(String("✻ Welcome to Claude Code!"))
+    for _ in range(30):
+        lines.append(String("$ echo plain shell output"))
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
+
+
+fn test_claude_detect_finds_marker_inside_ansi_wrapped_line() raises:
+    # In the real pane, color escapes wrap the marker text. The detector
+    # is a byte-level substring search so the escapes don't disturb the
+    # match as long as the marker bytes themselves are contiguous.
+    var lines = List[String]()
+    var wrapped = String("\x1b[2m✻ Hatching… (3s · esc to interrupt)\x1b[0m")
+    lines.append(wrapped)
+    assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
+
+
+fn test_claude_state_label_round_trip() raises:
+    assert_equal(claude_state_label(CLAUDE_NONE),    String(""))
+    assert_equal(claude_state_label(CLAUDE_CLEAN),   String("clean"))
+    assert_equal(claude_state_label(CLAUDE_WAITING), String("waiting"))
+    assert_equal(claude_state_label(CLAUDE_WORKING), String("working"))
+    assert_equal(claude_state_label(CLAUDE_ACTIVE),  String("active"))
 
 
 fn test_point_arithmetic() raises:
@@ -1517,15 +1614,22 @@ fn test_desktop_project_lifecycle() raises:
     var first = d.project.value()
     d.detect_project_from(String("src/turbokod/desktop.mojo"))
     assert_equal(d.project.value(), first)
-    # close_project clears project state but keeps the menu visible — the
-    # label resets to "project" and the item list shrinks back to the
-    # single recents-picker entry.
+    # close_project clears project state but keeps the menu visible —
+    # the label resets to "project", and the dropdown becomes the
+    # recents-picker entry followed by a separator and direct-pick
+    # entries for the recent projects. ``_set_project`` recorded the
+    # turbokod root into ``config.recent_projects`` on the way in, so
+    # at least one direct-pick entry exists here.
     d.close_project()
     assert_false(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
     assert_equal(d.menu_bar.menus[idx].label, String("project"))
-    assert_equal(len(d.menu_bar.menus[idx].items), 1)
+    assert_true(len(d.menu_bar.menus[idx].items) >= 3)
     assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT)
+    assert_true(d.menu_bar.menus[idx].items[1].is_separator)
+    assert_true(_starts_with(
+        d.menu_bar.menus[idx].items[2].action, PROJECT_OPEN_RECENT_PREFIX,
+    ))
     # After closing, detection works again.
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
@@ -2152,6 +2256,95 @@ fn test_editor_save_uses_editorconfig_line_endings() raises:
     _ = external_call["unlink", Int32]((f_path + String("\0")).unsafe_ptr())
     _ = external_call["unlink", Int32]((ec_path + String("\0")).unsafe_ptr())
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
+fn test_text_buffer_strips_crlf_on_split() raises:
+    """A CRLF-encoded payload must split into clean lines — leaving the
+    ``\\r`` byte attached to each line would later corrupt the terminal
+    paint (stray ``\\r`` resets the cursor to column 0 mid-row) and
+    confuse cursor / selection math.
+    """
+    var b = TextBuffer(String("ab\r\ncd\r\n"))
+    assert_equal(b.line_count(), 3)
+    assert_equal(b.line(0), String("ab"))
+    assert_equal(b.line(1), String("cd"))
+    assert_equal(b.line(2), String(""))
+    # A trailing CR with no following LF also gets stripped.
+    var b2 = TextBuffer(String("only\r"))
+    assert_equal(b2.line_count(), 1)
+    assert_equal(b2.line(0), String("only"))
+
+
+fn test_editor_preserves_crlf_round_trip() raises:
+    """Opening a CRLF file with no editorconfig and saving it again must
+    produce the original bytes verbatim — otherwise every CRLF file we
+    open would show a full-file diff on the next save."""
+    var dir = String("/tmp/turbokod_crlf_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var f_path = dir + String("/x.txt")
+    var original = String("alpha\r\nbeta\r\ngamma\r\n")
+    assert_true(write_file(f_path, original))
+    var ed = Editor.from_file(f_path)
+    # Detection: no editorconfig in this dir, so end_of_line should be
+    # filled in from the file's actual bytes.
+    assert_equal(ed.editorconfig.end_of_line, String("crlf"))
+    # Buffer holds clean lines (no trailing '\r').
+    assert_equal(ed.buffer.line(0), String("alpha"))
+    assert_equal(ed.buffer.line(1), String("beta"))
+    assert_equal(ed.buffer.line(2), String("gamma"))
+    assert_true(ed.save())
+    var got = read_file(f_path)
+    assert_equal(got, original)
+    _ = external_call["unlink", Int32]((f_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
+fn test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
+    """Opening a CRLF file shouldn't make the git gutter flag every row
+    as MODIFIED. The buffer strips trailing ``\\r``; the cached HEAD
+    text must do the same on ingress so the diff aligns. Also covers
+    the revert path: a revert of an unchanged row would otherwise
+    splice raw ``\\r``-laden lines back into the buffer.
+    """
+    var ed = Editor(String(""))
+    # Buffer matches HEAD modulo line endings (CRLF vs LF).
+    ed.buffer = TextBuffer(String("alpha\nbeta\ngamma\n"))
+    ed.set_git_head_text(String("alpha\r\nbeta\r\ngamma\r\n"), True)
+    # The cached text must be normalized — no '\r' bytes left.
+    var head_bytes = ed._git_head_text.as_bytes()
+    for i in range(len(head_bytes)):
+        assert_true(Int(head_bytes[i]) != 0x0D)
+    # Every buffer row should diff as NONE.
+    var diff = diff_buffer_against_head(
+        ed._git_head_text, ed.buffer.lines.copy(),
+    )
+    for i in range(len(diff)):
+        assert_equal(diff[i], GIT_CHANGE_NONE)
+
+
+fn test_canvas_substitutes_control_glyphs() raises:
+    """``Canvas.put_text`` must never emit a raw control byte — paint
+    a string containing ``\\r`` and confirm the cell glyph is the
+    Unicode 'Control Pictures' substitute (U+240D, ``␍``) rather than
+    the raw 0x0D byte. Same byte hitting the terminal verbatim is what
+    corrupts the editor paint of CRLF files."""
+    var c = Canvas(8, 1)
+    _ = c.put_text(Point(0, 0), String("a\rb"), default_attr())
+    # Cell 0 → 'a' (1 byte ASCII)
+    assert_equal(c.get(0, 0).glyph, String("a"))
+    # Cell 1 → '␍' (U+240D, 3 bytes UTF-8: E2 90 8D), NOT raw '\r'
+    var cr_glyph = c.get(1, 0).glyph
+    assert_equal(len(cr_glyph.as_bytes()), 3)
+    var crb = cr_glyph.as_bytes()
+    assert_equal(Int(crb[0]), 0xE2)
+    assert_equal(Int(crb[1]), 0x90)
+    assert_equal(Int(crb[2]), 0x8D)
+    # Cell 2 → 'b'
+    assert_equal(c.get(2, 0).glyph, String("b"))
 
 
 fn test_walk_project_files_finds_known_files() raises:
@@ -13157,6 +13350,16 @@ fn main() raises:
         c_fake.unsafe_ptr(), c_one.unsafe_ptr(), Int32(1),
     )
 
+    test_claude_detect_empty_buffer_returns_none()
+    test_claude_detect_plain_shell_output_returns_none()
+    test_claude_detect_spinner_row_returns_working()
+    test_claude_detect_welcome_banner_returns_clean()
+    test_claude_detect_idle_prompt_returns_waiting()
+    test_claude_detect_working_wins_over_waiting()
+    test_claude_detect_generic_marker_returns_active()
+    test_claude_detect_marker_outside_tail_window_is_ignored()
+    test_claude_detect_finds_marker_inside_ansi_wrapped_line()
+    test_claude_state_label_round_trip()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()
@@ -13326,6 +13529,10 @@ fn main() raises:
     test_editor_uses_editorconfig_indent()
     test_editor_save_applies_editorconfig_transforms()
     test_editor_save_uses_editorconfig_line_endings()
+    test_text_buffer_strips_crlf_on_split()
+    test_editor_preserves_crlf_round_trip()
+    test_git_gutter_no_diff_when_buffer_matches_crlf_head()
+    test_canvas_substitutes_control_glyphs()
     test_walk_project_files_finds_known_files()
     test_find_in_project_locates_string()
     test_gitignore_matches_directory_pattern()

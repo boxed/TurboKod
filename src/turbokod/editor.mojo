@@ -301,11 +301,13 @@ fn _lists_equal(a: List[String], b: List[String]) -> Bool:
 fn _split_buffer_lines(text: String) -> List[String]:
     """Split disk bytes into the buffer's line-list shape.
 
-    Mirrors ``TextBuffer.__init__`` exactly (split on ``\\n``; a trailing
-    ``\\n`` produces a trailing empty line). Used by the 3-way merge so
-    the merge base, the buffer, and the new on-disk content line up
-    cell-for-cell — any difference in how we tokenize lines would make
-    the merge spuriously flag whole files as conflicts.
+    Mirrors ``TextBuffer.__init__`` exactly (split on ``\\n``; trailing
+    ``\\r`` before each ``\\n`` is stripped so CRLF files share their
+    line-list shape with LF files; a trailing ``\\n`` produces a
+    trailing empty line). Used by the 3-way merge so the merge base,
+    the buffer, and the new on-disk content line up cell-for-cell —
+    any difference in how we tokenize lines would make the merge
+    spuriously flag whole files as conflicts.
     """
     var out = List[String]()
     var bytes = text.as_bytes()
@@ -313,11 +315,72 @@ fn _split_buffer_lines(text: String) -> List[String]:
     var i = 0
     while i < len(bytes):
         if bytes[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:i])))
+            var line_end = i
+            if line_end > start and bytes[line_end - 1] == 0x0D:
+                line_end -= 1
+            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:line_end])))
             start = i + 1
         i += 1
-    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:len(bytes)])))
+    var end = len(bytes)
+    if end > start and bytes[end - 1] == 0x0D:
+        end -= 1
+    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:end])))
     return out^
+
+
+fn _normalize_crlf(text: String) -> String:
+    """Rewrite ``text`` with all ``\\r\\n`` pairs collapsed to ``\\n``.
+
+    Used on external text that's about to be diffed or spliced into the
+    buffer (currently ``git show HEAD:<path>`` output) — the buffer
+    strips trailing ``\\r`` from each line on load, so any caller that
+    passes raw CRLF bytes through ``split_lines`` would line up
+    ``"foo\\r"`` against the buffer's ``"foo"`` and flag every row as
+    changed. Trailing single ``\\r`` (no following ``\\n``) at the very
+    end is also dropped to match ``TextBuffer.__init__``.
+    """
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    var out = List[UInt8]()
+    var i = 0
+    while i < n:
+        var b = bytes[i]
+        if b == 0x0D and (i + 1 < n and bytes[i + 1] == 0x0A):
+            # CRLF → LF; the loop will append the LF on the next pass.
+            i += 1
+            continue
+        if b == 0x0D and i + 1 == n:
+            # Trailing lone '\r' at EOF — strip.
+            break
+        out.append(b)
+        i += 1
+    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+
+
+fn _detect_line_ending(text: String) -> String:
+    """Pick a line-ending style for ``text``. Returns ``"crlf"`` when
+    the majority of ``\\n`` line breaks are preceded by ``\\r``, and
+    ``"lf"`` otherwise (including for empty / no-newline input).
+
+    Used by ``Editor.from_file`` to remember a CRLF file's style so
+    ``_disk_text`` can re-emit ``\\r\\n`` on save, preventing a
+    full-file CRLF→LF diff on round-trip. ``editorconfig`` always wins
+    if it sets ``end_of_line`` explicitly.
+    """
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    var lf_count = 0
+    var crlf_count = 0
+    var i = 0
+    while i < n:
+        if bytes[i] == 0x0A:
+            lf_count += 1
+            if i > 0 and bytes[i - 1] == 0x0D:
+                crlf_count += 1
+        i += 1
+    if lf_count > 0 and crlf_count * 2 >= lf_count:
+        return String("crlf")
+    return String("lf")
 
 
 # --- UTF-8 boundary helpers -------------------------------------------------
@@ -408,10 +471,25 @@ struct TextBuffer(ImplicitlyCopyable, Movable):
         var i = 0
         while i < len(bytes):
             if bytes[i] == 0x0A:  # '\n'
-                self.lines.append(_slice(text, line_start, i))
+                # CRLF: drop the trailing '\r' that sits right before
+                # the '\n' so the buffer holds clean text. Whether the
+                # file's line endings are CR or CRLF is tracked
+                # separately (see ``_detect_line_ending``) and re-emitted
+                # at save time via ``EditorConfig.line_separator``.
+                var line_end = i
+                if line_end > line_start and bytes[line_end - 1] == 0x0D:
+                    line_end -= 1
+                self.lines.append(_slice(text, line_start, line_end))
                 line_start = i + 1
             i += 1
-        self.lines.append(_slice(text, line_start, len(bytes)))
+        # Final segment after the last '\n' (or the whole text when no
+        # '\n' was present). Trim a trailing '\r' here too so a file
+        # ending in '\r\n' or a single '\r'-terminated line doesn't
+        # leave a stray '\r' in the last line.
+        var end = len(bytes)
+        if end > line_start and bytes[end - 1] == 0x0D:
+            end -= 1
+        self.lines.append(_slice(text, line_start, end))
 
     fn __copyinit__(out self, copy: Self):
         self.lines = copy.lines.copy()
@@ -1122,8 +1200,15 @@ struct Editor(ImplicitlyCopyable, Movable):
         # Keep a copy of the on-disk bytes as the merge base for any
         # later 3-way merge against an external write.
         var baseline = text
+        var detected_eol = _detect_line_ending(text)
         var ed = Editor(text^)
         ed.editorconfig = load_editorconfig_for_path(path)
+        # Adopt the file's actual line-ending style only when
+        # .editorconfig doesn't pin one explicitly — without this a
+        # CRLF file would silently round-trip to LF on save and produce
+        # a full-file diff for no reason.
+        if len(ed.editorconfig.end_of_line.as_bytes()) == 0:
+            ed.editorconfig.end_of_line = detected_eol
         ed.file_path = path^
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
@@ -2669,8 +2754,15 @@ struct Editor(ImplicitlyCopyable, Movable):
 
         Setting the baseline arms ``_git_changes_dirty`` so the next
         paint re-diffs the buffer against it.
+
+        CRLF line endings are normalized away on ingress: the buffer
+        strips trailing ``\\r`` from each line at load time, so a raw
+        CRLF blob from ``git show`` would otherwise diff against every
+        single buffer row (gutter shows ``MODIFIED`` everywhere) and
+        ``apply_revert_block`` would splice ``\\r``-laden lines back
+        into the buffer.
         """
-        self._git_head_text = text^
+        self._git_head_text = _normalize_crlf(text^)
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True

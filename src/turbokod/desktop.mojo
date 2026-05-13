@@ -153,9 +153,9 @@ from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .find_symbol import FindSymbol
 from .terminal import beep
+from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .window import (
     MIN_WIN_H, MIN_WIN_W,
-    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
     TitleCommand, Window, WindowManager,
     compute_display_titles,
 )
@@ -266,6 +266,11 @@ comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
 # files, but populated from ``self.config.recent_projects`` and routed
 # through ``open_project`` on submit instead of ``open_file``.
 comptime PROJECT_OPEN_RECENT  = String("project:open_recent")
+# Direct-pick recent-project menu entries that appear in the no-project
+# state. ``PROJECT_OPEN_RECENT_PREFIX + <index>`` encodes the slot in
+# ``config.recent_projects`` so the dispatcher can route the click
+# without a parallel lookup table.
+comptime PROJECT_OPEN_RECENT_PREFIX = String("project:open_recent_idx:")
 # "Open project..." — host-handled action that asks the framework's
 # ``FileDialog`` to pick a directory (dirs-only mode). The Desktop
 # doesn't intercept it; it falls through ``dispatch_action`` so the
@@ -304,6 +309,16 @@ comptime TARGET_TEST             = String("target:test")
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
 comptime TARGET_SELECT_PREFIX    = String("target:select:")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
+# Docked terminal-pane actions. The desktop holds a stack of panes —
+# the host can open as many as it wants (File → New terminal pane,
+# Ctrl+T) and each pane carries its own shell + scrollback. ``NEW``
+# always appends a new pane. ``TOGGLE`` is the convenience hotkey:
+# with no panes open it spawns one, with any panes open it tears them
+# all down. ``FOCUS`` lands keyboard focus on the most recently
+# created pane.
+comptime TERMINAL_NEW            = String("terminal:new")
+comptime TERMINAL_TOGGLE         = String("terminal:toggle")
+comptime TERMINAL_FOCUS          = String("terminal:focus")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
 comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
@@ -639,6 +654,14 @@ struct Desktop(Movable):
     var dap: DapManager
     var dap_specs: List[DebuggerSpec]
     var debug_pane: DebugPane
+    var terminal_panes: List[TerminalPane]
+    """Stack of docked shell panes — see ``terminal_pane.mojo``. Each
+    pane carries its own ``/bin/sh`` subprocess and scrollback. The
+    user appends new panes via File → New terminal pane (or Ctrl+T
+    on an empty stack) and removes them via the per-pane ``[X]``
+    title button. Panes paint top-to-bottom in list order, sitting
+    above the debug pane (when visible) and the status / tab strip
+    at the very bottom."""
     # Latched current-execution location. Painted as ``▶`` in the gutter
     # of whichever editor has a matching ``file_path``. Cleared on
     # ``continued`` / ``terminated`` events.
@@ -848,6 +871,7 @@ struct Desktop(Movable):
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
+        self.terminal_panes = List[TerminalPane]()
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self._dap_current_frame_id = -1
@@ -1006,6 +1030,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
         ))
+        # Ctrl+T toggles the docked terminal. Spawn $SHELL on first
+        # open; hide + terminate on close so an unused pane doesn't
+        # leak a shell. The pane paints "T" in the top-right corner
+        # to advertise this binding (mirroring the debug pane's "9").
+        self._hotkeys.append(Hotkey(
+            ctrl_key("t"), MOD_CTRL, TERMINAL_TOGGLE,
+        ))
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
         self._hotkeys.append(Hotkey(
             ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
@@ -1143,7 +1174,8 @@ struct Desktop(Movable):
     fn workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
         widgets. The file tree, when visible, eats space on the right; the
-        debug pane, when active, eats space at the bottom."""
+        terminal panes and debug pane, when active, eat space at the bottom
+        (terminal stack on top of debug when both are up)."""
         var right = screen.b.x
         if self.file_tree.visible:
             right -= self.file_tree.width
@@ -1154,6 +1186,9 @@ struct Desktop(Movable):
             bottom -= self._debug_pane_height(screen)
             if bottom < 1:
                 bottom = 1
+        bottom -= self._terminal_stack_height(screen)
+        if bottom < 1:
+            bottom = 1
         return Rect(0, 1, right, bottom)
 
     fn debug_pane_rect(self, screen: Rect) -> Rect:
@@ -1174,14 +1209,73 @@ struct Desktop(Movable):
         target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
         whole bottom area, leaving just the menu bar above and the
         status / tab strip below."""
-        if self.debug_pane.state == PANEL_STATE_MINIMIZED:
-            return 1
-        if self.debug_pane.state == PANEL_STATE_MAXIMIZED:
-            var avail = screen.b.y - self._bottom_chrome_height(screen) - 1
-            if avail < 4:
-                avail = 4
-            return avail
-        return self.debug_pane.preferred_height
+        return self.debug_pane.dock.effective_height(
+            screen, self._bottom_chrome_height(screen),
+        )
+
+    fn terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
+        """Where ``terminal_panes[idx]`` paints. Each pane in the stack
+        gets its own slice; pane 0 sits on top, the last pane sits
+        just above the debug pane (when visible) and the status / tab
+        strip at the very bottom.
+
+        Returns an empty rect when the index is out of range or the
+        available space is too small for the panel."""
+        var n = len(self.terminal_panes)
+        if idx < 0 or idx >= n:
+            return Rect.empty()
+        var chrome = self._bottom_chrome_height(screen)
+        var stack_bottom = screen.b.y - chrome
+        if self.debug_pane.visible:
+            stack_bottom -= self._debug_pane_height(screen)
+        if stack_bottom < 2:
+            return Rect.empty()
+        # Stack top = stack_bottom - sum(heights). Each pane's slot is
+        # its own ``effective_height`` clamped to whatever fits.
+        var total = self._terminal_stack_height(screen)
+        var stack_top = stack_bottom - total
+        if stack_top < 1:
+            stack_top = 1
+        # Walk from the top down to idx, accumulating heights.
+        var y = stack_top
+        for i in range(idx):
+            y += self.terminal_panes[i].dock.effective_height(
+                screen, chrome,
+            )
+        var h = self.terminal_panes[idx].dock.effective_height(
+            screen, chrome,
+        )
+        var top = y
+        var bottom = y + h
+        if bottom > stack_bottom:
+            bottom = stack_bottom
+        if top >= bottom:
+            return Rect.empty()
+        return Rect(0, top, screen.b.x, bottom)
+
+    fn _terminal_stack_height(self, screen: Rect) -> Int:
+        """Sum of ``effective_height`` across every terminal pane.
+        Zero when the list is empty — the workspace then reclaims
+        that row range."""
+        var n = len(self.terminal_panes)
+        if n == 0:
+            return 0
+        var chrome = self._bottom_chrome_height(screen)
+        var total = 0
+        for i in range(n):
+            total += self.terminal_panes[i].dock.effective_height(
+                screen, chrome,
+            )
+        return total
+
+    fn _terminal_pane_at(self, pos: Point, screen: Rect) -> Int:
+        """Return the index of the terminal pane whose painted rect
+        contains ``pos``, or ``-1`` if no pane is hit. Walks panes
+        in painted order; rects can't overlap so the first match wins."""
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_pane_rect(screen, i).contains(pos):
+                return i
+        return -1
 
     fn tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
@@ -1259,6 +1353,12 @@ struct Desktop(Movable):
                     pos, self.debug_pane_rect(screen)
                 ):
             return String("ns-resize")
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].is_resizing() \
+                    or self.terminal_panes[i].is_on_resize_edge(
+                        pos, self.terminal_pane_rect(screen, i)
+                    ):
+                return String("ns-resize")
         if self.file_tree.is_resizing() \
                 or self.file_tree.is_on_resize_edge(pos, screen):
             return String("ew-resize")
@@ -1486,6 +1586,10 @@ struct Desktop(Movable):
         # painted over by the editor it's describing.
         self.windows.paint_title_tooltip(canvas, ws)
         self.file_tree.paint(canvas, screen)
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].paint(
+                canvas, self.terminal_pane_rect(screen, i),
+            )
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         self.menu_bar.paint(canvas, screen)
         self._paint_tab_bar(canvas, screen)
@@ -2261,6 +2365,12 @@ struct Desktop(Movable):
         # focus-switched across at least two file-backed windows.
         self._recent_files = self.config.recent_files.copy()
         self._rebuild_lsp_specs()
+        # If we're still in the no-project state, refresh the project
+        # menu so the direct-pick recent entries that ``__init__``
+        # couldn't populate (the empty default config had no recents)
+        # appear from the just-loaded list.
+        if not self.project:
+            self._reset_no_project_menu()
 
     fn _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
@@ -2338,18 +2448,11 @@ struct Desktop(Movable):
         self.project = Optional[String]()
         self.speller.set_project(String(""))
         self.file_tree.close()
-        # Reset the project menu to its no-project state: label "project"
-        # and a single "Open recent project..." entry, so the user can
-        # still reach the recents picker without an active project.
-        var items = List[MenuItem]()
-        items.append(MenuItem(
-            String("Open recent project..."), PROJECT_OPEN_RECENT,
-        ))
-        self.menu_bar.menus[self._project_menu_idx].label = String("project")
-        self.menu_bar.menus[self._project_menu_idx].items = items^
-        self.menu_bar.menus[self._project_menu_idx].visible = True
-        if self.menu_bar.open_idx == self._project_menu_idx:
-            self.menu_bar.open_idx = -1
+        # Reset the project menu to its no-project state. The helper
+        # also seeds the dropdown with direct-pick entries for the
+        # most recent projects so the user can switch back without
+        # going through the picker.
+        self._reset_no_project_menu()
         # Drop the targets list and stop any in-flight run — the
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
@@ -2378,6 +2481,42 @@ struct Desktop(Movable):
         # guard and leaves the on-disk session.json intact. Reopening
         # the project then restores exactly these files.
         self._close_all_editor_windows()
+
+    fn _reset_no_project_menu(mut self):
+        """Populate the right-aligned project menu for the no-project
+        state: label "project", "Open recent project..." on top, then a
+        separator and up to 10 direct-pick entries drawn from
+        ``config.recent_projects`` (filtered to paths that still stat
+        as directories). Each direct entry's action is
+        ``PROJECT_OPEN_RECENT_PREFIX + <index>`` so the dispatcher can
+        round-trip back to the same slot."""
+        if self._project_menu_idx < 0:
+            return
+        var items = List[MenuItem]()
+        items.append(MenuItem(
+            String("Open recent project..."), PROJECT_OPEN_RECENT,
+        ))
+        var added = 0
+        var first = True
+        for i in range(len(self.config.recent_projects)):
+            if added >= 10:
+                break
+            var p = self.config.recent_projects[i]
+            var info = stat_file(p)
+            if not info.ok or not info.is_dir():
+                continue
+            if first:
+                items.append(MenuItem.separator())
+                first = False
+            items.append(MenuItem(
+                basename(p), PROJECT_OPEN_RECENT_PREFIX + String(i),
+            ))
+            added += 1
+        self.menu_bar.menus[self._project_menu_idx].label = String("project")
+        self.menu_bar.menus[self._project_menu_idx].items = items^
+        self.menu_bar.menus[self._project_menu_idx].visible = True
+        if self.menu_bar.open_idx == self._project_menu_idx:
+            self.menu_bar.open_idx = -1
 
     fn _close_all_editor_windows(mut self):
         """Drop every editor window from the manager, leaving non-editor
@@ -3143,7 +3282,12 @@ struct Desktop(Movable):
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
             # if neither claims the key, fall through to the regular
-            # dispatch (menu mnemonics, hotkeys, focused window).
+            # dispatch (menu mnemonics, hotkeys, focused window). At
+            # most one terminal pane carries focus at a time so a
+            # plain iteration is fine.
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].handle_key(event):
+                    return Optional[String]()
             if self.debug_pane.handle_key(event):
                 return Optional[String]()
             if self.file_tree.handle_key(event):
@@ -3189,6 +3333,16 @@ struct Desktop(Movable):
                         and self.debug_pane.is_on_resize_edge(event.pos, dp_rect)):
                 if self.debug_pane.handle_mouse(event, dp_rect):
                     return Optional[String]()
+            for i in range(len(self.terminal_panes)):
+                var tp_rect = self.terminal_pane_rect(screen, i)
+                if self.terminal_panes[i].is_resizing() \
+                        or (event.button == MOUSE_BUTTON_LEFT \
+                            and event.pressed and not event.motion \
+                            and self.terminal_panes[i].is_on_resize_edge(
+                                event.pos, tp_rect,
+                            )):
+                    if self.terminal_panes[i].handle_mouse(event, tp_rect):
+                        return Optional[String]()
             if self.file_tree.is_resizing() \
                     or (event.button == MOUSE_BUTTON_LEFT \
                         and event.pressed and not event.motion \
@@ -3231,6 +3385,17 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 WINDOW_FOCUS_PREFIX + String(win_tab), screen,
             )
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].handle_mouse(
+                event, self.terminal_pane_rect(screen, i),
+            ):
+                # Clicking on one pane defocuses the others so only one
+                # terminal is keyboard-live at a time.
+                if self.terminal_panes[i].focused:
+                    for j in range(len(self.terminal_panes)):
+                        if j != i:
+                            self.terminal_panes[j].focused = False
+                return Optional[String]()
         if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
             return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
@@ -3431,6 +3596,17 @@ struct Desktop(Movable):
         if action == PROJECT_OPEN_RECENT:
             self._open_recent_projects_picker()
             return Optional[String]()
+        if starts_with(action, PROJECT_OPEN_RECENT_PREFIX):
+            var idx = parse_int_prefix(
+                action, len(PROJECT_OPEN_RECENT_PREFIX.as_bytes()),
+                len(action.as_bytes()),
+            )
+            if idx >= 0 and idx < len(self.config.recent_projects):
+                var path = self.config.recent_projects[idx]
+                if self.project:
+                    self.close_project()
+                self.open_project(path)
+            return Optional[String]()
         if action == EDITOR_FIND:
             self._open_find_prompt()
             return Optional[String]()
@@ -3620,9 +3796,16 @@ struct Desktop(Movable):
                 self.windows.windows[self.windows.focused].editor.cut_to_clipboard()
             return Optional[String]()
         if action == EDITOR_COPY:
-            # Debug pane wins when it's focused with an active output
+            # Docked output panes win when one is focused with an active
             # selection — the user is plainly trying to copy from there
-            # rather than from a window in the background.
+            # rather than from a window in the background. Terminal
+            # panes come first because they sit above the debug pane
+            # visually and there can be more than one of them.
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].focused \
+                        and self.terminal_panes[i].has_selection():
+                    _ = self.terminal_panes[i].copy_selection_to_clipboard()
+                    return Optional[String]()
             if self.debug_pane.focused and self.debug_pane.has_selection():
                 _ = self.debug_pane.copy_selection_to_clipboard()
                 return Optional[String]()
@@ -3717,16 +3900,19 @@ struct Desktop(Movable):
             # when the user expects them at the editor cursor.
             self.debug_pane.focused = False
             self.file_tree.focused = False
+            self._defocus_terminal_panes()
             return Optional[String]()
         if action == WINDOW_ROTATE_NEXT:
             self.windows.rotate_focus(True)
             self.debug_pane.focused = False
             self.file_tree.focused = False
+            self._defocus_terminal_panes()
             return Optional[String]()
         if action == WINDOW_ROTATE_PREV:
             self.windows.rotate_focus(False)
             self.debug_pane.focused = False
             self.file_tree.focused = False
+            self._defocus_terminal_panes()
             return Optional[String]()
         if action == EDITOR_NAV_BACK:
             self.navigate_back(screen)
@@ -3783,10 +3969,36 @@ struct Desktop(Movable):
             # at a time.
             self.debug_pane.focused = True
             self.file_tree.focused = False
+            self._defocus_terminal_panes()
             return Optional[String]()
         if action == FILE_TREE_FOCUS:
             self.file_tree.focused = True
             self.debug_pane.focused = False
+            self._defocus_terminal_panes()
+            return Optional[String]()
+        if action == TERMINAL_NEW:
+            self._open_terminal_pane()
+            return Optional[String]()
+        if action == TERMINAL_TOGGLE:
+            # Toggle semantics across the stack: any panes open ⇒ tear
+            # them all down; none ⇒ spawn one. ``_terminate_shell``
+            # runs via ``close`` on each pane, so no shell is left
+            # behind.
+            if len(self.terminal_panes) > 0:
+                self._close_all_terminal_panes()
+            else:
+                self._open_terminal_pane()
+            return Optional[String]()
+        if action == TERMINAL_FOCUS:
+            # Land focus on the most recently created pane — the one
+            # the user is most likely to be looking at after pressing
+            # the hotkey from somewhere else in the UI.
+            if len(self.terminal_panes) > 0:
+                var last = len(self.terminal_panes) - 1
+                self._defocus_terminal_panes()
+                self.terminal_panes[last].focused = True
+                self.debug_pane.focused = False
+                self.file_tree.focused = False
             return Optional[String]()
         if action == TARGET_RUN:
             self._target_run()
@@ -4601,6 +4813,59 @@ struct Desktop(Movable):
         # narrows a crash to the post-tick paint / next_event path.
         if self.dap.is_running() or self.dap.is_stopped():
             self.dap.client.process.trace(String("dap_tick done"))
+
+    fn terminal_tick(mut self):
+        """Drain every docked terminal's shell output and dispatch any
+        pending chrome-command click. Called once per frame by the
+        host loop alongside ``lsp_tick`` / ``dap_tick``.
+
+        Cheap no-op when the stack is empty. The ``[X]`` close button
+        on any pane removes that pane from the list (rest of the
+        stack reflows on the next paint)."""
+        if len(self.terminal_panes) == 0:
+            return
+        var i = 0
+        while i < len(self.terminal_panes):
+            self.terminal_panes[i].tick()
+            var cmd = self.terminal_panes[i].consume_command_id()
+            if len(cmd.as_bytes()) > 0:
+                if cmd == TERMINAL_PANE_CLOSE:
+                    # Tear down the shell before dropping the value —
+                    # ``close`` is idempotent and the only place that
+                    # SIGTERMs the child + closes the pipe fds.
+                    self.terminal_panes[i].close()
+                    var removed = self.terminal_panes.pop(i)
+                    _ = removed
+                    continue
+                _ = self.terminal_panes[i].handle_command(cmd)
+            i += 1
+
+    fn _defocus_terminal_panes(mut self):
+        """Clear ``focused`` on every terminal pane. Used wherever the
+        host hands focus elsewhere (window focus changes, side-panel
+        focus actions) — keyboard input must land on exactly one
+        widget per frame."""
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].focused = False
+
+    fn _open_terminal_pane(mut self):
+        """Append a fresh ``TerminalPane`` to the stack, focus it, and
+        defocus its siblings + the other side panels so the new pane
+        is keyboard-live immediately."""
+        var pane = TerminalPane()
+        pane.open()
+        self._defocus_terminal_panes()
+        self.debug_pane.focused = False
+        self.file_tree.focused = False
+        self.terminal_panes.append(pane^)
+
+    fn _close_all_terminal_panes(mut self):
+        """Tear down every terminal pane (SIGTERM + close fds via
+        ``pane.close``), then clear the list. Used by
+        ``TERMINAL_TOGGLE`` to hide the stack as a unit."""
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].close()
+        self.terminal_panes = List[TerminalPane]()
 
     fn _build_debug_pane_commands(self) -> List[TitleCommand]:
         """Title-strip buttons for the debug pane.

@@ -23,6 +23,31 @@ from .geometry import Point, Rect
 comptime TAB_WIDTH: Int = 4
 
 
+fn _control_picture_glyph(b: Int) -> String:
+    """UTF-8 'Control Pictures' glyph for an ASCII control byte.
+
+    Maps 0x00..0x1F to U+2400..U+241F (␀..␟) and 0x7F to U+2421 (␡).
+    Used by ``put_text`` so a stray control byte (most commonly ``\r``
+    from a CRLF file that slipped through) becomes a visible cell
+    instead of being emitted raw to the terminal — a raw ``\r`` would
+    reset the cursor to column 0 mid-row and corrupt the entire paint.
+    """
+    var cp: Int
+    if b == 0x7F:
+        cp = 0x2421
+    else:
+        cp = 0x2400 + b
+    # UTF-8 three-byte form for U+2400..U+24FF: 1110xxxx 10xxxxxx 10xxxxxx.
+    # ``chr()`` encodes each value as the UTF-8 of *that codepoint*, so
+    # the obvious ``chr(b1) + chr(b2) + chr(b3)`` doubles the byte count
+    # for values >= 0x80. Build the bytes directly instead.
+    var buf = List[UInt8]()
+    buf.append(UInt8(0xE0 | (cp >> 12)))
+    buf.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+    buf.append(UInt8(0x80 | (cp & 0x3F)))
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+
+
 @fieldwise_init
 struct Canvas(Copyable, Movable):
     var width: Int
@@ -127,7 +152,17 @@ struct Canvas(Copyable, Movable):
             var glyph: String
             var seq_len: Int
             if b < 0x80:
-                glyph = chr(b)
+                # ASCII control bytes (0x00..0x1F minus 0x09 tab, which
+                # the loop's earlier tab branch already handled; 0x0A
+                # never reaches here because callers split on newlines
+                # before painting) and 0x7F DEL are substituted with
+                # their Unicode 'Control Pictures' glyphs so the raw
+                # byte never reaches the terminal — a stray ``\r``
+                # would otherwise drag the cursor to column 0 mid-row.
+                if b < 0x20 or b == 0x7F:
+                    glyph = _control_picture_glyph(b)
+                else:
+                    glyph = chr(b)
                 seq_len = 1
             elif (b & 0xE0) == 0xC0 and i + 2 <= n:
                 glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+2]))

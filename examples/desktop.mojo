@@ -63,7 +63,8 @@ from turbokod import (
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE,
-    TARGET_RUN, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
+    TARGET_RUN, TERMINAL_NEW,
+    WINDOW_CLOSE, WINDOW_CLOSE_ALL,
     stat_file,
 )
 
@@ -133,6 +134,7 @@ fn main() raises:
         ))
         desktop.menu_bar.add(_mk_menu(String("File"),
             (String("New"), EDITOR_NEW),
+            (String("New terminal pane"), TERMINAL_NEW),
             (String("Open..."), EDITOR_OPEN),
             (String("Open project..."), PROJECT_OPEN),
             (String("Quick open..."), EDITOR_QUICK_OPEN),
@@ -378,6 +380,7 @@ fn main() raises:
                             )
                 desktop.lsp_tick(app.screen())
                 desktop.dap_tick(app.screen())
+                desktop.terminal_tick()
                 if not maybe_ev:
                     continue
                 var ev = maybe_ev.value()

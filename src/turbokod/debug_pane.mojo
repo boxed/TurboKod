@@ -67,10 +67,15 @@ from .geometry import Point, Rect
 from .scrollbar import VScrollbar
 from .text_view import TextLog
 from .window import (
+    BottomDockedPanel,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
-    PanelChromeHits, TitleCommand, TitleCommandHit,
-    hit_title_command, paint_panel_window_buttons, paint_title_commands,
+    TitleCommand,
+    handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
+    paint_bottom_dock_chrome,
 )
+# PANEL_STATE_* constants are re-exported from this module for callers
+# that build TitleCommand strips (Desktop) and reason about pane state
+# without going through ``window.mojo`` directly.
 
 
 # --- row kinds ------------------------------------------------------------
@@ -175,17 +180,16 @@ the backlog lets a future ``output:save`` action dump the full log."""
 
 struct DebugPane(ImplicitlyCopyable, Movable):
     var visible: Bool
-    var preferred_height: Int
+    var dock: BottomDockedPanel
+    """Shared chrome state: window-state machine, preferred-height,
+    resize-drag, title commands, min/max button hit-rects. See
+    ``BottomDockedPanel`` for the full surface."""
     var status_text: String
     var mode: UInt8
     """``PANE_MODE_DEBUG`` (default) shows Stack/Locals/Watches +
     Output. ``PANE_MODE_RUN`` collapses the pane to Output-only and
     flips the title to "Run". Set by the host on every tick to match
     the active session (or the post-run hold)."""
-    var state: UInt8
-    """``PANEL_STATE_NORMAL`` (default), ``PANEL_STATE_MINIMIZED`` (header
-    line only), or ``PANEL_STATE_MAXIMIZED`` (full workspace). Toggled
-    via the header buttons or ESC."""
 
     var rows: List[PaneRow]
     """Inspect-view rows (status not included). Sectioned via
@@ -229,7 +233,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
     var _last_divider_x: Int    # screen x of the column divider
-    var _last_panel_top: Int    # screen y of the top-border / drag handle
     var _left_indices: List[Int]
     """Absolute ``rows`` indices that belong to the left (Stack)
     column, in paint order. Populated by ``paint`` and read by
@@ -237,31 +240,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     var _right_indices: List[Int]
     """Absolute ``rows`` indices that belong to the right
     (Locals / Watches) column, in paint order."""
-    var _resizing: Bool
-    """True while the user holds the left button after pressing on
-    the pane's top border. Mouse motion in this state updates
-    ``preferred_height``; the next non-pressed event clears it."""
-    var _chrome_hits: PanelChromeHits
-    """Painted-rect record for the framework min/max chrome buttons
-    drawn by the last ``paint``. Reset to a default (``-1`` everywhere)
-    record at the top of each paint and populated by the framework
-    helper when the buttons fit; ``handle_mouse`` consults it via
-    ``on_min`` / ``on_max``."""
-    var commands: List[TitleCommand]
-    """Clickable labels rendered after the title with a ``- ``
-    separator. Set by the host each tick so the strip mirrors the
-    current DAP state (e.g., ``[▶ Cont]`` when stopped, ``[⏸ Pause]``
-    while running). The pane just paints what the host hands in —
-    state-driven enable/disable is the host's job."""
-    var pending_command_id: String
-    """Id of the title-command the user just clicked, or empty when
-    nothing is pending. Polled and cleared by Desktop each tick;
-    dispatched through the regular action plumbing so a click and
-    its keyboard shortcut go through the same code path."""
-    var _last_cmd_hits: List[TitleCommandHit]
-    """Painted-rect record for each title-command from the last
-    ``paint`` call, used by ``handle_mouse`` to map the click back
-    to a command id."""
     var _last_links: List[OutputLink]
     """Clickable file:line spans painted by the last ``paint`` call,
     in absolute screen coordinates. Rebuilt on every paint so the
@@ -287,10 +265,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     fn __init__(out self):
         self.visible = False
-        self.preferred_height = 14
+        self.dock = BottomDockedPanel(preferred_height=14)
         self.status_text = String("")
         self.mode = PANE_MODE_DEBUG
-        self.state = PANEL_STATE_NORMAL
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
         self.output = TextLog(
@@ -309,15 +286,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_open_line = 0
         self._last_inspect_y0 = 0
         self._last_divider_x = 0
-        self._last_panel_top = 0
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
-        self._resizing = False
         self._last_links = List[OutputLink]()
-        self._chrome_hits = PanelChromeHits()
-        self.commands = List[TitleCommand]()
-        self.pending_command_id = String("")
-        self._last_cmd_hits = List[TitleCommandHit]()
         self._last_output_sb_x = -1
         self._last_output_sb_top = 0
         self._last_output_sb_bottom = -1
@@ -326,10 +297,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
-        self.preferred_height = copy.preferred_height
+        self.dock = copy.dock
         self.status_text = copy.status_text
         self.mode = copy.mode
-        self.state = copy.state
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
         self.output = copy.output
@@ -346,15 +316,9 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self.pending_open_line = copy.pending_open_line
         self._last_inspect_y0 = copy._last_inspect_y0
         self._last_divider_x = copy._last_divider_x
-        self._last_panel_top = copy._last_panel_top
         self._left_indices = copy._left_indices.copy()
         self._right_indices = copy._right_indices.copy()
-        self._resizing = copy._resizing
         self._last_links = copy._last_links.copy()
-        self._chrome_hits = copy._chrome_hits
-        self.commands = copy.commands.copy()
-        self.pending_command_id = copy.pending_command_id
-        self._last_cmd_hits = copy._last_cmd_hits.copy()
         self._last_output_sb_x = copy._last_output_sb_x
         self._last_output_sb_top = copy._last_output_sb_top
         self._last_output_sb_bottom = copy._last_output_sb_bottom
@@ -373,20 +337,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         """Replace the title-row command strip. Called by the host
         each tick so the visible buttons track DAP state — the pane
         just paints what's handed in."""
-        self.commands = commands^
+        self.dock.set_commands(commands^)
 
     fn is_minimized(self) -> Bool:
-        return self.state == PANEL_STATE_MINIMIZED
+        return self.dock.is_minimized()
 
     fn is_maximized(self) -> Bool:
-        return self.state == PANEL_STATE_MAXIMIZED
+        return self.dock.is_maximized()
 
     fn set_state(mut self, state: UInt8):
-        self.state = state
-        # Resize-drag belongs to NORMAL only — the top border is just a
-        # button strip in the other states, not a draggable handle.
-        if state != PANEL_STATE_NORMAL:
-            self._resizing = False
+        self.dock.set_state(state)
 
     fn rebuild_inspect(
         mut self,
@@ -571,9 +531,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     fn consume_command_id(mut self) -> String:
         """Returns the id of a freshly clicked title-command (if any)
         and clears the latch. Empty string means no click pending."""
-        var s = self.pending_command_id
-        self.pending_command_id = String("")
-        return s^
+        return self.dock.consume_command_id()
 
     fn consume_open_request(mut self) -> Tuple[String, Int]:
         """Returns ``(path, line)`` (1-based) for a freshly clicked
@@ -622,57 +580,16 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._last_links = List[OutputLink]()
         self._last_output_sb_x = -1
         painter.fill(canvas, panel, String(" "), bg)
-        self._last_panel_top = panel.a.y
-        # Top border with title. Focus is shown via line weight (single →
-        # double), mirroring how normal windows render their frame.
         var top = panel.a.y
-        var top_glyph = String("═") if self.focused else String("─")
-        for x in range(panel.a.x, panel.b.x):
-            painter.set(canvas, x, top, Cell(top_glyph, border, 1))
-        var title_text = String(" Run ") if self.mode == PANE_MODE_RUN \
-            else String(" Debug ")
-        var title_advanced = painter.put_text(
-            canvas, Point(panel.a.x + 2, top), title_text, title,
+        var title_text = String("Run") if self.mode == PANE_MODE_RUN \
+            else String("Debug")
+        var body = paint_bottom_dock_chrome(
+            canvas, painter, panel, title_text, self.focused, self.dock,
         )
-        # Title-row command strip — painted right after the title with
-        # a ``- `` separator. The right-hand window buttons reserve 11
-        # cells (3 + 3 + 3 trailing " 9", plus one cell of breathing
-        # room before the strip would crowd into them); the rest is
-        # available for commands. Reset the hit list each paint so a
-        # click on a command that just scrolled out doesn't fire.
-        self._last_cmd_hits = List[TitleCommandHit]()
-        var cmd_x = panel.a.x + 2 + title_advanced
-        var cmd_max = panel.b.x - 11
-        if cmd_max < cmd_x:
-            cmd_max = cmd_x
-        if len(self.commands) > 0 and cmd_max > cmd_x + 2:
-            self._last_cmd_hits = paint_title_commands(
-                canvas, Point(cmd_x, top), self.commands,
-                title, title, Attr(WHITE, BLACK),
-                cmd_max,
-            )
-        # Top-right header: framework min/max chrome buttons + the
-        # keyboard-hint number ("9", paired with ``Ctrl+9``). Reserve
-        # 2 cells for `` 9`` after the buttons.
-        self._chrome_hits = paint_panel_window_buttons(
-            canvas, painter, top, panel, self.state, border,
-            trailing_reserve=2,
-        )
-        var pane_w = panel.b.x - panel.a.x
-        if pane_w >= 12:
-            _ = painter.put_text(
-                canvas, Point(panel.b.x - 3, top), String(" 9"), title,
-            )
-        elif pane_w >= 6:
-            # Too narrow for buttons — fall back to just the focus
-            # hint, same as before.
-            _ = painter.put_text(
-                canvas, Point(panel.b.x - 3, top), String("9"), title,
-            )
         # In MINIMIZED state we stop after the title bar — the rest of
         # the pane is hidden, the user reads the status in the
         # status-bar / window-tab strip until they restore.
-        if self.state == PANEL_STATE_MINIMIZED:
+        if body.is_empty():
             self._last_inspect_y0 = top + 1
             self.output.last_y0 = top + 1
             self._last_divider_x = panel.a.x
@@ -922,34 +839,13 @@ struct DebugPane(ImplicitlyCopyable, Movable):
     fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
         """Hit-test for the top-border row — the pane's drag handle.
         Used by the host to switch the mouse pointer to ``ns-resize``
-        on hover. Resize is only available in NORMAL state, and the
-        button cells (top-right) are excluded so the cursor stays as
-        the default pointer over them."""
-        if not self.visible or panel.is_empty():
+        on hover."""
+        if not self.visible:
             return False
-        if self.state != PANEL_STATE_NORMAL:
-            return False
-        if pos.y != panel.a.y:
-            return False
-        if pos.x < panel.a.x or pos.x >= panel.b.x:
-            return False
-        if self._on_button(pos):
-            return False
-        return True
-
-    fn _on_button(self, pos: Point) -> Bool:
-        """True iff ``pos`` falls on either of the title-row buttons
-        drawn by the last ``paint`` call."""
-        return self._chrome_hits.on_any(pos)
-
-    fn _on_min_button(self, pos: Point) -> Bool:
-        return self._chrome_hits.on_min(pos)
-
-    fn _on_max_button(self, pos: Point) -> Bool:
-        return self._chrome_hits.on_max(pos)
+        return self.dock.is_on_resize_edge(pos, panel)
 
     fn is_resizing(self) -> Bool:
-        return self._resizing
+        return self.dock.is_resizing()
 
     fn _output_scrollbar(self) -> VScrollbar:
         """Reconstruct the output scrollbar value from the last paint's
@@ -969,21 +865,14 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         False to let it fall through to the workspace."""
         if event.kind != EVENT_MOUSE:
             return False
-        # Resize-drag: once started, every mouse event belongs to the
-        # resize until the button is released — even when the cursor
-        # leaves the original panel rect. Checked before the
-        # contains() gate for that reason.
-        if self._resizing:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._resizing = False
-                return True
-            # ``panel.b.y`` is the fixed bottom anchor (one row above
-            # the status bar); subtract the new top to get the desired
-            # height. The pane refits next frame from the updated
-            # ``preferred_height``.
-            self.preferred_height = self._clamp_height(
-                panel.b.y - event.pos.y, panel,
-            )
+        # Chrome (top border + min/max + command strip) gets first dibs
+        # — including an in-flight resize drag. Routing through the
+        # shared helper keeps title-bar behavior identical with the
+        # terminal pane.
+        var cr = handle_bottom_dock_chrome_mouse(event, panel, self.dock)
+        if cr.consumed:
+            if cr.focus_request:
+                self.focused = True
             return True
         # Output-thumb drag in flight — same drag-state-owners-first
         # convention as the resize handle. Motion updates scroll;
@@ -1005,48 +894,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # drag above — drag-state owners get first dibs.
         if self.output.selection.dragging:
             return self.output.handle_mouse(event)
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
-            # Title-row buttons take priority over the resize-drag
-            # handle. They sit on the same row as the drag edge but
-            # have a finer hit area.
-            if self._on_min_button(event.pos):
-                self.focused = True
-                if self.state == PANEL_STATE_MINIMIZED:
-                    self.set_state(PANEL_STATE_NORMAL)
-                else:
-                    self.set_state(PANEL_STATE_MINIMIZED)
-                return True
-            if self._on_max_button(event.pos):
-                self.focused = True
-                if self.state == PANEL_STATE_MAXIMIZED:
-                    self.set_state(PANEL_STATE_NORMAL)
-                else:
-                    self.set_state(PANEL_STATE_MAXIMIZED)
-                return True
-            # Title-row commands. Same priority as the window buttons
-            # so a click on a command label can't accidentally start a
-            # resize drag of the top border.
-            var cmd_id = hit_title_command(self._last_cmd_hits, event.pos)
-            if len(cmd_id.as_bytes()) > 0:
-                self.focused = True
-                self.pending_command_id = cmd_id^
-                return True
-            # Drag-to-resize is only meaningful in NORMAL state. In
-            # MINIMIZED / MAXIMIZED the height is dictated by state,
-            # not by the user's preferred-height; the press just
-            # focuses the pane.
-            if self.state == PANEL_STATE_NORMAL \
-                    and event.pos.y == panel.a.y \
-                    and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
-                self._resizing = True
-                return True
-            if self.state != PANEL_STATE_NORMAL \
-                    and event.pos.y == panel.a.y \
-                    and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
-                # Click on the title row outside the buttons just
-                # focuses the pane and is consumed.
-                self.focused = True
-                return True
         if not panel.contains(event.pos):
             # Bare hover under mouse-mode 1003 must not steal focus.
             if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
@@ -1134,13 +981,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         # the pane) belongs to the host's own ESC path, so we leave it
         # alone there.
         if event.key == KEY_ESC:
-            if self.state == PANEL_STATE_MAXIMIZED:
-                self.set_state(PANEL_STATE_NORMAL)
-                return True
-            if self.state == PANEL_STATE_NORMAL:
-                self.set_state(PANEL_STATE_MINIMIZED)
-                return True
-            return False
+            return handle_bottom_dock_esc(self.dock)
         # Arrow keys drive the right column (locals + watches) since
         # that's where the deep / scrollable content lives. The stack
         # column rarely needs scrolling and reaches the user via
@@ -1165,19 +1006,6 @@ struct DebugPane(ImplicitlyCopyable, Movable):
             self.output.autoscroll = True
             return True
         return False
-
-    fn _clamp_height(self, want: Int, panel: Rect) -> Int:
-        """Pin a proposed pane height to a usable range. Lower bound 4
-        keeps the title bar, status row, and at least two content rows
-        on screen; upper bound leaves at least 5 rows of workspace
-        above the pane (menu bar + a couple of editor rows)."""
-        var h = want
-        var hi = panel.b.y - 5
-        if h > hi:
-            h = hi
-        if h < 4:
-            h = 4
-        return h
 
     fn _on_row_click(mut self, row_idx: Int):
         var r = self.rows[row_idx]
