@@ -40,6 +40,7 @@ from .events import (
     KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_RIGHT,
 )
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
@@ -62,6 +63,9 @@ from .git_gutter_menu import (
     GitGutterMenu,
 )
 from .lsp import LspProcess
+from .lsp_status_menu import (
+    LSP_MENU_ACTION_RESTART, LspStatusMenu,
+)
 from .posix import close_fd, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -554,6 +558,10 @@ struct Desktop(Movable):
     # action; surfaced from ``Editor.consume_git_revert_request`` after
     # mouse dispatch and routed input-first like ``spell_menu``.
     var git_gutter_menu: GitGutterMenu
+    # Right-click on the LSP indicator on the right of the status bar →
+    # contextual menu with a single ``Restart LSP`` action. Same
+    # input-first routing pattern as ``git_gutter_menu``.
+    var lsp_status_menu: LspStatusMenu
     # Right-click on a breakpoint dot → contextual edit dialog. Carries
     # path + line back through to the DAP manager when the user
     # confirms with OK. Same modality story as ``git_gutter_menu``: it
@@ -819,6 +827,7 @@ struct Desktop(Movable):
         self.speller = Speller()
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
+        self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
         self._lsp_install_prompted = List[String]()
@@ -1503,6 +1512,7 @@ struct Desktop(Movable):
         # routinely opens above already-rendered widgets).
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
+        self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
         # Wait-for dropdown popup overlays the rest of the breakpoint
         # dialog. Paint after the dialog body so the popup z-orders on
@@ -2968,6 +2978,16 @@ struct Desktop(Movable):
             if self.git_gutter_menu.submitted:
                 self._on_git_gutter_menu_submit()
             return Optional[String]()
+        if self.lsp_status_menu.active:
+            # Right-click on the LSP indicator opens this single-row
+            # menu; same input-first routing as ``git_gutter_menu``.
+            if event.kind == EVENT_KEY:
+                _ = self.lsp_status_menu.handle_key(event)
+            else:
+                _ = self.lsp_status_menu.handle_mouse(event, screen)
+            if self.lsp_status_menu.submitted:
+                self._on_lsp_status_menu_submit()
+            return Optional[String]()
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
@@ -3166,12 +3186,17 @@ struct Desktop(Movable):
             )
         # Click on the right-aligned LSP indicator opens an info window
         # listing all running language servers, their argv, and state.
+        # Right-click on the same rect opens a contextual menu with a
+        # single ``Restart LSP`` action.
         if event.kind == EVENT_MOUSE \
-                and event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion \
                 and self.status_bar.hit_test_message(event.pos, screen):
-            self._open_lsp_info_window(screen)
-            return Optional[String]()
+            if event.button == MOUSE_BUTTON_LEFT:
+                self._open_lsp_info_window(screen)
+                return Optional[String]()
+            if event.button == MOUSE_BUTTON_RIGHT:
+                self.lsp_status_menu.open(event.pos)
+                return Optional[String]()
         # Window tab bar (one row above status bar). Same rationale as
         # the status-bar tabs: route the click to the named window
         # before the workspace gets a shot at it.
@@ -6515,6 +6540,32 @@ struct Desktop(Movable):
         var block = block_opt.value().copy()
         self.windows.windows[idx].editor.apply_revert_block(block^)
         self.windows.windows[idx].editor.invalidate_git_changes()
+
+    fn _on_lsp_status_menu_submit(mut self):
+        """Resolve the LSP status-bar right-click menu. The only action
+        is ``Restart LSP``: tear down the focused editor's language
+        server and let ``_retry_lsp_for_language`` spawn a fresh one,
+        then re-attach the open editor windows of that language."""
+        var act = self.lsp_status_menu.action
+        self.lsp_status_menu.close()
+        if act != LSP_MENU_ACTION_RESTART:
+            return
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
+            return
+        var lang = self.lsp_languages[lsp_idx]
+        self.lsp_managers[lsp_idx].shutdown()
+        _ = self.lsp_managers.pop(lsp_idx)
+        _ = self.lsp_languages.pop(lsp_idx)
+        self._retry_lsp_for_language(lang)
+        self.status_bar.set_message(
+            String("LSP[") + lang + String("]: restarting…"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
 
     fn _maybe_open_breakpoint_menu(mut self):
         """Drain ``Editor.consume_breakpoint_menu`` on every editor
