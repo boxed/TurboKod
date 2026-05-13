@@ -3216,6 +3216,118 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.scroll_y = target
         return True
 
+    fn _completion_popup_rect_at(
+        self, view: Rect, anchor_x: Int, anchor_y: Int,
+    ) -> Rect:
+        """Screen rect the popup occupies when anchored at
+        (``anchor_x``, ``anchor_y``). Shared by ``_paint_completion_popup_at``
+        and the click-routing in ``handle_mouse`` / desktop so dismissing
+        the popup on a click outside its bounds uses the same geometry
+        the renderer drew."""
+        var n_items = len(self.completion_items)
+        var visible_rows = n_items
+        if visible_rows > _COMPLETION_POPUP_ROWS:
+            visible_rows = _COMPLETION_POPUP_ROWS
+        var height = visible_rows
+        var longest_label = 0
+        var longest_kind = 0
+        var first = self.completion_scroll
+        var last = first + visible_rows
+        if last > n_items:
+            last = n_items
+        for i in range(first, last):
+            var lw = len(self.completion_items[i].label.as_bytes())
+            if lw > longest_label:
+                longest_label = lw
+            var kw = len(_completion_kind_name(
+                self.completion_items[i].kind,
+            ).as_bytes())
+            if kw > longest_kind:
+                longest_kind = kw
+        var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
+        var width: Int
+        if kind_col_w > 0:
+            width = longest_label + kind_col_w + 2
+        else:
+            width = longest_label + 2
+        if width < _COMPLETION_POPUP_WIDTH_MIN:
+            width = _COMPLETION_POPUP_WIDTH_MIN
+        if width > _COMPLETION_POPUP_WIDTH_MAX:
+            width = _COMPLETION_POPUP_WIDTH_MAX
+        var x = anchor_x
+        if x + width > view.b.x:
+            x = view.b.x - width
+            if x < view.a.x:
+                x = view.a.x
+        var y = anchor_y + 1
+        if y + height > view.b.y:
+            y = anchor_y - height
+            if y < view.a.y:
+                y = view.a.y
+        if width > view.width():
+            width = view.width()
+        if height > view.height():
+            height = view.height()
+        if x + width > view.b.x:
+            x = view.b.x - width
+        if x < view.a.x:
+            x = view.a.x
+        if y + height > view.b.y:
+            y = view.b.y - height
+        if y < view.a.y:
+            y = view.a.y
+        return Rect(x, y, x + width, y + height)
+
+    fn completion_popup_screen_rect(self, view: Rect) -> Optional[Rect]:
+        """Screen rect the popup currently occupies, or empty if the
+        popup isn't visible / can't be positioned. Used by click
+        routing to dismiss the popup when the user clicks outside it.
+        """
+        if not self.completion_popup_visible:
+            return Optional[Rect]()
+        if len(self.completion_items) == 0:
+            return Optional[Rect]()
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            content_w = 1
+        var layout = self._layout_lines(content_h, content_w)
+        var sr = self._screen_row_for(
+            layout, self.completion_anchor_row,
+            self.completion_anchor_col,
+        )
+        if sr < 0:
+            return Optional[Rect]()
+        var text_x0 = view.a.x + total_gutter
+        var seg_start = layout[sr].byte_start
+        var indent = layout[sr].indent_cells
+        var seg_x0 = text_x0 + indent
+        var line = self.buffer.line(self.completion_anchor_row)
+        var line_n = len(line.as_bytes())
+        var vis: String
+        if seg_start >= line_n:
+            vis = String("")
+        else:
+            vis = _slice(line, seg_start, layout[sr].byte_end)
+        var cm = utf8_byte_to_cell(vis)
+        var cc = utf8_codepoint_count(vis)
+        var vbc = len(vis.as_bytes())
+        var anchor_byte = self.completion_anchor_col - seg_start
+        var cell_off: Int
+        if anchor_byte < 0:
+            cell_off = 0
+        elif anchor_byte < vbc:
+            cell_off = cm[anchor_byte]
+        else:
+            cell_off = cc + (anchor_byte - vbc)
+        var sx = seg_x0 + cell_off
+        var sy = view.a.y + sr
+        return Optional[Rect](
+            self._completion_popup_rect_at(view, sx, sy)
+        )
+
     fn _paint_completion_popup_at(
         self, mut canvas: Canvas, view: Rect, anchor_x: Int, anchor_y: Int,
     ):
@@ -3233,73 +3345,24 @@ struct Editor(ImplicitlyCopyable, Movable):
         var visible_rows = n_items
         if visible_rows > _COMPLETION_POPUP_ROWS:
             visible_rows = _COMPLETION_POPUP_ROWS
-        var height = visible_rows
-        # Scan visible items to size both columns. Label column grows
-        # to the longest *visible* label so a single huge entry far
-        # offscreen doesn't bloat the popup; the kind column grows to
-        # the longest visible kind name and stays empty (width 0) if
-        # nothing has a known kind.
-        var longest_label = 0
+        # Scan visible items to size the kind column for the painting
+        # loop below; the popup rect itself is computed by
+        # ``_completion_popup_rect_at`` so click-outside detection uses
+        # exactly the same geometry. Kind column = [1 dark-gray pad]
+        # [name][1 dark-gray pad].
         var longest_kind = 0
         var first = self.completion_scroll
         var last = first + visible_rows
         if last > n_items:
             last = n_items
         for i in range(first, last):
-            var lw = len(self.completion_items[i].label.as_bytes())
-            if lw > longest_label:
-                longest_label = lw
             var kw = len(_completion_kind_name(
                 self.completion_items[i].kind
             ).as_bytes())
             if kw > longest_kind:
                 longest_kind = kw
-        # Kind column = [1 dark-gray pad][name][1 dark-gray pad]. The
-        # internal padding shares the kind stripe's background so the
-        # stripe reads as a self-contained chip. The cell of popup-bg
-        # padding sitting between the label and the kind stripe is
-        # *outside* this column and gets overpainted by the selection
-        # bg on the highlighted row.
         var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
-        # Natural width before clamps:
-        #   [1 left pad][label][1 pad before kind][kind column]  with kind
-        #   [1 left pad][label][1 right pad]                     no kind
-        var width: Int
-        if kind_col_w > 0:
-            width = longest_label + kind_col_w + 2
-        else:
-            width = longest_label + 2
-        if width < _COMPLETION_POPUP_WIDTH_MIN:
-            width = _COMPLETION_POPUP_WIDTH_MIN
-        if width > _COMPLETION_POPUP_WIDTH_MAX:
-            width = _COMPLETION_POPUP_WIDTH_MAX
-        var x = anchor_x
-        if x + width > view.b.x:
-            x = view.b.x - width
-            if x < view.a.x:
-                x = view.a.x
-        # Prefer below the cursor row; flip above when it'd run off
-        # the bottom of the editor's view.
-        var y = anchor_y + 1
-        if y + height > view.b.y:
-            y = anchor_y - height
-            if y < view.a.y:
-                y = view.a.y
-        # Final clamp horizontally + vertically — popup can't be
-        # bigger than the view.
-        if width > view.width():
-            width = view.width()
-        if height > view.height():
-            height = view.height()
-        if x + width > view.b.x:
-            x = view.b.x - width
-        if x < view.a.x:
-            x = view.a.x
-        if y + height > view.b.y:
-            y = view.b.y - height
-        if y < view.a.y:
-            y = view.a.y
-        var rect = Rect(x, y, x + width, y + height)
+        var rect = self._completion_popup_rect_at(view, anchor_x, anchor_y)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, LIGHT_GREEN)
         # The right-edge kind column gets its own background so the

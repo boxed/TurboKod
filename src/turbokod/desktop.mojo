@@ -3149,6 +3149,31 @@ struct Desktop(Movable):
             if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
+        # Click-outside dismisses the LSP completion popup. ESC takes
+        # the same role in ``_handle_key``. We check at the desktop
+        # level so clicks that land on the menu bar / file tree / a
+        # different window — anywhere the focused editor's
+        # ``handle_mouse`` never sees — still dismiss the overlay.
+        # Don't return — the click continues to its real target so the
+        # user's pointer action (cursor move, focus shift, …) still
+        # fires.
+        if event.kind == EVENT_MOUSE \
+                and event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion:
+            var fidx_pop = self._focused_editor_idx()
+            if fidx_pop >= 0 \
+                    and self.windows.windows[fidx_pop] \
+                        .editor.completion_popup_visible:
+                var pop_view = self.windows.windows[fidx_pop].interior()
+                var pop_rect = self.windows.windows[fidx_pop] \
+                    .editor.completion_popup_screen_rect(pop_view)
+                var close_it = True
+                if pop_rect:
+                    if pop_rect.value().contains(event.pos):
+                        close_it = False
+                if close_it:
+                    self.windows.windows[fidx_pop] \
+                        .editor.close_completion_popup()
         # Resize drags get first dibs: a click on a pane's resize edge
         # — or motion while a resize is already in flight — must reach
         # that pane before menu / status / overlapping-pane dispatch
@@ -3242,7 +3267,15 @@ struct Desktop(Movable):
             # arms the prefix path so the next keystroke can act as a
             # menu mnemonic — useful on macOS terminals that don't deliver
             # Option+F as ``ESC f`` by default.
-            if self.menu_bar.is_open():
+            # The LSP completion popup is the innermost transient overlay
+            # — when it's up, ESC dismisses it before anything else.
+            var fidx_esc = self._focused_editor_idx()
+            if fidx_esc >= 0 \
+                    and self.windows.windows[fidx_esc] \
+                        .editor.completion_popup_visible:
+                self.windows.windows[fidx_esc] \
+                    .editor.close_completion_popup()
+            elif self.menu_bar.is_open():
                 self.menu_bar.close()
             elif self._run_output_held \
                     and not self.dap.is_active() \

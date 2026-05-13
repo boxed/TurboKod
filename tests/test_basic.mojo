@@ -7059,6 +7059,86 @@ fn test_editor_close_completion_popup_clears_pending_request() raises:
     assert_false(ed.consume_completion_cancel())
 
 
+fn _popup_items_one() -> List[CompletionItem]:
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("foobar"), String("foobar"), 6, String(""), String("foobar"),
+        False, 0, 0, 0, 0,
+    ))
+    return items^
+
+
+fn test_desktop_esc_dismisses_completion_popup() raises:
+    """ESC routed through the Desktop must close the focused editor's
+    completion popup before any other ESC-bound action (menu close /
+    multi-caret clear / esc-prefix arm). Without this the popup would
+    persist until the user typed past the anchor."""
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar\n"),
+    ))
+    d.windows.windows[0].editor.move_to(0, 3, False)
+    d.windows.windows[0].editor.set_completions(
+        _popup_items_one(), 0, 0,
+    )
+    assert_true(d.windows.windows[0].editor.completion_popup_visible)
+    _ = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(d.windows.windows[0].editor.completion_popup_visible)
+    # ESC must not have also armed the menu-mnemonic prefix when it was
+    # consumed by the popup-close path.
+    assert_false(d._esc_armed)
+
+
+fn test_desktop_left_click_outside_popup_dismisses_it() raises:
+    """A left-click anywhere outside the popup's screen rect dismisses
+    it. The click still proceeds to its normal target — the popup is
+    just a transient overlay."""
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar\n"),
+    ))
+    d.windows.windows[0].editor.move_to(0, 3, False)
+    d.windows.windows[0].editor.set_completions(
+        _popup_items_one(), 0, 0,
+    )
+    assert_true(d.windows.windows[0].editor.completion_popup_visible)
+    # Click somewhere clearly outside the popup (far-right column of
+    # the editor's text area; popup is anchored at column 0).
+    _ = d.handle_event(
+        Event.mouse_event(
+            Point(35, 10), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        _SCREEN,
+    )
+    assert_false(d.windows.windows[0].editor.completion_popup_visible)
+
+
+fn test_desktop_left_click_inside_popup_keeps_it_open() raises:
+    """A left-click that lands *inside* the popup rect must not dismiss
+    it — that lane is reserved for future item-click acceptance."""
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar\n"),
+    ))
+    d.windows.windows[0].editor.move_to(0, 3, False)
+    d.windows.windows[0].editor.set_completions(
+        _popup_items_one(), 0, 0,
+    )
+    var interior = d.windows.windows[0].interior()
+    var maybe_rect = d.windows.windows[0] \
+        .editor.completion_popup_screen_rect(interior)
+    assert_true(Bool(maybe_rect))
+    var pr = maybe_rect.value()
+    # Click the popup's top-left interior cell.
+    _ = d.handle_event(
+        Event.mouse_event(
+            Point(pr.a.x, pr.a.y), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        _SCREEN,
+    )
+    assert_true(d.windows.windows[0].editor.completion_popup_visible)
+
+
 fn test_editor_show_no_completion_message_opens_unselectable_popup() raises:
     """``show_no_completion_message`` opens a popup with a single
     non-acceptable ``<no completion found>`` entry. Arrow keys must
@@ -13413,6 +13493,9 @@ fn main() raises:
     test_editor_autotrigger_request_released_after_debounce()
     test_editor_manual_completion_request_bypasses_debounce()
     test_editor_close_completion_popup_clears_pending_request()
+    test_desktop_esc_dismisses_completion_popup()
+    test_desktop_left_click_outside_popup_dismisses_it()
+    test_desktop_left_click_inside_popup_keeps_it_open()
     test_editor_show_no_completion_message_opens_unselectable_popup()
     test_editor_accept_completion_replaces_prefix()
     test_editor_accept_completion_overlap_widens_anchor()
