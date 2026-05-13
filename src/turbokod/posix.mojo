@@ -43,19 +43,6 @@ comptime POSIX_SPAWN_FILE_ACTIONS_SIZE: Int = 256
 comptime POSIX_SPAWN_ATTR_SIZE: Int = 256
 
 
-fn o_nonblock_value() -> Int32:
-    """``O_NONBLOCK`` differs by platform: Darwin 0x0004, Linux 0x800."""
-    comptime if CompilationTarget.is_macos():
-        return 0x0004
-    else:
-        return 0x800
-
-
-fn fcntl_setfl_value() -> Int32:
-    """``F_SETFL`` is 4 everywhere we target."""
-    return 4
-
-
 fn tciflush_value() -> Int32:
     """Platform-specific value for ``TCIFLUSH`` (discard input queue).
 
@@ -296,17 +283,22 @@ fn close_fd(fd: Int32) -> Int32:
 
 
 fn set_nonblocking(fd: Int32) -> Bool:
-    """Make ``fd`` non-blocking via ``fcntl(F_SETFL, O_NONBLOCK)``.
+    """Make ``fd`` non-blocking, preserving any other status flags.
 
-    The third arg of ``fcntl`` is technically variadic in C, but the
-    register-passing convention for a single scalar is identical to a
-    fixed-arity declaration on x86_64 SysV / ARM64 AAPCS. Returns True
-    on success.
+    Routes through ``tk_set_nonblock`` in ``process_shim.c`` rather than
+    calling ``fcntl`` directly. ``fcntl``'s third argument is variadic
+    in C, and on Apple's ARM64 ABI variadic args go on the stack —
+    Mojo's ``external_call`` declares a fixed-arity call and puts the
+    third arg in a register, so the kernel reads garbage and silently
+    leaves the fd in blocking mode. The fault surfaces later as a hang
+    of the UI thread inside ``write(2)`` once the peer stops draining
+    (LSP server overload was the original symptom). Calling from C
+    side-steps the issue by emitting the correct vararg convention.
+
+    Returns True on success.
     """
-    var rc = external_call["fcntl", Int32](
-        fd, fcntl_setfl_value(), o_nonblock_value(),
-    )
-    return Int(rc) == 0
+    var rc = external_call["tk_set_nonblock", Int32](fd)
+    return Int(rc) == 1
 
 
 fn waitpid_blocking(pid: Int32) -> Int32:

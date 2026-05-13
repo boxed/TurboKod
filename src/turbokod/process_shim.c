@@ -33,6 +33,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -57,6 +58,32 @@ long tk_write_nb(int fd, const void *buf, unsigned long count) {
     if (n >= 0) return (long) n;
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
     return -1;
+}
+
+/* Set ``O_NONBLOCK`` on ``fd`` while preserving its other status flags.
+ *
+ * Why this exists: Mojo can call ``fcntl`` directly via ``external_call``,
+ * but on Apple Silicon the third argument to a C variadic function is
+ * passed on the stack, not in a register — that's the Darwin ARM64
+ * deviation from generic AAPCS. Mojo's ``external_call`` declares a
+ * fixed-arity call and puts the third arg in a register, so the kernel
+ * reads garbage where the flag bitmask should be and silently leaves
+ * the fd in blocking mode. The fault then surfaces a million write(2)
+ * calls later as a hard hang of the UI thread inside a kernel ``write``
+ * when the peer (LSP / DAP / etc.) stops draining its stdin.
+ *
+ * Fix: do the fcntl from C, where the compiler emits the correct
+ * vararg convention for the platform. We also do the standard
+ * ``F_GETFL | O_NONBLOCK`` two-step so existing flags survive (e.g.
+ * ``O_APPEND`` if the caller ever passes one of those). Returns 1 on
+ * success, 0 on any failure.
+ */
+int tk_set_nonblock(int fd) {
+    if (fd < 0) return 0;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return 0;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return 0;
+    return 1;
 }
 
 static int *g_pids = NULL;

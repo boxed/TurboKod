@@ -3778,7 +3778,19 @@ struct Desktop(Movable):
             var req_opt = self.windows.windows[idx].editor.consume_definition_request()
             if req_opt:
                 self._dispatch_definition_request(idx, req_opt.value())
-            var comp_opt = self.windows.windows[idx].editor.consume_completion_request()
+            # Drain the cancel latch *before* consuming a new request:
+            # close_completion_popup may have set both (e.g. typing a
+            # non-word char that dismissed the popup yet stamped a
+            # fresh request). Cancel the old in-flight first, then let
+            # the new request go out.
+            if self.windows.windows[idx].editor.consume_completion_cancel():
+                var path = self.windows.windows[idx].editor.file_path
+                if len(path.as_bytes()) > 0:
+                    var li = self._lsp_for_path(path)
+                    if li >= 0:
+                        self.lsp_managers[li].cancel_completion()
+            var comp_opt = self.windows.windows[idx].editor \
+                .consume_completion_request(monotonic_ms())
             if comp_opt:
                 self._dispatch_completion_request(idx, comp_opt.value())
         # Drain every spawned manager every frame so responses on any

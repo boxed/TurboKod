@@ -33,7 +33,7 @@ from .lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
 )
-from .posix import getcwd_path, getenv_value, realpath, which
+from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
 
 
 fn _lsp_debug_log(line: String):
@@ -60,7 +60,13 @@ fn _lsp_debug_log(line: String):
         var eb = existing.as_bytes()
         if eb[len(eb) - 1] != 0x0A:
             existing = existing + String("\n")
-    _ = write_file(path, existing + line + String("\n"))
+    # Prefix each line with monotonic ms so the gap between
+    # ``→ request_completion`` and ``← completion response`` is
+    # readable by eye. The clock's absolute value is unspecified — only
+    # differences are meaningful — but that's exactly what we want for
+    # latency analysis.
+    var stamp = String("[") + String(monotonic_ms()) + String("] ")
+    _ = write_file(path, existing + stamp + line + String("\n"))
 
 
 # --- State -----------------------------------------------------------------
@@ -751,6 +757,39 @@ struct LspManager(Copyable, Movable):
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
         return True
+
+    fn cancel_completion(mut self):
+        """Cancel any in-flight completion request.
+
+        Sends ``$/cancelRequest`` so the server can drop work it has
+        already started, and zeroes ``_inflight_completion_id`` so a
+        late response — if one slips in before the cancel propagates —
+        is ignored by the response handler instead of being parked
+        for the host. Also clears any parked-but-unconsumed completion
+        list (the user dismissed the popup; that list is irrelevant).
+        No-op when nothing is in flight."""
+        if self._inflight_completion_id == 0 \
+                and not self._has_resolved_completions:
+            return
+        if self._inflight_completion_id != 0:
+            _lsp_debug_log(
+                String("→ cancel_completion id=")
+                + String(self._inflight_completion_id)
+                + String(" lang=") + self._language_id,
+            )
+            var cancel_params = json_object()
+            cancel_params.put(
+                String("id"), json_int(self._inflight_completion_id),
+            )
+            try:
+                self.client.send_notification(
+                    String("$/cancelRequest"), cancel_params,
+                )
+            except:
+                pass
+            self._inflight_completion_id = 0
+        self._resolved_completions = List[CompletionItem]()
+        self._has_resolved_completions = False
 
     fn has_pending_completions(self) -> Bool:
         """True iff a parsed completion response is parked for ``take``."""

@@ -523,6 +523,17 @@ comptime _COMPLETION_POPUP_WIDTH_MAX = 60
 """Maximum popup width; longer labels get truncated with an ellipsis."""
 
 
+comptime _COMPLETION_DEBOUNCE_MS = 120
+"""How long the as-you-type auto-trigger waits for typing to settle
+before forwarding a completion request to the LSP server. Without
+debounce, fast typing fires one request per keystroke and the popup
+visibly lags behind — each response reflects a prefix two or three
+chars older than what the user just typed. 120 ms is short enough that
+a deliberate pause feels instant, long enough that a steady typist
+produces a single request per word fragment. Manual (Ctrl+Space)
+requests bypass this — the user is explicitly waiting on results."""
+
+
 # --- External-change status codes ------------------------------------------
 #
 # Returned by ``Editor.check_for_external_change`` so callers (Window /
@@ -912,6 +923,16 @@ struct Editor(ImplicitlyCopyable, Movable):
     # empty). The single ``completion_items`` entry is non-acceptable —
     # Enter/Tab dismiss the popup rather than insert.
     var completion_is_message: Bool
+    # ``monotonic_ms()`` reading from the last time
+    # ``_stamp_completion_request`` (or Ctrl+Space) fired. The host's
+    # ``consume_completion_request`` reads this to debounce as-you-type
+    # requests — see ``_COMPLETION_DEBOUNCE_MS``.
+    var _completion_request_stamp_ms: Int
+    # Latched True when ``close_completion_popup`` runs: tells the host
+    # to send ``$/cancelRequest`` for any LSP-side completion that is
+    # still in flight so a late response doesn't pop the popup back open
+    # after the user dismissed it (Esc / cursor-out-of-word / accept).
+    var _completion_cancel_pending: Bool
 
     fn __init__(out self):
         self.buffer = TextBuffer()
@@ -990,6 +1011,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_anchor_row = 0
         self.completion_anchor_col = 0
         self.completion_is_message = False
+        self._completion_request_stamp_ms = 0
+        self._completion_cancel_pending = False
 
     fn __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -1068,6 +1091,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_anchor_row = 0
         self.completion_anchor_col = 0
         self.completion_is_message = False
+        self._completion_request_stamp_ms = 0
+        self._completion_cancel_pending = False
 
     @staticmethod
     fn from_file(var path: String) raises -> Self:
@@ -1172,6 +1197,8 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.completion_anchor_row = copy.completion_anchor_row
         self.completion_anchor_col = copy.completion_anchor_col
         self.completion_is_message = copy.completion_is_message
+        self._completion_request_stamp_ms = copy._completion_request_stamp_ms
+        self._completion_cancel_pending = copy._completion_cancel_pending
 
     fn flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -1677,23 +1704,63 @@ struct Editor(ImplicitlyCopyable, Movable):
         self.pending_definition = Optional[DefinitionRequest]()
         return req
 
-    fn consume_completion_request(mut self) -> Optional[CompletionRequest]:
+    fn consume_completion_request(
+        mut self, now_ms: Int = 0,
+    ) -> Optional[CompletionRequest]:
         """Return any pending ``CompletionRequest`` and clear the slot.
 
-        Set by ``handle_key`` when the user invokes completion
-        (Ctrl+Space). The host forwards to its LSP manager and routes
-        the response back via ``set_completions``."""
-        var req = self.pending_completion_request
+        Set by ``handle_key`` when the user invokes completion (Ctrl+Space
+        or the as-you-type auto-trigger). The host forwards to its LSP
+        manager and routes the response back via ``set_completions``.
+
+        ``now_ms`` (``monotonic_ms()`` from the host) gates as-you-type
+        requests behind ``_COMPLETION_DEBOUNCE_MS``: a request keeps
+        getting refreshed in the slot while the user types, and only
+        becomes consumable after typing settles. Manual requests
+        (Ctrl+Space) bypass the gate. ``now_ms == 0`` (the default) is
+        the test escape hatch — tests don't carry monotonic time and
+        the debounce check is unrelated to what they verify.
+        """
+        if not self.pending_completion_request:
+            return Optional[CompletionRequest]()
+        var req = self.pending_completion_request.value()
+        if now_ms != 0 and not req.manual:
+            if now_ms - self._completion_request_stamp_ms \
+                    < _COMPLETION_DEBOUNCE_MS:
+                return Optional[CompletionRequest]()
         self.pending_completion_request = Optional[CompletionRequest]()
-        return req
+        return Optional[CompletionRequest](req)
+
+    fn consume_completion_cancel(mut self) -> Bool:
+        """Return and clear the cancel-pending latch.
+
+        Set by ``close_completion_popup`` whenever the popup is
+        dismissed. The host translates a True return into
+        ``LspManager.cancel_completion()`` so a late response on a
+        previously-issued request doesn't reopen the popup after the
+        user has explicitly dismissed it."""
+        var pending = self._completion_cancel_pending
+        self._completion_cancel_pending = False
+        return pending
 
     fn close_completion_popup(mut self):
-        """Hide and clear the completion popup. Idempotent."""
+        """Hide and clear the completion popup. Idempotent.
+
+        Also clears any queued ``pending_completion_request`` and
+        latches ``_completion_cancel_pending`` so the host sends
+        ``$/cancelRequest`` for any LSP-side request still in flight.
+        Without the cancel a late response would call back into
+        ``set_completions`` and pop the popup right back open — the
+        user dismisses via Esc, sees the popup go away, then it
+        reappears 100 ms later. Cheap when nothing is in flight (the
+        host's ``cancel_completion`` is a no-op in that case)."""
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
         self.completion_scroll = 0
         self.completion_is_message = False
+        self.pending_completion_request = Optional[CompletionRequest]()
+        self._completion_cancel_pending = True
 
     fn set_completions(
         mut self, var items: List[CompletionItem],
@@ -1783,13 +1850,20 @@ struct Editor(ImplicitlyCopyable, Movable):
         Helper for the as-you-type auto-trigger paths so they don't
         each duplicate the prefix-start lookup. ``manual=False`` —
         an empty response on this path silently dismisses the popup
-        rather than showing ``<no completion found>``."""
+        rather than showing ``<no completion found>``.
+
+        Also refreshes ``_completion_request_stamp_ms``: while the user
+        is typing this keeps resetting and the host's debounced
+        ``consume_completion_request`` leaves the slot alone — only
+        once typing pauses for ``_COMPLETION_DEBOUNCE_MS`` does the
+        host actually forward the request."""
         var start_col = self.completion_prefix_start()
         self.pending_completion_request = Optional[CompletionRequest](
             CompletionRequest(
                 self.cursor_row, self.cursor_col, start_col, False,
             ),
         )
+        self._completion_request_stamp_ms = monotonic_ms()
 
     fn accept_completion(mut self) -> Bool:
         """Apply the currently highlighted completion to the buffer.
@@ -4471,6 +4545,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     self.cursor_row, self.cursor_col, start_col, True,
                 ),
             )
+            self._completion_request_stamp_ms = monotonic_ms()
             return True
         # Capture the typing-group flag before any branch touches it, then
         # default to "broken" — every non-typing path (cursor moves, edits,

@@ -7005,6 +7005,60 @@ fn test_editor_autotrigger_request_is_not_manual() raises:
     assert_false(req.value().manual)
 
 
+fn test_editor_autotrigger_request_debounced_until_settled() raises:
+    """As-you-type completion requests are held in the slot while
+    typing is still fresh. Gating ``consume_completion_request`` on a
+    ``now_ms`` equal to the stamp leaves the request parked."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x66))  # 'f'
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    assert_true(Bool(ed.pending_completion_request))
+    var stamp_field = ed._completion_request_stamp_ms
+    var req_now = ed.consume_completion_request(stamp_field)
+    assert_false(Bool(req_now))
+    assert_true(Bool(ed.pending_completion_request))
+
+
+fn test_editor_autotrigger_request_released_after_debounce() raises:
+    """Once ``_COMPLETION_DEBOUNCE_MS`` has elapsed since the last
+    keystroke, the gated consume releases the parked request."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x66))  # 'f'
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var stamp_field = ed._completion_request_stamp_ms
+    var req = ed.consume_completion_request(stamp_field + 1000)
+    assert_true(Bool(req))
+    assert_false(Bool(ed.pending_completion_request))
+
+
+fn test_editor_manual_completion_request_bypasses_debounce() raises:
+    """Ctrl+Space is user-invoked: the user is explicitly waiting on
+    results and the request must fire immediately regardless of how
+    recently anything was typed."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(KEY_SPACE, MOD_CTRL)
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_completion_request(1)
+    assert_true(Bool(req))
+    var unwrapped = req.value()
+    assert_true(unwrapped.manual)
+
+
+fn test_editor_close_completion_popup_clears_pending_request() raises:
+    """Dismissing the popup clears any queued pending request *and*
+    latches the cancel flag so the host can tell the LSP to drop
+    in-flight work. Without this a late response would re-open the
+    popup the user just dismissed."""
+    var ed = Editor(String(""))
+    var ev = Event.key_event(UInt32(0x66))  # 'f'
+    _ = ed.handle_key(ev, Rect(0, 0, 40, 5))
+    assert_true(Bool(ed.pending_completion_request))
+    ed.close_completion_popup()
+    assert_false(Bool(ed.pending_completion_request))
+    assert_true(ed.consume_completion_cancel())
+    assert_false(ed.consume_completion_cancel())
+
+
 fn test_editor_show_no_completion_message_opens_unselectable_popup() raises:
     """``show_no_completion_message`` opens a popup with a single
     non-acceptable ``<no completion found>`` entry. Arrow keys must
@@ -13355,6 +13409,10 @@ fn main() raises:
     test_editor_typing_non_word_char_closes_visible_popup()
     test_editor_ctrl_space_marks_request_manual()
     test_editor_autotrigger_request_is_not_manual()
+    test_editor_autotrigger_request_debounced_until_settled()
+    test_editor_autotrigger_request_released_after_debounce()
+    test_editor_manual_completion_request_bypasses_debounce()
+    test_editor_close_completion_popup_clears_pending_request()
     test_editor_show_no_completion_message_opens_unselectable_popup()
     test_editor_accept_completion_replaces_prefix()
     test_editor_accept_completion_overlap_widens_anchor()
