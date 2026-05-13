@@ -170,6 +170,27 @@ fn find_language_by_id(specs: List[LanguageSpec], language_id: String) -> Int:
     return -1
 
 
+fn dependency_dirs_for_language_id(language_id: String) -> List[String]:
+    """Directory names (path-segments, not globs) that hold a language's
+    third-party dependencies rather than user source.
+
+    A file under ``<project>/<name>/...`` where ``name`` is one of these
+    is treated as not part of the project — e.g. a Python venv at
+    ``<project>/.venv/lib/python3.x/site-packages/foo/bar.py`` is
+    library code that happens to live under the project tree.
+
+    Hand-curated rather than sourced from Helix because the upstream
+    catalog doesn't carry this notion; if the list grows, move it to
+    ``LanguageSpec`` and feed it through ``refresh_languages.py``.
+    """
+    var out = List[String]()
+    if language_id == String("python"):
+        out.append(String(".venv"))
+        out.append(String("venv"))
+        return out^
+    return out^
+
+
 fn apply_language_overrides(
     var specs: List[LanguageSpec],
     overrides: List[LanguageServerOverride],

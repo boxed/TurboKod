@@ -99,7 +99,7 @@ from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
-    find_language_for_extension,
+    dependency_dirs_for_language_id, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager
 from .dap_dispatch import (
@@ -1480,7 +1480,7 @@ struct Desktop(Movable):
         self._refresh_target_tabs()
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
-        self.windows.paint(canvas)
+        self.windows.paint(canvas, self._compute_subdued_windows())
         # Title-bar full-path tooltip: floats above every window but
         # below the side panes / chrome, so the popup never gets
         # painted over by the editor it's describing.
@@ -5381,6 +5381,60 @@ struct Desktop(Movable):
         self.windows.windows[existing].editor.reveal_cursor(
             self.windows.windows[existing].interior(),
         )
+
+    fn _compute_subdued_windows(self) -> List[Bool]:
+        """One flag per window: True means "paint with dim chrome."
+
+        A window is subdued when its file lives outside the project tree,
+        or inside a dependency directory the file's language declares
+        (a Python venv, a Node ``node_modules``, …). Non-editor windows
+        and unsaved buffers are never subdued — they're framework
+        chrome, not project files.
+
+        The debugger's stack frames get the equivalent classification
+        for free via the adapter's ``presentationHint``; windows have
+        no adapter to defer to, so we synthesize the decision here.
+        """
+        var out = List[Bool]()
+        var root = String("")
+        if self.project:
+            root = self.project.value()
+        if len(root.as_bytes()) > 0 and not _ends_with_slash(root):
+            root = root + String("/")
+        for i in range(len(self.windows.windows)):
+            out.append(self._is_window_subdued(self.windows.windows[i], root))
+        return out^
+
+    fn _is_window_subdued(self, win: Window, root_with_slash: String) -> Bool:
+        if not win.is_editor:
+            return False
+        var path = win.editor.file_path
+        if len(path.as_bytes()) == 0:
+            return False
+        if len(root_with_slash.as_bytes()) == 0:
+            return False
+        if not starts_with(path, root_with_slash):
+            return True
+        var ext = extension_of(path)
+        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        if spec_idx < 0:
+            return False
+        var deps = dependency_dirs_for_language_id(
+            self.lsp_specs[spec_idx].language_id,
+        )
+        if len(deps) == 0:
+            return False
+        # First path segment after the project root prefix.
+        var pb = path.as_bytes()
+        var seg_start = len(root_with_slash.as_bytes())
+        var seg_end = seg_start
+        while seg_end < len(pb) and pb[seg_end] != 0x2F:
+            seg_end += 1
+        var seg = String(StringSlice(unsafe_from_utf8=pb[seg_start:seg_end]))
+        for k in range(len(deps)):
+            if seg == deps[k]:
+                return True
+        return False
 
     fn _find_window_for_path(self, path: String) -> Int:
         """Return the index of an existing editor window whose file_path

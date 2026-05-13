@@ -8652,7 +8652,7 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
 
 fn test_debug_pane_subtle_frame_paints_dim() raises:
     """A frame the adapter marked subtle (library / external code)
-    paints in LIGHT_GRAY rather than WHITE so the user can still see
+    paints in DARK_GRAY rather than WHITE so the user can still see
     the full call chain but visually distinguish their own code. The
     currently-inspected frame still gets the highlight regardless of
     the subtle hint."""
@@ -8685,7 +8685,7 @@ fn test_debug_pane_subtle_frame_paints_dim() raises:
             break
     assert_true(subtle_y >= 0)
     var subtle_x = _find_glyph_x(c, subtle_y, String("r"))
-    assert_equal(c.get(subtle_x, subtle_y).attr.fg, LIGHT_GRAY)
+    assert_equal(c.get(subtle_x, subtle_y).attr.fg, DARK_GRAY)
     # And the inspected user frame stays in the highlight color, not dim.
     var user_y = -1
     for y in range(2, 16):
@@ -8698,7 +8698,7 @@ fn test_debug_pane_subtle_frame_paints_dim() raises:
     var user_x = _find_glyph_x(c, user_y, String("m"))
     # The current-frame highlight is BLACK on LIGHT_YELLOW — the key
     # invariant is that it's NOT painted dim.
-    assert_true(c.get(user_x, user_y).attr.fg != LIGHT_GRAY)
+    assert_true(c.get(user_x, user_y).attr.fg != DARK_GRAY)
 
 
 fn test_debug_pane_debug_mode_running_hides_inspect() raises:

@@ -54,7 +54,7 @@ from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
     LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, RED, STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .dap_dispatch import DapStackFrame, DapVariable
@@ -606,6 +606,12 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         var section = Attr(YELLOW, BLACK)
         var current = Attr(BLACK, LIGHT_YELLOW)
         var dim = Attr(LIGHT_GRAY, BLACK)
+        # Frame-specific dim. ANSI 7 (``LIGHT_GRAY``) collides with bright
+        # white on many terminals, so non-project frames painted in
+        # ``dim`` would read as the same color as user code. ``DARK_GRAY``
+        # (ANSI 8) is consistently dimmer across xterm-256 palettes, which
+        # is what we want for "you can see it, but it's not your code."
+        var subtle_frame = Attr(DARK_GRAY, BLACK)
         var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
         var painter = Painter(panel)
         # Reset visible-link rects + scrollbar bookkeeping each paint —
@@ -763,7 +769,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
                 # still wins when the user is inspecting this frame so
                 # the marker stays readable.
                 if r.expanded:
-                    attr = dim
+                    attr = subtle_frame
                 if r.depth == self.current_frame_index:
                     marker = String("▶")
                     attr = current

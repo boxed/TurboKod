@@ -15,7 +15,7 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
 from .editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor,
@@ -828,10 +828,19 @@ struct Window(ImplicitlyCopyable, Movable):
 
     fn paint(
         self, mut canvas: Canvas, display_title: String,
-        focused: Bool, number: Int,
+        focused: Bool, number: Int, subdued: Bool = False,
     ):
         var border: Attr
-        if focused:
+        if subdued:
+            # Caller marked this window as "not the user's code" (a file
+            # outside the project root, a venv / node_modules buffer,
+            # …). DARK_GRAY (ANSI 8) for both focus states — many
+            # terminals render LIGHT_GRAY (ANSI 7) indistinguishably from
+            # WHITE (ANSI 15), which would otherwise collapse the
+            # focused-subdued case onto the focused-prominent case.
+            # Focus is still readable via the single-vs-double border.
+            border = Attr(DARK_GRAY, BLUE)
+        elif focused:
             border = Attr(WHITE, BLUE)
         else:
             border = Attr(LIGHT_GRAY, BLUE)
@@ -1456,13 +1465,18 @@ struct WindowManager(Movable):
         new_z.append(idx)
         self.z_order = new_z^
 
-    fn paint(self, mut canvas: Canvas):
-        # Iterate z-order back-to-front so the focused window (which is
-        # always at the end of z_order, by invariant) lands on top.
+    fn paint(self, mut canvas: Canvas, subdued: List[Bool] = List[Bool]()):
+        """Paint every window in z-order. ``subdued[i]`` toggles the
+        dim-chrome style for ``windows[i]`` — the caller (Desktop)
+        decides the policy (out-of-project, in a venv, …). An empty
+        list means "no window is subdued."""
         var titles = compute_display_titles(self.windows)
         for k in range(len(self.z_order)):
             var i = self.z_order[k]
-            self.windows[i].paint(canvas, titles[i], i == self.focused, i + 1)
+            var sub = subdued[i] if i < len(subdued) else False
+            self.windows[i].paint(
+                canvas, titles[i], i == self.focused, i + 1, sub,
+            )
 
     fn paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):
         """Overlay the full-path tooltip for whichever editor window's
