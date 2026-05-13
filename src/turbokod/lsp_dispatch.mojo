@@ -113,12 +113,26 @@ struct CompletionItem(ImplicitlyCopyable, Movable):
     is the LSP ``sortText`` field used to order items in the popup —
     when the server omits it we copy the label so sortText-bearing
     entries can still sort cleanly against label-only ones.
+
+    ``has_range`` flips True when the server supplied a ``textEdit``
+    (TextEdit or InsertReplaceEdit) — in that case the editor must
+    replace exactly ``[range_start_char, range_end_char)`` on
+    ``range_start_line`` rather than walking back through word
+    codepoints. This matters when ``newText`` covers a span that
+    crosses non-word punctuation (e.g. template path completions
+    where ``reviews/re`` should be replaced wholesale with
+    ``reviews/reviews__tags.html``, not just the trailing ``re``).
     """
     var label: String
     var insert_text: String
     var kind: Int
     var detail: String
     var sort_text: String
+    var has_range: Bool
+    var range_start_line: Int
+    var range_start_char: Int
+    var range_end_line: Int
+    var range_end_char: Int
 
 
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
@@ -1236,27 +1250,69 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
         if detail_opt and detail_opt.value().is_string():
             detail = detail_opt.value().as_str()
         var insert_text = label
+        var has_range = False
+        var rs_line = 0
+        var rs_char = 0
+        var re_line = 0
+        var re_char = 0
         var fmt = 1
         var fmt_opt = entry.object_get(String("insertTextFormat"))
         if fmt_opt and fmt_opt.value().is_int():
             fmt = fmt_opt.value().as_int()
         if fmt != 2:
-            # Plain-text item: prefer explicit insertText, then textEdit.newText,
-            # else the label. (Servers vary in which they populate.)
-            var it_opt = entry.object_get(String("insertText"))
-            if it_opt and it_opt.value().is_string():
-                insert_text = it_opt.value().as_str()
-            else:
-                var te_opt = entry.object_get(String("textEdit"))
-                if te_opt and te_opt.value().is_object():
-                    var nt_opt = te_opt.value().object_get(String("newText"))
-                    if nt_opt and nt_opt.value().is_string():
-                        insert_text = nt_opt.value().as_str()
+            # Per LSP spec, when ``textEdit`` is provided the value of
+            # ``insertText`` is ignored — textEdit is authoritative for
+            # both the text to insert and the range to replace. Fall
+            # back to ``insertText`` only when textEdit is absent, and
+            # fall back to the label only when both are absent.
+            var got_te = False
+            var te_opt = entry.object_get(String("textEdit"))
+            if te_opt and te_opt.value().is_object():
+                var te = te_opt.value()
+                var nt_opt = te.object_get(String("newText"))
+                if nt_opt and nt_opt.value().is_string():
+                    insert_text = nt_opt.value().as_str()
+                    got_te = True
+                # ``TextEdit`` carries ``range``; ``InsertReplaceEdit``
+                # carries ``insert`` and ``replace`` — prefer ``replace``
+                # so accepting overwrites existing text rather than
+                # leaving a suffix behind the cursor.
+                var rng_obj_opt = te.object_get(String("range"))
+                if not rng_obj_opt:
+                    rng_obj_opt = te.object_get(String("replace"))
+                if rng_obj_opt and rng_obj_opt.value().is_object():
+                    var rng_obj = rng_obj_opt.value()
+                    var s_opt = rng_obj.object_get(String("start"))
+                    var e_opt = rng_obj.object_get(String("end"))
+                    if s_opt and e_opt \
+                            and s_opt.value().is_object() \
+                            and e_opt.value().is_object():
+                        var sl_opt = s_opt.value().object_get(String("line"))
+                        var sc_opt = s_opt.value().object_get(String("character"))
+                        var el_opt = e_opt.value().object_get(String("line"))
+                        var ec_opt = e_opt.value().object_get(String("character"))
+                        if sl_opt and sc_opt and el_opt and ec_opt \
+                                and sl_opt.value().is_int() \
+                                and sc_opt.value().is_int() \
+                                and el_opt.value().is_int() \
+                                and ec_opt.value().is_int():
+                            rs_line = sl_opt.value().as_int()
+                            rs_char = sc_opt.value().as_int()
+                            re_line = el_opt.value().as_int()
+                            re_char = ec_opt.value().as_int()
+                            has_range = True
+            if not got_te:
+                var it_opt = entry.object_get(String("insertText"))
+                if it_opt and it_opt.value().is_string():
+                    insert_text = it_opt.value().as_str()
         var sort_text = label
         var sort_opt = entry.object_get(String("sortText"))
         if sort_opt and sort_opt.value().is_string():
             sort_text = sort_opt.value().as_str()
-        out.append(CompletionItem(label, insert_text, kind, detail, sort_text))
+        out.append(CompletionItem(
+            label, insert_text, kind, detail, sort_text,
+            has_range, rs_line, rs_char, re_line, re_char,
+        ))
     # Stable insertion sort by sort_text — typical completion lists are
     # under ~200 items so quadratic worst-case is fine here.
     var m = len(out)

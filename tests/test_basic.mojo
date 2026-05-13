@@ -6897,11 +6897,11 @@ fn test_editor_set_completions_opens_popup() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foo_bar"), String("foo_bar"), 6, String(""),
-        String("foo_bar"),
+        String("foo_bar"), False, 0, 0, 0, 0,
     ))
     items.append(CompletionItem(
         String("foo_baz"), String("foo_baz"), 6, String(""),
-        String("foo_baz"),
+        String("foo_baz"), False, 0, 0, 0, 0,
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -6952,7 +6952,7 @@ fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foobar"), String("foobar"), 6, String(""),
-        String("foobar"),
+        String("foobar"), False, 0, 0, 0, 0,
     ))
     ed.set_completions(items^, 0, 0)
     # Left arrow from col 3 → col 2 keeps cursor inside "foo".
@@ -6971,7 +6971,7 @@ fn test_editor_typing_non_word_char_closes_visible_popup() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foo"), String("foo"), 6, String(""),
-        String("foo"),
+        String("foo"), False, 0, 0, 0, 0,
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -7038,7 +7038,7 @@ fn test_editor_accept_completion_replaces_prefix() raises:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("abcdef"), String("abcdef"), 6, String(""),
-        String("abcdef"),
+        String("abcdef"), False, 0, 0, 0, 0,
     ))
     ed.set_completions(items^, 0, 6)
     var ok = ed.accept_completion()
@@ -7046,6 +7046,124 @@ fn test_editor_accept_completion_replaces_prefix() raises:
     assert_equal(ed.buffer.line(0), String("foo + abcdef"))
     assert_equal(ed.cursor_col, 12)
     assert_false(ed.completion_popup_visible)
+
+
+fn test_editor_accept_completion_overlap_widens_anchor() raises:
+    """When the server returns a label-only entry (no textEdit), the
+    accept logic widens the replacement span by looking for the
+    longest suffix of the typed line that is a byte-exact prefix of
+    ``insert_text``. The ``reviews/re`` → ``reviews/reviews__tags.html``
+    case: word-boundary anchor stops after the ``/`` (col 8), but the
+    overlap scan finds that the whole ``reviews/re`` matches the start
+    of the insert text, so the replacement covers all 10 bytes."""
+    var ed = Editor(String("reviews/re"))
+    ed.move_to(0, 10, False)
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("reviews/reviews__tags.html"),
+        String("reviews/reviews__tags.html"),
+        17, String(""), String("reviews/reviews__tags.html"),
+        False, 0, 0, 0, 0,  # no textEdit range
+    ))
+    ed.set_completions(items^, 0, 8)  # word-boundary anchor
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    assert_equal(ed.buffer.line(0), String("reviews/reviews__tags.html"))
+    assert_equal(ed.cursor_col, 26)
+
+
+fn test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
+    """When the inserted text shares no prefix with what's left of the
+    cursor, the overlap heuristic must not widen the replacement —
+    accepting falls back to the word-boundary anchor. Otherwise typing
+    ``foo`` and accepting ``bar`` would silently eat the ``foo``."""
+    var ed = Editor(String("foo"))
+    ed.move_to(0, 3, False)
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("bar"), String("bar"), 6, String(""), String("bar"),
+        False, 0, 0, 0, 0,
+    ))
+    ed.set_completions(items^, 0, 0)  # word-boundary anchor at start of ``foo``
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    # The word-boundary anchor (col 0..3) still drives the replacement
+    # — overlap is 0 here, so it can't widen further left, but it also
+    # mustn't shrink the existing span.
+    assert_equal(ed.buffer.line(0), String("bar"))
+
+
+fn test_editor_accept_completion_uses_text_edit_range() raises:
+    """When the item carries a ``textEdit`` range, the replacement
+    span comes from the server — not from ``completion_prefix_start``.
+    The path-completion case: the buffer holds ``reviews/re`` and the
+    server returns ``newText="reviews/reviews__tags.html"`` covering
+    the whole ``reviews/re`` span. The editor's word-boundary anchor
+    would stop after the ``/`` and produce
+    ``reviews/reviews/reviews__tags.html``; honoring the range
+    yields the correct ``reviews/reviews__tags.html``."""
+    var ed = Editor(String("reviews/re"))
+    ed.move_to(0, 10, False)  # cursor at end of "reviews/re"
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("reviews/reviews__tags.html"),
+        String("reviews/reviews__tags.html"),
+        17, String(""), String("reviews/reviews__tags.html"),
+        True, 0, 0, 0, 10,  # textEdit range covers [0..10)
+    ))
+    # Anchor still arrives as the editor's heuristic (col 8 — after the
+    # ``/``), but the item's range should override it.
+    ed.set_completions(items^, 0, 8)
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    assert_equal(ed.buffer.line(0), String("reviews/reviews__tags.html"))
+    assert_equal(ed.cursor_col, 26)
+    assert_false(ed.completion_popup_visible)
+
+
+fn test_lsp_parse_completion_result_extracts_text_edit_range() raises:
+    """A ``textEdit`` with a ``range`` populates ``has_range`` plus
+    the start/end coords so the editor can replace exactly what the
+    server intended, even across non-word punctuation."""
+    var v = parse_json(String(
+        "[{\"label\":\"reviews/reviews__tags.html\","
+        + "\"kind\":17,"
+        + "\"textEdit\":{"
+        + "\"range\":{\"start\":{\"line\":3,\"character\":12},"
+        + "\"end\":{\"line\":3,\"character\":22}},"
+        + "\"newText\":\"reviews/reviews__tags.html\"}}]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(
+        items[0].insert_text, String("reviews/reviews__tags.html"),
+    )
+    assert_true(items[0].has_range)
+    assert_equal(items[0].range_start_line, 3)
+    assert_equal(items[0].range_start_char, 12)
+    assert_equal(items[0].range_end_line, 3)
+    assert_equal(items[0].range_end_char, 22)
+
+
+fn test_lsp_parse_completion_result_extracts_insert_replace_edit() raises:
+    """``InsertReplaceEdit`` uses ``replace`` (not ``insert``) so
+    accepting the completion overwrites the existing text rather than
+    leaving a trailing suffix past the cursor."""
+    var v = parse_json(String(
+        "[{\"label\":\"foo\",\"kind\":3,"
+        + "\"textEdit\":{"
+        + "\"newText\":\"foobar\","
+        + "\"insert\":{\"start\":{\"line\":1,\"character\":2},"
+        + "\"end\":{\"line\":1,\"character\":5}},"
+        + "\"replace\":{\"start\":{\"line\":1,\"character\":2},"
+        + "\"end\":{\"line\":1,\"character\":8}}}}]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(items[0].insert_text, String("foobar"))
+    assert_true(items[0].has_range)
+    assert_equal(items[0].range_start_char, 2)
+    assert_equal(items[0].range_end_char, 8)  # ``replace`` wins over ``insert``
 
 
 fn test_lsp_parse_diagnostics_skips_malformed_entries() raises:
@@ -13227,6 +13345,8 @@ fn main() raises:
     test_lsp_parse_completion_result_list_shape()
     test_lsp_parse_completion_result_honors_sort_text()
     test_lsp_parse_completion_result_snippet_falls_back_to_label()
+    test_lsp_parse_completion_result_extracts_text_edit_range()
+    test_lsp_parse_completion_result_extracts_insert_replace_edit()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
     test_editor_typing_word_char_stamps_autotrigger_request()
@@ -13237,6 +13357,9 @@ fn main() raises:
     test_editor_autotrigger_request_is_not_manual()
     test_editor_show_no_completion_message_opens_unselectable_popup()
     test_editor_accept_completion_replaces_prefix()
+    test_editor_accept_completion_overlap_widens_anchor()
+    test_editor_accept_completion_overlap_leaves_disjoint_text_alone()
+    test_editor_accept_completion_uses_text_edit_range()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
     test_editor_minimap_warning_outranks_git_change()

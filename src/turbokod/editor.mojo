@@ -145,6 +145,41 @@ fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     return False
 
 
+fn _completion_overlap_start(
+    line: String, cursor_col: Int, insert_text: String,
+) -> Int:
+    """Longest column on ``line`` such that ``line[col, cursor_col)``
+    is a byte-exact prefix of ``insert_text`` — i.e. how much of what
+    the user already typed gets eaten by accepting the completion.
+
+    Fallback anchor for when the server didn't supply a ``textEdit``
+    range. Handles the common path-style case: typing ``reviews/re``
+    while ``reviews/reviews__tags.html`` is offered — the word-boundary
+    anchor stops after the ``/`` and would yield
+    ``reviews/reviews/reviews__tags.html``, but the overlap span here
+    is the entire typed ``reviews/re`` (it's a prefix of the insert
+    text), so accepting replaces all 10 bytes instead.
+
+    Returns ``cursor_col`` (no widening) when nothing matches.
+    """
+    var lb = line.as_bytes()
+    var ib = insert_text.as_bytes()
+    var max_overlap = cursor_col
+    if max_overlap > len(ib):
+        max_overlap = len(ib)
+    if cursor_col > len(lb):
+        max_overlap = 0
+    for try_len in range(max_overlap, 0, -1):
+        var ok = True
+        for k in range(try_len):
+            if lb[cursor_col - try_len + k] != ib[k]:
+                ok = False
+                break
+        if ok:
+            return cursor_col - try_len
+    return cursor_col
+
+
 fn _rtrim(s: String) -> String:
     """Drop trailing ASCII spaces and tabs. Used by ``_disk_text`` to honor
     the editorconfig ``trim_trailing_whitespace`` property."""
@@ -1703,6 +1738,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             CompletionItem(
                 String("<no completion found>"),
                 String(""), 0, String(""), String(""),
+                False, 0, 0, 0, 0,
             )
         )
         self.completion_items = items^
@@ -1784,16 +1820,39 @@ struct Editor(ImplicitlyCopyable, Movable):
             return False
         var item = self.completion_items[self.completion_highlight]
         var pre = self.cursor_row
+        var line = self.buffer.line(self.cursor_row)
+        var ln = len(line.as_bytes())
         var start = self.completion_anchor_col
         var end = self.cursor_col
+        if end > ln:
+            end = ln
+        # Pick the widest sensible replacement span. Priority:
+        # 1. LSP ``textEdit`` range — the server's authoritative answer.
+        # 2. Longest typed-prefix overlap with ``insert_text`` — catches
+        #    path completions (``reviews/re`` → ``reviews/reviews__tags
+        #    .html``) where the word-boundary anchor stops at the ``/``
+        #    and would leave a duplicated prefix on the line.
+        # 3. Word-boundary anchor (already in ``start``) — the
+        #    conservative default.
+        # End stays at the cursor so chars typed between request and
+        # accept get folded into the replacement rather than left
+        # dangling past the inserted text.
+        if item.has_range \
+                and item.range_start_line == self.cursor_row \
+                and item.range_end_line == self.cursor_row:
+            start = item.range_start_char
+        else:
+            var overlap = _completion_overlap_start(
+                line, end, item.insert_text,
+            )
+            if overlap < start:
+                start = overlap
         if start < 0:
             start = 0
         if end < start:
             end = start
-        var line = self.buffer.line(self.cursor_row)
-        var ln = len(line.as_bytes())
-        if end > ln:
-            end = ln
+        if start > ln:
+            start = ln
         self._push_undo()
         self._typing_active = False
         # Delete the existing prefix span, then insert.
