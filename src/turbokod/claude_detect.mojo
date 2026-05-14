@@ -48,10 +48,26 @@ Used when only generic Claude markers match (e.g. a stray brand glyph
 in scrollback)."""
 
 
-comptime _TAIL_LINES = 12
-"""How many lines from the end of the buffer to scan. The user asked
-for ~10; we use 12 to give a little margin so a single intervening
-status line doesn't push the marker out of view between drains."""
+comptime _WORKING_STICKY_MS = 1500
+"""Grace window applied by ``ClaudeStateTracker``: after a confirmed
+``CLAUDE_WORKING`` detection we keep reporting working for this many
+milliseconds even if subsequent calls fall back to a different state.
+The spinner animation cycles through several glyphs (the throbbing
+asterisk variants enumerated in ``_row_starts_with_any_spinner``) and
+any frame we don't list silently looks like ``CLAUDE_WAITING`` —
+without the grace the title bar flaps working ↔ waiting on every paint
+while the spinner is rotating. 1500 ms covers ~10 spinner frames at
+the usual animation rate, comfortably bridging missed glyphs, while
+still letting "done" propagate within ~1.5 s of the spinner actually
+ending."""
+
+
+comptime _TAIL_LINES = 20
+"""How many lines from the end of the buffer to scan. The mascot
+banner that signals the clean/ready state can sit several rows above
+the bottom of the pane (the input box and shortcut strip live below
+it), so we need enough margin to keep the mascot in view even when
+the prompt has scrolled it up a few rows."""
 
 
 fn detect_claude_state(lines: List[String]) -> UInt8:
@@ -100,13 +116,22 @@ fn detect_claude_state(lines: List[String]) -> UInt8:
     var has_generic_marker  = False
 
     # --- working ------------------------------------------------------
-    # ``esc to interrupt`` is the spinner-row companion text. Claude
-    # Code paints something like ``✻ Synthesizing… (5s · esc to
-    # interrupt · ctrl+t to show todos)`` — the parenthesized substring
-    # is stable across spinner verbs and time updates. ``ctrl+t to show
-    # todos`` is a second working-only marker on the same row so the
-    # pane still detects working if the ``esc to`` half wrapped onto
-    # the previous line.
+    # Primary signal: the spinner row itself. Claude Code paints
+    # ``<glyph> <verb>… (<Ns> · <hints>)`` where ``<glyph>`` cycles
+    # through a throbbing asterisk animation (✻ ✺ ✼ ✽ ✶ … and a small
+    # ``·`` frame at the trough). Detecting via the glyph-at-start
+    # plus the timer's open-paren survives across versions that move
+    # or shorten the hint text, and across spinner frames where the
+    # glyph isn't ``✻``. The open-paren guard is what keeps the older
+    # welcome banner (``✻ Welcome to Claude Code!`` — no parens) from
+    # being misclassified as working.
+    if _any_spinner_row(rows_lc):
+        has_working_marker = True
+        has_generic_marker = True
+    # Fallback text markers for the status block. These still fire
+    # when the spinner glyph is in a frame we don't recognize, or
+    # when the row wrapped so the glyph sits on the previous line
+    # (per-row check above can't see across the wrap; ``joined`` can).
     if _any_contains(rows_lc, joined, String("esc to interrupt")):
         has_working_marker = True
         has_generic_marker = True
@@ -117,6 +142,16 @@ fn detect_claude_state(lines: List[String]) -> UInt8:
         has_working_marker = True
         has_generic_marker = True
     # --- clean / welcome ----------------------------------------------
+    # The mascot banner painted on startup and after ``/clear`` has
+    # shifted across versions: older builds printed ``Welcome to Claude
+    # Code`` next to the mascot, recent builds (2.1.x) print only the
+    # quadrant-block mascot plus ``Claude Code v<version>`` and the
+    # model line. The ``claude code v`` fragment is the stable anchor
+    # across both shapes — it's the version string and only appears on
+    # the mascot banner, not in normal session output.
+    if _any_contains(rows_lc, joined, String("claude code v")):
+        has_clean_marker = True
+        has_generic_marker = True
     if _any_contains(rows_lc, joined, String("welcome to claude code")):
         has_clean_marker = True
         has_generic_marker = True
@@ -171,6 +206,50 @@ fn claude_state_label(state: UInt8) -> String:
     return String("")
 
 
+struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
+    """Stateful wrapper around ``detect_claude_state`` that smooths the
+    result across spinner-frame transitions. The detector is a pure
+    tail-of-output scan and has no memory between calls; the spinner
+    glyph set is necessarily incomplete (Claude's animation cycles
+    through several variants and we only list the ones we've seen),
+    so any unrecognized frame produces a one-paint dropout to
+    ``CLAUDE_WAITING`` or ``CLAUDE_ACTIVE``. Without smoothing the
+    title bar flaps between ``working`` and ``waiting`` every few
+    paints while the spinner rotates.
+
+    The smoothing rule: once we've confirmed ``CLAUDE_WORKING``, we
+    keep reporting it for ``_WORKING_STICKY_MS`` past the timestamp of
+    that last confirmed working detection. New ``CLAUDE_WORKING``
+    detections refresh the timestamp; non-working detections inside
+    the grace window are suppressed. Outside the grace window, the
+    raw state is passed through.
+    """
+    var _last_working_ms: Int
+    """Monotonic-ms reading at the last ``CLAUDE_WORKING`` detection,
+    or ``0`` if we've never seen one yet. ``0`` doubles as the sentinel
+    so the first call to ``classify`` doesn't trigger a spurious
+    sticky window before any working signal has fired."""
+
+    fn __init__(out self):
+        self._last_working_ms = 0
+
+    fn classify(mut self, lines: List[String], now_ms: Int) -> UInt8:
+        """Run the raw detector and apply the working-state stickiness.
+        ``now_ms`` is a monotonic-ms reading provided by the caller —
+        kept as a parameter (rather than calling the syscall inside)
+        so tests can inject specific timestamps without timing
+        flakiness."""
+        var raw = detect_claude_state(lines)
+        if raw == CLAUDE_WORKING:
+            self._last_working_ms = now_ms
+            return raw
+        if self._last_working_ms > 0:
+            var elapsed = now_ms - self._last_working_ms
+            if elapsed < _WORKING_STICKY_MS:
+                return CLAUDE_WORKING
+        return raw
+
+
 # --- helpers --------------------------------------------------------------
 
 
@@ -209,6 +288,59 @@ fn _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bo
         if _contains(rows_lc[i], needle_lc):
             return True
     return _contains(joined, needle_lc)
+
+
+fn _any_spinner_row(rows_lc: List[String]) -> Bool:
+    """True if any tail row begins with a known spinner glyph followed
+    by a space AND contains an open paren. The two-part test is what
+    distinguishes the working spinner row from the older welcome
+    banner: both start with ``✻ ``, but only the spinner row carries
+    the parenthesized timer block ``(Ns · …)``."""
+    for i in range(len(rows_lc)):
+        var row = rows_lc[i]
+        if not _contains(row, String("(")):
+            continue
+        if _row_starts_with_any_spinner(row):
+            return True
+    return False
+
+
+fn _row_starts_with_any_spinner(row_lc: String) -> Bool:
+    """True if ``row_lc`` begins (after leading ASCII spaces) with one
+    of the rotating spinner glyphs followed by a space. The set covers
+    the throbbing-asterisk frames Claude Code cycles through; new
+    frames degrade gracefully via the text-marker fallbacks above."""
+    if _row_starts_with_glyph_space(row_lc, String("✻")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✺")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✼")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✽")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✶")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✱")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✲")): return True
+    if _row_starts_with_glyph_space(row_lc, String("✳")): return True
+    if _row_starts_with_glyph_space(row_lc, String("·")): return True
+    return False
+
+
+fn _row_starts_with_glyph_space(row_lc: String, glyph: String) -> Bool:
+    """True if ``row_lc``, after skipping leading ASCII spaces, begins
+    with the bytes of ``glyph`` immediately followed by an ASCII space.
+    Spinner glyphs are multibyte UTF-8 (``✻`` is three bytes, ``·`` is
+    two), so the check works at the byte level — matching the same
+    pattern the rest of the detector uses."""
+    var b = row_lc.as_bytes()
+    var gb = glyph.as_bytes()
+    var n = len(b)
+    var gl = len(gb)
+    var i = 0
+    while i < n and b[i] == UInt8(0x20):
+        i += 1
+    if i + gl + 1 > n:
+        return False
+    for k in range(gl):
+        if b[i + k] != gb[k]:
+            return False
+    return b[i + gl] == UInt8(0x20)
 
 
 fn _to_lower(s: String) -> String:

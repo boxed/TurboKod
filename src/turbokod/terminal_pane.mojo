@@ -38,7 +38,7 @@ from std.memory.span import Span
 from .canvas import Canvas
 from .cell import Cell
 from .claude_detect import (
-    CLAUDE_NONE, claude_state_label, detect_claude_state,
+    CLAUDE_NONE, ClaudeStateTracker, claude_state_label,
 )
 from .clipboard import clipboard_copy
 from .colors import Attr, BLACK, LIGHT_GRAY, WHITE
@@ -56,7 +56,7 @@ from .events import (
 from .geometry import Point, Rect
 from .painter import Painter
 from .posix import (
-    alloc_zero_buffer, getenv_value, poll_stdin, read_into,
+    alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
 )
 from .pty import PtyProcess
 from .vt import Vt
@@ -124,6 +124,11 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
     convert screen positions back to grid coords via this. ``Rect.empty``
     means the body wasn't laid out (minimized / first frame)."""
     var _last_panel_top: Int
+    var _claude_tracker: ClaudeStateTracker
+    """Smooths the Claude-state classification across paints so that a
+    single unrecognized spinner-glyph frame doesn't flip the title bar
+    from ``working`` to ``waiting``. See ``ClaudeStateTracker`` for
+    the smoothing contract."""
 
     fn __init__(out self):
         self.visible = False
@@ -148,6 +153,7 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         self.cwd = String("")
         self._last_body = Rect.empty()
         self._last_panel_top = 0
+        self._claude_tracker = ClaudeStateTracker()
 
     fn __copyinit__(out self, copy: Self):
         self.visible = copy.visible
@@ -170,6 +176,7 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         self.cwd = copy.cwd
         self._last_body = copy._last_body
         self._last_panel_top = copy._last_panel_top
+        self._claude_tracker = copy._claude_tracker
 
     # --- chrome forwarders ---------------------------------------------
 
@@ -350,8 +357,8 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         var displayed_title = String("Terminal")
         if len(self.vt.title.as_bytes()) > 0:
             displayed_title = self.vt.title
-        var tail = self.vt.tail_rows(12)
-        var claude_state = detect_claude_state(tail)
+        var tail = self.vt.tail_rows(20)
+        var claude_state = self._claude_tracker.classify(tail, monotonic_ms())
         if claude_state != CLAUDE_NONE:
             displayed_title = String("Claude · ") \
                 + claude_state_label(claude_state)

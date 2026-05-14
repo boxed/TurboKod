@@ -360,6 +360,80 @@ fn test_claude_detect_finds_marker_inside_ansi_wrapped_line() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
 
 
+fn test_claude_state_tracker_passes_through_when_no_working_seen() raises:
+    # Before any working detection, the tracker has nothing to stick to
+    # and must report whatever the raw detector returned.
+    var tracker = ClaudeStateTracker()
+    var clean_lines = List[String]()
+    clean_lines.append(String("▗ ▗   ▖ ▖  Claude Code v2.1.140"))
+    assert_equal(
+        Int(tracker.classify(clean_lines, 1000)), Int(CLAUDE_CLEAN)
+    )
+    var waiting_lines = List[String]()
+    waiting_lines.append(String("  ? for shortcuts"))
+    assert_equal(
+        Int(tracker.classify(waiting_lines, 1100)), Int(CLAUDE_WAITING)
+    )
+
+
+fn test_claude_state_tracker_sticks_working_during_grace() raises:
+    # After a confirmed working detection, an immediate follow-up where
+    # the spinner glyph drops out (so raw detection says waiting) must
+    # still report working — that's the whole point of the smoothing.
+    var tracker = ClaudeStateTracker()
+    var working_lines = List[String]()
+    working_lines.append(
+        String("✻ Synthesizing… (5s · esc to interrupt)")
+    )
+    assert_equal(
+        Int(tracker.classify(working_lines, 1000)), Int(CLAUDE_WORKING)
+    )
+    var no_spinner_lines = List[String]()
+    no_spinner_lines.append(String("  ? for shortcuts"))
+    # 500 ms later — well inside the grace window — still working.
+    assert_equal(
+        Int(tracker.classify(no_spinner_lines, 1500)), Int(CLAUDE_WORKING)
+    )
+
+
+fn test_claude_state_tracker_releases_after_grace_expires() raises:
+    # Past the grace window, the tracker must let go and report the
+    # current raw state. Otherwise the title bar would stay stuck on
+    # ``working`` forever after a single spinner sighting.
+    var tracker = ClaudeStateTracker()
+    var working_lines = List[String]()
+    working_lines.append(
+        String("✻ Synthesizing… (5s · esc to interrupt)")
+    )
+    _ = tracker.classify(working_lines, 1000)
+    var no_spinner_lines = List[String]()
+    no_spinner_lines.append(String("  ? for shortcuts"))
+    # 3 s later — well past the 1.5 s grace — flip to waiting.
+    assert_equal(
+        Int(tracker.classify(no_spinner_lines, 4000)), Int(CLAUDE_WAITING)
+    )
+
+
+fn test_claude_state_tracker_grace_refreshes_on_new_working() raises:
+    # A fresh working detection inside the grace window must restart
+    # the timer — otherwise a long-running spinner with one missed
+    # glyph would lose its grace cushion partway through.
+    var tracker = ClaudeStateTracker()
+    var working_lines = List[String]()
+    working_lines.append(
+        String("✻ Synthesizing… (5s · esc to interrupt)")
+    )
+    _ = tracker.classify(working_lines, 1000)
+    _ = tracker.classify(working_lines, 2000)   # refresh
+    var no_spinner_lines = List[String]()
+    no_spinner_lines.append(String("  ? for shortcuts"))
+    # 3000 ms is 2000 ms after the first sighting (past grace) but
+    # only 1000 ms after the refresh, so it must still be working.
+    assert_equal(
+        Int(tracker.classify(no_spinner_lines, 3000)), Int(CLAUDE_WORKING)
+    )
+
+
 fn test_claude_state_label_round_trip() raises:
     assert_equal(claude_state_label(CLAUDE_NONE),    String(""))
     assert_equal(claude_state_label(CLAUDE_CLEAN),   String("clean"))
