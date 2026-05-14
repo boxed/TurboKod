@@ -60,28 +60,29 @@ if [ -z "${env_prefix:-}" ]; then
   env_prefix="${project_root}/.pixi/envs/default"
 fi
 
-# 2. Compile the C shims (mirror what run.sh links in for dev builds):
-#    * onig_shim    — process-exit registry batching ``onig_free`` calls.
-#    * process_shim — kill-on-parent-death registry: SIGTERMs spawned
-#                     child PIDs on SIGHUP / SIGTERM / clean exit so the
-#                     macOS app doesn't orphan run / debug subprocesses.
-#    Each rebuilds only when its .c is newer than the cached object.
+# 2. Build the Rust shim staticlib. Provides pty spawn / nonblocking
+#    I/O / child registry / listdir / debug-log open / libonig handle
+#    registry — everything the old ``process_shim.c`` +
+#    ``onig_shim.c`` used to do, but with bounds checking + a safer
+#    allocator pattern.
 mkdir -p "${project_root}/.build"
-shim_src="${project_root}/src/turbokod/onig_shim.c"
-shim_obj="${project_root}/.build/onig_shim.o"
-if [ ! -f "$shim_obj" ] || [ "$shim_src" -nt "$shim_obj" ]; then
-  echo "[build] compiling onig shim -> ${shim_obj}" >&2
-  clang -c -O2 -fPIC "$shim_src" -o "$shim_obj"
+shim_crate="${project_root}/app/turbokod-shim"
+shim_lib="${shim_crate}/target/release/libturbokod_shim.a"
+shim_needs_build=0
+if [ ! -f "$shim_lib" ]; then
+  shim_needs_build=1
+elif find "$shim_crate/src" "$shim_crate/Cargo.toml" -newer "$shim_lib" \
+        -print -quit 2>/dev/null | grep -q .; then
+  shim_needs_build=1
 fi
-proc_src="${project_root}/src/turbokod/process_shim.c"
-proc_obj="${project_root}/.build/process_shim.o"
-if [ ! -f "$proc_obj" ] || [ "$proc_src" -nt "$proc_obj" ]; then
-  echo "[build] compiling process shim -> ${proc_obj}" >&2
-  clang -c -O2 -fPIC "$proc_src" -o "$proc_obj"
+if [ "$shim_needs_build" -eq 1 ]; then
+  echo "[build] building rust shim (release) -> ${shim_lib}" >&2
+  ( cd "$shim_crate" && cargo build --release )
 fi
+proc_obj="$shim_lib"
 
 # 3. Build the mojo backend. Mirror the flags ``run.sh`` uses so the
-#    binary links to libonig and has both C shims bundled in.
+#    binary links libonig and has the Rust shim bundled in.
 desktop_bin="${project_root}/.build/turbokod-desktop"
 echo "[build] mojo build (release) examples/desktop.mojo -> ${desktop_bin}" >&2
 pixi run mojo build \
@@ -89,7 +90,6 @@ pixi run mojo build \
   -I src \
   -Xlinker "-L${env_prefix}/lib" \
   -Xlinker "-lonig" \
-  -Xlinker "$shim_obj" \
   -Xlinker "$proc_obj" \
   -o "$desktop_bin" examples/desktop.mojo
 

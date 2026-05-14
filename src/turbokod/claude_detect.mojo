@@ -64,6 +64,14 @@ fn detect_claude_state(lines: List[String]) -> UInt8:
     because the welcome banner is paired with an empty prompt — both
     matchers would fire, but the user thinks of that state as ``clean``,
     not ``waiting``.
+
+    Matching is case-insensitive (Claude's labels have shifted between
+    ``esc`` / ``Esc`` / ``ESC`` across versions) and we test each row
+    individually AND the rows concatenated without separators. The
+    concatenated pass catches markers that have been split across two
+    grid rows by terminal wrapping — a narrow pane wraps
+    ``(esc to interrupt · ctrl+t to show todos)`` across lines and the
+    per-row scan would miss it.
     """
     var n = len(lines)
     if n == 0:
@@ -72,50 +80,70 @@ fn detect_claude_state(lines: List[String]) -> UInt8:
     if start < 0:
         start = 0
 
+    # Build a lower-cased view of the tail rows once. Both the per-row
+    # and the concatenated-rows checks read from this.
+    var rows_lc = List[String]()
+    for i in range(start, n):
+        rows_lc.append(_to_lower(lines[i]))
+    var joined_bytes = List[UInt8]()
+    for i in range(len(rows_lc)):
+        var rb = rows_lc[i].as_bytes()
+        for k in range(len(rb)):
+            joined_bytes.append(rb[k])
+    var joined = String(StringSlice(
+        ptr=joined_bytes.unsafe_ptr(), length=len(joined_bytes),
+    ))
+
     var has_working_marker  = False
     var has_clean_marker    = False
     var has_waiting_marker  = False
     var has_generic_marker  = False
 
-    for i in range(start, n):
-        var line = lines[i]
-        # --- working --------------------------------------------------
-        # ``esc to interrupt`` is the spinner-row companion text. Claude
-        # Code paints something like ``✻ Synthesizing… (5s · esc to
-        # interrupt · ctrl+t to show todos)`` — the parenthesized
-        # substring is stable across spinner verbs and time updates.
-        if _contains(line, String("esc to interrupt")):
-            has_working_marker = True
-            has_generic_marker = True
-        # --- clean / welcome ------------------------------------------
-        if _contains(line, String("Welcome to Claude Code")):
-            has_clean_marker = True
-            has_generic_marker = True
-        # ``/help for help`` is on the second welcome row; a separate
-        # match catches the case where the first row scrolled past but
-        # the help hint is still visible.
-        if _contains(line, String("/help for help")):
-            has_clean_marker = True
-            has_generic_marker = True
-        # --- waiting --------------------------------------------------
-        # The shortcut strip below the idle prompt. The exact wording
-        # has churned (``? for shortcuts``, ``shift+tab to cycle``,
-        # ``bypass permissions``); we match the two most stable
-        # fragments.
-        if _contains(line, String("? for shortcuts")):
-            has_waiting_marker = True
-            has_generic_marker = True
-        if _contains(line, String("shift+tab to")):
-            has_waiting_marker = True
-            has_generic_marker = True
-        # --- generic Claude marker ------------------------------------
-        # The brand glyph (``✻``) appears on the welcome banner, on the
-        # spinner row, and as a bullet on Claude's reply lines. On its
-        # own it doesn't tell us *which* state we're in, but it does
-        # tell us Claude is somewhere on screen — enough to label the
-        # title bar as ``active`` if no precise marker matches.
-        if _contains(line, String("✻")):
-            has_generic_marker = True
+    # --- working ------------------------------------------------------
+    # ``esc to interrupt`` is the spinner-row companion text. Claude
+    # Code paints something like ``✻ Synthesizing… (5s · esc to
+    # interrupt · ctrl+t to show todos)`` — the parenthesized substring
+    # is stable across spinner verbs and time updates. ``ctrl+t to show
+    # todos`` is a second working-only marker on the same row so the
+    # pane still detects working if the ``esc to`` half wrapped onto
+    # the previous line.
+    if _any_contains(rows_lc, joined, String("esc to interrupt")):
+        has_working_marker = True
+        has_generic_marker = True
+    if _any_contains(rows_lc, joined, String("ctrl+t to show todos")):
+        has_working_marker = True
+        has_generic_marker = True
+    if _any_contains(rows_lc, joined, String("to interrupt)")):
+        has_working_marker = True
+        has_generic_marker = True
+    # --- clean / welcome ----------------------------------------------
+    if _any_contains(rows_lc, joined, String("welcome to claude code")):
+        has_clean_marker = True
+        has_generic_marker = True
+    # ``/help for help`` is on the second welcome row; a separate match
+    # catches the case where the first row scrolled past but the help
+    # hint is still visible.
+    if _any_contains(rows_lc, joined, String("/help for help")):
+        has_clean_marker = True
+        has_generic_marker = True
+    # --- waiting ------------------------------------------------------
+    # The shortcut strip below the idle prompt. The exact wording has
+    # churned (``? for shortcuts``, ``shift+tab to cycle``, ``bypass
+    # permissions``); we match the most stable fragments.
+    if _any_contains(rows_lc, joined, String("? for shortcuts")):
+        has_waiting_marker = True
+        has_generic_marker = True
+    if _any_contains(rows_lc, joined, String("shift+tab to")):
+        has_waiting_marker = True
+        has_generic_marker = True
+    # --- generic Claude marker ----------------------------------------
+    # The brand glyph (``✻``) appears on the welcome banner, on the
+    # spinner row, and as a bullet on Claude's reply lines. On its own
+    # it doesn't tell us *which* state we're in, but it does tell us
+    # Claude is somewhere on screen — enough to label the title bar as
+    # ``active`` if no precise marker matches.
+    if _any_contains(rows_lc, joined, String("✻")):
+        has_generic_marker = True
 
     if has_working_marker:
         return CLAUDE_WORKING
@@ -169,3 +197,37 @@ fn _contains(haystack: String, needle: String) -> Bool:
         if matched:
             return True
     return False
+
+
+fn _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bool:
+    """True if ``needle_lc`` is in any individual row or in the
+    concatenation of all rows. Caller passes the lowercased needle and
+    the prepared lowercased haystacks so we don't redo that work per
+    marker. The joined check catches markers that wrapped across rows
+    in a narrow pane."""
+    for i in range(len(rows_lc)):
+        if _contains(rows_lc[i], needle_lc):
+            return True
+    return _contains(joined, needle_lc)
+
+
+fn _to_lower(s: String) -> String:
+    """ASCII-only lowercase. Claude Code's marker strings are all
+    plain ASCII (``esc to interrupt``, ``? for shortcuts``, etc.), so
+    a byte-level uppercase→lowercase mapping is sufficient; multibyte
+    sequences (the brand glyph, middle dots) pass through unchanged.
+    Used so the detector matches across ``esc`` / ``Esc`` / ``ESC``
+    variants without maintaining a per-marker alternate list."""
+    var src = s.as_bytes()
+    var n = len(src)
+    var out = List[UInt8]()
+    out.reserve(n)
+    for i in range(n):
+        var b = src[i]
+        if b >= UInt8(0x41) and b <= UInt8(0x5A):
+            out.append(b + UInt8(0x20))
+        else:
+            out.append(b)
+    return String(StringSlice(
+        ptr=out.unsafe_ptr(), length=n,
+    ))

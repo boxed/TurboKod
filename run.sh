@@ -56,8 +56,7 @@ needs_build=1
 if [ -x "$bin" ]; then
   newer=$(find src "$src" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
   if [ -z "$newer" ] \
-     && [ ! "src/turbokod/onig_shim.c" -nt "$bin" ] \
-     && [ ! "src/turbokod/process_shim.c" -nt "$bin" ]; then
+     && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ]; then
     needs_build=0
   fi
 fi
@@ -83,34 +82,37 @@ if [ -z "${env_prefix:-}" ]; then
   env_prefix="$(pwd)/.pixi/envs/default"
 fi
 
-# Compile the C shims:
-#   * ``onig_shim``    — process-exit registry that batches the
-#                         ``onig_free`` calls we can't safely run from
-#                         Mojo's per-instance ``__del__``.
-#   * ``process_shim`` — kill-on-parent-death registry: SIGTERMs every
-#                         spawned child PID on SIGHUP / SIGTERM / clean
-#                         exit, so quitting the macOS app while a Run /
-#                         Debug session is active doesn't orphan it.
-# Each rebuilds only when its .c is newer than the cached object;
-# they're tiny and rarely change.
-onig_src="src/turbokod/onig_shim.c"
-onig_obj=".build/onig_shim.o"
-if [ ! -f "$onig_obj" ] || [ "$onig_src" -nt "$onig_obj" ]; then
-  echo "[run.sh] compiling onig shim -> $onig_obj" >&2
-  if ! clang -c -O2 -fPIC "$onig_src" -o "$onig_obj"; then
-    echo "[run.sh] onig shim compilation failed; aborting (would otherwise run a stale binary)" >&2
+# Native shim:
+#   * ``turbokod-shim``  — Rust staticlib (``app/turbokod-shim``)
+#                          providing pty spawn / non-blocking I/O /
+#                          child registry / listdir / debug-log open
+#                          / libonig handle registry. Replaces the
+#                          old ``process_shim.c`` and ``onig_shim.c``;
+#                          Rust gives us bounds-checking + safer
+#                          allocator semantics that matter for the
+#                          intermittent crashes we chased before.
+# Rebuilds only when its sources are newer than the cached staticlib.
+shim_crate="app/turbokod-shim"
+shim_lib="$shim_crate/target/release/libturbokod_shim.a"
+# Rebuild the Rust shim crate when any of its sources is newer than
+# the resulting staticlib. Cargo would also detect this on its own,
+# but the explicit check lets us print a useful "what triggered the
+# rebuild" line above cargo's normal output.
+shim_needs_build=0
+if [ ! -f "$shim_lib" ]; then
+  shim_needs_build=1
+elif find "$shim_crate/src" "$shim_crate/Cargo.toml" -newer "$shim_lib" \
+        -print -quit 2>/dev/null | grep -q .; then
+  shim_needs_build=1
+fi
+if [ "$shim_needs_build" -eq 1 ]; then
+  echo "[run.sh] building rust shim -> $shim_lib" >&2
+  if ! ( cd "$shim_crate" && cargo build --release ); then
+    echo "[run.sh] rust shim build failed; aborting" >&2
     exit 1
   fi
 fi
-proc_src="src/turbokod/process_shim.c"
-proc_obj=".build/process_shim.o"
-if [ ! -f "$proc_obj" ] || [ "$proc_src" -nt "$proc_obj" ]; then
-  echo "[run.sh] compiling process shim -> $proc_obj" >&2
-  if ! clang -c -O2 -fPIC "$proc_src" -o "$proc_obj"; then
-    echo "[run.sh] process shim compilation failed; aborting (would otherwise run a stale binary)" >&2
-    exit 1
-  fi
-fi
+proc_obj="$shim_lib"
 
 if [ "$needs_build" -eq 1 ]; then
   echo "[run.sh] building $src -> $bin" >&2
@@ -118,7 +120,6 @@ if [ "$needs_build" -eq 1 ]; then
     -I src \
     -Xlinker "-L${env_prefix}/lib" \
     -Xlinker "-lonig" \
-    -Xlinker "$onig_obj" \
     -Xlinker "$proc_obj" \
     -o "$bin" "$src"; then
     # Without this guard, ``exec "$bin"`` below would silently run the

@@ -581,6 +581,16 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
             if routes_to_child:
                 self._forward_mouse_to_pty(event, motion=False, released=False)
                 return True
+            # Double-click selects the word under the cursor; triple
+            # selects the whole row. The terminal input parser stamps
+            # ``click_count`` so we don't need timing state of our own
+            # — same machinery already drives editor word-selection.
+            if event.click_count >= 3:
+                self._select_line_at(event.pos)
+                return True
+            if event.click_count == 2:
+                self._select_word_at(event.pos)
+                return True
             self._begin_drag(event.pos)
             return True
         if routes_to_child:
@@ -662,6 +672,60 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         var rc = self._grid_xy_for_pos(pos)
         self.sel_focus_r = rc[0]
         self.sel_focus_c = rc[1]
+
+    fn _select_word_at(mut self, pos: Point):
+        """Expand selection to the word boundary at ``pos`` — the
+        contiguous run of word-class cells around the click. "Word"
+        is everything that isn't whitespace or punctuation; same
+        definition every terminal uses for double-click."""
+        var rc = self._grid_xy_for_pos(pos)
+        var r = rc[0]
+        var c = rc[1]
+        if c >= self.vt.cols: c = self.vt.cols - 1
+        if c < 0:
+            self.sel_active = False
+            return
+        if not _is_word_glyph(self.vt.view_cell_at(r, c).glyph):
+            # Click landed on a separator — select just that cell so
+            # the user gets *some* feedback (and a single-cell copy is
+            # often what they wanted with punctuation anyway).
+            self.sel_anchor_r = r
+            self.sel_anchor_c = c
+            self.sel_focus_r = r
+            self.sel_focus_c = c + 1
+            self.sel_dragging = False
+            self.sel_active = True
+            return
+        # Walk left while still on a word glyph.
+        var lo = c
+        while lo > 0:
+            if not _is_word_glyph(self.vt.view_cell_at(r, lo - 1).glyph):
+                break
+            lo -= 1
+        # Walk right.
+        var hi = c
+        while hi + 1 < self.vt.cols:
+            if not _is_word_glyph(self.vt.view_cell_at(r, hi + 1).glyph):
+                break
+            hi += 1
+        self.sel_anchor_r = r
+        self.sel_anchor_c = lo
+        self.sel_focus_r = r
+        self.sel_focus_c = hi + 1
+        self.sel_dragging = False
+        self.sel_active = True
+
+    fn _select_line_at(mut self, pos: Point):
+        """Expand selection to the full visual row at ``pos`` — same
+        as triple-click in every terminal."""
+        var rc = self._grid_xy_for_pos(pos)
+        var r = rc[0]
+        self.sel_anchor_r = r
+        self.sel_anchor_c = 0
+        self.sel_focus_r = r
+        self.sel_focus_c = self.vt.cols
+        self.sel_dragging = False
+        self.sel_active = True
 
     fn _end_drag(mut self, pos: Point):
         self._extend_drag(pos)
@@ -967,6 +1031,35 @@ fn _ascii_to_string(b: UInt8) -> String:
 
 
 # --- visual helpers -------------------------------------------------------
+
+
+fn _is_word_glyph(glyph: String) -> Bool:
+    """Classify a cell's glyph for double-click word selection. The
+    rule: word characters are letters / digits / underscore / dot /
+    slash / dash — generous enough that file paths and identifiers
+    are one word, but separators like spaces, brackets, and quotes
+    still split. Same broad definition every modern terminal uses;
+    the exact set is bike-shed territory but matches iTerm's default
+    closely."""
+    var b = glyph.as_bytes()
+    var n = len(b)
+    if n == 0:
+        return False
+    # Look at the first codepoint only — that's good enough for
+    # ASCII content and for the common case of CJK / emoji cells
+    # (treat any non-ASCII as "word" so a word boundary doesn't
+    # accidentally cut a Chinese / Japanese identifier in half).
+    var c = Int(b[0])
+    if c >= 0x80:
+        return True
+    if c >= 0x30 and c <= 0x39: return True  # 0-9
+    if c >= 0x41 and c <= 0x5A: return True  # A-Z
+    if c >= 0x61 and c <= 0x7A: return True  # a-z
+    if c == 0x5F: return True                # _
+    if c == 0x2E: return True                # .
+    if c == 0x2D: return True                # -
+    if c == 0x2F: return True                # /
+    return False
 
 
 fn _invert_attr(a: Attr) -> Attr:

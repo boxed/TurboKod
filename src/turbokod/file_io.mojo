@@ -14,7 +14,6 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 from std.io.file_descriptor import FileDescriptor
 from std.memory.span import Span
-from std.os import listdir
 from std.sys.info import CompilationTarget
 
 from .posix import alloc_zero_buffer, realpath
@@ -126,16 +125,43 @@ fn write_file(path: String, content: String) -> Bool:
 fn list_directory(path: String) -> List[String]:
     """Names in ``path``. Returns an empty list on error.
 
-    Uses ``std.os.listdir`` under the hood. Filters out the empty string but
-    keeps "." and ".." so callers can render them.
-    """
+    Uses a thin C wrapper around ``opendir``/``readdir`` (declared in
+    ``process_shim.c``). The previous implementation routed through
+    ``std.os.listdir`` which has been observed to segfault in certain
+    launch-from-bundle environments where Python interop init differs
+    from the developer setup. The C path allocates its own buffer
+    (``tk_listdir`` mallocs, returns a pointer through ``out_buf``; we
+    copy the entries out and free)."""
+    from .posix import debug_log
+    debug_log(String("[list_directory] ENTER path=") + path)
     var out = List[String]()
-    try:
-        var raw = listdir(path)
-        for i in range(len(raw)):
-            out.append(raw[i])
-    except:
-        pass
+    var c_path = path + String("\0")
+    debug_log(String("[list_directory] calling tk_listdir"))
+    var n_entries = Int(external_call["tk_listdir", Int32](
+        c_path.unsafe_ptr(),
+    ))
+    debug_log(String("[list_directory] tk_listdir n_entries=")
+        + String(n_entries))
+    if n_entries < 0:
+        return out^
+    # Pull entries one at a time into a small fixed buffer. 4096 bytes
+    # is the maximum filename length on every filesystem we care about
+    # (HFS+/APFS: 255 codepoints, ext4: 255 bytes, NTFS: 255 chars).
+    var name_buf = List[UInt8]()
+    for _ in range(4096):
+        name_buf.append(0)
+    for i in range(n_entries):
+        var got = Int(external_call["tk_listdir_get_name", Int32](
+            Int32(i),
+            name_buf.unsafe_ptr(),
+            Int32(4096),
+        ))
+        if got > 0:
+            out.append(String(StringSlice(
+                ptr=name_buf.unsafe_ptr(), length=got,
+            )))
+    _ = external_call["tk_listdir_done", NoneType]()
+    debug_log(String("[list_directory] EXIT n=") + String(len(out)))
     return out^
 
 

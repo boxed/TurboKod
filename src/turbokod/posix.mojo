@@ -248,6 +248,32 @@ fn write_buffer(fd: Int32, mut buf: List[UInt8]):
     f.write_bytes(Span(buf))
 
 
+fn debug_log(msg: String):
+    """Append ``msg`` plus a newline to ``/tmp/turbokod_debug.log``.
+
+    Diagnostics-only: opens fresh in O_APPEND mode each call so a
+    ``tail -F`` of the log shows progress in real time even if the
+    next Mojo line never runs (the file is closed before the call
+    returns, so the kernel has already flushed the write).
+
+    Open is wrapped via ``tk_debug_log_open`` (in process_shim.c)
+    because Mojo's FFI rejects a second ``open`` binding with a
+    different arity, and the rest of the codebase already declares
+    the two-arg form."""
+    var path = String("/tmp/turbokod_debug.log\0")
+    var fd = external_call["tk_debug_log_open", Int32](
+        path.unsafe_ptr(),
+    )
+    if fd < 0:
+        return
+    var line = msg + String("\n")
+    var bytes = line.as_bytes()
+    _ = external_call["write", Int](
+        Int(fd), bytes.unsafe_ptr(), UInt(len(bytes)),
+    )
+    _ = external_call["close", Int32](fd)
+
+
 # --- Output -----------------------------------------------------------------
 
 

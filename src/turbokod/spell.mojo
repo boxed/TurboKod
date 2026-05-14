@@ -27,7 +27,7 @@ from std.ffi import external_call
 
 from .dictionary_install import user_dictionaries_root
 from .file_io import join_path, list_directory, read_file, stat_file, write_file
-from .posix import getenv_value
+from .posix import debug_log, getenv_value
 from .string_utils import (
     codepoint_at, is_word_codepoint, split_lines_no_trailing, word_char_step,
 )
@@ -304,29 +304,47 @@ struct Speller(Movable):
         the host closes the project). Re-calling with the same root is
         a no-op so paint-time invocations don't re-read the file each
         frame."""
+        debug_log(String("[speller.set_project] ENTER root=") + project_root)
         if project_root == self.project_root:
+            debug_log(String("[speller.set_project] unchanged, returning"))
             return
+        debug_log(String("[speller.set_project] clearing project_buckets n=")
+            + String(len(self.project_buckets)))
         for i in range(len(self.project_buckets)):
             self.project_buckets[i] = List[String]()
         self.project_root = project_root
         if len(project_root.as_bytes()) == 0:
+            debug_log(String("[speller.set_project] empty root, returning"))
             return
         var path = project_dict_path(project_root)
+        debug_log(String("[speller.set_project] dict path=") + path)
         if len(path.as_bytes()) > 0:
             try:
                 var content = read_file(path)
+                debug_log(String("[speller.set_project] read ")
+                    + String(len(content.as_bytes())) + String(" bytes"))
                 if len(content.as_bytes()) > 0:
                     var lines = split_lines_no_trailing(content)
+                    debug_log(String("[speller.set_project] loading ")
+                        + String(len(lines)) + String(" lines"))
                     self._load_project_words(lines)
-            except:
-                pass
+                    debug_log(String("[speller.set_project] loaded project words"))
+            except e:
+                debug_log(String("[speller.set_project] read exc: ") + String(e))
+        debug_log(String("[speller.set_project] before _load_idea_dictionaries"))
         self._load_idea_dictionaries(project_root)
+        debug_log(String("[speller.set_project] EXIT"))
 
     fn _load_idea_dictionaries(mut self, project_root: String):
         var dict_dir = join_path(
             join_path(project_root, String(".idea")), String("dictionaries"),
         )
+        debug_log(String("[_load_idea_dictionaries] dir=") + dict_dir)
         var entries = list_directory(dict_dir)
+        debug_log(String("[_load_idea_dictionaries] after list_directory call"))
+        var n_entries = len(entries)
+        debug_log(String("[_load_idea_dictionaries] entries=")
+            + String(n_entries))
         if len(entries) == 0:
             return
         var words = List[String]()
@@ -337,13 +355,23 @@ struct Speller(Movable):
             if not _has_xml_suffix(name):
                 continue
             var path = join_path(dict_dir, name)
+            debug_log(String("[_load_idea_dictionaries] reading ") + path)
             try:
                 var content = read_file(path)
+                debug_log(String("[_load_idea_dictionaries] parsing ")
+                    + String(len(content.as_bytes())) + String(" bytes"))
                 _parse_idea_dict_words(content, words)
-            except:
+                debug_log(String("[_load_idea_dictionaries] parsed -> words=")
+                    + String(len(words)))
+            except e:
+                debug_log(String("[_load_idea_dictionaries] read exc: ")
+                    + String(e))
                 continue
         if len(words) > 0:
+            debug_log(String("[_load_idea_dictionaries] _load_project_words n=")
+                + String(len(words)))
             self._load_project_words(words)
+            debug_log(String("[_load_idea_dictionaries] _load_project_words done"))
 
     fn _load_project_words(mut self, words: List[String]):
         for i in range(len(words)):

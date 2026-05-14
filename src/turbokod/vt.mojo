@@ -948,6 +948,12 @@ struct Vt(ImplicitlyCopyable, Movable):
             self._reset()
             self._state = _S_GROUND
             return
+        if b == 0x3D or b == 0x3E:
+            # ``=`` / ``>`` — DECKPAM / DECKPNM (application /
+            # numeric keypad). We don't differentiate keypad modes
+            # yet; just consume so the byte isn't painted.
+            self._state = _S_GROUND
+            return
         # Unhandled — drop back to GROUND. Includes charset
         # designators (``ESC ( B`` etc.) which would otherwise be
         # painted as garbage characters.

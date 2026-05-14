@@ -66,7 +66,7 @@ from .lsp import LspProcess
 from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
-from .posix import close_fd, realpath, untrack_child, waitpid_blocking
+from .posix import close_fd, debug_log, realpath, untrack_child, waitpid_blocking
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
@@ -1408,6 +1408,7 @@ struct Desktop(Movable):
         Read-only editors (the docs viewer) are special-cased: line
         numbers are forced off regardless of the global toggle, since
         a rendered docs page isn't a numbered source file."""
+        debug_log(String("[_apply_view_config] ENTER"))
         # Sync the View-menu checkmarks with the current config so the
         # dropdown always reflects the live state (Desktop owns the
         # config, the host owns the menu items, and this is the one
@@ -1427,6 +1428,7 @@ struct Desktop(Movable):
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
+        debug_log(String("[_apply_view_config] after menu_bar checks"))
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
         # adds up; ``self.project`` is the only relevant root because
@@ -1436,7 +1438,10 @@ struct Desktop(Movable):
         var root = String("")
         if self.project:
             root = self.project.value()
+            debug_log(String("[_apply_view_config] checking git for root=") + root)
             have_git = project_is_git_repo(root)
+            debug_log(String("[_apply_view_config] have_git=")
+                + (String("yes") if have_git else String("no")))
         # Poll for external git state changes (commit, checkout, reset,
         # stash, ...) at ~1 Hz. Two stat() calls — cheap enough on idle.
         # When ``.git/HEAD`` or ``.git/index`` mtime moves we drop every
@@ -1449,7 +1454,9 @@ struct Desktop(Movable):
             var now = monotonic_ms()
             if now - self._last_git_state_check_ms >= _GIT_POLL_INTERVAL_MS:
                 self._last_git_state_check_ms = now
+                debug_log(String("[_apply_view_config] calling git_state_mtimes"))
                 var current = git_state_mtimes(root)
+                debug_log(String("[_apply_view_config] git_state_mtimes returned"))
                 if not self._git_state_mtimes.is_zero() \
                         and not current.is_zero() \
                         and not current.equals(self._git_state_mtimes):
@@ -1458,9 +1465,11 @@ struct Desktop(Movable):
                                 and not self.windows.windows[j].editor.read_only:
                             self.windows.windows[j].editor.invalidate_git_changes()
                 self._git_state_mtimes = current
+        debug_log(String("[_apply_view_config] entering per-window loop"))
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
+            debug_log(String("[_apply_view_config] window ") + String(i))
             if self.windows.windows[i].editor.read_only:
                 self.windows.windows[i].editor.line_numbers = False
             else:
@@ -1491,12 +1500,15 @@ struct Desktop(Movable):
                 )
                 if want_git_data and have_git:
                     var fp = self.windows.windows[i].editor.file_path
+                    debug_log(String("[_apply_view_config] git data for ") + fp)
                     # Step 1: fetch HEAD content once per file. Bracket
                     # the spawn with the loaded flag so untracked / new
                     # files don't re-spawn ``git show`` every paint.
                     if len(fp.as_bytes()) > 0 \
                             and not self.windows.windows[i].editor._git_head_loaded:
+                        debug_log(String("[_apply_view_config] fetch_head_text ") + fp)
                         var head = fetch_head_text(root, fp)
+                        debug_log(String("[_apply_view_config] fetch_head_text done"))
                         if head:
                             self.windows.windows[i].editor.set_git_head_text(
                                 head.value(), True,
@@ -1511,6 +1523,7 @@ struct Desktop(Movable):
                     # do per paint while the user types.
                     if self.windows.windows[i].editor._git_head_present \
                             and self.windows.windows[i].editor._git_changes_dirty:
+                        debug_log(String("[_apply_view_config] diff_buffer_against_head ") + fp)
                         var buf_lines = \
                             self.windows.windows[i].editor.buffer.lines.copy()
                         var head_text = \
@@ -1519,6 +1532,8 @@ struct Desktop(Movable):
                             head_text, buf_lines,
                         )
                         self.windows.windows[i].editor.set_git_changes(lines^)
+                        debug_log(String("[_apply_view_config] diff done"))
+        debug_log(String("[_apply_view_config] EXIT"))
 
     fn paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
@@ -1544,13 +1559,16 @@ struct Desktop(Movable):
         # ones that were already open. The flag is one-shot: armed in
         # ``_set_project`` and cleared here even on failure.
         if self._pending_restore:
+            debug_log(String("[paint] pending_restore set, restoring..."))
             self._pending_restore = False
             self._restore_session(screen)
+            debug_log(String("[paint] _restore_session returned"))
         # If a file-open earlier deferred the install prompt because some
         # other modal was up, retry now. ``_maybe_prompt_lsp_install``
         # re-defers on a fresh `pending_*` field if a modal is *still*
         # in the way, so this is safe to call unconditionally.
         if len(self._pending_lsp_prompt_ext.as_bytes()) > 0:
+            debug_log(String("[paint] lsp install prompt"))
             var deferred_ext = self._pending_lsp_prompt_ext
             self._pending_lsp_prompt_ext = String("")
             self._maybe_prompt_lsp_install(deferred_ext)
@@ -1558,13 +1576,17 @@ struct Desktop(Movable):
         # from the LSP one — opening an Elm file when no Elm LSP install
         # spec exists still wants the grammar prompt to fire.
         if len(self._pending_grammar_prompt_ext.as_bytes()) > 0:
+            debug_log(String("[paint] grammar install prompt"))
             var deferred_ext = self._pending_grammar_prompt_ext
             self._pending_grammar_prompt_ext = String("")
             self._maybe_prompt_grammar_install(deferred_ext)
+        debug_log(String("[paint] before _apply_view_config"))
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
         self._apply_view_config()
+        debug_log(String("[paint] before flush_highlights loop n_windows=")
+            + String(len(self.windows.windows)))
         # Flush deferred highlight refreshes for every editor that
         # was edited since the last frame. ``flush_highlights`` is
         # a no-op when the dirty flag is clear, so this is cheap on
@@ -1572,42 +1594,61 @@ struct Desktop(Movable):
         # tokenization against the shared ``grammar_registry``.
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
+                debug_log(String("[paint] flush_highlights for window ")
+                    + String(i))
                 self.windows.windows[i].editor.flush_highlights(
                     self.grammar_registry, self.speller,
                 )
+                debug_log(String("[paint] flush_highlights done ")
+                    + String(i))
+        debug_log(String("[paint] before windows.fit_into"))
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
         self.windows.fit_into(self.workspace_rect(screen))
+        debug_log(String("[paint] before _rebuild_window_menu"))
         # Rebuild the Window menu from current state so it always reflects
         # what's actually open. (Cheap; one short item list.)
         self._rebuild_window_menu()
+        debug_log(String("[paint] before _refresh_shortcuts"))
         # Stamp the right-aligned shortcut text onto each menu item so it
         # picks up user-registered hotkey overrides automatically.
         self._refresh_shortcuts()
+        debug_log(String("[paint] before _refresh_target_tabs"))
         # Refresh the target-tab strip every frame so tab indicators
         # (running, debugging, active) stay in sync with the actual
         # session state — single source of truth for the painter.
         self._refresh_target_tabs()
+        debug_log(String("[paint] before workspace fill"))
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
+        debug_log(String("[paint] before windows.paint"))
         self.windows.paint(
             canvas, self._compute_subdued_windows(),
             not self._any_dock_focused(),
         )
+        debug_log(String("[paint] after windows.paint"))
         # Title-bar full-path tooltip: floats above every window but
         # below the side panes / chrome, so the popup never gets
         # painted over by the editor it's describing.
         self.windows.paint_title_tooltip(canvas, ws)
+        debug_log(String("[paint] before file_tree.paint"))
         self.file_tree.paint(canvas, screen)
+        debug_log(String("[paint] before terminal_panes.paint n=")
+            + String(len(self.terminal_panes)))
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].paint(
                 canvas, self.terminal_pane_rect(screen, i),
             )
+        debug_log(String("[paint] before debug_pane.paint"))
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
+        debug_log(String("[paint] before menu_bar.paint"))
         self.menu_bar.paint(canvas, screen)
+        debug_log(String("[paint] before tab_bar.paint"))
         self._paint_tab_bar(canvas, screen)
+        debug_log(String("[paint] before status_bar.paint"))
         self.status_bar.paint(canvas, screen)
+        debug_log(String("[paint] after status_bar.paint"))
         # Non-modal install-progress popup. Sits between the workspace and
         # the modal dialogs — visible while the user keeps editing, but
         # dismissed by any modal that pops over the top.
@@ -1833,6 +1874,7 @@ struct Desktop(Movable):
         non-empty ``install_hint`` (otherwise we'd have nothing actionable
         to suggest). Truly unknown extensions stay a silent no-op.
         """
+        debug_log(String("[_maybe_lsp_open] ENTER idx=") + String(idx))
         if idx < 0 or idx >= len(self.windows.windows):
             return
         if not self.windows.windows[idx].is_editor:
@@ -1840,12 +1882,15 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
+        debug_log(String("[_maybe_lsp_open] path=") + path)
         var ext = extension_of(path)
+        debug_log(String("[_maybe_lsp_open] ext=") + ext)
         # Grammar-download is independent from LSP install — a language
         # might have either, both, or neither. Try the grammar prompt
         # unconditionally; the helper bails fast when there's nothing
         # to ask about.
         self._maybe_prompt_grammar_install(ext)
+        debug_log(String("[_maybe_lsp_open] after grammar prompt"))
         # IntelliJ-style ``# language=NAME`` markers in the buffer
         # also count as "languages this file uses." Surface a grammar
         # install prompt for each unique embedded language whose
@@ -1855,14 +1900,21 @@ struct Desktop(Movable):
         var embedded = embedded_language_extensions(
             self.windows.windows[idx].editor.buffer.lines,
         )
+        debug_log(String("[_maybe_lsp_open] embedded count=")
+            + String(len(embedded)))
         for k in range(len(embedded)):
             self._maybe_prompt_grammar_install(embedded[k])
+        debug_log(String("[_maybe_lsp_open] before _ensure_lsp_for_extension"))
         var lsp_idx = self._ensure_lsp_for_extension(ext)
+        debug_log(String("[_maybe_lsp_open] lsp_idx=") + String(lsp_idx))
         if lsp_idx < 0:
             self._maybe_prompt_lsp_install(ext)
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
+        debug_log(String("[_maybe_lsp_open] text snapshot bytes=")
+            + String(len(text.as_bytes())))
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
+        debug_log(String("[_maybe_lsp_open] after notify_opened"))
 
     fn _maybe_prompt_lsp_install(mut self, ext: String):
         """Open the install prompt when ``ext`` belongs to a known language
@@ -2444,13 +2496,18 @@ struct Desktop(Movable):
         ``.git`` lives) rather than ``app/``, while a non-repo
         directory still gets treated as a project.
         """
+        debug_log(String("[open_project] ENTER path=") + path)
         if self.project:
+            debug_log(String("[open_project] already open, returning"))
             return
         var found = find_git_project(path)
         if found:
+            debug_log(String("[open_project] found git root=") + found.value())
             self._set_project(found.value())
         else:
+            debug_log(String("[open_project] no git, using path"))
             self._set_project(path)
+        debug_log(String("[open_project] EXIT"))
 
     fn close_project(mut self):
         # Flush any pending view-state changes for the still-open editor
@@ -2565,11 +2622,14 @@ struct Desktop(Movable):
         self._open_count = 0
 
     fn _set_project(mut self, path: String):
+        debug_log(String("[_set_project] ENTER path=") + path)
         # Resolve so a label like ``.`` becomes the actual directory name,
         # and so the stored project path is canonical for downstream
         # comparisons. Fall back to the input on resolution failure.
         var resolved = realpath(path)
+        debug_log(String("[_set_project] realpath=") + resolved)
         var canonical = resolved if len(resolved.as_bytes()) > 0 else path
+        debug_log(String("[_set_project] canonical=") + canonical)
         self.project = Optional[String](canonical)
         # Reset the external-git polling cache so the new project's
         # ``.git`` mtimes seed fresh on its first paint instead of
@@ -2580,7 +2640,9 @@ struct Desktop(Movable):
         # before any later step might raise — failing to save the config
         # is a non-fatal best-effort, just like the View-menu toggles.
         record_recent_project(self.config, canonical)
+        debug_log(String("[_set_project] after record_recent_project"))
         _ = save_config(self.config)
+        debug_log(String("[_set_project] after save_config"))
         var label = basename(canonical)
         var items = List[MenuItem]()
         items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
@@ -2601,10 +2663,12 @@ struct Desktop(Movable):
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
         # silently no-op until the user authors ``.turbokod/targets.json``.
         self.targets = load_project_targets(canonical)
+        debug_log(String("[_set_project] after load_project_targets"))
         # Swap the speller's per-project bucket to this project's
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
         self.speller.set_project(canonical)
+        debug_log(String("[_set_project] after speller.set_project"))
         # Seed the DAP manager from the per-user breakpoints file. We
         # do this here (rather than lazily on first F5) so the gutter
         # already shows red dots before the user starts a session, and
@@ -2625,20 +2689,24 @@ struct Desktop(Movable):
         self.dap.restore_breakpoints(
             bp_paths^, bp_lines^, bp_conds^, bp_enabled^, bp_wait_for^,
         )
+        debug_log(String("[_set_project] after dap.restore_breakpoints"))
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
         # re-write the file with the same bytes.
         self._last_breakpoints_json = encode_breakpoints(
             canonical, self._snapshot_breakpoints(),
         )
+        debug_log(String("[_set_project] after encode_breakpoints"))
         # Load per-file view states. The Desktop refreshes entries for
         # open editors on every paint and writes the file when the
         # encoding changes, so a closed-then-reopened file lands back
         # at the saved scroll position.
         self._view_states = load_view_states(canonical)
+        debug_log(String("[_set_project] after load_view_states"))
         self._last_view_states_json = encode_view_states(
             canonical, self._view_states,
         )
+        debug_log(String("[_set_project] after encode_view_states"))
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
         # against. The restore code merges by file path (existing
@@ -2648,6 +2716,7 @@ struct Desktop(Movable):
         # already on screen — they're not file-backed and so aren't
         # in the session.
         self._pending_restore = True
+        debug_log(String("[_set_project] EXIT"))
 
     # --- session restore / save -------------------------------------------
 
@@ -2865,9 +2934,13 @@ struct Desktop(Movable):
         windows. Z-order and focus are reapplied at the end so the
         user lands on the same window they left.
         """
+        debug_log(String("[_restore_session] ENTER"))
         if not self.project:
+            debug_log(String("[_restore_session] no project, return"))
             return
         var session = load_session(self.project.value())
+        debug_log(String("[_restore_session] load_session got n_windows=")
+            + String(len(session.windows)))
         if len(session.windows) == 0:
             # Nothing to restore. Leave the cached encoding empty so a
             # later ``_save_session_if_changed`` will write the first
@@ -2964,9 +3037,14 @@ struct Desktop(Movable):
                     self.windows.windows[idx].rect = workspace
                     self.windows.windows[idx].is_maximized = True
                     self.windows.windows[idx]._restore_rect = restore
+                debug_log(String("[_restore_session] adding window idx=")
+                    + String(idx) + String(" path=") + resolved)
                 self._maybe_lsp_open(idx)
+                debug_log(String("[_restore_session] after _maybe_lsp_open ")
+                    + String(idx))
                 session_to_window.append(idx)
-            except:
+            except e:
+                debug_log(String("[_restore_session] EXCEPTION: ") + String(e))
                 session_to_window.append(-1)
         # Reapply z-order: rebuild from session order, dropping
         # entries we couldn't restore. Anything not in the session
@@ -3001,6 +3079,7 @@ struct Desktop(Movable):
         # just loaded so the immediate post-restore ``paint`` doesn't
         # re-write the file with the same bytes.
         self._last_session_json = encode_session(self._snapshot_session())
+        debug_log(String("[_restore_session] EXIT"))
 
     fn _reapply_session_rects(mut self, screen: Rect):
         """Re-apply saved rects from ``_pending_restore_refit`` to any

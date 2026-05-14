@@ -1929,6 +1929,19 @@ fn main() -> anyhow::Result<()> {
             };
             env.insert("DYLD_FALLBACK_LIBRARY_PATH".to_string(), combined);
         }
+        // Workaround for a libsystem_malloc heap-corruption canary
+        // (``_os_unfair_lock_corruption_abort`` inside
+        // ``rack_region_insert``) that fires when the Mojo backend
+        // opens a project from the bundle-launched pty context.
+        // ``MallocScribble=1`` fills freshly-allocated and freed
+        // memory with sentinel bytes — empirically that suppresses
+        // the corruption 0/20 vs 10/10 baseline. The underlying bug
+        // is presumably an uninitialized-read or use-after-free that
+        // happens to hit benign values under Scribble. See repro/ for
+        // the minimal case. We leave this on permanently rather than
+        // gating it on debug builds because the cost (one byte fill
+        // per alloc/free) is negligible against a hard crash.
+        env.insert("MallocScribble".to_string(), "1".to_string());
     }
     let pty_opts = PtyOptions {
         shell,

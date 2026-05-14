@@ -196,6 +196,7 @@ from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
 from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
+from turbokod import Vt
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
@@ -13328,6 +13329,114 @@ fn test_text_field_paints_visible_window_after_scroll() raises:
     assert_equal(canvas.get(1, 0).glyph, String(" "))
 
 
+
+fn test_vt_da1_reply_on_csi_c() raises:
+    """``ESC[c`` (DA1) must enqueue a reply on the Vt's outbound
+    queue. Real-world: starship / oh-my-zsh probe with this; without
+    a reply the prompt stalls a beat on every redraw."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b[c"))
+    var reply = vt.take_reply()
+    assert_equal(reply, String("\x1b[?6c"))
+    # Drained — second call is empty.
+    assert_equal(vt.take_reply(), String(""))
+
+
+fn test_vt_dsr_6_reply_uses_1_based_cursor() raises:
+    """``ESC[6n`` (DSR cursor position) must reply with 1-based
+    coordinates. The cursor at (cur_r=2, cur_c=3) reports ``3;4R``."""
+    var vt = Vt(80, 24)
+    # Move cursor to row 3, col 4 (1-based via CUP).
+    vt.feed_string(String("\x1b[3;4H"))
+    vt.feed_string(String("\x1b[6n"))
+    assert_equal(vt.take_reply(), String("\x1b[3;4R"))
+
+
+fn test_vt_decset_2004_bracketed_paste_flag() raises:
+    """``ESC[?2004h`` enables bracketed-paste mode; ``l`` disables.
+    The pane reads this flag to decide whether to wrap pasted text."""
+    var vt = Vt(80, 24)
+    assert_false(vt.bracketed_paste)
+    vt.feed_string(String("\x1b[?2004h"))
+    assert_true(vt.bracketed_paste)
+    vt.feed_string(String("\x1b[?2004l"))
+    assert_false(vt.bracketed_paste)
+
+
+fn test_vt_decset_1_app_cursor_keys() raises:
+    """DECCKM (``ESC[?1h``) flips arrow encoding from CSI to SS3 in
+    the pane. We just verify the Vt tracks the flag."""
+    var vt = Vt(80, 24)
+    assert_false(vt.app_cursor_keys)
+    vt.feed_string(String("\x1b[?1h"))
+    assert_true(vt.app_cursor_keys)
+    vt.feed_string(String("\x1b[?1l"))
+    assert_false(vt.app_cursor_keys)
+
+
+fn test_vt_decset_1004_focus_events_round_trip() raises:
+    """With ``?1004`` on, ``notify_focus_change`` emits ``ESC[I``
+    (focus-in) / ``ESC[O`` (focus-out). With it off, nothing."""
+    var vt = Vt(80, 24)
+    # Off by default — no emit.
+    vt.notify_focus_change(True)
+    assert_equal(vt.take_reply(), String(""))
+    vt.feed_string(String("\x1b[?1004h"))
+    vt.notify_focus_change(True)
+    assert_equal(vt.take_reply(), String("\x1b[I"))
+    vt.notify_focus_change(False)
+    assert_equal(vt.take_reply(), String("\x1b[O"))
+
+
+fn test_vt_osc_52_decodes_base64_to_clipboard() raises:
+    """OSC 52 ``c;<base64>`` decodes to bytes the pane can hand to
+    the system clipboard. ``aGVsbG8=`` is the canonical 'hello' test
+    vector."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b]52;c;aGVsbG8=\x07"))
+    assert_equal(vt.take_clipboard(), String("hello"))
+    # Drained — second call is empty.
+    assert_equal(vt.take_clipboard(), String(""))
+
+
+fn test_vt_osc_52_query_does_not_leak_clipboard() raises:
+    """A query (``?`` in place of base64) must not produce a
+    clipboard payload — leaking host clipboard contents to whatever
+    the child is would be a security regression."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b]52;c;?\x07"))
+    assert_equal(vt.take_clipboard(), String(""))
+
+
+fn test_vt_decscusr_tracks_cursor_shape() raises:
+    """``CSI 4 SP q`` sets cursor_shape to 4 (steady underline). Out
+    of range falls back to 0 so a malformed sequence can't leave the
+    field in a nonsense state."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b[4 q"))
+    assert_equal(Int(vt.cursor_shape), 4)
+    vt.feed_string(String("\x1b[99 q"))
+    assert_equal(Int(vt.cursor_shape), 0)
+
+
+fn test_vt_ris_clears_mode_flags() raises:
+    """``ESC c`` (RIS) is a hard reset. Mouse tracking, bracketed
+    paste, focus events, app-cursor-keys all clear — otherwise a
+    fresh shell coming up after vim crashed inherits the dead
+    program's modes and routes events to the wrong handler."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b[?1000h\x1b[?2004h\x1b[?1004h\x1b[?1h"))
+    assert_true(vt.mouse_track_press)
+    assert_true(vt.bracketed_paste)
+    assert_true(vt.focus_events)
+    assert_true(vt.app_cursor_keys)
+    vt.feed_string(String("\x1bc"))
+    assert_false(vt.mouse_track_press)
+    assert_false(vt.bracketed_paste)
+    assert_false(vt.focus_events)
+    assert_false(vt.app_cursor_keys)
+
+
 fn main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
     # (which writes to ``~/.config/turbokod/config.json`` via
@@ -13927,4 +14036,5 @@ fn main() raises:
     test_text_field_cmd_letter_does_not_insert()
     test_text_field_ctrl_letter_does_not_insert()
     test_text_field_paints_visible_window_after_scroll()
+    test_vt_osc_52_decodes_base64_to_clipboard()
     print("all tests passed")
