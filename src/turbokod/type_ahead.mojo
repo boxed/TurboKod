@@ -64,22 +64,22 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
     var buf: String
     var last_ms: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.buf = String("")
         self.last_ms = 0
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.buf = copy.buf
         self.last_ms = copy.last_ms
 
-    fn reset(mut self):
+    def reset(mut self):
         """Drop the buffer immediately. Callers invoke this when the
         surrounding context shifts in a way that makes a continued
         prefix nonsensical (popup closed, directory changed)."""
         self.buf = String("")
         self.last_ms = 0
 
-    fn append(mut self, ch: String) -> String:
+    def append(mut self, ch: String) -> String:
         """Extend the buffer with ``ch`` (after the timeout reset)
         and return the current accumulated prefix. The returned value
         is a copy — callers can safely store it without sharing storage
@@ -91,7 +91,7 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
         self.buf = self.buf + ch
         return self.buf
 
-    fn solo_fallback(mut self, ch: String) -> String:
+    def solo_fallback(mut self, ch: String) -> String:
         """Replace the buffer with just ``ch`` and return it. Used
         for the stale-prefix recovery path: if no entry matched the
         accumulated prefix, retry with a fresh single character."""
@@ -99,14 +99,14 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
         return self.buf
 
 
-fn is_printable_ascii(key: UInt32) -> Bool:
+def is_printable_ascii(key: UInt32) -> Bool:
     """True for ``key`` codes a list widget should treat as "user is
     typing a search prefix". Matches the dropdown/dir-browser gate so
     every list widget agrees on what counts as a search keystroke."""
     return UInt32(0x20) <= key and key < UInt32(0x7F)
 
 
-fn _find_prefix_in(options: List[String], prefix: String) -> Int:
+def _find_prefix_in(options: List[String], prefix: String) -> Int:
     """First index in ``options`` whose entry starts with ``prefix``
     (case-insensitive), or -1 on no match. Empty entries are skipped
     so a stray printable key doesn't snap to the leading sentinel
@@ -123,7 +123,7 @@ fn _find_prefix_in(options: List[String], prefix: String) -> Int:
     return -1
 
 
-fn type_ahead_pick(
+def type_ahead_pick(
     mut type_ahead: TypeAhead, options: List[String], ch: String,
 ) -> Int:
     """Append ``ch`` to ``type_ahead`` and return the index of the
@@ -147,7 +147,7 @@ fn type_ahead_pick(
     return -1
 
 
-fn starts_with_ci(name: String, prefix: String) -> Bool:
+def starts_with_ci(name: String, prefix: String) -> Bool:
     """ASCII-case-insensitive prefix test. UTF-8 case folding is
     non-trivial; restricting to ASCII keeps the comparison cheap and
     matches the way the rest of this codebase already sorts/compares

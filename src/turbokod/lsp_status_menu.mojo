@@ -25,7 +25,7 @@ from .string_utils import display_columns
 from .view import RowCursor
 
 
-fn _row_y(rect: Rect) -> Int:
+def _row_y(rect: Rect) -> Int:
     var cursor = RowCursor(rect.a.y + 1)
     return cursor.place()
 
@@ -53,7 +53,7 @@ struct LspStatusMenu(Movable):
     var anchor_y: Int
     var selected: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.action = LSP_MENU_ACTION_NONE
@@ -61,7 +61,7 @@ struct LspStatusMenu(Movable):
         self.anchor_y = 0
         self.selected = 0
 
-    fn open(mut self, anchor: Point):
+    def open(mut self, anchor: Point):
         self.anchor_x = anchor.x
         self.anchor_y = anchor.y
         self.active = True
@@ -69,19 +69,19 @@ struct LspStatusMenu(Movable):
         self.action = LSP_MENU_ACTION_NONE
         self.selected = 0
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.action = LSP_MENU_ACTION_NONE
 
-    fn _row_count(self) -> Int:
+    def _row_count(self) -> Int:
         return 1
 
-    fn _resolve(mut self, action: Int):
+    def _resolve(mut self, action: Int):
         self.action = action
         self.submitted = True
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         var width = display_columns(_LABEL_RESTART) + 4
         var height = self._row_count() + 2
         # Anchor sits on the status bar (bottom row); open the menu
@@ -100,7 +100,7 @@ struct LspStatusMenu(Movable):
                     y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var rect = self._rect(screen)
@@ -122,7 +122,7 @@ struct LspStatusMenu(Movable):
             canvas, Point(rect.a.x + 2, y0), _LABEL_RESTART, row_attr,
         )
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -138,7 +138,7 @@ struct LspStatusMenu(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
         if not self.active:
             return LSP_MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:

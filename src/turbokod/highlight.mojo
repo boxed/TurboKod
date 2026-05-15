@@ -49,13 +49,13 @@ struct Highlight(ImplicitlyCopyable, Movable):
 
 
 # Public colors. They render against the editor's standard blue background.
-fn highlight_keyword_attr() -> Attr:    return Attr(WHITE,       BLUE, STYLE_NONE)
-fn highlight_string_attr()  -> Attr:    return Attr(RED,         BLUE, STYLE_NONE)
-fn highlight_comment_attr() -> Attr:    return Attr(CYAN,        BLUE, STYLE_NONE)
-fn highlight_number_attr()  -> Attr:    return Attr(LIGHT_GRAY,  BLUE, STYLE_NONE)
-fn highlight_ident_attr()   -> Attr:    return Attr(LIGHT_GREEN, BLUE, STYLE_NONE)
-fn highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,    BLUE, STYLE_NONE)
-fn highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_NONE)
+def highlight_keyword_attr() -> Attr:    return Attr(WHITE,       BLUE, STYLE_NONE)
+def highlight_string_attr()  -> Attr:    return Attr(RED,         BLUE, STYLE_NONE)
+def highlight_comment_attr() -> Attr:    return Attr(CYAN,        BLUE, STYLE_NONE)
+def highlight_number_attr()  -> Attr:    return Attr(LIGHT_GRAY,  BLUE, STYLE_NONE)
+def highlight_ident_attr()   -> Attr:    return Attr(LIGHT_GREEN, BLUE, STYLE_NONE)
+def highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,    BLUE, STYLE_NONE)
+def highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_NONE)
 
 
 # Per-line state passed between calls to ``_highlight_generic_line``.
@@ -65,7 +65,7 @@ fn highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_N
 comptime _HL_NORMAL          = 0
 
 
-fn highlight_for_extension(
+def highlight_for_extension(
     ext: String, lines: List[String],
 ) -> List[Highlight]:
     """Dispatch on file extension. Unknown extensions return ``[]``.
@@ -110,7 +110,7 @@ fn highlight_for_extension(
     return hls^
 
 
-fn _grammar_path_for_ext(ext: String) -> String:
+def _grammar_path_for_ext(ext: String) -> String:
     """Map extension → grammar JSON path, relative to project root.
 
     Empty string means "no grammar for this extension." Adding a
@@ -191,11 +191,11 @@ struct GrammarRegistry(Movable):
     var keys: List[String]
     var grammars: List[Grammar]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.keys = List[String]()
         self.grammars = List[Grammar]()
 
-    fn lookup_idx(self, key: String) -> Int:
+    def lookup_idx(self, key: String) -> Int:
         """Index of the cached grammar for ``key``, or -1.
         ``key`` is whatever the caller wants to key on — typically
         the file extension (``"rs"``, ``"py"``).
@@ -224,12 +224,12 @@ struct HighlightCache(Copyable, Movable):
     var highlights: List[Highlight]
     var post_stacks: List[List[Frame]]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.ext = String("")
         self.highlights = List[Highlight]()
         self.post_stacks = List[List[Frame]]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Deep-copy the cached state. Editor's ``Copyable`` declaration
         # exists for snapshotting; in the live path editors are grown via
         # ``^`` transfer so this branch is rare.
@@ -239,7 +239,7 @@ struct HighlightCache(Copyable, Movable):
         for i in range(len(copy.post_stacks)):
             self.post_stacks.append(copy.post_stacks[i].copy())
 
-    fn invalidate(mut self):
+    def invalidate(mut self):
         """Drop the per-line state — used when the line count or
         extension shifts in a way the incremental path can't
         reconcile."""
@@ -247,7 +247,7 @@ struct HighlightCache(Copyable, Movable):
         self.post_stacks = List[List[Frame]]()
 
 
-fn highlight_for_extension_cached(
+def highlight_for_extension_cached(
     ext: String, lines: List[String],
     mut registry: GrammarRegistry, mut cache: HighlightCache,
 ) -> List[Highlight]:
@@ -263,7 +263,7 @@ fn highlight_for_extension_cached(
     return highlight_incremental(ext, lines, 0, registry, cache)
 
 
-fn highlight_incremental(
+def highlight_incremental(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
 ) -> List[Highlight]:
@@ -385,7 +385,7 @@ fn highlight_incremental(
     return out^
 
 
-fn _full_retokenize(
+def _full_retokenize(
     grammar: Grammar, mut cache: HighlightCache, lines: List[String],
 ) -> List[Highlight]:
     """Re-tokenize ``lines`` from scratch, refreshing both
@@ -399,7 +399,7 @@ fn _full_retokenize(
     return hls^
 
 
-fn _fallback_for_extension(
+def _fallback_for_extension(
     ext: String, lines: List[String],
 ) -> List[Highlight]:
     """The "no TextMate grammar usable" branch shared by the
@@ -412,7 +412,7 @@ fn _fallback_for_extension(
     return List[Highlight]()
 
 
-fn _try_textmate(
+def _try_textmate(
     ext: String, lines: List[String],
 ) -> Optional[List[Highlight]]:
     """Load the matching TextMate grammar (if any) and tokenize.
@@ -441,7 +441,7 @@ fn _try_textmate(
         return Optional[List[Highlight]]()
 
 
-fn _has_nonempty_line(lines: List[String]) -> Bool:
+def _has_nonempty_line(lines: List[String]) -> Bool:
     """Returns True if ``lines`` contains at least one non-empty
     line. Used to disambiguate "grammar produced nothing" from
     "input was empty so of course nothing was produced."""
@@ -469,7 +469,7 @@ fn _has_nonempty_line(lines: List[String]) -> Bool:
 # ``word_at`` still depend on.
 
 
-fn _is_ident_start(c: UInt8) -> Bool:
+def _is_ident_start(c: UInt8) -> Bool:
     var v = Int(c)
     if v == 0x5F:  # _
         return True
@@ -480,19 +480,19 @@ fn _is_ident_start(c: UInt8) -> Bool:
     return False
 
 
-fn _is_ident_part(c: UInt8) -> Bool:
+def _is_ident_part(c: UInt8) -> Bool:
     if _is_ident_start(c):
         return True
     var v = Int(c)
     return 0x30 <= v and v <= 0x39
 
 
-fn _is_digit(c: UInt8) -> Bool:
+def _is_digit(c: UInt8) -> Bool:
     var v = Int(c)
     return 0x30 <= v and v <= 0x39
 
 
-fn _is_operator(c: UInt8) -> Bool:
+def _is_operator(c: UInt8) -> Bool:
     var v = Int(c)
     return v == 0x2B or v == 0x2D or v == 0x2A or v == 0x2F \
         or v == 0x25 or v == 0x3D or v == 0x3C or v == 0x3E \
@@ -506,7 +506,7 @@ fn _is_operator(c: UInt8) -> Bool:
 # --- editor-side helpers ---------------------------------------------------
 
 
-fn extension_of(path: String) -> String:
+def extension_of(path: String) -> String:
     """Return the suffix after the last ``.`` in ``path`` (lowercase),
     or empty string when the basename has no extension."""
     var b = path.as_bytes()
@@ -528,7 +528,7 @@ fn extension_of(path: String) -> String:
     return lower
 
 
-fn line_comment_for_extension(ext: String) -> String:
+def line_comment_for_extension(ext: String) -> String:
     """Return the line-comment prefix (with trailing space) for ``ext``,
     or empty when the language has no single-line comment syntax.
 
@@ -583,7 +583,7 @@ fn line_comment_for_extension(ext: String) -> String:
     return String("")
 
 
-fn word_at(line: String, col: Int) -> String:
+def word_at(line: String, col: Int) -> String:
     """Return the identifier surrounding ``col`` (start ≤ col ≤ end), or
     empty string when ``col`` isn't on an identifier codepoint. Walks
     by UTF-8 codepoint so non-ASCII letters (``ä``, Cyrillic, CJK)
@@ -683,7 +683,7 @@ struct LangSpec(Copyable, Movable):
     var block_close: String      # e.g. "*/" or ""
     var quotes: String           # e.g. "\"'`" — each byte is a quote
 
-    fn __init__(
+    def __init__(
         out self, var keywords: List[String], var line_comment: String,
         var block_open: String, var block_close: String, var quotes: String,
     ):
@@ -693,7 +693,7 @@ struct LangSpec(Copyable, Movable):
         self.block_close = block_close^
         self.quotes = quotes^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.keywords = copy.keywords.copy()
         self.line_comment = copy.line_comment
         self.block_open = copy.block_open
@@ -701,7 +701,7 @@ struct LangSpec(Copyable, Movable):
         self.quotes = copy.quotes
 
 
-fn _lang_spec_for_ext(ext: String) -> Optional[LangSpec]:
+def _lang_spec_for_ext(ext: String) -> Optional[LangSpec]:
     """Registry: extension → spec, or ``None`` for unknown.
 
     Linear scan; the table is small. Languages that share lexical
@@ -742,14 +742,14 @@ fn _lang_spec_for_ext(ext: String) -> Optional[LangSpec]:
     return Optional[LangSpec]()
 
 
-fn _kw(*words: String) -> List[String]:
+def _kw(*words: String) -> List[String]:
     var out = List[String]()
     for w in words:
         out.append(String(w))
     return out^
 
 
-fn _spec_rust() -> Optional[LangSpec]:
+def _spec_rust() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("as"), String("async"), String("await"), String("break"),
@@ -775,7 +775,7 @@ fn _spec_rust() -> Optional[LangSpec]:
     )
 
 
-fn _spec_c() -> Optional[LangSpec]:
+def _spec_c() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("auto"), String("break"), String("case"), String("char"),
@@ -804,7 +804,7 @@ fn _spec_c() -> Optional[LangSpec]:
     )
 
 
-fn _spec_go() -> Optional[LangSpec]:
+def _spec_go() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("break"), String("case"), String("chan"), String("const"),
@@ -827,7 +827,7 @@ fn _spec_go() -> Optional[LangSpec]:
     )
 
 
-fn _spec_ts() -> Optional[LangSpec]:
+def _spec_ts() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("abstract"), String("any"), String("as"), String("async"),
@@ -857,7 +857,7 @@ fn _spec_ts() -> Optional[LangSpec]:
     )
 
 
-fn _spec_zig() -> Optional[LangSpec]:
+def _spec_zig() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("addrspace"), String("align"), String("allowzero"),
@@ -885,7 +885,7 @@ fn _spec_zig() -> Optional[LangSpec]:
     )
 
 
-fn _spec_jvm_like() -> Optional[LangSpec]:
+def _spec_jvm_like() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("abstract"), String("as"), String("break"), String("case"),
@@ -909,7 +909,7 @@ fn _spec_jvm_like() -> Optional[LangSpec]:
     )
 
 
-fn _spec_bash() -> Optional[LangSpec]:
+def _spec_bash() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("if"), String("then"), String("else"), String("elif"),
@@ -926,7 +926,7 @@ fn _spec_bash() -> Optional[LangSpec]:
     )
 
 
-fn _spec_ruby() -> Optional[LangSpec]:
+def _spec_ruby() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("alias"), String("and"), String("begin"), String("break"),
@@ -945,7 +945,7 @@ fn _spec_ruby() -> Optional[LangSpec]:
     )
 
 
-fn _spec_json() -> Optional[LangSpec]:
+def _spec_json() -> Optional[LangSpec]:
     # JSONC supports // and /*..*/; plain JSON doesn't, but accepting them
     # is harmless on a strict file (they just won't appear).
     return LangSpec(
@@ -954,7 +954,7 @@ fn _spec_json() -> Optional[LangSpec]:
     )
 
 
-fn _spec_yaml() -> Optional[LangSpec]:
+def _spec_yaml() -> Optional[LangSpec]:
     return LangSpec(
         _kw(
             String("true"), String("false"), String("null"), String("yes"),
@@ -964,7 +964,7 @@ fn _spec_yaml() -> Optional[LangSpec]:
     )
 
 
-fn _spec_toml() -> Optional[LangSpec]:
+def _spec_toml() -> Optional[LangSpec]:
     return LangSpec(
         _kw(String("true"), String("false")),
         String("#"), String(""), String(""), String("\"'"),
@@ -973,7 +973,7 @@ fn _spec_toml() -> Optional[LangSpec]:
 
 
 
-fn _highlight_generic(
+def _highlight_generic(
     lines: List[String], spec: LangSpec,
 ) -> List[Highlight]:
     var out = List[Highlight]()
@@ -983,7 +983,7 @@ fn _highlight_generic(
     return out^
 
 
-fn _highlight_generic_line(
+def _highlight_generic_line(
     line: String, row: Int, state_in: Int, spec: LangSpec,
     mut out: List[Highlight],
 ) -> Int:
@@ -1119,7 +1119,7 @@ fn _highlight_generic_line(
     return state
 
 
-fn _is_keyword_in(word: String, keywords: List[String]) -> Bool:
+def _is_keyword_in(word: String, keywords: List[String]) -> Bool:
     """Linear membership test. Keyword lists are short (a few dozen
     entries) and the call site already paid the identifier-extraction
     cost, so a hash table would be over-engineering."""
@@ -1129,7 +1129,7 @@ fn _is_keyword_in(word: String, keywords: List[String]) -> Bool:
     return False
 
 
-fn _to_bytes_list(s: String) -> List[UInt8]:
+def _to_bytes_list(s: String) -> List[UInt8]:
     """Copy a string's bytes into an owned list. Used for the few
     short needle strings the tokenizer compares against — keeps the
     hot path free of ``Span`` origin parameters that ``@fieldwise_init``
@@ -1141,7 +1141,7 @@ fn _to_bytes_list(s: String) -> List[UInt8]:
     return out^
 
 
-fn _starts_with(line: String, i: Int, needle: List[UInt8]) -> Bool:
+def _starts_with(line: String, i: Int, needle: List[UInt8]) -> Bool:
     """Does ``line[i:]`` begin with ``needle``? Cheap byte-wise prefix
     compare. Returns ``False`` on out-of-bounds rather than raising —
     ``i`` may be at or past the end on the caller's last iteration."""
@@ -1201,7 +1201,7 @@ struct _StringBody(ImplicitlyCopyable, Movable):
     var end_col: Int
 
 
-fn _apply_intellij_injections(
+def _apply_intellij_injections(
     lines: List[String], mut hls: List[Highlight],
     mut registry: GrammarRegistry,
 ):
@@ -1234,7 +1234,7 @@ fn _apply_intellij_injections(
         i += 1
 
 
-fn _find_language_marker(line: String) -> Optional[_LangMarker]:
+def _find_language_marker(line: String) -> Optional[_LangMarker]:
     """Find a ``language=NAME`` substring in ``line``. Returns the
     lowercased language name plus the byte offset just past it.
 
@@ -1268,7 +1268,7 @@ fn _find_language_marker(line: String) -> Optional[_LangMarker]:
     return Optional[_LangMarker]()
 
 
-fn _is_lang_char(c: UInt8) -> Bool:
+def _is_lang_char(c: UInt8) -> Bool:
     var v = Int(c)
     if 0x30 <= v and v <= 0x39:
         return True
@@ -1281,7 +1281,7 @@ fn _is_lang_char(c: UInt8) -> Bool:
     return False
 
 
-fn _to_lower_ascii(s: String) -> String:
+def _to_lower_ascii(s: String) -> String:
     var b = s.as_bytes()
     var out = String("")
     for k in range(len(b)):
@@ -1292,7 +1292,7 @@ fn _to_lower_ascii(s: String) -> String:
     return out^
 
 
-fn _find_string_body_after(
+def _find_string_body_after(
     lines: List[String], start_row: Int, start_col: Int,
 ) -> Optional[_StringBody]:
     """Find the body bounds of the next string literal at or after
@@ -1327,7 +1327,7 @@ fn _find_string_body_after(
     return Optional[_StringBody]()
 
 
-fn _scan_triple_string(
+def _scan_triple_string(
     lines: List[String], open_row: Int, open_col: Int, ch: UInt8,
 ) -> Optional[_StringBody]:
     var body_start_row = open_row
@@ -1362,7 +1362,7 @@ fn _scan_triple_string(
     ))
 
 
-fn _scan_single_string(
+def _scan_single_string(
     lines: List[String], open_row: Int, open_col: Int, ch: UInt8,
 ) -> Optional[_StringBody]:
     """Single-character string: stays on one line. Backslash escapes
@@ -1387,7 +1387,7 @@ fn _scan_single_string(
     ))
 
 
-fn _ext_for_language(lang: String) -> String:
+def _ext_for_language(lang: String) -> String:
     """Map an IntelliJ language name to the file extension our
     grammar registry keys on. Empty string means "we don't have a
     grammar bundled for this language" — the marker becomes a
@@ -1438,7 +1438,7 @@ fn _ext_for_language(lang: String) -> String:
     return String("")
 
 
-fn embedded_language_extensions(lines: List[String]) -> List[String]:
+def embedded_language_extensions(lines: List[String]) -> List[String]:
     """Return the unique extensions of every IntelliJ-style
     ``language=NAME`` marker found in ``lines``. Languages that don't
     map to a known grammar (neither bundled nor downloadable) are
@@ -1468,7 +1468,7 @@ fn embedded_language_extensions(lines: List[String]) -> List[String]:
     return out^
 
 
-fn _inject_grammar(
+def _inject_grammar(
     lang: String, lines: List[String], body: _StringBody,
     mut hls: List[Highlight], mut registry: GrammarRegistry,
 ):
@@ -1519,7 +1519,7 @@ fn _inject_grammar(
         ))
 
 
-fn _slice_body_lines(
+def _slice_body_lines(
     lines: List[String], body: _StringBody,
 ) -> List[String]:
     """Build the sub-buffer the injected grammar tokenizes against:
@@ -1559,7 +1559,7 @@ fn _slice_body_lines(
     return out^
 
 
-fn _drop_highlights_in_body(
+def _drop_highlights_in_body(
     mut hls: List[Highlight], body: _StringBody,
 ):
     """Filter out highlights whose range lies inside the body. We

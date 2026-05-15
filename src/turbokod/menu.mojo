@@ -38,7 +38,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
     var checkable: Bool
     var checked: Bool
 
-    fn __init__(
+    def __init__(
         out self,
         var label: String,
         var action: String,
@@ -54,11 +54,11 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.checked = checked
 
     @staticmethod
-    fn separator() -> Self:
+    def separator() -> Self:
         """Build a non-interactive divider for grouping items in a dropdown."""
         return MenuItem(String(""), String(""), True)
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.action = copy.action
         self.is_separator = copy.is_separator
@@ -77,7 +77,7 @@ struct Menu(Copyable, Movable):
     # exclusive with ``right_aligned``.
     var is_system: Bool
 
-    fn __init__(
+    def __init__(
         out self,
         var label: String,
         var items: List[MenuItem],
@@ -90,7 +90,7 @@ struct Menu(Copyable, Movable):
         self.right_aligned = right_aligned
         self.is_system = is_system
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.items = copy.items.copy()
         self.visible = copy.visible
@@ -106,7 +106,7 @@ struct MenuResult(Movable):
     var consumed: Bool
 
 
-fn _menu_rank(label: String) -> Int:
+def _menu_rank(label: String) -> Int:
     """Display order rank for a left-aligned menu.
 
     Smaller rank → further left. Pinned slots are spread far apart so future
@@ -131,17 +131,17 @@ struct MenuBar(Movable):
     open / close so each fresh dropdown starts with a clean buffer
     and the leading keystroke isn't misrouted by a stale prefix."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.menus = List[Menu]()
         self.open_idx = -1
         self.selected_item = 0
         self.tracking = False
         self._type_ahead = TypeAhead()
 
-    fn add(mut self, var menu: Menu):
+    def add(mut self, var menu: Menu):
         self.menus.append(menu^)
 
-    fn set_visible_by_label(mut self, label: String, visible: Bool):
+    def set_visible_by_label(mut self, label: String, visible: Bool):
         for i in range(len(self.menus)):
             if self.menus[i].label == label:
                 self.menus[i].visible = visible
@@ -149,7 +149,7 @@ struct MenuBar(Movable):
                     self.open_menu(-1)
                 return
 
-    fn set_item_checked(mut self, action: String, checked: Bool):
+    def set_item_checked(mut self, action: String, checked: Bool):
         """Flip the ``checked`` flag on the first menu item whose action
         matches. No-op if no such item exists. Used by the host to keep
         the View-menu checkmarks in sync with persisted state."""
@@ -161,13 +161,13 @@ struct MenuBar(Movable):
                     self.menus[i].items[j].checked = checked
                     return
 
-    fn is_open(self) -> Bool:
+    def is_open(self) -> Bool:
         return self.open_idx >= 0
 
-    fn close(mut self):
+    def close(mut self):
         self.open_menu(-1)
 
-    fn open_menu(mut self, idx: Int):
+    def open_menu(mut self, idx: Int):
         """Open menu ``idx`` (or close, if -1) and seat the keyboard
         selection on the first non-separator item. Use this rather than
         writing to ``open_idx`` directly so the highlight stays in sync."""
@@ -179,7 +179,7 @@ struct MenuBar(Movable):
             self.selected_item = 0
             self.tracking = False
 
-    fn _first_non_separator(self, menu_idx: Int) -> Int:
+    def _first_non_separator(self, menu_idx: Int) -> Int:
         if menu_idx < 0 or menu_idx >= len(self.menus):
             return 0
         var menu = self.menus[menu_idx].copy()
@@ -190,7 +190,7 @@ struct MenuBar(Movable):
 
     # --- layout ------------------------------------------------------------
 
-    fn _layout(self, screen_width: Int) -> List[Rect]:
+    def _layout(self, screen_width: Int) -> List[Rect]:
         """Per-menu hit-test rects. Hidden menus get an empty rect at (0,0).
 
         Left-aligned menus pack from x=3 rightward; right-aligned menus pack
@@ -243,7 +243,7 @@ struct MenuBar(Movable):
             rx -= w + 1
         return rects^
 
-    fn _menu_has_checkable(self, menu_idx: Int) -> Bool:
+    def _menu_has_checkable(self, menu_idx: Int) -> Bool:
         """True when *any* item in this dropdown is checkable. Used to
         decide whether every row gets a 2-cell label-indent so labels
         stay aligned in mixed checkable/non-checkable menus."""
@@ -255,7 +255,7 @@ struct MenuBar(Movable):
                 return True
         return False
 
-    fn _dropdown_rect(self, screen_width: Int) -> Rect:
+    def _dropdown_rect(self, screen_width: Int) -> Rect:
         if self.open_idx < 0:
             return Rect(0, 0, 0, 0)
         var anchor = self._layout(screen_width)[self.open_idx]
@@ -284,7 +284,7 @@ struct MenuBar(Movable):
 
     # --- paint -------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, screen: Rect):
         var bar      = Attr(BLACK, LIGHT_GRAY)
         var bar_key  = Attr(RED,   LIGHT_GRAY)
         var open_bg  = Attr(BLACK, GREEN)
@@ -331,7 +331,7 @@ struct MenuBar(Movable):
         if self.open_idx >= 0:
             self._paint_dropdown(canvas, screen.b.x)
 
-    fn _paint_label_hotkey(
+    def _paint_label_hotkey(
         self, mut canvas: Canvas, painter: Painter, x: Int, y: Int,
         label: String, hotkey_attr: Attr, body_attr: Attr,
     ):
@@ -366,7 +366,7 @@ struct MenuBar(Movable):
             i += seq
             col += 1
 
-    fn _paint_dropdown(self, mut canvas: Canvas, screen_width: Int):
+    def _paint_dropdown(self, mut canvas: Canvas, screen_width: Int):
         var rect = self._dropdown_rect(screen_width)
         var attr     = Attr(BLACK, LIGHT_GRAY)
         var attr_key = Attr(RED,   LIGHT_GRAY)
@@ -420,7 +420,7 @@ struct MenuBar(Movable):
 
     # --- keyboard navigation ----------------------------------------------
 
-    fn _display_order_indices(self) -> List[Int]:
+    def _display_order_indices(self) -> List[Int]:
         """Indices of visible menus in painted left-to-right order: the
         system menu (if any) first, then rank-sorted left-aligned menus,
         then right-aligned menus reversed so the leftmost-visible
@@ -459,7 +459,7 @@ struct MenuBar(Movable):
             k -= 1
         return order^
 
-    fn _step_item(mut self, delta: Int):
+    def _step_item(mut self, delta: Int):
         if self.open_idx < 0:
             return
         var n = len(self.menus[self.open_idx].items)
@@ -472,7 +472,7 @@ struct MenuBar(Movable):
                 self.selected_item = i
                 return
 
-    fn _step_menu(mut self, delta: Int):
+    def _step_menu(mut self, delta: Int):
         var order = self._display_order_indices()
         if len(order) == 0:
             return
@@ -491,7 +491,7 @@ struct MenuBar(Movable):
             new_pos = 0
         self.open_menu(order[new_pos])
 
-    fn _activate_selected(mut self) -> MenuResult:
+    def _activate_selected(mut self) -> MenuResult:
         if self.open_idx < 0:
             return MenuResult(Optional[String](), False)
         var menu = self.menus[self.open_idx].copy()
@@ -504,7 +504,7 @@ struct MenuBar(Movable):
         self.open_menu(-1)
         return MenuResult(Optional[String](action), True)
 
-    fn handle_key(mut self, event: Event) -> MenuResult:
+    def handle_key(mut self, event: Event) -> MenuResult:
         """Keyboard navigation while a menu is open. ESC is handled by the
         owning Desktop (so it can also clear ESC-prefix state, etc.); we
         only handle Up/Down/Left/Right/Enter here."""
@@ -552,7 +552,7 @@ struct MenuBar(Movable):
 
     # --- events ------------------------------------------------------------
 
-    fn _menu_at(self, pos: Point, screen_width: Int) -> Int:
+    def _menu_at(self, pos: Point, screen_width: Int) -> Int:
         """Index of the visible menu-bar entry under ``pos``, or -1."""
         if pos.y != 0:
             return -1
@@ -564,7 +564,7 @@ struct MenuBar(Movable):
                 return i
         return -1
 
-    fn _item_at(self, pos: Point, screen_width: Int) -> Int:
+    def _item_at(self, pos: Point, screen_width: Int) -> Int:
         """Index of the dropdown item under ``pos``, or -1 (also -1 for
         separators and hits on the dropdown border)."""
         if self.open_idx < 0:
@@ -579,7 +579,7 @@ struct MenuBar(Movable):
             return -1
         return item_idx
 
-    fn handle_event(mut self, event: Event, screen_width: Int) -> MenuResult:
+    def handle_event(mut self, event: Event, screen_width: Int) -> MenuResult:
         if event.kind != EVENT_MOUSE:
             return MenuResult(Optional[String](), False)
 

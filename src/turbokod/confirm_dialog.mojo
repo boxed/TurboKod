@@ -58,7 +58,7 @@ struct ConfirmDialog(Movable):
     """Which button Enter activates. Defaults to No (safer choice for
     install / download prompts)."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.confirmed = False
@@ -67,7 +67,7 @@ struct ConfirmDialog(Movable):
         self._no_button = ShadowButton(_NO_LABEL, 0, 0)
         self._focus_yes = False
 
-    fn open(mut self, var message: String, default_yes: Bool = False):
+    def open(mut self, var message: String, default_yes: Bool = False):
         self.message = message^
         self.active = True
         self.submitted = False
@@ -78,7 +78,7 @@ struct ConfirmDialog(Movable):
         self._no_button.pressed = False
         self._no_button.pressed_inside = False
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.confirmed = False
@@ -89,7 +89,7 @@ struct ConfirmDialog(Movable):
         self._no_button.pressed = False
         self._no_button.pressed_inside = False
 
-    fn _layout(self, screen: Rect) -> Rect:
+    def _layout(self, screen: Rect) -> Rect:
         var width = _DEFAULT_WIDTH
         if width > screen.b.x - 4:
             width = screen.b.x - 4
@@ -114,7 +114,7 @@ struct ConfirmDialog(Movable):
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -154,11 +154,11 @@ struct ConfirmDialog(Movable):
         paint_shadow_button(canvas, self._yes_button, yes_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._no_button, no_face, LIGHT_GRAY)
 
-    fn _resolve(mut self, yes: Bool):
+    def _resolve(mut self, yes: Bool):
         self.confirmed = yes
         self.submitted = True
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the dialog."""
         if not self.active:
             return False
@@ -182,7 +182,7 @@ struct ConfirmDialog(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:

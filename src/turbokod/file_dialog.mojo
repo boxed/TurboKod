@@ -49,7 +49,7 @@ comptime _LIST_HEIGHT = _DIALOG_H - 7
 1 button face + 1 button shadow + 1 hint/bottom-border."""
 
 
-fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
+def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
@@ -68,7 +68,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 1)
     var current_dir_y = cursor.place()
     var list_y = cursor.place()
@@ -113,7 +113,7 @@ struct FileDialog(Movable):
     between paints. Repositioned to the right edge of the buttons
     row on every paint."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.selected_path = String("")
@@ -124,7 +124,7 @@ struct FileDialog(Movable):
         self.title = String(" Open File ")
         self._open_button = ShadowButton(String(" Open Project "), 0, 0)
 
-    fn open(mut self, var start_dir: String):
+    def open(mut self, var start_dir: String):
         self.active = True
         self.submitted = False
         self.selected_path = String("")
@@ -135,7 +135,7 @@ struct FileDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
 
-    fn open_directory(
+    def open_directory(
         mut self,
         var start_dir: String,
         var title: String = String(" Open Project "),
@@ -160,14 +160,14 @@ struct FileDialog(Movable):
         self._drag = Optional[Point]()
         self._open_button = ShadowButton(button_label^, 0, 0)
 
-    fn set_project(mut self, project: Optional[String]):
+    def set_project(mut self, project: Optional[String]):
         """Tell the dialog about the active project so the listing's
         jump-button row gets a ``Project`` entry pointing to its
         root. Pass ``Optional[String]()`` to clear it. Cheap and
         idempotent — call after ``open`` from the host."""
         self.browser.set_project(project)
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.selected_path = String("")
@@ -180,7 +180,7 @@ struct FileDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         # Turbo Vision palette: the dialog body sits on a light-gray
@@ -235,7 +235,7 @@ struct FileDialog(Movable):
 
     # --- events ------------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -274,7 +274,7 @@ struct FileDialog(Movable):
             return True
         return True
 
-    fn _activate_selection(mut self):
+    def _activate_selection(mut self):
         var name = self.browser.current_name()
         if len(name.as_bytes()) == 0:
             return
@@ -289,7 +289,7 @@ struct FileDialog(Movable):
 
     # --- mouse -------------------------------------------------------------
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         """Click in entry list selects; click on already-selected entry opens.
         Wheel up/down scrolls the listing. Clicks outside the dialog are
         swallowed (modal). Pressing on the title row begins a move-by-

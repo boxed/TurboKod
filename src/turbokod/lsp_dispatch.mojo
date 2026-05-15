@@ -36,7 +36,7 @@ from .lsp import (
 from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
 
 
-fn _lsp_debug_log(line: String):
+def _lsp_debug_log(line: String):
     """Append ``line`` (plus a trailing newline) to ``/tmp/turbokod-lsp.log``
     when that file already exists, or when ``TURBOKOD_LSP_LOG`` is set.
     No-op otherwise — ``touch /tmp/turbokod-lsp.log`` to enable, delete
@@ -172,7 +172,7 @@ struct CompletionItem(Copyable, Movable):
     var range_end_char: Int
     var additional_text_edits: List[TextEditEntry]
 
-    fn __init__(
+    def __init__(
         out self, var label: String, var insert_text: String, kind: Int,
         var detail: String, var sort_text: String, has_range: Bool,
         range_start_line: Int, range_start_char: Int,
@@ -191,7 +191,7 @@ struct CompletionItem(Copyable, Movable):
         self.range_end_char = range_end_char
         self.additional_text_edits = additional_text_edits^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.insert_text = copy.insert_text
         self.kind = copy.kind
@@ -249,7 +249,7 @@ struct _DiagnosticBucket(Copyable, Movable):
     var diags: List[Diagnostic]
     var consumed: Bool
 
-    fn __init__(
+    def __init__(
         out self, var path: String, var diags: List[Diagnostic],
         consumed: Bool,
     ):
@@ -257,7 +257,7 @@ struct _DiagnosticBucket(Copyable, Movable):
         self.diags = diags^
         self.consumed = consumed
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.path = copy.path
         self.diags = copy.diags.copy()
         self.consumed = copy.consumed
@@ -331,7 +331,7 @@ struct LspManager(Copyable, Movable):
     # overwrites the prior bucket's list and resets ``consumed``.
     var _diagnostic_buckets: List[_DiagnosticBucket]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
@@ -361,7 +361,7 @@ struct LspManager(Copyable, Movable):
         self._diagnostic_buckets = List[_DiagnosticBucket]()
         self._stderr_log = String("")
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
         # which leaks. We only declare ``Copyable`` so we can stash
         # managers in ``List[LspManager]``; the list is grown via ``^``
@@ -398,29 +398,29 @@ struct LspManager(Copyable, Movable):
         self._diagnostic_buckets = List[_DiagnosticBucket]()
         self._stderr_log = String("")
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.state == _STATE_READY \
             or self.state == _STATE_INITIALIZING
 
-    fn is_ready(self) -> Bool:
+    def is_ready(self) -> Bool:
         return self.state == _STATE_READY
 
-    fn is_failed(self) -> Bool:
+    def is_failed(self) -> Bool:
         return self.state == _STATE_FAILED
 
-    fn is_initializing(self) -> Bool:
+    def is_initializing(self) -> Bool:
         return self.state == _STATE_INITIALIZING
 
-    fn is_not_started(self) -> Bool:
+    def is_not_started(self) -> Bool:
         return self.state == _STATE_NOT_STARTED
 
-    fn inflight_word(self) -> String:
+    def inflight_word(self) -> String:
         return self._inflight_word
 
-    fn last_empty(self) -> Bool:
+    def last_empty(self) -> Bool:
         return self._last_empty
 
-    fn take_empty_word(mut self) -> String:
+    def take_empty_word(mut self) -> String:
         """One-shot consume of the just-resolved-empty word, or empty
         string when no fresh empty response is parked. Subsequent calls
         return empty until the next empty response lands. ``_last_empty``
@@ -433,28 +433,28 @@ struct LspManager(Copyable, Movable):
         self._empty_word = String("")
         return word^
 
-    fn clear_empty(mut self):
+    def clear_empty(mut self):
         """Drop the latched ``_last_empty`` flag. Host calls this after
         successfully handling an empty response some other way so the
         status bar stops claiming "no definition found"."""
         self._last_empty = False
 
-    fn inflight_symbols(self) -> Bool:
+    def inflight_symbols(self) -> Bool:
         return self._inflight_symbol_id != 0
 
-    fn symbols_empty(self) -> Bool:
+    def symbols_empty(self) -> Bool:
         return self._symbols_empty
 
-    fn language_id(self) -> String:
+    def language_id(self) -> String:
         return self._language_id
 
-    fn argv(self) -> List[String]:
+    def argv(self) -> List[String]:
         return self._argv.copy()
 
-    fn root_uri(self) -> String:
+    def root_uri(self) -> String:
         return self._root_uri
 
-    fn captured_stderr(self) -> String:
+    def captured_stderr(self) -> String:
         """Everything we've drained from the server's stderr since spawn,
         capped at 16 KB. Surfaced in the info window so the user can see
         what the server printed before exiting / hanging."""
@@ -462,7 +462,7 @@ struct LspManager(Copyable, Movable):
 
     # --- diagnostics -------------------------------------------------------
 
-    fn has_unconsumed_diagnostics_for(self, path: String) -> Bool:
+    def has_unconsumed_diagnostics_for(self, path: String) -> Bool:
         """True iff a fresh publishDiagnostics for ``path`` has landed
         since the last ``take_diagnostics_for`` call. Lets the host
         avoid re-running the apply path every frame for buffers whose
@@ -473,7 +473,7 @@ struct LspManager(Copyable, Movable):
                 return True
         return False
 
-    fn take_diagnostics_for(mut self, path: String) -> List[Diagnostic]:
+    def take_diagnostics_for(mut self, path: String) -> List[Diagnostic]:
         """Return the latest published diagnostic list for ``path`` and
         mark the bucket consumed so the host doesn't re-apply on every
         frame. Returns an empty list when nothing has been published
@@ -489,7 +489,7 @@ struct LspManager(Copyable, Movable):
                 return out^
         return List[Diagnostic]()
 
-    fn peek_diagnostics_for(self, path: String) -> List[Diagnostic]:
+    def peek_diagnostics_for(self, path: String) -> List[Diagnostic]:
         """Return the latest published diagnostic list for ``path``
         without flipping the consumed flag. Used when a fresh editor
         opens against an already-published path so it picks up the
@@ -501,7 +501,7 @@ struct LspManager(Copyable, Movable):
 
     # --- lifecycle ---------------------------------------------------------
 
-    fn start_with(
+    def start_with(
         mut self, language_id: String, argv: List[String], root_path: String,
     ):
         """Generic spawn: ``argv`` is the server command, ``language_id``
@@ -560,7 +560,7 @@ struct LspManager(Copyable, Movable):
             return
         self.state = _STATE_INITIALIZING
 
-    fn start_mojo(mut self, root_path: String, include_dirs: List[String]):
+    def start_mojo(mut self, root_path: String, include_dirs: List[String]):
         """Spawn ``mojo-lsp-server``. ``include_dirs`` map to ``-I <dir>``
         CLI flags — without these the server can't resolve project
         imports and every Cmd+click comes back empty."""
@@ -571,7 +571,7 @@ struct LspManager(Copyable, Movable):
             argv.append(include_dirs[i])
         self.start_with(String("mojo"), argv, root_path)
 
-    fn start_python(mut self, root_path: String) -> Bool:
+    def start_python(mut self, root_path: String) -> Bool:
         """Try the available Python LSP servers in priority order.
 
         Returns True if a candidate was found and a spawn was attempted
@@ -616,7 +616,7 @@ struct LspManager(Copyable, Movable):
             return True
         return False
 
-    fn shutdown(mut self):
+    def shutdown(mut self):
         """Best-effort: terminate the child if alive. Idempotent."""
         if self.state == _STATE_NOT_STARTED:
             return
@@ -625,7 +625,7 @@ struct LspManager(Copyable, Movable):
 
     # --- document lifecycle -----------------------------------------------
 
-    fn notify_opened(mut self, path: String, var text: String):
+    def notify_opened(mut self, path: String, var text: String):
         """Tell the server about a newly opened editor for ``path``.
 
         Queues until the server is READY. A second open of the same path
@@ -641,7 +641,7 @@ struct LspManager(Copyable, Movable):
             return
         self._send_open_or_change(path, text^)
 
-    fn notify_changed(mut self, path: String, var text: String):
+    def notify_changed(mut self, path: String, var text: String):
         """Send a didChange for ``path`` carrying the latest buffer
         text. No-op when the server isn't READY — for INITIALIZING the
         pending didOpen will eventually deliver some snapshot, and the
@@ -652,7 +652,7 @@ struct LspManager(Copyable, Movable):
             return
         self._send_open_or_change(path, text^)
 
-    fn request_definition(
+    def request_definition(
         mut self, path: String, line: Int, character: Int,
         var word: String, var text: String,
     ) -> Bool:
@@ -697,7 +697,7 @@ struct LspManager(Copyable, Movable):
         self._last_empty = False
         return True
 
-    fn request_document_symbols(
+    def request_document_symbols(
         mut self, path: String, var text: String,
     ) -> Bool:
         """Ask the server for ``textDocument/documentSymbol`` on ``path``.
@@ -727,11 +727,11 @@ struct LspManager(Copyable, Movable):
         self._symbols_empty = False
         return True
 
-    fn has_pending_symbols(self) -> Bool:
+    def has_pending_symbols(self) -> Bool:
         """True iff a parsed symbol response is parked, ready for ``take``."""
         return self._has_resolved_symbols
 
-    fn take_symbols(mut self) -> List[SymbolItem]:
+    def take_symbols(mut self) -> List[SymbolItem]:
         """Move the parked symbol list out of the manager.
 
         Pair with ``has_pending_symbols()`` — calling this when nothing is
@@ -743,7 +743,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_symbols = False
         return out^
 
-    fn request_completion(
+    def request_completion(
         mut self, path: String, line: Int, character: Int,
         var text: String, manual: Bool = False,
     ) -> Bool:
@@ -822,7 +822,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_completions = False
         return True
 
-    fn cancel_completion(mut self):
+    def cancel_completion(mut self):
         """Cancel any in-flight completion request.
 
         Sends ``$/cancelRequest`` so the server can drop work it has
@@ -855,26 +855,26 @@ struct LspManager(Copyable, Movable):
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
 
-    fn has_pending_completions(self) -> Bool:
+    def has_pending_completions(self) -> Bool:
         """True iff a parsed completion response is parked for ``take``."""
         return self._has_resolved_completions
 
-    fn pending_completion_path(self) -> String:
+    def pending_completion_path(self) -> String:
         return self._completion_path
 
-    fn pending_completion_row(self) -> Int:
+    def pending_completion_row(self) -> Int:
         return self._completion_row
 
-    fn pending_completion_col(self) -> Int:
+    def pending_completion_col(self) -> Int:
         return self._completion_col
 
-    fn pending_completion_manual(self) -> Bool:
+    def pending_completion_manual(self) -> Bool:
         """Echo the ``manual`` flag of the most recent completion
         request. True when the user explicitly invoked completion
         (Ctrl+Space), False for the as-you-type auto-trigger."""
         return self._completion_manual
 
-    fn take_completions(mut self) -> List[CompletionItem]:
+    def take_completions(mut self) -> List[CompletionItem]:
         """Move the parked completion list out of the manager.
 
         Pair with ``has_pending_completions()``. The flag is cleared
@@ -887,7 +887,7 @@ struct LspManager(Copyable, Movable):
 
     # --- frame-tick driver -------------------------------------------------
 
-    fn tick(mut self) -> Optional[DefinitionResolved]:
+    def tick(mut self) -> Optional[DefinitionResolved]:
         """Drive the state machine one step.
 
         Drains every framed message currently available, advancing the
@@ -1040,7 +1040,7 @@ struct LspManager(Copyable, Movable):
 
     # --- internals ---------------------------------------------------------
 
-    fn _absorb_stderr(mut self):
+    def _absorb_stderr(mut self):
         """Drain whatever's available on the server's stderr pipe and
         append it to the rolling capture. Bounded at 16 KB so a chatty
         server can't blow up our memory; once at the cap, new bytes are
@@ -1061,7 +1061,7 @@ struct LspManager(Copyable, Movable):
                 ptr=cb.unsafe_ptr(), length=room,
             ))
 
-    fn _on_publish_diagnostics(mut self, params: JsonValue):
+    def _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The
         spec is clear: ``publishDiagnostics`` is the *current* set, not
         an incremental update — empty array means "all clear.
@@ -1121,7 +1121,7 @@ struct LspManager(Copyable, Movable):
             _DiagnosticBucket(path, diags^, False),
         )
 
-    fn _on_initialize_response(mut self, msg: LspIncoming):
+    def _on_initialize_response(mut self, msg: LspIncoming):
         # Spec: send the ``initialized`` notification before any other request,
         # then we're free to didOpen / definition / etc.
         try:
@@ -1141,7 +1141,7 @@ struct LspManager(Copyable, Movable):
         for k in range(len(paths)):
             self._send_open_or_change(paths[k], texts[k])
 
-    fn _send_open_or_change(mut self, path: String, var text: String):
+    def _send_open_or_change(mut self, path: String, var text: String):
         var idx = -1
         for k in range(len(self._doc_paths)):
             if self._doc_paths[k] == path:
@@ -1156,7 +1156,7 @@ struct LspManager(Copyable, Movable):
             self._doc_versions[idx] = version
             self._send_did_change(path, version, text^)
 
-    fn _send_did_open(mut self, path: String, var text: String):
+    def _send_did_open(mut self, path: String, var text: String):
         _lsp_debug_log(
             String("→ didOpen lang=") + self._language_id
             + String(" path=") + path
@@ -1177,7 +1177,7 @@ struct LspManager(Copyable, Movable):
         except:
             pass
 
-    fn _send_did_change(mut self, path: String, version: Int, var text: String):
+    def _send_did_change(mut self, path: String, version: Int, var text: String):
         _lsp_debug_log(
             String("→ didChange lang=") + self._language_id
             + String(" path=") + path
@@ -1207,7 +1207,7 @@ struct LspManager(Copyable, Movable):
 # --- response parsing ------------------------------------------------------
 
 
-fn _parse_definition_result(v: JsonValue) -> Optional[DefinitionResolved]:
+def _parse_definition_result(v: JsonValue) -> Optional[DefinitionResolved]:
     """``textDocument/definition`` can return null, a single Location, or
     an array of Location/LocationLink. Pick the first usable hit."""
     if v.is_null():
@@ -1221,7 +1221,7 @@ fn _parse_definition_result(v: JsonValue) -> Optional[DefinitionResolved]:
     return Optional[DefinitionResolved]()
 
 
-fn _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
+def _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
     if not v.is_object():
         return Optional[DefinitionResolved]()
     # LocationLink: ``targetUri`` + ``targetSelectionRange`` (preferred) or
@@ -1261,7 +1261,7 @@ fn _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
 # --- symbol parsing --------------------------------------------------------
 
 
-fn _parse_symbols_result(v: JsonValue) -> List[SymbolItem]:
+def _parse_symbols_result(v: JsonValue) -> List[SymbolItem]:
     """``textDocument/documentSymbol`` returns ``DocumentSymbol[]`` (the
     hierarchical form, with ``range`` / ``selectionRange`` / ``children``)
     or the legacy flat ``SymbolInformation[]`` (with ``location`` and
@@ -1285,7 +1285,7 @@ fn _parse_symbols_result(v: JsonValue) -> List[SymbolItem]:
     return out^
 
 
-fn _parse_document_symbol(
+def _parse_document_symbol(
     v: JsonValue, container: String, mut out: List[SymbolItem],
 ):
     if not v.is_object():
@@ -1318,7 +1318,7 @@ fn _parse_document_symbol(
             _parse_document_symbol(children.array_at(i), sub_container, out)
 
 
-fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
+def _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     if not v.is_object():
         return
     var name_opt = v.object_get(String("name"))
@@ -1345,7 +1345,7 @@ fn _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
 
 
-fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
+def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     """``textDocument/completion`` returns either ``CompletionItem[]``
     directly, or a ``CompletionList`` object whose ``items`` field holds
     the array. Accept either, skip malformed entries.
@@ -1511,7 +1511,7 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     return out^
 
 
-fn _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
+def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
     """Parse the ``diagnostics`` array of a ``publishDiagnostics``
     notification into normalized buffer-relative entries. Skips
     malformed entries (missing range/severity is not fatal — the
@@ -1562,7 +1562,7 @@ fn _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
     return out^
 
 
-fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
+def _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
     """Extract ``(line, character)`` from a Range's ``start``. Returns
     ``(-1, -1)`` when the shape doesn't match — caller filters those out."""
     if not rng.is_object():
@@ -1583,7 +1583,7 @@ fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
 # --- URI <-> path ----------------------------------------------------------
 
 
-fn _first_nonempty_line(s: String) -> String:
+def _first_nonempty_line(s: String) -> String:
     """Return the first line of ``s`` that has at least one non-whitespace
     byte. Lets the FAILED state row in the LSP info window show a punchy
     one-liner from a multi-line stderr blob (the full thing is rendered
@@ -1613,7 +1613,7 @@ fn _first_nonempty_line(s: String) -> String:
     return String("")
 
 
-fn _trim_trailing_newline(s: String) -> String:
+def _trim_trailing_newline(s: String) -> String:
     """Drop trailing ``\\r``/``\\n`` so a one-line failure_reason from a
     stderr blob doesn't end with a dangling newline that confuses the
     info-window join."""
@@ -1626,7 +1626,7 @@ fn _trim_trailing_newline(s: String) -> String:
     return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
 
 
-fn _path_to_uri(path: String) -> String:
+def _path_to_uri(path: String) -> String:
     """``/abs/path`` → ``file:///abs/path``. Resolves through realpath when
     possible so the server sees the same canonical form across calls."""
     var resolved = realpath(path)
@@ -1638,7 +1638,7 @@ fn _path_to_uri(path: String) -> String:
     return String("file://") + p
 
 
-fn _uri_to_path(uri: String) -> String:
+def _uri_to_path(uri: String) -> String:
     """Strip the ``file://`` scheme. (We deliberately don't URL-decode
     yet — typical mojo-lsp-server responses send unencoded ASCII paths,
     and adding a decoder is more risk than reward right now.)"""

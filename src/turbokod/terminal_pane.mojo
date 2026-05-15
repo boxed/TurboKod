@@ -130,7 +130,7 @@ struct TerminalPane(Copyable, Movable):
     from ``working`` to ``waiting``. See ``ClaudeStateTracker`` for
     the smoothing contract."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.visible = False
         self.dock = BottomDockedPanel(preferred_height=14)
         # Window-style ``[■]`` close button at the top-LEFT, routed
@@ -155,7 +155,7 @@ struct TerminalPane(Copyable, Movable):
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
         self.dock = copy.dock
         self.focused = copy.focused
@@ -180,26 +180,26 @@ struct TerminalPane(Copyable, Movable):
 
     # --- chrome forwarders ---------------------------------------------
 
-    fn is_minimized(self) -> Bool:
+    def is_minimized(self) -> Bool:
         return self.dock.is_minimized()
 
-    fn is_maximized(self) -> Bool:
+    def is_maximized(self) -> Bool:
         return self.dock.is_maximized()
 
-    fn is_resizing(self) -> Bool:
+    def is_resizing(self) -> Bool:
         return self.dock.is_resizing()
 
-    fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
+    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
         if not self.visible:
             return False
         return self.dock.is_on_resize_edge(pos, panel)
 
-    fn consume_command_id(mut self) -> String:
+    def consume_command_id(mut self) -> String:
         return self.dock.consume_command_id()
 
     # --- lifecycle -----------------------------------------------------
 
-    fn open(mut self):
+    def open(mut self):
         """Show the pane and start the shell if needed. Idempotent —
         a second open with the pane already up just refocuses it.
         Called from the menu / hotkey toggle on Desktop."""
@@ -216,7 +216,7 @@ struct TerminalPane(Copyable, Movable):
                 + String("\r\n"),
             )
 
-    fn close(mut self):
+    def close(mut self):
         """Hide the pane and terminate the shell. The grid content is
         preserved (Vt state is intact) so re-opening shows what was on
         screen."""
@@ -224,7 +224,7 @@ struct TerminalPane(Copyable, Movable):
         self.focused = False
         self.pty.terminate()
 
-    fn ensure_started(mut self) raises:
+    def ensure_started(mut self) raises:
         """Spawn the shell if not already running.
 
         Honors ``$SHELL`` when set (most users want their login
@@ -248,7 +248,7 @@ struct TerminalPane(Copyable, Movable):
             cols=self.vt.cols, rows=self.vt.rows,
         )
 
-    fn restart(mut self):
+    def restart(mut self):
         """Kill the current shell and spawn a fresh one. Useful when
         the shell ends up in a wedged state."""
         self.pty.terminate()
@@ -264,7 +264,7 @@ struct TerminalPane(Copyable, Movable):
                 + String("\r\n"),
             )
 
-    fn clear(mut self):
+    def clear(mut self):
         """Wipe the visible grid. Doesn't kill the shell — equivalent
         to pressing Ctrl+L in most shells (and what the user expects
         from a Clear button)."""
@@ -272,7 +272,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- per-tick drain ------------------------------------------------
 
-    fn tick(mut self):
+    def tick(mut self):
         """Drain whatever's on the pty master right now and feed it
         into the emulator. Called by ``Desktop`` each frame so output
         appears live without the user pressing a key. Also flushes
@@ -309,7 +309,7 @@ struct TerminalPane(Copyable, Movable):
         if len(clip.as_bytes()) > 0:
             clipboard_copy(clip)
 
-    fn notify_focus_change(mut self, focused: Bool):
+    def notify_focus_change(mut self, focused: Bool):
         """Forward the host's focus-in / focus-out to the child when
         the child has enabled focus reporting (``?1004h``). Called by
         ``Desktop`` on ``EVENT_FOCUS_IN/OUT``. The reply is queued in
@@ -318,7 +318,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- title strip + chrome commands ---------------------------------
 
-    fn build_commands(self) -> List[TitleCommand]:
+    def build_commands(self) -> List[TitleCommand]:
         """Title-row strip — Clear and Restart. Close lives in the
         dock's own ``[■]`` button at the top-LEFT (see
         ``BottomDockedPanel.close_button_id``); both routes dispatch
@@ -328,7 +328,7 @@ struct TerminalPane(Copyable, Movable):
         out.append(TitleCommand(String("[Restart]"), _TERMINAL_RESTART))
         return out^
 
-    fn handle_command(mut self, id: String) -> Bool:
+    def handle_command(mut self, id: String) -> Bool:
         """Dispatch a title-command id that the host pulled off
         ``consume_command_id``. Returns True if handled."""
         if id == _TERMINAL_CLEAR:
@@ -341,7 +341,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- paint ---------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, panel: Rect):
+    def paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
             return
         var bg = Attr(WHITE, BLACK)
@@ -455,7 +455,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- selection helpers ---------------------------------------------
 
-    fn _cell_in_selection(self, r: Int, c: Int) -> Bool:
+    def _cell_in_selection(self, r: Int, c: Int) -> Bool:
         if not (self.sel_active or self.sel_dragging):
             return False
         var sr0 = self.sel_anchor_r
@@ -476,28 +476,28 @@ struct TerminalPane(Copyable, Movable):
             return c < sc1
         return True
 
-    fn _clear_selection(mut self):
+    def _clear_selection(mut self):
         self.sel_active = False
         self.sel_dragging = False
 
     # --- copy / selection delegates ------------------------------------
 
-    fn has_selection(self) -> Bool:
+    def has_selection(self) -> Bool:
         return self.sel_active
 
-    fn selected_text(self) -> String:
+    def selected_text(self) -> String:
         if not self.sel_active:
             return String("")
         return self._extract_selection()
 
-    fn copy_selection_to_clipboard(self) -> Bool:
+    def copy_selection_to_clipboard(self) -> Bool:
         var text = self.selected_text()
         if len(text.as_bytes()) == 0:
             return False
         clipboard_copy(text)
         return True
 
-    fn _extract_selection(self) -> String:
+    def _extract_selection(self) -> String:
         var sr0 = self.sel_anchor_r
         var sc0 = self.sel_anchor_c
         var sr1 = self.sel_focus_r
@@ -536,7 +536,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- mouse ---------------------------------------------------------
 
-    fn handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
         # Chrome wins first — close button, resize edge, etc.
@@ -617,7 +617,7 @@ struct TerminalPane(Copyable, Movable):
             return True
         return True
 
-    fn _forward_mouse_to_pty(
+    def _forward_mouse_to_pty(
         self, event: Event, motion: Bool, released: Bool,
     ):
         """Convert a panel-relative ``Event`` to an xterm mouse byte
@@ -652,7 +652,7 @@ struct TerminalPane(Copyable, Movable):
         if len(encoded.as_bytes()) > 0:
             self._write_to_pty(encoded^)
 
-    fn _grid_xy_for_pos(self, pos: Point) -> Tuple[Int, Int]:
+    def _grid_xy_for_pos(self, pos: Point) -> Tuple[Int, Int]:
         """Convert a screen position to ``(row, col)`` in the VT grid.
         Out-of-body positions clamp to the nearest edge — that's what
         you want for a drag that left the body."""
@@ -666,7 +666,7 @@ struct TerminalPane(Copyable, Movable):
         if c > self.vt.cols: c = self.vt.cols
         return (r, c)
 
-    fn _begin_drag(mut self, pos: Point):
+    def _begin_drag(mut self, pos: Point):
         var rc = self._grid_xy_for_pos(pos)
         self.sel_anchor_r = rc[0]
         self.sel_anchor_c = rc[1]
@@ -675,12 +675,12 @@ struct TerminalPane(Copyable, Movable):
         self.sel_dragging = True
         self.sel_active   = False
 
-    fn _extend_drag(mut self, pos: Point):
+    def _extend_drag(mut self, pos: Point):
         var rc = self._grid_xy_for_pos(pos)
         self.sel_focus_r = rc[0]
         self.sel_focus_c = rc[1]
 
-    fn _select_word_at(mut self, pos: Point):
+    def _select_word_at(mut self, pos: Point):
         """Expand selection to the word boundary at ``pos`` — the
         contiguous run of word-class cells around the click. "Word"
         is everything that isn't whitespace or punctuation; same
@@ -722,7 +722,7 @@ struct TerminalPane(Copyable, Movable):
         self.sel_dragging = False
         self.sel_active = True
 
-    fn _select_line_at(mut self, pos: Point):
+    def _select_line_at(mut self, pos: Point):
         """Expand selection to the full visual row at ``pos`` — same
         as triple-click in every terminal."""
         var rc = self._grid_xy_for_pos(pos)
@@ -734,7 +734,7 @@ struct TerminalPane(Copyable, Movable):
         self.sel_dragging = False
         self.sel_active = True
 
-    fn _end_drag(mut self, pos: Point):
+    def _end_drag(mut self, pos: Point):
         self._extend_drag(pos)
         self.sel_dragging = False
         # Tiny drag (or single click) → no selection. Saves the user
@@ -748,7 +748,7 @@ struct TerminalPane(Copyable, Movable):
 
     # --- keys ----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.focused:
             return False
         if event.kind == EVENT_PASTE:
@@ -814,7 +814,7 @@ struct TerminalPane(Copyable, Movable):
             return True
         return False
 
-    fn _write_to_pty(self, payload: String):
+    def _write_to_pty(self, payload: String):
         if not self.pty.alive or self.pty.master_fd < 0:
             return
         var bytes = payload.as_bytes()
@@ -841,7 +841,7 @@ struct TerminalPane(Copyable, Movable):
 # --- key encoding ---------------------------------------------------------
 
 
-fn _encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
+def _encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
     """Translate a Mojo key + modifier into the byte sequence a real
     pty child expects on its stdin. Mirrors what xterm sends.
 
@@ -994,21 +994,21 @@ fn _encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
     return String("")
 
 
-fn _csi_mod(letter: String, mod_byte: Int) -> String:
+def _csi_mod(letter: String, mod_byte: Int) -> String:
     """xterm modifier-encoded form: ``ESC [ 1 ; N c`` where ``c`` is
     the final letter (A/B/C/D/H/F/P/Q/R/S). Used for modified arrows,
     Home/End, and F1..F4."""
     return String("\x1b[1;") + String(mod_byte) + letter
 
 
-fn _csi_mod_tilde(num: Int, mod_byte: Int) -> String:
+def _csi_mod_tilde(num: Int, mod_byte: Int) -> String:
     """xterm modifier-encoded ``~``-terminated form: ``ESC [ n ; N ~``.
     Used for modified PageUp/PageDown/Insert/Delete and F5..F12."""
     return String("\x1b[") + String(num) + String(";") \
         + String(mod_byte) + String("~")
 
 
-fn _codepoint_to_utf8(cp: UInt32) -> String:
+def _codepoint_to_utf8(cp: UInt32) -> String:
     """Encode a Unicode codepoint to its UTF-8 byte sequence as a
     String. The pty child reads bytes — we have to convert from
     Mojo's codepoint-as-UInt32 representation back to wire bytes."""
@@ -1031,7 +1031,7 @@ fn _codepoint_to_utf8(cp: UInt32) -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
 
-fn _ascii_to_string(b: UInt8) -> String:
+def _ascii_to_string(b: UInt8) -> String:
     var buf = List[UInt8]()
     buf.append(b)
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=1))
@@ -1040,7 +1040,7 @@ fn _ascii_to_string(b: UInt8) -> String:
 # --- visual helpers -------------------------------------------------------
 
 
-fn _is_word_glyph(glyph: String) -> Bool:
+def _is_word_glyph(glyph: String) -> Bool:
     """Classify a cell's glyph for double-click word selection. The
     rule: word characters are letters / digits / underscore / dot /
     slash / dash — generous enough that file paths and identifiers
@@ -1069,7 +1069,7 @@ fn _is_word_glyph(glyph: String) -> Bool:
     return False
 
 
-fn _invert_attr(a: Attr) -> Attr:
+def _invert_attr(a: Attr) -> Attr:
     """Swap fg/bg for selection / cursor overlay. We don't toggle
     ``STYLE_REVERSE`` because the underlying cell may already have it
     set (vim's status line, e.g.) — swapping fg/bg lands at the same

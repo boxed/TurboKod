@@ -55,7 +55,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect, label_w: Int) -> _Layout:
+def _build_layout(rect: Rect, label_w: Int) -> _Layout:
     var cursor = RowCursor(rect.a.y + 1)
     var input_y = cursor.place()
     var list_y = cursor.place()
@@ -86,7 +86,7 @@ struct DocPick(Movable):
     # Cached input strip rect for mouse routing.
     var _input_rect: Rect
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.display = String("")
@@ -98,7 +98,7 @@ struct DocPick(Movable):
         self.selected_index = -1
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn open(
+    def open(
         mut self, var display: String, var entries: List[DocEntry],
     ):
         """Open the picker with ``entries`` already loaded."""
@@ -114,7 +114,7 @@ struct DocPick(Movable):
         self._input_rect = Rect(0, 0, 0, 0)
         self._refilter()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.display = String("")
@@ -128,7 +128,7 @@ struct DocPick(Movable):
 
     # --- filtering --------------------------------------------------------
 
-    fn _refilter(mut self):
+    def _refilter(mut self):
         self.matched = List[Int]()
         if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
@@ -151,7 +151,7 @@ struct DocPick(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         var width = 80
         var height = 22
         if width > screen.b.x - 4: width = screen.b.x - 4
@@ -160,7 +160,7 @@ struct DocPick(Movable):
         var y = (screen.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         if not self.active:
             return False
         var rect = self._rect(screen)
@@ -168,7 +168,7 @@ struct DocPick(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -234,7 +234,7 @@ struct DocPick(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -259,7 +259,7 @@ struct DocPick(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -294,7 +294,7 @@ struct DocPick(Movable):
         self.selected = idx
         return True
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         var visible = 16
         if self.selected < self.scroll:
             self.scroll = self.selected

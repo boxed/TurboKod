@@ -88,12 +88,12 @@ comptime POINTER_SHAPE_SUFFIX = String("\x07")
 comptime SEQ_BELL = String("\x07")
 
 
-fn move_cursor(x: Int, y: Int) -> String:
+def move_cursor(x: Int, y: Int) -> String:
     """1-based row;col cursor positioning."""
     return CSI + String(y + 1) + String(";") + String(x + 1) + String("H")
 
 
-fn beep():
+def beep():
     """Emit the terminal bell.
 
     Used as audible / visible feedback when the user presses a chord
@@ -104,7 +104,7 @@ fn beep():
     write_string(STDOUT_FD, SEQ_BELL)
 
 
-fn _contains(haystack: String, needle: String) -> Bool:
+def _contains(haystack: String, needle: String) -> Bool:
     var hb = haystack.as_bytes()
     var nb = needle.as_bytes()
     if len(nb) == 0:
@@ -122,7 +122,7 @@ fn _contains(haystack: String, needle: String) -> Bool:
     return False
 
 
-fn terminal_supports_extended_underline() -> Bool:
+def terminal_supports_extended_underline() -> Bool:
     """``True`` when the host terminal is known to handle the
     colon-separated ``SGR 4:3`` (curly underline) and ``SGR 58:5:N``
     (separately-colored underline) extensions.
@@ -225,7 +225,7 @@ struct Terminal:
     var _last_press_button: UInt8
     var _consec_press_count: UInt8
 
-    fn __init__(out self) raises:
+    def __init__(out self) raises:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
         self._started = False
         self._queue = List[Event]()
@@ -244,7 +244,7 @@ struct Terminal:
         self._last_press_button = UInt8(0)
         self._consec_press_count = UInt8(0)
 
-    fn _trace(self, var line: String):
+    def _trace(self, var line: String):
         """Write ``line`` to ``trace_fd`` if open. No newline added —
         callers include their own. Same shape as
         ``LspProcess.trace`` so a single log file makes sense."""
@@ -257,7 +257,7 @@ struct Terminal:
         f.write_bytes(bytes)
 
 
-    fn start(mut self) raises:
+    def start(mut self) raises:
         if self._started:
             return
         # Save current termios so stop() can restore it, then enter raw mode.
@@ -286,10 +286,10 @@ struct Terminal:
         write_string(STDOUT_FD, SEQ_CURSOR_HOME)
         self._started = True
 
-    fn _query_size_via_cursor(mut self) -> Tuple[Int, Int]:
+    def _query_size_via_cursor(mut self) -> Tuple[Int, Int]:
         return query_size_via_cursor(STDIN_FD, STDOUT_FD)
 
-    fn set_pointer_shape(mut self, shape: String) raises:
+    def set_pointer_shape(mut self, shape: String) raises:
         """Ask the host to display ``shape`` as the mouse-pointer icon.
 
         Only emitted when the bundled native app is detected (it sets
@@ -311,7 +311,7 @@ struct Terminal:
             POINTER_SHAPE_PREFIX + shape + POINTER_SHAPE_SUFFIX,
         )
 
-    fn stop(mut self) raises:
+    def stop(mut self) raises:
         if not self._started:
             return
         write_string(STDOUT_FD, SEQ_FOCUS_OFF)
@@ -335,7 +335,7 @@ struct Terminal:
         _ = tcsetattr(STDIN_FD, TCSANOW, self._orig_termios)
         self._started = False
 
-    fn refresh_size(mut self) raises -> Bool:
+    def refresh_size(mut self) raises -> Bool:
         """Re-query terminal dimensions; return True if they changed.
 
         Two paths land us here:
@@ -369,7 +369,7 @@ struct Terminal:
         self.height = size[1]
         return True
 
-    fn present(mut self, back: Canvas) raises:
+    def present(mut self, back: Canvas) raises:
         """Diff the back canvas against our front, write only what changed.
 
         Output is accumulated into a ``List[UInt8]`` and flushed in a single
@@ -406,7 +406,7 @@ struct Terminal:
                 self._front.set(x, y, nc)
         write_buffer(STDOUT_FD, buf)
 
-    fn poll_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
+    def poll_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
         """Return the next buffered event, or block up to ``timeout_ms`` reading more.
 
         Each ``read()`` burst (e.g. several SGR mouse reports during a drag) is
@@ -509,7 +509,7 @@ struct Terminal:
         self._trace(String("    poll_event:exit pop_queue\n"))
         return self._pop_queue()
 
-    fn _pop_queue(mut self) -> Event:
+    def _pop_queue(mut self) -> Event:
         var ev = self._queue[self._queue_head]
         self._queue_head += 1
         if self._queue_head >= len(self._queue):
@@ -518,7 +518,7 @@ struct Terminal:
             self._queue_head = 0
         return ev
 
-    fn _update_click_count(mut self, ev: Event) -> UInt8:
+    def _update_click_count(mut self, ev: Event) -> UInt8:
         """Compute the consecutive-press count for a mouse event.
 
         Only initial presses (``pressed=True``, ``motion=False``) of
@@ -556,7 +556,7 @@ struct Terminal:
         self._last_press_button = b
         return count
 
-    fn _flush_pending_as_esc(mut self):
+    def _flush_pending_as_esc(mut self):
         """Emit a KEY_ESC for the pending leading byte (must be ESC) and clear.
 
         Pending only ever holds the start of a partial escape sequence, which
@@ -572,7 +572,7 @@ struct Terminal:
 # --- Input parser -----------------------------------------------------------
 
 
-fn parse_input(data: String) -> Tuple[Event, Int]:
+def parse_input(data: String) -> Tuple[Event, Int]:
     """Parse one Event from the start of ``data``.
 
     Returns ``(event, bytes_consumed)``. When multiple events are buffered in a
@@ -587,14 +587,14 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     detection is a Terminal.poll_event responsibility — it disambiguates
     via a short follow-up timeout.
     """
-    if len(data) == 0:
+    if data.byte_length() == 0:
         return (Event(), 0)
     var bytes = data.as_bytes()
     var b0 = bytes[0]
 
     # Bare ESC, or ESC + something — could be Alt-modified key or a CSI/SS3.
     if b0 == 0x1B:
-        if len(data) == 1:
+        if data.byte_length() == 1:
             # Could be a real ESC keypress, or the first byte of an escape
             # sequence whose tail hasn't arrived yet. Defer to caller.
             return (Event(), 0)
@@ -604,7 +604,7 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
         if b1 == 0x5D:  # ']' — OSC
             return _parse_osc(data)
         if b1 == 0x4F:  # 'O' — SS3, used by some terminals for F1..F4
-            if len(data) < 3:
+            if data.byte_length() < 3:
                 # Partial SS3: tail not yet read.
                 return (Event(), 0)
             var b2 = bytes[2]
@@ -656,7 +656,7 @@ fn parse_input(data: String) -> Tuple[Event, Int]:
     return (Event.key_event(_decode_first_codepoint(data)), cp_len)
 
 
-fn _csi_mods_from(mod_num: Int) -> UInt8:
+def _csi_mods_from(mod_num: Int) -> UInt8:
     """Decode the xterm modifier-parameter (1 + shift|alt<<1|ctrl<<2|meta<<3).
 
     Bit 8 (meta) is the macOS Cmd key. xterm's standard mod values stop at
@@ -675,7 +675,7 @@ fn _csi_mods_from(mod_num: Int) -> UInt8:
     return mods
 
 
-fn _named_key_for_cp(cp: Int) -> UInt32:
+def _named_key_for_cp(cp: Int) -> UInt32:
     """If ``cp`` is one of the C0 control bytes that has its own
     ``KEY_*`` constant — CR/LF for Enter, TAB for Tab, BS/DEL for
     Backspace — return that constant. Returns ``0`` for everything
@@ -696,7 +696,7 @@ fn _named_key_for_cp(cp: Int) -> UInt32:
     return UInt32(0)
 
 
-fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
+def _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
     """Canonicalize ``Ctrl+letter`` to ``(lowercase letter, MOD_CTRL)``.
 
     Terminals deliver ``Ctrl+letter`` in two shapes:
@@ -718,7 +718,7 @@ fn _normalize_ctrl_letter(cp: Int, mods: UInt8) -> Tuple[UInt32, UInt8]:
     return (UInt32(c), MOD_CTRL)
 
 
-fn _parse_csi(data: String) -> Tuple[Event, Int]:
+def _parse_csi(data: String) -> Tuple[Event, Int]:
     """Parse a complete CSI sequence and return whatever event it represents.
 
     The parser scans to the CSI **final byte** (any byte in ``0x40..0x7E``)
@@ -879,7 +879,7 @@ fn _parse_csi(data: String) -> Tuple[Event, Int]:
     return (Event(), consumed)
 
 
-fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
+def _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
     """Parse `CSI < B ; X ; Y (M|m)`. Press/drag = M, release = m.
 
     If the buffer ends mid-sequence (read split a mouse report in two) we
@@ -941,7 +941,7 @@ fn _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
     return (Event(), 0)
 
 
-fn _parse_osc(data: String) -> Tuple[Event, Int]:
+def _parse_osc(data: String) -> Tuple[Event, Int]:
     """Parse a complete OSC sequence: ``ESC ] Ps ; Pt ST``.
 
     The terminator ST is either ``BEL`` (0x07) or ``ESC \\`` (0x1b 0x5c).
@@ -1027,7 +1027,7 @@ fn _parse_osc(data: String) -> Tuple[Event, Int]:
     return (Event.open_path_event(path^, line), consumed)
 
 
-fn _utf8_seq_len(b: UInt8) -> Int:
+def _utf8_seq_len(b: UInt8) -> Int:
     var ib = Int(b)
     if ib < 0x80:        return 1
     if (ib & 0xF8) == 0xF0: return 4
@@ -1036,7 +1036,7 @@ fn _utf8_seq_len(b: UInt8) -> Int:
     return 1
 
 
-fn _decode_first_codepoint(data: String) -> UInt32:
+def _decode_first_codepoint(data: String) -> UInt32:
     """Decode one UTF-8 codepoint from the start of ``data``."""
     var bytes = data.as_bytes()
     if len(bytes) == 0:

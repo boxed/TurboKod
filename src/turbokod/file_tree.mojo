@@ -50,7 +50,7 @@ struct FileTreeEntry(ImplicitlyCopyable, Movable):
     var is_expanded: Bool
 
 
-fn _strip_root_prefix(root: String, full: String) -> String:
+def _strip_root_prefix(root: String, full: String) -> String:
     """Return ``full`` minus the ``root + "/"`` prefix, or ``""`` when they
     coincide. Falls back to ``full`` if the prefix doesn't match, so the
     caller still gets a usable path."""
@@ -96,7 +96,7 @@ struct FileTree(Movable):
     directory. ``.git`` is always hidden — it's not in ``.gitignore``
     but git itself treats it as implicitly ignored."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.visible = False
         self.root = String("")
         self.width = FILE_TREE_WIDTH
@@ -110,7 +110,7 @@ struct FileTree(Movable):
         self._type_ahead = TypeAhead()
         self._gitignore = GitignoreMatcher()
 
-    fn open(mut self, var root: String):
+    def open(mut self, var root: String):
         self.root = root^
         self._gitignore = load_project_gitignore(self.root)
         self.entries = List[FileTreeEntry]()
@@ -124,7 +124,7 @@ struct FileTree(Movable):
         self.submitted = False
         self._type_ahead.reset()
 
-    fn close(mut self):
+    def close(mut self):
         self.visible = False
         self.entries = List[FileTreeEntry]()
         self.root = String("")
@@ -137,7 +137,7 @@ struct FileTree(Movable):
         self._resizing = False
         self._gitignore = GitignoreMatcher()
 
-    fn consume_open(mut self) -> Optional[String]:
+    def consume_open(mut self) -> Optional[String]:
         """If a file was just opened, return its path and clear the flag."""
         if not self.submitted:
             return Optional[String]()
@@ -148,7 +148,7 @@ struct FileTree(Movable):
 
     # --- tree mechanics ---------------------------------------------------
 
-    fn _list_dir(self, path: String, depth: Int) -> List[FileTreeEntry]:
+    def _list_dir(self, path: String, depth: Int) -> List[FileTreeEntry]:
         """Return the immediate children of ``path``, dirs first then files,
         each group sorted case-insensitively by name. ``.git`` is hidden
         and ``.gitignore``-matched entries are dropped; other dotfiles
@@ -186,7 +186,7 @@ struct FileTree(Movable):
             ))
         return out^
 
-    fn _toggle_expand(mut self, idx: Int):
+    def _toggle_expand(mut self, idx: Int):
         if idx < 0 or idx >= len(self.entries):
             return
         if not self.entries[idx].is_dir:
@@ -217,10 +217,10 @@ struct FileTree(Movable):
 
     # --- geometry & paint -------------------------------------------------
 
-    fn rect(self, screen: Rect) -> Rect:
+    def rect(self, screen: Rect) -> Rect:
         return Rect(screen.b.x - self.width, 1, screen.b.x, screen.b.y - 1)
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, screen: Rect):
         if not self.visible:
             return
         var area = self.rect(screen)
@@ -300,7 +300,7 @@ struct FileTree(Movable):
 
     # --- mouse ------------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Arrow / Enter / Esc when the panel has keyboard focus.
         Returns True iff the key was consumed. Esc releases focus
         without affecting visibility — the panel stays open and the
@@ -372,7 +372,7 @@ struct FileTree(Movable):
             return True
         return False
 
-    fn _clamp_width(self, want: Int, screen: Rect) -> Int:
+    def _clamp_width(self, want: Int, screen: Rect) -> Int:
         """Pin a proposed width to ``[FILE_TREE_MIN_WIDTH, screen.b.x -
         FILE_TREE_RIGHT_RESERVE]`` so a runaway drag can't shrink the
         editor area below something usable. Order of clamps matters on
@@ -387,7 +387,7 @@ struct FileTree(Movable):
             w = FILE_TREE_MIN_WIDTH
         return w
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         # Visible-window height isn't known without ``screen``, so
         # use a conservative fixed visible count — the listing is
         # right-docked at a fixed width and the host gives us at
@@ -402,7 +402,7 @@ struct FileTree(Movable):
         elif self.selected >= self.scroll + visible:
             self.scroll = self.selected - visible + 1
 
-    fn is_on_resize_edge(self, pos: Point, screen: Rect) -> Bool:
+    def is_on_resize_edge(self, pos: Point, screen: Rect) -> Bool:
         """Hit-test for the left border column — the row-tall handle the
         user drags to widen / narrow the panel. Used by the host to
         switch the mouse pointer to ``ew-resize`` while hovering."""
@@ -411,10 +411,10 @@ struct FileTree(Movable):
         var area = self.rect(screen)
         return pos.x == area.a.x and pos.y >= area.a.y and pos.y < area.b.y
 
-    fn is_resizing(self) -> Bool:
+    def is_resizing(self) -> Bool:
         return self._resizing
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         """Returns True iff the event was inside the panel (consumed)."""
         if not self.visible:
             return False

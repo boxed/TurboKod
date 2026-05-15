@@ -54,7 +54,7 @@ struct JumpShortcut(ImplicitlyCopyable, Movable):
     var x: Int
 
 
-fn jump_shortcuts(
+def jump_shortcuts(
     start_x: Int, project: Optional[String] = Optional[String](),
 ) -> List[JumpShortcut]:
     """Build the Project / Desktop / Home / Root button row, laid out
@@ -129,7 +129,7 @@ struct DirBrowser(Movable):
     ``(x, y)`` to the current row, and ``handle_jump_click`` runs
     every event through ``handle_mouse``."""
 
-    fn __init__(out self, dirs_only: Bool = False):
+    def __init__(out self, dirs_only: Bool = False):
         self.dir = String(".")
         self.entries = List[String]()
         self.entry_is_dir = List[Bool]()
@@ -146,7 +146,7 @@ struct DirBrowser(Movable):
         self._jump_buttons = List[ShadowButton]()
         self._rebuild_jump_buttons()
 
-    fn _rebuild_jump_buttons(mut self):
+    def _rebuild_jump_buttons(mut self):
         """Sync ``_jump_buttons`` to the current ``project``. Called
         from ``__init__`` and ``set_project``; the button labels are
         baked in once the row exists so the press-latch state
@@ -160,7 +160,7 @@ struct DirBrowser(Movable):
                 ShadowButton(labels[i].label, 0, 0),
             )
 
-    fn set_project(mut self, project: Optional[String]):
+    def set_project(mut self, project: Optional[String]):
         """Switch the active project (or clear it). Triggers a rebuild
         of the jump-button row so a ``Project`` entry appears /
         disappears in lockstep — the host calls this when opening a
@@ -169,13 +169,13 @@ struct DirBrowser(Movable):
         self.project = project
         self._rebuild_jump_buttons()
 
-    fn open(mut self, var start_dir: String):
+    def open(mut self, var start_dir: String):
         self.dir = start_dir^
         self.selected = 0
         self.scroll = 0
         self.refresh()
 
-    fn refresh(mut self):
+    def refresh(mut self):
         """Rebuild ``entries``/``entry_is_dir`` for the current ``dir``.
 
         ``..`` is prepended unconditionally so an empty / unreadable
@@ -213,7 +213,7 @@ struct DirBrowser(Movable):
         # match against entries that no longer exist.
         self._type_ahead.reset()
 
-    fn ascend(mut self):
+    def ascend(mut self):
         """Move ``self.dir`` to its parent. Canonicalizes via
         ``realpath`` first so a relative start dir like ``"."`` —
         whose parent under POSIX dirname semantics is itself — still
@@ -226,11 +226,11 @@ struct DirBrowser(Movable):
             self.dir = parent_path(self.dir)
         self.refresh()
 
-    fn descend(mut self, name: String):
+    def descend(mut self, name: String):
         self.dir = join_path(self.dir, name)
         self.refresh()
 
-    fn jump_to(mut self, var path: String):
+    def jump_to(mut self, var path: String):
         """Replace ``self.dir`` with ``path`` and rebuild the listing.
         Used by the Desktop / Home / Root shortcut buttons — same
         end-effect as a sequence of ``descend`` / ``ascend`` calls,
@@ -238,7 +238,7 @@ struct DirBrowser(Movable):
         self.dir = path^
         self.refresh()
 
-    fn paint_jump_buttons(mut self, mut canvas: Canvas, row: Rect):
+    def paint_jump_buttons(mut self, mut canvas: Canvas, row: Rect):
         """Paint the Desktop / Home / Root buttons across ``row``.
 
         Repositions the persistent ``_jump_buttons`` table to ``row``
@@ -260,7 +260,7 @@ struct DirBrowser(Movable):
                 canvas, self._jump_buttons[i], face, LIGHT_GRAY, row.b.x,
             )
 
-    fn handle_jump_click(mut self, event: Event, row: Rect) -> Bool:
+    def handle_jump_click(mut self, event: Event, row: Rect) -> Bool:
         """Route ``event`` through each jump button's ``handle_mouse``
         and run ``jump_to`` when one fires. Returns True iff the
         event was consumed by the button row.
@@ -295,17 +295,17 @@ struct DirBrowser(Movable):
             return True
         return False
 
-    fn current_name(self) -> String:
+    def current_name(self) -> String:
         if self.selected < 0 or self.selected >= len(self.entries):
             return String("")
         return self.entries[self.selected]
 
-    fn current_is_dir(self) -> Bool:
+    def current_is_dir(self) -> Bool:
         if self.selected < 0 or self.selected >= len(self.entries):
             return False
         return self.entry_is_dir[self.selected]
 
-    fn current_path(self) -> String:
+    def current_path(self) -> String:
         """Joined path of the highlighted entry, or ``self.dir`` when
         nothing is selected. Returns the parent dir for ``..``, not the
         literal ``"<dir>/.."`` — that's never what callers want."""
@@ -319,7 +319,7 @@ struct DirBrowser(Movable):
             return parent_path(self.dir)
         return join_path(self.dir, name)
 
-    fn move_by(mut self, delta: Int, list_h: Int):
+    def move_by(mut self, delta: Int, list_h: Int):
         """Bump the selection by ``delta`` rows and re-clip ``scroll`` so
         the new selection stays visible. ``list_h`` is the visible row
         count of the listing area (passed in because only the host knows
@@ -335,7 +335,7 @@ struct DirBrowser(Movable):
         self.selected = s
         self._scroll_to_selection(list_h)
 
-    fn set_selection(mut self, idx: Int, list_h: Int):
+    def set_selection(mut self, idx: Int, list_h: Int):
         var n = len(self.entries)
         if n == 0:
             return
@@ -347,7 +347,7 @@ struct DirBrowser(Movable):
         self.selected = s
         self._scroll_to_selection(list_h)
 
-    fn type_to_search(mut self, ch: String, list_h: Int) -> Bool:
+    def type_to_search(mut self, ch: String, list_h: Int) -> Bool:
         """Extend the type-to-search buffer with ``ch`` and jump the
         selection to the first entry whose name starts with the
         accumulated buffer (case-insensitive). Returns True if a
@@ -371,7 +371,7 @@ struct DirBrowser(Movable):
                 return True
         return False
 
-    fn _find_and_select(mut self, var prefix: String, list_h: Int) -> Bool:
+    def _find_and_select(mut self, var prefix: String, list_h: Int) -> Bool:
         """Locate the first entry (other than ``..``) whose name
         starts with ``prefix`` (case-insensitive). Returns True and
         updates the selection if one is found."""
@@ -386,7 +386,7 @@ struct DirBrowser(Movable):
                 return True
         return False
 
-    fn _scroll_to_selection(mut self, list_h: Int):
+    def _scroll_to_selection(mut self, list_h: Int):
         if list_h < 1:
             return
         if self.selected < self.scroll:
@@ -396,7 +396,7 @@ struct DirBrowser(Movable):
 
     # --- painting ---------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, list_rect: Rect, focused: Bool = True):
+    def paint(self, mut canvas: Canvas, list_rect: Rect, focused: Bool = True):
         """Paint the entry list inside ``list_rect``. The host paints the
         dialog frame, title, and the "current directory" line above; this
         method only touches the rectangle it was given.
@@ -453,7 +453,7 @@ struct DirBrowser(Movable):
 
     # --- mouse ------------------------------------------------------------
 
-    fn handle_list_mouse(
+    def handle_list_mouse(
         mut self, event: Event, list_rect: Rect,
     ) -> Int:
         """Process a mouse event scoped to the listing area. Returns:

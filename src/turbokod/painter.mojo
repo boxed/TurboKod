@@ -26,7 +26,7 @@ from .colors import Attr
 from .geometry import Point, Rect
 
 
-fn _codepoint_size(b: Int) -> Int:
+def _codepoint_size(b: Int) -> Int:
     """Byte length of the UTF-8 codepoint that begins with lead byte ``b``.
     Returns 1 for invalid leads so a stray continuation byte never traps
     a forward walk."""
@@ -46,10 +46,10 @@ struct Painter(Copyable, Movable):
     the clip; widgets pass a Painter and forget about boundaries."""
     var clip: Rect
 
-    fn __init__(out self, clip: Rect):
+    def __init__(out self, clip: Rect):
         self.clip = clip
 
-    fn put_text(
+    def put_text(
         self,
         mut canvas: Canvas,
         p: Point,
@@ -96,7 +96,7 @@ struct Painter(Copyable, Movable):
         var sub = String(StringSlice(unsafe_from_utf8=bytes[i:]))
         return canvas.put_text(Point(x, p.y), sub, attr, self.clip.b.x)
 
-    fn fill(
+    def fill(
         self,
         mut canvas: Canvas,
         rect: Rect,
@@ -110,7 +110,7 @@ struct Painter(Copyable, Movable):
             return
         canvas.fill(c, glyph, attr)
 
-    fn set(
+    def set(
         self,
         mut canvas: Canvas,
         x: Int, y: Int,
@@ -121,7 +121,7 @@ struct Painter(Copyable, Movable):
             return
         canvas.set(x, y, cell^)
 
-    fn set_attr(
+    def set_attr(
         self, mut canvas: Canvas, x: Int, y: Int, attr: Attr,
     ):
         if x < self.clip.a.x or x >= self.clip.b.x \
@@ -129,7 +129,7 @@ struct Painter(Copyable, Movable):
             return
         canvas.set_attr(x, y, attr)
 
-    fn draw_box(
+    def draw_box(
         self,
         mut canvas: Canvas,
         rect: Rect,
@@ -169,13 +169,13 @@ struct Painter(Copyable, Movable):
         self.set(canvas, x0, y1, Cell(bl, attr, 1))
         self.set(canvas, x1, y1, Cell(br, attr, 1))
 
-    fn sub(self, rect: Rect) -> Self:
+    def sub(self, rect: Rect) -> Self:
         """A Painter restricted to the intersection of ``rect`` and the
         current clip. Useful when a parent passes a wider painter and
         the child wants to constrain itself to a sub-area."""
         return Self(rect.intersect(self.clip))
 
-    fn draw_box_inner(
+    def draw_box_inner(
         self,
         mut canvas: Canvas,
         rect: Rect,

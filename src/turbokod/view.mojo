@@ -22,12 +22,12 @@ from .string_utils import display_columns
 
 trait Drawable:
     """Anything that can paint itself into a Canvas at a given rect."""
-    fn paint(self, mut canvas: Canvas, bounds: Rect): ...
+    def paint(self, mut canvas: Canvas, bounds: Rect): ...
 
 
 trait EventHandler:
     """Anything that can react to an event. Returns True if handled."""
-    fn handle(mut self, event: Event) -> Bool: ...
+    def handle(mut self, event: Event) -> Bool: ...
 
 
 # --- Concrete widgets -------------------------------------------------------
@@ -37,15 +37,15 @@ struct Label(Copyable, Movable, Drawable):
     var text: String
     var attr: Attr
 
-    fn __init__(out self, var text: String):
+    def __init__(out self, var text: String):
         self.text = text^
         self.attr = default_attr()
 
-    fn __init__(out self, var text: String, attr: Attr):
+    def __init__(out self, var text: String, attr: Attr):
         self.text = text^
         self.attr = attr
 
-    fn paint(self, mut canvas: Canvas, bounds: Rect):
+    def paint(self, mut canvas: Canvas, bounds: Rect):
         if bounds.is_empty():
             return
         # Center horizontally, top-align vertically.
@@ -63,17 +63,17 @@ struct Frame(Copyable, Movable, Drawable):
     var attr: Attr
     var double_line: Bool
 
-    fn __init__(out self, var title: String):
+    def __init__(out self, var title: String):
         self.title = title^
         self.attr = Attr(WHITE, BLUE)
         self.double_line = False
 
-    fn __init__(out self, var title: String, attr: Attr, double_line: Bool = False):
+    def __init__(out self, var title: String, attr: Attr, double_line: Bool = False):
         self.title = title^
         self.attr = attr
         self.double_line = double_line
 
-    fn paint(self, mut canvas: Canvas, bounds: Rect):
+    def paint(self, mut canvas: Canvas, bounds: Rect):
         if bounds.width() < 2 or bounds.height() < 2:
             return
         var painter = Painter(bounds)
@@ -82,7 +82,7 @@ struct Frame(Copyable, Movable, Drawable):
         if not interior.is_empty():
             painter.fill(canvas, interior, String(" "), self.attr)
         painter.draw_box(canvas, bounds, self.attr, self.double_line)
-        if len(self.title) > 0 and bounds.width() >= display_columns(self.title) + 4:
+        if self.title.byte_length() > 0 and bounds.width() >= display_columns(self.title) + 4:
             var label = String(" ") + self.title + String(" ")
             var label_len = display_columns(label)
             var x = bounds.a.x + (bounds.width() - label_len) // 2
@@ -94,15 +94,15 @@ struct Fill(Copyable, Movable, Drawable):
     var glyph: String
     var attr: Attr
 
-    fn __init__(out self):
+    def __init__(out self):
         self.glyph = String(" ")
         self.attr = Attr(LIGHT_GRAY, BLACK)
 
-    fn __init__(out self, var glyph: String, attr: Attr):
+    def __init__(out self, var glyph: String, attr: Attr):
         self.glyph = glyph^
         self.attr = attr
 
-    fn paint(self, mut canvas: Canvas, bounds: Rect):
+    def paint(self, mut canvas: Canvas, bounds: Rect):
         var painter = Painter(bounds)
         painter.fill(canvas, bounds, self.glyph, self.attr)
 
@@ -110,7 +110,7 @@ struct Fill(Copyable, Movable, Drawable):
 # --- Layout helpers ---------------------------------------------------------
 
 
-fn centered(outer: Rect, width: Int, height: Int) -> Rect:
+def centered(outer: Rect, width: Int, height: Int) -> Rect:
     """Return the rectangle of ``width × height`` centered inside ``outer``."""
     var x = outer.a.x + (outer.width() - width) // 2
     var y = outer.a.y + (outer.height() - height) // 2
@@ -147,12 +147,12 @@ struct RowCursor(Copyable, Movable):
     var gap: Int
     var _first: Bool
 
-    fn __init__(out self, start_y: Int, gap: Int = 1):
+    def __init__(out self, start_y: Int, gap: Int = 1):
         self.y = start_y
         self.gap = gap
         self._first = True
 
-    fn place(mut self, height: Int = 1) -> Int:
+    def place(mut self, height: Int = 1) -> Int:
         if not self._first:
             self.y = self.y + self.gap
         self._first = False
@@ -160,11 +160,11 @@ struct RowCursor(Copyable, Movable):
         self.y = self.y + height
         return start
 
-    fn place_tight(mut self, height: Int = 1) -> Int:
+    def place_tight(mut self, height: Int = 1) -> Int:
         self._first = False
         var start = self.y
         self.y = self.y + height
         return start
 
-    fn skip(mut self, rows: Int):
+    def skip(mut self, rows: Int):
         self.y = self.y + rows

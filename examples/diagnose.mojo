@@ -17,17 +17,17 @@ from turbokod.posix import (
 )
 
 
-fn _isatty(fd: Int32) -> Bool:
+def _isatty(fd: Int32) -> Bool:
     return external_call["isatty", Int32](fd) == Int32(1)
 
 
-fn _report_ioctl(label: String, fd: Int32):
+def _report_ioctl(label: String, fd: Int32):
     var size = query_winsize(fd)
     print(label, "(fd =", fd, ", isatty =", _isatty(fd), "):",
           size[0], "x", size[1])
 
 
-fn main() raises:
+def main() raises:
     print("--- turbokod terminal size diagnostics ---")
     print("TIOCGWINSZ =", hex(tiocgwinsz()))
     print()

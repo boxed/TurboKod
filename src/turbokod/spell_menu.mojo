@@ -32,7 +32,7 @@ from .string_utils import display_columns
 from .view import RowCursor
 
 
-fn _rows_top(rect: Rect) -> Int:
+def _rows_top(rect: Rect) -> Int:
     """Y of the first menu row. Driven by ``RowCursor`` so paint and
     hit-testing share one source of truth — the original code had
     ``rect.a.y + 1`` hardcoded in both ``paint`` and ``handle_mouse``."""
@@ -100,7 +100,7 @@ struct SpellMenu(Movable):
     it falls through to ``SPELL_ACTION_NONE``. The label still appears
     so the user gets a hint about why it's there."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.action = SPELL_ACTION_NONE
@@ -110,7 +110,7 @@ struct SpellMenu(Movable):
         self.selected = 0
         self.has_project = False
 
-    fn open(
+    def open(
         mut self, var word: String, anchor: Point, has_project: Bool,
     ):
         """Open the menu over ``word`` anchored at ``anchor`` (the
@@ -129,17 +129,17 @@ struct SpellMenu(Movable):
         self.action = SPELL_ACTION_NONE
         self.selected = 0
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.action = SPELL_ACTION_NONE
         self.word = String("")
 
-    fn _row_count(self) -> Int:
+    def _row_count(self) -> Int:
         # Always show both rows; project is greyed when ``not has_project``.
         return 2
 
-    fn _step(mut self, delta: Int):
+    def _step(mut self, delta: Int):
         var n = self._row_count()
         if n == 0:
             return
@@ -150,13 +150,13 @@ struct SpellMenu(Movable):
             i = 0
         self.selected = i
 
-    fn _resolve(mut self, action: Int):
+    def _resolve(mut self, action: Int):
         self.action = action
         self.submitted = True
 
     # --- layout / paint ---------------------------------------------------
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         """Where the popup will render. Width matches the longer
         label + 4 (left pad + label + right pad + 2 borders); height
         is ``rows + 2`` (two items + top/bottom borders).
@@ -181,7 +181,7 @@ struct SpellMenu(Movable):
                 y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var rect = self._rect(screen)
@@ -225,7 +225,7 @@ struct SpellMenu(Movable):
 
     # --- input ------------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed."""
         if not self.active:
             return False
@@ -255,7 +255,7 @@ struct SpellMenu(Movable):
         # underlying editor while the menu is up would be surprising.
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
         if not self.active:
             return SPELL_HIT_NONE
         if event.kind != EVENT_MOUSE:

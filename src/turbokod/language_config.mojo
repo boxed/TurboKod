@@ -38,10 +38,10 @@ struct ServerCandidate(Copyable, Movable):
     """One concrete binary + argv we can try to spawn for a language."""
     var argv: List[String]
 
-    fn __init__(out self, var argv: List[String]):
+    def __init__(out self, var argv: List[String]):
         self.argv = argv^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.argv = copy.argv.copy()
 
 
@@ -65,7 +65,7 @@ struct LanguageSpec(Copyable, Movable):
     var install_hint: String
     var comment_token: String
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var candidates: List[ServerCandidate],
@@ -78,7 +78,7 @@ struct LanguageSpec(Copyable, Movable):
         self.install_hint = install_hint^
         self.comment_token = comment_token^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.candidates = copy.candidates.copy()
@@ -86,13 +86,13 @@ struct LanguageSpec(Copyable, Movable):
         self.comment_token = copy.comment_token
 
 
-fn _candidate_from_json(v: JsonValue) -> ServerCandidate:
+def _candidate_from_json(v: JsonValue) -> ServerCandidate:
     if not v.is_object():
         return ServerCandidate(List[String]())
     return ServerCandidate(json_get_string_array(v, String("argv")))
 
 
-fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
+def _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
     """Translate one JSON catalog entry into a LanguageSpec. Returns
     None when required fields are missing — corrupt entries are skipped
     rather than aborting the whole load."""
@@ -120,7 +120,7 @@ fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
     ))
 
 
-fn built_in_servers() -> List[LanguageSpec]:
+def built_in_servers() -> List[LanguageSpec]:
     """Load the curated language-server catalog from the bundled JSON.
 
     Returns an empty list if the file is missing or malformed — every
@@ -145,7 +145,7 @@ fn built_in_servers() -> List[LanguageSpec]:
     return out^
 
 
-fn find_language_for_extension(
+def find_language_for_extension(
     specs: List[LanguageSpec], ext: String,
 ) -> Int:
     """Index of the spec whose ``file_types`` contains ``ext``, or -1.
@@ -163,14 +163,14 @@ fn find_language_for_extension(
     return -1
 
 
-fn find_language_by_id(specs: List[LanguageSpec], language_id: String) -> Int:
+def find_language_by_id(specs: List[LanguageSpec], language_id: String) -> Int:
     for i in range(len(specs)):
         if specs[i].language_id == language_id:
             return i
     return -1
 
 
-fn dependency_dirs_for_language_id(language_id: String) -> List[String]:
+def dependency_dirs_for_language_id(language_id: String) -> List[String]:
     """Directory names (path-segments, not globs) that hold a language's
     third-party dependencies rather than user source.
 
@@ -191,7 +191,7 @@ fn dependency_dirs_for_language_id(language_id: String) -> List[String]:
     return out^
 
 
-fn apply_language_overrides(
+def apply_language_overrides(
     var specs: List[LanguageSpec],
     overrides: List[LanguageServerOverride],
 ) -> List[LanguageSpec]:

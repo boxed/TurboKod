@@ -22,28 +22,28 @@ struct SearchOptions(ImplicitlyCopyable, Movable):
     var whole_word: Bool
     var regex: Bool
 
-    fn __init__(out self):
+    def __init__(out self):
         self.case_sensitive = False
         self.whole_word = False
         self.regex = False
 
-    fn __init__(
+    def __init__(
         out self, case_sensitive: Bool, whole_word: Bool, regex: Bool,
     ):
         self.case_sensitive = case_sensitive
         self.whole_word = whole_word
         self.regex = regex
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.case_sensitive = copy.case_sensitive
         self.whole_word = copy.whole_word
         self.regex = copy.regex
 
-    fn any_set(self) -> Bool:
+    def any_set(self) -> Bool:
         return self.case_sensitive or self.whole_word or self.regex
 
 
-fn default_search_options() -> SearchOptions:
+def default_search_options() -> SearchOptions:
     """Factory for the all-flags-off default. Used as the default
     argument value for ``find_next`` / ``find_prev`` / ``replace_all``
     and the project-wide variants so callers that don't care about
@@ -52,7 +52,7 @@ fn default_search_options() -> SearchOptions:
     return SearchOptions()
 
 
-fn regex_escape_literal(needle: String) -> String:
+def regex_escape_literal(needle: String) -> String:
     """Escape ``needle`` so libonig treats every byte as literal. Used
     when the user has opted into whole-word or case-insensitive but
     *not* regex — we still need a regex to express the boundary or
@@ -75,7 +75,7 @@ fn regex_escape_literal(needle: String) -> String:
     return out
 
 
-fn build_search_regex(
+def build_search_regex(
     needle: String, opts: SearchOptions,
 ) -> Optional[OnigRegex]:
     """Compile ``needle`` into a regex honoring ``opts`` flags, or

@@ -53,7 +53,7 @@ comptime _FOCUS_INPUT   = UInt8(0)
 comptime _FOCUS_LISTING = UInt8(1)
 
 
-fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
+def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
@@ -75,7 +75,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 2)
     var input_y = cursor.place()
     var current_dir_y = cursor.place()
@@ -111,7 +111,7 @@ struct SaveAsDialog(Movable):
     """Cursor offset within the dialog at drag-start; ``None`` means
     not currently dragging."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.filename = TextField()
@@ -121,7 +121,7 @@ struct SaveAsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
 
-    fn open(mut self, var start_path: String):
+    def open(mut self, var start_path: String):
         """Seed the dialog from a path. ``start_path`` may be empty (a
         brand-new buffer): in that case the listing starts at ``"."``
         and the filename input is empty.
@@ -143,7 +143,7 @@ struct SaveAsDialog(Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.filename = TextField()
@@ -155,7 +155,7 @@ struct SaveAsDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         # Same Turbo Vision palette as ``FileDialog``: light-gray
@@ -203,7 +203,7 @@ struct SaveAsDialog(Movable):
 
     # --- key handling -----------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -266,7 +266,7 @@ struct SaveAsDialog(Movable):
                 return True
         return True
 
-    fn _submit(mut self):
+    def _submit(mut self):
         """Stamp ``selected_path`` and flip the submit flag — but only
         when the filename input has at least one character. An empty
         filename would happily ``join_path`` to a trailing-slash path
@@ -281,7 +281,7 @@ struct SaveAsDialog(Movable):
 
     # --- mouse ------------------------------------------------------------
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True iff ``pos`` lies on the editable filename row. Used by
         the host to hint a text-cursor shape over the input but a
         default arrow over the listing and buttons."""
@@ -291,7 +291,7 @@ struct SaveAsDialog(Movable):
             _dialog_rect(screen, self.pos),
         ).input_rect.contains(pos)
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:

@@ -263,7 +263,7 @@ struct DebugPane(Copyable, Movable):
     on it — preserves the click point relative to the thumb so the
     drag doesn't snap the thumb to mouse-y."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.visible = False
         self.dock = BottomDockedPanel(preferred_height=14)
         self.status_text = String("")
@@ -295,7 +295,7 @@ struct DebugPane(Copyable, Movable):
         self._output_scrolling = False
         self._output_drag_offset = 0
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
         self.dock = copy.dock
         self.status_text = copy.status_text
@@ -327,28 +327,28 @@ struct DebugPane(Copyable, Movable):
 
     # --- setters (used by Desktop) ---------------------------------------
 
-    fn set_status(mut self, var text: String):
+    def set_status(mut self, var text: String):
         self.status_text = text^
 
-    fn set_mode(mut self, mode: UInt8):
+    def set_mode(mut self, mode: UInt8):
         self.mode = mode
 
-    fn set_commands(mut self, var commands: List[TitleCommand]):
+    def set_commands(mut self, var commands: List[TitleCommand]):
         """Replace the title-row command strip. Called by the host
         each tick so the visible buttons track DAP state — the pane
         just paints what's handed in."""
         self.dock.set_commands(commands^)
 
-    fn is_minimized(self) -> Bool:
+    def is_minimized(self) -> Bool:
         return self.dock.is_minimized()
 
-    fn is_maximized(self) -> Bool:
+    def is_maximized(self) -> Bool:
         return self.dock.is_maximized()
 
-    fn set_state(mut self, state: UInt8):
+    def set_state(mut self, state: UInt8):
         self.dock.set_state(state)
 
-    fn rebuild_inspect(
+    def rebuild_inspect(
         mut self,
         var frames: List[DapStackFrame],
         var locals_label: String,
@@ -404,7 +404,7 @@ struct DebugPane(Copyable, Movable):
         self.stack_scroll = 0
         self.right_scroll = 0
 
-    fn splice_children_at(
+    def splice_children_at(
         mut self, parent_row: Int, child_depth: Int,
         var children: List[DapVariable],
     ):
@@ -433,7 +433,7 @@ struct DebugPane(Copyable, Movable):
                     ))
         self.rows = out^
 
-    fn collapse_at(mut self, parent_row: Int):
+    def collapse_at(mut self, parent_row: Int):
         """Remove all children of ``parent_row`` (rows whose depth is
         greater than the parent's). Also clears ``expanded`` on the
         parent. Idempotent: collapsing an unexpanded row is a no-op."""
@@ -464,7 +464,7 @@ struct DebugPane(Copyable, Movable):
             i += 1
         self.rows = out^
 
-    fn append_output(
+    def append_output(
         mut self, var text: String, category: UInt8 = PANE_OUT_STDOUT,
     ):
         """Append a single output blob, splitting on ``\\n`` so a
@@ -479,7 +479,7 @@ struct DebugPane(Copyable, Movable):
             attr = Attr(LIGHT_GRAY, BLACK)
         self.output.append(text^, attr)
 
-    fn clear(mut self):
+    def clear(mut self):
         """Wipe inspect state (stack/locals/watches). Called on
         terminate / failure. The Output ``TextLog`` is preserved by
         design — the user often wants to scroll back through the run
@@ -492,7 +492,7 @@ struct DebugPane(Copyable, Movable):
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
 
-    fn clear_all(mut self):
+    def clear_all(mut self):
         """Wipe inspect state *and* the Output log. Called on the start
         of a new run / debug / test session — preserving the previous
         session's output across a fresh launch is more confusing than
@@ -503,7 +503,7 @@ struct DebugPane(Copyable, Movable):
 
     # --- pending-intent accessors ----------------------------------------
 
-    fn consume_frame_click(mut self) -> Tuple[Int, Int]:
+    def consume_frame_click(mut self) -> Tuple[Int, Int]:
         """Returns ``(frame_id, frame_index)`` if a frame was just
         clicked, ``(-1, -1)`` otherwise."""
         var fid = self.pending_frame_id
@@ -512,7 +512,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_frame_index = -1
         return (fid, idx)
 
-    fn consume_expand(mut self) -> Tuple[Int, Int, Int]:
+    def consume_expand(mut self) -> Tuple[Int, Int, Int]:
         """Returns ``(variables_reference, parent_row, child_depth)``
         for a freshly clicked expansion, or ``(-1, -1, 0)``."""
         var r = self.pending_expand_ref
@@ -523,17 +523,17 @@ struct DebugPane(Copyable, Movable):
         self.pending_expand_depth = 0
         return (r, row, depth)
 
-    fn consume_collapse(mut self) -> Int:
+    def consume_collapse(mut self) -> Int:
         var row = self.pending_collapse_row
         self.pending_collapse_row = -1
         return row
 
-    fn consume_command_id(mut self) -> String:
+    def consume_command_id(mut self) -> String:
         """Returns the id of a freshly clicked title-command (if any)
         and clears the latch. Empty string means no click pending."""
         return self.dock.consume_command_id()
 
-    fn consume_open_request(mut self) -> Tuple[String, Int]:
+    def consume_open_request(mut self) -> Tuple[String, Int]:
         """Returns ``(path, line)`` (1-based) for a freshly clicked
         output-log link, or ``("", 0)`` when nothing is pending. The
         host calls ``open_file_at`` with ``line - 1`` since
@@ -547,7 +547,7 @@ struct DebugPane(Copyable, Movable):
 
     # --- paint -----------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, panel: Rect):
+    def paint(mut self, mut canvas: Canvas, panel: Rect):
         """Paint inspect (top) + output (bottom) sections. Stamps the
         screen-y origins so ``handle_mouse`` can later map clicks back
         to row indices.
@@ -836,7 +836,7 @@ struct DebugPane(Copyable, Movable):
 
     # --- input -----------------------------------------------------------
 
-    fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
+    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
         """Hit-test for the top-border row — the pane's drag handle.
         Used by the host to switch the mouse pointer to ``ns-resize``
         on hover."""
@@ -844,10 +844,10 @@ struct DebugPane(Copyable, Movable):
             return False
         return self.dock.is_on_resize_edge(pos, panel)
 
-    fn is_resizing(self) -> Bool:
+    def is_resizing(self) -> Bool:
         return self.dock.is_resizing()
 
-    fn _output_scrollbar(self) -> VScrollbar:
+    def _output_scrollbar(self) -> VScrollbar:
         """Reconstruct the output scrollbar value from the last paint's
         bookkeeping. ``present()`` is False when the bar wasn't drawn."""
         if self._last_output_sb_x < 0:
@@ -860,7 +860,7 @@ struct DebugPane(Copyable, Movable):
             self.output.last_first_visual,
         )
 
-    fn handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
         """Return True if the click landed in the pane (consumed),
         False to let it fall through to the workspace."""
         if event.kind != EVENT_MOUSE:
@@ -968,7 +968,7 @@ struct DebugPane(Copyable, Movable):
             return self.output.handle_mouse(event)
         return True
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Arrow keys / PageUp / End scroll the focused pane.
         Returns True if the key was consumed."""
         if not self.focused:
@@ -1007,7 +1007,7 @@ struct DebugPane(Copyable, Movable):
             return True
         return False
 
-    fn _on_row_click(mut self, row_idx: Int):
+    def _on_row_click(mut self, row_idx: Int):
         var r = self.rows[row_idx]
         if r.kind == PANE_ROW_FRAME:
             self.pending_frame_id = r.ref_id
@@ -1021,7 +1021,7 @@ struct DebugPane(Copyable, Movable):
                 self.pending_expand_row = row_idx
                 self.pending_expand_depth = r.depth + 1
 
-    fn _scroll_stack(mut self, delta: Int):
+    def _scroll_stack(mut self, delta: Int):
         var ns = self.stack_scroll + delta
         if ns < 0:
             ns = 0
@@ -1032,7 +1032,7 @@ struct DebugPane(Copyable, Movable):
             ns = max_s
         self.stack_scroll = ns
 
-    fn _scroll_right(mut self, delta: Int):
+    def _scroll_right(mut self, delta: Int):
         var ns = self.right_scroll + delta
         if ns < 0:
             ns = 0
@@ -1043,7 +1043,7 @@ struct DebugPane(Copyable, Movable):
             ns = max_s
         self.right_scroll = ns
 
-    fn _compute_columns(mut self):
+    def _compute_columns(mut self):
         """Partition ``rows`` into left (Stack) and right
         (Locals / Watches) absolute-index lists. The first HEADER row
         plus its trailing FRAME rows go left; everything else goes
@@ -1082,24 +1082,24 @@ struct DebugPane(Copyable, Movable):
     # These exist so the host (Desktop) can keep using the pane-level
     # API surface; everything routes to ``self.output``.
 
-    fn has_selection(self) -> Bool:
+    def has_selection(self) -> Bool:
         return self.output.has_selection()
 
-    fn selected_text(self) -> String:
+    def selected_text(self) -> String:
         return self.output.selected_text()
 
-    fn copy_selection_to_clipboard(self) -> Bool:
+    def copy_selection_to_clipboard(self) -> Bool:
         return self.output.copy_to_clipboard()
 
 
 # --- formatting helpers ---------------------------------------------------
 
 
-fn _format_variable(name: String, value: String) -> String:
+def _format_variable(name: String, value: String) -> String:
     return name + String(" = ") + value
 
 
-fn _type_attr(type_name: String) -> Attr:
+def _type_attr(type_name: String) -> Attr:
     """Color for a Python/Mojo value type, mirroring what the syntax
     highlighter would paint a literal of that type. ``str``/``bytes``
     take the string-literal color, numerics the number color, bool/None
@@ -1124,7 +1124,7 @@ fn _type_attr(type_name: String) -> Attr:
     return Attr(LIGHT_YELLOW, BLACK)
 
 
-fn _basename(path: String) -> String:
+def _basename(path: String) -> String:
     var b = path.as_bytes()
     var n = len(b)
     var i = n - 1
@@ -1137,7 +1137,7 @@ fn _basename(path: String) -> String:
     return path
 
 
-fn _pad_right(s: String, width: Int) -> String:
+def _pad_right(s: String, width: Int) -> String:
     var n = len(s.as_bytes())
     if n >= width:
         if n > width:
@@ -1167,7 +1167,7 @@ struct _LinkHit(ImplicitlyCopyable, Movable):
     var line: Int        # 1-based
 
 
-fn _extract_python_traceback_links(line: String) -> List[_LinkHit]:
+def _extract_python_traceback_links(line: String) -> List[_LinkHit]:
     """Find every ``File "<path>", line <N>`` span in ``line``.
 
     Matches Python's traceback format. The trailing ``, in <name>`` is

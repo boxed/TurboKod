@@ -15,7 +15,7 @@ from std.collections.list import List
 from turbokod.lsp import LspProcess
 
 
-fn main() raises:
+def main() raises:
     var argv = List[String]()
     argv.append(String("sleep"))
     argv.append(String("60"))

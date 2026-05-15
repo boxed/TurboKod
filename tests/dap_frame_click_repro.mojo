@@ -34,11 +34,11 @@ from turbokod.file_io import write_file
 from turbokod.posix import monotonic_ms
 
 
-fn _sleep_ms(ms: Int):
+def _sleep_ms(ms: Int):
     _ = external_call["usleep", Int32](Int32(ms * 1000))
 
 
-fn _wait_for(
+def _wait_for(
     mut mgr: DapManager, label: String, deadline_ms: Int,
 ) raises -> Bool:
     """Tick until either the manager reports has_X for ``label`` or
@@ -69,7 +69,7 @@ fn _wait_for(
     return False
 
 
-fn main() raises:
+def main() raises:
     var test_path = String("/tmp/dap_click_test.py")
     var src = String("def foo(a, b):\n")             # 1
     src = src + String("    x = a + b\n")             # 2 ← breakpoint here

@@ -81,7 +81,7 @@ shadow). Used to carve out space at the right edge of the Program
 row so the editable strip doesn't overrun the button."""
 
 
-fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
+def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
@@ -105,7 +105,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var bottom_buttons_y: Int
     var label_x: Int
 
-    fn field_rects(self) -> List[Rect]:
+    def field_rects(self) -> List[Rect]:
         """Form-input row rects in registration order
         (``_FOCUS_PROGRAM``, ``_FOCUS_ARGS``, ``_FOCUS_CWD``) — what
         ``Form.handle_mouse`` expects."""
@@ -116,7 +116,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
         return rects^
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 2)
     var lang_y = cursor.place()
     var program_y = cursor.place()
@@ -194,7 +194,7 @@ struct ActionEditor(Movable):
     var form: Form
     var _buttons: List[_PlacedButton]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.entry = OnSaveAction()
@@ -219,7 +219,7 @@ struct ActionEditor(Movable):
             ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
         ))
 
-    fn open(mut self, var entry: OnSaveAction, edit_index: Int):
+    def open(mut self, var entry: OnSaveAction, edit_index: Int):
         """Begin editing ``entry``. ``edit_index = -1`` signals
         "new"; any other value is the host-list slot being edited."""
         # Capture the language id before consuming the entry — Mojo's
@@ -245,7 +245,7 @@ struct ActionEditor(Movable):
         self.form.set_text(_FOCUS_ARGS, seed_args^)
         self.form.set_text(_FOCUS_CWD, seed_cwd^)
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.entry = OnSaveAction()
@@ -263,7 +263,7 @@ struct ActionEditor(Movable):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
 
-    fn value(self) -> OnSaveAction:
+    def value(self) -> OnSaveAction:
         # Snapshot the editable fields back into ``entry`` before
         # returning. Edits during the dialog's life live on the
         # TextFields; ``entry`` is the host-facing record, populated
@@ -276,7 +276,7 @@ struct ActionEditor(Movable):
 
     # --- painting ---------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
@@ -349,20 +349,20 @@ struct ActionEditor(Movable):
         if self.file_dialog.active:
             self.file_dialog.paint(canvas, screen)
 
-    fn _lang_dropdown(self, current: String) -> Dropdown:
+    def _lang_dropdown(self, current: String) -> Dropdown:
         """Test-only convenience: build a one-shot dropdown the way
         ``open`` would. Production paint/event paths read from
         ``self.lang_dropdown`` directly so the open state persists."""
         return _build_lang_dropdown(current)
 
-    fn _paint_lang(self, mut canvas: Canvas, layout: _Layout):
+    def _paint_lang(self, mut canvas: Canvas, layout: _Layout):
         var has_focus = self.focus == _FOCUS_LANG
         self.lang_dropdown.paint(
             canvas, layout.lang_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
 
-    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
+    def _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
         # Browse sits at the right edge of the Program row.
         var browse_y = layout.program_rect.a.y
         var browse_w = self._buttons[0].button.face_width()
@@ -379,7 +379,7 @@ struct ActionEditor(Movable):
         for i in range(len(self._buttons)):
             self._paint_button(canvas, i)
 
-    fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
+    def _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
         var face: Attr
         if self.focus == pb.focus:
@@ -390,7 +390,7 @@ struct ActionEditor(Movable):
 
     # --- key handling -----------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if self.file_dialog.active:
@@ -447,7 +447,7 @@ struct ActionEditor(Movable):
             return True
         return True
 
-    fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
+    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         var n = _FOCUS_COUNT
         var idx = Int(current)
         if backward:
@@ -456,12 +456,12 @@ struct ActionEditor(Movable):
             idx = (idx + 1) % n
         return UInt8(idx)
 
-    fn _cycle_lang(mut self, event: Event):
+    def _cycle_lang(mut self, event: Event):
         if not self.lang_dropdown.handle_key(event):
             return
         self.entry.language_id = self.lang_dropdown.value()
 
-    fn _activate_focus(mut self) -> Bool:
+    def _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_BROWSE:
             self._open_browse()
             return True
@@ -480,7 +480,7 @@ struct ActionEditor(Movable):
         self.focus = self._next_focus(self.focus, False)
         return True
 
-    fn _open_browse(mut self):
+    def _open_browse(mut self):
         """Seed the file dialog at the directory of the current program
         path, or at the user's home when that's empty. The picker is
         modal-on-top of this dialog — events route to it until it
@@ -501,7 +501,7 @@ struct ActionEditor(Movable):
                 seed = String("/")
         self.file_dialog.open(seed^)
 
-    fn _maybe_consume_browse(mut self):
+    def _maybe_consume_browse(mut self):
         if not self.file_dialog.submitted:
             return
         var path = self.file_dialog.selected_path
@@ -511,7 +511,7 @@ struct ActionEditor(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if self.file_dialog.active:
@@ -593,7 +593,7 @@ struct ActionEditor(Movable):
             return True
         return True
 
-    fn _dispatch_buttons(mut self, event: Event) -> Bool:
+    def _dispatch_buttons(mut self, event: Event) -> Bool:
         for i in range(len(self._buttons)):
             var status = self._buttons[i].button.handle_mouse(event)
             if status == BUTTON_NONE:
@@ -608,7 +608,7 @@ struct ActionEditor(Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _build_lang_dropdown(var current: String) -> Dropdown:
+def _build_lang_dropdown(var current: String) -> Dropdown:
     """Empty slot ("any file") followed by every known language id
     from the LSP registry. Built once per ``open`` and held as a
     persistent dropdown — clicking the strip toggles its popup, which
@@ -648,7 +648,7 @@ fn _build_lang_dropdown(var current: String) -> Dropdown:
     return dd^
 
 
-fn _join_args(args: List[String]) -> String:
+def _join_args(args: List[String]) -> String:
     var out = String("")
     for i in range(len(args)):
         if i > 0:
@@ -657,7 +657,7 @@ fn _join_args(args: List[String]) -> String:
     return out^
 
 
-fn _split_args(text: String) -> List[String]:
+def _split_args(text: String) -> List[String]:
     var out = List[String]()
     var b = text.as_bytes()
     var n = len(b)
@@ -674,7 +674,7 @@ fn _split_args(text: String) -> List[String]:
     return out^
 
 
-fn _str_pop_byte(s: String) -> String:
+def _str_pop_byte(s: String) -> String:
     var b = s.as_bytes()
     if len(b) == 0:
         return s

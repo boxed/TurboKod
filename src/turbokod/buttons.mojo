@@ -86,23 +86,23 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
     is now armed to cancel — and also decides ``FIRED`` vs.
     ``CANCELED`` on release."""
 
-    fn __init__(out self, var label: String, x: Int, y: Int):
+    def __init__(out self, var label: String, x: Int, y: Int):
         self.label = label^
         self.x = x
         self.y = y
         self.pressed = False
         self.pressed_inside = False
 
-    fn face_width(self) -> Int:
+    def face_width(self) -> Int:
         return display_columns(self.label)
 
-    fn total_width(self) -> Int:
+    def total_width(self) -> Int:
         """Cells the button claims horizontally: face + the 1-column
         right-edge shadow. Use to lay out two buttons side by side
         without their shadows colliding."""
         return self.face_width() + 1
 
-    fn hit_rect(self) -> Rect:
+    def hit_rect(self) -> Rect:
         """Click region: the face row plus the right-shadow column
         and the bottom-shadow row. Generous on purpose — users
         regularly miss-click downward by a row, and the bottom
@@ -112,7 +112,7 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
             self.x + self.face_width() + 1, self.y + 2,
         )
 
-    fn move_to(mut self, x: Int, y: Int):
+    def move_to(mut self, x: Int, y: Int):
         """Reposition without disturbing tracking state. Layouts that
         depend on a parent rect (e.g. dialogs that re-flow when
         dragged) update geometry every paint; an in-progress press
@@ -122,7 +122,7 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         self.x = x
         self.y = y
 
-    fn show_pressed(self) -> Bool:
+    def show_pressed(self) -> Bool:
         """True when the button should paint flush (no drop-shadow):
         currently captured *and* the cursor is still over the hit
         rect. ``paint_shadow_button`` consults this; reading it
@@ -130,7 +130,7 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         focus rings) consistently."""
         return self.pressed and self.pressed_inside
 
-    fn handle_mouse(mut self, event: Event) -> UInt8:
+    def handle_mouse(mut self, event: Event) -> UInt8:
         """Press / move / release state machine. See module docstring
         for the high-level model. Returns one of ``BUTTON_NONE`` /
         ``BUTTON_CAPTURED`` / ``BUTTON_FIRED`` / ``BUTTON_CANCELED``.
@@ -186,7 +186,7 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         return BUTTON_NONE
 
 
-fn paint_shadow_button(
+def paint_shadow_button(
     mut canvas: Canvas, button: ShadowButton, face: Attr, shadow_bg: UInt8,
     max_x: Int = -1,
 ):
@@ -268,7 +268,7 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
     var pressed_inside: Bool
     var hovered: Bool
 
-    fn __init__(
+    def __init__(
         out self, var label: String, var tooltip: String,
         x: Int = 0, y: Int = 0,
     ):
@@ -281,19 +281,19 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
         self.pressed_inside = False
         self.hovered = False
 
-    fn width(self) -> Int:
+    def width(self) -> Int:
         """Cells the toggle paints horizontally (label plus 1-cell pad
         on each side)."""
         return display_columns(self.label) + 2
 
-    fn hit_rect(self) -> Rect:
+    def hit_rect(self) -> Rect:
         return Rect(self.x, self.y, self.x + self.width(), self.y + 1)
 
-    fn move_to(mut self, x: Int, y: Int):
+    def move_to(mut self, x: Int, y: Int):
         self.x = x
         self.y = y
 
-    fn handle_mouse(mut self, event: Event) -> UInt8:
+    def handle_mouse(mut self, event: Event) -> UInt8:
         """Press / drag / release state machine; returns
         ``BUTTON_FIRED`` on a release inside the hit rect after a
         captured press (caller should flip ``on``). Hover state is
@@ -334,7 +334,7 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
         return BUTTON_NONE
 
 
-fn paint_option_toggle(
+def paint_option_toggle(
     mut canvas: Canvas, toggle: OptionToggle,
     off_attr: Attr, on_attr: Attr, max_x: Int = -1,
 ):
@@ -376,7 +376,7 @@ struct Checkbox(ImplicitlyCopyable, Movable):
     var pressed: Bool
     var pressed_inside: Bool
 
-    fn __init__(
+    def __init__(
         out self, var label: String,
         x: Int = 0, y: Int = 0, on: Bool = False,
     ):
@@ -387,7 +387,7 @@ struct Checkbox(ImplicitlyCopyable, Movable):
         self.pressed = False
         self.pressed_inside = False
 
-    fn width(self) -> Int:
+    def width(self) -> Int:
         """Cells the chip claims horizontally. Layout is
         `` [x] Label `` — 1 leading pad + 3 box + 1 separator + label
         + 1 trailing pad — so the colored strip extends one cell past
@@ -395,17 +395,17 @@ struct Checkbox(ImplicitlyCopyable, Movable):
         chip rather than tinted text."""
         return 6 + display_columns(self.label)
 
-    fn hit_rect(self) -> Rect:
+    def hit_rect(self) -> Rect:
         return Rect(self.x, self.y, self.x + self.width(), self.y + 1)
 
-    fn move_to(mut self, x: Int, y: Int):
+    def move_to(mut self, x: Int, y: Int):
         self.x = x
         self.y = y
 
-    fn toggle(mut self):
+    def toggle(mut self):
         self.on = not self.on
 
-    fn handle_mouse(mut self, event: Event) -> UInt8:
+    def handle_mouse(mut self, event: Event) -> UInt8:
         """Press / drag / release state machine — same shape as
         ``ShadowButton.handle_mouse``. Returns ``BUTTON_FIRED`` on a
         release inside the hit rect after a captured press; the
@@ -441,7 +441,7 @@ struct Checkbox(ImplicitlyCopyable, Movable):
         return BUTTON_NONE
 
 
-fn paint_checkbox(
+def paint_checkbox(
     mut canvas: Canvas, cb: Checkbox,
     chip_attr: Attr, focus_attr: Attr, focused: Bool,
     max_x: Int = -1,
@@ -460,7 +460,7 @@ fn paint_checkbox(
     _ = canvas.put_text(Point(cb.x, cb.y), text, attr, max_x)
 
 
-fn shadow_button_hit(button: ShadowButton, event: Event) -> Bool:
+def shadow_button_hit(button: ShadowButton, event: Event) -> Bool:
     """True when ``event`` is a left-button press landing on
     ``button``'s hit rect (face or shadow rows). Drag-motion and
     release are excluded.

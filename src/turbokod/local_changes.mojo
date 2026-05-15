@@ -181,7 +181,7 @@ struct RightPanel(Movable):
     var scroll_x: Int
     var cursor: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.lines = List[String]()
         self.diff_line = List[Int]()
         self.kind = List[Int]()
@@ -192,7 +192,7 @@ struct RightPanel(Movable):
         self.scroll_x = 0
         self.cursor = 0
 
-    fn reset(mut self):
+    def reset(mut self):
         self.lines = List[String]()
         self.diff_line = List[Int]()
         self.kind = List[Int]()
@@ -204,12 +204,12 @@ struct RightPanel(Movable):
         self.cursor = 0
 
 
-fn _line_starts_with_at_at(line: String) -> Bool:
+def _line_starts_with_at_at(line: String) -> Bool:
     var b = line.as_bytes()
     return len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40
 
 
-fn _convert_to_context(line: String) -> String:
+def _convert_to_context(line: String) -> String:
     """Swap the leading ``+`` / ``-`` prefix for a single space, leaving
     the rest of the line untouched. Used by ``_build_minimal_patch`` to
     demote unselected ± lines to context so they stay in the target
@@ -224,14 +224,14 @@ fn _convert_to_context(line: String) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-fn _append_line(mut buf: List[UInt8], line: String):
+def _append_line(mut buf: List[UInt8], line: String):
     var b = line.as_bytes()
     for i in range(len(b)):
         buf.append(b[i])
     buf.append(0x0A)
 
 
-fn build_minimal_patch(
+def build_minimal_patch(
     file_diff: String, target_line_idx: Int, reverse: Bool,
 ) -> String:
     """Construct a single-line stage/unstage patch.
@@ -332,7 +332,7 @@ fn build_minimal_patch(
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-fn _byte_to_string(b: UInt8) -> String:
+def _byte_to_string(b: UInt8) -> String:
     """Wrap a single byte as a one-char ``String``. Used for rendering
     porcelain status codes (always ASCII) one column at a time so the
     X column and Y column can take different colors."""
@@ -341,7 +341,7 @@ fn _byte_to_string(b: UInt8) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(buf)))
 
 
-fn _take_first_char(s: String) -> String:
+def _take_first_char(s: String) -> String:
     """Return the first UTF-8 codepoint of ``s`` as its own ``String``,
     or empty when ``s`` is empty. Used by ``_author_abbrev`` so a
     multi-byte initial (``Ö``, ``É``, …) survives the abbreviation."""
@@ -357,7 +357,7 @@ fn _take_first_char(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[:n]))
 
 
-fn _take_after_first_char(s: String) -> String:
+def _take_after_first_char(s: String) -> String:
     """Counterpart of ``_take_first_char``: everything *after* the first
     codepoint. Lets us pull the second char out of a single-word author
     name (``Madonna`` → ``Ma``) without re-walking the string."""
@@ -373,7 +373,7 @@ fn _take_after_first_char(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[n:len(b)]))
 
 
-fn _ascii_upper_str(s: String) -> String:
+def _ascii_upper_str(s: String) -> String:
     """Uppercase the leading ASCII letter of ``s`` and return the result.
     Non-ASCII chars are passed through unchanged — fine for the
     abbreviation pass, since author initials that are already uppercase
@@ -391,7 +391,7 @@ fn _ascii_upper_str(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-fn _author_abbrev(author: String) -> String:
+def _author_abbrev(author: String) -> String:
     """Two-character abbreviation: ``Anders Hovmöller`` → ``AH``,
     ``Madonna`` → ``MA``. Empty author yields two spaces so the column
     stays aligned. Only the first letter of the first/last whitespace-
@@ -425,7 +425,7 @@ fn _author_abbrev(author: String) -> String:
     return _ascii_upper_str(first) + _ascii_upper_str(second)
 
 
-fn _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
+def _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
     """Free-function scroller: avoids Mojo's mut-self / mut-self.field
     aliasing rejection. Caller passes the focused panel's body height."""
     var n = len(panel.lines)
@@ -445,7 +445,7 @@ fn _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
         panel.cursor = bottom
 
 
-fn _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
+def _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
     var n = len(panel.lines)
     if n == 0:
         return
@@ -463,7 +463,7 @@ fn _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
         panel.scroll = 0
 
 
-fn _strip_first_byte_to_string(s: String) -> String:
+def _strip_first_byte_to_string(s: String) -> String:
     """Drop the leading byte of ``s`` (the ``+`` / ``-`` / `` `` diff
     prefix). Returns an empty ``String`` when ``s`` is shorter than one
     byte. The diff prefix is always ASCII so byte-strip is codepoint-
@@ -474,7 +474,7 @@ fn _strip_first_byte_to_string(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[1:]))
 
 
-fn _build_filename_banner(path: String, width: Int) -> String:
+def _build_filename_banner(path: String, width: Int) -> String:
     """Make a ``-- path -----------`` banner sized to ``width``.
 
     Always emits at least eight trailing dashes so the banner reads as
@@ -493,7 +493,7 @@ fn _build_filename_banner(path: String, width: Int) -> String:
     return prefix + String(StringSlice(unsafe_from_utf8=Span(dashes)))
 
 
-fn _is_skip_diff_header(line: String) -> Bool:
+def _is_skip_diff_header(line: String) -> Bool:
     """``True`` when ``line`` is one of the unified-diff machine headers
     we hide from the human-facing rendering: ``diff --git``, ``index ``,
     ``--- ``, ``+++ ``, ``@@ ...``, plus the lesser-seen rename / mode
@@ -537,7 +537,7 @@ fn _is_skip_diff_header(line: String) -> Bool:
     return False
 
 
-fn _emit_filename_banner(
+def _emit_filename_banner(
     mut panel: RightPanel, path: String, width: Int,
 ):
     panel.lines.append(_build_filename_banner(path, width))
@@ -547,7 +547,7 @@ fn _emit_filename_banner(
     panel.file_line.append(0)
 
 
-fn _emit_blank(mut panel: RightPanel):
+def _emit_blank(mut panel: RightPanel):
     panel.lines.append(String(""))
     panel.kind.append(_LINE_BLANK)
     panel.diff_line.append(-1)
@@ -555,7 +555,7 @@ fn _emit_blank(mut panel: RightPanel):
     panel.file_line.append(0)
 
 
-fn _emit_info(mut panel: RightPanel, var text: String):
+def _emit_info(mut panel: RightPanel, var text: String):
     panel.lines.append(text^)
     panel.kind.append(_LINE_INFO)
     panel.diff_line.append(-1)
@@ -563,7 +563,7 @@ fn _emit_info(mut panel: RightPanel, var text: String):
     panel.file_line.append(0)
 
 
-fn _emit_body_row(
+def _emit_body_row(
     mut panel: RightPanel,
     var text: String, kind: Int, diff_idx: Int,
     path: String, line: Int,
@@ -575,7 +575,7 @@ fn _emit_body_row(
     panel.file_line.append(line)
 
 
-fn _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
+def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
     """Parse ``-a[,b] +c[,d]`` from a ``@@ -a,b +c,d @@`` hunk header.
     Sets ``old_start`` / ``new_start`` to 1-based line numbers, or -1
     when the corresponding side is malformed. Both numbers come from
@@ -625,7 +625,7 @@ fn _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
             new_start = v
 
 
-fn _emit_panel_highlights(
+def _emit_panel_highlights(
     mut panel: RightPanel,
     side_text: String,
     file_path: String,
@@ -689,7 +689,7 @@ fn _emit_panel_highlights(
             )
 
 
-fn _populate_diff_panel(
+def _populate_diff_panel(
     mut panel: RightPanel,
     diff_text: String,
     file_path: String,
@@ -911,7 +911,7 @@ struct LocalChanges(Movable):
     # action shortcuts from active git workflows.
     var _type_ahead: TypeAhead
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -950,7 +950,7 @@ struct LocalChanges(Movable):
         _ = self.sidebar_dock.add(String("Commits"))
         self._type_ahead = TypeAhead()
 
-    fn open(mut self, var root: String):
+    def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
         for a real project are sub-millisecond `git` invocations each,
         and tearing down the modal is the user's "refresh" gesture so a
@@ -994,7 +994,7 @@ struct LocalChanges(Movable):
             self.status_message = \
                 String("No git data (empty repo or git unavailable).")
 
-    fn _reload_files(mut self):
+    def _reload_files(mut self):
         """Re-fetch ``git status`` plus the staged + unstaged whole-tree
         diffs and rebuild ``self.files``. Called from ``open`` and after
         every staging mutation. Keeps ``status_message`` populated when
@@ -1025,7 +1025,7 @@ struct LocalChanges(Movable):
                 FileEntry(st.path, st.staged, st.worktree, sd^, ud^),
             )
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -1061,13 +1061,13 @@ struct LocalChanges(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _panel_rect(self, screen: Rect) -> Rect:
+    def _panel_rect(self, screen: Rect) -> Rect:
         """The modal always paints fullscreen — it intercepts every
         input event, so a non-fullscreen "windowed" mode wouldn't gain
         anything visible behind it that the user could interact with."""
         return screen
 
-    fn _sidebar_width(self, screen: Rect) -> Int:
+    def _sidebar_width(self, screen: Rect) -> Int:
         """Sidebar width in cells. The auto-default (no user drag yet)
         targets ~⅓ of the window with the ``_SIDEBAR_MIN``/``MAX``
         comfort range. Once the user drags, only natural bounds apply
@@ -1088,30 +1088,30 @@ struct LocalChanges(Movable):
         if w > hard_max: w = hard_max
         return w
 
-    fn _list_top(self, screen: Rect) -> Int:
+    def _list_top(self, screen: Rect) -> Int:
         return screen.a.y + 2
 
-    fn _list_bottom(self, screen: Rect) -> Int:
+    def _list_bottom(self, screen: Rect) -> Int:
         return screen.b.y - 1
 
-    fn _list_height(self, screen: Rect) -> Int:
+    def _list_height(self, screen: Rect) -> Int:
         var h = self._list_bottom(screen) - self._list_top(screen)
         return 0 if h < 0 else h
 
-    fn _diff_left(self, screen: Rect) -> Int:
+    def _diff_left(self, screen: Rect) -> Int:
         return screen.a.x + self._sidebar_width(screen) + 1
 
-    fn _diff_right(self, screen: Rect) -> Int:
+    def _diff_right(self, screen: Rect) -> Int:
         return screen.b.x - 1
 
-    fn _diff_width(self, screen: Rect) -> Int:
+    def _diff_width(self, screen: Rect) -> Int:
         var w = self._diff_right(screen) - self._diff_left(screen) - 1
         return 0 if w < 0 else w
 
-    fn _diff_height(self, screen: Rect) -> Int:
+    def _diff_height(self, screen: Rect) -> Int:
         return self._list_height(screen)
 
-    fn _pane_rows(self, screen: Rect) -> List[Int]:
+    def _pane_rows(self, screen: Rect) -> List[Int]:
         """Return the y-row layout for the three sidebar panels:
         ``[files_top, files_h, branches_top, branches_h, commits_top,
         commits_h]``. Each panel's first row is a section heading; the
@@ -1176,7 +1176,7 @@ struct LocalChanges(Movable):
         out.append(c_h)
         return out^
 
-    fn _right_panes(self, screen: Rect) -> List[Int]:
+    def _right_panes(self, screen: Rect) -> List[Int]:
         """Returns ``[unstaged_top, unstaged_h, staged_top, staged_h]``
         when the right side is split for a file selection. Same min-
         height clamping logic as ``_pane_rows`` so dragging never
@@ -1209,12 +1209,12 @@ struct LocalChanges(Movable):
         out.append(s_h)
         return out^
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         return False
 
     # --- right-pane refresh ----------------------------------------------
 
-    fn _focus_key(self) -> String:
+    def _focus_key(self) -> String:
         var driving = self._driving_pane()
         if driving == _PANE_FILES:
             return String("f:") + String(self.sel_file)
@@ -1222,7 +1222,7 @@ struct LocalChanges(Movable):
             return String("b:") + String(self.sel_branch)
         return String("c:") + String(self.sel_commit)
 
-    fn _driving_pane(self) -> Int:
+    def _driving_pane(self) -> Int:
         """Which sidebar selection drives what shows on the right side.
         When focus is on a right-pane subpane, ``last_sidebar_focus``
         carries it; otherwise it's the focused pane itself."""
@@ -1232,12 +1232,12 @@ struct LocalChanges(Movable):
             return self.last_sidebar_focus
         return self.focus
 
-    fn _is_right_focus(self) -> Bool:
+    def _is_right_focus(self) -> Bool:
         return self.focus == _PANE_RIGHT_UNSTAGED \
             or self.focus == _PANE_RIGHT_STAGED \
             or self.focus == _PANE_RIGHT_INFO
 
-    fn _ensure_right_panels(
+    def _ensure_right_panels(
         mut self, mut registry: GrammarRegistry,
     ):
         """Recompute the three right-side panel caches when the driving
@@ -1277,7 +1277,7 @@ struct LocalChanges(Movable):
             var show_text = fetch_commit_show(self.root, sha)
             self._populate_commit_info(show_text, registry)
 
-    fn _populate_commit_info(
+    def _populate_commit_info(
         mut self, show_text: String, mut registry: GrammarRegistry,
     ):
         """Render ``git show`` output into the info panel: commit
@@ -1323,7 +1323,7 @@ struct LocalChanges(Movable):
                 String(""), String(""), banner_w, registry,
             )
 
-    fn _build_files_right_panels(
+    def _build_files_right_panels(
         mut self, mut registry: GrammarRegistry,
     ):
         """Populate the unstaged + staged panels from the focused file's
@@ -1386,7 +1386,7 @@ struct LocalChanges(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(
+    def paint(
         mut self, mut canvas: Canvas, screen: Rect,
         mut registry: GrammarRegistry,
     ):
@@ -1501,7 +1501,7 @@ struct LocalChanges(Movable):
         if self.overlay != _OVERLAY_NONE:
             self._paint_overlay(canvas, bounds)
 
-    fn _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
+    def _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
         """Render the active overlay (commit prompt / confirmation /
         status flash) as a small drop-shadowed box centered on the
         modal area. Every write is bound to the overlay's clip via a
@@ -1582,7 +1582,7 @@ struct LocalChanges(Movable):
             canvas, Point(bx + 2, by + box_h - 2), hint, body,
         )
 
-    fn _paint_horizontal_splitter(
+    def _paint_horizontal_splitter(
         self, mut canvas: Canvas, left: Int, right: Int, y: Int,
         attr: Attr,
     ):
@@ -1591,7 +1591,7 @@ struct LocalChanges(Movable):
         for x in range(left, right + 1):
             canvas.set(x, y, Cell(String("─"), attr, 1))
 
-    fn _paint_section_body(
+    def _paint_section_body(
         self, mut canvas: Canvas,
         left: Int, right: Int, top: Int, height: Int, pane: Int,
         list_attr: Attr, sel_active: Attr,
@@ -1624,7 +1624,7 @@ struct LocalChanges(Movable):
                 list_attr, sel_active, sel_inactive, dim_attr,
             )
 
-    fn _row_attr(
+    def _row_attr(
         self, is_sel: Bool, is_focused: Bool,
         list_attr: Attr, sel_active: Attr, sel_inactive: Attr,
     ) -> Attr:
@@ -1632,7 +1632,7 @@ struct LocalChanges(Movable):
             return list_attr
         return sel_active if is_focused else sel_inactive
 
-    fn _paint_truncated(
+    def _paint_truncated(
         self, mut canvas: Canvas, x: Int, y: Int, right_excl: Int,
         text: String, attr: Attr,
     ):
@@ -1654,7 +1654,7 @@ struct LocalChanges(Movable):
             attr, right_excl,
         )
 
-    fn _paint_files(
+    def _paint_files(
         self, mut canvas: Canvas,
         left: Int, right: Int, top: Int, height: Int, is_focused: Bool,
         list_attr: Attr, sel_active: Attr, sel_inactive: Attr,
@@ -1705,7 +1705,7 @@ struct LocalChanges(Movable):
                 canvas, x, y, stop, fe.path, row_attr,
             )
 
-    fn _paint_branches(
+    def _paint_branches(
         self, mut canvas: Canvas,
         left: Int, right: Int, top: Int, height: Int, is_focused: Bool,
         list_attr: Attr, sel_active: Attr, sel_inactive: Attr,
@@ -1736,7 +1736,7 @@ struct LocalChanges(Movable):
                 marker + br.name, attr,
             )
 
-    fn _paint_commits(
+    def _paint_commits(
         self, mut canvas: Canvas,
         left: Int, right: Int, top: Int, height: Int, is_focused: Bool,
         list_attr: Attr, sel_active: Attr, sel_inactive: Attr,
@@ -1803,7 +1803,7 @@ struct LocalChanges(Movable):
                 Point(x, y), co.subject, seg_subj, stop,
             )
 
-    fn _paint_right_side(
+    def _paint_right_side(
         mut self, mut canvas: Canvas, screen: Rect,
         section_attr: Attr, splitter_attr: Attr,
         ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
@@ -1860,7 +1860,7 @@ struct LocalChanges(Movable):
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
 
-    fn _paint_panel_with_header(
+    def _paint_panel_with_header(
         self, mut canvas: Canvas,
         area: Rect,
         title: String, pane: Int,
@@ -1895,7 +1895,7 @@ struct LocalChanges(Movable):
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
 
-    fn _paint_panel_body(
+    def _paint_panel_body(
         self, mut canvas: Canvas,
         area: Rect,
         pane: Int, panel: RightPanel,
@@ -2078,19 +2078,19 @@ struct LocalChanges(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn _focused_count(self) -> Int:
+    def _focused_count(self) -> Int:
         if self.focus == _PANE_FILES: return len(self.files)
         if self.focus == _PANE_BRANCHES: return len(self.branches)
         if self.focus == _PANE_COMMITS: return len(self.commits)
         return 0
 
-    fn _focused_selection(self) -> Int:
+    def _focused_selection(self) -> Int:
         if self.focus == _PANE_FILES: return self.sel_file
         if self.focus == _PANE_BRANCHES: return self.sel_branch
         if self.focus == _PANE_COMMITS: return self.sel_commit
         return 0
 
-    fn _focused_panel_height(self, screen: Rect) -> Int:
+    def _focused_panel_height(self, screen: Rect) -> Int:
         var rows = self._pane_rows(screen)
         var h: Int
         if self.focus == _PANE_FILES:
@@ -2103,7 +2103,7 @@ struct LocalChanges(Movable):
             h = 0
         return 0 if h < 0 else h
 
-    fn _set_focused_selection(mut self, new_idx: Int, screen: Rect):
+    def _set_focused_selection(mut self, new_idx: Int, screen: Rect):
         var n = self._focused_count()
         if n == 0:
             return
@@ -2134,7 +2134,7 @@ struct LocalChanges(Movable):
                 self.scroll_commits = self.sel_commit - h + 1
             if self.scroll_commits < 0: self.scroll_commits = 0
 
-    fn _cycle_focus(mut self, direction: Int):
+    def _cycle_focus(mut self, direction: Int):
         """Tab / Shift+Tab. Cycles through every visible pane in a
         single sequence: each sidebar pane is followed by the right-
         side pane(s) it drives, then on to the next sidebar pane.
@@ -2160,7 +2160,7 @@ struct LocalChanges(Movable):
         # fresh search against the new pane's items.
         self._type_ahead.reset()
 
-    fn _tab_forward(mut self):
+    def _tab_forward(mut self):
         var f = self.focus
         if f == _PANE_FILES:
             self.focus = _PANE_RIGHT_UNSTAGED
@@ -2192,7 +2192,7 @@ struct LocalChanges(Movable):
                 self.last_sidebar_focus = _PANE_FILES
             return
 
-    fn _tab_backward(mut self):
+    def _tab_backward(mut self):
         var f = self.focus
         if f == _PANE_FILES:
             # Wrap to last stop in the cycle: Info driven by Commits.
@@ -2222,7 +2222,7 @@ struct LocalChanges(Movable):
             self.last_sidebar_focus = _PANE_FILES
             return
 
-    fn _focused_right_panel_height(self, screen: Rect) -> Int:
+    def _focused_right_panel_height(self, screen: Rect) -> Int:
         if self.focus == _PANE_RIGHT_INFO:
             return self._diff_height(screen) - 1
         var rp = self._right_panes(screen)
@@ -2230,7 +2230,7 @@ struct LocalChanges(Movable):
             return rp[1] - 1
         return rp[3] - 1
 
-    fn _scroll_focused_right(mut self, delta: Int, screen: Rect):
+    def _scroll_focused_right(mut self, delta: Int, screen: Rect):
         """Scroll the focused right panel and clamp its cursor.
 
         Dispatches to a free function (rather than a method) because
@@ -2244,7 +2244,7 @@ struct LocalChanges(Movable):
         elif self.focus == _PANE_RIGHT_INFO:
             _scroll_panel(self.info, delta, h)
 
-    fn _move_focused_right_cursor(mut self, delta: Int, screen: Rect):
+    def _move_focused_right_cursor(mut self, delta: Int, screen: Rect):
         var h = self._focused_right_panel_height(screen)
         if self.focus == _PANE_RIGHT_UNSTAGED:
             _move_panel_cursor(self.unstaged, delta, h)
@@ -2253,7 +2253,7 @@ struct LocalChanges(Movable):
         elif self.focus == _PANE_RIGHT_INFO:
             _move_panel_cursor(self.info, delta, h)
 
-    fn _enter_right_pane(
+    def _enter_right_pane(
         mut self, screen: Rect, mut registry: GrammarRegistry,
     ):
         """Move focus from sidebar → right side. For file selections we
@@ -2296,12 +2296,12 @@ struct LocalChanges(Movable):
         # Branch / commit selection → single info panel.
         self.focus = _PANE_RIGHT_INFO
 
-    fn _leave_right_pane(mut self):
+    def _leave_right_pane(mut self):
         if not self._is_right_focus():
             return
         self.focus = self.last_sidebar_focus
 
-    fn handle_key(
+    def handle_key(
         mut self, event: Event, screen: Rect,
         mut registry: GrammarRegistry,
     ) -> Bool:
@@ -2432,7 +2432,7 @@ struct LocalChanges(Movable):
             return True
         return False
 
-    fn _handle_space(mut self, screen: Rect):
+    def _handle_space(mut self, screen: Rect):
         """Stage / unstage the focused thing.
 
         * On the Files panel: toggle whole-file staged status — stage if
@@ -2467,7 +2467,7 @@ struct LocalChanges(Movable):
                 self._toggle_diff_line(diff_idx, True)
             return
 
-    fn _toggle_file_at(mut self, idx: Int):
+    def _toggle_file_at(mut self, idx: Int):
         """Stage everything if the worktree column has any unstaged
         change (including untracked ``??``); otherwise unstage what's in
         the index. ``add`` covers the first case across modified and
@@ -2485,7 +2485,7 @@ struct LocalChanges(Movable):
             return
         self._refresh_after_mutation(path)
 
-    fn _toggle_diff_line(
+    def _toggle_diff_line(
         mut self, diff_line_idx: Int, reverse: Bool,
     ):
         """Build a minimal patch for ``diff_line_idx`` in the focused
@@ -2511,7 +2511,7 @@ struct LocalChanges(Movable):
             return
         self._refresh_after_mutation(fe.path)
 
-    fn _refresh_after_mutation(mut self, kept_path: String):
+    def _refresh_after_mutation(mut self, kept_path: String):
         """Re-fetch files after a stage/unstage. Try to keep the user's
         place: prefer the index of the path we just acted on; if it's
         no longer in the list (e.g. a fully-staged file with a clean
@@ -2539,7 +2539,7 @@ struct LocalChanges(Movable):
         self.staged.reset()
         self.info.reset()
 
-    fn _refresh_full(mut self):
+    def _refresh_full(mut self):
         """Reload everything (files + branches + commits) and clear the
         right-pane cache. Used after commit / amend / pull / push since
         any of those can shuffle every list."""
@@ -2567,7 +2567,7 @@ struct LocalChanges(Movable):
 
     # --- overlay (commit / confirm / status) ------------------------------
 
-    fn _open_commit_prompt(mut self):
+    def _open_commit_prompt(mut self):
         """Pop the commit-message input. Pre-checks that *something* is
         actually staged so we don't pop a prompt that git will refuse."""
         var have_staged = False
@@ -2586,13 +2586,13 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
 
-    fn _open_amend_confirm(mut self):
+    def _open_amend_confirm(mut self):
         self.overlay = _OVERLAY_AMEND_CONFIRM
         self.overlay_input = TextField()
         self.overlay_message = \
             String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
 
-    fn _open_revert_confirm(mut self):
+    def _open_revert_confirm(mut self):
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._show_status(String("No file selected."), False)
             return
@@ -2608,32 +2608,32 @@ struct LocalChanges(Movable):
                 String("Discard ALL local changes for ") + fe.path \
                 + String(" (staged + worktree)?")
 
-    fn _show_status(mut self, var msg: String, ok: Bool):
+    def _show_status(mut self, var msg: String, ok: Bool):
         """Flash a one-shot status line. Dismissed by any keystroke."""
         self.overlay = _OVERLAY_STATUS
         self.overlay_message = msg^
         self.overlay_ok = ok
         self.overlay_input = TextField()
 
-    fn _close_overlay(mut self):
+    def _close_overlay(mut self):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
 
-    fn _run_pull(mut self):
+    def _run_pull(mut self):
         var r = git_pull(self.root)
         if r.ok:
             self._refresh_full()
         self._show_status(r.message, r.ok)
 
-    fn _run_push(mut self):
+    def _run_push(mut self):
         var r = git_push(self.root)
         if r.ok:
             self._refresh_full()
         self._show_status(r.message, r.ok)
 
-    fn _submit_commit(mut self):
+    def _submit_commit(mut self):
         var msg = self.overlay_input.text
         if len(msg.as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
@@ -2643,13 +2643,13 @@ struct LocalChanges(Movable):
             self._refresh_full()
         self._show_status(r.message, r.ok)
 
-    fn _confirm_amend(mut self):
+    def _confirm_amend(mut self):
         var r = git_amend_no_edit(self.root)
         if r.ok:
             self._refresh_full()
         self._show_status(r.message, r.ok)
 
-    fn _confirm_revert(mut self):
+    def _confirm_revert(mut self):
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._close_overlay()
             return
@@ -2659,7 +2659,7 @@ struct LocalChanges(Movable):
             self._refresh_full()
         self._show_status(r.message, r.ok)
 
-    fn _handle_overlay_key(mut self, event: Event) -> Bool:
+    def _handle_overlay_key(mut self, event: Event) -> Bool:
         """Route key events while an overlay is active. Returns True to
         keep events from leaking to the underlying view."""
         var k = event.key
@@ -2694,7 +2694,7 @@ struct LocalChanges(Movable):
 
     # --- mouse / drag helpers ---------------------------------------------
 
-    fn _hit_splitter(self, pos: Point, screen: Rect) -> Int:
+    def _hit_splitter(self, pos: Point, screen: Rect) -> Int:
         """Return ``_DRAG_*`` for the splitter at ``pos``, or
         ``_DRAG_NONE`` if the position isn't on any splitter. The
         vertical sidebar/right splitter takes a 2-cell hit zone (the
@@ -2733,7 +2733,7 @@ struct LocalChanges(Movable):
                 return _DRAG_SPLIT_US
         return _DRAG_NONE
 
-    fn _apply_drag(mut self, pos: Point, screen: Rect):
+    def _apply_drag(mut self, pos: Point, screen: Rect):
         """Continue a drag: update the relevant override based on
         ``pos.y`` (or ``pos.x`` for the vertical splitter). The
         geometry helpers clamp on read, so we just store the raw value."""
@@ -2791,7 +2791,7 @@ struct LocalChanges(Movable):
             self.unstaged_height_user = h
             return
 
-    fn _pane_at(self, pos: Point, screen: Rect) -> Int:
+    def _pane_at(self, pos: Point, screen: Rect) -> Int:
         """Return which sidebar pane (or -1 for "right pane / outside /
         on a splitter row") the cursor position falls in."""
         var sw = self._sidebar_width(screen)
@@ -2807,7 +2807,7 @@ struct LocalChanges(Movable):
             return _PANE_COMMITS
         return -1
 
-    fn _right_pane_at(self, pos: Point, screen: Rect) -> Int:
+    def _right_pane_at(self, pos: Point, screen: Rect) -> Int:
         """Return _PANE_RIGHT_UNSTAGED / _PANE_RIGHT_STAGED /
         _PANE_RIGHT_INFO based on which sub-panel ``pos`` falls in. -1
         when ``pos`` is outside the right side or on the splitter row."""
@@ -2828,7 +2828,7 @@ struct LocalChanges(Movable):
             return _PANE_RIGHT_STAGED
         return -1
 
-    fn _try_submit_jump(
+    def _try_submit_jump(
         mut self, var path: String, line: Int,
     ) -> Bool:
         """Set the submission contract for ``selected_path`` /
@@ -2842,7 +2842,7 @@ struct LocalChanges(Movable):
         self.submitted = True
         return True
 
-    fn handle_mouse(
+    def handle_mouse(
         mut self, event: Event, screen: Rect,
         mut registry: GrammarRegistry,
     ) -> Bool:

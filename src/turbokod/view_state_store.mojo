@@ -58,7 +58,7 @@ struct StoredViewState(ImplicitlyCopyable, Movable):
     var scroll_y: Int
 
 
-fn _current_username() -> String:
+def _current_username() -> String:
     var user = getenv_value(String("USER"))
     if len(user.as_bytes()) > 0:
         return user^
@@ -68,7 +68,7 @@ fn _current_username() -> String:
     return String("default")
 
 
-fn _vs_dir(project_root: String) -> String:
+def _vs_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
     var d = join_path(project_root, VS_DIR_PROJECT)
@@ -76,21 +76,21 @@ fn _vs_dir(project_root: String) -> String:
     return join_path(d, _current_username())
 
 
-fn _vs_path(project_root: String) -> String:
+def _vs_path(project_root: String) -> String:
     var dir = _vs_dir(project_root)
     if len(dir.as_bytes()) == 0:
         return String("")
     return join_path(dir, VS_FILE)
 
 
-fn _ensure_dir(path: String):
+def _ensure_dir(path: String):
     if len(path.as_bytes()) == 0:
         return
     var c_path = path + String("\0")
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-fn _ensure_dirs(project_root: String):
+def _ensure_dirs(project_root: String):
     if len(project_root.as_bytes()) == 0:
         return
     var top = join_path(project_root, VS_DIR_PROJECT)
@@ -101,7 +101,7 @@ fn _ensure_dirs(project_root: String):
     _ensure_dir(user_dir)
 
 
-fn _vs_relative(project_root: String, full: String) -> String:
+def _vs_relative(project_root: String, full: String) -> String:
     var rb = project_root.as_bytes()
     var fb = full.as_bytes()
     if len(rb) == 0:
@@ -116,7 +116,7 @@ fn _vs_relative(project_root: String, full: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
-fn _resolve_vs_path(project_root: String, stored: String) -> String:
+def _resolve_vs_path(project_root: String, stored: String) -> String:
     var b = stored.as_bytes()
     if len(b) == 0:
         return stored
@@ -127,7 +127,7 @@ fn _resolve_vs_path(project_root: String, stored: String) -> String:
     return join_path(project_root, stored)
 
 
-fn _read_int_pair(
+def _read_int_pair(
     obj: JsonValue, key: String, fallback_a: Int, fallback_b: Int,
 ) -> Tuple[Int, Int]:
     var v = obj.object_get(key)
@@ -139,7 +139,7 @@ fn _read_int_pair(
     return (fallback_a, fallback_b)
 
 
-fn load_view_states(project_root: String) -> List[StoredViewState]:
+def load_view_states(project_root: String) -> List[StoredViewState]:
     """Parse the per-user view-states file. Any failure (missing file,
     malformed JSON, missing keys) yields an empty list."""
     var out = List[StoredViewState]()
@@ -181,14 +181,14 @@ fn load_view_states(project_root: String) -> List[StoredViewState]:
     return out^
 
 
-fn _encode_int_pair(a: Int, b: Int) -> JsonValue:
+def _encode_int_pair(a: Int, b: Int) -> JsonValue:
     var arr = json_array()
     arr.append(json_int(a))
     arr.append(json_int(b))
     return arr^
 
 
-fn encode_view_states(
+def encode_view_states(
     project_root: String, views: List[StoredViewState],
 ) -> String:
     """Serialize ``views`` to the on-disk JSON form. Pure function —
@@ -212,7 +212,7 @@ fn encode_view_states(
     return encode_json(root) + String("\n")
 
 
-fn save_view_states(
+def save_view_states(
     project_root: String, views: List[StoredViewState],
 ) -> Bool:
     """Rewrite the per-user view-states file. Creates the directory

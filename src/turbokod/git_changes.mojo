@@ -56,13 +56,13 @@ struct GitRevertBlock(Copyable, Movable):
     var buf_end_excl: Int
     var head_lines: List[String]
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.buf_start = copy.buf_start
         self.buf_end_excl = copy.buf_end_excl
         self.head_lines = copy.head_lines.copy()
 
 
-fn compute_revert_block(
+def compute_revert_block(
     head_text: String, buffer_lines: List[String], target_row: Int,
 ) -> Optional[GitRevertBlock]:
     """Walk the Myers diff between ``head_text`` (the file at HEAD) and
@@ -129,7 +129,7 @@ struct ChangedFile(ImplicitlyCopyable, Movable):
     var diff: String
 
 
-fn _strip_prefix_b(line: String) -> String:
+def _strip_prefix_b(line: String) -> String:
     """Strip the leading ``+++ b/`` (or ``--- a/``) marker from a path
     header, leaving the bare relative path. The ``a/`` and ``b/``
     pseudo-roots are git's convention; not all renderers emit them, but
@@ -147,7 +147,7 @@ fn _strip_prefix_b(line: String) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[ofs:n]))
 
 
-fn parse_unified_diff_files(diff: String) -> List[ChangedFile]:
+def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     """Walk a multi-file unified diff and split it on ``diff --git``
     boundaries. Each ``ChangedFile`` carries its own complete chunk
     (header + hunks) so the right-pane renderer doesn't need to track
@@ -229,7 +229,7 @@ fn parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     return out^
 
 
-fn _relative_to_root(file_path: String, root: String) -> String:
+def _relative_to_root(file_path: String, root: String) -> String:
     """Strip a leading ``<root>/`` (or ``<root>``) from ``file_path``;
     return the input unchanged if the prefix doesn't match. Used to
     feed ``git diff -- <pathspec>`` a path relative to the repo root,
@@ -248,7 +248,7 @@ fn _relative_to_root(file_path: String, root: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:len(fb)]))
 
 
-fn diff_buffer_against_head(
+def diff_buffer_against_head(
     head_text: String, buffer_lines: List[String],
 ) -> List[Int]:
     """Run a Myers line-diff between ``head_text`` (the file at HEAD)
@@ -308,7 +308,7 @@ fn diff_buffer_against_head(
     return out^
 
 
-fn fetch_blob_text(
+def fetch_blob_text(
     project_root: String, git_ref: String, rel_path: String,
 ) -> String:
     """Spawn ``git -C <root> show <git_ref>:<rel_path>`` and return
@@ -342,7 +342,7 @@ fn fetch_blob_text(
         return String("")
 
 
-fn fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
+def fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
     """Spawn ``git -C <root> show HEAD:<rel>`` and return its stdout.
 
     Empty Optional when git can't resolve the path at HEAD (file is
@@ -371,7 +371,7 @@ fn fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
         return Optional[String]()
 
 
-fn project_is_git_repo(project_root: String) -> Bool:
+def project_is_git_repo(project_root: String) -> Bool:
     """Cheap check: ``True`` iff a ``.git`` entry exists at or above
     ``project_root``. Empty string short-circuits to False."""
     if len(project_root.as_bytes()) == 0:
@@ -392,15 +392,15 @@ struct GitStateMtimes(ImplicitlyCopyable, Movable):
     var head_mtime: Int64
     var index_mtime: Int64
 
-    fn equals(self, other: GitStateMtimes) -> Bool:
+    def equals(self, other: GitStateMtimes) -> Bool:
         return self.head_mtime == other.head_mtime \
             and self.index_mtime == other.index_mtime
 
-    fn is_zero(self) -> Bool:
+    def is_zero(self) -> Bool:
         return self.head_mtime == Int64(0) and self.index_mtime == Int64(0)
 
 
-fn git_state_mtimes(project_root: String) -> GitStateMtimes:
+def git_state_mtimes(project_root: String) -> GitStateMtimes:
     """Stat ``.git/HEAD`` and ``.git/index`` and return their mtimes —
     the cheap proxy the desktop polls (~1 Hz) to notice external git
     operations on an open file. Returns zeros for non-repos and for
@@ -423,7 +423,7 @@ fn git_state_mtimes(project_root: String) -> GitStateMtimes:
     return GitStateMtimes(head_mt, index_mt)
 
 
-fn compute_local_changes(project_root: String) raises -> String:
+def compute_local_changes(project_root: String) raises -> String:
     """Spawn ``git -C <root> diff HEAD --no-color`` and return stdout.
 
     ``project_root`` should be the directory holding the ``.git`` entry —
@@ -444,7 +444,7 @@ fn compute_local_changes(project_root: String) raises -> String:
     return result.stdout
 
 
-fn compute_staged_diff(project_root: String) -> String:
+def compute_staged_diff(project_root: String) -> String:
     """``git diff --cached --no-color`` — the index versus HEAD. Empty
     string on failure (no commits, not a repo, git missing)."""
     if len(project_root.as_bytes()) == 0:
@@ -465,7 +465,7 @@ fn compute_staged_diff(project_root: String) -> String:
         return String("")
 
 
-fn compute_unstaged_diff(project_root: String) -> String:
+def compute_unstaged_diff(project_root: String) -> String:
     """``git diff --no-color`` — worktree versus index. Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
@@ -498,7 +498,7 @@ struct GitFileStatus(ImplicitlyCopyable, Movable):
     var orig_path: String
 
 
-fn fetch_git_status(project_root: String) -> List[GitFileStatus]:
+def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     """Run ``git status --porcelain=v1 -z`` and parse one entry per row.
 
     The ``-z`` framing keeps paths unquoted and NUL-terminated, so a
@@ -550,7 +550,7 @@ fn fetch_git_status(project_root: String) -> List[GitFileStatus]:
     return out^
 
 
-fn stage_file(project_root: String, path: String) -> Bool:
+def stage_file(project_root: String, path: String) -> Bool:
     """``git add -- <path>``. Returns False when git is unavailable, the
     path is empty, or git exited non-zero. ``path`` is taken as-is —
     callers should pass repo-relative paths (the same shape ``git
@@ -571,7 +571,7 @@ fn stage_file(project_root: String, path: String) -> Bool:
         return False
 
 
-fn unstage_file(project_root: String, path: String) -> Bool:
+def unstage_file(project_root: String, path: String) -> Bool:
     """``git restore --staged -- <path>`` (git ≥ 2.23). For pre-existing
     repos this restores the index entry to its HEAD content without
     touching the worktree. Returns False on failure."""
@@ -592,7 +592,7 @@ fn unstage_file(project_root: String, path: String) -> Bool:
         return False
 
 
-fn apply_patch_to_index(
+def apply_patch_to_index(
     project_root: String, patch: String, reverse: Bool = False,
 ) -> Bool:
     """Pipe ``patch`` to ``git apply --cached --recount`` (with
@@ -632,7 +632,7 @@ struct GitOpResult(ImplicitlyCopyable, Movable):
     var message: String
 
 
-fn _trim_one_line(s: String) -> String:
+def _trim_one_line(s: String) -> String:
     """Collapse ``s`` to its first non-empty line, stripped of trailing
     whitespace. Falls back to the empty string when ``s`` is all blank.
     Used to render git's stdout/stderr inside a single overlay row."""
@@ -657,7 +657,7 @@ fn _trim_one_line(s: String) -> String:
     return String("")
 
 
-fn git_commit(project_root: String, message: String) -> GitOpResult:
+def git_commit(project_root: String, message: String) -> GitOpResult:
     """``git commit -m <message>``. Reports the first stdout line on
     success (``[main abc1234] subject``) and the first stderr line on
     failure (typically ``nothing to commit`` or a hook complaint)."""
@@ -689,7 +689,7 @@ fn git_commit(project_root: String, message: String) -> GitOpResult:
         return GitOpResult(False, String("git unavailable"))
 
 
-fn git_amend_no_edit(project_root: String) -> GitOpResult:
+def git_amend_no_edit(project_root: String) -> GitOpResult:
     """``git commit --amend --no-edit``: fold staged changes (or just
     re-touch the commit) into HEAD without prompting for a new message."""
     if len(project_root.as_bytes()) == 0:
@@ -718,7 +718,7 @@ fn git_amend_no_edit(project_root: String) -> GitOpResult:
         return GitOpResult(False, String("git unavailable"))
 
 
-fn git_revert_file(
+def git_revert_file(
     project_root: String, path: String,
     staged: UInt8, worktree: UInt8,
 ) -> GitOpResult:
@@ -761,7 +761,7 @@ fn git_revert_file(
         return GitOpResult(False, String("git unavailable"))
 
 
-fn git_pull(project_root: String) -> GitOpResult:
+def git_pull(project_root: String) -> GitOpResult:
     """``git pull`` (uses repo defaults — branch tracking, ff/rebase
     settings, etc.). This is a synchronous network call; the surrounding
     UI blocks until it returns."""
@@ -791,7 +791,7 @@ fn git_pull(project_root: String) -> GitOpResult:
         return GitOpResult(False, String("git unavailable"))
 
 
-fn git_push(project_root: String) -> GitOpResult:
+def git_push(project_root: String) -> GitOpResult:
     """``git push`` (uses repo defaults — remote, branch, upstream).
     Same blocking caveat as ``git_pull``."""
     if len(project_root.as_bytes()) == 0:
@@ -847,7 +847,7 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     var is_pushed: Bool
 
 
-fn _split_tab_fields(line: String, n: Int) -> List[String]:
+def _split_tab_fields(line: String, n: Int) -> List[String]:
     """Split ``line`` on ``\\t`` into at most ``n`` fields. The last
     field absorbs any further tabs verbatim, so a commit subject that
     happens to include a tab survives unmangled. Output is padded to
@@ -869,7 +869,7 @@ fn _split_tab_fields(line: String, n: Int) -> List[String]:
     return out^
 
 
-fn fetch_git_branches(project_root: String) -> List[GitBranch]:
+def fetch_git_branches(project_root: String) -> List[GitBranch]:
     """Run ``git for-each-ref refs/heads`` and parse the output.
 
     Branches are returned sorted by most recent commit date first. Empty
@@ -909,7 +909,7 @@ fn fetch_git_branches(project_root: String) -> List[GitBranch]:
     return out^
 
 
-fn _fetch_unpushed_short_shas(
+def _fetch_unpushed_short_shas(
     project_root: String, limit: Int,
 ) -> List[String]:
     """Short SHAs of commits reachable from HEAD that are *not* in any
@@ -946,14 +946,14 @@ fn _fetch_unpushed_short_shas(
     return out^
 
 
-fn _list_contains(shas: List[String], sha: String) -> Bool:
+def _list_contains(shas: List[String], sha: String) -> Bool:
     for i in range(len(shas)):
         if shas[i] == sha:
             return True
     return False
 
 
-fn fetch_git_commits(
+def fetch_git_commits(
     project_root: String, limit: Int = 50,
 ) -> List[GitCommit]:
     """Run ``git log -<limit> --pretty=format``. The newest commit is
@@ -996,7 +996,7 @@ fn fetch_git_commits(
     return out^
 
 
-fn fetch_commit_show(project_root: String, sha: String) -> String:
+def fetch_commit_show(project_root: String, sha: String) -> String:
     """Run ``git show <sha> --no-color`` and return its full output
     (header + unified diff). Used as the right-pane content when the
     user focuses a commit in the local-changes view."""
@@ -1018,7 +1018,7 @@ fn fetch_commit_show(project_root: String, sha: String) -> String:
         return String("")
 
 
-fn fetch_branch_log(
+def fetch_branch_log(
     project_root: String, branch: String, limit: Int = 30,
 ) -> String:
     """Run ``git log -<limit> --no-color <branch>`` and return stdout.

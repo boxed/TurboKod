@@ -35,34 +35,34 @@ struct Application:
     var back: Canvas
     var running: Bool
 
-    fn __init__(out self) raises:
+    def __init__(out self) raises:
         self.terminal = Terminal()
         self.back = Canvas(self.terminal.width, self.terminal.height)
         self.running = True
 
-    fn start(mut self) raises:
+    def start(mut self) raises:
         self.terminal.start()
         # Terminal.start() may discover a more accurate size via the cursor
         # query that runs after raw mode is on. Sync the back canvas.
         if self.back.width != self.terminal.width or self.back.height != self.terminal.height:
             self.back.resize(self.terminal.width, self.terminal.height)
 
-    fn stop(mut self) raises:
+    def stop(mut self) raises:
         self.terminal.stop()
 
-    fn screen(self) -> Rect:
+    def screen(self) -> Rect:
         return Rect(0, 0, self.back.width, self.back.height)
 
-    fn quit(mut self):
+    def quit(mut self):
         self.running = False
 
-    fn clear(mut self):
+    def clear(mut self):
         self.back.clear(default_attr())
 
-    fn present(mut self) raises:
+    def present(mut self) raises:
         self.terminal.present(self.back)
 
-    fn next_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
+    def next_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
         # Polled-cursor refresh stays as a fallback for real terminals where
         # the wrapper isn't around to push window-size updates.
         if self.terminal.refresh_size():

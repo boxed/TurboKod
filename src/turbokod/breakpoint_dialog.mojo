@@ -88,7 +88,7 @@ struct _MenuLayout(ImplicitlyCopyable, Movable):
     var buttons_y: Int
 
 
-fn _build_menu_layout(rect: Rect) -> _MenuLayout:
+def _build_menu_layout(rect: Rect) -> _MenuLayout:
     var cursor = RowCursor(rect.a.y + 1)
     var title_y = cursor.place()
     var checkbox_y = cursor.place()
@@ -156,7 +156,7 @@ struct BreakpointMenu(Movable):
     Esc / Cancel. The host gates its apply step on this so cancelled
     dialogs leave the BP untouched."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.path = String("")
@@ -171,7 +171,7 @@ struct BreakpointMenu(Movable):
         self._cancel = ShadowButton(String(" Cancel "), 0, 0)
         self._confirmed = False
 
-    fn open(
+    def open(
         mut self, var path: String, line: Int, enabled: Bool,
         var condition: String, var wait_for: String,
         var wait_for_options: List[String],
@@ -199,7 +199,7 @@ struct BreakpointMenu(Movable):
         self._cancel.pressed_inside = False
         self._confirmed = False
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.path = String("")
@@ -214,7 +214,7 @@ struct BreakpointMenu(Movable):
         self._cancel.pressed_inside = False
         self._confirmed = False
 
-    fn result(self) -> BreakpointMenuResult:
+    def result(self) -> BreakpointMenuResult:
         """Captured state at submit time. Caller pulls this *before*
         calling ``close`` so the strings come out in the live form,
         not the post-close empty form."""
@@ -223,7 +223,7 @@ struct BreakpointMenu(Movable):
             _wait_for_value(self.wait_for),
         )
 
-    fn _layout(self, screen: Rect) -> Rect:
+    def _layout(self, screen: Rect) -> Rect:
         var width = _DLG_WIDTH
         if width > screen.b.x - 4:
             width = screen.b.x - 4
@@ -242,14 +242,14 @@ struct BreakpointMenu(Movable):
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn _position_checkbox(mut self, layout: _MenuLayout, dlg: Rect):
+    def _position_checkbox(mut self, layout: _MenuLayout, dlg: Rect):
         """Repoint the checkbox at the dialog's current position. Run
         from both ``paint`` and ``handle_mouse`` so the chip's
         ``hit_rect`` is in sync with where it was last drawn even if
         the dialog has since moved/resized."""
         self.enabled.move_to(dlg.a.x + 2, layout.checkbox_y)
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -335,7 +335,7 @@ struct BreakpointMenu(Movable):
         paint_shadow_button(canvas, self._ok, ok_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._cancel, cancel_face, LIGHT_GRAY)
 
-    fn paint_popup(self, mut canvas: Canvas, screen: Rect):
+    def paint_popup(self, mut canvas: Canvas, screen: Rect):
         """Render the wait-for dropdown popup on top. Caller invokes
         this after every other modal layer so the popup overlays them
         — same z-order pattern as ``Settings`` and ``ActionEditor``."""
@@ -345,14 +345,14 @@ struct BreakpointMenu(Movable):
         var layout = _build_menu_layout(rect)
         self.wait_for.paint_popup(canvas, layout.wait_for_rect, screen)
 
-    fn _resolve(mut self, confirmed: Bool):
+    def _resolve(mut self, confirmed: Bool):
         self.submitted = True
         self._confirmed = confirmed
 
-    fn _toggle_enabled(mut self):
+    def _toggle_enabled(mut self):
         self.enabled.toggle()
 
-    fn _focus_next(mut self, backward: Bool = False):
+    def _focus_next(mut self, backward: Bool = False):
         # 5 stops: Enabled → Wait-for → Condition → OK → Cancel → wrap.
         # Tabbing away from the wait-for dropdown also closes its popup
         # so a half-open menu doesn't bleed past focus changes.
@@ -381,7 +381,7 @@ struct BreakpointMenu(Movable):
         else:
             self._focus = _FOCUS_ENABLED
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -438,7 +438,7 @@ struct BreakpointMenu(Movable):
         # above — the underlying ``ShadowButton`` only responds to mouse.
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -533,7 +533,7 @@ struct _ErrorLayout(ImplicitlyCopyable, Movable):
     var buttons_y: Int
 
 
-fn _build_error_layout(rect: Rect) -> _ErrorLayout:
+def _build_error_layout(rect: Rect) -> _ErrorLayout:
     var cursor = RowCursor(rect.a.y + 1)
     var title_y = cursor.place()
     var error_y = cursor.place()
@@ -597,7 +597,7 @@ struct BreakpointConditionErrorDialog(Movable):
     var _disable: ShadowButton
     var _cancel: ShadowButton
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.action = BP_ERR_NONE
@@ -613,7 +613,7 @@ struct BreakpointConditionErrorDialog(Movable):
         )
         self._cancel = ShadowButton(String(" Cancel "), 0, 0)
 
-    fn open(
+    def open(
         mut self, var path: String, line: Int,
         var error: String, var condition: String,
         var locals_: List[String],
@@ -635,7 +635,7 @@ struct BreakpointConditionErrorDialog(Movable):
         self._cancel.pressed = False
         self._cancel.pressed_inside = False
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.action = BP_ERR_NONE
@@ -645,7 +645,7 @@ struct BreakpointConditionErrorDialog(Movable):
         self.locals_ = List[String]()
         self.condition = TextField()
 
-    fn set_error(mut self, var error: String):
+    def set_error(mut self, var error: String):
         """Update the error text without closing — used when ``Try
         again`` re-submits an edited condition that's still bad."""
         self.error = error^
@@ -654,7 +654,7 @@ struct BreakpointConditionErrorDialog(Movable):
         # Refocus the condition so the user can keep typing.
         self._focus = _ERR_FOCUS_CONDITION
 
-    fn _layout(self, screen: Rect) -> Rect:
+    def _layout(self, screen: Rect) -> Rect:
         var width = _DLG_WIDTH + 8
         if width > screen.b.x - 4:
             width = screen.b.x - 4
@@ -676,7 +676,7 @@ struct BreakpointConditionErrorDialog(Movable):
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -770,7 +770,7 @@ struct BreakpointConditionErrorDialog(Movable):
         paint_shadow_button(canvas, self._disable, dis_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._cancel, can_face, LIGHT_GRAY)
 
-    fn _focus_next(mut self, backward: Bool = False):
+    def _focus_next(mut self, backward: Bool = False):
         if backward:
             if self._focus == _ERR_FOCUS_CONDITION:
                 self._focus = _ERR_FOCUS_CANCEL
@@ -790,7 +790,7 @@ struct BreakpointConditionErrorDialog(Movable):
         else:
             self._focus = _ERR_FOCUS_CONDITION
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -820,7 +820,7 @@ struct BreakpointConditionErrorDialog(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -858,7 +858,7 @@ struct BreakpointConditionErrorDialog(Movable):
 # --- wait-for dropdown helpers --------------------------------------------
 
 
-fn _build_wait_for_dropdown(
+def _build_wait_for_dropdown(
     var options: List[String], var current: String,
 ) -> Dropdown:
     """Construct the trigger-BP dropdown with a leading ``(none)`` row
@@ -883,7 +883,7 @@ fn _build_wait_for_dropdown(
     return dd^
 
 
-fn _wait_for_value(dd: Dropdown) -> String:
+def _wait_for_value(dd: Dropdown) -> String:
     """Translate a dropdown selection back to the storage form: the
     ``(none)`` sentinel maps to the empty string; everything else
     passes through verbatim."""

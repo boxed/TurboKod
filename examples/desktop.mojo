@@ -69,14 +69,14 @@ from turbokod import (
 )
 
 
-fn _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
+def _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
     var list = List[MenuItem]()
     for it in items:
         list.append(MenuItem(it[0], it[1]))
     return Menu(label^, list^)
 
 
-fn _split_open_arg_path(arg: String) -> String:
+def _split_open_arg_path(arg: String) -> String:
     """Path portion of an open-arg, with the optional ``\\x1f<line>``
     suffix stripped. The native wrapper appends ``\\x1f<line>`` when
     translating ``turbokod://open?...&line=N`` URLs; pure paths come
@@ -88,7 +88,7 @@ fn _split_open_arg_path(arg: String) -> String:
     return arg
 
 
-fn _split_open_arg_line(arg: String) -> Int:
+def _split_open_arg_line(arg: String) -> Int:
     """Line portion of an open-arg (1-based), or 0 when absent /
     malformed. Mirrors ``_split_open_arg_path`` so a single arg can be
     interpreted with two cheap byte scans."""
@@ -113,7 +113,7 @@ fn _split_open_arg_line(arg: String) -> Int:
     return n if saw else 0
 
 
-fn main() raises:
+def main() raises:
     var app = Application()
     var error_log = List[String]()        # populated in the loop, drained on quit
     app.start()
@@ -413,7 +413,7 @@ fn main() raises:
                 # URL.
                 if ev.kind == EVENT_OPEN_PATH:
                     var path = ev.text
-                    if len(path) > 0:
+                    if path.byte_length() > 0:
                         var info = stat_file(path)
                         if info.ok and info.is_dir():
                             desktop.open_project(path)

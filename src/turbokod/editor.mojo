@@ -77,7 +77,7 @@ from .text_view import (
 # --- Helpers ----------------------------------------------------------------
 
 
-fn _slice(s: String, start: Int, end: Int) -> String:
+def _slice(s: String, start: Int, end: Int) -> String:
     """Byte-range substring (ASCII-safe)."""
     var bytes = s.as_bytes()
     var s_start = start
@@ -88,7 +88,7 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
-fn _completion_kind_name(kind: Int) -> String:
+def _completion_kind_name(kind: Int) -> String:
     """Map an LSP ``CompletionItemKind`` integer to its human-readable
     name. Unknown kinds get an empty string so the column stays blank
     rather than rendering noise.
@@ -121,7 +121,7 @@ fn _completion_kind_name(kind: Int) -> String:
     return String("")
 
 
-fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
+def _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     """True iff typing the ASCII byte ``k`` should kick off an
     as-you-type completion request.
 
@@ -145,7 +145,7 @@ fn _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     return False
 
 
-fn _completion_overlap_start(
+def _completion_overlap_start(
     line: String, cursor_col: Int, insert_text: String,
 ) -> Int:
     """Longest column on ``line`` such that ``line[col, cursor_col)``
@@ -180,7 +180,7 @@ fn _completion_overlap_start(
     return cursor_col
 
 
-fn _rtrim(s: String) -> String:
+def _rtrim(s: String) -> String:
     """Drop trailing ASCII spaces and tabs. Used by ``_disk_text`` to honor
     the editorconfig ``trim_trailing_whitespace`` property."""
     var bytes = s.as_bytes()
@@ -192,14 +192,14 @@ fn _rtrim(s: String) -> String:
     return _slice(s, 0, n)
 
 
-fn _diag_intersects_row(diag: Diagnostic, row: Int) -> Bool:
+def _diag_intersects_row(diag: Diagnostic, row: Int) -> Bool:
     """True iff ``diag`` covers any byte on ``row``. LSP ranges can
     span multiple rows (e.g. an unclosed bracket marked from open to
     EOF), so the renderer needs to project per row."""
     return diag.start_row <= row and row <= diag.end_row
 
 
-fn _diag_byte_start_for_row(diag: Diagnostic, row: Int) -> Int:
+def _diag_byte_start_for_row(diag: Diagnostic, row: Int) -> Int:
     """Buffer-byte start column for ``diag`` *on row ``row``*. For the
     first row of a multi-row diagnostic this is ``diag.start_col``; for
     a continuation row the diagnostic starts at column 0 of that row."""
@@ -208,7 +208,7 @@ fn _diag_byte_start_for_row(diag: Diagnostic, row: Int) -> Int:
     return 0
 
 
-fn _diag_byte_end_for_row(diag: Diagnostic, row: Int, line_len: Int) -> Int:
+def _diag_byte_end_for_row(diag: Diagnostic, row: Int, line_len: Int) -> Int:
     """Buffer-byte end column for ``diag`` *on row ``row``*. For rows
     strictly between start and end, the diagnostic occupies the whole
     line; ``end_col`` only applies on ``end_row``. ``line_len`` is the
@@ -229,7 +229,7 @@ fn _diag_byte_end_for_row(diag: Diagnostic, row: Int, line_len: Int) -> Int:
     return hi
 
 
-fn _diag_covers_cell(diag: Diagnostic, row: Int, byte_col: Int) -> Bool:
+def _diag_covers_cell(diag: Diagnostic, row: Int, byte_col: Int) -> Bool:
     """True iff ``(row, byte_col)`` falls inside ``diag``'s range.
 
     Continuation rows (rows strictly between start and end) are treated
@@ -255,7 +255,7 @@ fn _diag_covers_cell(diag: Diagnostic, row: Int, byte_col: Int) -> Bool:
     return byte_col < hi
 
 
-fn _diag_severity_to_minimap_kind(severity: Int) -> Int:
+def _diag_severity_to_minimap_kind(severity: Int) -> Int:
     """Map LSP severity → the minimap-hover ``kind`` discriminant the
     tooltip-paint pass already understands. Errors=3, warnings=4,
     info=5, hints=6; unknown severities fall through to info so the
@@ -271,7 +271,7 @@ fn _diag_severity_to_minimap_kind(severity: Int) -> Int:
     return 5
 
 
-fn _diag_underline_color(severity: Int) -> UInt8:
+def _diag_underline_color(severity: Int) -> UInt8:
     """Map LSP severity → squiggle color. Errors = LIGHT_RED, warnings
     = LIGHT_YELLOW, info = LIGHT_BLUE, hints = DARK_GRAY (subtle so
     they don't compete with real problems). Unknown severities default
@@ -286,7 +286,7 @@ fn _diag_underline_color(severity: Int) -> UInt8:
     return LIGHT_BLUE
 
 
-fn _lists_equal(a: List[String], b: List[String]) -> Bool:
+def _lists_equal(a: List[String], b: List[String]) -> Bool:
     """Element-wise equality for two ``List[String]``. Used after a
     3-way merge to decide whether the merged buffer matches the
     just-read on-disk content (clean = leaves the buffer non-dirty)."""
@@ -298,7 +298,7 @@ fn _lists_equal(a: List[String], b: List[String]) -> Bool:
     return True
 
 
-fn _split_buffer_lines(text: String) -> List[String]:
+def _split_buffer_lines(text: String) -> List[String]:
     """Split disk bytes into the buffer's line-list shape.
 
     Mirrors ``TextBuffer.__init__`` exactly (split on ``\\n``; trailing
@@ -328,7 +328,7 @@ fn _split_buffer_lines(text: String) -> List[String]:
     return out^
 
 
-fn _normalize_crlf(text: String) -> String:
+def _normalize_crlf(text: String) -> String:
     """Rewrite ``text`` with all ``\\r\\n`` pairs collapsed to ``\\n``.
 
     Used on external text that's about to be diffed or spliced into the
@@ -357,7 +357,7 @@ fn _normalize_crlf(text: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
 
 
-fn _detect_line_ending(text: String) -> String:
+def _detect_line_ending(text: String) -> String:
     """Pick a line-ending style for ``text``. Returns ``"crlf"`` when
     the majority of ``\\n`` line breaks are preceded by ``\\r``, and
     ``"lf"`` otherwise (including for empty / no-newline input).
@@ -394,7 +394,7 @@ fn _detect_line_ending(text: String) -> String:
 # stepping share one source of truth for UTF-8 lead-byte decoding.
 
 
-fn _utf8_step_forward(line: String, col: Int) -> Int:
+def _utf8_step_forward(line: String, col: Int) -> Int:
     """Byte offset of the codepoint boundary one step forward from ``col``."""
     var bytes = line.as_bytes()
     var n = len(bytes)
@@ -407,7 +407,7 @@ fn _utf8_step_forward(line: String, col: Int) -> Int:
     return nxt
 
 
-fn _utf8_step_backward(line: String, col: Int) -> Int:
+def _utf8_step_backward(line: String, col: Int) -> Int:
     """Byte offset of the codepoint boundary one step backward from ``col``.
     Walks back over UTF-8 continuation bytes (10xxxxxx)."""
     if col <= 0:
@@ -419,7 +419,7 @@ fn _utf8_step_backward(line: String, col: Int) -> Int:
     return c
 
 
-fn _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
+def _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
     """Cell column for byte offset ``byte_col`` in ``line``. Past-EOL bytes
     consume one virtual cell each so cursors parked to the right of the last
     character stay distinguishable in vertical-movement bookkeeping."""
@@ -437,7 +437,7 @@ fn _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
     return cell
 
 
-fn _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
+def _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
     clamped to ``len(line)``. Used to translate a remembered cell column from
     one row to another during vertical movement."""
@@ -460,11 +460,11 @@ struct TextBuffer(Copyable, Movable):
     """Line-oriented buffer. Always has at least one (possibly empty) line."""
     var lines: List[String]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.lines = List[String]()
         self.lines.append(String(""))
 
-    fn __init__(out self, var text: String):
+    def __init__(out self, var text: String):
         self.lines = List[String]()
         var bytes = text.as_bytes()
         var line_start = 0
@@ -491,23 +491,23 @@ struct TextBuffer(Copyable, Movable):
             end -= 1
         self.lines.append(_slice(text, line_start, end))
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
 
-    fn line_count(self) -> Int:
+    def line_count(self) -> Int:
         return len(self.lines)
 
-    fn line(self, row: Int) -> String:
+    def line(self, row: Int) -> String:
         if 0 <= row and row < len(self.lines):
             return self.lines[row]
         return String("")
 
-    fn line_length(self, row: Int) -> Int:
+    def line_length(self, row: Int) -> Int:
         if 0 <= row and row < len(self.lines):
             return len(self.lines[row].as_bytes())
         return 0
 
-    fn insert(mut self, row: Int, col: Int, text: String):
+    def insert(mut self, row: Int, col: Int, text: String):
         if row < 0 or row >= len(self.lines):
             return
         var line = self.lines[row]
@@ -517,7 +517,7 @@ struct TextBuffer(Copyable, Movable):
         if pos > n: pos = n
         self.lines[row] = _slice(line, 0, pos) + text + _slice(line, pos, n)
 
-    fn delete_at(mut self, row: Int, col: Int):
+    def delete_at(mut self, row: Int, col: Int):
         """Delete one codepoint at (row, col). If past EOL, joins next line."""
         if row < 0 or row >= len(self.lines):
             return
@@ -531,7 +531,7 @@ struct TextBuffer(Copyable, Movable):
         var nxt = _utf8_step_forward(line, col)
         self.lines[row] = _slice(line, 0, col) + _slice(line, nxt, n)
 
-    fn delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
+    def delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Backspace one codepoint. Returns the new cursor (row, col)."""
         if col > 0:
             var line = self.lines[row]
@@ -546,7 +546,7 @@ struct TextBuffer(Copyable, Movable):
             return (row - 1, prev_len)
         return (row, col)
 
-    fn split(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
+    def split(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Split line at col (Enter key). Returns the new cursor (row+1, 0)."""
         if row < 0 or row >= len(self.lines):
             return (row, col)
@@ -694,7 +694,7 @@ struct EditorSnapshot(Copyable, Movable):
     # round-trips multi-caret state.
     var extra_carets: List[Caret]
 
-    fn __init__(
+    def __init__(
         out self,
         var lines: List[String],
         cursor_row: Int,
@@ -710,7 +710,7 @@ struct EditorSnapshot(Copyable, Movable):
         self.anchor_col = anchor_col
         self.extra_carets = extra_carets^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.cursor_row = copy.cursor_row
         self.cursor_col = copy.cursor_col
@@ -1031,7 +1031,7 @@ struct Editor(Copyable, Movable):
     # after the user dismissed it (Esc / cursor-out-of-word / accept).
     var _completion_cancel_pending: Bool
 
-    fn __init__(out self):
+    def __init__(out self):
         self.buffer = TextBuffer()
         self.cursor_row = 0
         self.cursor_col = 0
@@ -1112,7 +1112,7 @@ struct Editor(Copyable, Movable):
         self._completion_request_stamp_ms = 0
         self._completion_cancel_pending = False
 
-    fn __init__(out self, var text: String):
+    def __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
         self.cursor_row = 0
         self.cursor_col = 0
@@ -1194,7 +1194,7 @@ struct Editor(Copyable, Movable):
         self._completion_cancel_pending = False
 
     @staticmethod
-    fn from_file(var path: String) raises -> Self:
+    def from_file(var path: String) raises -> Self:
         var text = read_file(path)
         var info = stat_file(path)
         # Keep a copy of the on-disk bytes as the merge base for any
@@ -1221,7 +1221,7 @@ struct Editor(Copyable, Movable):
         # ``ed.flush_highlights(local_registry)`` directly.
         return ed^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.buffer = copy.buffer
         self.cursor_row = copy.cursor_row
         self.cursor_col = copy.cursor_col
@@ -1307,7 +1307,7 @@ struct Editor(Copyable, Movable):
         self._completion_request_stamp_ms = copy._completion_request_stamp_ms
         self._completion_cancel_pending = copy._completion_cancel_pending
 
-    fn flush_highlights(
+    def flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
     ):
         """Bring ``self.highlights`` up to date by tokenizing against
@@ -1341,7 +1341,7 @@ struct Editor(Copyable, Movable):
         speller.load_default()
         self._refresh_spell(speller)
 
-    fn _refresh_spell(mut self, speller: Speller):
+    def _refresh_spell(mut self, speller: Speller):
         """Rebuild ``spell_highlights`` and ``spell_lines`` from the
         current ``self.highlights``. Walks every comment / string
         highlight, runs the words through the speller, and emits an
@@ -1440,7 +1440,7 @@ struct Editor(Copyable, Movable):
                 )
             self.spell_lines[hl.row] = True
 
-    fn invalidate_spell(mut self):
+    def invalidate_spell(mut self):
         """Force ``flush_highlights`` to rerun ``_refresh_spell`` on
         the next paint. Used after the speller's word list changes
         (e.g. user added a word to the user/project dictionary) so the
@@ -1454,7 +1454,7 @@ struct Editor(Copyable, Movable):
         self._highlights_dirty = True
         self._hl_dirty_row = 0
 
-    fn set_diagnostics(mut self, var diags: List[Diagnostic]):
+    def set_diagnostics(mut self, var diags: List[Diagnostic]):
         """Replace the diagnostic set with ``diags`` and rebuild the
         per-row severity index used by the minimap.
 
@@ -1482,14 +1482,14 @@ struct Editor(Copyable, Movable):
         self.diagnostics = diags^
         self.diagnostic_lines = per_row^
 
-    fn clear_diagnostics(mut self):
+    def clear_diagnostics(mut self):
         """Drop all diagnostics and the per-row severity index. Used
         when an LSP server fails / restarts and the prior diagnostics
         no longer reflect reality."""
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
 
-    fn consume_lsp_dirty(mut self, now_ms: Int = 0) -> Bool:
+    def consume_lsp_dirty(mut self, now_ms: Int = 0) -> Bool:
         """Return whether the buffer has been edited since the last
         time this was called, and clear the flag. The host drives this
         from ``Desktop.lsp_tick`` to send a didChange and keep the
@@ -1512,7 +1512,7 @@ struct Editor(Copyable, Movable):
         self._lsp_dirty = False
         return True
 
-    fn invalidate_highlight_cache(mut self):
+    def invalidate_highlight_cache(mut self):
         """Drop the per-buffer tokenizer state and force a full
         retokenize on the next ``flush_highlights``. Used after a
         grammar download lands so the editor immediately picks up the
@@ -1522,7 +1522,7 @@ struct Editor(Copyable, Movable):
         self._highlights_dirty = True
         self._hl_dirty_row = 0
 
-    fn _mark_hl_dirty(mut self, row: Int):
+    def _mark_hl_dirty(mut self, row: Int):
         """Note that ``row`` (and possibly later rows) need
         re-tokenizing. The dirty pointer only ever moves *up*
         toward the top of the buffer — once row 5 is dirty,
@@ -1545,7 +1545,7 @@ struct Editor(Copyable, Movable):
         self._lsp_dirty = True
         self._lsp_dirty_stamp_ms = monotonic_ms()
 
-    fn refresh_highlights(mut self):
+    def refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
         call (driven by the render path) re-tokenizes. Use this
         when the host changes the buffer through a path that
@@ -1561,7 +1561,7 @@ struct Editor(Copyable, Movable):
 
     # --- undo / redo ------------------------------------------------------
 
-    fn _snapshot(self) -> EditorSnapshot:
+    def _snapshot(self) -> EditorSnapshot:
         return EditorSnapshot(
             self.buffer.lines.copy(),
             self.cursor_row, self.cursor_col,
@@ -1569,7 +1569,7 @@ struct Editor(Copyable, Movable):
             self.extra_carets.copy(),
         )
 
-    fn _push_undo(mut self):
+    def _push_undo(mut self):
         """Record the current state on the undo stack and clear redo.
 
         Call this *before* applying a mutation so ``undo`` rewinds to the
@@ -1595,7 +1595,7 @@ struct Editor(Copyable, Movable):
         # call when it wants the new char to anchor a fresh group.
         self._typing_active = False
 
-    fn _restore(mut self, snap: EditorSnapshot):
+    def _restore(mut self, snap: EditorSnapshot):
         self.buffer.lines = snap.lines.copy()
         self.cursor_row = snap.cursor_row
         self.cursor_col = snap.cursor_col
@@ -1627,33 +1627,33 @@ struct Editor(Copyable, Movable):
     # so iteration helpers can run the existing single-caret code once
     # per caret (set primary, run op, capture result).
 
-    fn has_extra_carets(self) -> Bool:
+    def has_extra_carets(self) -> Bool:
         return len(self.extra_carets) > 0
 
-    fn caret_count(self) -> Int:
+    def caret_count(self) -> Int:
         return 1 + len(self.extra_carets)
 
-    fn primary_caret(self) -> Caret:
+    def primary_caret(self) -> Caret:
         return Caret(
             self.cursor_row, self.cursor_col, self.desired_col,
             self.anchor_row, self.anchor_col,
         )
 
-    fn _apply_caret(mut self, c: Caret):
+    def _apply_caret(mut self, c: Caret):
         self.cursor_row = c.row
         self.cursor_col = c.col
         self.desired_col = c.desired_col
         self.anchor_row = c.anchor_row
         self.anchor_col = c.anchor_col
 
-    fn clear_extra_carets(mut self):
+    def clear_extra_carets(mut self):
         """Drop every extra caret. The primary caret keeps its position
         and selection. Called on plain mouse click, on collapsing
         operations (Enter, paste, comment toggle, …), and from the host
         when the user presses Esc with no modal open."""
         self.extra_carets = List[Caret]()
 
-    fn _collapse_extras_with_undo(mut self):
+    def _collapse_extras_with_undo(mut self):
         """When extras are present, push an undo snapshot capturing
         them and then drop them — so undo restores the multi-caret
         state. Used by ops that don't generalise to multi-caret
@@ -1665,7 +1665,7 @@ struct Editor(Copyable, Movable):
             self._push_undo()
             self.extra_carets = List[Caret]()
 
-    fn _all_carets_asc(self) -> List[Caret]:
+    def _all_carets_asc(self) -> List[Caret]:
         """Return primary + extras sorted ascending by ``(row, col)``.
         Used by every multi-caret iteration; sort is stable, ties on
         identical positions are dropped by the dedupe in
@@ -1685,7 +1685,7 @@ struct Editor(Copyable, Movable):
                 j -= 1
         return out^
 
-    fn _install_carets(mut self, var carets: List[Caret]):
+    def _install_carets(mut self, var carets: List[Caret]):
         """Promote ``carets[0]`` to primary, the rest to ``extra_carets``,
         after deduping carets that landed on the same ``(row, col)`` —
         merging is what the user expects when two carets walk into each
@@ -1727,14 +1727,14 @@ struct Editor(Copyable, Movable):
             extras.append(deduped[i])
         self.extra_carets = extras^
 
-    fn _add_caret(mut self, c: Caret):
+    def _add_caret(mut self, c: Caret):
         """Append a caret and renormalise. Public-facing convenience for
         the host (Ctrl+click, Ctrl+Alt+Up/Down, …)."""
         var all_c = self._all_carets_asc()
         all_c.append(c)
         self._install_carets(all_c^)
 
-    fn add_caret_above(mut self):
+    def add_caret_above(mut self):
         """Stamp a new caret one row above the topmost existing caret,
         column-cell-aligned to the primary caret's ``desired_col``. Bound
         to Ctrl+Alt+Up. No-op when the topmost caret is already on row 0
@@ -1748,7 +1748,7 @@ struct Editor(Copyable, Movable):
         var nc = _utf8_byte_of_cell(line, self.desired_col)
         self._add_caret(Caret(nr, nc, self.desired_col, nr, nc))
 
-    fn add_caret_below(mut self):
+    def add_caret_below(mut self):
         """Stamp a new caret one row below the bottommost existing caret.
         Bound to Ctrl+Alt+Down. No-op when there's no row below."""
         var all_c = self._all_carets_asc()
@@ -1760,7 +1760,7 @@ struct Editor(Copyable, Movable):
         var nc = _utf8_byte_of_cell(line, self.desired_col)
         self._add_caret(Caret(nr, nc, self.desired_col, nr, nc))
 
-    fn _any_caret_has_selection(self) -> Bool:
+    def _any_caret_has_selection(self) -> Bool:
         if self.has_selection():
             return True
         for i in range(len(self.extra_carets)):
@@ -1769,7 +1769,7 @@ struct Editor(Copyable, Movable):
                 return True
         return False
 
-    fn _all_carets_inline_safe(
+    def _all_carets_inline_safe(
         self, op: Int,
     ) -> Bool:
         """``op``: 0 = inline insert, 1 = backspace, 2 = delete.
@@ -1794,7 +1794,7 @@ struct Editor(Copyable, Movable):
                     return False
         return True
 
-    fn undo(mut self) -> Bool:
+    def undo(mut self) -> Bool:
         """Roll back the last mutation. Returns False when the stack is empty.
 
         The caller is responsible for re-scrolling — pass the editor's view
@@ -1809,7 +1809,7 @@ struct Editor(Copyable, Movable):
         self._restore(snap)
         return True
 
-    fn redo(mut self) -> Bool:
+    def redo(mut self) -> Bool:
         """Replay the most recently undone mutation. False when nothing to redo."""
         if self.read_only:
             return False
@@ -1820,13 +1820,13 @@ struct Editor(Copyable, Movable):
         self._restore(snap)
         return True
 
-    fn consume_definition_request(mut self) -> Optional[DefinitionRequest]:
+    def consume_definition_request(mut self) -> Optional[DefinitionRequest]:
         """Return any pending ``DefinitionRequest`` and clear the slot."""
         var req = self.pending_definition
         self.pending_definition = Optional[DefinitionRequest]()
         return req
 
-    fn consume_completion_request(
+    def consume_completion_request(
         mut self, now_ms: Int = 0,
     ) -> Optional[CompletionRequest]:
         """Return any pending ``CompletionRequest`` and clear the slot.
@@ -1853,7 +1853,7 @@ struct Editor(Copyable, Movable):
         self.pending_completion_request = Optional[CompletionRequest]()
         return Optional[CompletionRequest](req)
 
-    fn consume_completion_cancel(mut self) -> Bool:
+    def consume_completion_cancel(mut self) -> Bool:
         """Return and clear the cancel-pending latch.
 
         Set by ``close_completion_popup`` whenever the popup is
@@ -1865,7 +1865,7 @@ struct Editor(Copyable, Movable):
         self._completion_cancel_pending = False
         return pending
 
-    fn close_completion_popup(mut self):
+    def close_completion_popup(mut self):
         """Hide and clear the completion popup. Idempotent.
 
         Also clears any queued ``pending_completion_request`` and
@@ -1884,7 +1884,7 @@ struct Editor(Copyable, Movable):
         self.pending_completion_request = Optional[CompletionRequest]()
         self._completion_cancel_pending = True
 
-    fn set_completions(
+    def set_completions(
         mut self, var items: List[CompletionItem],
         anchor_row: Int, anchor_col: Int,
     ):
@@ -1912,7 +1912,7 @@ struct Editor(Copyable, Movable):
         self.completion_anchor_col = anchor_col
         self.completion_is_message = False
 
-    fn show_no_completion_message(
+    def show_no_completion_message(
         mut self, anchor_row: Int, anchor_col: Int,
     ):
         """Surface a ``<no completion found>`` popup at the anchor.
@@ -1939,7 +1939,7 @@ struct Editor(Copyable, Movable):
         self.completion_anchor_col = anchor_col
         self.completion_is_message = True
 
-    fn completion_prefix_start(self) -> Int:
+    def completion_prefix_start(self) -> Int:
         """Cursor's identifier start col on the current line. Walks
         backward through word codepoints until hitting a non-word char
         or the start of the line. Used to anchor the completion popup
@@ -1954,7 +1954,7 @@ struct Editor(Copyable, Movable):
             col = prev
         return col
 
-    fn _cursor_after_word_codepoint(self) -> Bool:
+    def _cursor_after_word_codepoint(self) -> Bool:
         """True iff the codepoint immediately to the left of the cursor
         is a word codepoint (letter, digit, or underscore). Used by the
         as-you-type completion auto-trigger to decide whether the
@@ -1968,7 +1968,7 @@ struct Editor(Copyable, Movable):
         var info = codepoint_at(line, prev)
         return is_word_codepoint(info[0])
 
-    fn _stamp_completion_request(mut self):
+    def _stamp_completion_request(mut self):
         """Stamp ``pending_completion_request`` at the current cursor.
         Helper for the as-you-type auto-trigger paths so they don't
         each duplicate the prefix-start lookup. ``manual=False`` —
@@ -1988,7 +1988,7 @@ struct Editor(Copyable, Movable):
         )
         self._completion_request_stamp_ms = monotonic_ms()
 
-    fn _apply_buffer_edit_raw(
+    def _apply_buffer_edit_raw(
         mut self, sl: Int, sc: Int, el: Int, ec: Int, new_text: String,
     ) -> Int:
         """Apply one LSP ``TextEdit`` at absolute buffer coordinates.
@@ -2074,7 +2074,7 @@ struct Editor(Copyable, Movable):
 
         return self.buffer.line_count() - n_lines
 
-    fn accept_completion(mut self) -> Bool:
+    def accept_completion(mut self) -> Bool:
         """Apply the currently highlighted completion to the buffer.
 
         Replaces ``[anchor_col, cursor_col)`` on ``anchor_row`` with the
@@ -2198,7 +2198,7 @@ struct Editor(Copyable, Movable):
         self.close_completion_popup()
         return True
 
-    fn _completion_step(mut self, delta: Int):
+    def _completion_step(mut self, delta: Int):
         """Move the popup highlight by ``delta`` (clamped). No-op when
         the popup isn't visible or when showing a message popup (the
         sole entry isn't selectable, so arrow keys have nothing to do).
@@ -2227,7 +2227,7 @@ struct Editor(Copyable, Movable):
                 self.completion_highlight - _COMPLETION_POPUP_ROWS + 1
             )
 
-    fn consume_spell_action_request(
+    def consume_spell_action_request(
         mut self,
     ) -> Optional[SpellActionRequest]:
         """Return any pending ``SpellActionRequest`` and clear the slot.
@@ -2239,7 +2239,7 @@ struct Editor(Copyable, Movable):
         self.pending_spell_action = Optional[SpellActionRequest]()
         return req
 
-    fn spell_run_at_cursor(self) -> Optional[SpellActionRequest]:
+    def spell_run_at_cursor(self) -> Optional[SpellActionRequest]:
         """Return the misspelled-word range at the current cursor, or
         ``None`` if the cursor isn't inside one. Treats the trailing
         boundary as inclusive (``col_start <= cursor_col <= col_end``)
@@ -2269,13 +2269,13 @@ struct Editor(Copyable, Movable):
                 )
         return Optional[SpellActionRequest]()
 
-    fn consume_breakpoint_toggle(mut self) -> Optional[Int]:
+    def consume_breakpoint_toggle(mut self) -> Optional[Int]:
         """Return any pending gutter-click row and clear the slot."""
         var row = self.pending_breakpoint_toggle
         self.pending_breakpoint_toggle = Optional[Int]()
         return row
 
-    fn consume_breakpoint_menu(
+    def consume_breakpoint_menu(
         mut self,
     ) -> Optional[BreakpointMenuRequest]:
         """Return any pending right-click on a BP dot and clear the
@@ -2285,7 +2285,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         return req
 
-    fn consume_git_revert_request(mut self) -> Optional[GitRevertRequest]:
+    def consume_git_revert_request(mut self) -> Optional[GitRevertRequest]:
         """Return any pending git revert request and clear the slot.
         Set by ``handle_mouse`` when the user clicks the per-line bar
         in the git-changes column over a row that's actually changed
@@ -2294,7 +2294,7 @@ struct Editor(Copyable, Movable):
         self.pending_git_revert = Optional[GitRevertRequest]()
         return req
 
-    fn apply_revert_block(mut self, var block: GitRevertBlock):
+    def apply_revert_block(mut self, var block: GitRevertBlock):
         """Replace ``buffer.lines[buf_start:buf_end_excl]`` with
         ``block.head_lines``. Used by the git-gutter revert popup;
         leaves the cursor at the start of the reverted block."""
@@ -2334,7 +2334,7 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(bs)
 
-    fn consume_conflict_diff(mut self) -> Optional[String]:
+    def consume_conflict_diff(mut self) -> Optional[String]:
         """Return any pending merge-conflict diff text and clear the
         slot. Populated by ``check_for_external_change`` whenever it
         returns ``EXT_CHANGE_CONFLICT``; the host wraps the text in a
@@ -2345,7 +2345,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = Optional[String]()
         return d
 
-    fn check_for_external_change(mut self) raises -> Int:
+    def check_for_external_change(mut self) raises -> Int:
         """Re-stat the backing file and react to any out-of-band write.
 
         Returns one of the ``EXT_CHANGE_*`` codes:
@@ -2430,7 +2430,7 @@ struct Editor(Copyable, Movable):
         self.refresh_highlights()
         return EXT_CHANGE_MERGED
 
-    fn _clamp_cursor_after_reload(mut self):
+    def _clamp_cursor_after_reload(mut self):
         """Pull the primary cursor back inside the new buffer bounds and
         recompute ``desired_col``. Used after a reload or merge replaces
         ``buffer.lines`` so a cursor that was past the previous EOL
@@ -2453,7 +2453,7 @@ struct Editor(Copyable, Movable):
 
     # --- saving ------------------------------------------------------------
 
-    fn text_snapshot(self) -> String:
+    def text_snapshot(self) -> String:
         """Concatenate buffer lines with ``\\n`` separators (no trailing
         newline appended — a file that originally ended in ``\\n`` produces
         a trailing empty line in the buffer, which round-trips correctly).
@@ -2481,7 +2481,7 @@ struct Editor(Copyable, Movable):
             ptr=buf.unsafe_ptr(), length=len(buf),
         ))
 
-    fn _disk_text(self) -> String:
+    def _disk_text(self) -> String:
         """Build the byte sequence to write to disk for the current buffer,
         applying any active editorconfig transforms.
 
@@ -2528,7 +2528,7 @@ struct Editor(Copyable, Movable):
             out = out + line
         return out
 
-    fn save(mut self) raises -> Bool:
+    def save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the
         editor has no backing path (caller should trigger Save As) or the
         write fails.
@@ -2549,7 +2549,7 @@ struct Editor(Copyable, Movable):
         self.dirty = False
         return True
 
-    fn save_as(mut self, var path: String) raises -> Bool:
+    def save_as(mut self, var path: String) raises -> Bool:
         """Write the buffer to ``path`` and adopt it as the new backing file.
 
         Resolves editorconfig for the destination *before* writing so disk
@@ -2577,7 +2577,7 @@ struct Editor(Copyable, Movable):
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         return True
 
-    fn replace_all(
+    def replace_all(
         mut self, find: String, replacement: String,
         opts: SearchOptions = default_search_options(),
     ) -> Int:
@@ -2660,7 +2660,7 @@ struct Editor(Copyable, Movable):
             _ = self._undo_stack.pop()
         return count
 
-    fn _replace_all_regex(
+    def _replace_all_regex(
         mut self, rx: OnigRegex, replacement: String,
     ) -> Int:
         """Regex-mode ``replace_all``: rebuild each line by walking
@@ -2720,11 +2720,11 @@ struct Editor(Copyable, Movable):
 
     # --- selection state ---------------------------------------------------
 
-    fn has_selection(self) -> Bool:
+    def has_selection(self) -> Bool:
         return (self.cursor_row != self.anchor_row) \
             or (self.cursor_col != self.anchor_col)
 
-    fn selection(self) -> Tuple[Int, Int, Int, Int]:
+    def selection(self) -> Tuple[Int, Int, Int, Int]:
         """Normalized ``(start_row, start_col, end_row, end_col)`` (start <= end)."""
         var sr = self.anchor_row
         var sc = self.anchor_col
@@ -2736,7 +2736,7 @@ struct Editor(Copyable, Movable):
             er = tr; ec = tc
         return (sr, sc, er, ec)
 
-    fn _line_op_range(self) -> Tuple[Int, Int]:
+    def _line_op_range(self) -> Tuple[Int, Int]:
         """Inclusive ``(start_row, end_row)`` for line-level commands like
         Tab/Shift+Tab indent. With no selection both bounds are the cursor's
         row. With a selection that ends at column 0 of a row, that row is
@@ -2752,7 +2752,7 @@ struct Editor(Copyable, Movable):
             er -= 1
         return (sr, er)
 
-    fn _indent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
+    def _indent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
         """Prepend one indent unit (per editorconfig) to every row in
         ``[sr, er]``. Cursor and anchor cols on affected rows shift right
         by the inserted byte count so the selection stays anchored to the
@@ -2776,7 +2776,7 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(pre_dirty_row)
 
-    fn _dedent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
+    def _dedent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
         """Remove up to one indent unit of leading whitespace from every
         row in ``[sr, er]``. A leading tab counts as one unit; otherwise
         up to ``effective_indent_size`` leading spaces are removed. Lines
@@ -2826,7 +2826,7 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(pre_dirty_row)
 
-    fn move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
+    def move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
         """Place the cursor at ``(row, col)`` (``col`` is a byte offset, must
         sit on a codepoint boundary).
 
@@ -2848,23 +2848,23 @@ struct Editor(Copyable, Movable):
 
     # --- view options ------------------------------------------------------
 
-    fn toggle_line_numbers(mut self):
+    def toggle_line_numbers(mut self):
         self.line_numbers = not self.line_numbers
 
-    fn set_blame(mut self, var lines: List[BlameLine]):
+    def set_blame(mut self, var lines: List[BlameLine]):
         """Replace the blame attribution list and turn the blame
         gutter on. Pass an empty list to clear the cache (the gutter
         also auto-hides when there's nothing to show)."""
         self.blame_lines = lines^
         self.blame_visible = True
 
-    fn toggle_blame(mut self):
+    def toggle_blame(mut self):
         """Show / hide the blame gutter. The host loads ``blame_lines``
         on the same tick the user enables it; toggling off doesn't
         discard the cache, so the next toggle-on is instant."""
         self.blame_visible = not self.blame_visible
 
-    fn _blame_gutter(self) -> Int:
+    def _blame_gutter(self) -> Int:
         """Width of the blame gutter in cells: 8-char short SHA + space
         + author truncated to 14 cells + one trailing separator. Zero
         when blame is hidden or no data has been loaded yet."""
@@ -2872,7 +2872,7 @@ struct Editor(Copyable, Movable):
             return 0
         return 8 + 1 + 14 + 1
 
-    fn set_git_head_text(mut self, var text: String, present: Bool):
+    def set_git_head_text(mut self, var text: String, present: Bool):
         """Cache the file's content at ``HEAD`` for the change-bar
         gutter. ``present=False`` records "no baseline" (file is
         untracked, brand new, or git couldn't resolve the path) — the
@@ -2893,13 +2893,13 @@ struct Editor(Copyable, Movable):
         self._git_head_present = present
         self._git_changes_dirty = True
 
-    fn set_git_changes(mut self, var lines: List[Int]):
+    def set_git_changes(mut self, var lines: List[Int]):
         """Replace the per-line change-status cache. The desktop paint
         pass calls this after running the buffer-vs-HEAD diff."""
         self.git_change_lines = lines^
         self._git_changes_dirty = False
 
-    fn git_head_text(self) -> Optional[String]:
+    def git_head_text(self) -> Optional[String]:
         """Return the cached HEAD content for this file, or empty
         Optional when no baseline has been fetched (file is untracked,
         new, or git isn't reachable). Used by the gutter revert popup
@@ -2908,7 +2908,7 @@ struct Editor(Copyable, Movable):
             return Optional[String]()
         return Optional[String](self._git_head_text)
 
-    fn invalidate_git_changes(mut self):
+    def invalidate_git_changes(mut self):
         """Drop the cached HEAD baseline and per-line change status.
         The next paint with the toggle on re-fetches HEAD via
         ``git show`` and re-runs the diff. Call this on save / file
@@ -2921,7 +2921,7 @@ struct Editor(Copyable, Movable):
         self._git_head_present = False
         self._git_changes_dirty = True
 
-    fn has_uncommitted_changes(self) -> Bool:
+    def has_uncommitted_changes(self) -> Bool:
         """True if the buffer has unsaved edits or any cached
         line-vs-HEAD diff entry. Used by the tab bar to tint the
         filename. ``git_change_lines`` may be empty (non-git file or
@@ -2934,14 +2934,14 @@ struct Editor(Copyable, Movable):
                 return True
         return False
 
-    fn toggle_soft_wrap(mut self):
+    def toggle_soft_wrap(mut self):
         self.soft_wrap = not self.soft_wrap
         if self.soft_wrap:
             # Soft wrap forces a left-aligned visible area: keep the
             # invariant that scroll_x == 0 by snapping it back here.
             self.scroll_x = 0
 
-    fn _line_number_gutter(self) -> Int:
+    def _line_number_gutter(self) -> Int:
         """Width of the line-number gutter in cells, including a trailing
         space. Zero when line numbers are off."""
         if not self.line_numbers:
@@ -2954,7 +2954,7 @@ struct Editor(Copyable, Movable):
             digits += 1
         return digits + 1
 
-    fn _git_changes_gutter(self) -> Int:
+    def _git_changes_gutter(self) -> Int:
         """Width of the git-changes gutter in cells (one column for the
         bar, no trailing separator — line-number gutter already gives a
         space, and the blame / text columns abut directly). Zero when
@@ -2966,7 +2966,7 @@ struct Editor(Copyable, Movable):
             return 0
         return 1
 
-    fn _right_gutter(self) -> Int:
+    def _right_gutter(self) -> Int:
         """Width of the right-side gutter in cells. A single column
         reserved on the right edge of the editor for at-a-glance row
         annotations: gray squares for uncommitted-change lines, yellow
@@ -2983,19 +2983,19 @@ struct Editor(Copyable, Movable):
             return 1
         return 0
 
-    fn _has_spell_issues(self) -> Bool:
+    def _has_spell_issues(self) -> Bool:
         for i in range(len(self.spell_lines)):
             if self.spell_lines[i]:
                 return True
         return False
 
-    fn _has_diagnostic_lines(self) -> Bool:
+    def _has_diagnostic_lines(self) -> Bool:
         for i in range(len(self.diagnostic_lines)):
             if self.diagnostic_lines[i] != 0:
                 return True
         return False
 
-    fn _minimap_total_lines(self) -> Int:
+    def _minimap_total_lines(self) -> Int:
         """Largest source length — sets the file-row span the minimap
         projects onto its content_h screen rows. Sources may differ in
         length (e.g. ``git_change_lines`` is empty for non-git files
@@ -3008,7 +3008,7 @@ struct Editor(Copyable, Movable):
             n = len(self.diagnostic_lines)
         return n
 
-    fn _minimap_buf_range_for_screen_row(
+    def _minimap_buf_range_for_screen_row(
         self, sy: Int, content_h: Int,
     ) -> Tuple[Int, Int]:
         """Map screen row ``sy`` (relative to the editor's view) onto the
@@ -3038,7 +3038,7 @@ struct Editor(Copyable, Movable):
             end = n_lines
         return (start, end)
 
-    fn _minimap_kind_in_slice(self, start: Int, end: Int) -> Int:
+    def _minimap_kind_in_slice(self, start: Int, end: Int) -> Int:
         """Return the priority-winning source kind for the slice.
 
         Kinds: ``0`` (clean), ``1`` (git change), ``2`` (spell),
@@ -3079,7 +3079,7 @@ struct Editor(Copyable, Movable):
                 return 6
         return 0
 
-    fn _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
+    def _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
         """First buffer row in ``[start, end)`` that carries a mark,
         in the same priority order as ``_minimap_kind_in_slice``.
         Returns ``-1`` when the slice has no marks."""
@@ -3112,7 +3112,7 @@ struct Editor(Copyable, Movable):
                 return li
         return -1
 
-    fn _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
+    def _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
         """Source registry for the right-side projection — same priority
         order as ``_minimap_kind_in_slice``, returning the Attr to paint."""
         var kind = self._minimap_kind_in_slice(start, end)
@@ -3130,7 +3130,7 @@ struct Editor(Copyable, Movable):
             return Optional[Attr](Attr(DARK_GRAY, BLUE))
         return Optional[Attr]()
 
-    fn _minimap_first_misspelled_word(self, row: Int) -> String:
+    def _minimap_first_misspelled_word(self, row: Int) -> String:
         """The first misspelled word on ``row``, sliced from the buffer
         line using ``spell_highlights``. Empty string if none — callers
         fall back to a generic 'spelling issue' label."""
@@ -3141,7 +3141,7 @@ struct Editor(Copyable, Movable):
                 return _slice(line, hl.col_start, hl.col_end)
         return String("")
 
-    fn _minimap_first_diagnostic_message(self, row: Int) -> String:
+    def _minimap_first_diagnostic_message(self, row: Int) -> String:
         """The first diagnostic message that intersects ``row``, with
         the source name prepended in brackets when present (so the user
         can distinguish "[pyright] …" from "[ruff] …" when both
@@ -3157,7 +3157,7 @@ struct Editor(Copyable, Movable):
             return msg^
         return String("")
 
-    fn _is_minimap_hit(self, pos: Point, view: Rect) -> Bool:
+    def _is_minimap_hit(self, pos: Point, view: Rect) -> Bool:
         """True when ``pos`` lands on the minimap column for ``view``."""
         if not self.minimap_visible:
             return False
@@ -3170,13 +3170,13 @@ struct Editor(Copyable, Movable):
             return False
         return True
 
-    fn clear_minimap_hover(mut self):
+    def clear_minimap_hover(mut self):
         self._minimap_hover_kind = 0
         self._minimap_hover_buf_row = -1
         self._minimap_hover_word = String("")
         self._minimap_hover_below = False
 
-    fn _update_minimap_hover(mut self, pos: Point, view: Rect):
+    def _update_minimap_hover(mut self, pos: Point, view: Rect):
         """Refresh hover-tooltip state from a mouse position.
 
         Two hit surfaces, in order:
@@ -3196,7 +3196,7 @@ struct Editor(Copyable, Movable):
             return
         self._update_minimap_hover_from_text_area(pos, view)
 
-    fn _update_minimap_hover_from_minimap(
+    def _update_minimap_hover_from_minimap(
         mut self, pos: Point, view: Rect,
     ):
         """Minimap-column branch of ``_update_minimap_hover``."""
@@ -3221,7 +3221,7 @@ struct Editor(Copyable, Movable):
                 buf_row,
             )
 
-    fn _update_minimap_hover_from_text_area(
+    def _update_minimap_hover_from_text_area(
         mut self, pos: Point, view: Rect,
     ):
         """Text-area branch of ``_update_minimap_hover``: hit-test the
@@ -3292,7 +3292,7 @@ struct Editor(Copyable, Movable):
             )
             return
 
-    fn _set_text_hover_anchor(
+    def _set_text_hover_anchor(
         mut self, row: Int, span_start: Int,
         seg_byte_start: Int, seg_byte_end: Int, seg_x0: Int,
         screen_y: Int,
@@ -3326,7 +3326,7 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_y = screen_y + 1
         self._minimap_hover_below = True
 
-    fn _resolve_text_area_buf_pos(
+    def _resolve_text_area_buf_pos(
         self, pos: Point, view: Rect,
     ) -> Optional[Tuple[Int, Int, Int, Int, Int]]:
         """Map a screen position onto buffer + segment info if it lands
@@ -3385,7 +3385,7 @@ struct Editor(Copyable, Movable):
             (row, col, seg_start, seg_end, seg_x0)
         )
 
-    fn _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
+    def _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
         """Handle a left-click on the minimap column: scroll the editor
         so the corresponding buffer row is centered, and place the cursor
         on that row. For rows flagged by the speller, the cursor lands
@@ -3432,7 +3432,7 @@ struct Editor(Copyable, Movable):
         self.scroll_y = target
         return True
 
-    fn _completion_popup_rect_at(
+    def _completion_popup_rect_at(
         self, view: Rect, anchor_x: Int, anchor_y: Int,
     ) -> Rect:
         """Screen rect the popup occupies when anchored at
@@ -3494,7 +3494,7 @@ struct Editor(Copyable, Movable):
             y = view.a.y
         return Rect(x, y, x + width, y + height)
 
-    fn completion_popup_screen_rect(self, view: Rect) -> Optional[Rect]:
+    def completion_popup_screen_rect(self, view: Rect) -> Optional[Rect]:
         """Screen rect the popup currently occupies, or empty if the
         popup isn't visible / can't be positioned. Used by click
         routing to dismiss the popup when the user clicks outside it.
@@ -3544,7 +3544,7 @@ struct Editor(Copyable, Movable):
             self._completion_popup_rect_at(view, sx, sy)
         )
 
-    fn _paint_completion_popup_at(
+    def _paint_completion_popup_at(
         self, mut canvas: Canvas, view: Rect, anchor_x: Int, anchor_y: Int,
     ):
         """Render the completion popup anchored at the start of the
@@ -3652,7 +3652,7 @@ struct Editor(Copyable, Movable):
                     _completion_kind_name(item.kind), kind_attr,
                 )
 
-    fn paint_minimap_tooltip(
+    def paint_minimap_tooltip(
         self, mut canvas: Canvas, view: Rect,
     ):
         """Render the hover tooltip for the right-side minimap. Called
@@ -3762,7 +3762,7 @@ struct Editor(Copyable, Movable):
         if msg_rect.width() > 0 and msg_rect.height() > 0:
             _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
-    fn _paint_right_gutter(
+    def _paint_right_gutter(
         self, mut canvas: Canvas, painter: Painter,
         view: Rect, content_h: Int,
     ):
@@ -3791,11 +3791,11 @@ struct Editor(Copyable, Movable):
                     Cell(String("■"), attr_opt.value(), 1),
                 )
 
-    fn _total_gutter(self) -> Int:
+    def _total_gutter(self) -> Int:
         return self.gutter_width + self._line_number_gutter() \
             + self._git_changes_gutter() + self._blame_gutter()
 
-    fn _layout_lines(
+    def _layout_lines(
         self, content_h: Int, text_width: Int,
     ) -> List[VisualLine]:
         """Per-screen-row visual layout for the painted window.
@@ -3837,7 +3837,7 @@ struct Editor(Copyable, Movable):
             start_line=self.scroll_y, max_rows=max_rows,
         )
 
-    fn _cursor_screen_row(
+    def _cursor_screen_row(
         self, layout: List[VisualLine],
     ) -> Int:
         """Convenience wrapper around ``_screen_row_for`` that uses the
@@ -3845,7 +3845,7 @@ struct Editor(Copyable, Movable):
         called from ``_scroll_to_cursor`` and ``reveal_cursor``."""
         return self._screen_row_for(layout, self.cursor_row, self.cursor_col)
 
-    fn _paint_one_caret(
+    def _paint_one_caret(
         self, mut canvas: Canvas, painter: Painter, view: Rect,
         layout: List[VisualLine],
         text_x0: Int, content_right: Int, content_bottom: Int,
@@ -3889,7 +3889,7 @@ struct Editor(Copyable, Movable):
         else:
             painter.set(canvas, sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
 
-    fn _screen_row_for(
+    def _screen_row_for(
         self, layout: List[VisualLine],
         row: Int, col: Int,
     ) -> Int:
@@ -3919,7 +3919,7 @@ struct Editor(Copyable, Movable):
 
     # --- painting ----------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
+    def paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         # Nothing to draw when the host workspace has collapsed (e.g.
         # the debug pane is maximized and the editor area shrinks to
         # zero or negative height). Without this early return,
@@ -4274,7 +4274,7 @@ struct Editor(Copyable, Movable):
 
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
-    fn _dispatch_move_one(
+    def _dispatch_move_one(
         mut self, kind: Int, extend: Bool, page_height: Int,
     ):
         """Single-caret movement step. ``kind`` selects the operation;
@@ -4315,7 +4315,7 @@ struct Editor(Copyable, Movable):
             var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
 
-    fn _multi_move(
+    def _multi_move(
         mut self, kind: Int, extend: Bool, page_height: Int,
     ):
         """Apply a movement to every caret. With no extras the primary
@@ -4334,7 +4334,7 @@ struct Editor(Copyable, Movable):
             new_carets.append(self.primary_caret())
         self._install_carets(new_carets^)
 
-    fn _multi_insert_inline(mut self, ch: String):
+    def _multi_insert_inline(mut self, ch: String):
         """Insert ``ch`` at every caret. Pre-condition checked by the
         caller: no caret has a selection, every caret position is
         valid for an inline insert.
@@ -4367,7 +4367,7 @@ struct Editor(Copyable, Movable):
             row_shift += n
         self._install_carets(new_carets^)
 
-    fn _multi_backspace_inline(mut self):
+    def _multi_backspace_inline(mut self):
         """Same-row backspace at every caret. Caller guarantees every
         caret has ``col > 0`` (so no row joins) and no selection."""
         var carets = self._all_carets_asc()
@@ -4396,7 +4396,7 @@ struct Editor(Copyable, Movable):
             row_shift -= byte_removed
         self._install_carets(new_carets^)
 
-    fn _multi_delete_inline(mut self):
+    def _multi_delete_inline(mut self):
         """Same-row Delete at every caret. Caller guarantees every
         caret has ``col < line_length`` (so no row joins) and no
         selection."""
@@ -4455,7 +4455,7 @@ struct Editor(Copyable, Movable):
     # any extra carets — multi-caret + smart-select isn't a meaningful
     # combination and would just complicate the snapshot model.
 
-    fn _smart_select_set(
+    def _smart_select_set(
         mut self, sr: Int, sc: Int, er: Int, ec: Int,
     ):
         """Install ``[sr, sc) .. [er, ec)`` as the primary caret's
@@ -4469,7 +4469,7 @@ struct Editor(Copyable, Movable):
         self.cursor_col = ec
         self.desired_col = _utf8_cell_of_byte(self.buffer.line(er), ec)
 
-    fn _smart_select_grow(mut self):
+    def _smart_select_grow(mut self):
         """Expand the primary caret's selection to the next-larger
         smart-select level and push the previous state onto the stack.
         No-op once the selection covers the whole file."""
@@ -4492,7 +4492,7 @@ struct Editor(Copyable, Movable):
         self._smart_select_stack.append(before)
         self._smart_select_set(nxt[0], nxt[1], nxt[2], nxt[3])
 
-    fn _smart_select_shrink(mut self):
+    def _smart_select_shrink(mut self):
         """Pop the most-recently captured snapshot and restore it.
         No-op when the stack is empty — Cmd+Down outside a smart-select
         run does nothing rather than guessing what to shrink."""
@@ -4505,7 +4505,7 @@ struct Editor(Copyable, Movable):
         )
         self._apply_caret(c)
 
-    fn _smart_compute_expansion(
+    def _smart_compute_expansion(
         self, sr: Int, sc: Int, er: Int, ec: Int,
     ) -> Tuple[Int, Int, Int, Int]:
         """Return the next-larger range strictly containing
@@ -4623,7 +4623,7 @@ struct Editor(Copyable, Movable):
                 return (0, 0, last, last_len)
         return (sr, sc, er, ec)
 
-    fn _smart_find_enclosing_bracket(
+    def _smart_find_enclosing_bracket(
         self, sr: Int, sc: Int, er: Int, ec: Int,
     ) -> Optional[Tuple[Int, Int, Int, Int]]:
         """Find the smallest bracket pair ``( ) / [ ] / { }`` that
@@ -4729,7 +4729,7 @@ struct Editor(Copyable, Movable):
             fc = 0
         return Optional[Tuple[Int, Int, Int, Int]]()
 
-    fn _smart_indent_block(
+    def _smart_indent_block(
         self, sr: Int, er: Int,
     ) -> Optional[Tuple[Int, Int]]:
         """Expand ``[sr, er]`` outward to consecutive rows whose leading
@@ -4814,7 +4814,7 @@ struct Editor(Copyable, Movable):
 
     # --- event handling ----------------------------------------------------
 
-    fn handle_key(mut self, event: Event, view: Rect) -> Bool:
+    def handle_key(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_KEY:
             return False
         # LSP completion-popup intercept. While the popup is visible
@@ -5259,13 +5259,13 @@ struct Editor(Copyable, Movable):
 
     # --- clipboard / programmatic edit API --------------------------------
 
-    fn selection_text(self) -> String:
+    def selection_text(self) -> String:
         """Return the currently-selected text (empty when no selection).
         Delegates to ``Selection.extracted_text`` — same byte-slice
         iteration the DebugPane output panel uses for its Cmd+C copy."""
         return self._selection_view().extracted_text(self.buffer.lines)
 
-    fn _selection_view(self) -> Selection:
+    def _selection_view(self) -> Selection:
         """Wrap ``anchor_*`` / ``cursor_*`` into a ``Selection`` value
         for shared text-extraction logic. The Editor still owns the
         anchor/cursor fields directly (mutated all over the place by
@@ -5276,7 +5276,7 @@ struct Editor(Copyable, Movable):
             self.cursor_row, self.cursor_col,
         )
 
-    fn cut_selection(mut self) -> String:
+    def cut_selection(mut self) -> String:
         """Remove and return the selected text. Pushes an undo step iff a
         selection actually existed (so calling cut with no selection is a
         true no-op). No-op (returns empty string) when the editor is
@@ -5294,7 +5294,7 @@ struct Editor(Copyable, Movable):
             self._mark_hl_dirty(pre)
         return text
 
-    fn paste_text(mut self, text: String):
+    def paste_text(mut self, text: String):
         """Replace any selection then insert ``text`` (newlines split lines).
         Pushes an undo step when there's something to do — a paste with
         empty clipboard and no selection is a no-op and won't disturb the
@@ -5309,7 +5309,7 @@ struct Editor(Copyable, Movable):
         self._insert_text(text)
         self.dirty = True
 
-    fn copy_to_clipboard(self):
+    def copy_to_clipboard(self):
         """Copy the current selection to the system clipboard. With no
         selection, copy the whole current line including its trailing
         newline — matches the behavior in VS Code/Sublime/JetBrains
@@ -5319,7 +5319,7 @@ struct Editor(Copyable, Movable):
         else:
             clipboard_copy(self.buffer.line(self.cursor_row) + String("\n"))
 
-    fn cut_to_clipboard(mut self):
+    def cut_to_clipboard(mut self):
         """Copy the selection to the clipboard, then remove it from the
         buffer. With no selection, cut the whole current line (including
         its trailing newline). Read-only editors fall through to a copy
@@ -5360,7 +5360,7 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(r)
 
-    fn paste_from_clipboard(mut self):
+    def paste_from_clipboard(mut self):
         """Replace any selection with the system clipboard's contents.
         With no selection, a clipboard whose text ends in ``\\n`` is
         treated as a line-clipboard and inserted as new lines above the
@@ -5379,7 +5379,7 @@ struct Editor(Copyable, Movable):
         else:
             self.paste_text(text)
 
-    fn _paste_as_line(mut self, text: String):
+    def _paste_as_line(mut self, text: String):
         """Insert ``text`` (which ends in ``\\n``) above the cursor's
         current line, leaving the cursor on its original line at the
         same column."""
@@ -5402,7 +5402,7 @@ struct Editor(Copyable, Movable):
 
     # --- turbo-style editor commands --------------------------------------
 
-    fn goto_line(mut self, one_based_line: Int):
+    def goto_line(mut self, one_based_line: Int):
         """Move the cursor to the start of ``one_based_line`` (clamped)."""
         var r = one_based_line - 1
         if r < 0: r = 0
@@ -5410,7 +5410,7 @@ struct Editor(Copyable, Movable):
         if r > max_r: r = max_r
         self.move_to(r, 0, False)
 
-    fn find_next(
+    def find_next(
         mut self, needle: String,
         opts: SearchOptions = default_search_options(),
     ) -> Bool:
@@ -5453,7 +5453,7 @@ struct Editor(Copyable, Movable):
                         return True
         return False
 
-    fn _find_next_regex(mut self, rx: OnigRegex) -> Bool:
+    def _find_next_regex(mut self, rx: OnigRegex) -> Bool:
         """Regex-mode implementation of ``find_next``. Scans each
         line independently from the cursor's row, then wraps. We
         skip the current selection by starting one byte past
@@ -5480,7 +5480,7 @@ struct Editor(Copyable, Movable):
                     return True
         return False
 
-    fn find_prev(
+    def find_prev(
         mut self, needle: String,
         opts: SearchOptions = default_search_options(),
     ) -> Bool:
@@ -5543,7 +5543,7 @@ struct Editor(Copyable, Movable):
                 r -= 1
         return False
 
-    fn _find_prev_regex(mut self, rx: OnigRegex) -> Bool:
+    def _find_prev_regex(mut self, rx: OnigRegex) -> Bool:
         """Regex-mode ``find_prev``: walk lines from the selection
         anchor backward, and within each line collect every match
         forward until past the upper bound, then return the
@@ -5602,7 +5602,7 @@ struct Editor(Copyable, Movable):
                 r -= 1
         return False
 
-    fn toggle_comment(mut self, prefix: String = String("")):
+    def toggle_comment(mut self, prefix: String = String("")):
         """Toggle a line-comment prefix on every line touched by the selection
         (or the current line if no selection). No-op when the editor is
         read-only.
@@ -5703,7 +5703,7 @@ struct Editor(Copyable, Movable):
         self._mark_hl_dirty(sr)
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
-    fn toggle_case(mut self):
+    def toggle_case(mut self):
         """Invert ASCII case across the current selection (no-op if empty
         or when the editor is read-only)."""
         if self.read_only:
@@ -5739,7 +5739,7 @@ struct Editor(Copyable, Movable):
         self._mark_hl_dirty(sr)
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
-    fn _insert_text(mut self, text: String):
+    def _insert_text(mut self, text: String):
         var bytes = text.as_bytes()
         var line_start = 0
         var i = 0
@@ -5764,7 +5764,7 @@ struct Editor(Copyable, Movable):
                 False,
             )
 
-    fn longest_line_width(self) -> Int:
+    def longest_line_width(self) -> Int:
         """Used by the surrounding window to size its horizontal scroll bar."""
         var m = 0
         for i in range(self.buffer.line_count()):
@@ -5772,7 +5772,7 @@ struct Editor(Copyable, Movable):
             if n > m: m = n
         return m
 
-    fn handle_mouse(mut self, event: Event, view: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
         # Bare hover (no button held, motion=True under xterm 1003): the
@@ -6025,7 +6025,7 @@ struct Editor(Copyable, Movable):
         self._scroll_to_cursor(view)
         return True
 
-    fn _extend_word_drag(mut self, row: Int, col: Int):
+    def _extend_word_drag(mut self, row: Int, col: Int):
         """Word-snapped selection extend used while the user is
         double-click-dragging. The originally double-clicked word stays
         anchored; the moving end snaps to the start or end of whichever
@@ -6045,7 +6045,7 @@ struct Editor(Copyable, Movable):
             self.move_to(ar, a_start, False)
             self.move_to(row, word_end, True)
 
-    fn _line_select_range(self, row: Int) -> Tuple[Int, Int, Int, Int]:
+    def _line_select_range(self, row: Int) -> Tuple[Int, Int, Int, Int]:
         """Return ``(start_row, start_col, end_row, end_col)`` for
         selecting the entire line at ``row``. Includes the trailing
         newline by extending to col 0 of the next line; on the last line
@@ -6056,7 +6056,7 @@ struct Editor(Copyable, Movable):
             return (row, 0, row + 1, 0)
         return (row, 0, row, self.buffer.line_length(row))
 
-    fn _extend_line_drag(mut self, row: Int):
+    def _extend_line_drag(mut self, row: Int):
         """Line-snapped selection extend used while the user is
         triple-click-dragging. The originally triple-clicked row stays
         anchored; the selection grows to cover whole lines from the
@@ -6078,7 +6078,7 @@ struct Editor(Copyable, Movable):
 
     # --- buffer-level helpers ---------------------------------------------
 
-    fn _delete_selection(mut self):
+    def _delete_selection(mut self):
         var sel = self.selection()
         var sr = sel[0]; var sc = sel[1]
         var er = sel[2]; var ec = sel[3]
@@ -6097,7 +6097,7 @@ struct Editor(Copyable, Movable):
 
     # --- cursor movement primitives ---------------------------------------
 
-    fn _move_left(mut self, extend: Bool):
+    def _move_left(mut self, extend: Bool):
         if self.cursor_col > 0:
             var line = self.buffer.line(self.cursor_row)
             var nc = _utf8_step_backward(line, self.cursor_col)
@@ -6106,7 +6106,7 @@ struct Editor(Copyable, Movable):
             var prev = self.buffer.line_length(self.cursor_row - 1)
             self.move_to(self.cursor_row - 1, prev, extend)
 
-    fn _move_right(mut self, extend: Bool):
+    def _move_right(mut self, extend: Bool):
         var n = self.buffer.line_length(self.cursor_row)
         if self.cursor_col < n:
             var line = self.buffer.line(self.cursor_row)
@@ -6115,27 +6115,27 @@ struct Editor(Copyable, Movable):
         elif self.cursor_row + 1 < self.buffer.line_count():
             self.move_to(self.cursor_row + 1, 0, extend)
 
-    fn _move_up(mut self, extend: Bool):
+    def _move_up(mut self, extend: Bool):
         if self.cursor_row > 0:
             var nr = self.cursor_row - 1
             var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
 
-    fn _move_down(mut self, extend: Bool):
+    def _move_down(mut self, extend: Bool):
         if self.cursor_row + 1 < self.buffer.line_count():
             var nr = self.cursor_row + 1
             var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.desired_col)
             self.move_to(nr, nc, extend, False)
 
-    fn _move_word_right(mut self, extend: Bool):
+    def _move_word_right(mut self, extend: Bool):
         var p = self._next_word_pos(self.cursor_row, self.cursor_col)
         self.move_to(p[0], p[1], extend)
 
-    fn _move_word_left(mut self, extend: Bool):
+    def _move_word_left(mut self, extend: Bool):
         var p = self._prev_word_pos(self.cursor_row, self.cursor_col)
         self.move_to(p[0], p[1], extend)
 
-    fn _next_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
+    def _next_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Move to end-of-word + skip following non-word chars on this line.
 
         At end of line, jumps to the start of the next line. One press = one
@@ -6163,7 +6163,7 @@ struct Editor(Copyable, Movable):
             c += step[1]
         return (row, c)
 
-    fn _prev_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
+    def _prev_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
         if col == 0:
             if row > 0:
                 return (row - 1, self.buffer.line_length(row - 1))
@@ -6184,7 +6184,7 @@ struct Editor(Copyable, Movable):
             c = prev
         return (row, c)
 
-    fn _scroll_to_cursor(mut self, view: Rect):
+    def _scroll_to_cursor(mut self, view: Rect):
         var h = view.height()
         var total_gutter = self._total_gutter()
         var right_gutter = self._right_gutter()
@@ -6219,7 +6219,7 @@ struct Editor(Copyable, Movable):
             scroll_cell = cur_cell - w + 1
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
-    fn max_scroll_y(self, view: Rect) -> Int:
+    def max_scroll_y(self, view: Rect) -> Int:
         """Largest valid ``scroll_y`` for ``view``.
 
         Hard-wrap: simply ``line_count - view.height()`` — one buffer row
@@ -6273,7 +6273,7 @@ struct Editor(Copyable, Movable):
             ms = n_lines - 1
         return ms
 
-    fn clamp_scroll(mut self, view: Rect):
+    def clamp_scroll(mut self, view: Rect):
         """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.
 
         Called every frame from ``WindowManager.fit_into``. The interesting
@@ -6308,7 +6308,7 @@ struct Editor(Copyable, Movable):
         if self.scroll_y < 0:
             self.scroll_y = 0
 
-    fn reveal_cursor(
+    def reveal_cursor(
         mut self, view: Rect,
         margin_below: Int = 5, margin_above: Int = 0,
     ):
@@ -6357,7 +6357,7 @@ struct Editor(Copyable, Movable):
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
 
-fn _caret_less(a: Caret, b: Caret) -> Bool:
+def _caret_less(a: Caret, b: Caret) -> Bool:
     """Strict ``<`` ordering on (row, col). Used by the caret-iteration
     helpers; ties on position are broken by the dedupe step that
     follows."""
@@ -6366,7 +6366,7 @@ fn _caret_less(a: Caret, b: Caret) -> Bool:
     return a.col < b.col
 
 
-fn _caret_anchor_span(c: Caret) -> Int:
+def _caret_anchor_span(c: Caret) -> Int:
     """Cheap "is this caret carrying a selection?" measure used when
     deduping two carets that landed on the same ``(row, col)``. The
     caret with the longer selection span wins so a real selection
@@ -6378,7 +6378,7 @@ fn _caret_anchor_span(c: Caret) -> Int:
     return d if d >= 0 else -d
 
 
-fn _char_class(cp: Int) -> Int:
+def _char_class(cp: Int) -> Int:
     """Three-way character class used by ``_word_range_at``. Word chars
     cluster, whitespace clusters, everything else clusters as
     "punctuation" — so a double-click on punctuation selects the run of
@@ -6392,7 +6392,7 @@ fn _char_class(cp: Int) -> Int:
     return 3
 
 
-fn _smart_indent_for_enter(
+def _smart_indent_for_enter(
     line: String, split_col: Int, ec: EditorConfig,
 ) -> String:
     """Indent the new line produced by Enter inside ``line`` at byte
@@ -6423,7 +6423,7 @@ fn _smart_indent_for_enter(
     return base
 
 
-fn _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
+def _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
     """Return the (start, end) byte range of the contiguous run of the
     same character class around ``col``. Empty range when ``col`` is at
     or past end of line. Walks by UTF-8 codepoint so a multibyte letter
@@ -6460,7 +6460,7 @@ fn _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
 # touch the editor — keeping them pure makes the levels easy to test.
 
 
-fn _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
+def _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
     """Word range covering ``col``. If ``col`` sits on whitespace or
     punctuation, try ``col - 1`` so a click just past the end of an
     identifier still selects it. Empty result when neither side is a
@@ -6508,7 +6508,7 @@ fn _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
     return (col, col)
 
 
-fn _smart_dotted_extend(
+def _smart_dotted_extend(
     line: String, sc: Int, ec: Int,
 ) -> Tuple[Int, Int]:
     """Extend ``[sc, ec)`` over surrounding ``.``-joined word runs. So
@@ -6544,13 +6544,13 @@ fn _smart_dotted_extend(
     return (s, e)
 
 
-fn _is_string_quote(b: Int) -> Bool:
+def _is_string_quote(b: Int) -> Bool:
     """ASCII single, double, and back-tick quotes — the three string
     delimiters we recognize for smart-select."""
     return b == 0x22 or b == 0x27 or b == 0x60
 
 
-fn _smart_string_around(
+def _smart_string_around(
     line: String, sc: Int, ec: Int,
 ) -> Optional[Tuple[Int, Int]]:
     """Find the nearest matching pair of ASCII quote characters on
@@ -6581,7 +6581,7 @@ fn _smart_string_around(
     return Optional[Tuple[Int, Int]]()
 
 
-fn _is_blank_line(line: String) -> Bool:
+def _is_blank_line(line: String) -> Bool:
     """A line of zero or more spaces / tabs is blank for the purpose of
     smart-select indent block detection."""
     var bytes = line.as_bytes()
@@ -6592,7 +6592,7 @@ fn _is_blank_line(line: String) -> Bool:
     return True
 
 
-fn _smart_line_content_range(line: String) -> Tuple[Int, Int]:
+def _smart_line_content_range(line: String) -> Tuple[Int, Int]:
     """Byte range of the non-whitespace content on ``line`` — leading
     whitespace and trailing whitespace stripped. Empty range for blank
     lines."""
@@ -6607,7 +6607,7 @@ fn _smart_line_content_range(line: String) -> Tuple[Int, Int]:
     return (s, e)
 
 
-fn _smart_strictly_contains(
+def _smart_strictly_contains(
     sr1: Int, sc1: Int, er1: Int, ec1: Int,
     sr2: Int, sc2: Int, er2: Int, ec2: Int,
 ) -> Bool:
@@ -6623,7 +6623,7 @@ fn _smart_strictly_contains(
     return start_lt or end_gt
 
 
-fn _matching_closer(opener: Int) -> Int:
+def _matching_closer(opener: Int) -> Int:
     """Closing-bracket byte for an opener byte. Returns ``0`` for
     non-bracket inputs so callers can guard with a nonzero check."""
     if opener == 0x28: return 0x29  # ( )
@@ -6632,9 +6632,9 @@ fn _matching_closer(opener: Int) -> Int:
     return 0
 
 
-fn _is_open_bracket(b: Int) -> Bool:
+def _is_open_bracket(b: Int) -> Bool:
     return b == 0x28 or b == 0x5B or b == 0x7B
 
 
-fn _is_close_bracket(b: Int) -> Bool:
+def _is_close_bracket(b: Int) -> Bool:
     return b == 0x29 or b == 0x5D or b == 0x7D

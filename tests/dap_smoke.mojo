@@ -39,14 +39,14 @@ from turbokod.geometry import Rect
 from turbokod.posix import monotonic_ms
 
 
-fn _sleep_ms(ms: Int):
+def _sleep_ms(ms: Int):
     """Sleep ``ms`` milliseconds via ``usleep``. Cheap to call from a
     polling loop and avoids dragging in Python interop just for a
     sleep call."""
     _ = external_call["usleep", Int32](Int32(ms * 1000))
 
 
-fn main() raises:
+def main() raises:
     # 1. Pick the test program. If the user passed one on the
     # command line (``./run.sh tests/dap_smoke.mojo path/to/file.py``)
     # we use that; otherwise we synthesize ``/tmp/dap_smoke_test.py``.
@@ -246,7 +246,7 @@ fn main() raises:
     _smoke_via_desktop(test_path)
 
 
-fn _smoke_via_desktop(test_path: String) raises:
+def _smoke_via_desktop(test_path: String) raises:
     """Reproduce what the example app's main loop does — open the
     file in a Desktop, fire the F5 action to start debugpy, then tick
     until the stopped event has been fully processed (or we time

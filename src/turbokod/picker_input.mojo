@@ -25,7 +25,7 @@ comptime _PAGE_STEP: Int = 10
 comptime _WHEEL_STEP: Int = 3
 
 
-fn picker_nav_key(k: UInt32, matched_len: Int, mut selected: Int) -> Bool:
+def picker_nav_key(k: UInt32, matched_len: Int, mut selected: Int) -> Bool:
     """Apply UP / DOWN / PAGEUP / PAGEDOWN to ``selected``, clamped to
     ``[0, matched_len)``. Returns ``True`` iff ``k`` was one of those
     keys (caller should consume the event and refresh scroll)."""
@@ -52,7 +52,7 @@ fn picker_nav_key(k: UInt32, matched_len: Int, mut selected: Int) -> Bool:
     return False
 
 
-fn picker_wheel_scroll(
+def picker_wheel_scroll(
     button: UInt8, mut scroll: Int, matched_len: Int, list_height: Int,
 ) -> Bool:
     """Apply wheel-up / wheel-down to ``scroll``, clamped to

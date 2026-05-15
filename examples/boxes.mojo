@@ -17,7 +17,7 @@ from turbokod import (
 from turbokod.view import Fill
 
 
-fn main() raises:
+def main() raises:
     var app = Application()
     app.start()
     try:

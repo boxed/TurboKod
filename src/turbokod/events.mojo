@@ -130,7 +130,7 @@ struct Event(ImplicitlyCopyable, Movable):
     # Paste payload
     var text: String
 
-    fn __init__(out self):
+    def __init__(out self):
         self.kind = EVENT_NONE
         self.key = KEY_NONE
         self.mods = MOD_NONE
@@ -142,7 +142,7 @@ struct Event(ImplicitlyCopyable, Movable):
         self.text = String("")
 
     @staticmethod
-    fn key_event(key: UInt32, mods: UInt8 = MOD_NONE) -> Event:
+    def key_event(key: UInt32, mods: UInt8 = MOD_NONE) -> Event:
         var e = Event()
         e.kind = EVENT_KEY
         e.key = key
@@ -150,7 +150,7 @@ struct Event(ImplicitlyCopyable, Movable):
         return e
 
     @staticmethod
-    fn mouse_event(
+    def mouse_event(
         pos: Point,
         button: UInt8,
         pressed: Bool = True,
@@ -169,33 +169,33 @@ struct Event(ImplicitlyCopyable, Movable):
         return e
 
     @staticmethod
-    fn resize_event(width: Int, height: Int) -> Event:
+    def resize_event(width: Int, height: Int) -> Event:
         var e = Event()
         e.kind = EVENT_RESIZE
         e.pos = Point(width, height)
         return e
 
     @staticmethod
-    fn quit_event() -> Event:
+    def quit_event() -> Event:
         var e = Event()
         e.kind = EVENT_QUIT
         return e
 
     @staticmethod
-    fn paste_event(var text: String) -> Event:
+    def paste_event(var text: String) -> Event:
         var e = Event()
         e.kind = EVENT_PASTE
         e.text = text^
         return e
 
     @staticmethod
-    fn focus_event(focused: Bool) -> Event:
+    def focus_event(focused: Bool) -> Event:
         var e = Event()
         e.kind = EVENT_FOCUS_IN if focused else EVENT_FOCUS_OUT
         return e
 
     @staticmethod
-    fn open_path_event(var path: String, line: Int = 0) -> Event:
+    def open_path_event(var path: String, line: Int = 0) -> Event:
         var e = Event()
         e.kind = EVENT_OPEN_PATH
         e.text = path^
@@ -205,8 +205,8 @@ struct Event(ImplicitlyCopyable, Movable):
         e.pos = Point(0, line)
         return e
 
-    fn is_key(self, key: UInt32) -> Bool:
+    def is_key(self, key: UInt32) -> Bool:
         return self.kind == EVENT_KEY and self.key == key
 
-    fn is_char(self, c: UInt32) -> Bool:
+    def is_char(self, c: UInt32) -> Bool:
         return self.kind == EVENT_KEY and self.key == c

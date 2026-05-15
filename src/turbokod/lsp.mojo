@@ -48,7 +48,7 @@ struct ArgvBuffer(Movable):
     var pointers: List[UInt8]
 
 
-fn _build_envp_from_parent() -> ArgvBuffer:
+def _build_envp_from_parent() -> ArgvBuffer:
     """Build an envp by reading specific variables from the parent.
 
     These are the ones ``mojo-lsp-server`` cares about (some directly —
@@ -105,7 +105,7 @@ fn _build_envp_from_parent() -> ArgvBuffer:
     return _build_argv_buffer(pairs^)
 
 
-fn _build_argv_buffer(args: List[String]) -> ArgvBuffer:
+def _build_argv_buffer(args: List[String]) -> ArgvBuffer:
     var blob = List[UInt8]()
     var offsets = List[Int]()
     for i in range(len(args)):
@@ -141,7 +141,7 @@ struct CaptureResult(Movable):
     var status: Int32
 
 
-fn capture_command(
+def capture_command(
     argv: List[String], stdin_text: String = String(""),
 ) raises -> CaptureResult:
     """Run ``argv`` to completion, return ``(stdout, exit_status)``.
@@ -227,7 +227,7 @@ fn capture_command(
     return CaptureResult(out^, err^, status)
 
 
-fn _drain_to_eof(fd: Int32) -> String:
+def _drain_to_eof(fd: Int32) -> String:
     var out = String("")
     var scratch = alloc_zero_buffer(8192)
     while True:
@@ -285,7 +285,7 @@ struct LspProcess(Copyable, Movable):
     # buffering) so each call is durable on return.
     var trace_fd: Int32
 
-    fn __init__(out self):
+    def __init__(out self):
         self.pid = -1
         self.stdin_fd = -1
         self.stdout_fd = -1
@@ -296,7 +296,7 @@ struct LspProcess(Copyable, Movable):
         self._write_overflowed = False
         self.trace_fd = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.pid = -1
         self.stdin_fd = -1
         self.stdout_fd = -1
@@ -308,7 +308,7 @@ struct LspProcess(Copyable, Movable):
         self.trace_fd = -1
 
     @staticmethod
-    fn spawn(argv: List[String], cwd: String = String("")) raises -> Self:
+    def spawn(argv: List[String], cwd: String = String("")) raises -> Self:
         """Run ``argv`` with three pipes wired onto stdin/stdout/stderr.
 
         Returns a process with the parent-side ends owned by ``self``;
@@ -417,7 +417,7 @@ struct LspProcess(Copyable, Movable):
         _ = set_nonblocking(proc.stderr_fd)
         return proc^
 
-    fn trace(self, var line: String):
+    def trace(self, var line: String):
         """Append ``line`` (plus a newline) to the trace fd, if open.
 
         Uses the raw ``write`` syscall — no userspace buffering — so
@@ -433,7 +433,7 @@ struct LspProcess(Copyable, Movable):
         var f = FileDescriptor(Int(self.trace_fd))
         f.write_bytes(bytes)
 
-    fn write_message(mut self, payload: String) raises:
+    def write_message(mut self, payload: String) raises:
         """Frame ``payload`` with ``Content-Length: N\\r\\n\\r\\n`` and
         queue it for non-blocking delivery to the child's stdin.
 
@@ -472,7 +472,7 @@ struct LspProcess(Copyable, Movable):
             return
         self._try_flush_writes()
 
-    fn _try_flush_writes(mut self):
+    def _try_flush_writes(mut self):
         """Drain ``_pending_write`` via non-blocking ``write(2)`` until
         either the queue is empty or the kernel returns < 0 (EAGAIN /
         EPIPE / etc.). The remaining bytes stay queued for the next
@@ -501,7 +501,7 @@ struct LspProcess(Copyable, Movable):
                 return
             self._pending_write = _drop_prefix(self._pending_write^, Int(rc))
 
-    fn pump_writes(mut self):
+    def pump_writes(mut self):
         """Continue draining any queued outbound bytes.
 
         Called every manager tick so a backlog left after the
@@ -513,14 +513,14 @@ struct LspProcess(Copyable, Movable):
             return
         self._try_flush_writes()
 
-    fn write_overflowed(self) -> Bool:
+    def write_overflowed(self) -> Bool:
         """True if the outbound queue overflowed since the last reset.
         ``LspManager.tick`` uses this to latch FAILED instead of
         letting silent message loss accumulate.
         """
         return self._write_overflowed
 
-    fn poll_message(mut self, timeout_ms: Int32) -> Optional[String]:
+    def poll_message(mut self, timeout_ms: Int32) -> Optional[String]:
         """Try to return one complete framed payload.
 
         ``timeout_ms`` is the budget for waiting on stdout when the buffer
@@ -593,7 +593,7 @@ struct LspProcess(Copyable, Movable):
             # available. ``poll_stdin(0)`` on the next iteration exits
             # the loop when the pipe is empty.
 
-    fn _extract_one_message(mut self) -> Optional[String]:
+    def _extract_one_message(mut self) -> Optional[String]:
         """Scan ``_read_buffer`` for a complete framed payload; if one is
         present, slice it out, shrink the buffer, and return it."""
         var hdr_end = _find_double_crlf(self._read_buffer)
@@ -619,7 +619,7 @@ struct LspProcess(Copyable, Movable):
         )
         return Optional[String](body^)
 
-    fn drain_stderr(mut self) -> String:
+    def drain_stderr(mut self) -> String:
         """Drain whatever's available on the server's stderr.
         Non-blocking; loops until ``poll`` says no more data so a
         chatty adapter (debugpy logs many lines per second) can't
@@ -649,7 +649,7 @@ struct LspProcess(Copyable, Movable):
             total += m
         return out
 
-    fn terminate(mut self):
+    def terminate(mut self):
         """Send SIGTERM and reap the child, then close the I/O fds.
         Idempotent. Safe to call on a socket-mode process (``pid == -1``)
         — the kill/waitpid steps are skipped, the fd close still runs.
@@ -678,7 +678,7 @@ struct LspProcess(Copyable, Movable):
         self._write_overflowed = False
 
     @staticmethod
-    fn from_socket(fd: Int32) -> Self:
+    def from_socket(fd: Int32) -> Self:
         """Wrap a connected TCP socket fd in an ``LspProcess`` so the
         same Content-Length-aware framer can ferry DAP messages over it.
 
@@ -701,7 +701,7 @@ struct LspProcess(Copyable, Movable):
         _ = set_nonblocking(fd)
         return p^
 
-    fn try_reap(mut self) -> Bool:
+    def try_reap(mut self) -> Bool:
         """Non-blocking ``waitpid``. Returns True if the child exited.
         Use after ``shutdown``+``exit`` to see if the server cleaned up
         on its own before resorting to ``terminate``.
@@ -725,7 +725,7 @@ struct LspProcess(Copyable, Movable):
 # --- framer helpers (top-level for testability) ---------------------------
 
 
-fn _find_double_crlf(buf: List[UInt8]) -> Int:
+def _find_double_crlf(buf: List[UInt8]) -> Int:
     """Return the index of the first ``\\r\\n\\r\\n`` in ``buf``, or -1."""
     if len(buf) < 4:
         return -1
@@ -736,7 +736,7 @@ fn _find_double_crlf(buf: List[UInt8]) -> Int:
     return -1
 
 
-fn _parse_content_length(buf: List[UInt8], hdr_end: Int) -> Int:
+def _parse_content_length(buf: List[UInt8], hdr_end: Int) -> Int:
     """Find ``Content-Length: N`` in the header block (case-insensitive on
     the field name) and return ``N``. Returns -1 if not found / malformed."""
     var name = String("content-length")
@@ -776,7 +776,7 @@ fn _parse_content_length(buf: List[UInt8], hdr_end: Int) -> Int:
     return -1
 
 
-fn _drop_prefix(var buf: List[UInt8], n: Int) -> List[UInt8]:
+def _drop_prefix(var buf: List[UInt8], n: Int) -> List[UInt8]:
     """Shrink ``buf`` by removing the first ``n`` bytes."""
     if n <= 0:
         return buf^
@@ -824,20 +824,20 @@ struct LspClient(Copyable, Movable):
     var process: LspProcess
     var _next_id: Int
 
-    fn __init__(out self, var process: LspProcess):
+    def __init__(out self, var process: LspProcess):
         self.process = process^
         self._next_id = 1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.process = LspProcess()
         self._next_id = 1
 
     @staticmethod
-    fn spawn(argv: List[String], cwd: String = String("")) raises -> Self:
+    def spawn(argv: List[String], cwd: String = String("")) raises -> Self:
         var p = LspProcess.spawn(argv, cwd)
         return LspClient(p^)
 
-    fn send_request(
+    def send_request(
         mut self, method: String, params: JsonValue,
     ) raises -> Int:
         """Send a JSON-RPC request and return the issued id (so callers
@@ -852,7 +852,7 @@ struct LspClient(Copyable, Movable):
         self.process.write_message(encode_json(envelope))
         return id
 
-    fn send_notification(
+    def send_notification(
         mut self, method: String, params: JsonValue,
     ) raises:
         var envelope = json_object()
@@ -861,18 +861,18 @@ struct LspClient(Copyable, Movable):
         envelope.put(String("params"), params)
         self.process.write_message(encode_json(envelope))
 
-    fn poll(mut self, timeout_ms: Int32) raises -> Optional[LspIncoming]:
+    def poll(mut self, timeout_ms: Int32) raises -> Optional[LspIncoming]:
         var maybe = self.process.poll_message(timeout_ms)
         if not maybe:
             return Optional[LspIncoming]()
         var v = parse_json(maybe.value())
         return Optional[LspIncoming](classify_message(v))
 
-    fn terminate(mut self):
+    def terminate(mut self):
         self.process.terminate()
 
 
-fn classify_message(v: JsonValue) -> LspIncoming:
+def classify_message(v: JsonValue) -> LspIncoming:
     """Examine a parsed JSON-RPC envelope and tag it as response /
     notification / request. Top-level utility for tests + clients."""
     var id_opt = Optional[Int]()
@@ -911,7 +911,7 @@ fn classify_message(v: JsonValue) -> LspIncoming:
 # --- High-level helpers used by tests + Phase 3 wiring --------------------
 
 
-fn lsp_initialize_params(
+def lsp_initialize_params(
     root_uri: String, workspace_name: String,
 ) -> JsonValue:
     """Build the ``initialize`` payload.
@@ -958,7 +958,7 @@ fn lsp_initialize_params(
     return params^
 
 
-fn json_null_v() -> JsonValue:
+def json_null_v() -> JsonValue:
     """Local alias to keep the import list shorter at call sites."""
     var v = JsonValue()
     return v^

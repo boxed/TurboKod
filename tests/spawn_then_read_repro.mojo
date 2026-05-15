@@ -30,7 +30,7 @@ from turbokod.posix import (
 )
 
 
-fn _read_one_keypress(label: String) raises:
+def _read_one_keypress(label: String) raises:
     print(label, "— press a key")
     while not poll_stdin(STDIN_FD, Int32(1000)):
         pass
@@ -39,7 +39,7 @@ fn _read_one_keypress(label: String) raises:
     print(label, " -> N=", n)
 
 
-fn main() raises:
+def main() raises:
     var orig = alloc_zero_buffer(TERMIOS_SIZE)
     if tcgetattr(STDIN_FD, orig) != 0:
         print("not a tty"); return

@@ -68,11 +68,11 @@ struct AdapterCandidate(Copyable, Movable):
     var argv: List[String]
     var transport: UInt8
 
-    fn __init__(out self, var argv: List[String], transport: UInt8):
+    def __init__(out self, var argv: List[String], transport: UInt8):
         self.argv = argv^
         self.transport = transport
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.argv = copy.argv.copy()
         self.transport = copy.transport
 
@@ -91,7 +91,7 @@ struct DebuggerSpec(Copyable, Movable):
     var request_kind: UInt8
     var name: String  # human-readable, e.g. "debugpy"
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String,
         var candidates: List[AdapterCandidate],
         request_kind: UInt8, var name: String,
@@ -101,7 +101,7 @@ struct DebuggerSpec(Copyable, Movable):
         self.request_kind = request_kind
         self.name = name^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.candidates = copy.candidates.copy()
         self.request_kind = copy.request_kind
@@ -111,13 +111,13 @@ struct DebuggerSpec(Copyable, Movable):
 # --- helpers ---------------------------------------------------------------
 
 
-fn _argv1(a: String, transport: UInt8 = DAP_TRANSPORT_STDIO) -> AdapterCandidate:
+def _argv1(a: String, transport: UInt8 = DAP_TRANSPORT_STDIO) -> AdapterCandidate:
     var v = List[String]()
     v.append(a)
     return AdapterCandidate(v^, transport)
 
 
-fn _argv2(
+def _argv2(
     a: String, b: String, transport: UInt8 = DAP_TRANSPORT_STDIO,
 ) -> AdapterCandidate:
     var v = List[String]()
@@ -126,7 +126,7 @@ fn _argv2(
     return AdapterCandidate(v^, transport)
 
 
-fn _argv3(
+def _argv3(
     a: String, b: String, c: String, transport: UInt8 = DAP_TRANSPORT_STDIO,
 ) -> AdapterCandidate:
     var v = List[String]()
@@ -139,7 +139,7 @@ fn _argv3(
 # --- built-ins ------------------------------------------------------------
 
 
-fn built_in_debuggers() -> List[DebuggerSpec]:
+def built_in_debuggers() -> List[DebuggerSpec]:
     """Curated debugger registry, keyed on ``language_id``.
 
     Order within ``candidates`` is the spawn-priority order — first
@@ -190,7 +190,7 @@ fn built_in_debuggers() -> List[DebuggerSpec]:
     return out^
 
 
-fn python_debugger_spec_for_venv(
+def python_debugger_spec_for_venv(
     spec: DebuggerSpec, venv_dir: String,
 ) -> DebuggerSpec:
     """Return a copy of ``spec`` with venv-resolved adapter candidates
@@ -232,7 +232,7 @@ fn python_debugger_spec_for_venv(
     )
 
 
-fn python_venv_has_debugpy(venv_dir: String) -> Bool:
+def python_venv_has_debugpy(venv_dir: String) -> Bool:
     """Return True if ``venv_dir`` has debugpy importable.
 
     Two probes:
@@ -279,7 +279,7 @@ fn python_venv_has_debugpy(venv_dir: String) -> Bool:
     return False
 
 
-fn find_debugger_for_language(
+def find_debugger_for_language(
     specs: List[DebuggerSpec], language_id: String,
 ) -> Int:
     """Index of the spec for ``language_id``, or -1 if no debugger is
@@ -295,7 +295,7 @@ fn find_debugger_for_language(
 # --- launch-arguments builders --------------------------------------------
 
 
-fn launch_arguments_for(
+def launch_arguments_for(
     spec: DebuggerSpec, program: String, cwd: String,
     var args: List[String], stop_on_entry: Bool = False,
 ) -> JsonValue:
@@ -321,7 +321,7 @@ fn launch_arguments_for(
     return _launch_args_generic(program, cwd, args^, stop_on_entry)
 
 
-fn _launch_args_debugpy(
+def _launch_args_debugpy(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
@@ -407,12 +407,12 @@ fn _launch_args_debugpy(
     return o^
 
 
-fn _starts_with_dash(s: String) -> Bool:
+def _starts_with_dash(s: String) -> Bool:
     var b = s.as_bytes()
     return len(b) > 0 and b[0] == 0x2D
 
 
-fn _is_python_interpreter(program: String) -> Bool:
+def _is_python_interpreter(program: String) -> Bool:
     """Return True if ``program``'s basename looks like a Python
     interpreter — ``python``, ``python3``, ``python3.11``, etc. Used
     to detect the ``python -m <module>`` idiom in run targets so a
@@ -447,7 +447,7 @@ fn _is_python_interpreter(program: String) -> Bool:
     return True
 
 
-fn _launch_args_lldb(
+def _launch_args_lldb(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
@@ -462,7 +462,7 @@ fn _launch_args_lldb(
     return o^
 
 
-fn _launch_args_delve(
+def _launch_args_delve(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
@@ -482,7 +482,7 @@ fn _launch_args_delve(
     return o^
 
 
-fn _launch_args_generic(
+def _launch_args_generic(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
@@ -494,7 +494,7 @@ fn _launch_args_generic(
     return o^
 
 
-fn _string_list_to_json(var args: List[String]) -> JsonValue:
+def _string_list_to_json(var args: List[String]) -> JsonValue:
     var arr = json_array()
     for i in range(len(args)):
         arr.append(json_str(args[i]))

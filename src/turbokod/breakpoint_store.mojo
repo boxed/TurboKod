@@ -67,7 +67,7 @@ struct StoredBreakpoint(ImplicitlyCopyable, Movable):
     var wait_for: String
 
 
-fn _current_username() -> String:
+def _current_username() -> String:
     """Best-effort username for the per-user directory.
 
     Tries ``$USER`` then ``$LOGNAME`` — both are POSIX-standard. Falls
@@ -82,7 +82,7 @@ fn _current_username() -> String:
     return String("default")
 
 
-fn _bp_dir(project_root: String) -> String:
+def _bp_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
     var d = join_path(project_root, BP_DIR_PROJECT)
@@ -90,14 +90,14 @@ fn _bp_dir(project_root: String) -> String:
     return join_path(d, _current_username())
 
 
-fn _bp_path(project_root: String) -> String:
+def _bp_path(project_root: String) -> String:
     var dir = _bp_dir(project_root)
     if len(dir.as_bytes()) == 0:
         return String("")
     return join_path(dir, BP_FILE)
 
 
-fn _ensure_dir(path: String):
+def _ensure_dir(path: String):
     """Create ``path`` if missing. ``mkdir`` only creates one level, so
     we walk parents top-down to handle the ``per_user/<username>``
     nesting on first use."""
@@ -107,7 +107,7 @@ fn _ensure_dir(path: String):
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-fn _ensure_dirs(project_root: String):
+def _ensure_dirs(project_root: String):
     if len(project_root.as_bytes()) == 0:
         return
     var top = join_path(project_root, BP_DIR_PROJECT)
@@ -118,7 +118,7 @@ fn _ensure_dirs(project_root: String):
     _ensure_dir(user_dir)
 
 
-fn _bp_relative(project_root: String, full: String) -> String:
+def _bp_relative(project_root: String, full: String) -> String:
     """Project-relative form of ``full`` when inside the project, else
     ``full`` unchanged. Identical algorithm to
     ``session_store._session_relative``."""
@@ -136,7 +136,7 @@ fn _bp_relative(project_root: String, full: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
-fn _resolve_bp_path(project_root: String, stored: String) -> String:
+def _resolve_bp_path(project_root: String, stored: String) -> String:
     """Anchor a relative ``stored`` path onto ``project_root``. Absolute
     paths and empty roots pass through unchanged."""
     var b = stored.as_bytes()
@@ -149,7 +149,7 @@ fn _resolve_bp_path(project_root: String, stored: String) -> String:
     return join_path(project_root, stored)
 
 
-fn load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
+def load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
     """Parse the per-user breakpoints file. Any failure (missing file,
     malformed JSON, missing keys) yields an empty list — the caller
     distinguishes by checking ``len(out)``."""
@@ -199,7 +199,7 @@ fn load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
     return out^
 
 
-fn encode_breakpoints(
+def encode_breakpoints(
     project_root: String, breakpoints: List[StoredBreakpoint],
 ) -> String:
     """Serialize ``breakpoints`` to the on-disk JSON form. Pure function
@@ -226,7 +226,7 @@ fn encode_breakpoints(
     return encode_json(root) + String("\n")
 
 
-fn save_breakpoints(
+def save_breakpoints(
     project_root: String, breakpoints: List[StoredBreakpoint],
 ) -> Bool:
     """Rewrite the per-user breakpoints file. Creates the directory

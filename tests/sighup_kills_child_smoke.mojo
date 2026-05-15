@@ -37,7 +37,7 @@ from turbokod.posix import (
 )
 
 
-fn main() raises:
+def main() raises:
     # Spawn a child that will sit doing nothing for a while. We use
     # ``sleep`` because it's universally available, doesn't print
     # anything, and responds promptly to SIGTERM.

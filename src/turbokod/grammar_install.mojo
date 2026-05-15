@@ -32,7 +32,7 @@ struct DownloadableGrammar(Copyable, Movable):
     var url: String
     var display: String
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var url: String,
@@ -43,21 +43,21 @@ struct DownloadableGrammar(Copyable, Movable):
         self.url = url^
         self.display = display^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.url = copy.url
         self.display = copy.display
 
 
-fn _exts(*items: String) -> List[String]:
+def _exts(*items: String) -> List[String]:
     var out = List[String]()
     for x in items:
         out.append(String(x))
     return out^
 
 
-fn built_in_downloadable_grammars() -> List[DownloadableGrammar]:
+def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
     """The fixed catalog. Add an entry per language we want to offer.
 
     Pick URLs from open-source vscode plugin repos (raw JSON), since
@@ -81,7 +81,7 @@ fn built_in_downloadable_grammars() -> List[DownloadableGrammar]:
     return out^
 
 
-fn find_downloadable_grammar_for_extension(
+def find_downloadable_grammar_for_extension(
     specs: List[DownloadableGrammar], ext: String,
 ) -> Int:
     """Index of the spec whose ``file_types`` contains ``ext``, or -1."""
@@ -94,7 +94,7 @@ fn find_downloadable_grammar_for_extension(
     return -1
 
 
-fn find_downloadable_grammar_by_language(
+def find_downloadable_grammar_by_language(
     specs: List[DownloadableGrammar], language_id: String,
 ) -> Int:
     for i in range(len(specs)):
@@ -103,7 +103,7 @@ fn find_downloadable_grammar_by_language(
     return -1
 
 
-fn user_grammar_root() -> String:
+def user_grammar_root() -> String:
     """``~/.config/turbokod/languages``. Empty when ``$HOME`` is unset
     (sandboxed processes); callers treat that as "no user grammars
     available" and skip both load and install."""
@@ -113,7 +113,7 @@ fn user_grammar_root() -> String:
     return home + String("/.config/turbokod/languages")
 
 
-fn user_grammar_dir(lang: String) -> String:
+def user_grammar_dir(lang: String) -> String:
     """Per-language directory: ``~/.config/turbokod/languages/<lang>``."""
     var root = user_grammar_root()
     if len(root.as_bytes()) == 0:
@@ -121,7 +121,7 @@ fn user_grammar_dir(lang: String) -> String:
     return root + String("/") + lang
 
 
-fn user_grammar_path(lang: String) -> String:
+def user_grammar_path(lang: String) -> String:
     """Where the downloaded ``<lang>.tmLanguage.json`` lives on disk."""
     var dir = user_grammar_dir(lang)
     if len(dir.as_bytes()) == 0:
@@ -129,14 +129,14 @@ fn user_grammar_path(lang: String) -> String:
     return dir + String("/") + lang + String(".tmLanguage.json")
 
 
-fn user_grammar_installed(lang: String) -> Bool:
+def user_grammar_installed(lang: String) -> Bool:
     var path = user_grammar_path(lang)
     if len(path.as_bytes()) == 0:
         return False
     return stat_file(path).ok
 
 
-fn user_grammar_path_for_ext(ext: String) -> String:
+def user_grammar_path_for_ext(ext: String) -> String:
     """Return the user-installed grammar path for ``ext`` if present
     on disk, else empty. Highlighter calls this after the bundled-
     extension lookup misses, so a downloaded Elm grammar transparently
@@ -153,7 +153,7 @@ fn user_grammar_path_for_ext(ext: String) -> String:
     return path
 
 
-fn grammar_install_command(lang: String, url: String) -> String:
+def grammar_install_command(lang: String, url: String) -> String:
     """Shell command that mkdirs the per-language dir and curls the
     grammar JSON into it. Single ``sh -c`` line so ``InstallRunner``
     runs it unchanged. ``set -e`` aborts on the first failure so a

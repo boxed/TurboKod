@@ -37,7 +37,7 @@ struct DiffOp(ImplicitlyCopyable, Movable):
     var b_index: Int
 
 
-fn diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
+def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     """Myers diff over two line lists. Returns the edit script in
     forward (input-order) form: a sequence of equal / delete / insert
     operations whose application turns ``a`` into ``b``.
@@ -137,7 +137,7 @@ fn diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     return ops^
 
 
-fn _hunk_header(a_start: Int, a_count: Int, b_start: Int, b_count: Int) -> String:
+def _hunk_header(a_start: Int, a_count: Int, b_start: Int, b_count: Int) -> String:
     """Render ``@@ -l,c +l,c @@``. When the count is 1, GNU diff omits the
     ``,c`` — match that so output reads like ``diff -u``. Empty ranges are
     rendered with display-line one less than the start (GNU convention)."""
@@ -152,7 +152,7 @@ fn _hunk_header(a_start: Int, a_count: Int, b_start: Int, b_count: Int) -> Strin
     return String("@@ ") + a_part + String(" ") + b_part + String(" @@")
 
 
-fn unified_diff(
+def unified_diff(
     a: String,
     b: String,
     a_label: String,
@@ -288,7 +288,7 @@ struct MergeResult(Copyable, Movable):
     var first_conflict_row: Int
 
 
-fn _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
+def _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
     """For each index ``i`` in the ``a`` input of a Myers diff, return
     the matching index in ``b`` (when ``ops`` contains a kind==0 op for
     ``a_index == i``), else -1."""
@@ -301,7 +301,7 @@ fn _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
     return out^
 
 
-fn _slice_eq(
+def _slice_eq(
     a: List[String], a_lo: Int, a_hi: Int,
     b: List[String], b_lo: Int, b_hi: Int,
 ) -> Bool:
@@ -317,7 +317,7 @@ fn _slice_eq(
     return True
 
 
-fn diff3_merge(
+def diff3_merge(
     base: List[String],
     ours: List[String],
     theirs: List[String],

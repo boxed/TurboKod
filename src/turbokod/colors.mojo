@@ -64,63 +64,63 @@ struct Attr(ImplicitlyCopyable, Movable):
     var style: UInt8
     var underline_color: Int16
 
-    fn __init__(out self):
+    def __init__(out self):
         self.fg = LIGHT_GRAY
         self.bg = BLACK
         self.style = STYLE_NONE
         self.underline_color = -1
 
-    fn __init__(out self, fg: UInt8, bg: UInt8):
+    def __init__(out self, fg: UInt8, bg: UInt8):
         self.fg = fg
         self.bg = bg
         self.style = STYLE_NONE
         self.underline_color = -1
 
-    fn __init__(out self, fg: UInt8, bg: UInt8, style: UInt8):
+    def __init__(out self, fg: UInt8, bg: UInt8, style: UInt8):
         self.fg = fg
         self.bg = bg
         self.style = style
         self.underline_color = -1
 
-    fn with_fg(self, fg: UInt8) -> Attr:
+    def with_fg(self, fg: UInt8) -> Attr:
         var a = Attr(fg, self.bg, self.style)
         a.underline_color = self.underline_color
         return a
 
-    fn with_bg(self, bg: UInt8) -> Attr:
+    def with_bg(self, bg: UInt8) -> Attr:
         var a = Attr(self.fg, bg, self.style)
         a.underline_color = self.underline_color
         return a
 
-    fn with_style(self, style: UInt8) -> Attr:
+    def with_style(self, style: UInt8) -> Attr:
         var a = Attr(self.fg, self.bg, style)
         a.underline_color = self.underline_color
         return a
 
-    fn add_style(self, bits: UInt8) -> Attr:
+    def add_style(self, bits: UInt8) -> Attr:
         var a = Attr(self.fg, self.bg, self.style | bits)
         a.underline_color = self.underline_color
         return a
 
-    fn with_underline_color(self, color: Int16) -> Attr:
+    def with_underline_color(self, color: Int16) -> Attr:
         var a = Attr(self.fg, self.bg, self.style)
         a.underline_color = color
         return a
 
-    fn __eq__(self, other: Attr) -> Bool:
+    def __eq__(self, other: Attr) -> Bool:
         return self.fg == other.fg and self.bg == other.bg \
             and self.style == other.style \
             and self.underline_color == other.underline_color
 
-    fn __ne__(self, other: Attr) -> Bool:
+    def __ne__(self, other: Attr) -> Bool:
         return not (self == other)
 
 
-fn default_attr() -> Attr:
+def default_attr() -> Attr:
     return Attr(LIGHT_GRAY, BLACK, STYLE_NONE)
 
 
-fn attr_to_sgr(attr: Attr) -> String:
+def attr_to_sgr(attr: Attr) -> String:
     """Render an `Attr` as a CSI SGR escape sequence (no leading ESC[)."""
     var s = String("0")  # reset first; simpler than diffing previous attr
     if (attr.style & STYLE_BOLD) != 0:      s += String(";1")

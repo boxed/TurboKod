@@ -17,7 +17,7 @@ from std.testing import assert_equal, assert_false, assert_true
 from turbokod.vt import Vt
 
 
-fn test_vt_plain_text_paints_cells_left_to_right() raises:
+def test_vt_plain_text_paints_cells_left_to_right() raises:
     var vt = Vt(20, 5)
     vt.feed_string(String("hello"))
     assert_equal(vt.cell_at(0, 0).glyph, String("h"))
@@ -26,7 +26,7 @@ fn test_vt_plain_text_paints_cells_left_to_right() raises:
     assert_equal(vt.cur_c, 5)
 
 
-fn test_vt_cr_and_lf_move_cursor() raises:
+def test_vt_cr_and_lf_move_cursor() raises:
     var vt = Vt(20, 5)
     vt.feed_string(String("abc\r\ndef"))
     assert_equal(vt.cell_at(0, 0).glyph, String("a"))
@@ -35,7 +35,7 @@ fn test_vt_cr_and_lf_move_cursor() raises:
     assert_equal(vt.cur_c, 3)
 
 
-fn test_vt_cup_moves_cursor_one_indexed() raises:
+def test_vt_cup_moves_cursor_one_indexed() raises:
     # CSI 3;7 H — row 3, column 7, 1-indexed in protocol.
     var vt = Vt(20, 10)
     vt.feed_string(String("\x1b[3;7HX"))
@@ -45,7 +45,7 @@ fn test_vt_cup_moves_cursor_one_indexed() raises:
     assert_equal(vt.cell_at(2, 6).glyph, String("X"))
 
 
-fn test_vt_sgr_red_then_reset() raises:
+def test_vt_sgr_red_then_reset() raises:
     var vt = Vt(20, 5)
     # SGR 31 = red foreground.
     vt.feed_string(String("\x1b[31mR\x1b[0mG"))
@@ -57,7 +57,7 @@ fn test_vt_sgr_red_then_reset() raises:
     assert_equal(Int(g_cell.attr.fg), Int(UInt8(7)))
 
 
-fn test_vt_auto_wrap_delays_until_next_glyph() raises:
+def test_vt_auto_wrap_delays_until_next_glyph() raises:
     # Filling the last column shouldn't immediately move the cursor —
     # only the next printable byte should trigger the wrap. xterm's
     # delayed-wrap semantics; vim relies on it.
@@ -74,7 +74,7 @@ fn test_vt_auto_wrap_delays_until_next_glyph() raises:
     assert_equal(vt.cur_c, 1)
 
 
-fn test_vt_alt_screen_swap_and_restore() raises:
+def test_vt_alt_screen_swap_and_restore() raises:
     var vt = Vt(10, 4)
     vt.feed_string(String("primary"))
     # Enter alt screen — primary content frozen, alt is blank.
@@ -89,13 +89,13 @@ fn test_vt_alt_screen_swap_and_restore() raises:
     assert_equal(vt.cell_at(0, 0).glyph, String("p"))
 
 
-fn test_vt_osc_2_sets_title() raises:
+def test_vt_osc_2_sets_title() raises:
     var vt = Vt(10, 4)
     vt.feed_string(String("\x1b]2;my title\x07"))
     assert_equal(vt.title, String("my title"))
 
 
-fn test_vt_erase_in_line_from_cursor() raises:
+def test_vt_erase_in_line_from_cursor() raises:
     var vt = Vt(8, 2)
     vt.feed_string(String("abcdef"))
     # Cursor at col 6 after printing 6 chars. Move back to col 2.
@@ -106,7 +106,7 @@ fn test_vt_erase_in_line_from_cursor() raises:
     assert_equal(vt.cell_at(0, 5).glyph, String(" "))
 
 
-fn test_vt_scroll_on_lf_at_bottom() raises:
+def test_vt_scroll_on_lf_at_bottom() raises:
     # rows=3, scroll region is full screen by default. The fourth LF
     # at the bottom should scroll the first row off the top.
     var vt = Vt(4, 3)
@@ -118,7 +118,7 @@ fn test_vt_scroll_on_lf_at_bottom() raises:
     assert_equal(vt.cell_at(2, 0).glyph, String("D"))
 
 
-fn test_vt_utf8_multi_byte_glyph_placed_in_one_cell() raises:
+def test_vt_utf8_multi_byte_glyph_placed_in_one_cell() raises:
     # ``✻`` is U+273B, 3-byte UTF-8. After feed, the cell at (0,0)
     # should hold the whole codepoint, not just the first byte.
     var vt = Vt(4, 2)
@@ -127,7 +127,7 @@ fn test_vt_utf8_multi_byte_glyph_placed_in_one_cell() raises:
     assert_equal(vt.cur_c, 1)
 
 
-fn test_vt_resize_preserves_top_left_content() raises:
+def test_vt_resize_preserves_top_left_content() raises:
     var vt = Vt(10, 4)
     vt.feed_string(String("hello"))
     vt.resize(20, 6)
@@ -137,7 +137,7 @@ fn test_vt_resize_preserves_top_left_content() raises:
     assert_equal(vt.cell_at(0, 4).glyph, String("o"))
 
 
-fn test_vt_cursor_visibility_dec_25() raises:
+def test_vt_cursor_visibility_dec_25() raises:
     var vt = Vt(4, 2)
     assert_true(vt.cursor_visible)
     vt.feed_string(String("\x1b[?25l"))
@@ -146,7 +146,7 @@ fn test_vt_cursor_visibility_dec_25() raises:
     assert_true(vt.cursor_visible)
 
 
-fn test_vt_scrollback_captures_rows_off_the_top() raises:
+def test_vt_scrollback_captures_rows_off_the_top() raises:
     # rows=3, cols=4. Fill the screen, then scroll once more: the top
     # row should land in scrollback verbatim.
     var vt = Vt(4, 3)
@@ -163,7 +163,7 @@ fn test_vt_scrollback_captures_rows_off_the_top() raises:
     assert_equal(vt.cell_at(2, 0).glyph, String("D"))
 
 
-fn test_vt_view_offset_shows_scrollback_above_live() raises:
+def test_vt_view_offset_shows_scrollback_above_live() raises:
     var vt = Vt(2, 2)
     vt.feed_string(String("A\r\nB"))
     # Push one more row to fill the scrollback. After: scrollback=["A"],
@@ -180,7 +180,7 @@ fn test_vt_view_offset_shows_scrollback_above_live() raises:
     assert_equal(vt.view_cell_at(1, 0).glyph, String("B"))
 
 
-fn test_vt_scroll_view_clamps_to_scrollback_extents() raises:
+def test_vt_scroll_view_clamps_to_scrollback_extents() raises:
     var vt = Vt(2, 2)
     vt.feed_string(String("A\r\nB\r\nC\r\nD"))  # scrollback grows to 2
     assert_equal(len(vt.scrollback), 2)
@@ -190,7 +190,7 @@ fn test_vt_scroll_view_clamps_to_scrollback_extents() raises:
     assert_equal(vt.view_offset, 0)
 
 
-fn test_vt_scrollback_does_not_fill_on_alt_screen() raises:
+def test_vt_scrollback_does_not_fill_on_alt_screen() raises:
     var vt = Vt(2, 2)
     vt.feed_string(String("\x1b[?1049h"))  # enter alt
     assert_true(vt.using_alt)
@@ -199,7 +199,7 @@ fn test_vt_scrollback_does_not_fill_on_alt_screen() raises:
     assert_equal(len(vt.scrollback), 0)
 
 
-fn test_vt_view_offset_pinned_when_new_output_arrives() raises:
+def test_vt_view_offset_pinned_when_new_output_arrives() raises:
     # While the user is scrolled back, new output should keep their
     # viewport pinned to the same absolute scrollback row. Without
     # this, every newline during a scrollback review would drift the
@@ -214,14 +214,14 @@ fn test_vt_view_offset_pinned_when_new_output_arrives() raises:
     assert_equal(vt.view_cell_at(0, 0).glyph, String("A"))
 
 
-fn test_vt_mouse_tracking_off_by_default() raises:
+def test_vt_mouse_tracking_off_by_default() raises:
     var vt = Vt(20, 5)
     assert_false(vt.tracks_mouse())
     assert_equal(vt.encode_mouse(0, 5, 3, False, False, False, False, False),
                  String(""))
 
 
-fn test_vt_mouse_sgr_press_release_encoding() raises:
+def test_vt_mouse_sgr_press_release_encoding() raises:
     # Enable 1000 + 1006 (standard combo).
     var vt = Vt(80, 24)
     vt.feed_string(String("\x1b[?1000h\x1b[?1006h"))
@@ -234,7 +234,7 @@ fn test_vt_mouse_sgr_press_release_encoding() raises:
     assert_equal(release, String("\x1b[<0;11;5m"))
 
 
-fn test_vt_mouse_modifier_bits_encoded() raises:
+def test_vt_mouse_modifier_bits_encoded() raises:
     var vt = Vt(80, 24)
     vt.feed_string(String("\x1b[?1000h\x1b[?1006h"))
     # Ctrl-shift-left at (0, 0). Modifiers: shift=4, ctrl=16 → +20.
@@ -242,7 +242,7 @@ fn test_vt_mouse_modifier_bits_encoded() raises:
     assert_equal(press, String("\x1b[<20;1;1M"))
 
 
-fn test_vt_mouse_wheel_codes() raises:
+def test_vt_mouse_wheel_codes() raises:
     var vt = Vt(80, 24)
     vt.feed_string(String("\x1b[?1000h\x1b[?1006h"))
     var up = vt.encode_mouse(4, 5, 3, False, False, False, False, False)
@@ -251,7 +251,7 @@ fn test_vt_mouse_wheel_codes() raises:
     assert_equal(down, String("\x1b[<65;6;4M"))
 
 
-fn test_vt_mouse_motion_bit_set_on_drag() raises:
+def test_vt_mouse_motion_bit_set_on_drag() raises:
     var vt = Vt(80, 24)
     vt.feed_string(String("\x1b[?1002h\x1b[?1006h"))
     # Drag with left held: motion bit (+32) on top of button 0.
@@ -259,7 +259,7 @@ fn test_vt_mouse_motion_bit_set_on_drag() raises:
     assert_equal(drag, String("\x1b[<32;11;5M"))
 
 
-fn test_vt_save_restore_cursor_via_decsc() raises:
+def test_vt_save_restore_cursor_via_decsc() raises:
     var vt = Vt(20, 5)
     vt.feed_string(String("\x1b[3;5H"))  # move to (2, 4)
     vt.feed_string(String("\x1b7"))      # DECSC — save
@@ -269,7 +269,7 @@ fn test_vt_save_restore_cursor_via_decsc() raises:
     assert_equal(vt.cur_c, 4)
 
 
-fn main() raises:
+def main() raises:
     test_vt_plain_text_paints_cells_left_to_right()
     test_vt_cr_and_lf_move_cursor()
     test_vt_cup_moves_cursor_one_indexed()

@@ -99,7 +99,7 @@ comptime _LABEL_W = 18
 """Column width reserved for right-side form labels."""
 
 
-fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
+def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
@@ -129,7 +129,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var label_x: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 2)
     var name_y = cursor.place()
     var program_y = cursor.place()
@@ -159,7 +159,7 @@ fn _build_layout(rect: Rect) -> _Layout:
     )
 
 
-fn _input_rect_for(layout: _Layout, focus: UInt8) -> Rect:
+def _input_rect_for(layout: _Layout, focus: UInt8) -> Rect:
     if focus == _FOCUS_NAME:    return layout.name_rect
     if focus == _FOCUS_PROGRAM: return layout.program_rect
     if focus == _FOCUS_ARGS:    return layout.args_rect
@@ -168,7 +168,7 @@ fn _input_rect_for(layout: _Layout, focus: UInt8) -> Rect:
     return Rect(0, 0, 0, 0)
 
 
-fn _label_pt_for(layout: _Layout, focus: UInt8) -> Point:
+def _label_pt_for(layout: _Layout, focus: UInt8) -> Point:
     return Point(layout.label_x, _input_rect_for(layout, focus).a.y)
 
 
@@ -185,7 +185,7 @@ struct _PlacedButton(ImplicitlyCopyable, Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _join_args(args: List[String]) -> String:
+def _join_args(args: List[String]) -> String:
     """Render ``debug_args`` as a single space-separated string for
     display. Targets with spaces in individual args lose their
     grouping in this view — advanced users can hand-edit the JSON."""
@@ -197,7 +197,7 @@ fn _join_args(args: List[String]) -> String:
     return out^
 
 
-fn _split_args(text: String) -> List[String]:
+def _split_args(text: String) -> List[String]:
     """Inverse of ``_join_args``. Splits on runs of spaces — empty
     pieces are dropped so leading / trailing whitespace doesn't
     produce phantom arg entries."""
@@ -265,7 +265,7 @@ struct TargetsDialog(Movable):
     clicks feel like no-ops. Re-seeded from the selected target's
     ``debug_language`` whenever the selection changes."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.entries = List[RunTarget]()
@@ -298,7 +298,7 @@ struct TargetsDialog(Movable):
             ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
         ))
 
-    fn open(mut self, var targets: ProjectTargets):
+    def open(mut self, var targets: ProjectTargets):
         """Take a snapshot of ``targets`` for editing. Subsequent
         edits never touch the host's copy until Save."""
         self.entries = targets.targets.copy()
@@ -318,7 +318,7 @@ struct TargetsDialog(Movable):
         self._last_scroll_sel = -2
         self._load_fields_from_selected()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.entries = List[RunTarget]()
@@ -335,7 +335,7 @@ struct TargetsDialog(Movable):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
 
-    fn into_targets(self) -> ProjectTargets:
+    def into_targets(self) -> ProjectTargets:
         """Build a fresh ProjectTargets from the editable state. The
         active selection follows ``active_name`` when it still
         resolves, otherwise falls back to the highlighted row."""
@@ -357,7 +357,7 @@ struct TargetsDialog(Movable):
 
     # --- editing operations -----------------------------------------
 
-    fn _add_new(mut self):
+    def _add_new(mut self):
         """Append a fresh target with placeholder values. Selecting it
         immediately and shifting focus to the Name field is what users
         expect — the next keystroke lands where they're already
@@ -373,7 +373,7 @@ struct TargetsDialog(Movable):
         self._scroll_selection_into_view()
         self._load_fields_from_selected()
 
-    fn _unique_name(self, base: String) -> String:
+    def _unique_name(self, base: String) -> String:
         """Return ``base`` if no entry uses it, else ``base 2``,
         ``base 3``, ... — adding two ``new`` targets in a row should
         not produce a duplicate-name list."""
@@ -401,7 +401,7 @@ struct TargetsDialog(Movable):
             n += 1
         return base + String(" ") + String(n)
 
-    fn _remove_selected(mut self):
+    def _remove_selected(mut self):
         if self.selected < 0 or self.selected >= len(self.entries):
             return
         var rebuilt = List[RunTarget]()
@@ -432,12 +432,12 @@ struct TargetsDialog(Movable):
         # Reload the editable strips from whichever row we landed on.
         self._load_fields_from_selected()
 
-    fn _selected_target(self) -> RunTarget:
+    def _selected_target(self) -> RunTarget:
         if self.selected < 0 or self.selected >= len(self.entries):
             return RunTarget()
         return self.entries[self.selected].copy()
 
-    fn _put_selected(mut self, var t: RunTarget):
+    def _put_selected(mut self, var t: RunTarget):
         """Write ``t`` back to the selected slot. Mojo can't mutate a
         list element through field access, so callers do
         ``var t = _selected_target(); t.field = …; _put_selected(t^)``.
@@ -446,7 +446,7 @@ struct TargetsDialog(Movable):
             return
         self.entries[self.selected] = t^
 
-    fn _load_fields_from_selected(mut self):
+    def _load_fields_from_selected(mut self):
         """Populate the editable strips from ``entries[selected]`` —
         called after every selection change (open, add, remove,
         list-arrow-key, list click). Empty fields when no row is
@@ -470,7 +470,7 @@ struct TargetsDialog(Movable):
         self.cwd_tf.set_text(t.cwd)
         self.lang_dropdown = _build_lang_dropdown(t.debug_language)
 
-    fn _commit_fields_to_selected(mut self):
+    def _commit_fields_to_selected(mut self):
         """Write the editable strip values back into
         ``entries[selected]``. Called before any selection change, and
         on Save, so the entries snapshot is always up-to-date with
@@ -486,7 +486,7 @@ struct TargetsDialog(Movable):
 
     # --- focus walk -------------------------------------------------
 
-    fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
+    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         """Cycle to the next/previous focusable widget, skipping the
         Remove button when the list is empty (no row to remove) and
         all the right-side fields when no row is selected."""
@@ -502,7 +502,7 @@ struct TargetsDialog(Movable):
                 return f
         return current
 
-    fn _focus_visitable(self, focus: UInt8) -> Bool:
+    def _focus_visitable(self, focus: UInt8) -> Bool:
         if focus == _FOCUS_LIST:
             return len(self.entries) > 0
         if focus == _FOCUS_REMOVE:
@@ -515,7 +515,7 @@ struct TargetsDialog(Movable):
 
     # --- painting ---------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
@@ -544,7 +544,7 @@ struct TargetsDialog(Movable):
         if self.lang_dropdown.is_open:
             self.lang_dropdown.paint_popup(canvas, layout.lang_rect, screen)
 
-    fn _paint_list(
+    def _paint_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         """Paint each list entry on a cyan field — no border. The
@@ -606,7 +606,7 @@ struct TargetsDialog(Movable):
                 canvas, Point(inner.a.x, inner.a.y + r), line, attr,
             )
 
-    fn _paint_form(
+    def _paint_form(
         mut self, mut canvas: Canvas, painter: Painter, layout: _Layout,
     ):
         """Paint the labels + editable strips for the selected target.
@@ -663,7 +663,7 @@ struct TargetsDialog(Movable):
         self.cwd_tf.paint(canvas, layout.cwd_rect, self.focus == _FOCUS_CWD)
         self._paint_lang_dropdown(canvas, layout)
 
-    fn _paint_lang_dropdown(self, mut canvas: Canvas, layout: _Layout):
+    def _paint_lang_dropdown(self, mut canvas: Canvas, layout: _Layout):
         """Render the debug-language dropdown using the same focus
         colours as ``_paint_input`` so the form reads as a uniform
         row of editable strips. Reads from the persistent
@@ -675,7 +675,7 @@ struct TargetsDialog(Movable):
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
         )
 
-    fn _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
+    def _paint_buttons(mut self, mut canvas: Canvas, rect: Rect, layout: _Layout):
         """Layout: Add and Remove on the bottom-left, Save and Cancel
         on the bottom-right. Each button is painted with the shared
         ``ShadowButton`` widget so the drop-shadow look matches the
@@ -709,7 +709,7 @@ struct TargetsDialog(Movable):
         for i in range(len(self._buttons)):
             self._paint_button(canvas, i)
 
-    fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
+    def _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
         var face: Attr
         if not pb.enabled:
@@ -732,7 +732,7 @@ struct TargetsDialog(Movable):
 
     # --- key handling -----------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -809,7 +809,7 @@ struct TargetsDialog(Movable):
                 return True
         return True
 
-    fn _cycle_lang(mut self, event: Event):
+    def _cycle_lang(mut self, event: Event):
         """Forward a Left / Right press to the persistent dropdown. The
         dropdown ignores these when collapsed (its primary interaction
         is the popup), but routing through it keeps any future cycle
@@ -820,7 +820,7 @@ struct TargetsDialog(Movable):
             return
         self._commit_lang_dropdown()
 
-    fn _commit_lang_dropdown(mut self):
+    def _commit_lang_dropdown(mut self):
         """Push the dropdown's currently-committed value back into the
         selected target so Save round-trips it."""
         if self.selected < 0:
@@ -829,7 +829,7 @@ struct TargetsDialog(Movable):
         t.debug_language = self.lang_dropdown.value()
         self._put_selected(t^)
 
-    fn _activate_focus(mut self) -> Bool:
+    def _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
             self._add_new()
             return True
@@ -847,7 +847,7 @@ struct TargetsDialog(Movable):
         self.focus = self._next_focus(self.focus, False)
         return True
 
-    fn _move_selection(mut self, delta: Int):
+    def _move_selection(mut self, delta: Int):
         if len(self.entries) == 0:
             return
         var s = self.selected + delta
@@ -864,7 +864,7 @@ struct TargetsDialog(Movable):
         self._scroll_selection_into_view()
         self._load_fields_from_selected()
 
-    fn _scroll_selection_into_view(mut self):
+    def _scroll_selection_into_view(mut self):
         # The visible row count depends on the list rect, which we
         # don't have here; clip on next paint where it's known.
         # Reset enough that paint will pick up.
@@ -873,7 +873,7 @@ struct TargetsDialog(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    fn _dispatch_buttons(mut self, event: Event) -> Bool:
+    def _dispatch_buttons(mut self, event: Event) -> Bool:
         """Route ``event`` through every button's ``handle_mouse``.
         Returns True if any button consumed the event. On
         ``BUTTON_FIRED`` the button's action runs before returning;
@@ -895,7 +895,7 @@ struct TargetsDialog(Movable):
             return True
         return False
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True if ``pos`` would land on an editable strip — used by
         the host to surface a text-cursor pointer over those cells."""
         if not self.active:
@@ -910,7 +910,7 @@ struct TargetsDialog(Movable):
             or layout.lang_rect.contains(pos)
         )
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -1024,7 +1024,7 @@ struct TargetsDialog(Movable):
             return True
         return True
 
-    fn _click_lang(mut self, ir: Rect, screen: Rect, event: Event):
+    def _click_lang(mut self, ir: Rect, screen: Rect, event: Event):
         """Forward a click on the language strip to the persistent
         dropdown. A click on the closed strip toggles the popup open;
         when already open, popup-row clicks are routed through the
@@ -1039,7 +1039,7 @@ struct TargetsDialog(Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _build_lang_dropdown(var current: String) -> Dropdown:
+def _build_lang_dropdown(var current: String) -> Dropdown:
     """Empty slot ("(none)" — disables Cmd+D) followed by every known
     language id from the LSP catalog. The catalog is the broadest list
     of programming languages we ship: anything with a Helix entry

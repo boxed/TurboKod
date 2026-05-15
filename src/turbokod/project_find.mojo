@@ -96,7 +96,7 @@ struct ProjectFind(Movable):
     # never blocks the UI thread. ``close()`` also cancels.
     var _runner: _RgRunner
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -124,7 +124,7 @@ struct ProjectFind(Movable):
         self._context_highlights = List[Highlight]()
         self._runner = _RgRunner()
 
-    fn open(
+    def open(
         mut self,
         var root: String,
         var prefill: String = String(""),
@@ -171,7 +171,7 @@ struct ProjectFind(Movable):
         self.active = True
         self.submitted = False
 
-    fn close(mut self):
+    def close(mut self):
         self._runner.cancel()
         self.active = False
         self.submitted = False
@@ -193,14 +193,14 @@ struct ProjectFind(Movable):
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
 
-    fn _current_options(self) -> SearchOptions:
+    def _current_options(self) -> SearchOptions:
         return SearchOptions(
             self.toggle_case.on, self.toggle_word.on, self.toggle_regex.on,
         )
 
     # --- per-frame tick ---------------------------------------------------
 
-    fn tick(mut self, now_ms: Int):
+    def tick(mut self, now_ms: Int):
         """Run the pending search if the debounce window has elapsed,
         and pump any in-flight streaming runner.
 
@@ -236,7 +236,7 @@ struct ProjectFind(Movable):
                         # instead of "(loading <rel>)".
                         self._refresh_context_for_selection()
 
-    fn _mark_toggle_changed(mut self):
+    def _mark_toggle_changed(mut self):
         """Force the next ``tick`` to re-run the search with the
         current toggle state. Uses the existing debounce path so a
         rapid sequence of toggle clicks coalesces into one rg
@@ -254,7 +254,7 @@ struct ProjectFind(Movable):
             self.scroll = 0
         self._query_dirty_at_ms = 1
 
-    fn _mark_query_dirty(mut self, now_ms: Int):
+    def _mark_query_dirty(mut self, now_ms: Int):
         # Reset the debounce on every keystroke. ``now_ms == 0`` (clock
         # syscall failure) gets clamped to 1 so the "no pending" sentinel
         # stays distinguishable.
@@ -271,7 +271,7 @@ struct ProjectFind(Movable):
             self.selected = 0
             self.scroll = 0
 
-    fn _run_search(mut self):
+    def _run_search(mut self):
         self._last_searched_query = self.query.text
         var opts = self._current_options()
         self._last_searched_opts = opts
@@ -290,7 +290,7 @@ struct ProjectFind(Movable):
         # and let the user retry.
         _ = self._runner.start(self.root, self.query.text, opts)
 
-    fn _refresh_context_for_selection(mut self):
+    def _refresh_context_for_selection(mut self):
         """Reload + retokenize the context panel for the current
         selection. The retokenize defers to ``paint`` (which has the
         shared ``GrammarRegistry``) by leaving ``_context_highlights``
@@ -325,7 +325,7 @@ struct ProjectFind(Movable):
         # ``_ensure_context_highlights`` — that's where the cached
         # ``GrammarRegistry`` is in scope.
 
-    fn _ensure_context_highlights(
+    def _ensure_context_highlights(
         mut self, mut registry: GrammarRegistry,
     ):
         """Tokenize the loaded context file once, using the shared
@@ -352,26 +352,26 @@ struct ProjectFind(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _input_y(self, screen: Rect) -> Int:
+    def _input_y(self, screen: Rect) -> Int:
         return screen.a.y + 1
 
-    fn _list_top(self, screen: Rect) -> Int:
+    def _list_top(self, screen: Rect) -> Int:
         return screen.a.y + 3
 
-    fn _context_height(self, screen: Rect) -> Int:
+    def _context_height(self, screen: Rect) -> Int:
         # 1 separator + ``2 * _CONTEXT_LINES + 1`` content rows.
         return 2 * _CONTEXT_LINES + 2
 
-    fn _list_bottom(self, screen: Rect) -> Int:
+    def _list_bottom(self, screen: Rect) -> Int:
         return screen.b.y - 1 - self._context_height(screen)
 
-    fn _list_height(self, screen: Rect) -> Int:
+    def _list_height(self, screen: Rect) -> Int:
         var h = self._list_bottom(screen) - self._list_top(screen)
         if h < 0:
             return 0
         return h
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Search:`` query row."""
         if not self.active:
             return False
@@ -380,7 +380,7 @@ struct ProjectFind(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect,
+    def paint(mut self, mut canvas: Canvas, screen: Rect,
              mut registry: GrammarRegistry):
         if not self.active:
             return
@@ -530,7 +530,7 @@ struct ProjectFind(Movable):
             hx = screen.a.x + 1
         _ = painter.put_text(canvas, Point(hx, screen.b.y - 1), hint, hint_attr)
 
-    fn _paint_match_row(
+    def _paint_match_row(
         mut self, mut canvas: Canvas, screen: Rect, painter: Painter,
         y: Int, m: ProjectMatch, is_sel: Bool,
         line_attr: Attr, sel_line: Attr,
@@ -634,7 +634,7 @@ struct ProjectFind(Movable):
         if start > 0:
             painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
 
-    fn _paint_context(
+    def _paint_context(
         self, mut canvas: Canvas, screen: Rect, painter: Painter,
         top_y: Int, ctx_attr: Attr, match_attr: Attr,
     ):
@@ -715,7 +715,7 @@ struct ProjectFind(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event, now_ms: Int) -> Bool:
+    def handle_key(mut self, event: Event, now_ms: Int) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -743,7 +743,7 @@ struct ProjectFind(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -800,7 +800,7 @@ struct ProjectFind(Movable):
         self._refresh_context_for_selection()
         return True
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         # Conservative window: assume ~12 visible rows; the actual list
         # height depends on the screen so we re-clamp on paint.
         var visible = 12
@@ -813,7 +813,7 @@ struct ProjectFind(Movable):
 # --- internals --------------------------------------------------------------
 
 
-fn _lstrip_tabs(s: String) -> String:
+def _lstrip_tabs(s: String) -> String:
     """Drop leading whitespace (tabs/spaces) so the first non-blank
     character of the line lines up at the row's left edge — search hits
     in deeply indented code stay on-screen."""
@@ -858,7 +858,7 @@ struct _RgRunner(Movable):
     var _scan_pos: Int
     var _new: List[ProjectMatch]   # parsed but not yet handed to caller
 
-    fn __init__(out self):
+    def __init__(out self):
         self.proc = LspProcess()
         self.active = False
         self.root = String("")
@@ -867,10 +867,10 @@ struct _RgRunner(Movable):
         self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.active
 
-    fn cancel(mut self):
+    def cancel(mut self):
         """Stop the running child (if any) and reset state.
 
         Safe to call when idle. Sends SIGTERM via ``LspProcess.terminate``
@@ -885,7 +885,7 @@ struct _RgRunner(Movable):
         self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
-    fn start(
+    def start(
         mut self, root: String, query: String, opts: SearchOptions,
     ) -> Bool:
         """Spawn a fresh ``rg`` child for ``(root, query)``. Returns
@@ -942,7 +942,7 @@ struct _RgRunner(Movable):
         self.query = query
         return True
 
-    fn tick(mut self) -> Bool:
+    def tick(mut self) -> Bool:
         """Drain any bytes available on the child's stdout and parse
         complete lines. Returns True when at least one new match was
         appended (or the search just completed) so the caller knows to
@@ -1018,7 +1018,7 @@ struct _RgRunner(Movable):
             changed = True
         return changed
 
-    fn drain_new(mut self) -> List[ProjectMatch]:
+    def drain_new(mut self) -> List[ProjectMatch]:
         """Move out the matches parsed since the last ``drain_new``.
         Caller appends them to its own snapshot."""
         var out = self._new^
@@ -1026,7 +1026,7 @@ struct _RgRunner(Movable):
         return out^
 
 
-fn _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
+def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     """Decode one ``--no-heading --line-number --column`` output line
     (``path:line:col:text``) into a ``ProjectMatch``. Returns None when
     the prefix doesn't have three colons (rg sometimes emits other
@@ -1056,7 +1056,7 @@ fn _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     ))
 
 
-fn _scan_to_newline(s: String, start: Int) -> Int:
+def _scan_to_newline(s: String, start: Int) -> Int:
     var b = s.as_bytes()
     var i = start
     while i < len(b) and b[i] != 0x0A:
@@ -1064,7 +1064,7 @@ fn _scan_to_newline(s: String, start: Int) -> Int:
     return i
 
 
-fn _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
+def _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
     var b = s.as_bytes()
     var i = start
     while i < end:
@@ -1074,7 +1074,7 @@ fn _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
     return -1
 
 
-fn _parse_uint(s: String, start: Int, end: Int) -> Int:
+def _parse_uint(s: String, start: Int, end: Int) -> Int:
     var b = s.as_bytes()
     var n = 0
     var any = False
@@ -1091,14 +1091,14 @@ fn _parse_uint(s: String, start: Int, end: Int) -> Int:
     return n
 
 
-fn _slice_str(s: String, start: Int, end: Int) -> String:
+def _slice_str(s: String, start: Int, end: Int) -> String:
     var b = s.as_bytes()
     if start >= end:
         return String("")
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
-fn _strip_root(path: String, root: String) -> String:
+def _strip_root(path: String, root: String) -> String:
     var pb = path.as_bytes()
     var rb = root.as_bytes()
     if len(rb) == 0 or len(pb) <= len(rb) + 1:
@@ -1111,7 +1111,7 @@ fn _strip_root(path: String, root: String) -> String:
     return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
-fn _find_bytes(haystack: String, needle: String) -> Int:
+def _find_bytes(haystack: String, needle: String) -> Int:
     """First byte offset of ``needle`` in ``haystack``, or ``-1``."""
     var hb = haystack.as_bytes()
     var nb = needle.as_bytes()

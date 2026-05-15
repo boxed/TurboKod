@@ -63,7 +63,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 1)
     var input_y = cursor.place()
     var list_y = cursor.place()
@@ -124,16 +124,16 @@ struct _FindSymbolRunner(Movable):
     var _buf: List[UInt8]
     var _scan_pos: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.proc = LspProcess()
         self.active = False
         self._buf = List[UInt8]()
         self._scan_pos = 0
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.active
 
-    fn cancel(mut self):
+    def cancel(mut self):
         """Stop the running child (if any) and reset state. Idempotent."""
         if self.active:
             self.proc.terminate()
@@ -141,7 +141,7 @@ struct _FindSymbolRunner(Movable):
         self._buf = List[UInt8]()
         self._scan_pos = 0
 
-    fn start(mut self, query: String, root: String) -> Bool:
+    def start(mut self, query: String, root: String) -> Bool:
         """Spawn ``rg`` for ``query`` rooted at ``root``. The pattern
         is ``\\b[\\w]*<query>[\\w]*\\b`` so any identifier *containing*
         the query — anywhere — counts as a hit. Returns False on
@@ -174,7 +174,7 @@ struct _FindSymbolRunner(Movable):
         self.active = True
         return True
 
-    fn tick(mut self) -> List[Tuple[String, Int, Int, String]]:
+    def tick(mut self) -> List[Tuple[String, Int, Int, String]]:
         """Drain whatever bytes are queued on rg's stdout, parse as
         many complete lines as possible, and return them as
         ``(path, line, column, text)`` tuples. The caller owns the
@@ -269,7 +269,7 @@ struct FindSymbol(Movable):
     var status_message: String
     var runner: _FindSymbolRunner
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.query = TextField()
         self.root = String("")
@@ -287,7 +287,7 @@ struct FindSymbol(Movable):
         self.runner = _FindSymbolRunner()
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn open(mut self, var root: String):
+    def open(mut self, var root: String):
         self.active = True
         self.query = TextField()
         self.root = root^
@@ -305,7 +305,7 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.query = TextField()
         self.root = String("")
@@ -319,22 +319,22 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn set_pending(mut self, var msg: String):
+    def set_pending(mut self, var msg: String):
         self.state = _STATE_PENDING
         self.status_message = msg^
 
-    fn set_error(mut self, var msg: String):
+    def set_error(mut self, var msg: String):
         self.state = _STATE_ERROR
         self.status_message = msg^
 
-    fn take_submitted(mut self) -> Bool:
+    def take_submitted(mut self) -> Bool:
         var s = self.submitted
         self.submitted = False
         return s
 
     # --- background pump --------------------------------------------------
 
-    fn tick(mut self):
+    def tick(mut self):
         """Drain one batch of rg output and merge new symbol names
         into the entry list. Called every paint frame by the host
         (cheap when the runner is idle).
@@ -362,7 +362,7 @@ struct FindSymbol(Movable):
             self.seen_names.append(name)
             self.entries.append(FindSymbolMatch(name, path, line_no, col))
 
-    fn restart_runner(mut self):
+    def restart_runner(mut self):
         """Cancel any in-flight rg and start a fresh search for
         ``self.query`` rooted at ``self.root``. Picker entries are
         cleared so the new query gets a clean slate.
@@ -383,7 +383,7 @@ struct FindSymbol(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         var width = 80
         var height = 22
         if width > screen.b.x - 4: width = screen.b.x - 4
@@ -392,7 +392,7 @@ struct FindSymbol(Movable):
         var y = (screen.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         if not self.active:
             return False
         var rect = self._rect(screen)
@@ -400,7 +400,7 @@ struct FindSymbol(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -476,7 +476,7 @@ struct FindSymbol(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True iff consumed (always True while active)."""
         if not self.active:
             return False
@@ -523,7 +523,7 @@ struct FindSymbol(Movable):
                 self.restart_runner()
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -562,7 +562,7 @@ struct FindSymbol(Movable):
         self.selected = idx
         return True
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         var visible = 16
         if self.selected < self.scroll:
             self.scroll = self.selected
@@ -573,7 +573,7 @@ struct FindSymbol(Movable):
 # --- helpers ---------------------------------------------------------------
 
 
-fn _list_contains(haystack: List[String], needle: String) -> Bool:
+def _list_contains(haystack: List[String], needle: String) -> Bool:
     """Linear membership check. Used for the symbol-name dedupe set;
     capped by ``_ENTRIES_CAP`` so the O(N²) total cost stays bounded."""
     for i in range(len(haystack)):
@@ -582,7 +582,7 @@ fn _list_contains(haystack: List[String], needle: String) -> Bool:
     return False
 
 
-fn _is_ident_byte(b: UInt8) -> Bool:
+def _is_ident_byte(b: UInt8) -> Bool:
     var c = Int(b)
     return (0x30 <= c and c <= 0x39) \
         or (0x41 <= c and c <= 0x5A) \
@@ -590,7 +590,7 @@ fn _is_ident_byte(b: UInt8) -> Bool:
         or c == 0x5F
 
 
-fn _extract_identifier(line: String, col_1based: Int) -> String:
+def _extract_identifier(line: String, col_1based: Int) -> String:
     """Walk left + right from ``col_1based`` (rg's 1-based byte column)
     while the byte is in ``[A-Za-z0-9_]``. Returns the full identifier
     sitting at that position, or an empty string if the column doesn't
@@ -611,7 +611,7 @@ fn _extract_identifier(line: String, col_1based: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
-fn _parse_rg_match_line(
+def _parse_rg_match_line(
     line: String,
 ) -> Optional[Tuple[String, Int, Int, String]]:
     """Decode one rg ``--no-heading --line-number --column`` row
@@ -652,7 +652,7 @@ fn _parse_rg_match_line(
     return Optional[Tuple[String, Int, Int, String]]()
 
 
-fn _parse_int(b: Span[UInt8, _], start: Int, end: Int) -> Int:
+def _parse_int(b: Span[UInt8, _], start: Int, end: Int) -> Int:
     var n = 0
     var any = False
     for p in range(start, end):
@@ -666,7 +666,7 @@ fn _parse_int(b: Span[UInt8, _], start: Int, end: Int) -> Int:
     return n
 
 
-fn sanitize_symbol_query(query: String) -> String:
+def sanitize_symbol_query(query: String) -> String:
     """Strip everything that isn't an identifier byte.
 
     The query is interpolated into rg's regex, so leaving punctuation

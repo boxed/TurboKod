@@ -75,14 +75,14 @@ struct RunTarget(Copyable, Movable):
     var cwd: String
     var debug_language: String
 
-    fn __init__(out self):
+    def __init__(out self):
         self.name = String("")
         self.program = String("")
         self.args = List[String]()
         self.cwd = String("")
         self.debug_language = String("")
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.name = copy.name
         self.program = copy.program
         self.args = copy.args.copy()
@@ -100,57 +100,57 @@ struct ProjectTargets(Movable):
     var targets: List[RunTarget]
     var active: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.targets = List[RunTarget]()
         self.active = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.targets = copy.targets.copy()
         self.active = copy.active
 
-    fn has_active(self) -> Bool:
+    def has_active(self) -> Bool:
         return self.active >= 0 and self.active < len(self.targets)
 
-    fn current(self) -> Optional[RunTarget]:
+    def current(self) -> Optional[RunTarget]:
         if not self.has_active():
             return Optional[RunTarget]()
         return Optional[RunTarget](self.targets[self.active])
 
-    fn set_active_by_name(mut self, name: String) -> Bool:
+    def set_active_by_name(mut self, name: String) -> Bool:
         for i in range(len(self.targets)):
             if self.targets[i].name == name:
                 self.active = i
                 return True
         return False
 
-    fn set_active_index(mut self, idx: Int) -> Bool:
+    def set_active_index(mut self, idx: Int) -> Bool:
         if idx < 0 or idx >= len(self.targets):
             return False
         self.active = idx
         return True
 
 
-fn _targets_dir(project_root: String) -> String:
+def _targets_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
     return join_path(project_root, TURBOKOD_DIR)
 
 
-fn _targets_path(project_root: String) -> String:
+def _targets_path(project_root: String) -> String:
     var dir = _targets_dir(project_root)
     if len(dir.as_bytes()) == 0:
         return String("")
     return join_path(dir, TARGETS_FILE)
 
 
-fn _ensure_dir(path: String):
+def _ensure_dir(path: String):
     if len(path.as_bytes()) == 0:
         return
     var c_path = path + String("\0")
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-fn _parse_target(node: JsonValue) -> RunTarget:
+def _parse_target(node: JsonValue) -> RunTarget:
     """Parse one target node. Accepts both the new flat shape
     (``program`` / ``args`` / ``language``) and the legacy nested
     shape (``run`` / ``debug.{program, args, language}``); fields
@@ -198,7 +198,7 @@ fn _parse_target(node: JsonValue) -> RunTarget:
     return t^
 
 
-fn _split_command(s: String) -> List[String]:
+def _split_command(s: String) -> List[String]:
     """Whitespace-split ``s`` into argv-shaped pieces. Used only by
     the legacy ``run`` migration path — modern configs go through
     the flat ``program`` / ``args`` keys and never hit this."""
@@ -218,7 +218,7 @@ fn _split_command(s: String) -> List[String]:
     return out^
 
 
-fn load_project_targets(project_root: String) -> ProjectTargets:
+def load_project_targets(project_root: String) -> ProjectTargets:
     """Load ``<project>/.turbokod/targets.json``. Returns an empty list
     on any failure (missing dir, malformed JSON, missing keys)."""
     var out = ProjectTargets()
@@ -258,7 +258,7 @@ fn load_project_targets(project_root: String) -> ProjectTargets:
     return out^
 
 
-fn _encode_target(t: RunTarget) -> JsonValue:
+def _encode_target(t: RunTarget) -> JsonValue:
     """Encode one target as a JSON object using the new flat shape.
 
     Only populated fields are emitted; empty ``cwd`` /
@@ -280,7 +280,7 @@ fn _encode_target(t: RunTarget) -> JsonValue:
     return obj^
 
 
-fn write_all_targets(
+def write_all_targets(
     project_root: String, targets: ProjectTargets,
 ) -> Bool:
     """Rewrite ``<project>/.turbokod/targets.json`` from scratch with
@@ -307,7 +307,7 @@ fn write_all_targets(
     return write_file(path, encode_json(root) + String("\n"))
 
 
-fn save_project_targets(
+def save_project_targets(
     project_root: String, targets: ProjectTargets,
 ) -> Bool:
     """Persist the currently active selection to disk. Creates the
@@ -357,7 +357,7 @@ fn save_project_targets(
     return write_file(path, encode_json(stub) + String("\n"))
 
 
-fn resolved_cwd(project_root: String, target_cwd: String) -> String:
+def resolved_cwd(project_root: String, target_cwd: String) -> String:
     """Pick the cwd for a target invocation: the target's ``cwd`` if
     set, otherwise the project root. A ``cwd`` that doesn't start with
     ``/`` is joined onto the project root so users can write
@@ -370,7 +370,7 @@ fn resolved_cwd(project_root: String, target_cwd: String) -> String:
     return join_path(project_root, target_cwd)
 
 
-fn _contains_slash(s: String) -> Bool:
+def _contains_slash(s: String) -> Bool:
     var b = s.as_bytes()
     for i in range(len(b)):
         if b[i] == 0x2F:
@@ -378,7 +378,7 @@ fn _contains_slash(s: String) -> Bool:
     return False
 
 
-fn resolved_program(
+def resolved_program(
     project_root: String, target_cwd: String, program: String,
 ) -> String:
     """Resolve ``program`` for ``posix_spawnp``.
@@ -410,7 +410,7 @@ fn resolved_program(
     return join_path(cwd, program)
 
 
-fn detect_project_language(project_root: String) -> String:
+def detect_project_language(project_root: String) -> String:
     """Best-effort guess at the project's primary language. Returns a
     value matching ``RunTarget.debug_language`` (e.g. ``"python"``) or
     the empty string when no marker matches.
@@ -452,7 +452,7 @@ fn detect_project_language(project_root: String) -> String:
     return String("")
 
 
-fn _ends_with(s: String, suffix: String) -> Bool:
+def _ends_with(s: String, suffix: String) -> Bool:
     var sb = s.as_bytes()
     var fb = suffix.as_bytes()
     if len(fb) > len(sb):
@@ -463,7 +463,7 @@ fn _ends_with(s: String, suffix: String) -> Bool:
     return True
 
 
-fn resolve_python_interpreter(
+def resolve_python_interpreter(
     project_root: String, program: String,
 ) -> String:
     """If ``program`` is a bare ``python`` / ``python3`` and a project
@@ -492,7 +492,7 @@ fn resolve_python_interpreter(
     return program
 
 
-fn python_venv_dir(project_root: String) -> String:
+def python_venv_dir(project_root: String) -> String:
     """Return the absolute path to the project's Python virtualenv root,
     or empty when none was found. Same lookup order as
     ``resolve_python_interpreter`` — project-local ``.venv`` / ``venv``

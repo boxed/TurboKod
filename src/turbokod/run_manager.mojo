@@ -56,7 +56,7 @@ struct RunSession(Movable):
     var exit_code: Int
     var started_ms: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.target_name = String("")
         self.command = String("")
@@ -65,13 +65,13 @@ struct RunSession(Movable):
         self.exit_code = 0
         self.started_ms = 0
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.active and not self.exited
 
-    fn matches(self, name: String) -> Bool:
+    def matches(self, name: String) -> Bool:
         return self.active and self.target_name == name
 
-    fn start(
+    def start(
         mut self, var target_name: String, program: String,
         args: List[String], cwd: String,
     ) raises:
@@ -112,7 +112,7 @@ struct RunSession(Movable):
         self.started_ms = monotonic_ms()
         self.active = True
 
-    fn terminate(mut self):
+    def terminate(mut self):
         """SIGTERM the child if still alive, then close our pipe ends.
         Idempotent — fine to call after the child has already exited."""
         if not self.active:
@@ -131,7 +131,7 @@ struct RunSession(Movable):
         self._close_pipes()
         self.active = False
 
-    fn _close_pipes(mut self):
+    def _close_pipes(mut self):
         if self.process.stdin_fd >= 0:
             _ = close_fd(self.process.stdin_fd)
             self.process.stdin_fd = -1
@@ -149,20 +149,20 @@ struct RunOutput(ImplicitlyCopyable, Movable):
     var stdout: String
     var stderr: String
 
-    fn __init__(out self):
+    def __init__(out self):
         self.stdout = String("")
         self.stderr = String("")
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.stdout = copy.stdout
         self.stderr = copy.stderr
 
-    fn empty(self) -> Bool:
+    def empty(self) -> Bool:
         return len(self.stdout.as_bytes()) == 0 \
             and len(self.stderr.as_bytes()) == 0
 
 
-fn drain_run_output(mut session: RunSession) -> RunOutput:
+def drain_run_output(mut session: RunSession) -> RunOutput:
     """Pull whatever's on the child's pipes right now without
     blocking. Both pipes were set non-blocking by ``LspProcess.spawn``
     so each loop is bounded by the per-call 64 KB cap."""
@@ -174,7 +174,7 @@ fn drain_run_output(mut session: RunSession) -> RunOutput:
     return out^
 
 
-fn poll_run_exit(mut session: RunSession) -> Bool:
+def poll_run_exit(mut session: RunSession) -> Bool:
     """Returns True the first tick on which the child has exited.
     Subsequent calls return False (it's already exited; nothing new).
 
@@ -196,7 +196,7 @@ fn poll_run_exit(mut session: RunSession) -> Bool:
     return True
 
 
-fn _drain_fd(fd: Int32) -> String:
+def _drain_fd(fd: Int32) -> String:
     if fd < 0:
         return String("")
     var out = String("")
@@ -213,7 +213,7 @@ fn _drain_fd(fd: Int32) -> String:
     return out^
 
 
-fn _shell_quote(s: String) -> String:
+def _shell_quote(s: String) -> String:
     """Single-quote ``s`` for safe substitution into ``sh -c``.
     Embedded single quotes are escaped via ``'\\''`` (close-quote,
     literal-quote, re-open-quote) — the standard POSIX idiom."""

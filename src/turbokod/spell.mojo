@@ -40,7 +40,7 @@ from .string_utils import (
 comptime _N_BUCKETS = UInt32(4096)
 
 
-fn user_dict_path() -> String:
+def user_dict_path() -> String:
     """``~/.config/turbokod/dictionary.txt``, or ``""`` when ``$HOME``
     is unset. One word per line; appended whenever the user picks
     "Add to user dictionary" on a misspelled word."""
@@ -50,7 +50,7 @@ fn user_dict_path() -> String:
     return home + String("/.config/turbokod/dictionary.txt")
 
 
-fn project_dict_path(project_root: String) -> String:
+def project_dict_path(project_root: String) -> String:
     """``<project>/.turbokod/dictionary.txt``, or ``""`` when no project
     is open. Sits beside ``targets.json`` / ``session.json`` so it gets
     picked up by the same ``.turbokod/`` directory the user already has
@@ -60,7 +60,7 @@ fn project_dict_path(project_root: String) -> String:
     return project_root + String("/.turbokod/dictionary.txt")
 
 
-fn _ensure_parent_dir(path: String):
+def _ensure_parent_dir(path: String):
     """Best-effort ``mkdir`` of every prefix of ``path`` up to (but not
     including) the file. Mirrors ``config._ensure_dir`` but walks each
     slash so a fresh ``~/.config/turbokod`` or ``<project>/.turbokod``
@@ -93,7 +93,7 @@ struct SpellActionRequest(ImplicitlyCopyable, Movable):
     var word: String
 
 
-fn _append_to_file(path: String, line: String) -> Bool:
+def _append_to_file(path: String, line: String) -> Bool:
     """Append ``line + \\n`` to ``path``, creating it (and any missing
     parent directories) if needed. Read-modify-write rather than
     ``O_APPEND`` because the rest of the codebase only knows how to
@@ -143,7 +143,7 @@ struct Speller(Movable):
     # short-circuit re-load when the project hasn't actually changed.
     var project_root: String
 
-    fn __init__(out self):
+    def __init__(out self):
         self.buckets = List[List[String]]()
         for _ in range(Int(_N_BUCKETS)):
             self.buckets.append(List[String]())
@@ -153,7 +153,7 @@ struct Speller(Movable):
         self.loaded = False
         self.project_root = String("")
 
-    fn load_default(mut self):
+    def load_default(mut self):
         """Layer five word sources, in order, into ``buckets``:
 
         1. The OS-supplied wordlist (``/usr/share/dict/words`` and
@@ -203,7 +203,7 @@ struct Speller(Movable):
             except:
                 pass
 
-    fn reload(mut self):
+    def reload(mut self):
         """Drop the in-memory main bucket set and re-run ``load_default``.
         Used after the user installs or removes a downloaded dictionary
         from Settings — the just-installed words show up on the next
@@ -217,7 +217,7 @@ struct Speller(Movable):
         self.loaded = False
         self.load_default()
 
-    fn _load_user_language_dictionaries(mut self):
+    def _load_user_language_dictionaries(mut self):
         """Load every ``<lang>.txt`` under ``~/.config/turbokod/dictionaries/``.
 
         Each file is treated as a plain wordlist (one word per line,
@@ -253,7 +253,7 @@ struct Speller(Movable):
             except:
                 continue
 
-    fn _load_bundled_wordlists(mut self):
+    def _load_bundled_wordlists(mut self):
         """Load every ``.txt`` in ``src/turbokod/data/wordlists/``.
 
         Path is relative to cwd; ``run.sh`` cd's to the project root
@@ -287,7 +287,7 @@ struct Speller(Movable):
             except:
                 continue
 
-    fn set_project(mut self, project_root: String):
+    def set_project(mut self, project_root: String):
         """Swap ``project_buckets`` to the dictionary for ``project_root``.
 
         Loads two sources, in order, into the freshly cleared project
@@ -335,7 +335,7 @@ struct Speller(Movable):
         self._load_idea_dictionaries(project_root)
         debug_log(String("[speller.set_project] EXIT"))
 
-    fn _load_idea_dictionaries(mut self, project_root: String):
+    def _load_idea_dictionaries(mut self, project_root: String):
         var dict_dir = join_path(
             join_path(project_root, String(".idea")), String("dictionaries"),
         )
@@ -373,7 +373,7 @@ struct Speller(Movable):
             self._load_project_words(words)
             debug_log(String("[_load_idea_dictionaries] _load_project_words done"))
 
-    fn _load_project_words(mut self, words: List[String]):
+    def _load_project_words(mut self, words: List[String]):
         for i in range(len(words)):
             var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
@@ -381,7 +381,7 @@ struct Speller(Movable):
             var b = _bucket(w)
             self.project_buckets[b].append(w^)
 
-    fn add_user_word(mut self, word: String) -> Bool:
+    def add_user_word(mut self, word: String) -> Bool:
         """Add ``word`` to the user dictionary in memory and on disk.
 
         In-memory addition flips ``loaded`` to True even on systems
@@ -403,7 +403,7 @@ struct Speller(Movable):
             return False
         return _append_to_file(path, lw)
 
-    fn add_project_word(mut self, word: String) -> Bool:
+    def add_project_word(mut self, word: String) -> Bool:
         """Add ``word`` to the project dictionary in memory and on disk.
 
         No-op (returns False) when no project is open — the host should
@@ -423,13 +423,13 @@ struct Speller(Movable):
             return False
         return _append_to_file(path, lw)
 
-    fn load_words(mut self, words: List[String]):
+    def load_words(mut self, words: List[String]):
         """Test seam: bypass the OS wordlist and load an explicit small
         dictionary. Tests use this so they don't depend on whichever
         ``/usr/share/dict/words`` happens to ship with the host."""
         self._load_words(words)
 
-    fn _load_words(mut self, words: List[String]):
+    def _load_words(mut self, words: List[String]):
         for i in range(len(words)):
             var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
@@ -438,7 +438,7 @@ struct Speller(Movable):
             self.buckets[b].append(w^)
         self.loaded = True
 
-    fn check_word(self, word: String) -> Bool:
+    def check_word(self, word: String) -> Bool:
         """``True`` if ``word`` (or a stripped form) is in the dictionary.
 
         When the dictionary failed to load, returns ``True`` for
@@ -504,7 +504,7 @@ struct Speller(Movable):
                 return True
         return False
 
-    fn _has(self, w: String) -> Bool:
+    def _has(self, w: String) -> Bool:
         var b = _bucket(w)
         var n = len(self.buckets[b])
         for i in range(n):
@@ -517,7 +517,7 @@ struct Speller(Movable):
         return False
 
 
-fn find_misspelled_runs(
+def find_misspelled_runs(
     self_speller: Speller, text: String,
 ) -> List[Tuple[Int, Int]]:
     """Return ``(byte_start, byte_end)`` pairs for misspelled words in
@@ -601,7 +601,7 @@ fn find_misspelled_runs(
     return out^
 
 
-fn has_spell_noinspection_directive(text: String) -> Bool:
+def has_spell_noinspection_directive(text: String) -> Bool:
     """True if ``text`` contains an IntelliJ-style directive that
     disables the spell-check inspection. Recognized forms:
 
@@ -672,7 +672,7 @@ fn has_spell_noinspection_directive(text: String) -> Bool:
     return False
 
 
-fn _is_ident_byte(c: UInt8) -> Bool:
+def _is_ident_byte(c: UInt8) -> Bool:
     return (
         (c >= 0x41 and c <= 0x5A)
         or (c >= 0x61 and c <= 0x7A)
@@ -681,7 +681,7 @@ fn _is_ident_byte(c: UInt8) -> Bool:
     )
 
 
-fn _bucket(w: String) -> Int:
+def _bucket(w: String) -> Int:
     var b = w.as_bytes()
     var h = UInt32(2166136261)
     for i in range(len(b)):
@@ -689,7 +689,7 @@ fn _bucket(w: String) -> Int:
     return Int(h % _N_BUCKETS)
 
 
-fn _normalize(s: String) -> String:
+def _normalize(s: String) -> String:
     """Bucket-lookup key: lowercase + Latin-1 case fold + NFD→NFC compose.
 
     Three things happen here, all driven by examples that bit us in
@@ -740,7 +740,7 @@ fn _normalize(s: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
 
 
-fn _lower_codepoint(cp: Int) -> Int:
+def _lower_codepoint(cp: Int) -> Int:
     """Lowercase ``cp`` if it's an upper-case ASCII or Latin-1 letter.
 
     Skips ``×`` (U+00D7) — it shares its slot with the multiplication
@@ -754,7 +754,7 @@ fn _lower_codepoint(cp: Int) -> Int:
     return cp
 
 
-fn _compose_diacritic(base: Int, mark: Int) -> Int:
+def _compose_diacritic(base: Int, mark: Int) -> Int:
     """Compose ``base`` (an ASCII or Latin-1 lowercase letter) with
     ``mark`` (a combining diacritic) into a precomposed Latin-1
     supplement codepoint, or return 0 when no composition is known.
@@ -803,7 +803,7 @@ fn _compose_diacritic(base: Int, mark: Int) -> Int:
     return 0
 
 
-fn _emit_utf8(mut out: List[UInt8], cp: Int):
+def _emit_utf8(mut out: List[UInt8], cp: Int):
     """Append ``cp``'s UTF-8 encoding to ``out``. Handles the full
     1- to 4-byte range so any normalized codepoint round-trips
     cleanly. Negative / oversized inputs are clamped to ``?``
@@ -829,20 +829,20 @@ fn _emit_utf8(mut out: List[UInt8], cp: Int):
     out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
-fn _slice(s: String, start: Int, end: Int) -> String:
+def _slice(s: String, start: Int, end: Int) -> String:
     var b = s.as_bytes()
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
-fn _is_letter(c: UInt8) -> Bool:
+def _is_letter(c: UInt8) -> Bool:
     return (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A)
 
 
-fn _is_digit(c: UInt8) -> Bool:
+def _is_digit(c: UInt8) -> Bool:
     return c >= 0x30 and c <= 0x39
 
 
-fn _has_xml_suffix(name: String) -> Bool:
+def _has_xml_suffix(name: String) -> Bool:
     var b = name.as_bytes()
     var n = len(b)
     if n < 4:
@@ -853,7 +853,7 @@ fn _has_xml_suffix(name: String) -> Bool:
     )
 
 
-fn _has_txt_suffix(name: String) -> Bool:
+def _has_txt_suffix(name: String) -> Bool:
     var b = name.as_bytes()
     var n = len(b)
     if n < 4:
@@ -864,7 +864,7 @@ fn _has_txt_suffix(name: String) -> Bool:
     )
 
 
-fn _strip_word(line: String) -> String:
+def _strip_word(line: String) -> String:
     """Strip a wordlist line: trim ASCII whitespace, drop comment-only
     (``#``-prefixed) lines, and reject anything containing whitespace
     after trimming (entries from cspell are sometimes weird shapes —
@@ -889,7 +889,7 @@ fn _strip_word(line: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[i:j]))
 
 
-fn _parse_idea_dict_words(content: String, mut out: List[String]):
+def _parse_idea_dict_words(content: String, mut out: List[String]):
     """Pull text inside ``<w>...</w>`` elements out of an IntelliJ
     project dictionary XML file and append to ``out``. Byte-level scan
     rather than a real XML parse — IDEA always emits the same simple

@@ -70,7 +70,7 @@ it), so we need enough margin to keep the mascot in view even when
 the prompt has scrolled it up a few rows."""
 
 
-fn detect_claude_state(lines: List[String]) -> UInt8:
+def detect_claude_state(lines: List[String]) -> UInt8:
     """Classify the visible Claude Code state from the last few lines.
 
     Priority when multiple markers match in the same tail: working >
@@ -191,7 +191,7 @@ fn detect_claude_state(lines: List[String]) -> UInt8:
     return CLAUDE_NONE
 
 
-fn claude_state_label(state: UInt8) -> String:
+def claude_state_label(state: UInt8) -> String:
     """Short human-readable label for the title bar. Empty string when
     no Claude state is detected so callers can paint a different
     fallback title without branching on the enum themselves."""
@@ -230,10 +230,10 @@ struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
     so the first call to ``classify`` doesn't trigger a spurious
     sticky window before any working signal has fired."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self._last_working_ms = 0
 
-    fn classify(mut self, lines: List[String], now_ms: Int) -> UInt8:
+    def classify(mut self, lines: List[String], now_ms: Int) -> UInt8:
         """Run the raw detector and apply the working-state stickiness.
         ``now_ms`` is a monotonic-ms reading provided by the caller —
         kept as a parameter (rather than calling the syscall inside)
@@ -253,7 +253,7 @@ struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _contains(haystack: String, needle: String) -> Bool:
+def _contains(haystack: String, needle: String) -> Bool:
     """Byte-level substring search. The lines we scan may have ANSI
     color escapes embedded around (but not inside) the marker strings
     we look for, so a plain byte search is sufficient and avoids the
@@ -278,7 +278,7 @@ fn _contains(haystack: String, needle: String) -> Bool:
     return False
 
 
-fn _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bool:
+def _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bool:
     """True if ``needle_lc`` is in any individual row or in the
     concatenation of all rows. Caller passes the lowercased needle and
     the prepared lowercased haystacks so we don't redo that work per
@@ -290,7 +290,7 @@ fn _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bo
     return _contains(joined, needle_lc)
 
 
-fn _any_spinner_row(rows_lc: List[String]) -> Bool:
+def _any_spinner_row(rows_lc: List[String]) -> Bool:
     """True if any tail row begins with a known spinner glyph followed
     by a space AND contains an open paren. The two-part test is what
     distinguishes the working spinner row from the older welcome
@@ -305,7 +305,7 @@ fn _any_spinner_row(rows_lc: List[String]) -> Bool:
     return False
 
 
-fn _row_starts_with_any_spinner(row_lc: String) -> Bool:
+def _row_starts_with_any_spinner(row_lc: String) -> Bool:
     """True if ``row_lc`` begins (after leading ASCII spaces) with one
     of the rotating spinner glyphs followed by a space. The set covers
     the throbbing-asterisk frames Claude Code cycles through; new
@@ -322,7 +322,7 @@ fn _row_starts_with_any_spinner(row_lc: String) -> Bool:
     return False
 
 
-fn _row_starts_with_glyph_space(row_lc: String, glyph: String) -> Bool:
+def _row_starts_with_glyph_space(row_lc: String, glyph: String) -> Bool:
     """True if ``row_lc``, after skipping leading ASCII spaces, begins
     with the bytes of ``glyph`` immediately followed by an ASCII space.
     Spinner glyphs are multibyte UTF-8 (``✻`` is three bytes, ``·`` is
@@ -343,7 +343,7 @@ fn _row_starts_with_glyph_space(row_lc: String, glyph: String) -> Bool:
     return b[i + gl] == UInt8(0x20)
 
 
-fn _to_lower(s: String) -> String:
+def _to_lower(s: String) -> String:
     """ASCII-only lowercase. Claude Code's marker strings are all
     plain ASCII (``esc to interrupt``, ``? for shortcuts``, etc.), so
     a byte-level uppercase→lowercase mapping is sufficient; multibyte

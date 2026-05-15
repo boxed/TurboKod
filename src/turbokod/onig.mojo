@@ -50,7 +50,7 @@ comptime ONIG_OPTION_NONE: Int = 0
 comptime ONIG_OPTION_NOT_BEGIN_POSITION: Int = 1 << 24
 
 
-fn _rtld_default() -> Int:
+def _rtld_default() -> Int:
     """``RTLD_DEFAULT`` is one of those values the C preprocessor hides
     behind a cast. macOS defines it as ``((void*)-2)``; Linux as
     ``((void*)0)``. We pass it as a plain ``Int`` to ``dlsym``; the
@@ -61,7 +61,7 @@ fn _rtld_default() -> Int:
         return 0
 
 
-fn _resolve_enc() raises -> Int:
+def _resolve_enc() raises -> Int:
     """Resolve ``OnigEncodingUTF8`` via ``dlsym``. Also runs
     ``onig_init`` (documented as idempotent in libonig) so callers
     don't have to remember a separate init step.
@@ -82,7 +82,7 @@ fn _resolve_enc() raises -> Int:
     return enc
 
 
-fn _resolve_syntax() raises -> Int:
+def _resolve_syntax() raises -> Int:
     var name_syn = String("OnigSyntaxRuby\0")
     var syn = external_call["dlsym", Int](
         _rtld_default(), name_syn.unsafe_ptr(),
@@ -92,7 +92,7 @@ fn _resolve_syntax() raises -> Int:
     return syn
 
 
-fn onig_global_init() raises:
+def onig_global_init() raises:
     """Eagerly resolve libonig globals. Optional — ``OnigRegex.__init__``
     calls this lazily — but exposed for callers that want the dlsym
     error to surface at startup rather than the first regex compile."""
@@ -100,7 +100,7 @@ fn onig_global_init() raises:
     _ = _resolve_syntax()
 
 
-fn onig_global_end():
+def onig_global_end():
     """Optional: release libonig's internal tables. Not required for
     correctness — present for completeness."""
     _ = external_call["onig_end", Int]()
@@ -124,7 +124,7 @@ struct OnigMatch(Copyable, Movable):
     var group_starts: List[Int]
     var group_ends: List[Int]
 
-    fn __init__(
+    def __init__(
         out self, start: Int, end: Int,
         var group_starts: List[Int],
         var group_ends: List[Int],
@@ -134,16 +134,16 @@ struct OnigMatch(Copyable, Movable):
         self.group_starts = group_starts^
         self.group_ends = group_ends^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.start = copy.start
         self.end = copy.end
         self.group_starts = copy.group_starts.copy()
         self.group_ends = copy.group_ends.copy()
 
-    fn group_count(self) -> Int:
+    def group_count(self) -> Int:
         return len(self.group_starts)
 
-    fn group(self, i: Int) -> OnigMatch:
+    def group(self, i: Int) -> OnigMatch:
         """Bounds of group ``i`` (0 = whole match) packaged as a
         plain ``OnigMatch``. Returns a zero-length match at offset
         ``-1`` when the group didn't participate. Convenient for
@@ -187,11 +187,11 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
     var _reg: Int       # OnigRegex (regex_t*) value
     var _region: Int    # OnigRegion* scratch, allocated once
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self._reg = copy._reg
         self._region = copy._region
 
-    fn __init__(out self, pattern: String) raises:
+    def __init__(out self, pattern: String) raises:
         var enc = _resolve_enc()
         var syn = _resolve_syntax()
         var pb = pattern.as_bytes()
@@ -230,19 +230,19 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         # Mojo (see the struct doc-comment for the lifecycle saga).
         _ = external_call["tk_onig_track", Int](self._reg, self._region)
 
-    fn search(self, haystack: String) -> Optional[OnigMatch]:
+    def search(self, haystack: String) -> Optional[OnigMatch]:
         """Search ``haystack`` for the first match. Returns the match
         bounds or ``None`` if there's no match."""
         return self.search_at(haystack, 0, ONIG_OPTION_NONE)
 
-    fn search_at(
+    def search_at(
         self, haystack: String, start: Int,
     ) -> Optional[OnigMatch]:
         """Search starting from byte offset ``start`` with default
         options. Convenience wrapper around the four-arg form."""
         return self.search_at(haystack, start, ONIG_OPTION_NONE)
 
-    fn search_at(
+    def search_at(
         self, haystack: String, start: Int, options: Int,
     ) -> Optional[OnigMatch]:
         """Search ``haystack`` starting from byte offset ``start``.
@@ -296,7 +296,7 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         )
 
 
-fn _read_ptr(addr: Int) -> Int:
+def _read_ptr(addr: Int) -> Int:
     """Read an 8-byte pointer-sized value at the given address."""
     var buf = List[UInt8]()
     for _ in range(8):
@@ -305,7 +305,7 @@ fn _read_ptr(addr: Int) -> Int:
     return buf.unsafe_ptr().bitcast[Int]()[0]
 
 
-fn _read_int32(addr: Int) -> Int:
+def _read_int32(addr: Int) -> Int:
     """Read a 4-byte signed int at the given address, sign-extended."""
     var buf = List[UInt8]()
     for _ in range(4):

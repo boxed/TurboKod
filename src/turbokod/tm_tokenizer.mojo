@@ -70,12 +70,12 @@ struct Frame(ImplicitlyCopyable, Movable):
     var scope_chain: String
 
 
-fn frame_eq(a: Frame, b: Frame) -> Bool:
+def frame_eq(a: Frame, b: Frame) -> Bool:
     return a.pattern_idx == b.pattern_idx \
         and a.scope_chain == b.scope_chain
 
 
-fn stack_eq(a: List[Frame], b: List[Frame]) -> Bool:
+def stack_eq(a: List[Frame], b: List[Frame]) -> Bool:
     """Two scope stacks are equal iff they're the same depth and
     every frame matches. Used by the incremental tokenizer to
     detect "tokenizer state stabilized, the rest of the buffer
@@ -89,7 +89,7 @@ fn stack_eq(a: List[Frame], b: List[Frame]) -> Bool:
     return True
 
 
-fn copy_stack(s: List[Frame]) -> List[Frame]:
+def copy_stack(s: List[Frame]) -> List[Frame]:
     var out = List[Frame]()
     for i in range(len(s)):
         out.append(s[i])
@@ -110,7 +110,7 @@ struct _Cand(ImplicitlyCopyable, Movable):
     var regex_idx: Int
 
 
-fn tokenize_with_grammar(
+def tokenize_with_grammar(
     grammar: Grammar, lines: List[String],
 ) -> List[Highlight]:
     """Run the tokenizer over an entire buffer. The scope stack is
@@ -122,7 +122,7 @@ fn tokenize_with_grammar(
     return tokenize_with_grammar_full(grammar, lines, post_stacks)
 
 
-fn tokenize_with_grammar_full(
+def tokenize_with_grammar_full(
     grammar: Grammar, lines: List[String],
     mut post_stacks: List[List[Frame]],
 ) -> List[Highlight]:
@@ -144,7 +144,7 @@ fn tokenize_with_grammar_full(
     return out^
 
 
-fn tokenize_lines_from(
+def tokenize_lines_from(
     grammar: Grammar, lines: List[String],
     start_row: Int, start_stack: List[Frame],
     cached_post_stacks: List[List[Frame]],
@@ -192,7 +192,7 @@ fn tokenize_lines_from(
     return out^
 
 
-fn _tokenize_line(
+def _tokenize_line(
     grammar: Grammar, line: String, next_line: String, row: Int,
     mut stack: List[Frame], mut out: List[Highlight],
 ):
@@ -411,7 +411,7 @@ fn _tokenize_line(
                 out.append(Highlight(row, i, i + 1, op_attr))
 
 
-fn _process_while_frames(
+def _process_while_frames(
     grammar: Grammar, line: String, row: Int,
     mut stack: List[Frame], pos_in: Int,
     mut out: List[Highlight],
@@ -476,7 +476,7 @@ fn _process_while_frames(
     return pos
 
 
-fn _emit_captures(
+def _emit_captures(
     grammar: Grammar, chain: String, match_name: String,
     caps: List[Capture], m: OnigMatch,
     line: String, row: Int, mut out: List[Highlight],
@@ -527,7 +527,7 @@ fn _emit_captures(
             )
 
 
-fn _emit_capture_subtokens(
+def _emit_capture_subtokens(
     grammar: Grammar, line: String,
     sub_start: Int, sub_end: Int,
     chain: String, pattern_idxs: List[Int],
@@ -584,7 +584,7 @@ fn _emit_capture_subtokens(
         pos = me
 
 
-fn _slice_string(s: String, start: Int, end: Int) -> String:
+def _slice_string(s: String, start: Int, end: Int) -> String:
     """Byte-slice helper. Mojo's StringSlice accepts unsafe-from-utf8
     construction; the caller guarantees the bounds are codepoint-
     aligned (libonig matches at codepoint boundaries)."""
@@ -600,7 +600,7 @@ fn _slice_string(s: String, start: Int, end: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=b[s_clamped:e_clamped]))
 
 
-fn _emit_unmatched(
+def _emit_unmatched(
     grammar: Grammar, stack: List[Frame], line: String, row: Int,
     start: Int, end: Int, mut out: List[Highlight],
 ):
@@ -618,17 +618,17 @@ fn _emit_unmatched(
         out.append(Highlight(row, start, end, attr_opt.value()))
 
 
-fn _empty_frame() -> Frame:
+def _empty_frame() -> Frame:
     return Frame(0, String(""))
 
 
-fn _top_chain(stack: List[Frame]) -> String:
+def _top_chain(stack: List[Frame]) -> String:
     if len(stack) == 0:
         return String("")
     return stack[len(stack) - 1].scope_chain
 
 
-fn _join_scope(chain: String, leaf: String) -> String:
+def _join_scope(chain: String, leaf: String) -> String:
     """Append a scope to an existing chain, space-separated as
     TextMate conventionally writes them."""
     var cb = chain.as_bytes()
@@ -637,7 +637,7 @@ fn _join_scope(chain: String, leaf: String) -> String:
     return chain + String(" ") + leaf
 
 
-fn _active_candidates(
+def _active_candidates(
     grammar: Grammar, stack: List[Frame],
 ) -> List[_Cand]:
     """Build the list of patterns to probe at the current position.
@@ -677,7 +677,7 @@ fn _active_candidates(
     return out^
 
 
-fn _expand_into(
+def _expand_into(
     grammar: Grammar, pattern_idx: Int,
     mut out: List[_Cand], mut seen: List[Int],
 ):
@@ -736,7 +736,7 @@ fn _expand_into(
 # --- scope → Attr mapping ----------------------------------------------------
 
 
-fn _attr_for_scopes(chain: String, leaf: String) -> Attr:
+def _attr_for_scopes(chain: String, leaf: String) -> Attr:
     """Pick an Attr by inspecting the leaf scope first, then walking
     the chain from innermost to outermost. First known prefix wins.
     Falls back to the identifier color if nothing matches — better
@@ -759,7 +759,7 @@ fn _attr_for_scopes(chain: String, leaf: String) -> Attr:
     return highlight_ident_attr()
 
 
-fn _scope_attr(scope: String) -> Optional[Attr]:
+def _scope_attr(scope: String) -> Optional[Attr]:
     """Map a single TextMate scope to an Attr by prefix.
 
     The list mirrors what the existing Mojo/Python tokenizer paints,
@@ -828,7 +828,7 @@ fn _scope_attr(scope: String) -> Optional[Attr]:
 
 
 
-fn _split_scopes(chain: String) -> List[String]:
+def _split_scopes(chain: String) -> List[String]:
     """Split a space-separated scope chain into individual scopes."""
     var out = List[String]()
     var sb = chain.as_bytes()

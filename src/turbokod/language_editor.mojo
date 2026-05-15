@@ -117,7 +117,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var argv_rect: Rect
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     """Lay the dialog out top-down with automatic gaps between
     controls, plus the bottom-anchored commit/hint rows."""
     var cursor = RowCursor(rect.a.y + 1)
@@ -142,7 +142,7 @@ fn _build_layout(rect: Rect) -> _Layout:
     )
 
 
-fn _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
+def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
@@ -181,7 +181,7 @@ struct LanguageEditor(Movable):
     open / close and on focus changes away from the list so the next
     list-focused keystroke starts a fresh search."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.is_existing = False
@@ -214,7 +214,7 @@ struct LanguageEditor(Movable):
             ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
         ))
 
-    fn open(
+    def open(
         mut self, var language_id: String, var file_types: List[String],
         var candidates: List[String], is_existing: Bool,
     ):
@@ -245,7 +245,7 @@ struct LanguageEditor(Movable):
         self._drag = Optional[Point]()
         self._type_ahead.reset()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.is_existing = False
@@ -262,7 +262,7 @@ struct LanguageEditor(Movable):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
 
-    fn value(self) -> LanguageServerOverride:
+    def value(self) -> LanguageServerOverride:
         """Snapshot the editor state into a ``LanguageServerOverride``.
         Empty argv lines (after trim) are skipped — they're the
         leftover from a + Add the user never filled in.
@@ -278,7 +278,7 @@ struct LanguageEditor(Movable):
 
     # --- painting ---------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
@@ -353,7 +353,7 @@ struct LanguageEditor(Movable):
                 hint,
             )
 
-    fn _paint_list(
+    def _paint_list(
         mut self, mut canvas: Canvas, list_rect: Rect,
     ):
         var bg = Attr(BLACK, CYAN)
@@ -375,13 +375,13 @@ struct LanguageEditor(Movable):
             self.focus == _FOCUS_LIST, bg,
         )
 
-    fn _layout_action_buttons(mut self, rect: Rect, y: Int):
+    def _layout_action_buttons(mut self, rect: Rect, y: Int):
         var x = rect.a.x + 2
         for i in range(_BTN_ADD, _BTN_DOWN + 1):
             self._buttons[i].button.move_to(x, y)
             x = x + self._buttons[i].button.total_width() + 1
 
-    fn _layout_commit_buttons(mut self, rect: Rect, layout: _Layout):
+    def _layout_commit_buttons(mut self, rect: Rect, layout: _Layout):
         var bottom_y = layout.commit_y
         var cancel_w = self._buttons[_BTN_CANCEL].button.face_width()
         var cancel_x = rect.b.x - 2 - (cancel_w + 1)
@@ -390,7 +390,7 @@ struct LanguageEditor(Movable):
         self._buttons[_BTN_SAVE].button.move_to(save_x, bottom_y)
         self._buttons[_BTN_CANCEL].button.move_to(cancel_x, bottom_y)
 
-    fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
+    def _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
         var face: Attr
         if not pb.enabled:
@@ -403,7 +403,7 @@ struct LanguageEditor(Movable):
 
     # --- key handling -----------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_KEY:
@@ -465,7 +465,7 @@ struct LanguageEditor(Movable):
                 return True
         return True
 
-    fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
+    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         var ordered = List[UInt8]()
         if not self.is_existing:
             ordered.append(_FOCUS_LANG)
@@ -491,7 +491,7 @@ struct LanguageEditor(Movable):
             return ordered[(pos - 1 + n) % n]
         return ordered[(pos + 1) % n]
 
-    fn _activate_focus(mut self) -> Bool:
+    def _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
             self._add_candidate()
             return True
@@ -514,13 +514,13 @@ struct LanguageEditor(Movable):
         self.focus = self._next_focus(self.focus, False)
         return True
 
-    fn _add_candidate(mut self):
+    def _add_candidate(mut self):
         self.candidates.append(String(""))
         self._list.selected = len(self.candidates) - 1
         self.argv_tf = TextField()
         self.focus = _FOCUS_ARGV
 
-    fn _remove_candidate(mut self):
+    def _remove_candidate(mut self):
         if self._list.selected < 0 or self._list.selected >= len(self.candidates):
             return
         var rebuilt = List[String]()
@@ -539,7 +539,7 @@ struct LanguageEditor(Movable):
             self.argv_tf = TextField()
             self.argv_tf.set_text(self.candidates[self._list.selected])
 
-    fn _move_candidate(mut self, delta: Int):
+    def _move_candidate(mut self, delta: Int):
         if self._list.selected < 0:
             return
         var target = self._list.selected + delta
@@ -552,7 +552,7 @@ struct LanguageEditor(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -632,7 +632,7 @@ struct LanguageEditor(Movable):
             return True
         return True
 
-    fn _dispatch_buttons(mut self, event: Event) -> Bool:
+    def _dispatch_buttons(mut self, event: Event) -> Bool:
         for i in range(len(self._buttons)):
             var status = self._buttons[i].button.handle_mouse(event)
             if status == BUTTON_NONE:
@@ -647,7 +647,7 @@ struct LanguageEditor(Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _join_space(items: List[String]) -> String:
+def _join_space(items: List[String]) -> String:
     var out = String("")
     for i in range(len(items)):
         if i > 0:
@@ -656,7 +656,7 @@ fn _join_space(items: List[String]) -> String:
     return out^
 
 
-fn _split_space(text: String) -> List[String]:
+def _split_space(text: String) -> List[String]:
     """Shell-style argv tokenizer: split on whitespace, but treat
     ``"..."`` and ``'...'`` as a single token whose interior whitespace
     is preserved (the quote characters themselves are stripped). Adjacent

@@ -43,7 +43,7 @@ comptime POSIX_SPAWN_FILE_ACTIONS_SIZE: Int = 256
 comptime POSIX_SPAWN_ATTR_SIZE: Int = 256
 
 
-fn tciflush_value() -> Int32:
+def tciflush_value() -> Int32:
     """Platform-specific value for ``TCIFLUSH`` (discard input queue).
 
     Linux defines TCIFLUSH=0; the BSDs (incl. Darwin) define TCIFLUSH=1.
@@ -64,7 +64,7 @@ comptime WINSIZE_SIZE: Int = 8
 comptime TIMESPEC_SIZE: Int = 16
 
 
-fn clock_monotonic_id() -> Int32:
+def clock_monotonic_id() -> Int32:
     """``CLOCK_MONOTONIC`` differs across platforms — Linux defines it
     as 1, Darwin as 6. Hardcoding the Linux value made every call to
     ``clock_gettime`` fail on macOS (returning 0 here, which broke
@@ -79,7 +79,7 @@ comptime POLLFD_SIZE: Int = 8
 comptime POLLIN: Int16 = 0x0001
 
 
-fn tiocgwinsz() -> UInt:
+def tiocgwinsz() -> UInt:
     """Platform-specific ioctl request number for getting window size."""
     comptime if CompilationTarget.is_macos():
         return 0x40087468
@@ -87,7 +87,7 @@ fn tiocgwinsz() -> UInt:
         return 0x5413
 
 
-fn alloc_zero_buffer(n: Int) -> List[UInt8]:
+def alloc_zero_buffer(n: Int) -> List[UInt8]:
     var buf = List[UInt8]()
     for _ in range(n):
         buf.append(0)
@@ -97,19 +97,19 @@ fn alloc_zero_buffer(n: Int) -> List[UInt8]:
 # --- Termios ----------------------------------------------------------------
 
 
-fn tcgetattr(fd: Int32, mut termios_buf: List[UInt8]) -> Int32:
+def tcgetattr(fd: Int32, mut termios_buf: List[UInt8]) -> Int32:
     return external_call["tcgetattr", Int32](fd, termios_buf.unsafe_ptr())
 
 
-fn tcsetattr(fd: Int32, action: Int32, mut termios_buf: List[UInt8]) -> Int32:
+def tcsetattr(fd: Int32, action: Int32, mut termios_buf: List[UInt8]) -> Int32:
     return external_call["tcsetattr", Int32](fd, action, termios_buf.unsafe_ptr())
 
 
-fn cfmakeraw(mut termios_buf: List[UInt8]):
+def cfmakeraw(mut termios_buf: List[UInt8]):
     _ = external_call["cfmakeraw", Int32](termios_buf.unsafe_ptr())
 
 
-fn tcflush(fd: Int32, queue_selector: Int32) -> Int32:
+def tcflush(fd: Int32, queue_selector: Int32) -> Int32:
     """Discard the queued input/output bytes on ``fd``.
 
     Use ``tciflush_value()`` for input-queue flush. Used at shutdown to
@@ -123,7 +123,7 @@ fn tcflush(fd: Int32, queue_selector: Int32) -> Int32:
 # --- Monotonic clock --------------------------------------------------------
 
 
-fn monotonic_ms() -> Int:
+def monotonic_ms() -> Int:
     """Milliseconds from a monotonic source (``CLOCK_MONOTONIC``).
 
     The absolute value is unspecified — it's only meaningful as a
@@ -146,7 +146,7 @@ fn monotonic_ms() -> Int:
 # --- I/O multiplexing -------------------------------------------------------
 
 
-fn poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
+def poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
     """Return True if ``fd`` has data ready within ``timeout_ms``.
 
     We poll exactly one fd asking for POLLIN, so ``n > 0`` from poll already
@@ -166,7 +166,7 @@ fn poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
 # --- Reading raw bytes ------------------------------------------------------
 
 
-fn read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
+def read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
     """Read up to ``count`` bytes from ``fd`` into ``buf``. Returns
     the byte count actually read, or -1 on error / 0 on EOF.
 
@@ -185,7 +185,7 @@ fn read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
 # --- Window size ------------------------------------------------------------
 
 
-fn query_winsize(fd: Int32) -> Tuple[Int, Int]:
+def query_winsize(fd: Int32) -> Tuple[Int, Int]:
     """``(cols, rows)`` for ``fd``, or ``(0, 0)`` if not a TTY.
 
     Note: ``ioctl(2)`` is variadic in C and Mojo's ``external_call`` doesn't
@@ -206,7 +206,7 @@ fn query_winsize(fd: Int32) -> Tuple[Int, Int]:
     return (cols, rows)
 
 
-fn get_window_size() -> Tuple[Int, Int]:
+def get_window_size() -> Tuple[Int, Int]:
     """Find ``(cols, rows)`` by querying any TTY-attached file descriptor.
 
     Tries stdout, stderr, stdin, then opens ``/dev/tty`` directly. This matters
@@ -233,14 +233,14 @@ fn get_window_size() -> Tuple[Int, Int]:
     return (80, 24)
 
 
-fn append_string_bytes(mut buf: List[UInt8], s: String):
+def append_string_bytes(mut buf: List[UInt8], s: String):
     """Copy the raw UTF-8 bytes of ``s`` onto the end of ``buf``."""
     var src = s.as_bytes()
     for i in range(len(src)):
         buf.append(src[i])
 
 
-fn write_buffer(fd: Int32, mut buf: List[UInt8]):
+def write_buffer(fd: Int32, mut buf: List[UInt8]):
     """Write ``buf`` (a byte accumulator) to ``fd`` in one syscall."""
     if len(buf) == 0:
         return
@@ -248,7 +248,7 @@ fn write_buffer(fd: Int32, mut buf: List[UInt8]):
     f.write_bytes(Span(buf))
 
 
-fn debug_log(msg: String):
+def debug_log(msg: String):
     """Append ``msg`` plus a newline to ``/tmp/turbokod_debug.log``.
 
     Diagnostics-only: opens fresh in O_APPEND mode each call so a
@@ -277,7 +277,7 @@ fn debug_log(msg: String):
 # --- Output -----------------------------------------------------------------
 
 
-fn write_string(fd: Int32, s: String):
+def write_string(fd: Int32, s: String):
     """Write ``s`` to ``fd`` via ``FileDescriptor.write_string``."""
     var f = FileDescriptor(Int(fd))
     f.write_string(StringSlice(s))
@@ -293,7 +293,7 @@ fn write_string(fd: Int32, s: String):
 # runtime state in the child between fork and execve is undefined.
 
 
-fn pipe_pair() raises -> Tuple[Int32, Int32]:
+def pipe_pair() raises -> Tuple[Int32, Int32]:
     """``pipe(int[2])`` → ``(read_fd, write_fd)``. Raises on failure."""
     var fds = alloc_zero_buffer(8)   # int[2] = 8 bytes
     var rc = external_call["pipe", Int32](fds.unsafe_ptr())
@@ -303,12 +303,12 @@ fn pipe_pair() raises -> Tuple[Int32, Int32]:
     return (p[0], p[1])
 
 
-fn close_fd(fd: Int32) -> Int32:
+def close_fd(fd: Int32) -> Int32:
     """Wrap ``close(2)`` so callers don't have to write external_call inline."""
     return external_call["close", Int32](fd)
 
 
-fn set_nonblocking(fd: Int32) -> Bool:
+def set_nonblocking(fd: Int32) -> Bool:
     """Make ``fd`` non-blocking, preserving any other status flags.
 
     Routes through ``tk_set_nonblock`` in ``process_shim.c`` rather than
@@ -327,7 +327,7 @@ fn set_nonblocking(fd: Int32) -> Bool:
     return Int(rc) == 1
 
 
-fn waitpid_blocking(pid: Int32) -> Int32:
+def waitpid_blocking(pid: Int32) -> Int32:
     """Wait for ``pid`` and return the raw status int. Blocks. Use
     ``waitpid_nohang`` for a non-blocking poll."""
     var status = alloc_zero_buffer(4)
@@ -346,7 +346,7 @@ comptime _AF_INET: Int32 = 2
 comptime _SOCK_STREAM: Int32 = 1
 
 
-fn _parse_dotted_ipv4(host: String) -> Tuple[UInt32, Bool]:
+def _parse_dotted_ipv4(host: String) -> Tuple[UInt32, Bool]:
     """Parse ``"127.0.0.1"`` into the network-byte-order ``in_addr`` value.
 
     Returns ``(addr_be, ok)``. We only ever target ``127.0.0.1`` from the
@@ -390,7 +390,7 @@ fn _parse_dotted_ipv4(host: String) -> Tuple[UInt32, Bool]:
     return (swapped, True)
 
 
-fn tcp_connect(host: String, port: Int) -> Int32:
+def tcp_connect(host: String, port: Int) -> Int32:
     """Open a blocking TCP socket to ``host:port`` and return its fd, or
     ``-1`` on failure (any of: bad host literal, ``socket`` failed,
     ``connect`` failed). Caller is responsible for ``close``.
@@ -428,7 +428,7 @@ fn tcp_connect(host: String, port: Int) -> Int32:
     return fd
 
 
-fn waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
+def waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     """``waitpid(pid, &status, WNOHANG)``. Returns ``(rc, status)`` —
     rc is 0 if the child hasn't exited, ``pid`` if it has, ``-1`` on error.
     """
@@ -437,13 +437,13 @@ fn waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     return (rc, status.unsafe_ptr().bitcast[Int32]()[0])
 
 
-fn kill_pid(pid: Int32, sig: Int32) -> Int32:
+def kill_pid(pid: Int32, sig: Int32) -> Int32:
     """``kill(pid, sig)`` — signal-delivery only, doesn't reap. Caller is
     responsible for the subsequent ``waitpid``."""
     return external_call["kill", Int32](pid, sig)
 
 
-fn track_child(pid: Int32):
+def track_child(pid: Int32):
     """Register ``pid`` with the process-shim child registry so it
     receives SIGTERM if the parent dies on SIGHUP / SIGTERM / clean
     exit. Idempotent and safe to call with any PID — no-ops on
@@ -454,7 +454,7 @@ fn track_child(pid: Int32):
     _ = external_call["tk_track_child_add", Int32](pid)
 
 
-fn untrack_child(pid: Int32):
+def untrack_child(pid: Int32):
     """Drop ``pid`` from the kill-on-parent-death registry. Call
     after a successful ``waitpid`` so the PID isn't re-signaled at
     shutdown (potentially hitting an unrelated process that recycled
@@ -470,25 +470,25 @@ fn untrack_child(pid: Int32):
 # libc helpers.
 
 
-fn posix_spawn_file_actions_init(mut buf: List[UInt8]) -> Int32:
+def posix_spawn_file_actions_init(mut buf: List[UInt8]) -> Int32:
     return external_call["posix_spawn_file_actions_init", Int32](
         buf.unsafe_ptr(),
     )
 
 
-fn posix_spawn_file_actions_destroy(mut buf: List[UInt8]) -> Int32:
+def posix_spawn_file_actions_destroy(mut buf: List[UInt8]) -> Int32:
     return external_call["posix_spawn_file_actions_destroy", Int32](
         buf.unsafe_ptr(),
     )
 
 
-fn posix_spawn_file_actions_addclose(mut buf: List[UInt8], fd: Int32) -> Int32:
+def posix_spawn_file_actions_addclose(mut buf: List[UInt8], fd: Int32) -> Int32:
     return external_call["posix_spawn_file_actions_addclose", Int32](
         buf.unsafe_ptr(), fd,
     )
 
 
-fn posix_spawn_file_actions_adddup2(
+def posix_spawn_file_actions_adddup2(
     mut buf: List[UInt8], old_fd: Int32, new_fd: Int32,
 ) -> Int32:
     return external_call["posix_spawn_file_actions_adddup2", Int32](
@@ -496,15 +496,15 @@ fn posix_spawn_file_actions_adddup2(
     )
 
 
-fn posix_spawnattr_init(mut buf: List[UInt8]) -> Int32:
+def posix_spawnattr_init(mut buf: List[UInt8]) -> Int32:
     return external_call["posix_spawnattr_init", Int32](buf.unsafe_ptr())
 
 
-fn posix_spawnattr_destroy(mut buf: List[UInt8]) -> Int32:
+def posix_spawnattr_destroy(mut buf: List[UInt8]) -> Int32:
     return external_call["posix_spawnattr_destroy", Int32](buf.unsafe_ptr())
 
 
-fn posix_spawnattr_setflags(mut buf: List[UInt8], flags: Int16) -> Int32:
+def posix_spawnattr_setflags(mut buf: List[UInt8], flags: Int16) -> Int32:
     """``int posix_spawnattr_setflags(posix_spawnattr_t *, short)``.
 
     The flags argument is a ``short`` in the C ABI, so we pass it as
@@ -515,7 +515,7 @@ fn posix_spawnattr_setflags(mut buf: List[UInt8], flags: Int16) -> Int32:
     )
 
 
-fn posix_spawn_setsid_flag() -> Int16:
+def posix_spawn_setsid_flag() -> Int16:
     """``POSIX_SPAWN_SETSID`` value: macOS = 0x0400, Linux glibc = 0x80.
 
     When this flag is set in the spawn attributes, the new process
@@ -532,7 +532,7 @@ fn posix_spawn_setsid_flag() -> Int16:
         return 0x80
 
 
-fn posix_spawnp_call(
+def posix_spawnp_call(
     mut argv_buf: List[UInt8],
     mut envp_buf: List[UInt8],
     mut file_actions: List[UInt8],
@@ -573,7 +573,7 @@ fn posix_spawnp_call(
     return pid_buf.unsafe_ptr().bitcast[Int32]()[0]
 
 
-fn getenv_value(name: String) -> String:
+def getenv_value(name: String) -> String:
     """Read ``name`` from the parent's environment, or "" when unset.
 
     Mojo's ``external_call`` can't easily return a typed C pointer, so we
@@ -593,7 +593,7 @@ fn getenv_value(name: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=n))
 
 
-fn which(name: String) -> String:
+def which(name: String) -> String:
     """Locate ``name`` on ``$PATH`` and return its absolute path, or "".
 
     Walks ``PATH`` left-to-right, joins each entry with ``name``, and
@@ -631,7 +631,7 @@ fn which(name: String) -> String:
     return String("")
 
 
-fn getcwd_path() -> String:
+def getcwd_path() -> String:
     """Return the process's current working directory, or "" on error.
 
     Uses ``getcwd(3)`` with a 4096-byte buffer (Linux PATH_MAX). Returns
@@ -648,7 +648,7 @@ fn getcwd_path() -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=n))
 
 
-fn chdir_path(path: String) -> Int32:
+def chdir_path(path: String) -> Int32:
     """Wrap ``chdir(2)``. Returns 0 on success, non-zero on failure.
 
     Caller is responsible for restoring the previous directory if it
@@ -658,7 +658,7 @@ fn chdir_path(path: String) -> Int32:
     return external_call["chdir", Int32](c_path.unsafe_ptr())
 
 
-fn realpath(path: String) -> String:
+def realpath(path: String) -> String:
     """Return the canonical absolute form of ``path``, or empty on error.
 
     Uses ``realpath(3)`` with a 4096-byte resolved-path buffer (PATH_MAX is
@@ -684,7 +684,7 @@ fn realpath(path: String) -> String:
 # --- Cursor-position size query ---------------------------------------------
 
 
-fn query_size_via_cursor(fd_in: Int32, fd_out: Int32, timeout_ms: Int32 = 500) -> Tuple[Int, Int]:
+def query_size_via_cursor(fd_in: Int32, fd_out: Int32, timeout_ms: Int32 = 500) -> Tuple[Int, Int]:
     """Send ``DECSC`` ``CSI 9999;9999 H`` ``CSI 6 n`` ``DECRC`` and parse the reply.
 
     The DEC Save/Restore Cursor pair (``ESC 7`` / ``ESC 8``) brackets the

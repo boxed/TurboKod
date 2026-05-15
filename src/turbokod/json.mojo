@@ -50,7 +50,7 @@ struct JsonValue(Copyable, Movable):
     var arr_v: List[JsonValue]
     var obj_v: List[JsonMember]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.kind = JSON_NULL
         self.bool_v = False
         self.int_v = 0
@@ -58,7 +58,7 @@ struct JsonValue(Copyable, Movable):
         self.arr_v = List[JsonValue]()
         self.obj_v = List[JsonMember]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
         self.bool_v = copy.bool_v
         self.int_v = copy.int_v
@@ -68,27 +68,27 @@ struct JsonValue(Copyable, Movable):
 
     # --- predicates / accessors --------------------------------------
 
-    fn is_null(self) -> Bool:    return self.kind == JSON_NULL
-    fn is_bool(self) -> Bool:    return self.kind == JSON_BOOL
-    fn is_int(self) -> Bool:     return self.kind == JSON_INT
-    fn is_float(self) -> Bool:   return self.kind == JSON_FLOAT
-    fn is_string(self) -> Bool:  return self.kind == JSON_STRING
-    fn is_array(self) -> Bool:   return self.kind == JSON_ARRAY
-    fn is_object(self) -> Bool:  return self.kind == JSON_OBJECT
+    def is_null(self) -> Bool:    return self.kind == JSON_NULL
+    def is_bool(self) -> Bool:    return self.kind == JSON_BOOL
+    def is_int(self) -> Bool:     return self.kind == JSON_INT
+    def is_float(self) -> Bool:   return self.kind == JSON_FLOAT
+    def is_string(self) -> Bool:  return self.kind == JSON_STRING
+    def is_array(self) -> Bool:   return self.kind == JSON_ARRAY
+    def is_object(self) -> Bool:  return self.kind == JSON_OBJECT
 
-    fn as_bool(self) -> Bool:    return self.bool_v
-    fn as_int(self) -> Int:      return self.int_v
-    fn as_str(self) -> String:   return self.str_v
+    def as_bool(self) -> Bool:    return self.bool_v
+    def as_int(self) -> Int:      return self.int_v
+    def as_str(self) -> String:   return self.str_v
 
-    fn array_len(self) -> Int:
+    def array_len(self) -> Int:
         return len(self.arr_v) if self.is_array() else 0
 
-    fn array_at(self, i: Int) -> JsonValue:
+    def array_at(self, i: Int) -> JsonValue:
         if not self.is_array() or i < 0 or i >= len(self.arr_v):
             return json_null()
         return self.arr_v[i].copy()
 
-    fn object_get(self, key: String) -> Optional[JsonValue]:
+    def object_get(self, key: String) -> Optional[JsonValue]:
         if not self.is_object():
             return Optional[JsonValue]()
         for i in range(len(self.obj_v)):
@@ -96,17 +96,17 @@ struct JsonValue(Copyable, Movable):
                 return Optional[JsonValue](self.obj_v[i].value.copy())
         return Optional[JsonValue]()
 
-    fn object_has(self, key: String) -> Bool:
+    def object_has(self, key: String) -> Bool:
         return Bool(self.object_get(key))
 
     # --- mutators (for object/array construction) --------------------
 
-    fn append(mut self, value: JsonValue):
+    def append(mut self, value: JsonValue):
         if self.kind != JSON_ARRAY:
             return
         self.arr_v.append(value.copy())
 
-    fn put(mut self, var key: String, value: JsonValue):
+    def put(mut self, var key: String, value: JsonValue):
         if self.kind != JSON_OBJECT:
             return
         for i in range(len(self.obj_v)):
@@ -119,40 +119,40 @@ struct JsonValue(Copyable, Movable):
 # --- builders --------------------------------------------------------------
 
 
-fn json_null() -> JsonValue:
+def json_null() -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_NULL
     return v^
 
 
-fn json_bool(b: Bool) -> JsonValue:
+def json_bool(b: Bool) -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_BOOL
     v.bool_v = b
     return v^
 
 
-fn json_int(n: Int) -> JsonValue:
+def json_int(n: Int) -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_INT
     v.int_v = n
     return v^
 
 
-fn json_str(var s: String) -> JsonValue:
+def json_str(var s: String) -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_STRING
     v.str_v = s^
     return v^
 
 
-fn json_array() -> JsonValue:
+def json_array() -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_ARRAY
     return v^
 
 
-fn json_object() -> JsonValue:
+def json_object() -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_OBJECT
     return v^
@@ -166,21 +166,21 @@ fn json_object() -> JsonValue:
 # wrong-type case so the call site doesn't have to branch.
 
 
-fn json_get_bool(obj: JsonValue, key: String, default: Bool) -> Bool:
+def json_get_bool(obj: JsonValue, key: String, default: Bool) -> Bool:
     var v = obj.object_get(key)
     if v and v.value().is_bool():
         return v.value().as_bool()
     return default
 
 
-fn json_get_int(obj: JsonValue, key: String, default: Int) -> Int:
+def json_get_int(obj: JsonValue, key: String, default: Int) -> Int:
     var v = obj.object_get(key)
     if v and v.value().is_int():
         return v.value().as_int()
     return default
 
 
-fn json_get_string(obj: JsonValue, key: String) -> String:
+def json_get_string(obj: JsonValue, key: String) -> String:
     """Return the string at ``key`` or ``""`` if missing / wrong type."""
     var v = obj.object_get(key)
     if v and v.value().is_string():
@@ -188,7 +188,7 @@ fn json_get_string(obj: JsonValue, key: String) -> String:
     return String("")
 
 
-fn json_get_string_array(obj: JsonValue, key: String) -> List[String]:
+def json_get_string_array(obj: JsonValue, key: String) -> List[String]:
     """Return the array-of-strings at ``key`` or an empty list. Non-string
     array entries are silently skipped."""
     var out = List[String]()
@@ -206,7 +206,7 @@ fn json_get_string_array(obj: JsonValue, key: String) -> List[String]:
 # --- encoder ---------------------------------------------------------------
 
 
-fn encode_json(value: JsonValue) -> String:
+def encode_json(value: JsonValue) -> String:
     """Encode ``value`` as a single-line JSON document.
 
     Accumulates into a ``List[UInt8]`` rather than ``out = out + ...`` —
@@ -224,7 +224,7 @@ fn encode_json(value: JsonValue) -> String:
     ))
 
 
-fn _encode(value: JsonValue, mut buf: List[UInt8]):
+def _encode(value: JsonValue, mut buf: List[UInt8]):
     if value.is_null():
         _append_bytes(buf, String("null"))
         return
@@ -264,7 +264,7 @@ fn _encode(value: JsonValue, mut buf: List[UInt8]):
     _append_bytes(buf, String("null"))
 
 
-fn _encode_string(s: String, mut buf: List[UInt8]):
+def _encode_string(s: String, mut buf: List[UInt8]):
     buf.append(UInt8(0x22))  # '"'
     var b = s.as_bytes()
     for i in range(len(b)):
@@ -293,13 +293,13 @@ fn _encode_string(s: String, mut buf: List[UInt8]):
     buf.append(UInt8(0x22))
 
 
-fn _hex_nibble_byte(n: Int) -> Int:
+def _hex_nibble_byte(n: Int) -> Int:
     if n < 10:
         return 0x30 + n
     return 0x61 + (n - 10)
 
 
-fn _append_bytes(mut buf: List[UInt8], s: String):
+def _append_bytes(mut buf: List[UInt8], s: String):
     var src = s.as_bytes()
     for i in range(len(src)):
         buf.append(src[i])
@@ -313,7 +313,7 @@ fn _append_bytes(mut buf: List[UInt8], s: String):
 # rules in some versions).
 
 
-fn parse_json(s: String) raises -> JsonValue:
+def parse_json(s: String) raises -> JsonValue:
     """Parse a complete JSON document. Trailing whitespace is allowed; any
     other trailing content raises (matches RFC 8259 strict)."""
     var n = len(s.as_bytes())
@@ -325,7 +325,7 @@ fn parse_json(s: String) raises -> JsonValue:
     return parsed[0].copy()
 
 
-fn _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     if pos >= len(bytes):
         raise Error("unexpected end of input")
@@ -347,7 +347,7 @@ fn _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     raise Error("unexpected byte starting JSON value")
 
 
-fn _parse_object(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_object(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     var p = pos + 1
     var obj = json_object()
@@ -378,7 +378,7 @@ fn _parse_object(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
         raise Error("expected ',' or '}' in object")
 
 
-fn _parse_array(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_array(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     var p = pos + 1
     var arr = json_array()
@@ -400,7 +400,7 @@ fn _parse_array(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
         raise Error("expected ',' or ']' in array")
 
 
-fn _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
+def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
     """Read one JSON-escaped string starting at ``pos``.
 
     Accumulates into a ``List[UInt8]`` rather than ``out + chr(c)`` —
@@ -450,7 +450,7 @@ fn _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
     raise Error("unterminated string")
 
 
-fn _emit_utf8(cp: Int, mut out: List[UInt8]):
+def _emit_utf8(cp: Int, mut out: List[UInt8]):
     if cp < 0x80:
         out.append(UInt8(cp))
     elif cp < 0x800:
@@ -462,7 +462,7 @@ fn _emit_utf8(cp: Int, mut out: List[UInt8]):
         out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
-fn _hex_value(c: Int) raises -> Int:
+def _hex_value(c: Int) raises -> Int:
     if 0x30 <= c and c <= 0x39:
         return c - 0x30
     if 0x41 <= c and c <= 0x46:
@@ -472,7 +472,7 @@ fn _hex_value(c: Int) raises -> Int:
     raise Error("bad hex digit")
 
 
-fn _parse_number(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_number(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     var start = pos
     var p = pos
@@ -505,7 +505,7 @@ fn _parse_number(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     return (json_int(n), p)
 
 
-fn _parse_bool(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_bool(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     if pos + 3 < len(bytes) \
             and bytes[pos] == 0x74 and bytes[pos+1] == 0x72 \
@@ -519,7 +519,7 @@ fn _parse_bool(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     raise Error("expected true/false")
 
 
-fn _parse_null(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_null(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     var bytes = text.as_bytes()
     if pos + 3 < len(bytes) \
             and bytes[pos] == 0x6E and bytes[pos+1] == 0x75 \
@@ -528,7 +528,7 @@ fn _parse_null(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
     raise Error("expected null")
 
 
-fn _skip_ws(text: String, pos: Int) -> Int:
+def _skip_ws(text: String, pos: Int) -> Int:
     var bytes = text.as_bytes()
     var p = pos
     while p < len(bytes):

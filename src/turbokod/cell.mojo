@@ -19,41 +19,41 @@ struct Cell(ImplicitlyCopyable, Movable):
     var attr: Attr
     var width: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.glyph = String(" ")
         self.attr = default_attr()
         self.width = 1
 
-    fn __init__(out self, glyph: String, attr: Attr):
+    def __init__(out self, glyph: String, attr: Attr):
         self.glyph = glyph
         self.attr = attr
         self.width = cell_width(glyph)
 
-    fn __init__(out self, glyph: String, attr: Attr, width: Int):
+    def __init__(out self, glyph: String, attr: Attr, width: Int):
         self.glyph = glyph
         self.attr = attr
         self.width = width
 
-    fn is_blank(self) -> Bool:
+    def is_blank(self) -> Bool:
         return self.glyph == String(" ")
 
-    fn __eq__(self, other: Cell) -> Bool:
+    def __eq__(self, other: Cell) -> Bool:
         return self.glyph == other.glyph and self.attr == other.attr and self.width == other.width
 
-    fn __ne__(self, other: Cell) -> Bool:
+    def __ne__(self, other: Cell) -> Bool:
         return not (self == other)
 
 
-fn cell_width(glyph: String) -> Int:
+def cell_width(glyph: String) -> Int:
     """Best-effort terminal column width for a single grapheme.
 
     TODO: handle East-Asian wide characters and zero-width combiners properly.
     For now: 1 for any non-empty glyph, 0 for empty.
     """
-    if len(glyph) == 0:
+    if glyph.byte_length() == 0:
         return 0
     return 1
 
 
-fn blank_cell() -> Cell:
+def blank_cell() -> Cell:
     return Cell(String(" "), default_attr(), 1)

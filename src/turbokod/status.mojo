@@ -24,7 +24,7 @@ from .string_utils import display_columns
 # fast enough to read as "working" without flicker. The status bar paints
 # once per app frame (≈20 fps), so each cycle through this list takes
 # 10 paints — well above the user-perceptible threshold.
-fn _spinner_glyph_now() -> String:
+def _spinner_glyph_now() -> String:
     var idx = (monotonic_ms() // 80) % 10
     if idx == 0:
         return String("⠋")
@@ -89,7 +89,7 @@ struct StatusBar(Movable):
     var _msg_a_x: Int
     var _msg_b_x: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.items = List[StatusItem]()
         self.tabs = List[StatusTab]()
         self.active_tab = -1
@@ -101,10 +101,10 @@ struct StatusBar(Movable):
         self._msg_a_x = 0
         self._msg_b_x = 0
 
-    fn add(mut self, var key: String, var desc: String):
+    def add(mut self, var key: String, var desc: String):
         self.items.append(StatusItem(key^, desc^))
 
-    fn set_message(
+    def set_message(
         mut self, var text: String, attr: Attr, clickable: Bool = False,
         spinner: Bool = False,
     ):
@@ -124,7 +124,7 @@ struct StatusBar(Movable):
         self.message_clickable = clickable
         self.message_spinner = spinner
 
-    fn set_tabs(
+    def set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,
     ):
         """Replace the target-tab strip. ``active_tab`` is the index
@@ -137,7 +137,7 @@ struct StatusBar(Movable):
         else:
             self.active_tab = active_tab
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         # Same palette as the menu bar: dark text on light gray, hot keys in red.
         var bg = Attr(BLACK, LIGHT_GRAY)
         var key_attr = Attr(RED, LIGHT_GRAY)
@@ -207,7 +207,7 @@ struct StatusBar(Movable):
             self._msg_a_x = mx
             self._msg_b_x = mx + msg_w
 
-    fn hit_test_message(self, pos: Point, screen: Rect) -> Bool:
+    def hit_test_message(self, pos: Point, screen: Rect) -> Bool:
         """True if ``pos`` lands on a click-marked message. Returns False
         for non-clickable messages even when the geometry matches, so
         non-LSP messages can sit in the same slot without claiming
@@ -220,7 +220,7 @@ struct StatusBar(Movable):
             return False
         return self._msg_a_x <= pos.x and pos.x < self._msg_b_x
 
-    fn hit_test_tab(self, pos: Point, screen: Rect) -> Int:
+    def hit_test_tab(self, pos: Point, screen: Rect) -> Int:
         """Return the index of the tab clicked at ``pos``, or -1 if no
         tab was hit. Hit rects are populated by ``paint`` and the bar
         only occupies the bottom row, so callers don't need to gate
@@ -233,7 +233,7 @@ struct StatusBar(Movable):
                 return h.index
         return -1
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
         """Route a mouse event onto the tab strip. Returns the index of
         the clicked tab on a left-button press, or -1 if the event
         didn't land on a tab.

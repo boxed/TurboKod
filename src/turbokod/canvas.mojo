@@ -23,7 +23,7 @@ from .geometry import Point, Rect
 comptime TAB_WIDTH: Int = 4
 
 
-fn _control_picture_glyph(b: Int) -> String:
+def _control_picture_glyph(b: Int) -> String:
     """UTF-8 'Control Pictures' glyph for an ASCII control byte.
 
     Maps 0x00..0x1F to U+2400..U+241F (␀..␟) and 0x7F to U+2421 (␡).
@@ -54,7 +54,7 @@ struct Canvas(Copyable, Movable):
     var height: Int
     var cells: List[Cell]  # row-major, length == width * height
 
-    fn __init__(out self, width: Int, height: Int):
+    def __init__(out self, width: Int, height: Int):
         self.width = width
         self.height = height
         self.cells = List[Cell]()
@@ -62,7 +62,7 @@ struct Canvas(Copyable, Movable):
         for _ in range(n):
             self.cells.append(blank_cell())
 
-    fn resize(mut self, width: Int, height: Int):
+    def resize(mut self, width: Int, height: Int):
         self.width = width
         self.height = height
         self.cells = List[Cell]()
@@ -70,27 +70,27 @@ struct Canvas(Copyable, Movable):
         for _ in range(n):
             self.cells.append(blank_cell())
 
-    fn _index(self, x: Int, y: Int) -> Int:
+    def _index(self, x: Int, y: Int) -> Int:
         return y * self.width + x
 
-    fn in_bounds(self, x: Int, y: Int) -> Bool:
+    def in_bounds(self, x: Int, y: Int) -> Bool:
         return 0 <= x and x < self.width and 0 <= y and y < self.height
 
-    fn get(self, x: Int, y: Int) -> Cell:
+    def get(self, x: Int, y: Int) -> Cell:
         if not self.in_bounds(x, y):
             return blank_cell()
         return self.cells[self._index(x, y)]
 
-    fn set(mut self, x: Int, y: Int, var cell: Cell):
+    def set(mut self, x: Int, y: Int, var cell: Cell):
         if self.in_bounds(x, y):
             self.cells[self._index(x, y)] = cell^
 
-    fn clear(mut self, attr: Attr = default_attr()):
+    def clear(mut self, attr: Attr = default_attr()):
         var blank = Cell(String(" "), attr, 1)
         for i in range(len(self.cells)):
             self.cells[i] = blank
 
-    fn fill(mut self, rect: Rect, glyph: String, attr: Attr):
+    def fill(mut self, rect: Rect, glyph: String, attr: Attr):
         var cell = Cell(glyph, attr)
         var w = cell.width
         if w < 1:
@@ -102,7 +102,7 @@ struct Canvas(Copyable, Movable):
                 self.cells[self._index(x, y)] = cell
                 x += w
 
-    fn put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
+    def put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
         """Paint ``text`` starting at ``p`` (no wrapping). Returns columns advanced.
 
         If ``max_x`` is non-negative, painting stops at column ``max_x``
@@ -185,7 +185,7 @@ struct Canvas(Copyable, Movable):
             i += seq_len
         return advanced
 
-    fn set_attr(mut self, x: Int, y: Int, attr: Attr):
+    def set_attr(mut self, x: Int, y: Int, attr: Attr):
         """Change the attribute at ``(x, y)`` without touching the glyph.
 
         Lets overlay passes (highlight, selection, cursor) recolor cells
@@ -199,7 +199,7 @@ struct Canvas(Copyable, Movable):
         var current = self.cells[idx]
         self.cells[idx] = Cell(current.glyph, attr, current.width)
 
-    fn darken_rect(mut self, rect: Rect):
+    def darken_rect(mut self, rect: Rect):
         """Recolor every cell inside ``rect`` to a "shadow" attr,
         preserving each glyph and width.
 
@@ -219,7 +219,7 @@ struct Canvas(Copyable, Movable):
                 var current = self.cells[idx]
                 self.cells[idx] = Cell(current.glyph, shadow, current.width)
 
-    fn draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
+    def draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
         if rect.width() < 2 or rect.height() < 2:
             return
         var tl: String
@@ -249,17 +249,17 @@ struct Canvas(Copyable, Movable):
         self.set(x0, y1, Cell(bl, attr, 1))
         self.set(x1, y1, Cell(br, attr, 1))
 
-    fn draw_hline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
+    def draw_hline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
         var cell = Cell(glyph, attr, 1)
         for i in range(length):
             self.set(p.x + i, p.y, cell)
 
-    fn draw_vline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
+    def draw_vline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
         var cell = Cell(glyph, attr, 1)
         for i in range(length):
             self.set(p.x, p.y + i, cell)
 
-    fn put_wrapped_text(
+    def put_wrapped_text(
         mut self, rect: Rect, text: String, attr: Attr,
     ) -> Int:
         """Paint ``text`` inside ``rect``, soft-wrapping at spaces.
@@ -290,7 +290,7 @@ struct Canvas(Copyable, Movable):
         return rows
 
 
-fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
+def paint_drop_shadow(mut canvas: Canvas, rect: Rect):
     """Paint a Turbo Vision–style drop shadow under ``rect``.
 
     The shadow is two cells wide on the right and one cell tall
@@ -317,7 +317,7 @@ fn paint_drop_shadow(mut canvas: Canvas, rect: Rect):
     canvas.darken_rect(Rect(rect.a.x + 2, rect.b.y, rect.b.x + 2, rect.b.y + 1))
 
 
-fn popup_size_for_text(
+def popup_size_for_text(
     text: String, max_w: Int, max_h: Int,
 ) -> Tuple[Int, Int]:
     """Compute the (width, height) a popup needs to host ``text``.
@@ -355,7 +355,7 @@ fn popup_size_for_text(
     return (inner_w + 4, h)
 
 
-fn wrap_to_width(text: String, width: Int) -> List[String]:
+def wrap_to_width(text: String, width: Int) -> List[String]:
     """Soft-wrap ``text`` to lines of at most ``width`` codepoint cells.
 
     Breaks at the last space inside the budget; words longer than
@@ -468,7 +468,7 @@ fn wrap_to_width(text: String, width: Int) -> List[String]:
     return lines^
 
 
-fn utf8_byte_to_cell(text: String) -> List[Int]:
+def utf8_byte_to_cell(text: String) -> List[Int]:
     """Map every byte index in ``text`` to the cell column its codepoint
     occupies under ``Canvas.put_text``'s codepoint-aligned layout.
 
@@ -515,7 +515,7 @@ fn utf8_byte_to_cell(text: String) -> List[Int]:
     return result^
 
 
-fn utf8_codepoint_count(text: String) -> Int:
+def utf8_codepoint_count(text: String) -> Int:
     """Number of cells ``Canvas.put_text(text)`` would produce.
 
     Counts each codepoint as one cell *except* tabs, which expand to

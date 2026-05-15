@@ -46,7 +46,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 1)
     var input_y = cursor.place()
     var list_y = cursor.place()
@@ -87,7 +87,7 @@ struct QuickOpen(Movable):
     # re-running layout. Negative width = "no paint yet".
     var _input_rect: Rect
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -102,7 +102,7 @@ struct QuickOpen(Movable):
         self.picks_project = False
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn open(mut self, var root: String):
+    def open(mut self, var root: String):
         self.root = root^
         self.query = TextField()
         self.active = True
@@ -136,7 +136,7 @@ struct QuickOpen(Movable):
             self.entries_abs.append(paths[i])
         self._refilter()
 
-    fn open_recent(
+    def open_recent(
         mut self, var root: String, var entries: List[String],
         var entries_abs: List[String], picks_project: Bool = False,
     ):
@@ -166,7 +166,7 @@ struct QuickOpen(Movable):
         self.picks_project = picks_project
         self._refilter()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -182,7 +182,7 @@ struct QuickOpen(Movable):
 
     # --- filtering --------------------------------------------------------
 
-    fn _refilter(mut self):
+    def _refilter(mut self):
         self.matched = List[Int]()
         if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
@@ -196,7 +196,7 @@ struct QuickOpen(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         var width = 70
         var height = 20
         if width > screen.b.x - 4: width = screen.b.x - 4
@@ -205,7 +205,7 @@ struct QuickOpen(Movable):
         var y = (screen.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Find:`` query row."""
         if not self.active:
             return False
@@ -214,7 +214,7 @@ struct QuickOpen(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -256,7 +256,7 @@ struct QuickOpen(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed (always True while active)."""
         if not self.active:
             return False
@@ -282,7 +282,7 @@ struct QuickOpen(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -317,7 +317,7 @@ struct QuickOpen(Movable):
         self.selected = idx
         return True
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         var visible = 14
         if self.selected < self.scroll:
             self.scroll = self.selected
@@ -334,7 +334,7 @@ struct QuickOpen(Movable):
 # ``foo``, ``/``, ``bar`` matched as substrings in that order.
 
 
-fn quick_open_match(path: String, query: String) -> Bool:
+def quick_open_match(path: String, query: String) -> Bool:
     """Return True iff ``query`` matches ``path`` under the QuickOpen rules.
 
     Examples (with ``path = "src/turbokod/cell.mojo"``):
@@ -361,7 +361,7 @@ fn quick_open_match(path: String, query: String) -> Bool:
     return True
 
 
-fn _split_query_to_parts(q: String) -> List[String]:
+def _split_query_to_parts(q: String) -> List[String]:
     """Split ``q`` on spaces, then split each token around every ``/``,
     keeping ``/`` as its own one-byte part. Empty parts are dropped.
     """
@@ -393,7 +393,7 @@ fn _split_query_to_parts(q: String) -> List[String]:
     return out^
 
 
-fn _find_substring_ci(path: String, needle: String, start: Int) -> Int:
+def _find_substring_ci(path: String, needle: String, start: Int) -> Int:
     """Earliest index ``>= start`` where ``needle`` occurs as a
     case-insensitive substring of ``path``, or ``-1`` if absent.
     """
@@ -414,7 +414,7 @@ fn _find_substring_ci(path: String, needle: String, start: Int) -> Int:
     return -1
 
 
-fn _ci_byte_eq(a: UInt8, b: UInt8) -> Bool:
+def _ci_byte_eq(a: UInt8, b: UInt8) -> Bool:
     var ai = Int(a)
     var bi = Int(b)
     if 0x41 <= ai and ai <= 0x5A: ai = ai + 0x20

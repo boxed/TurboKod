@@ -15,17 +15,17 @@ from turbokod.events import (
 from turbokod.geometry import Point, Rect
 
 
-fn _view() -> Rect:
+def _view() -> Rect:
     return Rect(Point(0, 0), Point(80, 25))
 
 
-fn test_primary_only_by_default() raises:
+def test_primary_only_by_default() raises:
     var ed = Editor(String("hello\nworld\n"))
     assert_equal(ed.caret_count(), 1)
     assert_false(ed.has_extra_carets())
 
 
-fn test_add_caret_below_then_above() raises:
+def test_add_caret_below_then_above() raises:
     var ed = Editor(String("aaa\nbbb\nccc\nddd\n"))
     # Primary at (0, 0); desired_col = 0 → adding below should land
     # at (1, 0), then (2, 0), then (3, 0).
@@ -56,14 +56,14 @@ fn test_add_caret_below_then_above() raises:
     assert_equal(sorted_rows[2], 2)
 
 
-fn test_add_caret_above_at_row_zero_is_noop() raises:
+def test_add_caret_above_at_row_zero_is_noop() raises:
     var ed = Editor(String("aaa\nbbb\n"))
     assert_equal(ed.cursor_row, 0)
     ed.add_caret_above()
     assert_equal(ed.caret_count(), 1)
 
 
-fn test_add_caret_below_past_eof_is_noop() raises:
+def test_add_caret_below_past_eof_is_noop() raises:
     var ed = Editor(String("only\n"))
     # Buffer has two lines: "only" and "" (trailing-newline empty line).
     ed.add_caret_below()
@@ -73,7 +73,7 @@ fn test_add_caret_below_past_eof_is_noop() raises:
     assert_equal(ed.caret_count(), 2)
 
 
-fn test_movement_applies_to_every_caret() raises:
+def test_movement_applies_to_every_caret() raises:
     var ed = Editor(String("hello\nworld\nthere\n"))
     ed.add_caret_below()
     ed.add_caret_below()
@@ -87,7 +87,7 @@ fn test_movement_applies_to_every_caret() raises:
         assert_equal(c.col, 2)
 
 
-fn test_typing_inserts_at_every_caret() raises:
+def test_typing_inserts_at_every_caret() raises:
     var ed = Editor(String("aaa\nbbb\nccc\n"))
     ed.add_caret_below()
     ed.add_caret_below()
@@ -99,7 +99,7 @@ fn test_typing_inserts_at_every_caret() raises:
     assert_equal(ed.buffer.line(2), String("Xccc"))
 
 
-fn test_typing_two_carets_same_row_shifts_correctly() raises:
+def test_typing_two_carets_same_row_shifts_correctly() raises:
     var ed = Editor(String("hello\n"))
     # Place primary at col 0 and an extra at col 5 (end of "hello").
     ed.cursor_col = 0
@@ -112,7 +112,7 @@ fn test_typing_two_carets_same_row_shifts_correctly() raises:
     assert_equal(ed.buffer.line(0), String("XhelloX"))
 
 
-fn test_backspace_at_every_caret() raises:
+def test_backspace_at_every_caret() raises:
     var ed = Editor(String("aaa\nbbb\nccc\n"))
     ed.add_caret_below()
     ed.add_caret_below()
@@ -127,7 +127,7 @@ fn test_backspace_at_every_caret() raises:
     assert_equal(ed.buffer.line(2), String("cc"))
 
 
-fn test_collapse_extras_on_enter() raises:
+def test_collapse_extras_on_enter() raises:
     var ed = Editor(String("aaa\nbbb\n"))
     ed.add_caret_below()
     assert_equal(ed.caret_count(), 2)
@@ -138,7 +138,7 @@ fn test_collapse_extras_on_enter() raises:
     assert_equal(ed.caret_count(), 1)
 
 
-fn test_undo_restores_extras() raises:
+def test_undo_restores_extras() raises:
     var ed = Editor(String("aaa\nbbb\nccc\n"))
     ed.add_caret_below()
     ed.add_caret_below()
@@ -161,7 +161,7 @@ fn test_undo_restores_extras() raises:
     assert_equal(ed.buffer.line(2), String("ccc"))
 
 
-fn test_clear_extra_carets() raises:
+def test_clear_extra_carets() raises:
     var ed = Editor(String("aaa\nbbb\n"))
     ed.add_caret_below()
     assert_equal(ed.caret_count(), 2)
@@ -169,7 +169,7 @@ fn test_clear_extra_carets() raises:
     assert_equal(ed.caret_count(), 1)
 
 
-fn test_carets_merge_when_movement_collides() raises:
+def test_carets_merge_when_movement_collides() raises:
     var ed = Editor(String("hello\n"))
     # Place primary at col 0; add an extra at col 2.
     ed._add_caret(Caret(0, 2, 2, 0, 2))
@@ -180,7 +180,7 @@ fn test_carets_merge_when_movement_collides() raises:
     assert_equal(ed.caret_count(), 1)
 
 
-fn test_three_carets_delete_inline() raises:
+def test_three_carets_delete_inline() raises:
     var ed = Editor(String("aaa\nbbb\nccc\n"))
     ed.add_caret_below()
     ed.add_caret_below()
@@ -193,7 +193,7 @@ fn test_three_carets_delete_inline() raises:
     assert_equal(ed.buffer.line(2), String("cc"))
 
 
-fn test_backspace_at_col_zero_collapses_to_primary() raises:
+def test_backspace_at_col_zero_collapses_to_primary() raises:
     var ed = Editor(String("aaa\nbbb\n"))
     ed.add_caret_below()
     # Primary at (0, 0), extra at (1, 0). Backspace at (0, 0) is a
@@ -204,7 +204,7 @@ fn test_backspace_at_col_zero_collapses_to_primary() raises:
     assert_equal(ed.caret_count(), 1)
 
 
-fn test_typing_three_carets_same_row() raises:
+def test_typing_three_carets_same_row() raises:
     var ed = Editor(String("hello\n"))
     ed.cursor_col = 0
     ed.anchor_col = 0
@@ -220,7 +220,7 @@ fn test_typing_three_carets_same_row() raises:
     assert_equal(ed.buffer.line(0), String("XhelXloX"))
 
 
-fn test_ctrl_alt_down_adds_caret() raises:
+def test_ctrl_alt_down_adds_caret() raises:
     var ed = Editor(String("aaa\nbbb\nccc\n"))
     var view = _view()
     # Ctrl+Alt+Down should stamp a caret one row below the primary.
@@ -230,7 +230,7 @@ fn test_ctrl_alt_down_adds_caret() raises:
     assert_equal(ed.caret_count(), 2)
 
 
-fn main() raises:
+def main() raises:
     test_primary_only_by_default()
     test_add_caret_below_then_above()
     test_add_caret_above_at_row_zero_is_noop()

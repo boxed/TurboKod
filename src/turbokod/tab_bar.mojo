@@ -39,10 +39,10 @@ struct _TabHit(ImplicitlyCopyable, Movable):
 struct TabBar(Movable):
     var _hits: List[_TabHit]    # captured by ``paint`` for ``hit_test``
 
-    fn __init__(out self):
+    def __init__(out self):
         self._hits = List[_TabHit]()
 
-    fn paint(
+    def paint(
         mut self,
         mut canvas: Canvas,
         rect: Rect,
@@ -87,7 +87,7 @@ struct TabBar(Movable):
             self._hits.append(_TabHit(x, end, items[i].window_idx))
             x = end + 1
 
-    fn hit_test(self, pos: Point, rect: Rect) -> Int:
+    def hit_test(self, pos: Point, rect: Rect) -> Int:
         """Return the window index at ``pos``, or -1 if no tab was hit."""
         if rect.width() <= 0 or rect.height() <= 0:
             return -1
@@ -99,7 +99,7 @@ struct TabBar(Movable):
                 return h.window_idx
         return -1
 
-    fn handle_mouse(self, event: Event, rect: Rect) -> Int:
+    def handle_mouse(self, event: Event, rect: Rect) -> Int:
         """Match-on-press click routing. Returns the clicked window
         index or -1 when the event missed every tab."""
         if event.kind != EVENT_MOUSE:

@@ -72,22 +72,22 @@ struct ListBox(Copyable, Movable):
     wheel can move the viewport without the next paint snapping it
     back to the selected row."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.selected = -1
         self._scroll = 0
         self._last_scroll_sel = -2
 
-    fn reset(mut self):
+    def reset(mut self):
         """Forget selection and scroll state; call when the host
         clears its items list (open / close, replace-all)."""
         self.selected = -1
         self._scroll = 0
         self._last_scroll_sel = -2
 
-    fn set_selected(mut self, idx: Int):
+    def set_selected(mut self, idx: Int):
         self.selected = idx
 
-    fn move_selection(mut self, delta: Int, item_count: Int) -> Bool:
+    def move_selection(mut self, delta: Int, item_count: Int) -> Bool:
         """Bump selection by ``delta`` rows, clamping to
         ``[0, item_count)``. Returns True iff selection moved."""
         if item_count == 0:
@@ -102,7 +102,7 @@ struct ListBox(Copyable, Movable):
         self.selected = s
         return True
 
-    fn paint(
+    def paint(
         mut self,
         mut canvas: Canvas,
         bounds: Rect,
@@ -159,7 +159,7 @@ struct ListBox(Copyable, Movable):
                 items[idx], attr,
             )
 
-    fn paint_empty_hint(
+    def paint_empty_hint(
         self,
         mut canvas: Canvas,
         bounds: Rect,
@@ -174,7 +174,7 @@ struct ListBox(Copyable, Movable):
             canvas, Point(bounds.a.x + 1, bounds.a.y), hint, attr,
         )
 
-    fn handle_mouse_press(
+    def handle_mouse_press(
         mut self, event: Event, bounds: Rect, item_count: Int,
     ) -> Bool:
         """Consume mouse presses that target the list. Wheel scrolls
@@ -209,7 +209,7 @@ struct ListBox(Copyable, Movable):
             self.selected = idx
         return True
 
-    fn handle_nav_key(
+    def handle_nav_key(
         mut self, event: Event, item_count: Int,
     ) -> Bool:
         """Handle Up / Down / PageUp / PageDown / Home / End on the

@@ -22,7 +22,7 @@ from turbokod.project_targets import ProjectTargets, RunTarget
 from turbokod.targets_dialog import TargetsDialog
 
 
-fn test_shadow_button_press_captures_and_release_fires() raises:
+def test_shadow_button_press_captures_and_release_fires() raises:
     """A press inside the hit rect captures the mouse; a release
     inside the same rect fires. The latch clears on release."""
     var btn = ShadowButton(String(" OK "), 2, 1)
@@ -37,7 +37,7 @@ fn test_shadow_button_press_captures_and_release_fires() raises:
     assert_false(btn.pressed)
 
 
-fn test_shadow_button_release_outside_cancels() raises:
+def test_shadow_button_release_outside_cancels() raises:
     """Press inside, drag outside, release: button must NOT fire.
     The state machine returns ``BUTTON_CANCELED`` so the host can
     distinguish "ran the action" from "user backed out"."""
@@ -59,7 +59,7 @@ fn test_shadow_button_release_outside_cancels() raises:
     assert_false(btn.pressed)
 
 
-fn test_shadow_button_drag_back_in_re_fires() raises:
+def test_shadow_button_drag_back_in_re_fires() raises:
     """Press, drag out, drag back in, release: must fire — matches
     native button affordance where re-entering the held button
     re-arms it for the click."""
@@ -79,7 +79,7 @@ fn test_shadow_button_drag_back_in_re_fires() raises:
     assert_equal(btn.handle_mouse(release), BUTTON_FIRED)
 
 
-fn test_shadow_button_press_outside_returns_none() raises:
+def test_shadow_button_press_outside_returns_none() raises:
     """A press that doesn't land on the button is unconsumed —
     callers can then route it elsewhere without their own
     hit-test."""
@@ -89,7 +89,7 @@ fn test_shadow_button_press_outside_returns_none() raises:
     assert_false(btn.pressed)
 
 
-fn test_shadow_button_motion_without_capture_returns_none() raises:
+def test_shadow_button_motion_without_capture_returns_none() raises:
     """Drag motion when no button is captured is not ours to
     consume — must return NONE so the host can route it to e.g.
     a title-bar drag."""
@@ -100,7 +100,7 @@ fn test_shadow_button_motion_without_capture_returns_none() raises:
     assert_equal(btn.handle_mouse(drag), BUTTON_NONE)
 
 
-fn test_paint_shadow_button_pressed_omits_shadow() raises:
+def test_paint_shadow_button_pressed_omits_shadow() raises:
     """When the button is captured AND the cursor is over it, the
     drop-shadow cells are overpainted with the dialog body so the
     button reads as sunken-flush."""
@@ -121,7 +121,7 @@ fn test_paint_shadow_button_pressed_omits_shadow() raises:
     assert_equal(canvas.get(2 + 4, 2).glyph, String(" "))
 
 
-fn test_paint_shadow_button_dragged_off_shows_shadow_again() raises:
+def test_paint_shadow_button_dragged_off_shows_shadow_again() raises:
     """While the button is captured but the cursor has moved off
     the hit rect, the shadow returns — the user sees the click is
     armed to cancel."""
@@ -135,7 +135,7 @@ fn test_paint_shadow_button_dragged_off_shows_shadow_again() raises:
     assert_equal(canvas.get(3, 2).glyph, String("▀"))
 
 
-fn test_dir_browser_jump_button_release_inside_jumps() raises:
+def test_dir_browser_jump_button_release_inside_jumps() raises:
     """Press + release inside the Root jump button must navigate
     via ``jump_to``. Press alone must not navigate (release-fire
     semantics)."""
@@ -157,7 +157,7 @@ fn test_dir_browser_jump_button_release_inside_jumps() raises:
     assert_true(browser.dir == String("/"))
 
 
-fn test_dir_browser_jump_button_release_outside_cancels() raises:
+def test_dir_browser_jump_button_release_outside_cancels() raises:
     """Press inside Root, release way outside — must NOT navigate."""
     var browser = DirBrowser()
     var start_dir = browser.dir
@@ -177,7 +177,7 @@ fn test_dir_browser_jump_button_release_outside_cancels() raises:
     assert_true(browser.dir == start_dir)
 
 
-fn test_targets_dialog_save_release_outside_cancels() raises:
+def test_targets_dialog_save_release_outside_cancels() raises:
     """Press the Save button, drag away, release: dialog must NOT
     submit. Symmetric with the dir_browser test."""
     var src = ProjectTargets()
@@ -209,7 +209,7 @@ fn test_targets_dialog_save_release_outside_cancels() raises:
     assert_false(dlg.submitted)
 
 
-fn test_targets_dialog_save_release_inside_submits() raises:
+def test_targets_dialog_save_release_inside_submits() raises:
     """Press + release on the Save button submits the dialog."""
     var src = ProjectTargets()
     var t1 = RunTarget()
@@ -233,7 +233,7 @@ fn test_targets_dialog_save_release_inside_submits() raises:
     assert_true(dlg.submitted)
 
 
-fn main() raises:
+def main() raises:
     test_shadow_button_press_captures_and_release_fires()
     test_shadow_button_release_outside_cancels()
     test_shadow_button_drag_back_in_re_fires()

@@ -81,7 +81,7 @@ struct DocStore(Copyable, Movable):
     var _body_paths: List[String]
     var _body_html: List[String]
 
-    fn __init__(out self, var slug: String, var display: String):
+    def __init__(out self, var slug: String, var display: String):
         self.slug = slug^
         self.display = display^
         self.loaded = False
@@ -89,7 +89,7 @@ struct DocStore(Copyable, Movable):
         self._body_paths = List[String]()
         self._body_html = List[String]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.slug = copy.slug
         self.display = copy.display
         self.loaded = copy.loaded
@@ -97,13 +97,13 @@ struct DocStore(Copyable, Movable):
         self._body_paths = copy._body_paths.copy()
         self._body_html = copy._body_html.copy()
 
-    fn is_installed(self, dest_dir: String) -> Bool:
+    def is_installed(self, dest_dir: String) -> Bool:
         """True iff both DevDocs files exist on disk under ``dest_dir``."""
         var idx = join_path(dest_dir, String("index.json"))
         var db  = join_path(dest_dir, String("db.json"))
         return stat_file(idx).ok and stat_file(db).ok
 
-    fn load(mut self, dest_dir: String) raises:
+    def load(mut self, dest_dir: String) raises:
         """Parse ``index.json`` + ``db.json`` from ``dest_dir`` into the
         store. Idempotent: a second call with ``loaded == True`` is a
         no-op (avoids re-parsing 6+ MB of JSON if the host calls us
@@ -157,7 +157,7 @@ struct DocStore(Copyable, Movable):
             self._body_html.append(member.value.as_str())
         self.loaded = True
 
-    fn html_for(self, entry_idx: Int) -> String:
+    def html_for(self, entry_idx: Int) -> String:
         """Raw HTML body of ``entries[entry_idx]``, or empty string when
         the body file isn't found (orphan index entry — DevDocs ships a
         few of these). The fragment is *not* applied here; the caller
@@ -171,7 +171,7 @@ struct DocStore(Copyable, Movable):
         return String("")
 
 
-fn _split_at_hash(path: String) -> Tuple[String, String]:
+def _split_at_hash(path: String) -> Tuple[String, String]:
     """Split a DevDocs entry path on the *first* ``#`` into
     ``(file, fragment)``. Fragment is empty when there's no ``#``."""
     var b = path.as_bytes()
@@ -187,7 +187,7 @@ fn _split_at_hash(path: String) -> Tuple[String, String]:
 # --- HTML → text renderer --------------------------------------------------
 
 
-fn html_to_text(html: String) -> String:
+def html_to_text(html: String) -> String:
     """Render HTML to markdown-flavoured plain text.
 
     Block tags (``<p>``, ``<div>``, ``<section>``, …) are separated by
@@ -439,7 +439,7 @@ fn html_to_text(html: String) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-fn _extend(mut out: List[UInt8], s: String):
+def _extend(mut out: List[UInt8], s: String):
     """Append every byte of ``s`` to ``out``. The bulk-append helper for
     the ``html_to_text`` buffer; ``String + String`` would re-allocate
     and copy on every step, regressing to O(N²) on multi-MB inputs."""
@@ -448,7 +448,7 @@ fn _extend(mut out: List[UInt8], s: String):
         out.append(sb[k])
 
 
-fn _ensure_blank_line(mut out: List[UInt8]):
+def _ensure_blank_line(mut out: List[UInt8]):
     """Ensure ``out`` ends with two newlines (i.e. a trailing blank
     line) so the next emit lands on a fresh paragraph. Trailing spaces
     or tabs on the last line are stripped first."""
@@ -467,7 +467,7 @@ fn _ensure_blank_line(mut out: List[UInt8]):
         nl += 1
 
 
-fn _ensure_newline(mut out: List[UInt8]):
+def _ensure_newline(mut out: List[UInt8]):
     """Ensure ``out`` ends with at least one newline. Trailing spaces /
     tabs on the last line are stripped first so the newline lands
     cleanly."""
@@ -480,7 +480,7 @@ fn _ensure_newline(mut out: List[UInt8]):
         out.append(0x0A)
 
 
-fn _heading_level(name: String) -> Int:
+def _heading_level(name: String) -> Int:
     """Return 1..6 for ``h1``..``h6``, or 0 if ``name`` is not a heading."""
     if name == String("h1"): return 1
     if name == String("h2"): return 2
@@ -491,7 +491,7 @@ fn _heading_level(name: String) -> Int:
     return 0
 
 
-fn _get_attr(tag: String, attr: String) -> String:
+def _get_attr(tag: String, attr: String) -> String:
     """Return the (un-quoted) value of attribute ``attr`` on a tag, or
     empty string when absent. Case-insensitive on the attribute name;
     handles double, single, and unquoted values. Substrings *inside* a
@@ -541,7 +541,7 @@ fn _get_attr(tag: String, attr: String) -> String:
     return String("")
 
 
-fn _classify_tag(tag: String) -> Tuple[String, Int]:
+def _classify_tag(tag: String) -> Tuple[String, Int]:
     """Parse ``<...>`` content (the bit between the angle brackets) into
     ``(name_lower, is_close)``. ``is_close`` is 1 for ``</tag>`` style.
 
@@ -573,7 +573,7 @@ fn _classify_tag(tag: String) -> Tuple[String, Int]:
     return (lower^, is_close)
 
 
-fn _is_block_tag(name: String) -> Bool:
+def _is_block_tag(name: String) -> Bool:
     """Tags whose presence forces a line break in the rendered output."""
     if name == String("p"):  return True
     if name == String("div"): return True
@@ -599,7 +599,7 @@ fn _is_block_tag(name: String) -> Bool:
     return False
 
 
-fn _skip_to_close(html: String, start: Int, name: String) -> Int:
+def _skip_to_close(html: String, start: Int, name: String) -> Int:
     """Advance past everything up to and including ``</name>``. Returns
     the index immediately after ``>``. Falls back to ``len(b)`` if no
     closing tag is found — better to swallow trailing junk than to
@@ -633,7 +633,7 @@ fn _skip_to_close(html: String, start: Int, name: String) -> Int:
     return n
 
 
-fn _decode_entity(name: String) -> String:
+def _decode_entity(name: String) -> String:
     """Decode the part *between* ``&`` and ``;`` for the entities
     DevDocs HTML actually emits. Falls back to the raw ``&name;`` form
     so unknown entities are still readable.
@@ -684,7 +684,7 @@ fn _decode_entity(name: String) -> String:
     return String("&") + name + String(";")
 
 
-fn _utf8_from_codepoint(cp: Int) -> String:
+def _utf8_from_codepoint(cp: Int) -> String:
     """Encode a Unicode codepoint as a UTF-8 string. ``chr()`` only
     handles ASCII, so the multi-byte branches assemble the bytes by
     hand (same as ``json._emit_utf8``)."""
@@ -709,7 +709,7 @@ fn _utf8_from_codepoint(cp: Int) -> String:
 # --- Table renderer --------------------------------------------------------
 
 
-fn _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
+def _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
     """``start`` is the index right after a ``<table...>`` open tag.
     Returns ``(inner_html, end_index)`` where ``end_index`` is the byte
     after the matching ``</table>``. Nested ``<table>`` tags are
@@ -751,7 +751,7 @@ fn _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
     return (inner^, n)
 
 
-fn _render_table(mut out: List[UInt8], inner: String):
+def _render_table(mut out: List[UInt8], inner: String):
     """Parse ``<tr>`` / ``<th>`` / ``<td>`` from ``inner`` (the body of
     one ``<table>``) and write a column-padded GFM table into ``out``.
 
@@ -860,7 +860,7 @@ fn _render_table(mut out: List[UInt8], inner: String):
             _emit_table_separator(out, widths)
 
 
-fn _emit_table_row(
+def _emit_table_row(
     mut out: List[UInt8], cells: List[String], widths: List[Int],
 ):
     """``| cell1 | cell2 | ... |\\n`` with each cell right-padded with
@@ -878,7 +878,7 @@ fn _emit_table_row(
     out.append(0x0A)
 
 
-fn _emit_table_separator(mut out: List[UInt8], widths: List[Int]):
+def _emit_table_separator(mut out: List[UInt8], widths: List[Int]):
     """``|---|---|...|\\n`` separator that GFM requires between header
     and body rows. Each column gets ``widths[ci]`` dashes (min 3, set
     in the caller) so the separator visibly spans the column."""
@@ -892,7 +892,7 @@ fn _emit_table_separator(mut out: List[UInt8], widths: List[Int]):
     out.append(0x0A)
 
 
-fn _flatten_cell(s: String) -> String:
+def _flatten_cell(s: String) -> String:
     """Collapse whitespace runs (including ``\\n``) to a single space,
     strip leading/trailing whitespace, and escape ``|`` as ``\\|``.
     Markdown tables can't contain newlines, and a bare ``|`` inside a
@@ -920,7 +920,7 @@ fn _flatten_cell(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-fn _utf8_codepoint_count(s: String) -> Int:
+def _utf8_codepoint_count(s: String) -> Int:
     """Number of Unicode codepoints in ``s``. We count UTF-8 lead bytes
     (``b & 0xC0 != 0x80``) so multi-byte runes contribute one column
     each — close enough for column-padding latin-script docs and

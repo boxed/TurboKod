@@ -48,7 +48,7 @@ struct _Layout(ImplicitlyCopyable, Movable):
     var hint_y: Int
 
 
-fn _build_layout(rect: Rect) -> _Layout:
+def _build_layout(rect: Rect) -> _Layout:
     var cursor = RowCursor(rect.a.y + 1)
     var input_y = cursor.place()
     var list_y = cursor.place()
@@ -79,7 +79,7 @@ struct SymbolPick(Movable):
     # Cached input strip rect for mouse routing.
     var _input_rect: Rect
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.loading = False
         self.submitted = False
@@ -93,7 +93,7 @@ struct SymbolPick(Movable):
         self.selected_character = 0
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn open(mut self, var path: String):
+    def open(mut self, var path: String):
         """Open the picker in a loading state for ``path``. Entries arrive
         later via ``set_entries`` once the LSP responds."""
         self.path = path^
@@ -109,7 +109,7 @@ struct SymbolPick(Movable):
         self.selected_character = 0
         self._input_rect = Rect(0, 0, 0, 0)
 
-    fn set_entries(mut self, var items: List[SymbolItem]):
+    def set_entries(mut self, var items: List[SymbolItem]):
         """Populate the picker with the response and clear the loading flag.
         Refilters with the current query in case the user typed while we
         were waiting."""
@@ -117,7 +117,7 @@ struct SymbolPick(Movable):
         self.loading = False
         self._refilter()
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.loading = False
         self.submitted = False
@@ -131,7 +131,7 @@ struct SymbolPick(Movable):
 
     # --- filtering --------------------------------------------------------
 
-    fn _refilter(mut self):
+    def _refilter(mut self):
         self.matched = List[Int]()
         if len(self.query.text.as_bytes()) == 0:
             for i in range(len(self.entries)):
@@ -153,7 +153,7 @@ struct SymbolPick(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    fn _rect(self, screen: Rect) -> Rect:
+    def _rect(self, screen: Rect) -> Rect:
         var width = 70
         var height = 20
         if width > screen.b.x - 4: width = screen.b.x - 4
@@ -162,7 +162,7 @@ struct SymbolPick(Movable):
         var y = (screen.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    fn is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Find:`` query row."""
         if not self.active:
             return False
@@ -171,7 +171,7 @@ struct SymbolPick(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -245,7 +245,7 @@ struct SymbolPick(Movable):
 
     # --- events -----------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed (always True while active)."""
         if not self.active:
             return False
@@ -273,7 +273,7 @@ struct SymbolPick(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -310,7 +310,7 @@ struct SymbolPick(Movable):
         self.selected = idx
         return True
 
-    fn _scroll_to_selection(mut self):
+    def _scroll_to_selection(mut self):
         var visible = 14
         if self.selected < self.scroll:
             self.scroll = self.selected
@@ -318,7 +318,7 @@ struct SymbolPick(Movable):
             self.scroll = self.selected - visible + 1
 
 
-fn symbol_kind_label(kind: Int) -> String:
+def symbol_kind_label(kind: Int) -> String:
     """Map an LSP ``SymbolKind`` integer to a 5-char fixed-width label so
     list rows align cleanly. Unknown kinds render as ``[ ? ]``."""
     if kind == 5:  return String("[cls]")    # Class

@@ -390,7 +390,7 @@ comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
 
 
-fn ctrl_key(letter: String) -> UInt32:
+def ctrl_key(letter: String) -> UInt32:
     """Return the canonical key codepoint for a ``Ctrl+letter`` hotkey.
 
     The parser canonicalizes ``Ctrl+letter`` to
@@ -434,7 +434,7 @@ struct NavPoint(ImplicitlyCopyable, Movable):
     var col: Int
 
 
-fn format_hotkey(key: UInt32, mods: UInt8) -> String:
+def format_hotkey(key: UInt32, mods: UInt8) -> String:
     """Render a ``(key, mods)`` pair as a human-readable label.
 
     Used for the right-aligned shortcut text on menu items. Modifier
@@ -842,7 +842,7 @@ struct Desktop(Movable):
     var _git_state_mtimes: GitStateMtimes
     var _last_git_state_check_ms: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.menu_bar = MenuBar()
         self.windows = WindowManager()
         self.status_bar = StatusBar()
@@ -1207,7 +1207,7 @@ struct Desktop(Movable):
             KEY_RIGHT, MOD_META | MOD_ALT, EDITOR_NAV_FORWARD,
         ))
 
-    fn _bottom_chrome_height(self, screen: Rect) -> Int:
+    def _bottom_chrome_height(self, screen: Rect) -> Int:
         """Rows the bottom chrome (status bar + optional tab bar) eats
         from the workspace. The status bar is always one row; the
         tab bar adds another when the View toggle is on, but only
@@ -1217,7 +1217,7 @@ struct Desktop(Movable):
             return 2
         return 1
 
-    fn workspace_rect(self, screen: Rect) -> Rect:
+    def workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
         widgets. The file tree, when visible, eats space on the right; the
         terminal panes and debug pane, when active, eat space at the bottom
@@ -1237,7 +1237,7 @@ struct Desktop(Movable):
             bottom = 1
         return Rect(0, 1, right, bottom)
 
-    fn debug_pane_rect(self, screen: Rect) -> Rect:
+    def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked debug pane lives — above the status
         bar (and the tab bar, when visible) which together always
         sit at the screen's bottom edge."""
@@ -1249,7 +1249,7 @@ struct Desktop(Movable):
             top = 1
         return Rect(0, top, screen.b.x, screen.b.y - chrome)
 
-    fn _debug_pane_height(self, screen: Rect) -> Int:
+    def _debug_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the debug pane, considering
         its window state. NORMAL → ``preferred_height`` (user's drag
         target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
@@ -1259,7 +1259,7 @@ struct Desktop(Movable):
             screen, self._bottom_chrome_height(screen),
         )
 
-    fn terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
+    def terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
         """Where ``terminal_panes[idx]`` paints. Each pane in the stack
         gets its own slice; pane 0 sits on top, the last pane sits
         just above the debug pane (when visible) and the status / tab
@@ -1299,7 +1299,7 @@ struct Desktop(Movable):
             return Rect.empty()
         return Rect(0, top, screen.b.x, bottom)
 
-    fn _terminal_stack_height(self, screen: Rect) -> Int:
+    def _terminal_stack_height(self, screen: Rect) -> Int:
         """Sum of ``effective_height`` across every terminal pane.
         Zero when the list is empty — the workspace then reclaims
         that row range."""
@@ -1314,7 +1314,7 @@ struct Desktop(Movable):
             )
         return total
 
-    fn _terminal_pane_at(self, pos: Point, screen: Rect) -> Int:
+    def _terminal_pane_at(self, pos: Point, screen: Rect) -> Int:
         """Return the index of the terminal pane whose painted rect
         contains ``pos``, or ``-1`` if no pane is hit. Walks panes
         in painted order; rects can't overlap so the first match wins."""
@@ -1323,7 +1323,7 @@ struct Desktop(Movable):
                 return i
         return -1
 
-    fn tab_bar_rect(self, screen: Rect) -> Rect:
+    def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
         if not self.config.tab_bar:
@@ -1333,7 +1333,7 @@ struct Desktop(Movable):
             return Rect.empty()
         return Rect(0, y, screen.b.x, y + 1)
 
-    fn pointer_shape_at(self, pos: Point, screen: Rect) -> String:
+    def pointer_shape_at(self, pos: Point, screen: Rect) -> String:
         """Mouse-pointer icon the host should display at ``pos``.
 
         ``"text"`` over a text-input region (editor body, prompt input,
@@ -1422,7 +1422,7 @@ struct Desktop(Movable):
                 k -= 1
         return String("default")
 
-    fn _prompt_input_rect(self, screen: Rect) -> Rect:
+    def _prompt_input_rect(self, screen: Rect) -> Rect:
         """Mirror of the layout in ``Prompt.paint``: the input row is the
         middle line of the centered 3-row box. Kept here so we can hit-
         test without forcing ``Prompt`` to retain layout state."""
@@ -1433,7 +1433,7 @@ struct Desktop(Movable):
         var y = (screen.b.y - 3) // 2
         return Rect(x + 1, y + 1, x + width - 1, y + 2)
 
-    fn _apply_view_config(mut self):
+    def _apply_view_config(mut self):
         """Push ``self.config`` into every editor window. Called every
         paint so the global preference is the source of truth no matter
         who created the editor (Desktop API, host calling
@@ -1570,7 +1570,7 @@ struct Desktop(Movable):
                         debug_log(String("[_apply_view_config] diff done"))
         debug_log(String("[_apply_view_config] EXIT"))
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
@@ -1760,7 +1760,7 @@ struct Desktop(Movable):
         # via ``_capture_view_state_for_window``.
         self._save_view_states_if_changed()
 
-    fn _shortcut_for_action(self, action: String) -> String:
+    def _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
         (matching the dispatch order — newest wins). Empty string if none."""
         if len(action.as_bytes()) == 0:
@@ -1772,7 +1772,7 @@ struct Desktop(Movable):
             i -= 1
         return String("")
 
-    fn _refresh_shortcuts(mut self):
+    def _refresh_shortcuts(mut self):
         for m in range(len(self.menu_bar.menus)):
             for it in range(len(self.menu_bar.menus[m].items)):
                 if self.menu_bar.menus[m].items[it].is_separator:
@@ -1783,7 +1783,7 @@ struct Desktop(Movable):
 
     # --- opening files -----------------------------------------------------
 
-    fn open_file(mut self, path: String, screen: Rect) raises:
+    def open_file(mut self, path: String, screen: Rect) raises:
         """Open ``path`` as an editor window using framework defaults.
 
         Sizing: 80% of the current workspace, clamped to the workspace and
@@ -1843,7 +1843,7 @@ struct Desktop(Movable):
             self.windows.windows[idx].toggle_maximize(workspace)
         self._maybe_lsp_open(len(self.windows.windows) - 1)
 
-    fn open_file_at(
+    def open_file_at(
         mut self, path: String, line: Int, character: Int, screen: Rect,
     ) raises:
         """Open ``path`` (or focus the existing window for it) and place
@@ -1879,7 +1879,7 @@ struct Desktop(Movable):
             self.windows.windows[existing].interior(),
         )
 
-    fn new_file(mut self, screen: Rect):
+    def new_file(mut self, screen: Rect):
         """Open a fresh, file-less editor window using the same placement
         rules as ``open_file``. The first window is titled ``Untitled``;
         subsequent ones get a numeric suffix so the dynamic Window menu
@@ -1898,7 +1898,7 @@ struct Desktop(Movable):
             var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
 
-    fn _maybe_lsp_open(mut self, idx: Int):
+    def _maybe_lsp_open(mut self, idx: Int):
         """If the window at ``idx`` is an editor for a recognized source
         file type, ensure the matching LSP server is started and inform
         it of this document.
@@ -1951,7 +1951,7 @@ struct Desktop(Movable):
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
         debug_log(String("[_maybe_lsp_open] after notify_opened"))
 
-    fn _maybe_prompt_lsp_install(mut self, ext: String):
+    def _maybe_prompt_lsp_install(mut self, ext: String):
         """Open the install prompt when ``ext`` belongs to a known language
         whose binary isn't on ``$PATH``.
 
@@ -2001,7 +2001,7 @@ struct Desktop(Movable):
             + spec.install_hint + String("'")
         )
 
-    fn _maybe_prompt_grammar_install(mut self, ext: String):
+    def _maybe_prompt_grammar_install(mut self, ext: String):
         """Open the "Install <lang> grammar?" prompt when ``ext`` belongs
         to a language in the downloadable-grammar registry and isn't
         already installed under ``~/.config/turbokod/languages/``.
@@ -2040,7 +2040,7 @@ struct Desktop(Movable):
                 + String(" syntax grammar?")
         )
 
-    fn _start_grammar_install(mut self, lang: String):
+    def _start_grammar_install(mut self, lang: String):
         """Spawn the curl that drops the grammar JSON into the user
         config dir. Single-slot ``InstallRunner`` — if an LSP or docs
         install is already running, surface the conflict on the status
@@ -2074,7 +2074,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _on_grammar_install_complete(
+    def _on_grammar_install_complete(
         mut self, result: InstallResult, screen: Rect,
     ):
         """React to a grammar-download finishing. Success: invalidate
@@ -2132,7 +2132,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _start_dict_install(mut self, lang: String):
+    def _start_dict_install(mut self, lang: String):
         """Spawn the curl that drops a wordlist into the user dictionary
         dir. Single-slot ``InstallRunner`` — surfaces a status-bar
         conflict if another install is in flight rather than queueing,
@@ -2166,7 +2166,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _do_dict_remove(mut self, lang: String):
+    def _do_dict_remove(mut self, lang: String):
         """Delete the on-disk wordlist for ``lang`` and reload the
         speller so the words drop out of the in-memory bucket set.
         Sync — no async work to do, so we don't go through
@@ -2192,7 +2192,7 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
-    fn _on_dict_install_complete(
+    def _on_dict_install_complete(
         mut self, result: InstallResult, screen: Rect,
     ):
         """React to a dictionary download finishing. Success: reload the
@@ -2229,7 +2229,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _pick_lsp_argv(self, spec_idx: Int) -> List[String]:
+    def _pick_lsp_argv(self, spec_idx: Int) -> List[String]:
         """The argv we would spawn for ``lsp_specs[spec_idx]`` *right
         now* — first candidate whose binary is on ``$PATH``, with the
         Mojo ``-I`` include flags appended for the Mojo case. Returns
@@ -2263,7 +2263,7 @@ struct Desktop(Movable):
                 argv.append(includes[i])
         return argv^
 
-    fn _ensure_lsp_for_extension(mut self, ext: String) -> Int:
+    def _ensure_lsp_for_extension(mut self, ext: String) -> Int:
         """Spawn (or look up) an LSP manager for files with extension
         ``ext``. Returns the index into ``lsp_managers`` of the manager,
         or ``-1`` for unsupported file types or when no candidate
@@ -2294,7 +2294,7 @@ struct Desktop(Movable):
         self.lsp_languages.append(lang)
         return len(self.lsp_managers) - 1
 
-    fn _lsp_for_path(self, path: String) -> Int:
+    def _lsp_for_path(self, path: String) -> Int:
         """Index into ``lsp_managers`` of the (already-spawned) server
         handling ``path``, or ``-1`` if none has been spawned for that
         file's extension yet."""
@@ -2311,7 +2311,7 @@ struct Desktop(Movable):
                 return i
         return -1
 
-    fn _default_window_rect(self, workspace: Rect) -> Rect:
+    def _default_window_rect(self, workspace: Rect) -> Rect:
         var w80 = (workspace.width() * 80) // 100
         var h80 = (workspace.height() * 80) // 100
         if w80 < MIN_WIN_W:
@@ -2334,13 +2334,13 @@ struct Desktop(Movable):
         var ay = workspace.a.y + dy
         return Rect(ax, ay, ax + w80, ay + h80)
 
-    fn _frontmost_maximized(self) -> Bool:
+    def _frontmost_maximized(self) -> Bool:
         if self.windows.focused < 0 \
                 or self.windows.focused >= len(self.windows.windows):
             return False
         return self.windows.windows[self.windows.focused].is_maximized
 
-    fn _open_compare_with_clipboard(mut self, screen: Rect):
+    def _open_compare_with_clipboard(mut self, screen: Rect):
         """Open a read-only window with a unified diff of the focused
         editor's selection against the system clipboard. With no selection,
         compare the entire buffer. The "old" side (``-``) is the
@@ -2381,7 +2381,7 @@ struct Desktop(Movable):
         if was_max:
             self.windows.windows[new_idx].toggle_maximize(workspace)
 
-    fn process_external_changes(mut self, screen: Rect) raises:
+    def process_external_changes(mut self, screen: Rect) raises:
         """Re-stat every editor window and react to any out-of-band
         write. Clean reloads and clean 3-way merges happen silently
         inside the editors themselves; for every window where the
@@ -2421,7 +2421,7 @@ struct Desktop(Movable):
 
     # --- dynamic Window menu -----------------------------------------------
 
-    fn _rebuild_window_menu(mut self):
+    def _rebuild_window_menu(mut self):
         """Replace the Window menu's items with the current window list +
         a separator + Maximize all + Restore all."""
         if self._window_menu_idx < 0:
@@ -2440,7 +2440,7 @@ struct Desktop(Movable):
 
     # --- project state -----------------------------------------------------
 
-    fn detect_project_from(mut self, path: String):
+    def detect_project_from(mut self, path: String):
         """Set the project to the ``.git`` ancestor of ``path``, if any.
 
         No-op if a project is already set — the user closes it explicitly
@@ -2452,7 +2452,7 @@ struct Desktop(Movable):
         if found:
             self._set_project(found.value())
 
-    fn load_config_from_disk(mut self):
+    def load_config_from_disk(mut self):
         """Replace ``config`` with the user's saved preferences from
         ``~/.config/turbokod/config.json`` (or defaults if the file is
         missing / unreadable). The host calls this once at startup;
@@ -2473,7 +2473,7 @@ struct Desktop(Movable):
         if not self.project:
             self._reset_no_project_menu()
 
-    fn _rebuild_lsp_specs(mut self):
+    def _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
         overrides in ``config.language_servers``. For any already-
         spawned manager whose argv no longer matches the new
@@ -2520,7 +2520,7 @@ struct Desktop(Movable):
             _ = self.lsp_languages.pop(mgr_idx)
             self._retry_lsp_for_language(lang)
 
-    fn open_project(mut self, path: String):
+    def open_project(mut self, path: String):
         """Pick a project root for ``path``.
 
         Walks up from ``path`` looking for the nearest ``.git`` ancestor;
@@ -2544,7 +2544,7 @@ struct Desktop(Movable):
             self._set_project(path)
         debug_log(String("[open_project] EXIT"))
 
-    fn close_project(mut self):
+    def close_project(mut self):
         # Flush any pending view-state changes for the still-open editor
         # windows while we still know the project root. After
         # ``self.project`` is cleared (and the windows themselves
@@ -2588,7 +2588,7 @@ struct Desktop(Movable):
         # the project then restores exactly these files.
         self._close_all_editor_windows()
 
-    fn _reset_no_project_menu(mut self):
+    def _reset_no_project_menu(mut self):
         """Populate the right-aligned project menu for the no-project
         state: label "project", "Open recent project..." on top, then a
         separator and up to 10 direct-pick entries drawn from
@@ -2624,7 +2624,7 @@ struct Desktop(Movable):
         if self.menu_bar.open_idx == self._project_menu_idx:
             self.menu_bar.open_idx = -1
 
-    fn _close_all_editor_windows(mut self):
+    def _close_all_editor_windows(mut self):
         """Drop every editor window from the manager, leaving non-editor
         windows (host-added panels / demo content) alone. Rebuilds
         ``z_order`` and ``focused`` against the surviving windows."""
@@ -2656,7 +2656,7 @@ struct Desktop(Movable):
         # land at the workspace origin instead of inheriting an offset.
         self._open_count = 0
 
-    fn _set_project(mut self, path: String):
+    def _set_project(mut self, path: String):
         debug_log(String("[_set_project] ENTER path=") + path)
         # Resolve so a label like ``.`` becomes the actual directory name,
         # and so the stored project path is canonical for downstream
@@ -2755,7 +2755,7 @@ struct Desktop(Movable):
 
     # --- session restore / save -------------------------------------------
 
-    fn _snapshot_session(self) -> Session:
+    def _snapshot_session(self) -> Session:
         """Build a ``Session`` describing every file-backed editor window
         currently open. Non-editor windows and Untitled buffers (no
         ``file_path``) are skipped — they have nothing meaningful to
@@ -2819,7 +2819,7 @@ struct Desktop(Movable):
             session.focused = -1
         return session^
 
-    fn _snapshot_breakpoints(self) -> List[StoredBreakpoint]:
+    def _snapshot_breakpoints(self) -> List[StoredBreakpoint]:
         """Pull the current breakpoint set off the DAP manager into the
         flat ``StoredBreakpoint`` list we serialize. Iterating via the
         index API rather than returning the manager's parallel lists
@@ -2837,7 +2837,7 @@ struct Desktop(Movable):
             ))
         return out^
 
-    fn _save_breakpoints_if_changed(mut self):
+    def _save_breakpoints_if_changed(mut self):
         """Re-encode the current breakpoint set and write it to disk
         only when the encoding differs from the previously-written one.
         Skipped when no project is open — nowhere to write."""
@@ -2850,7 +2850,7 @@ struct Desktop(Movable):
         if save_breakpoints(self.project.value(), snapshot):
             self._last_breakpoints_json = encoded
 
-    fn _find_view_state(self, path: String) -> Int:
+    def _find_view_state(self, path: String) -> Int:
         """Index of the ``_view_states`` entry whose ``path`` equals
         ``path``, or ``-1`` if absent. Paths in the list are absolute
         (the loader resolves project-relative paths against the project
@@ -2861,7 +2861,7 @@ struct Desktop(Movable):
                 return i
         return -1
 
-    fn _capture_view_state_for_window(mut self, idx: Int):
+    def _capture_view_state_for_window(mut self, idx: Int):
         """Update ``_view_states`` from window ``idx`` right before that
         window is removed. Without this the next paint's refresh would
         see the window already gone and the user's last scroll position
@@ -2892,7 +2892,7 @@ struct Desktop(Movable):
                 self.windows.windows[idx].editor.scroll_y,
             ))
 
-    fn _refresh_view_states_from_windows(mut self):
+    def _refresh_view_states_from_windows(mut self):
         """Copy scroll + cursor off every file-backed editor window into
         ``_view_states`` so the next ``save_view_states_if_changed``
         captures the latest values. Untitled buffers (no ``file_path``)
@@ -2924,7 +2924,7 @@ struct Desktop(Movable):
                     self.windows.windows[i].editor.scroll_y,
                 ))
 
-    fn _save_view_states_if_changed(mut self):
+    def _save_view_states_if_changed(mut self):
         """Refresh entries from the live editors, then re-encode and
         write the per-user view-states file only when the encoding
         differs from the previously-written one. Skipped when no
@@ -2940,7 +2940,7 @@ struct Desktop(Movable):
         if save_view_states(self.project.value(), self._view_states):
             self._last_view_states_json = encoded
 
-    fn _save_session_if_changed(mut self):
+    def _save_session_if_changed(mut self):
         """Re-encode the current session and write it to disk only when
         the encoding differs from the previously-written one. Skipped
         when no project is open — nowhere to write. Closing the last
@@ -2958,7 +2958,7 @@ struct Desktop(Movable):
         if save_session(self.project.value(), session):
             self._last_session_json = encoded
 
-    fn _restore_session(mut self, screen: Rect):
+    def _restore_session(mut self, screen: Rect):
         """Recreate windows from ``<project>/.turbokod/session.json``.
 
         Files already open are left in place (so calling this from the
@@ -3116,7 +3116,7 @@ struct Desktop(Movable):
         self._last_session_json = encode_session(self._snapshot_session())
         debug_log(String("[_restore_session] EXIT"))
 
-    fn _reapply_session_rects(mut self, screen: Rect):
+    def _reapply_session_rects(mut self, screen: Rect):
         """Re-apply saved rects from ``_pending_restore_refit`` to any
         already-open editor windows whose ``file_path`` matches a
         session entry. Used to recover from a startup-time clip when
@@ -3161,7 +3161,7 @@ struct Desktop(Movable):
         # doesn't re-write the file with the now-correctly-fit bytes.
         self._last_session_json = encode_session(self._snapshot_session())
 
-    fn _toggle_file_tree(mut self):
+    def _toggle_file_tree(mut self):
         if self._project_menu_idx < 0 or not self.project:
             return
         if self.file_tree.visible:
@@ -3175,7 +3175,7 @@ struct Desktop(Movable):
 
     # --- events ------------------------------------------------------------
 
-    fn handle_event(mut self, event: Event, screen: Rect) -> Optional[String]:
+    def handle_event(mut self, event: Event, screen: Rect) -> Optional[String]:
         """Single entry point for every event the app receives.
 
         The Desktop handles the prompt-modal lifecycle, mouse routing, and
@@ -3560,7 +3560,7 @@ struct Desktop(Movable):
             self._pending_restore_refit = Optional[Session]()
         return Optional[String]()
 
-    fn _handle_key(mut self, event: Event, screen: Rect) -> Optional[String]:
+    def _handle_key(mut self, event: Event, screen: Rect) -> Optional[String]:
         # Capture and reset the one-shot ESC-prefix flag so this keystroke
         # gets at most one chance to act as a mnemonic via that path.
         var was_armed = self._esc_armed
@@ -3660,7 +3660,7 @@ struct Desktop(Movable):
         self._maybe_open_spell_menu()
         return Optional[String]()
 
-    fn _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
+    def _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
         var k = Int(key)
         if 0x41 <= k and k <= 0x5A:
             k = k + 0x20
@@ -3680,7 +3680,7 @@ struct Desktop(Movable):
                 return True
         return False
 
-    fn register_hotkey(
+    def register_hotkey(
         mut self, key: UInt32, mods: UInt8, action: String,
     ):
         """Bind ``(key, mods)`` to ``action``.
@@ -3692,7 +3692,7 @@ struct Desktop(Movable):
         """
         self._hotkeys.append(Hotkey(key, mods, action))
 
-    fn dispatch_action(
+    def dispatch_action(
         mut self, action: String, screen: Rect,
     ) -> Optional[String]:
         """Execute a framework-recognized action; pass anything else back.
@@ -4158,7 +4158,7 @@ struct Desktop(Movable):
 
     # --- LSP tick ---------------------------------------------------------
 
-    fn lsp_tick(mut self, screen: Rect):
+    def lsp_tick(mut self, screen: Rect):
         """Drain editor → LSP → editor for the focused frame.
 
         Step 1: if the focused editor has a pending Cmd+click definition
@@ -4317,7 +4317,7 @@ struct Desktop(Movable):
             self._on_install_complete(maybe_install.value(), screen)
         self._refresh_lsp_status()
 
-    fn _on_install_complete(
+    def _on_install_complete(
         mut self, result: InstallResult, screen: Rect,
     ):
         """React to an install run finishing. Success: flash the status
@@ -4371,7 +4371,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _retry_lsp_for_language(mut self, lang: String):
+    def _retry_lsp_for_language(mut self, lang: String):
         """After a successful install, re-attempt LSP startup for any
         editors whose language matches ``lang``. Cheap: ``open_file`` and
         ``_maybe_lsp_open`` both go through ``_ensure_lsp_for_extension``
@@ -4391,7 +4391,7 @@ struct Desktop(Movable):
                 continue
             self._maybe_lsp_open(i)
 
-    fn _dispatch_completion_request(
+    def _dispatch_completion_request(
         mut self, win_idx: Int, var req: CompletionRequest,
     ):
         """Forward a Ctrl+Space completion request to the right server.
@@ -4421,7 +4421,7 @@ struct Desktop(Movable):
             path, req.row, req.col, text^, req.manual,
         )
 
-    fn _dispatch_definition_request(
+    def _dispatch_definition_request(
         mut self, win_idx: Int, var req: DefinitionRequest,
     ):
         """Forward a Cmd+click definition request to the right server,
@@ -4465,7 +4465,7 @@ struct Desktop(Movable):
                 Attr(BLACK, LIGHT_GRAY),
             )
 
-    fn _open_lsp_info_window(mut self, screen: Rect):
+    def _open_lsp_info_window(mut self, screen: Rect):
         """Open a window summarizing every spawned LSP — language id,
         actual command line, state, root, and (for python) which
         candidates were considered. Triggered by clicking the LSP
@@ -4571,7 +4571,7 @@ struct Desktop(Movable):
             var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
 
-    fn _refresh_lsp_status(mut self):
+    def _refresh_lsp_status(mut self):
         """Show the focused editor's language-server state on the right
         side of the status bar. The prefix carries the language id so
         the user can tell whether a slow response is from mojo-lsp or
@@ -4594,7 +4594,7 @@ struct Desktop(Movable):
 
     # --- DAP wiring ------------------------------------------------------
 
-    fn dap_tick(mut self, screen: Rect):
+    def dap_tick(mut self, screen: Rect):
         """Drive the DAP session forward and reflect its state in the UI.
 
         Called once per frame by the host (just like ``lsp_tick``).
@@ -4950,7 +4950,7 @@ struct Desktop(Movable):
         if self.dap.is_running() or self.dap.is_stopped():
             self.dap.client.process.trace(String("dap_tick done"))
 
-    fn terminal_tick(mut self):
+    def terminal_tick(mut self):
         """Drain every docked terminal's shell output and dispatch any
         pending chrome-command click. Called once per frame by the
         host loop alongside ``lsp_tick`` / ``dap_tick``.
@@ -4976,7 +4976,7 @@ struct Desktop(Movable):
                 _ = self.terminal_panes[i].handle_command(cmd)
             i += 1
 
-    fn _focus_dock(mut self, kind: UInt8, idx: Int = 0):
+    def _focus_dock(mut self, kind: UInt8, idx: Int = 0):
         """Single source of truth for which docked pane owns keyboard
         focus. Sets the matching pane's ``focused`` flag and clears
         every other one so exactly one widget is keyboard-live per
@@ -4991,7 +4991,7 @@ struct Desktop(Movable):
                 kind == DOCK_TERMINAL and i == idx
             )
 
-    fn _any_dock_focused(self) -> Bool:
+    def _any_dock_focused(self) -> Bool:
         """True when any docked pane currently owns keyboard focus —
         used to dim the editor-window chrome so the visible focus
         matches the keyboard target."""
@@ -5002,7 +5002,7 @@ struct Desktop(Movable):
                 return True
         return False
 
-    fn _open_terminal_pane(mut self):
+    def _open_terminal_pane(mut self):
         """Append a fresh ``TerminalPane`` to the stack and route
         focus to it through ``_focus_dock`` so the new pane is
         keyboard-live immediately and every other dock + sibling
@@ -5020,7 +5020,7 @@ struct Desktop(Movable):
         self.terminal_panes.append(pane^)
         self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
 
-    fn _close_all_terminal_panes(mut self):
+    def _close_all_terminal_panes(mut self):
         """Tear down every terminal pane (SIGTERM + close fds via
         ``pane.close``), then clear the list. Used by
         ``TERMINAL_TOGGLE`` to hide the stack as a unit."""
@@ -5028,7 +5028,7 @@ struct Desktop(Movable):
             self.terminal_panes[i].close()
         self.terminal_panes = List[TerminalPane]()
 
-    fn _build_debug_pane_commands(self) -> List[TitleCommand]:
+    def _build_debug_pane_commands(self) -> List[TitleCommand]:
         """Title-strip buttons for the debug pane.
 
         DEBUG mode (DAP active) shows the per-state debugger controls
@@ -5082,7 +5082,7 @@ struct Desktop(Movable):
             ))
         return out^
 
-    fn _mark_subtle_frames(
+    def _mark_subtle_frames(
         self, var frames: List[DapStackFrame],
     ) -> List[DapStackFrame]:
         """Tag every frame outside the project root as subtle so the
@@ -5115,7 +5115,7 @@ struct Desktop(Movable):
             out.append(f)
         return out^
 
-    fn _rebuild_pane_inspect(mut self, var locals: List[DapVariable]):
+    def _rebuild_pane_inspect(mut self, var locals: List[DapVariable]):
         """Rebuild the inspect rows from the cached stack + given locals
         + cached watch results. Called whenever any one of those three
         inputs changes; the others are pulled from cached state so the
@@ -5145,7 +5145,7 @@ struct Desktop(Movable):
             cur_idx,
         )
 
-    fn _refresh_watches(mut self):
+    def _refresh_watches(mut self):
         """Fire ``evaluate`` for every watch expression against the
         current frame. Results land asynchronously and are folded back
         in via ``_fold_watch_results``."""
@@ -5158,7 +5158,7 @@ struct Desktop(Movable):
                 String("watch"),
             )
 
-    fn _fold_watch_results(mut self):
+    def _fold_watch_results(mut self):
         """Drain DAP evaluate responses, splice them into the parallel
         ``_dap_watch_values`` list, and rebuild the pane so the new
         values show up. Watch results identify themselves by the
@@ -5189,7 +5189,7 @@ struct Desktop(Movable):
         # straight into the row text for ``PANE_ROW_WATCH`` rows.
         self._patch_pane_watches()
 
-    fn _patch_pane_watches(mut self):
+    def _patch_pane_watches(mut self):
         """In-place update of the watch rows' text in the pane.
         Avoids a full rebuild (which would collapse any expanded
         variable rows). Called after watch values change."""
@@ -5207,7 +5207,7 @@ struct Desktop(Movable):
                 k += 1
             i += 1
 
-    fn add_watch(mut self, var expression: String):
+    def add_watch(mut self, var expression: String):
         """Add a watch expression. Evaluates immediately if the session
         is stopped. Can be called from menu actions / hotkey handlers."""
         self._dap_watch_exprs.append(expression^)
@@ -5222,7 +5222,7 @@ struct Desktop(Movable):
         self._rebuild_pane_inspect(List[DapVariable]())
         self._refresh_watches()
 
-    fn remove_watch(mut self, expression: String):
+    def remove_watch(mut self, expression: String):
         var new_exprs = List[String]()
         var new_values = List[String]()
         for k in range(len(self._dap_watch_exprs)):
@@ -5234,7 +5234,7 @@ struct Desktop(Movable):
         self._dap_watch_exprs = new_exprs^
         self._dap_watch_values = new_values^
 
-    fn _refresh_dap_status(mut self):
+    def _refresh_dap_status(mut self):
         """When a debug session is active, surface its state on the right
         side of the status bar (sharing space with the LSP indicator —
         whichever was set most recently wins, which is fine since both
@@ -5248,7 +5248,7 @@ struct Desktop(Movable):
                 attr = Attr(BLACK, LIGHT_GRAY)
             self.status_bar.set_message(self.dap.status_summary(), attr)
 
-    fn _debug_open_condition_prompt(mut self):
+    def _debug_open_condition_prompt(mut self):
         """Shift+F9: prompt for a breakpoint condition on the focused
         editor's cursor row. Pre-fills with any existing condition so
         users can edit rather than re-type. Path + line are stashed in
@@ -5271,7 +5271,7 @@ struct Desktop(Movable):
         var label = String("Break when (line ") + String(line + 1) + String("): ")
         self.prompt.open(label, existing)
 
-    fn _toggle_raised_exceptions(mut self):
+    def _toggle_raised_exceptions(mut self):
         """Add or remove the ``raised`` exception filter. The
         ``uncaught`` filter is left as-is — that's the always-on
         default, while ``raised`` is the noisier opt-in."""
@@ -5289,7 +5289,7 @@ struct Desktop(Movable):
             new_filters.append(String("raised"))
         self.dap.set_exception_filters(new_filters^)
 
-    fn _debug_toggle_breakpoint(mut self):
+    def _debug_toggle_breakpoint(mut self):
         """F9: toggle a breakpoint at the focused editor's cursor row.
 
         Local list mutates immediately; the manager will resend the
@@ -5310,7 +5310,7 @@ struct Desktop(Movable):
         var line = self.windows.windows[idx].editor.cursor_row
         self.dap.toggle_breakpoint(path, line)
 
-    fn _debug_run_to_cursor(mut self):
+    def _debug_run_to_cursor(mut self):
         """Cmd+5: resume execution and stop at the focused editor's
         cursor row. No-op when not paused / no focused editor / unsaved
         file."""
@@ -5327,7 +5327,7 @@ struct Desktop(Movable):
         var line = self.windows.windows[idx].editor.cursor_row
         _ = self.dap.run_to_cursor(path, line)
 
-    fn _debug_start_or_continue(mut self):
+    def _debug_start_or_continue(mut self):
         """F5: start a session if none is active, otherwise resume.
 
         When the project has an active target with ``debug_language``
@@ -5429,7 +5429,7 @@ struct Desktop(Movable):
 
     # --- target run / debug ----------------------------------------------
 
-    fn _open_targets_config(mut self):
+    def _open_targets_config(mut self):
         """Open the structured targets-configuration dialog.
 
         Editing happens against a private copy inside ``TargetsDialog``;
@@ -5452,7 +5452,7 @@ struct Desktop(Movable):
         snapshot.active = self.targets.active
         self.targets_dialog.open(snapshot^)
 
-    fn _on_targets_dialog_submit(mut self):
+    def _on_targets_dialog_submit(mut self):
         """Copy the dialog's edited list back into the host and
         persist it. Called from the modal-dispatch loop when the
         user clicks Save / hits Enter on the Save button."""
@@ -5463,7 +5463,7 @@ struct Desktop(Movable):
         _ = write_all_targets(self.project.value(), self.targets)
         self.targets_dialog.close()
 
-    fn _target_run(mut self):
+    def _target_run(mut self):
         """Cmd+R: spawn the active target's ``run_command``.
 
         If a debug session is running for the same target, terminate
@@ -5538,7 +5538,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _target_debug(mut self):
+    def _target_debug(mut self):
         """Cmd+D: launch the active target under the DAP adapter for
         its ``debug_language``.
 
@@ -5634,7 +5634,7 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
-    fn _target_test(mut self):
+    def _target_test(mut self):
         """Cmd+T: run the project's test suite.
 
         Unlike ``_target_run`` / ``_target_debug``, this doesn't read
@@ -5719,7 +5719,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn target_tick(mut self):
+    def target_tick(mut self):
         """Drain the run session's output into the debug pane and
         reap on exit. Called once per frame by the host (paired with
         ``lsp_tick`` / ``dap_tick``).
@@ -5753,7 +5753,7 @@ struct Desktop(Movable):
             # screen as ``run_session.is_active()`` flips to False.
             self._run_output_held = True
 
-    fn _paint_tab_bar(mut self, mut canvas: Canvas, screen: Rect):
+    def _paint_tab_bar(mut self, mut canvas: Canvas, screen: Rect):
         """Render one tab per open window directly above the status
         bar when ``config.tab_bar`` is on. Hidden when no rect is
         carved out (toggle off, or terminal too short)."""
@@ -5768,7 +5768,7 @@ struct Desktop(Movable):
             items.append(TabBarItem(titles[i], i, dirty))
         self.tab_bar.paint(canvas, rect, items, self.windows.focused)
 
-    fn _refresh_target_tabs(mut self):
+    def _refresh_target_tabs(mut self):
         """Push the current target list + active selection into the
         status bar so the tabs render with up-to-date state. Called
         every paint — cheap (one short list)."""
@@ -5785,7 +5785,7 @@ struct Desktop(Movable):
             tabs.append(StatusTab(t.name, running, debugging))
         self.status_bar.set_tabs(tabs^, self.targets.active)
 
-    fn _jump_to(mut self, target: DefinitionResolved, screen: Rect):
+    def _jump_to(mut self, target: DefinitionResolved, screen: Rect):
         """Focus the window for ``target.path`` (opening it if needed) and
         move the cursor to ``(line, character)``."""
         var existing = self._find_window_for_path(target.path)
@@ -5808,7 +5808,7 @@ struct Desktop(Movable):
             self.windows.windows[existing].interior(),
         )
 
-    fn _compute_subdued_windows(self) -> List[Bool]:
+    def _compute_subdued_windows(self) -> List[Bool]:
         """One flag per window: True means "paint with dim chrome."
 
         A window is subdued when its file lives outside the project tree,
@@ -5831,7 +5831,7 @@ struct Desktop(Movable):
             out.append(self._is_window_subdued(self.windows.windows[i], root))
         return out^
 
-    fn _is_window_subdued(self, win: Window, root_with_slash: String) -> Bool:
+    def _is_window_subdued(self, win: Window, root_with_slash: String) -> Bool:
         if not win.is_editor:
             return False
         var path = win.editor.file_path
@@ -5862,7 +5862,7 @@ struct Desktop(Movable):
                 return True
         return False
 
-    fn _find_window_for_path(self, path: String) -> Int:
+    def _find_window_for_path(self, path: String) -> Int:
         """Return the index of an existing editor window whose file_path
         matches ``path`` (raw or canonicalized), or -1."""
         var canon = realpath(path)
@@ -5878,7 +5878,7 @@ struct Desktop(Movable):
 
     # --- recents ----------------------------------------------------------
 
-    fn _track_recent_focus(mut self):
+    def _track_recent_focus(mut self):
         """Promote the focused editor's file path to the front of
         ``_recent_files`` and persist the change to ``config.recent_files``
         so the "Open Recent" picker keeps the list across sessions.
@@ -5913,7 +5913,7 @@ struct Desktop(Movable):
 
     # --- navigation history ---------------------------------------------
 
-    fn _track_nav_position(mut self):
+    def _track_nav_position(mut self):
         """Per-frame: record the focused editor's cursor position when
         it has drifted far enough from the last recorded entry.
 
@@ -5956,7 +5956,7 @@ struct Desktop(Movable):
                 return
         self._push_nav_point(NavPoint(path, row, col))
 
-    fn _push_nav_point(mut self, p: NavPoint):
+    def _push_nav_point(mut self, p: NavPoint):
         """Append ``p`` to the nav stack, truncating any forward branch
         and capping the total length. No-op if ``p`` matches the
         current entry exactly (defensive against double-recording the
@@ -5978,7 +5978,7 @@ struct Desktop(Movable):
             _ = self._nav_stack.pop(0)
             self._nav_pos -= 1
 
-    fn navigate_back(mut self, screen: Rect):
+    def navigate_back(mut self, screen: Rect):
         """Cmd+[: jump to the previous nav-history entry, if any."""
         if self._nav_pos <= 0:
             return
@@ -5986,7 +5986,7 @@ struct Desktop(Movable):
         var p = self._nav_stack[self._nav_pos]
         self._jump_to_nav(p, screen)
 
-    fn navigate_forward(mut self, screen: Rect):
+    def navigate_forward(mut self, screen: Rect):
         """Cmd+]: jump to the next nav-history entry, if any."""
         if self._nav_pos < 0 \
                 or self._nav_pos >= len(self._nav_stack) - 1:
@@ -5995,7 +5995,7 @@ struct Desktop(Movable):
         var p = self._nav_stack[self._nav_pos]
         self._jump_to_nav(p, screen)
 
-    fn _jump_to_nav(mut self, p: NavPoint, screen: Rect):
+    def _jump_to_nav(mut self, p: NavPoint, screen: Rect):
         """Focus (or re-open) ``p.file_path`` and place the cursor at
         ``(p.row, p.col)``. Mirrors ``_jump_to`` but takes a NavPoint
         so the call sites stay tidy."""
@@ -6026,7 +6026,7 @@ struct Desktop(Movable):
             self.windows.windows[existing].interior(),
         )
 
-    fn _open_recent_picker(mut self):
+    def _open_recent_picker(mut self):
         """Open the QuickOpen picker over the recents list, skipping the
         currently focused file.
 
@@ -6111,7 +6111,7 @@ struct Desktop(Movable):
             return
         self.quick_open.open_recent(root, rel_entries^, abs_entries^)
 
-    fn _open_recent_projects_picker(mut self):
+    def _open_recent_projects_picker(mut self):
         """Open the QuickOpen picker over ``self.config.recent_projects``.
 
         Skips the currently active project (if any), and silently drops
@@ -6151,14 +6151,14 @@ struct Desktop(Movable):
 
     # --- editor-action helpers --------------------------------------------
 
-    fn _focused_editor_idx(self) -> Int:
+    def _focused_editor_idx(self) -> Int:
         if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
             return -1
         if not self.windows.windows[self.windows.focused].is_editor:
             return -1
         return self.windows.focused
 
-    fn _open_find_prompt(mut self):
+    def _open_find_prompt(mut self):
         """Open the Find prompt, seeded from the focused editor's
         selection when it's a single-line span. The seeded text is
         left fully selected so the next typed key replaces it — the
@@ -6187,7 +6187,7 @@ struct Desktop(Movable):
         )
         self.prompt.set_search_options(self._last_search_opts)
 
-    fn _autosave_all_dirty(mut self):
+    def _autosave_all_dirty(mut self):
         """Save every dirty editor that has a backing path. Called on
         ``EVENT_FOCUS_OUT`` when ``config.auto_save`` is on.
 
@@ -6217,7 +6217,7 @@ struct Desktop(Movable):
             except:
                 pass
 
-    fn _do_save(mut self):
+    def _do_save(mut self):
         var idx = self._focused_editor_idx()
         if idx < 0:
             return
@@ -6247,7 +6247,7 @@ struct Desktop(Movable):
         # No backing file — escalate to Save As.
         self._open_save_as_dialog()
 
-    fn _run_on_save_actions(mut self, saved_path: String):
+    def _run_on_save_actions(mut self, saved_path: String):
         """Walk ``self.config.on_save_actions`` and spawn each entry
         whose ``language_id`` matches the saved file's language (empty
         ``language_id`` matches every file). Each runs as a one-shot
@@ -6278,7 +6278,7 @@ struct Desktop(Movable):
                 continue
             self._spawn_on_save_action(act, saved_path)
 
-    fn _reload_after_on_save(mut self, saved_path: String):
+    def _reload_after_on_save(mut self, saved_path: String):
         """Re-stat the editor backing ``saved_path`` and adopt any new
         bytes the on-save action wrote. Silent on no-change."""
         for i in range(len(self.windows.windows)):
@@ -6292,7 +6292,7 @@ struct Desktop(Movable):
                 pass
             return
 
-    fn _spawn_on_save_action(
+    def _spawn_on_save_action(
         mut self, act: OnSaveAction, saved_path: String,
     ):
         """Fork+exec ``act.program act.args...`` with the configured
@@ -6349,7 +6349,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn save_actions_tick(mut self):
+    def save_actions_tick(mut self):
         """Per-frame reap of ``pending_save_actions``.
 
         For each pending child:
@@ -6398,7 +6398,7 @@ struct Desktop(Movable):
             self._reload_after_on_save(pa.saved_path)
         self.pending_save_actions = still_pending^
 
-    fn _drain_save_action_fd(mut self, fd: Int32):
+    def _drain_save_action_fd(mut self, fd: Int32):
         """Read and discard everything currently available on ``fd``.
         Keeps a chatty on-save child from filling its pipe and stalling
         on its own ``write(2)``. Bounded per call so one runaway child
@@ -6413,7 +6413,7 @@ struct Desktop(Movable):
                 break
             total += n
 
-    fn _maybe_reload_targets(mut self, saved_path: String):
+    def _maybe_reload_targets(mut self, saved_path: String):
         if not self.project:
             return
         var expected = join_path(
@@ -6423,7 +6423,7 @@ struct Desktop(Movable):
         if saved_path == expected:
             self.targets = load_project_targets(self.project.value())
 
-    fn _open_symbol_pick(mut self):
+    def _open_symbol_pick(mut self):
         """Open the Go-to-Symbol picker for the focused editor and kick
         off a ``textDocument/documentSymbol`` request to its language
         server. Picker shows "Loading…" until the response lands."""
@@ -6459,7 +6459,7 @@ struct Desktop(Movable):
         if ok:
             self.symbol_pick.open(path)
 
-    fn _open_find_symbol(mut self):
+    def _open_find_symbol(mut self):
         """Open the Find Symbol picker. Validates rg + project
         availability up front so a misconfigured environment fails
         fast rather than at submit time."""
@@ -6479,7 +6479,7 @@ struct Desktop(Movable):
         self._find_symbol_hit_path = String("")
         self.find_symbol.open(self.project.value())
 
-    fn _submit_find_symbol(mut self, screen: Rect):
+    def _submit_find_symbol(mut self, screen: Rect):
         """Take the picker's selected entry and resolve it via LSP.
 
         The entry's ``(path, line, column)`` is the *first textual
@@ -6532,7 +6532,7 @@ struct Desktop(Movable):
             String("Resolving ") + name + String(" via LSP…"),
         )
 
-    fn _snapshot_or_read(self, path: String) -> Optional[String]:
+    def _snapshot_or_read(self, path: String) -> Optional[String]:
         """Return the editor's live buffer text for ``path`` if any
         window has it open, otherwise the on-disk contents. ``None``
         on read failure.
@@ -6548,7 +6548,7 @@ struct Desktop(Movable):
         except:
             return Optional[String]()
 
-    fn _open_save_as_dialog(mut self):
+    def _open_save_as_dialog(mut self):
         """Open the modal save-as picker, seeded from the focused editor's
         current path (or the project root for an untitled buffer). The
         dialog reuses ``DirBrowser`` for the folder listing — see
@@ -6564,7 +6564,7 @@ struct Desktop(Movable):
 
     # --- documentation lookup -------------------------------------------
 
-    fn _doc_dest_dir(self, slug: String) -> String:
+    def _doc_dest_dir(self, slug: String) -> String:
         """Where the offline DevDocs JSON for ``slug`` lives on disk.
 
         Per-project (under ``<project>/.turbokod/docs/<slug>/``) when a
@@ -6580,7 +6580,7 @@ struct Desktop(Movable):
             join_path(String("docs"), slug),
         )
 
-    fn _ensure_doc_store(mut self, lang: String) -> Int:
+    def _ensure_doc_store(mut self, lang: String) -> Int:
         """Index into ``doc_stores`` of the (possibly already-loaded)
         store for language ``lang``. Returns -1 when the language isn't
         in the docset registry. Doesn't load from disk — that happens
@@ -6597,7 +6597,7 @@ struct Desktop(Movable):
         self.doc_languages.append(lang)
         return len(self.doc_stores) - 1
 
-    fn _open_doc_pick(mut self, screen: Rect):
+    def _open_doc_pick(mut self, screen: Rect):
         """Entry point for ``Ctrl+K`` / "Look up in docs".
 
         Routing tiers (first hit wins):
@@ -6665,7 +6665,7 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
-    fn _open_doc_pick_for_lang(
+    def _open_doc_pick_for_lang(
         mut self, lang: String, focused_editor_idx: Int,
     ) -> Bool:
         """Open the picker for ``lang`` if its docset is installed on
@@ -6705,7 +6705,7 @@ struct Desktop(Movable):
         self._last_doc_lang = spec.language_id
         return True
 
-    fn _seed_doc_query_from_cursor(mut self, win_idx: Int):
+    def _seed_doc_query_from_cursor(mut self, win_idx: Int):
         """Pre-fill the doc picker's query with the identifier under the
         focused editor's cursor (if any). No-op for buffers with no
         identifier under the cursor (whitespace, punctuation, etc.) —
@@ -6725,7 +6725,7 @@ struct Desktop(Movable):
         self.doc_pick.query.set_text(word^)
         self.doc_pick._refilter()
 
-    fn _maybe_prompt_doc_install(mut self, spec: DocSpec):
+    def _maybe_prompt_doc_install(mut self, spec: DocSpec):
         """Open the "Download <X> docs?" prompt. Skipped when another
         modal is open or when the user has already been asked for this
         language this session — same one-nag rule as the LSP installer.
@@ -6756,7 +6756,7 @@ struct Desktop(Movable):
                 + String(" docs (~few MB)?")
         )
 
-    fn _maybe_prompt_debugpy_install(
+    def _maybe_prompt_debugpy_install(
         mut self, language_id: String, venv_dir: String,
         program: String, cwd: String, var args: List[String],
     ) -> Bool:
@@ -6804,7 +6804,7 @@ struct Desktop(Movable):
         )
         return True
 
-    fn _clear_pending_dap_start(mut self):
+    def _clear_pending_dap_start(mut self):
         """Drop the deferred ``dap.start`` parameters. Called whenever
         the prompt-and-install flow exits without retrying — user said
         no, install spawn failed, install errored out."""
@@ -6813,7 +6813,7 @@ struct Desktop(Movable):
         self._pending_dap_args = List[String]()
         self._pending_dap_venv_dir = String("")
 
-    fn _on_debugpy_install_complete(
+    def _on_debugpy_install_complete(
         mut self, result: InstallResult, screen: Rect,
     ):
         """Replay the deferred ``dap.start`` after the debugpy pip
@@ -6878,7 +6878,7 @@ struct Desktop(Movable):
             self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
         self.debug_pane.visible = True
 
-    fn _maybe_install_python_lsp_in_venv(
+    def _maybe_install_python_lsp_in_venv(
         mut self, language_id: String, venv_dir: String,
     ):
         """Kick off ``<venv>/bin/python -m pip install <lsp-package>`` if
@@ -6964,7 +6964,7 @@ struct Desktop(Movable):
         except:
             pass
 
-    fn _start_doc_install(mut self, lang: String):
+    def _start_doc_install(mut self, lang: String):
         """Spawn the ``curl`` install for the docset matching ``lang``,
         through the same ``InstallRunner`` that handles LSP installs.
 
@@ -7000,7 +7000,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _on_doc_install_complete(
+    def _on_doc_install_complete(
         mut self, result: InstallResult, screen: Rect,
     ):
         """React to a docs download finishing. Success: load + open the
@@ -7060,7 +7060,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    fn _try_docs_fallback(
+    def _try_docs_fallback(
         mut self, lang: String, word: String, screen: Rect,
     ) -> Bool:
         """When the LSP returns no definition for ``word``, try to open
@@ -7108,7 +7108,7 @@ struct Desktop(Movable):
         )
         return True
 
-    fn _open_doc_entry(
+    def _open_doc_entry(
         mut self, entry_idx: Int, display: String, screen: Rect,
     ):
         """Render a doc entry's HTML and open it in a read-only viewer
@@ -7152,7 +7152,7 @@ struct Desktop(Movable):
         if was_max:
             self.windows.windows[idx].toggle_maximize(workspace)
 
-    fn _maybe_open_git_gutter_menu(mut self):
+    def _maybe_open_git_gutter_menu(mut self):
         """Drain ``Editor.consume_git_revert_request`` on the focused
         window. The request carries the screen cell that was clicked,
         so the popup opens right under the gutter bar."""
@@ -7166,7 +7166,7 @@ struct Desktop(Movable):
         var req = req_opt.value()
         self.git_gutter_menu.open(req.row, Point(req.anchor_x, req.anchor_y))
 
-    fn _on_git_gutter_menu_submit(mut self):
+    def _on_git_gutter_menu_submit(mut self):
         """Resolve the revert pick: recompute the change block against
         the cached HEAD baseline and apply it to the focused editor.
 
@@ -7205,7 +7205,7 @@ struct Desktop(Movable):
         self.windows.windows[idx].editor.apply_revert_block(block^)
         self.windows.windows[idx].editor.invalidate_git_changes()
 
-    fn _on_lsp_status_menu_submit(mut self):
+    def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action
         is ``Restart LSP``: tear down the focused editor's language
         server and let ``_retry_lsp_for_language`` spawn a fresh one,
@@ -7231,7 +7231,7 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
-    fn _maybe_open_breakpoint_menu(mut self):
+    def _maybe_open_breakpoint_menu(mut self):
         """Drain ``Editor.consume_breakpoint_menu`` on every editor
         window. Right-clicking a BP dot in the gutter sets the request;
         we look up the BP's current state in the DAP manager and open
@@ -7260,7 +7260,7 @@ struct Desktop(Movable):
                 path, req.row, enabled, cond, wait_for, options^,
             )
 
-    fn _wait_for_options_excluding(
+    def _wait_for_options_excluding(
         self, self_path: String, self_line: Int,
     ) -> List[String]:
         """Build the list of trigger-BP keys for the wait-for dropdown,
@@ -7279,7 +7279,7 @@ struct Desktop(Movable):
             out.append(p + String(":") + String(l + 1))
         return out^
 
-    fn _on_breakpoint_menu_submit(mut self):
+    def _on_breakpoint_menu_submit(mut self):
         """Apply the right-click dialog's result, then close. The user
         may have toggled enabled, edited the condition, changed the
         wait-for trigger, or any combination — push each change
@@ -7301,7 +7301,7 @@ struct Desktop(Movable):
         if cur_wait != r.wait_for:
             self.dap.set_breakpoint_wait_for(path, line, r.wait_for)
 
-    fn _on_breakpoint_error_submit(mut self):
+    def _on_breakpoint_error_submit(mut self):
         """Resolve the condition-error dialog. Three buttons:
           * Try again — apply the edited condition. The next
             ``setBreakpoints`` response either lands clean (we close
@@ -7354,7 +7354,7 @@ struct Desktop(Movable):
         self._breakpoint_error_test_pending = False
         self.breakpoint_error.close()
 
-    fn _open_condition_exception_dialog(
+    def _open_condition_exception_dialog(
         mut self, ce: DapConditionException,
     ):
         """Open the condition-error dialog in *runtime* mode against
@@ -7387,7 +7387,7 @@ struct Desktop(Movable):
         self._breakpoint_error_test_pending = False
         self._breakpoint_error_awaiting_response = False
 
-    fn _on_breakpoint_error_submit_runtime(mut self):
+    def _on_breakpoint_error_submit_runtime(mut self):
         """Dispatch a runtime-mode submit:
 
         * Try again — fire a test ``evaluate`` against the live frame.
@@ -7446,7 +7446,7 @@ struct Desktop(Movable):
         # condition in place.
         self._close_runtime_breakpoint_error()
 
-    fn _on_runtime_condition_test_result(
+    def _on_runtime_condition_test_result(
         mut self, teval: DapTestEvaluation,
     ):
         """Handle the response to a runtime-mode Try-again. On error,
@@ -7477,13 +7477,13 @@ struct Desktop(Movable):
         if _is_falsy_value(teval.value) and self.dap.is_stopped():
             _ = self.dap.cont()
 
-    fn _close_runtime_breakpoint_error(mut self):
+    def _close_runtime_breakpoint_error(mut self):
         self._breakpoint_error_runtime = False
         self._breakpoint_error_test_pending = False
         self._breakpoint_error_awaiting_response = False
         self.breakpoint_error.close()
 
-    fn _snapshot_locals_for_dialog(self) -> List[String]:
+    def _snapshot_locals_for_dialog(self) -> List[String]:
         """``name = value`` strings for the most recently fetched scope
         load. The condition-error dialog shows these so the user can
         gauge what's in scope while editing the bad condition.
@@ -7498,7 +7498,7 @@ struct Desktop(Movable):
             out.append(v.name + String(" = ") + v.value)
         return out^
 
-    fn _maybe_open_spell_menu(mut self):
+    def _maybe_open_spell_menu(mut self):
         """Drain ``Editor.consume_spell_action_request`` on the focused
         window and, if it returned a request, open ``spell_menu``
         anchored at the misspelled word's screen position.
@@ -7534,7 +7534,7 @@ struct Desktop(Movable):
             has_project = True
         self.spell_menu.open(sa.word, Point(ax, ay), has_project)
 
-    fn _on_spell_menu_submit(mut self):
+    def _on_spell_menu_submit(mut self):
         """Resolve the spell-menu pick: append the word to the chosen
         dictionary and force every editor to recompute its spell
         overlay so the underline disappears on this same frame.
@@ -7579,7 +7579,7 @@ struct Desktop(Movable):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.invalidate_spell()
 
-    fn _on_confirm_submit(mut self) -> Optional[String]:
+    def _on_confirm_submit(mut self) -> Optional[String]:
         """Resolve the most recent ``confirm_dialog.open`` by reading
         ``confirm_dialog.confirmed`` and dispatching the install action
         keyed by ``_pending_action``. The dialog is closed before any
@@ -7689,7 +7689,7 @@ struct Desktop(Movable):
         self._pending_arg = String("")
         return Optional[String]()
 
-    fn _on_prompt_submit(mut self) -> Optional[String]:
+    def _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input.text
         self.prompt.close()
         var pa = self._pending_action
@@ -7803,7 +7803,7 @@ struct Desktop(Movable):
 # --- Small helpers ----------------------------------------------------------
 
 
-fn _find_doc_entry_for_word(
+def _find_doc_entry_for_word(
     entries: List[DocEntry], word: String,
 ) -> Int:
     """Return the index of the entry whose name best matches ``word``,
@@ -7861,7 +7861,7 @@ fn _find_doc_entry_for_word(
 
 
 
-fn _expand_save_placeholders(arg: String, saved_path: String) -> String:
+def _expand_save_placeholders(arg: String, saved_path: String) -> String:
     """Replace every literal ``$FilePath$`` in ``arg`` with ``saved_path``.
 
     Only one placeholder is recognised today; this is the entry point
@@ -7899,7 +7899,7 @@ fn _expand_save_placeholders(arg: String, saved_path: String) -> String:
 
 
 
-fn _recent_display_label(path: String, project_root: String) -> String:
+def _recent_display_label(path: String, project_root: String) -> String:
     """Return ``path`` formatted for display in the "Open Recent" picker:
     project-relative when ``path`` lives under ``project_root``, absolute
     otherwise. An empty ``project_root`` (no project open) returns the
@@ -7918,7 +7918,7 @@ fn _recent_display_label(path: String, project_root: String) -> String:
     return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
-fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
+def _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
     """Shrink-and-shift ``rect`` so it fits entirely inside ``workspace``,
     preserving the upper-left anchor when possible. Used for restored
     sessions: a window saved at terminal size 200×60 gets clipped down
@@ -7952,7 +7952,7 @@ fn _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
     return Rect(ax, ay, ax + w, ay + h)
 
 
-fn _is_falsy_value(value: String) -> Bool:
+def _is_falsy_value(value: String) -> Bool:
     """Heuristic match for "this evaluate result would have been falsy
     in the original ``if condition:`` test". Used by the runtime
     condition-error dialog: when the user fixes a broken condition and
@@ -7980,7 +7980,7 @@ fn _is_falsy_value(value: String) -> Bool:
     return False
 
 
-fn _category_to_pane(category: String) -> UInt8:
+def _category_to_pane(category: String) -> UInt8:
     """Map a DAP ``output`` event's category string to the pane's
     output-attr enum. ``stderr`` lights the row red; ``console`` (and
     ``important``) get a dim color so the user can tell adapter chatter
@@ -7992,12 +7992,12 @@ fn _category_to_pane(category: String) -> UInt8:
     return UInt8(0)       # PANE_OUT_STDOUT
 
 
-fn _ends_with_slash(s: String) -> Bool:
+def _ends_with_slash(s: String) -> Bool:
     var b = s.as_bytes()
     return len(b) > 0 and b[len(b) - 1] == 0x2F
 
 
-fn _same_file(a: String, b: String) -> Bool:
+def _same_file(a: String, b: String) -> Bool:
     """True if ``a`` and ``b`` resolve to the same on-disk file. Used to
     match a DAP stack-frame source path against editor file paths even
     when one is a symlink and the other is canonical."""
@@ -8012,7 +8012,7 @@ fn _same_file(a: String, b: String) -> Bool:
 
 
 
-fn _argv_equal(a: List[String], b: List[String]) -> Bool:
+def _argv_equal(a: List[String], b: List[String]) -> Bool:
     """Element-wise equality for two argv lists. Used to detect when a
     settings change (server re-ordering, candidate add/remove) means
     a spawned LSP manager's argv no longer matches the now-preferred
@@ -8025,7 +8025,7 @@ fn _argv_equal(a: List[String], b: List[String]) -> Bool:
     return True
 
 
-fn _mojo_include_dirs(root: String) -> List[String]:
+def _mojo_include_dirs(root: String) -> List[String]:
     """``-I`` paths for ``mojo-lsp-server``: the project root, plus
     ``<root>/src`` if it exists.
 
@@ -8050,7 +8050,7 @@ fn _mojo_include_dirs(root: String) -> List[String]:
 # --- Result / summary windows for project search ----------------------------
 
 
-fn _refresh_status_for(
+def _refresh_status_for(
     mut sb: StatusBar, prefix: String, m: LspManager,
 ):
     """Free function so the caller can pass ``self.status_bar`` and one
@@ -8100,7 +8100,7 @@ fn _refresh_status_for(
         )
 
 
-fn _rg_missing_window() -> Window:
+def _rg_missing_window() -> Window:
     var content = List[String]()
     content.append(String("Project find requires ripgrep (rg), which was not"))
     content.append(String("found on your PATH."))
@@ -8113,7 +8113,7 @@ fn _rg_missing_window() -> Window:
     )
 
 
-fn _summary_window(
+def _summary_window(
     find: String, replace: String, files_changed: Int, total: Int,
 ) -> Window:
     var content = List[String]()

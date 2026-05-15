@@ -18,7 +18,7 @@ from turbokod import (
 from turbokod.cell import Cell
 
 
-fn main() raises:
+def main() raises:
     var app = Application()
     app.start()
     try:

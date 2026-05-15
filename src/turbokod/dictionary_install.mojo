@@ -41,7 +41,7 @@ struct DownloadableDictionary(ImplicitlyCopyable, Movable):
     var display: String
     var url: String
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String, var display: String,
         var url: String,
     ):
@@ -49,13 +49,13 @@ struct DownloadableDictionary(ImplicitlyCopyable, Movable):
         self.display = display^
         self.url = url^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.display = copy.display
         self.url = copy.url
 
 
-fn built_in_downloadable_dictionaries() -> List[DownloadableDictionary]:
+def built_in_downloadable_dictionaries() -> List[DownloadableDictionary]:
     """The fixed catalog. Each entry points at a permissively-licensed
     plain-text wordlist (one word per line). Add an entry here per
     language we want to offer; nothing else needs to change.
@@ -96,7 +96,7 @@ fn built_in_downloadable_dictionaries() -> List[DownloadableDictionary]:
     return out^
 
 
-fn find_downloadable_dictionary_by_language(
+def find_downloadable_dictionary_by_language(
     specs: List[DownloadableDictionary], language_id: String,
 ) -> Int:
     for i in range(len(specs)):
@@ -105,7 +105,7 @@ fn find_downloadable_dictionary_by_language(
     return -1
 
 
-fn user_dictionaries_root() -> String:
+def user_dictionaries_root() -> String:
     """``~/.config/turbokod/dictionaries``. Empty when ``$HOME`` is unset
     (sandboxed processes); callers treat that as "no user dictionaries
     available" and skip both load and install."""
@@ -115,21 +115,21 @@ fn user_dictionaries_root() -> String:
     return home + String("/.config/turbokod/dictionaries")
 
 
-fn user_dictionary_path(language_id: String) -> String:
+def user_dictionary_path(language_id: String) -> String:
     var root = user_dictionaries_root()
     if len(root.as_bytes()) == 0:
         return String("")
     return root + String("/") + language_id + String(".txt")
 
 
-fn user_dictionary_installed(language_id: String) -> Bool:
+def user_dictionary_installed(language_id: String) -> Bool:
     var path = user_dictionary_path(language_id)
     if len(path.as_bytes()) == 0:
         return False
     return stat_file(path).ok
 
 
-fn installed_dictionary_languages() -> List[String]:
+def installed_dictionary_languages() -> List[String]:
     """Language ids with a ``<lang>.txt`` file under
     ``user_dictionaries_root``. Used by Settings to know which catalog
     rows render with the "installed" tick. Order is filesystem order;
@@ -156,7 +156,7 @@ fn installed_dictionary_languages() -> List[String]:
     return out^
 
 
-fn dictionary_install_command(language_id: String, url: String) -> String:
+def dictionary_install_command(language_id: String, url: String) -> String:
     """Shell command that mkdirs the dictionaries dir and curls the
     wordlist into it. Single ``sh -c`` line so ``InstallRunner`` runs
     it unchanged. ``set -e`` aborts on the first failure so a half-
@@ -170,7 +170,7 @@ fn dictionary_install_command(language_id: String, url: String) -> String:
         + url + String("'")
 
 
-fn remove_user_dictionary(language_id: String) -> Bool:
+def remove_user_dictionary(language_id: String) -> Bool:
     """Delete the on-disk wordlist for ``language_id``. Returns True on
     success or when the file was already gone. The caller is expected
     to ``Speller.reload`` afterwards so the in-memory bucket set drops

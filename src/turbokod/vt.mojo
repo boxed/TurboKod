@@ -91,7 +91,7 @@ host."""
 # what a naive 0..7 cast would suggest. Build a table so the SGR
 # parser is one indexed lookup.
 
-fn _ansi_color(idx: Int) -> UInt8:
+def _ansi_color(idx: Int) -> UInt8:
     """Map an SGR 30-37 / 90-97 base color to our palette index."""
     if idx == 0: return BLACK
     if idx == 1: return RED
@@ -279,7 +279,7 @@ struct Vt(Copyable, Movable):
     drains this via ``take_clipboard`` each tick and writes it to the
     system clipboard. We don't ack the write back to the child."""
 
-    fn __init__(out self, cols: Int = 80, rows: Int = 24):
+    def __init__(out self, cols: Int = 80, rows: Int = 24):
         self.cols       = cols if cols > 0 else 1
         self.rows       = rows if rows > 0 else 1
         self.primary    = _make_grid(self.cols, self.rows)
@@ -321,7 +321,7 @@ struct Vt(Copyable, Movable):
         self.reply_buf = String("")
         self._clipboard_pending = String("")
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Explicit because ``List[Cell]`` isn't auto-copyable — Mojo's
         # value semantics require the deep copy to be spelled out.
         # The pane composes a Vt and is ImplicitlyCopyable itself
@@ -370,7 +370,7 @@ struct Vt(Copyable, Movable):
 
     # --- accessors -----------------------------------------------------
 
-    fn cell_at(self, r: Int, c: Int) -> Cell:
+    def cell_at(self, r: Int, c: Int) -> Cell:
         """Read the current cell at ``(r, c)``. Out-of-range returns
         a blank cell — defensive so a paint loop that miscalculates
         bounds doesn't index past the buffer."""
@@ -381,7 +381,7 @@ struct Vt(Copyable, Movable):
             return self.alt[idx]
         return self.primary[idx]
 
-    fn tail_rows(self, n: Int) -> List[String]:
+    def tail_rows(self, n: Int) -> List[String]:
         """Return the bottom ``n`` rows of the active grid as strings,
         one entry per row, trailing spaces trimmed off each row. Used
         by the Claude-state detector — it wants tail-of-output line
@@ -407,7 +407,7 @@ struct Vt(Copyable, Movable):
             )))
         return out^
 
-    fn view_cell_at(self, r: Int, c: Int) -> Cell:
+    def view_cell_at(self, r: Int, c: Int) -> Cell:
         """Cell as seen by the user at view-row ``r``, accounting for
         ``view_offset``. When ``view_offset == 0`` this matches
         ``cell_at`` exactly. Otherwise rows are pulled from the top of
@@ -444,7 +444,7 @@ struct Vt(Copyable, Movable):
             return row[c]
         return self.cell_at(abs_row - sb_len, c)
 
-    fn scroll_view_by(mut self, delta: Int):
+    def scroll_view_by(mut self, delta: Int):
         """Shift the viewport by ``delta`` rows. Positive means "show
         older content" (mouse wheel up); negative is the inverse.
         Clamped at 0 (live tail) and ``len(scrollback)`` (top of
@@ -458,14 +458,14 @@ struct Vt(Copyable, Movable):
         if new_off > max_off: new_off = max_off
         self.view_offset = new_off
 
-    fn reset_view(mut self):
+    def reset_view(mut self):
         """Snap back to the live tail. The pane calls this on
         keyboard input — typing into the shell while scrolled back
         almost always means the user wants to interact with the live
         prompt, not the historical view."""
         self.view_offset = 0
 
-    fn tracks_mouse(self) -> Bool:
+    def tracks_mouse(self) -> Bool:
         """True when the child has enabled any form of mouse tracking
         (1000 / 1002 / 1003). The pane uses this to decide whether
         mouse events go to the child or to its own selection /
@@ -474,7 +474,7 @@ struct Vt(Copyable, Movable):
             or self.mouse_track_btn_motion \
             or self.mouse_track_any_motion
 
-    fn take_reply(mut self) -> String:
+    def take_reply(mut self) -> String:
         """Drain the outbound reply queue. The pane calls this each
         tick and writes the result to the pty master so DSR / DA1 /
         OSC replies actually reach the child. Returns the empty
@@ -483,7 +483,7 @@ struct Vt(Copyable, Movable):
         self.reply_buf = String("")
         return out^
 
-    fn take_clipboard(mut self) -> String:
+    def take_clipboard(mut self) -> String:
         """Drain the pending OSC 52 clipboard write (already
         base64-decoded). The pane calls this each tick and forwards
         any non-empty payload to the system clipboard. Returns the
@@ -492,7 +492,7 @@ struct Vt(Copyable, Movable):
         self._clipboard_pending = String("")
         return out^
 
-    fn notify_focus_change(mut self, focused: Bool):
+    def notify_focus_change(mut self, focused: Bool):
         """Tell the emulator the host gained / lost focus. When the
         child has enabled focus reporting (``?1004h``) this enqueues
         ``ESC[I`` (gained) or ``ESC[O`` (lost) on the reply queue.
@@ -504,7 +504,7 @@ struct Vt(Copyable, Movable):
         else:
             self.reply_buf = self.reply_buf + String("\x1b[O")
 
-    fn encode_mouse(
+    def encode_mouse(
         self,
         button: Int,
         col: Int, row: Int,
@@ -582,7 +582,7 @@ struct Vt(Copyable, Movable):
             ptr=bytes.unsafe_ptr(), length=len(bytes),
         ))
 
-    fn take_bell(mut self) -> Bool:
+    def take_bell(mut self) -> Bool:
         """Consume the latched-bell flag. Returns True iff a BEL
         arrived since the last call. The pane uses this to flash a
         visual indicator without echoing a beep to its own host
@@ -591,13 +591,13 @@ struct Vt(Copyable, Movable):
         self.bell_pending = False
         return b
 
-    fn _idx(self, r: Int, c: Int) -> Int:
+    def _idx(self, r: Int, c: Int) -> Int:
         return r * self.cols + c
 
-    fn _row_start(self, r: Int) -> Int:
+    def _row_start(self, r: Int) -> Int:
         return r * self.cols
 
-    fn _grid_ref_set(mut self, idx: Int, cell: Cell):
+    def _grid_ref_set(mut self, idx: Int, cell: Cell):
         """Write into whichever grid is currently in use. Pulling
         this out of the call sites keeps the alt-screen dispatch
         in one place — no caller has to remember to branch."""
@@ -608,7 +608,7 @@ struct Vt(Copyable, Movable):
 
     # --- resize --------------------------------------------------------
 
-    fn resize(mut self, cols: Int, rows: Int):
+    def resize(mut self, cols: Int, rows: Int):
         """Resize to ``cols`` × ``rows``. Existing content is
         preserved where it still fits (top-left anchored); new
         cells are blank. The cursor is clamped to the new bounds.
@@ -648,7 +648,7 @@ struct Vt(Copyable, Movable):
 
     # --- input feed ----------------------------------------------------
 
-    fn feed(mut self, data: Span[UInt8, _]):
+    def feed(mut self, data: Span[UInt8, _]):
         """Consume ``data`` and advance internal state. The pane calls
         this once per drain — typically with whatever ``read(2)`` got
         off the master fd this tick."""
@@ -659,7 +659,7 @@ struct Vt(Copyable, Movable):
             self._step(UInt8(b))
             i += 1
 
-    fn feed_string(mut self, s: String):
+    def feed_string(mut self, s: String):
         """Convenience for tests / callers with String-shaped data.
         Internally we operate on bytes."""
         var b = s.as_bytes()
@@ -667,7 +667,7 @@ struct Vt(Copyable, Movable):
 
     # --- inner step ----------------------------------------------------
 
-    fn _step(mut self, b: UInt8):
+    def _step(mut self, b: UInt8):
         var v = Int(b)
         if self._state == _S_GROUND:
             self._step_ground(v)
@@ -692,7 +692,7 @@ struct Vt(Copyable, Movable):
             self._state = _S_GROUND
             return
 
-    fn _step_ground(mut self, b: Int):
+    def _step_ground(mut self, b: Int):
         # Control characters first.
         if b == 0x1B:  # ESC
             self._enter_esc()
@@ -755,7 +755,7 @@ struct Vt(Copyable, Movable):
         self._utf8_remaining = remaining
         self._state = _S_UTF8
 
-    fn _step_utf8(mut self, b: Int):
+    def _step_utf8(mut self, b: Int):
         if (b & 0xC0) != 0x80:
             # Invalid continuation — abort, paint replacement, then
             # re-feed the offending byte from GROUND.
@@ -775,7 +775,7 @@ struct Vt(Copyable, Movable):
         self._state = _S_GROUND
         self._print_glyph(glyph)
 
-    fn _print_glyph(mut self, glyph: String):
+    def _print_glyph(mut self, glyph: String):
         # Delayed-wrap: if the previous print filled the last column
         # and auto-wrap is on, advance to the next row now.
         if self.wrap_pending and self.auto_wrap:
@@ -793,7 +793,7 @@ struct Vt(Copyable, Movable):
         else:
             self.cur_c += 1
 
-    fn _line_feed(mut self):
+    def _line_feed(mut self):
         """LF behavior: move down one row, scrolling if the cursor is
         at the bottom of the scroll region. Outside the scroll region,
         LF at the very bottom of the screen also scrolls (matches
@@ -804,11 +804,11 @@ struct Vt(Copyable, Movable):
         if self.cur_r < self.rows - 1:
             self.cur_r += 1
 
-    fn _cursor_down_or_scroll(mut self):
+    def _cursor_down_or_scroll(mut self):
         # Used by auto-wrap. Same semantics as LF.
         self._line_feed()
 
-    fn _scroll_up_in_region(mut self, n: Int):
+    def _scroll_up_in_region(mut self, n: Int):
         """Shift rows in ``[scroll_top, scroll_bot]`` up by ``n``,
         filling the bottom with blanks at the current attr's bg.
 
@@ -867,7 +867,7 @@ struct Vt(Copyable, Movable):
             for c in range(self.cols):
                 self._grid_ref_set(self._idx(r, c), blank)
 
-    fn _scroll_down_in_region(mut self, n: Int):
+    def _scroll_down_in_region(mut self, n: Int):
         """Shift rows in ``[scroll_top, scroll_bot]`` down by ``n``,
         filling the top with blanks. Used by RI (reverse index)."""
         if n <= 0: return
@@ -895,10 +895,10 @@ struct Vt(Copyable, Movable):
 
     # --- ESC dispatch --------------------------------------------------
 
-    fn _enter_esc(mut self):
+    def _enter_esc(mut self):
         self._state = _S_ESC
 
-    fn _step_esc(mut self, b: Int):
+    def _step_esc(mut self, b: Int):
         if b == 0x5B:  # '[' — CSI
             self._csi_params = List[Int]()
             self._csi_current = 0
@@ -968,7 +968,7 @@ struct Vt(Copyable, Movable):
 
     # --- CSI dispatch --------------------------------------------------
 
-    fn _step_csi(mut self, b: Int):
+    def _step_csi(mut self, b: Int):
         # Parameter bytes: digits and ';'.
         if b >= 0x30 and b <= 0x39:  # '0'..'9'
             self._csi_current = self._csi_current * 10 + (b - 0x30)
@@ -1011,7 +1011,7 @@ struct Vt(Copyable, Movable):
         # Anything else aborts the sequence.
         self._state = _S_GROUND
 
-    fn _param(self, i: Int, default: Int) -> Int:
+    def _param(self, i: Int, default: Int) -> Int:
         """Read the i-th param, falling back to ``default`` when the
         param is missing (off the end of the list) or zero. ``0``
         meaning "default" is a vt100 convention used by most CSI
@@ -1023,7 +1023,7 @@ struct Vt(Copyable, Movable):
             return default
         return v
 
-    fn _param_raw(self, i: Int, default: Int) -> Int:
+    def _param_raw(self, i: Int, default: Int) -> Int:
         """Read i-th param literally; missing → default but a
         present 0 stays 0. SGR uses this (0 is "reset"); ED/EL use
         it because their "0" sub-action differs from the absent
@@ -1033,7 +1033,7 @@ struct Vt(Copyable, Movable):
             return default
         return self._csi_params[i]
 
-    fn _dispatch_csi(mut self, final_byte: Int):
+    def _dispatch_csi(mut self, final_byte: Int):
         # Private-mode dispatches use a separate table because the
         # parameters are mode numbers, not coords.
         if self._csi_private == 0x3F:  # '?'
@@ -1181,7 +1181,7 @@ struct Vt(Copyable, Movable):
 
     # --- erase ---------------------------------------------------------
 
-    fn _erase_in_display(mut self, mode: Int):
+    def _erase_in_display(mut self, mode: Int):
         var blank = Cell(String(" "), self.current_attr, 1)
         if mode == 0:
             # Cursor to end of screen.
@@ -1206,7 +1206,7 @@ struct Vt(Copyable, Movable):
                 for c in range(self.cols):
                     self._grid_ref_set(self._idx(r, c), blank)
 
-    fn _erase_in_line(mut self, mode: Int):
+    def _erase_in_line(mut self, mode: Int):
         var blank = Cell(String(" "), self.current_attr, 1)
         if mode == 0:
             for c in range(self.cur_c, self.cols):
@@ -1220,7 +1220,7 @@ struct Vt(Copyable, Movable):
             for c in range(self.cols):
                 self._grid_ref_set(self._idx(self.cur_r, c), blank)
 
-    fn _ich(mut self, n: Int):
+    def _ich(mut self, n: Int):
         """Insert ``n`` blanks at cursor, shifting the rest of the
         line right. Cells past the right edge fall off."""
         if n <= 0: return
@@ -1238,7 +1238,7 @@ struct Vt(Copyable, Movable):
         for c2 in range(self.cur_c, self.cur_c + shift):
             self._grid_ref_set(self._idx(self.cur_r, c2), blank)
 
-    fn _dch(mut self, n: Int):
+    def _dch(mut self, n: Int):
         """Delete ``n`` chars at cursor; rest of the line shifts
         left, right edge backfills with blanks."""
         if n <= 0: return
@@ -1254,7 +1254,7 @@ struct Vt(Copyable, Movable):
         for c2 in range(self.cols - shift, self.cols):
             self._grid_ref_set(self._idx(self.cur_r, c2), blank)
 
-    fn _ech(mut self, n: Int):
+    def _ech(mut self, n: Int):
         """Erase ``n`` chars at cursor — doesn't shift, just blanks."""
         if n <= 0: return
         var end = self.cur_c + n
@@ -1263,7 +1263,7 @@ struct Vt(Copyable, Movable):
         for c in range(self.cur_c, end):
             self._grid_ref_set(self._idx(self.cur_r, c), blank)
 
-    fn _il(mut self, n: Int):
+    def _il(mut self, n: Int):
         """Insert ``n`` blank lines at cursor row, within the scroll
         region. Lines below shift down; lines pushed past
         ``scroll_bot`` are lost."""
@@ -1275,7 +1275,7 @@ struct Vt(Copyable, Movable):
         self._scroll_down_in_region(n)
         self.scroll_top = saved_top
 
-    fn _dl(mut self, n: Int):
+    def _dl(mut self, n: Int):
         """Delete ``n`` lines at cursor row, within the scroll region.
         Lines below shift up; bottom backfills with blanks."""
         if self.cur_r < self.scroll_top or self.cur_r > self.scroll_bot:
@@ -1288,7 +1288,7 @@ struct Vt(Copyable, Movable):
 
     # --- scroll region -------------------------------------------------
 
-    fn _set_scroll_region(mut self):
+    def _set_scroll_region(mut self):
         var top = self._param(0, 1) - 1
         var bot = self._param(1, self.rows) - 1
         if top < 0: top = 0
@@ -1307,12 +1307,12 @@ struct Vt(Copyable, Movable):
 
     # --- save / restore cursor -----------------------------------------
 
-    fn _save_cursor(mut self):
+    def _save_cursor(mut self):
         self.saved_cur_r = self.cur_r
         self.saved_cur_c = self.cur_c
         self.saved_attr  = self.current_attr
 
-    fn _restore_cursor(mut self):
+    def _restore_cursor(mut self):
         self.cur_r = self.saved_cur_r
         self.cur_c = self.saved_cur_c
         self.current_attr = self.saved_attr
@@ -1322,7 +1322,7 @@ struct Vt(Copyable, Movable):
 
     # --- SGR -----------------------------------------------------------
 
-    fn _sgr(mut self):
+    def _sgr(mut self):
         # ``ESC [ m`` with no params is the same as ``ESC [ 0 m`` — reset.
         if len(self._csi_params) == 0:
             self.current_attr = Attr()
@@ -1398,7 +1398,7 @@ struct Vt(Copyable, Movable):
 
     # --- DEC private modes ---------------------------------------------
 
-    fn _dec_set(mut self, on: Bool):
+    def _dec_set(mut self, on: Bool):
         for i in range(len(self._csi_params)):
             var m = self._csi_params[i]
             if m == 1:
@@ -1429,7 +1429,7 @@ struct Vt(Copyable, Movable):
             # accepted-but-ignored. Children can probe with impunity;
             # we just don't act on them yet.
 
-    fn _toggle_alt_screen(mut self, on: Bool):
+    def _toggle_alt_screen(mut self, on: Bool):
         if on:
             if self.using_alt: return
             self._save_cursor()
@@ -1446,7 +1446,7 @@ struct Vt(Copyable, Movable):
 
     # --- OSC -----------------------------------------------------------
 
-    fn _step_osc(mut self, b: Int):
+    def _step_osc(mut self, b: Int):
         if b == 0x07:  # BEL — string terminator
             self._dispatch_osc()
             self._state = _S_GROUND
@@ -1463,7 +1463,7 @@ struct Vt(Copyable, Movable):
             ptr=tmp.unsafe_ptr(), length=1,
         ))
 
-    fn _step_osc_esc(mut self, b: Int):
+    def _step_osc_esc(mut self, b: Int):
         if b == 0x5C:  # '\\' — String Terminator
             self._dispatch_osc()
             self._state = _S_GROUND
@@ -1475,7 +1475,7 @@ struct Vt(Copyable, Movable):
         self._step(UInt8(0x1B))
         self._step(UInt8(b))
 
-    fn _dispatch_osc(mut self):
+    def _dispatch_osc(mut self):
         # OSC body is ``<num>;<text>``. We honor 0/1/2 (title) and
         # 52 (clipboard); the rest get silently dropped so children
         # probing for capabilities (palette set, hyperlink, …) don't
@@ -1544,7 +1544,7 @@ struct Vt(Copyable, Movable):
 
     # --- reset / charset stub ------------------------------------------
 
-    fn _reset(mut self):
+    def _reset(mut self):
         self.primary    = _make_grid(self.cols, self.rows)
         self.alt        = _make_grid(self.cols, self.rows)
         self.using_alt  = False
@@ -1578,7 +1578,7 @@ struct Vt(Copyable, Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _make_grid(cols: Int, rows: Int) -> List[Cell]:
+def _make_grid(cols: Int, rows: Int) -> List[Cell]:
     var g = List[Cell]()
     var blank = blank_cell()
     for _ in range(cols * rows):
@@ -1586,7 +1586,7 @@ fn _make_grid(cols: Int, rows: Int) -> List[Cell]:
     return g^
 
 
-fn _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
+def _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
     """Collapse 24-bit RGB to the nearest 256-color palette index.
     Used by ``SGR 38;2;…`` / ``48;2;…`` when truecolor is sent but
     we only store an 8-bit palette index. Standard xterm formula:
@@ -1596,13 +1596,13 @@ fn _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
     return UInt8(16 + 36 * _rgb_step(r) + 6 * _rgb_step(g) + _rgb_step(b))
 
 
-fn _rgb_step(v: Int) -> Int:
+def _rgb_step(v: Int) -> Int:
     if v < 48: return 0
     if v < 115: return 1
     return (v - 35) // 40
 
 
-fn _b64_decode(var s: String) -> String:
+def _b64_decode(var s: String) -> String:
     """Decode a base64 payload. Stops at the first non-alphabet,
     non-padding byte (so trailing whitespace from the OSC body is
     tolerated). Returns the empty string on malformed input — better

@@ -32,7 +32,7 @@ from .string_utils import parse_int_all, starts_with
 # --- helpers ---------------------------------------------------------------
 
 
-fn _slice(s: String, start: Int, end: Int) -> String:
+def _slice(s: String, start: Int, end: Int) -> String:
     var bytes = s.as_bytes()
     var s_start = start
     var s_end = end
@@ -42,7 +42,7 @@ fn _slice(s: String, start: Int, end: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
-fn _to_lower(s: String) -> String:
+def _to_lower(s: String) -> String:
     var bytes = s.as_bytes()
     var out = List[UInt8]()
     for i in range(len(bytes)):
@@ -54,7 +54,7 @@ fn _to_lower(s: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
 
 
-fn _strip(s: String) -> String:
+def _strip(s: String) -> String:
     var bytes = s.as_bytes()
     var n = len(bytes)
     var i = 0
@@ -66,12 +66,12 @@ fn _strip(s: String) -> String:
     return _slice(s, i, j)
 
 
-fn _ends_with_byte(s: String, b: UInt8) -> Bool:
+def _ends_with_byte(s: String, b: UInt8) -> Bool:
     var sb = s.as_bytes()
     return len(sb) > 0 and sb[len(sb) - 1] == b
 
 
-fn _parse_bool(s: String) -> Int:
+def _parse_bool(s: String) -> Int:
     """Returns 1 for ``true``, 0 for ``false``, ``-1`` for anything else."""
     var lower = _to_lower(s)
     if lower == String("true"):
@@ -102,7 +102,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
     var insert_final_newline: Int       # -1 unset, 0 false, 1 true
     var max_line_length: Int       # -1 = unset
 
-    fn __init__(out self):
+    def __init__(out self):
         self.indent_style = String("")
         self.indent_size = -1
         self.tab_width = -1
@@ -112,7 +112,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         self.insert_final_newline = -1
         self.max_line_length = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.indent_style = copy.indent_style
         self.indent_size = copy.indent_size
         self.tab_width = copy.tab_width
@@ -122,7 +122,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         self.insert_final_newline = copy.insert_final_newline
         self.max_line_length = copy.max_line_length
 
-    fn effective_indent_size(self) -> Int:
+    def effective_indent_size(self) -> Int:
         """Width of one indentation level in spaces.
 
         Per the spec: if ``indent_size`` is unset and ``indent_style`` is
@@ -135,7 +135,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             return self.tab_width
         return 4
 
-    fn indent_string(self) -> String:
+    def indent_string(self) -> String:
         """Bytes to insert when the user presses Tab."""
         if self.indent_style == String("tab"):
             return String("\t")
@@ -147,7 +147,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             out = out + String(" ")
         return out
 
-    fn line_separator(self) -> String:
+    def line_separator(self) -> String:
         """Byte sequence to use between lines on disk. ``\\n`` by default."""
         if self.end_of_line == String("crlf"):
             return String("\r\n")
@@ -155,7 +155,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             return String("\r")
         return String("\n")
 
-    fn _set(mut self, key: String, value: String):
+    def _set(mut self, key: String, value: String):
         """Apply one ``key = value`` pair. Unknown keys are ignored."""
         var k = _to_lower(_strip(key))
         var v = _strip(value)
@@ -207,12 +207,12 @@ struct EditorConfigSection(Copyable, Movable):
     var keys: List[String]
     var values: List[String]
 
-    fn __init__(out self, var pattern: String):
+    def __init__(out self, var pattern: String):
         self.pattern = pattern^
         self.keys = List[String]()
         self.values = List[String]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.pattern = copy.pattern
         self.keys = copy.keys.copy()
         self.values = copy.values.copy()
@@ -224,18 +224,18 @@ struct EditorConfigFile(Copyable, Movable):
     var is_root: Bool
     var sections: List[EditorConfigSection]
 
-    fn __init__(out self, var dir: String):
+    def __init__(out self, var dir: String):
         self.dir = dir^
         self.is_root = False
         self.sections = List[EditorConfigSection]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.dir = copy.dir
         self.is_root = copy.is_root
         self.sections = copy.sections.copy()
 
 
-fn parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
+def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
     """Parse ``contents`` (the bytes of one ``.editorconfig`` file) into a
     structured form. ``dir`` is the directory the file lives in — needed
     later by the matcher to compute paths relative to it.
@@ -326,7 +326,7 @@ fn parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
 # --- glob matching ---------------------------------------------------------
 
 
-fn _bytes_slice_to_string(
+def _bytes_slice_to_string(
     bytes: List[UInt8], start: Int, end: Int,
 ) -> String:
     """Copy ``bytes[start:end]`` into a fresh ``String``.
@@ -346,7 +346,7 @@ fn _bytes_slice_to_string(
     return String(StringSlice(ptr=tmp.unsafe_ptr(), length=len(tmp)))
 
 
-fn _split_alts(bytes: List[UInt8], start: Int, end: Int) -> List[String]:
+def _split_alts(bytes: List[UInt8], start: Int, end: Int) -> List[String]:
     """Split the body of a ``{a,b,c}`` block on top-level commas."""
     var alts = List[String]()
     var depth = 0
@@ -365,7 +365,7 @@ fn _split_alts(bytes: List[UInt8], start: Int, end: Int) -> List[String]:
     return alts^
 
 
-fn _expand_alternations(pat: String) -> List[String]:
+def _expand_alternations(pat: String) -> List[String]:
     """Expand ``{a,b,c}`` alternations into one pattern per alternative.
 
     Recurses so nested alternations like ``{x,{y,z}}`` flatten correctly.
@@ -407,7 +407,7 @@ fn _expand_alternations(pat: String) -> List[String]:
     return single^
 
 
-fn _gm(
+def _gm(
     pat: List[UInt8], pi: Int, path: List[UInt8], ti: Int,
 ) -> Bool:
     """Recursive glob matcher (no alternation — that's expanded upstream)."""
@@ -481,7 +481,7 @@ fn _gm(
         return _gm(pat, pi + 1, path, ti + 1)
 
 
-fn _glob_match_one(pat: String, path: String) -> Bool:
+def _glob_match_one(pat: String, path: String) -> Bool:
     """Match a single (alternation-expanded) glob against ``path``."""
     var pb = List[UInt8]()
     var pat_bytes = pat.as_bytes()
@@ -494,7 +494,7 @@ fn _glob_match_one(pat: String, path: String) -> Bool:
     return _gm(pb, 0, tb, 0)
 
 
-fn _pattern_has_internal_slash(pat: String) -> Bool:
+def _pattern_has_internal_slash(pat: String) -> Bool:
     """A path separator anywhere except a single trailing slash. Trailing
     slashes are stripped by the caller, so this stays simple."""
     var bytes = pat.as_bytes()
@@ -504,7 +504,7 @@ fn _pattern_has_internal_slash(pat: String) -> Bool:
     return False
 
 
-fn match_section(pattern: String, rel_path: String) -> Bool:
+def match_section(pattern: String, rel_path: String) -> Bool:
     """Return True iff ``rel_path`` matches ``pattern`` per editorconfig rules.
 
     ``rel_path`` is the path of the file relative to the ``.editorconfig``
@@ -538,7 +538,7 @@ fn match_section(pattern: String, rel_path: String) -> Bool:
 # --- filesystem walk -------------------------------------------------------
 
 
-fn _abs_dir(file_path: String) -> String:
+def _abs_dir(file_path: String) -> String:
     """Realpath of the directory containing ``file_path`` (or the file
     itself if it's a directory). Falls back to lexical resolution when the
     path doesn't exist on disk yet — supports Save As to a new file."""
@@ -554,7 +554,7 @@ fn _abs_dir(file_path: String) -> String:
     return dir
 
 
-fn _abs_file(file_path: String) -> String:
+def _abs_file(file_path: String) -> String:
     """Best-effort absolute path of ``file_path`` even when it doesn't exist."""
     var rp = realpath(file_path)
     if len(rp.as_bytes()) > 0:
@@ -574,7 +574,7 @@ fn _abs_file(file_path: String) -> String:
     return file_path
 
 
-fn _relative_path(abs_file: String, ec_dir: String) -> String:
+def _relative_path(abs_file: String, ec_dir: String) -> String:
     var prefix = ec_dir
     if not _ends_with_byte(prefix, 0x2F):
         prefix = prefix + String("/")
@@ -584,7 +584,7 @@ fn _relative_path(abs_file: String, ec_dir: String) -> String:
                   len(abs_file.as_bytes()))
 
 
-fn load_editorconfig_for_path(file_path: String) -> EditorConfig:
+def load_editorconfig_for_path(file_path: String) -> EditorConfig:
     """Compute the resolved ``EditorConfig`` for ``file_path``.
 
     Walks up the filesystem from the file's directory, collecting any

@@ -79,7 +79,7 @@ struct Dropdown(Copyable, Movable):
     """Type-to-search buffer (shared with file lists). Reset on
     ``open`` / ``close``."""
 
-    fn __init__(out self, var options: List[String], index: Int = 0):
+    def __init__(out self, var options: List[String], index: Int = 0):
         self.options = options^
         self.index = index
         self.is_open = False
@@ -88,7 +88,7 @@ struct Dropdown(Copyable, Movable):
         self._type_ahead = TypeAhead()
         self._clip_index()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.options = copy.options.copy()
         self.index = copy.index
         self.is_open = copy.is_open
@@ -96,7 +96,7 @@ struct Dropdown(Copyable, Movable):
         self._scroll = copy._scroll
         self._type_ahead = copy._type_ahead
 
-    fn _clip_index(mut self):
+    def _clip_index(mut self):
         var n = len(self.options)
         if n == 0:
             self.index = -1
@@ -106,7 +106,7 @@ struct Dropdown(Copyable, Movable):
         elif self.index >= n:
             self.index = n - 1
 
-    fn value(self) -> String:
+    def value(self) -> String:
         """Currently committed string, or empty when the option list
         is empty. Empty is also a legitimate selection when it
         appears in ``options`` — callers distinguish via ``index``."""
@@ -114,7 +114,7 @@ struct Dropdown(Copyable, Movable):
             return String("")
         return self.options[self.index]
 
-    fn set_value(mut self, value: String):
+    def set_value(mut self, value: String):
         """Move the cursor to ``value``. If the value isn't in the
         option list and is non-empty, append it so it's preserved
         through paints (a config loaded from disk shouldn't snap to
@@ -142,7 +142,7 @@ struct Dropdown(Copyable, Movable):
         self.is_open = False
         self.highlight = self.index
 
-    fn open(mut self):
+    def open(mut self):
         if len(self.options) == 0:
             return
         self.is_open = True
@@ -152,11 +152,11 @@ struct Dropdown(Copyable, Movable):
         self._scroll_to_highlight()
         self._type_ahead.reset()
 
-    fn close(mut self):
+    def close(mut self):
         self.is_open = False
         self._type_ahead.reset()
 
-    fn type_to_search(mut self, ch: String) -> Bool:
+    def type_to_search(mut self, ch: String) -> Bool:
         """Extend the prefix buffer with ``ch`` and jump the highlight
         to the first option whose label starts with the accumulated
         buffer (case-insensitive). Returns True on a hit.
@@ -178,7 +178,7 @@ struct Dropdown(Copyable, Movable):
         self._scroll_to_highlight()
         return True
 
-    fn toggle(mut self):
+    def toggle(mut self):
         if self.is_open:
             self.close()
         else:
@@ -186,7 +186,7 @@ struct Dropdown(Copyable, Movable):
 
     # --- popup geometry -----------------------------------------------
 
-    fn popup_rect(self, anchor: Rect, screen: Rect) -> Rect:
+    def popup_rect(self, anchor: Rect, screen: Rect) -> Rect:
         """Where the popup will render relative to the collapsed
         strip. Sits directly below the strip when there's room;
         flips above when not. Width matches the strip but is widened
@@ -216,7 +216,7 @@ struct Dropdown(Copyable, Movable):
                 y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn _scroll_to_highlight(mut self):
+    def _scroll_to_highlight(mut self):
         if self.highlight < self._scroll:
             self._scroll = self.highlight
             return
@@ -227,7 +227,7 @@ struct Dropdown(Copyable, Movable):
 
     # --- painting -----------------------------------------------------
 
-    fn paint(
+    def paint(
         self, mut canvas: Canvas, rect: Rect, focused: Bool,
         focused_attr: Attr, blurred_attr: Attr,
         empty_label: String = String("(none)"),
@@ -256,7 +256,7 @@ struct Dropdown(Copyable, Movable):
         var caret = String("▲") if self.is_open else String("▼")
         painter.set(canvas, rect.b.x - 1, rect.a.y, Cell(caret, fill_attr, 1))
 
-    fn paint_popup(self, mut canvas: Canvas, anchor: Rect, screen: Rect):
+    def paint_popup(self, mut canvas: Canvas, anchor: Rect, screen: Rect):
         """Render the popup list. Caller invokes this last (after the
         rest of the dialog) so the popup overlays whatever's
         underneath. No-op when the dropdown is collapsed."""
@@ -298,7 +298,7 @@ struct Dropdown(Copyable, Movable):
 
     # --- input --------------------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Return True if ``event`` was a key the dropdown consumed.
         Caller is expected to gate this on focus before invoking."""
         if event.kind != EVENT_KEY:
@@ -344,7 +344,7 @@ struct Dropdown(Copyable, Movable):
         # surprising.
         return True
 
-    fn _step(mut self, delta: Int):
+    def _step(mut self, delta: Int):
         var n = len(self.options)
         if n == 0:
             return
@@ -356,7 +356,7 @@ struct Dropdown(Copyable, Movable):
         self.highlight = i
         self._scroll_to_highlight()
 
-    fn handle_mouse(
+    def handle_mouse(
         mut self, anchor: Rect, screen: Rect, event: Event,
     ) -> Int:
         """Treat ``event`` as a candidate click on the dropdown.

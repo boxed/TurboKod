@@ -68,7 +68,7 @@ struct VisualLine(ImplicitlyCopyable, Movable):
     var indent_cells: Int  # hanging-indent cells before the text starts
 
 
-fn wrap_lines(
+def wrap_lines(
     lines: List[String],
     content_w: Int,
     indent_size: Int = 0,
@@ -199,10 +199,10 @@ struct Selection(ImplicitlyCopyable, Movable):
     var cursor_col: Int
 
     @staticmethod
-    fn empty() -> Self:
+    def empty() -> Self:
         return Selection(False, False, 0, 0, 0, 0)
 
-    fn is_empty(self) -> Bool:
+    def is_empty(self) -> Bool:
         """True iff there is no selection to copy. Endpoints meeting at
         the same byte counts as empty (no glyphs in between)."""
         if not self.active:
@@ -210,7 +210,7 @@ struct Selection(ImplicitlyCopyable, Movable):
         return self.anchor_line == self.cursor_line \
             and self.anchor_col == self.cursor_col
 
-    fn normalized(self) -> Tuple[Int, Int, Int, Int]:
+    def normalized(self) -> Tuple[Int, Int, Int, Int]:
         """``(s_line, s_col, e_line, e_col)`` sorted in document order."""
         if self.anchor_line < self.cursor_line \
                 or (self.anchor_line == self.cursor_line
@@ -224,7 +224,7 @@ struct Selection(ImplicitlyCopyable, Movable):
             self.anchor_line, self.anchor_col,
         )
 
-    fn extracted_text(self, lines: List[String]) -> String:
+    def extracted_text(self, lines: List[String]) -> String:
         """Substring of ``lines`` covered by this selection, joining
         logical-line boundaries with ``\\n``. Byte-slices, so the
         ``col`` offsets must be byte offsets into ``lines[i]``.
@@ -251,7 +251,7 @@ struct Selection(ImplicitlyCopyable, Movable):
 # --- paint helpers (shared by Editor and TextLog) -------------------------
 
 
-fn paint_text_segments(
+def paint_text_segments(
     mut canvas: Canvas,
     view: Rect,
     lines: List[String],
@@ -306,7 +306,7 @@ fn paint_text_segments(
         )
 
 
-fn paint_selection_overlay(
+def paint_selection_overlay(
     mut canvas: Canvas,
     view: Rect,
     lines: List[String],
@@ -445,7 +445,7 @@ struct TextLog(Copyable, Movable):
     main loop from ever hitting its idle-blocking ``poll_stdin``
     timeout — CPU pegged at 100 % until the pane was un-maximized."""
 
-    fn __init__(out self, default_attr: Attr, max_lines: Int = 500):
+    def __init__(out self, default_attr: Attr, max_lines: Int = 500):
         self.lines = List[String]()
         self.line_attrs = List[Attr]()
         self.default_attr = default_attr
@@ -461,7 +461,7 @@ struct TextLog(Copyable, Movable):
         self.last_visible_count = 0
         self._layout_w = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.line_attrs = copy.line_attrs.copy()
         self.default_attr = copy.default_attr
@@ -479,7 +479,7 @@ struct TextLog(Copyable, Movable):
 
     # --- mutation -------------------------------------------------------
 
-    fn append(mut self, var text: String, attr: Optional[Attr] = None):
+    def append(mut self, var text: String, attr: Optional[Attr] = None):
         """Append ``text``, splitting on ``\\n``. Each split line gets
         its own ``Attr`` — when ``attr`` is None we fall back to
         ``default_attr``. Trims the front when ``max_lines`` is hit."""
@@ -505,7 +505,7 @@ struct TextLog(Copyable, Movable):
                 resolved,
             )
 
-    fn clear(mut self):
+    def clear(mut self):
         """Drop all lines and any selection. Scroll resets to top."""
         self.lines = List[String]()
         self.line_attrs = List[Attr]()
@@ -515,7 +515,7 @@ struct TextLog(Copyable, Movable):
         self.last_visual = List[VisualLine]()
         self._layout_w = -1
 
-    fn _push_line(mut self, var line: String, attr: Attr):
+    def _push_line(mut self, var line: String, attr: Attr):
         self.lines.append(line^)
         self.line_attrs.append(attr)
         # Incremental cache update: wrap just the newly-appended line
@@ -578,13 +578,13 @@ struct TextLog(Copyable, Movable):
 
     # --- query ----------------------------------------------------------
 
-    fn has_selection(self) -> Bool:
+    def has_selection(self) -> Bool:
         return self.selection.active
 
-    fn selected_text(self) -> String:
+    def selected_text(self) -> String:
         return self.selection.extracted_text(self.lines)
 
-    fn copy_to_clipboard(self) -> Bool:
+    def copy_to_clipboard(self) -> Bool:
         var text = self.selected_text()
         if len(text.as_bytes()) == 0:
             return False
@@ -593,7 +593,7 @@ struct TextLog(Copyable, Movable):
 
     # --- paint ----------------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, view: Rect):
+    def paint(mut self, mut canvas: Canvas, view: Rect):
         """Paint soft-wrapped text + selection overlay into ``view``.
 
         The actual per-row painting is delegated to ``paint_text_segments``
@@ -634,7 +634,7 @@ struct TextLog(Copyable, Movable):
 
     # --- input ----------------------------------------------------------
 
-    fn position_at(self, pos: Point) -> Tuple[Int, Int]:
+    def position_at(self, pos: Point) -> Tuple[Int, Int]:
         """Map a screen point to ``(line_idx, byte_col)`` using the
         layout the last ``paint`` stamped. Out-of-range clicks clamp
         to the nearest visible row."""
@@ -665,7 +665,7 @@ struct TextLog(Copyable, Movable):
             b = vrow.byte_end
         return (vrow.line_idx, b)
 
-    fn handle_mouse(mut self, event: Event) -> Bool:
+    def handle_mouse(mut self, event: Event) -> Bool:
         """Consume mouse events that belong to this view: wheel for
         scroll, left-press to start a drag, motion to extend, release
         to commit. Returns True if the event was handled.
@@ -711,7 +711,7 @@ struct TextLog(Copyable, Movable):
         )
         return True
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Scroll keys: PageUp/PageDown move by 8 visual rows,
         Home/End jump to the top / re-engage autoscroll."""
         if event.kind != EVENT_KEY:
@@ -731,7 +731,7 @@ struct TextLog(Copyable, Movable):
             return True
         return False
 
-    fn scroll_by(mut self, delta: Int):
+    def scroll_by(mut self, delta: Int):
         """Move scroll by ``delta`` visual rows (positive = down).
         Manual scrolls disengage autoscroll until the user reaches
         the bottom row again."""
@@ -746,7 +746,7 @@ struct TextLog(Copyable, Movable):
         self.autoscroll = (ns >= max_s)
         self.scroll = ns
 
-    fn scroll_to_top_row(mut self, top: Int):
+    def scroll_to_top_row(mut self, top: Int):
         """Set the first visible row to ``top``. Disengages autoscroll
         unless ``top`` would still leave the last visual row visible
         (in which case autoscroll re-engages so new output keeps
@@ -774,7 +774,7 @@ struct TextLog(Copyable, Movable):
 # --- internal helpers -----------------------------------------------------
 
 
-fn _row_cell_offset(
+def _row_cell_offset(
     vrow: VisualLine, line: String, target_byte: Int,
 ) -> Int:
     """Cells from the row's painted left edge to byte ``target_byte``.
@@ -792,7 +792,7 @@ fn _row_cell_offset(
     return cells
 
 
-fn _byte_slice(s: String, start: Int, end: Int) -> String:
+def _byte_slice(s: String, start: Int, end: Int) -> String:
     """Byte-range substring (no UTF-8 decoding). Tolerates out-of-range
     bounds. Mirrors editor.mojo's ``_slice`` so we can drop the local
     copy in either consumer if it ever becomes single-source."""

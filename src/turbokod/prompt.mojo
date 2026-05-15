@@ -61,7 +61,7 @@ struct Prompt(Movable):
     var toggle_word: OptionToggle
     var toggle_regex: OptionToggle
 
-    fn __init__(out self):
+    def __init__(out self):
         self.label = String("")
         self.input = TextField()
         self.active = False
@@ -78,7 +78,7 @@ struct Prompt(Movable):
             String(".*"), String("Regular expression"),
         )
 
-    fn open(
+    def open(
         mut self,
         var label: String,
         var prefill: String = String(""),
@@ -107,7 +107,7 @@ struct Prompt(Movable):
         self._input_rect = Rect(0, 0, 0, 0)
         self.show_options = show_options
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.submitted = False
         self.label = String("")
@@ -120,7 +120,7 @@ struct Prompt(Movable):
         self.toggle_word.hovered = False
         self.toggle_regex.hovered = False
 
-    fn search_options(self) -> SearchOptions:
+    def search_options(self) -> SearchOptions:
         """Read back the toggle states as a ``SearchOptions``. Caller
         uses this after Enter to drive ``find_next`` / ``replace_all``."""
         return SearchOptions(
@@ -129,7 +129,7 @@ struct Prompt(Movable):
             self.toggle_regex.on,
         )
 
-    fn set_search_options(mut self, opts: SearchOptions):
+    def set_search_options(mut self, opts: SearchOptions):
         """Restore toggle states from a previously captured
         ``SearchOptions``. Used to seed a fresh prompt with whatever
         flags the user had on for the previous Find."""
@@ -137,7 +137,7 @@ struct Prompt(Movable):
         self.toggle_word.on = opts.whole_word
         self.toggle_regex.on = opts.regex
 
-    fn _layout(self, screen: Rect) -> Rect:
+    def _layout(self, screen: Rect) -> Rect:
         """Compute the dialog rect for the current label.
 
         Width caps at ``_DEFAULT_WIDTH`` (or whatever the screen
@@ -187,7 +187,7 @@ struct Prompt(Movable):
             y = 0
         return Rect(x, y, x + width, y + height)
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -290,7 +290,7 @@ struct Prompt(Movable):
                         canvas, Point(content_x, tip_y), tip, attr,
                     )
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""
         if not self.active:
             return False
@@ -308,7 +308,7 @@ struct Prompt(Movable):
             return True
         return True
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:

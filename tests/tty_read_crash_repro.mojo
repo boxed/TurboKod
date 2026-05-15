@@ -31,7 +31,7 @@ from turbokod.posix import (
 )
 
 
-fn main() raises:
+def main() raises:
     var orig = alloc_zero_buffer(TERMIOS_SIZE)
     if tcgetattr(STDIN_FD, orig) != 0:
         print("not a tty?")

@@ -261,7 +261,7 @@ struct SubprocessAttach(Copyable, Movable):
     var bp_conditions: List[String]
     var bp_enabled: List[Bool]
 
-    fn __init__(out self):
+    def __init__(out self):
         # Inert default — ``state == _STATE_NOT_STARTED`` is the sentinel
         # for "no subprocess is attached". Lets the field live as a
         # direct ``DapManager`` member without ``Optional`` plumbing,
@@ -288,7 +288,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.bp_conditions = List[String]()
         self.bp_enabled = List[Bool]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Same caveat as ``DapManager.__copyinit__``: a real copy would
         # double-own the connected socket. We declare ``Copyable`` only
         # so the field can live in a ``DapManager`` (which is itself
@@ -506,7 +506,7 @@ struct DapManager(Copyable, Movable):
     var _oneshot_bp_path: String
     var _oneshot_bp_line: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.client = DapClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
@@ -569,7 +569,7 @@ struct DapManager(Copyable, Movable):
         self._oneshot_bp_path = String("")
         self._oneshot_bp_line = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
         # duplicate child PID + pipe FD ownership. We declare ``Copyable``
         # only so a manager can live in ``List[DapManager]``; lists are
@@ -640,15 +640,15 @@ struct DapManager(Copyable, Movable):
 
     # --- state predicates ------------------------------------------------
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.state != _STATE_NOT_STARTED \
             and self.state != _STATE_FAILED \
             and self.state != _STATE_TERMINATED
 
-    fn is_running(self) -> Bool:
+    def is_running(self) -> Bool:
         return self.state == _STATE_RUNNING and not self._is_stopped
 
-    fn is_stopped(self) -> Bool:
+    def is_stopped(self) -> Bool:
         # Gated on ``is_active`` for the same reason ``is_running``
         # checks state: ``shutdown`` doesn't clear ``_is_stopped``, so
         # without this gate a session that was paused at a breakpoint
@@ -657,13 +657,13 @@ struct DapManager(Copyable, Movable):
         # instead of starting a new session.
         return self._is_stopped and self.is_active()
 
-    fn is_failed(self) -> Bool:
+    def is_failed(self) -> Bool:
         return self.state == _STATE_FAILED
 
-    fn is_terminated(self) -> Bool:
+    def is_terminated(self) -> Bool:
         return self.state == _STATE_TERMINATED
 
-    fn status_summary(self) -> String:
+    def status_summary(self) -> String:
         """Short label suitable for the status bar."""
         if self.state == _STATE_NOT_STARTED:
             return String("DAP: idle")
@@ -683,7 +683,7 @@ struct DapManager(Copyable, Movable):
 
     # --- session lifecycle -----------------------------------------------
 
-    fn start(
+    def start(
         mut self, spec: DebuggerSpec, program: String, cwd: String,
         var program_args: List[String], stop_on_entry: Bool = False,
     ):
@@ -754,7 +754,7 @@ struct DapManager(Copyable, Movable):
         self._state_entered_ms = monotonic_ms()
         self.client.process.trace(String("state -> initializing"))
 
-    fn _pick_argv(self, spec: DebuggerSpec) -> List[String]:
+    def _pick_argv(self, spec: DebuggerSpec) -> List[String]:
         """Return the first candidate whose argv[0] resolves on $PATH."""
         for i in range(len(spec.candidates)):
             var c = spec.candidates[i].copy()
@@ -768,7 +768,7 @@ struct DapManager(Copyable, Movable):
             return out^
         return List[String]()
 
-    fn drain_stderr(mut self) -> String:
+    def drain_stderr(mut self) -> String:
         """Read whatever's available on the adapter's stderr without
         blocking. Critical when the adapter dies mid-handshake — DAP
         offers no protocol-level signal for that, so the only way to
@@ -784,7 +784,7 @@ struct DapManager(Copyable, Movable):
         return text^
 
 
-    fn shutdown(mut self):
+    def shutdown(mut self):
         """Best-effort: send ``disconnect`` if active, then terminate the
         child if alive. Idempotent."""
         if self.state == _STATE_NOT_STARTED:
@@ -819,7 +819,7 @@ struct DapManager(Copyable, Movable):
             self._subprocess.client.terminate()
             self._subprocess.state = _STATE_TERMINATED
 
-    fn reset_for_restart(mut self):
+    def reset_for_restart(mut self):
         """Return to ``NOT_STARTED`` so ``start()`` can run again,
         preserving the persistent debugger configuration the user has
         accumulated this run.
@@ -910,7 +910,7 @@ struct DapManager(Copyable, Movable):
 
     # --- breakpoints -----------------------------------------------------
 
-    fn toggle_breakpoint(mut self, path: String, line: Int):
+    def toggle_breakpoint(mut self, path: String, line: Int):
         """Add or remove an unconditional breakpoint at ``(path, line)``.
 
         Lines are 0-based here (matching ``Editor.cursor_row``); we add
@@ -936,7 +936,7 @@ struct DapManager(Copyable, Movable):
             self._bp_armed.append(True)
         self._push_breakpoints_for_path(path)
 
-    fn set_breakpoint_condition(
+    def set_breakpoint_condition(
         mut self, path: String, line: Int, var condition: String,
     ):
         """Set the condition expression for the breakpoint at
@@ -959,7 +959,7 @@ struct DapManager(Copyable, Movable):
             self._bp_condition[found] = condition^
         self._push_breakpoints_for_path(path)
 
-    fn set_breakpoint_enabled(
+    def set_breakpoint_enabled(
         mut self, path: String, line: Int, enabled: Bool,
     ):
         """Mark the breakpoint at ``(path, line)`` enabled or disabled.
@@ -974,7 +974,7 @@ struct DapManager(Copyable, Movable):
                 self._push_breakpoints_for_path(path)
                 return
 
-    fn set_breakpoint_wait_for(
+    def set_breakpoint_wait_for(
         mut self, path: String, line: Int, var wait_for: String,
     ):
         """Set (or clear) the trigger-BP key for the breakpoint at
@@ -995,7 +995,7 @@ struct DapManager(Copyable, Movable):
                 self._push_breakpoints_for_path(path)
                 return
 
-    fn breakpoint_wait_for(self, path: String, line: Int) -> String:
+    def breakpoint_wait_for(self, path: String, line: Int) -> String:
         """Wait-for trigger key at ``(path, line)``, or empty string
         when none / no BP exists."""
         for i in range(len(self._bp_path)):
@@ -1003,7 +1003,7 @@ struct DapManager(Copyable, Movable):
                 return self._bp_wait_for[i]
         return String("")
 
-    fn arm_dependents(mut self, path: String, line: Int):
+    def arm_dependents(mut self, path: String, line: Int):
         """Mark every BP whose ``wait_for`` matches ``(path, line)`` as
         armed and re-push ``setBreakpoints`` for any newly-armed paths
         so the adapter starts honoring them.
@@ -1036,7 +1036,7 @@ struct DapManager(Copyable, Movable):
         for k in range(len(changed_paths)):
             self._push_breakpoints_for_path(changed_paths[k])
 
-    fn breakpoint_condition(self, path: String, line: Int) -> String:
+    def breakpoint_condition(self, path: String, line: Int) -> String:
         """Current condition for the breakpoint at ``(path, line)``,
         or empty string when none / unconditional."""
         for i in range(len(self._bp_path)):
@@ -1044,7 +1044,7 @@ struct DapManager(Copyable, Movable):
                 return self._bp_condition[i]
         return String("")
 
-    fn breakpoint_enabled(self, path: String, line: Int) -> Bool:
+    def breakpoint_enabled(self, path: String, line: Int) -> Bool:
         """Enable state at ``(path, line)``. Defaults to True (the
         most common case) so callers can use this in expressions
         without first probing ``has_breakpoint``."""
@@ -1053,7 +1053,7 @@ struct DapManager(Copyable, Movable):
                 return self._bp_enabled[i]
         return True
 
-    fn _remove_bp_at(mut self, idx: Int):
+    def _remove_bp_at(mut self, idx: Int):
         """Compact the parallel breakpoint lists by skipping ``idx``."""
         var new_paths = List[String]()
         var new_lines = List[Int]()
@@ -1077,7 +1077,7 @@ struct DapManager(Copyable, Movable):
         self._bp_wait_for = new_wait^
         self._bp_armed = new_armed^
 
-    fn breakpoints_for(self, path: String) -> List[Int]:
+    def breakpoints_for(self, path: String) -> List[Int]:
         """Return a copy of the breakpoint lines for ``path``, 0-based.
         Includes disabled breakpoints — the gutter still draws them
         (in gray) so the user knows they're parked there."""
@@ -1087,7 +1087,7 @@ struct DapManager(Copyable, Movable):
                 out.append(self._bp_line[i])
         return out^
 
-    fn breakpoints_info_for(
+    def breakpoints_info_for(
         self, path: String,
     ) -> Tuple[List[Int], List[Bool], List[Bool]]:
         """Return parallel ``(lines, enabled, conditional)`` lists for
@@ -1106,35 +1106,35 @@ struct DapManager(Copyable, Movable):
                 )
         return (lines^, enabled^, conditional^)
 
-    fn breakpoint_count(self) -> Int:
+    def breakpoint_count(self) -> Int:
         return len(self._bp_path)
 
-    fn breakpoint_path_at(self, idx: Int) -> String:
+    def breakpoint_path_at(self, idx: Int) -> String:
         if idx < 0 or idx >= len(self._bp_path):
             return String("")
         return self._bp_path[idx]
 
-    fn breakpoint_line_at(self, idx: Int) -> Int:
+    def breakpoint_line_at(self, idx: Int) -> Int:
         if idx < 0 or idx >= len(self._bp_line):
             return 0
         return self._bp_line[idx]
 
-    fn breakpoint_condition_at(self, idx: Int) -> String:
+    def breakpoint_condition_at(self, idx: Int) -> String:
         if idx < 0 or idx >= len(self._bp_condition):
             return String("")
         return self._bp_condition[idx]
 
-    fn breakpoint_enabled_at(self, idx: Int) -> Bool:
+    def breakpoint_enabled_at(self, idx: Int) -> Bool:
         if idx < 0 or idx >= len(self._bp_enabled):
             return True
         return self._bp_enabled[idx]
 
-    fn breakpoint_wait_for_at(self, idx: Int) -> String:
+    def breakpoint_wait_for_at(self, idx: Int) -> String:
         if idx < 0 or idx >= len(self._bp_wait_for):
             return String("")
         return self._bp_wait_for[idx]
 
-    fn restore_breakpoints(
+    def restore_breakpoints(
         mut self,
         var paths: List[String],
         var lines: List[Int],
@@ -1169,13 +1169,13 @@ struct DapManager(Copyable, Movable):
         self._bp_wait_for = wait_for^
         self._bp_armed = armed^
 
-    fn has_breakpoint(self, path: String, line: Int) -> Bool:
+    def has_breakpoint(self, path: String, line: Int) -> Bool:
         for i in range(len(self._bp_path)):
             if self._bp_path[i] == path and self._bp_line[i] == line:
                 return True
         return False
 
-    fn _distinct_breakpoint_paths(self) -> List[String]:
+    def _distinct_breakpoint_paths(self) -> List[String]:
         """Unique source paths that currently hold a breakpoint."""
         var out = List[String]()
         for i in range(len(self._bp_path)):
@@ -1188,7 +1188,7 @@ struct DapManager(Copyable, Movable):
                 out.append(self._bp_path[i])
         return out^
 
-    fn _push_breakpoints_for_path(mut self, path: String):
+    def _push_breakpoints_for_path(mut self, path: String):
         """Send ``setBreakpoints`` for ``path`` if the adapter is in a
         state that can accept it. No-op otherwise — once the session
         reaches CONFIGURING / RUNNING we resend everything in
@@ -1197,14 +1197,14 @@ struct DapManager(Copyable, Movable):
             return
         self._send_set_breakpoints(path)
 
-    fn _push_all_breakpoints(mut self):
+    def _push_all_breakpoints(mut self):
         """Send the full breakpoint set, one ``setBreakpoints`` per
         distinct source. Called once during the CONFIGURING transition."""
         var paths = self._distinct_breakpoint_paths()
         for i in range(len(paths)):
             self._send_set_breakpoints(paths[i])
 
-    fn _send_set_breakpoints(mut self, path: String):
+    def _send_set_breakpoints(mut self, path: String):
         var args = json_object()
         var src = json_object()
         var resolved = realpath(path)
@@ -1298,7 +1298,7 @@ struct DapManager(Copyable, Movable):
 
     # --- exception breakpoints --------------------------------------------
 
-    fn set_exception_filters(mut self, var filters: List[String]):
+    def set_exception_filters(mut self, var filters: List[String]):
         """Replace the active exception filter set. Resends to the
         adapter immediately if the session is past CONFIGURING; queued
         otherwise, picked up during ``_do_configure``."""
@@ -1306,13 +1306,13 @@ struct DapManager(Copyable, Movable):
         if self.state == _STATE_RUNNING:
             self._send_set_exception_breakpoints()
 
-    fn exception_filters(self) -> List[String]:
+    def exception_filters(self) -> List[String]:
         var out = List[String]()
         for i in range(len(self._exception_filters)):
             out.append(self._exception_filters[i])
         return out^
 
-    fn _send_set_exception_breakpoints(mut self):
+    def _send_set_exception_breakpoints(mut self):
         var args = json_object()
         var arr = json_array()
         for i in range(len(self._exception_filters)):
@@ -1327,7 +1327,7 @@ struct DapManager(Copyable, Movable):
 
     # --- evaluate (watch / REPL) ------------------------------------------
 
-    fn request_evaluate(
+    def request_evaluate(
         mut self, var expression: String, frame_id: Int,
         var context: String = String("watch"),
     ) -> Bool:
@@ -1376,10 +1376,10 @@ struct DapManager(Copyable, Movable):
             self._inflight_evaluate_exprs.append(expression^)
         return True
 
-    fn has_evaluations(self) -> Bool:
+    def has_evaluations(self) -> Bool:
         return len(self._evaluations_expr) > 0
 
-    fn take_evaluations(mut self) -> DapEvaluations:
+    def take_evaluations(mut self) -> DapEvaluations:
         """Drain the buffered evaluate responses.
 
         Empty types are common for adapters that don't return ``type``
@@ -1394,26 +1394,26 @@ struct DapManager(Copyable, Movable):
 
     # --- execution control -----------------------------------------------
 
-    fn cont(mut self) -> Bool:
+    def cont(mut self) -> Bool:
         """``continue`` is a Mojo keyword — hence ``cont``. Resumes the
         thread reported in the most recent ``stopped`` event, or thread
         1 as a fallback. Returns False if no session is active."""
         return self._send_thread_command(String("continue"))
 
-    fn next(mut self) -> Bool:
+    def next(mut self) -> Bool:
         """Step over (one source line, no descent into calls)."""
         return self._send_thread_command(String("next"))
 
-    fn step_in(mut self) -> Bool:
+    def step_in(mut self) -> Bool:
         return self._send_thread_command(String("stepIn"))
 
-    fn step_out(mut self) -> Bool:
+    def step_out(mut self) -> Bool:
         return self._send_thread_command(String("stepOut"))
 
-    fn pause(mut self) -> Bool:
+    def pause(mut self) -> Bool:
         return self._send_thread_command(String("pause"))
 
-    fn run_to_cursor(mut self, path: String, line: Int) -> Bool:
+    def run_to_cursor(mut self, path: String, line: Int) -> Bool:
         """Resume execution and stop again at ``(path, line)``.
 
         DAP has no native one-shot breakpoint, so we plant a transient
@@ -1435,7 +1435,7 @@ struct DapManager(Copyable, Movable):
         self._push_breakpoints_for_path(path)
         return self._send_thread_command(String("continue"))
 
-    fn _send_thread_command(mut self, command: String) -> Bool:
+    def _send_thread_command(mut self, command: String) -> Bool:
         if not self.is_active():
             return False
         # Prefer the sticky thread id over the unread ``_stopped`` event:
@@ -1464,7 +1464,7 @@ struct DapManager(Copyable, Movable):
 
     # --- async data fetches ----------------------------------------------
 
-    fn request_threads(mut self) -> Bool:
+    def request_threads(mut self) -> Bool:
         if not self.is_active():
             return False
         try:
@@ -1475,7 +1475,7 @@ struct DapManager(Copyable, Movable):
             return False
         return True
 
-    fn request_stack_trace(mut self, thread_id: Int, levels: Int = 64) -> Bool:
+    def request_stack_trace(mut self, thread_id: Int, levels: Int = 64) -> Bool:
         if not self.is_active():
             return False
         var args = json_object()
@@ -1521,7 +1521,7 @@ struct DapManager(Copyable, Movable):
             return False
         return True
 
-    fn request_scopes(mut self, frame_id: Int) -> Bool:
+    def request_scopes(mut self, frame_id: Int) -> Bool:
         if not self.is_active():
             return False
         var args = json_object()
@@ -1542,7 +1542,7 @@ struct DapManager(Copyable, Movable):
             return False
         return True
 
-    fn request_variables(mut self, variables_reference: Int) -> Bool:
+    def request_variables(mut self, variables_reference: Int) -> Bool:
         if not self.is_active():
             return False
         var args = json_object()
@@ -1565,7 +1565,7 @@ struct DapManager(Copyable, Movable):
 
     # --- pending-event accessors -----------------------------------------
 
-    fn take_stopped(mut self) -> Optional[DapStopped]:
+    def take_stopped(mut self) -> Optional[DapStopped]:
         """Pop the most recent ``stopped`` event. The ``_is_stopped``
         flag stays true until execution resumes (``continued`` event)
         — UI surfaces (gutter caret, stack pane) consult it."""
@@ -1573,13 +1573,13 @@ struct DapManager(Copyable, Movable):
         self._stopped = Optional[DapStopped]()
         return out
 
-    fn take_outputs(mut self) -> List[DapOutput]:
+    def take_outputs(mut self) -> List[DapOutput]:
         """Drain all buffered ``output`` events."""
         var out = self._output_events^
         self._output_events = List[DapOutput]()
         return out^
 
-    fn consume_terminated(mut self) -> Bool:
+    def consume_terminated(mut self) -> Bool:
         """Returns True iff a ``terminated`` event has fired since the
         last call. Used by the host to fold up the debug pane."""
         if self._terminated_pending:
@@ -1587,7 +1587,7 @@ struct DapManager(Copyable, Movable):
             return True
         return False
 
-    fn consume_continued(mut self) -> Bool:
+    def consume_continued(mut self) -> Bool:
         """Returns True iff a ``continued`` event has fired since the
         last call. Host uses this to wipe stack/locals/watches while
         the program is running again — those rows hold ids tied to
@@ -1598,37 +1598,37 @@ struct DapManager(Copyable, Movable):
             return True
         return False
 
-    fn has_threads(self) -> Bool:
+    def has_threads(self) -> Bool:
         return self._pending_threads_ready
 
-    fn take_threads(mut self) -> List[DapThread]:
+    def take_threads(mut self) -> List[DapThread]:
         var out = self._pending_threads^
         self._pending_threads = List[DapThread]()
         self._pending_threads_ready = False
         return out^
 
-    fn has_stack(self) -> Bool:
+    def has_stack(self) -> Bool:
         return self._pending_stack_ready
 
-    fn take_stack(mut self) -> List[DapStackFrame]:
+    def take_stack(mut self) -> List[DapStackFrame]:
         var out = self._pending_stack^
         self._pending_stack = List[DapStackFrame]()
         self._pending_stack_ready = False
         return out^
 
-    fn has_scopes(self) -> Bool:
+    def has_scopes(self) -> Bool:
         return self._pending_scopes_ready
 
-    fn take_scopes(mut self) -> List[DapScope]:
+    def take_scopes(mut self) -> List[DapScope]:
         var out = self._pending_scopes^
         self._pending_scopes = List[DapScope]()
         self._pending_scopes_ready = False
         return out^
 
-    fn has_variables(self) -> Bool:
+    def has_variables(self) -> Bool:
         return self._pending_vars_ready
 
-    fn take_variables(mut self) -> List[DapVariable]:
+    def take_variables(mut self) -> List[DapVariable]:
         var out = self._pending_vars^
         self._pending_vars = List[DapVariable]()
         self._pending_vars_ready = False
@@ -1636,7 +1636,7 @@ struct DapManager(Copyable, Movable):
 
     # --- frame-tick driver -----------------------------------------------
 
-    fn tick(mut self):
+    def tick(mut self):
         """Drive the state machine one step.
 
         Drains every framed message currently available, advancing the
@@ -1740,7 +1740,7 @@ struct DapManager(Copyable, Movable):
         # this tick gets its initialize sent before we poll the new socket.
         self._tick_subprocess()
 
-    fn _tick_subprocess(mut self):
+    def _tick_subprocess(mut self):
         """Pump messages between turbokod and one attached subprocess.
 
         Runs entirely independently of the parent state machine: the
@@ -1769,7 +1769,7 @@ struct DapManager(Copyable, Movable):
             var msg = maybe.value().copy()
             self._handle_subprocess_message(msg)
 
-    fn _handle_subprocess_message(mut self, msg: DapIncoming):
+    def _handle_subprocess_message(mut self, msg: DapIncoming):
         if msg.kind == DAP_EVENT:
             if not msg.event:
                 return
@@ -1910,7 +1910,7 @@ struct DapManager(Copyable, Movable):
             except:
                 pass
 
-    fn _subprocess_configure(mut self):
+    def _subprocess_configure(mut self):
         """Push breakpoints + exception filters, then ``configurationDone``."""
         # Subprocess attach is debugpy-only (the ``debugpyAttach`` event
         # that opens this socket is a debugpy extension), so the same
@@ -1991,7 +1991,7 @@ struct DapManager(Copyable, Movable):
 
     # --- event / response handlers ---------------------------------------
 
-    fn _handle_event(mut self, msg: DapIncoming):
+    def _handle_event(mut self, msg: DapIncoming):
         if not msg.event:
             return
         var event = msg.event.value()
@@ -2027,7 +2027,7 @@ struct DapManager(Copyable, Movable):
         # ``thread``, ``module``, ``loadedSource``, ``breakpoint``,
         # ``capabilities``, ``progress*`` — unhandled, silently dropped.
 
-    fn _handle_response(mut self, msg: DapIncoming):
+    def _handle_response(mut self, msg: DapIncoming):
         if not msg.request_seq:
             return
         var rseq = msg.request_seq.value()
@@ -2098,7 +2098,7 @@ struct DapManager(Copyable, Movable):
             self._on_set_breakpoints_response(sidx, msg)
             return
 
-    fn _handle_reverse_request(mut self, msg: DapIncoming):
+    def _handle_reverse_request(mut self, msg: DapIncoming):
         if not msg.command:
             return
         try:
@@ -2108,7 +2108,7 @@ struct DapManager(Copyable, Movable):
         except:
             pass
 
-    fn _on_initialize_response(mut self, msg: DapIncoming):
+    def _on_initialize_response(mut self, msg: DapIncoming):
         if msg.success and not msg.success.value():
             self.state = _STATE_FAILED
             var why = String("initialize rejected")
@@ -2147,14 +2147,14 @@ struct DapManager(Copyable, Movable):
         if self._got_initialized_event:
             self._do_configure()
 
-    fn _on_initialized_event(mut self):
+    def _on_initialized_event(mut self):
         # Only meaningful once we've moved past INITIALIZING — if it
         # arrives during INITIALIZING (some adapters send it eagerly),
         # we'll act on it after the launch request goes out.
         if self.state == _STATE_LAUNCHING:
             self._do_configure()
 
-    fn _on_set_breakpoints_response(mut self, idx: Int, msg: DapIncoming):
+    def _on_set_breakpoints_response(mut self, idx: Int, msg: DapIncoming):
         """Demux a ``setBreakpoints`` response: pop the inflight slot,
         then walk the response's ``breakpoints`` array against the live
         local list (filtered by enabled-state to mirror what we sent).
@@ -2226,17 +2226,17 @@ struct DapManager(Copyable, Movable):
                 DapBreakpointError(path, line, msg_text^),
             )
 
-    fn take_breakpoint_errors(mut self) -> List[DapBreakpointError]:
+    def take_breakpoint_errors(mut self) -> List[DapBreakpointError]:
         """Drain any ``setBreakpoints`` rejections since the last call.
         Empty list when nothing's wrong."""
         var out = self._bp_errors^
         self._bp_errors = List[DapBreakpointError]()
         return out^
 
-    fn has_breakpoint_errors(self) -> Bool:
+    def has_breakpoint_errors(self) -> Bool:
         return len(self._bp_errors) > 0
 
-    fn has_inflight_set_breakpoints(self) -> Bool:
+    def has_inflight_set_breakpoints(self) -> Bool:
         """True while at least one ``setBreakpoints`` request is still
         waiting on a response. The condition-error dialog uses this to
         tell "the adapter hasn't answered yet" from "the adapter
@@ -2244,7 +2244,7 @@ struct DapManager(Copyable, Movable):
         close the dialog."""
         return len(self._inflight_set_breakpoints_seqs) > 0
 
-    fn _on_evaluate_response(mut self, idx: Int, msg: DapIncoming):
+    def _on_evaluate_response(mut self, idx: Int, msg: DapIncoming):
         """Pop ``idx`` from the parent in-flight evaluate lists and
         stash the result. ``msg.body`` shape:
         ``{result, type?, variablesReference}``; we surface ``result``
@@ -2261,7 +2261,7 @@ struct DapManager(Copyable, Movable):
         self._inflight_evaluate_exprs = new_exprs^
         self._stash_evaluate_result(expr^, msg)
 
-    fn _on_evaluate_response_subprocess(
+    def _on_evaluate_response_subprocess(
         mut self, idx: Int, msg: DapIncoming,
     ):
         """Subprocess-channel variant: same body, different inflight
@@ -2279,7 +2279,7 @@ struct DapManager(Copyable, Movable):
         self._subprocess.inflight_evaluate_exprs = new_exprs^
         self._stash_evaluate_result(expr^, msg)
 
-    fn _stash_evaluate_result(
+    def _stash_evaluate_result(
         mut self, var expr: String, msg: DapIncoming,
     ):
         """Append one parsed ``evaluate`` result to the watch/REPL
@@ -2309,7 +2309,7 @@ struct DapManager(Copyable, Movable):
 
     # --- condition-exception buffer & test-evaluate channel --------------
 
-    fn _maybe_capture_condition_exception(mut self, text: String) -> Bool:
+    def _maybe_capture_condition_exception(mut self, text: String) -> Bool:
         """Detect pydevd's ``Error while evaluating expression in
         conditional breakpoint`` notice and stash the parsed condition
         + short error so ``take_condition_exception`` can surface it on
@@ -2349,10 +2349,10 @@ struct DapManager(Copyable, Movable):
         self._pending_cond_exc_error = short_error^
         return True
 
-    fn has_condition_exception(self) -> Bool:
+    def has_condition_exception(self) -> Bool:
         return len(self._pending_cond_exc_condition.as_bytes()) > 0
 
-    fn take_condition_exception(mut self) -> Optional[DapConditionException]:
+    def take_condition_exception(mut self) -> Optional[DapConditionException]:
         """Drain the most recent runtime condition-exception buffer.
         Returns ``None`` when nothing's pending. The host calls this
         once per tick after handling the surfaced ``stopped`` event;
@@ -2367,7 +2367,7 @@ struct DapManager(Copyable, Movable):
             DapConditionException(c^, e^),
         )
 
-    fn request_test_evaluate(
+    def request_test_evaluate(
         mut self, var expression: String, frame_id: Int,
     ) -> Bool:
         """Issue an ``evaluate`` whose result lands in the test-eval
@@ -2412,10 +2412,10 @@ struct DapManager(Copyable, Movable):
             self._inflight_test_eval_exprs.append(expression^)
         return True
 
-    fn has_test_evaluations(self) -> Bool:
+    def has_test_evaluations(self) -> Bool:
         return len(self._test_eval_expr) > 0
 
-    fn take_test_evaluation(mut self) -> Optional[DapTestEvaluation]:
+    def take_test_evaluation(mut self) -> Optional[DapTestEvaluation]:
         """Pop the oldest test-evaluate result. Returns ``None`` when
         nothing's queued. We pop one at a time rather than draining
         the batch so the dialog state machine handles each ``Try again``
@@ -2441,7 +2441,7 @@ struct DapManager(Copyable, Movable):
             DapTestEvaluation(expr^, val^, err),
         )
 
-    fn _on_test_evaluate_response(mut self, idx: Int, msg: DapIncoming):
+    def _on_test_evaluate_response(mut self, idx: Int, msg: DapIncoming):
         """Pop the parent in-flight slot at ``idx`` and store the value
         (or the error message) in the test-eval result lists."""
         var expr = self._inflight_test_eval_exprs[idx]
@@ -2456,7 +2456,7 @@ struct DapManager(Copyable, Movable):
         self._inflight_test_eval_exprs = new_exprs^
         self._stash_test_evaluate_result(expr^, msg)
 
-    fn _on_test_evaluate_response_subprocess(
+    def _on_test_evaluate_response_subprocess(
         mut self, idx: Int, msg: DapIncoming,
     ):
         """Subprocess-channel variant — same body, different inflight
@@ -2477,7 +2477,7 @@ struct DapManager(Copyable, Movable):
         self._subprocess.inflight_test_eval_exprs = new_exprs^
         self._stash_test_evaluate_result(expr^, msg)
 
-    fn _stash_test_evaluate_result(
+    def _stash_test_evaluate_result(
         mut self, var expr: String, msg: DapIncoming,
     ):
         var value = String("")
@@ -2497,7 +2497,7 @@ struct DapManager(Copyable, Movable):
         self._test_eval_value.append(value^)
         self._test_eval_error.append(is_error)
 
-    fn _send_set_debugger_property_debugpy(mut self):
+    def _send_set_debugger_property_debugpy(mut self):
         """debugpy-only: tell pydevd to suspend (and print) on every
         exception raised while evaluating a conditional breakpoint.
 
@@ -2526,7 +2526,7 @@ struct DapManager(Copyable, Movable):
         except:
             pass
 
-    fn _do_configure(mut self):
+    def _do_configure(mut self):
         """Push all breakpoints + exception filters, then send
         ``configurationDone``."""
         self._send_set_debugger_property_debugpy()
@@ -2550,7 +2550,7 @@ struct DapManager(Copyable, Movable):
             self.client.process.trace(String("state -> running (no configDone)"))
         self._state_entered_ms = monotonic_ms()
 
-    fn _on_launch_response(mut self, msg: DapIncoming):
+    def _on_launch_response(mut self, msg: DapIncoming):
         # Spec lets the launch response arrive at any point — even after
         # the program has stopped on entry. We only fail the session if
         # success=false; otherwise the response is informational.
@@ -2561,7 +2561,7 @@ struct DapManager(Copyable, Movable):
                 why = why + String(": ") + msg.message.value()
             self.failure_reason = why
 
-    fn _on_config_done_response(mut self, msg: DapIncoming):
+    def _on_config_done_response(mut self, msg: DapIncoming):
         if msg.success and not msg.success.value():
             self.state = _STATE_FAILED
             self.failure_reason = String("configurationDone rejected")
@@ -2571,7 +2571,7 @@ struct DapManager(Copyable, Movable):
             self._state_entered_ms = monotonic_ms()
             self.client.process.trace(String("state -> running"))
 
-    fn _on_stopped_event(mut self, msg: DapIncoming, from_subprocess: Bool):
+    def _on_stopped_event(mut self, msg: DapIncoming, from_subprocess: Bool):
         var tid = 1
         var reason = String("")
         var description = String("")
@@ -2608,7 +2608,7 @@ struct DapManager(Copyable, Movable):
             self._oneshot_bp_line = -1
             self._push_breakpoints_for_path(stale_path)
 
-    fn _on_output_event(mut self, msg: DapIncoming):
+    def _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():
             return
         var b = msg.body.value().copy()
@@ -2629,7 +2629,7 @@ struct DapManager(Copyable, Movable):
         _ = self._maybe_capture_condition_exception(text)
         self._output_events.append(DapOutput(category, text))
 
-    fn _on_debugpy_attach_event(mut self, msg: DapIncoming):
+    def _on_debugpy_attach_event(mut self, msg: DapIncoming):
         """Open a TCP session to the forked subprocess and start its
         attach handshake. Without this, the child blocks at startup
         forever waiting for an IDE that never connects — and frameworks
@@ -2759,7 +2759,7 @@ struct DapManager(Copyable, Movable):
 # --- module-level helpers -------------------------------------------------
 
 
-fn _trim_trailing_newline(s: String) -> String:
+def _trim_trailing_newline(s: String) -> String:
     """``s`` minus a single trailing ``\\n``, if any. Keeps trace lines
     one-per-line in the log file."""
     var b = s.as_bytes()
@@ -2770,7 +2770,7 @@ fn _trim_trailing_newline(s: String) -> String:
     return s
 
 
-fn _last_nonempty_line(text: String) -> String:
+def _last_nonempty_line(text: String) -> String:
     """Last ``\\n``-delimited line of ``text`` skipping any trailing
     blank lines. Used to reduce a Python traceback string down to its
     final ``ExceptionType: message`` summary, which is what the
@@ -2789,7 +2789,7 @@ fn _last_nonempty_line(text: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
-fn _state_name(state: UInt8) -> String:
+def _state_name(state: UInt8) -> String:
     """Human-readable name for a state constant. Used in failure
     messages so ``adapter unresponsive for 15s in initializing`` reads
     cleanly without the caller knowing the comptime constants."""
@@ -2808,7 +2808,7 @@ fn _state_name(state: UInt8) -> String:
     return String("failed")
 
 
-fn _default_exception_filters() -> List[String]:
+def _default_exception_filters() -> List[String]:
     """Sensible default: break only on uncaught exceptions. ``raised``
     fires on every raise (including ones the program later catches)
     which is rarely useful as a default but easy to flip on via
@@ -2821,7 +2821,7 @@ fn _default_exception_filters() -> List[String]:
 # --- response-body parsers ------------------------------------------------
 
 
-fn _parse_threads(body_opt: Optional[JsonValue]) -> List[DapThread]:
+def _parse_threads(body_opt: Optional[JsonValue]) -> List[DapThread]:
     var out = List[DapThread]()
     if not body_opt:
         return out^
@@ -2847,7 +2847,7 @@ fn _parse_threads(body_opt: Optional[JsonValue]) -> List[DapThread]:
     return out^
 
 
-fn _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
+def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
     var out = List[DapStackFrame]()
     if not body_opt:
         return out^
@@ -2914,7 +2914,7 @@ fn _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
     return out^
 
 
-fn _parse_scopes(body_opt: Optional[JsonValue]) -> List[DapScope]:
+def _parse_scopes(body_opt: Optional[JsonValue]) -> List[DapScope]:
     var out = List[DapScope]()
     if not body_opt:
         return out^
@@ -2945,7 +2945,7 @@ fn _parse_scopes(body_opt: Optional[JsonValue]) -> List[DapScope]:
     return out^
 
 
-fn _parse_variables(body_opt: Optional[JsonValue]) -> List[DapVariable]:
+def _parse_variables(body_opt: Optional[JsonValue]) -> List[DapVariable]:
     var out = List[DapVariable]()
     if not body_opt:
         return out^

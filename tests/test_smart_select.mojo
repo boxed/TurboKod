@@ -16,15 +16,15 @@ from turbokod.geometry import Rect
 comptime _VIEW = Rect(0, 0, 80, 24)
 
 
-fn _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
+def _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
     return Event.key_event(k, mods)
 
 
-fn _set_caret(mut ed: Editor, row: Int, col: Int):
+def _set_caret(mut ed: Editor, row: Int, col: Int):
     ed.move_to(row, col, False)
 
 
-fn _selection(ed: Editor) -> Tuple[Int, Int, Int, Int]:
+def _selection(ed: Editor) -> Tuple[Int, Int, Int, Int]:
     """Normalize selection to (start_row, start_col, end_row, end_col)."""
     var sr = ed.anchor_row
     var sc = ed.anchor_col
@@ -35,7 +35,7 @@ fn _selection(ed: Editor) -> Tuple[Int, Int, Int, Int]:
     return (sr, sc, er, ec)
 
 
-fn test_cmd_up_on_caret_selects_word() raises:
+def test_cmd_up_on_caret_selects_word() raises:
     var ed = Editor(String("hello world"))
     _set_caret(ed, 0, 2)  # in the middle of "hello"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -44,7 +44,7 @@ fn test_cmd_up_on_caret_selects_word() raises:
     assert_equal(s[2], 0); assert_equal(s[3], 5)
 
 
-fn test_cmd_up_after_word_extends_to_dotted_path() raises:
+def test_cmd_up_after_word_extends_to_dotted_path() raises:
     var ed = Editor(String("foo.bar.baz()"))
     _set_caret(ed, 0, 5)  # in "bar"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -55,7 +55,7 @@ fn test_cmd_up_after_word_extends_to_dotted_path() raises:
     assert_equal(s[1], 0); assert_equal(s[3], 11)  # "foo.bar.baz"
 
 
-fn test_cmd_up_inside_string_grows_to_quotes() raises:
+def test_cmd_up_inside_string_grows_to_quotes() raises:
     var ed = Editor(String("name = \"hello world\""))
     _set_caret(ed, 0, 9)  # inside "hello"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -71,7 +71,7 @@ fn test_cmd_up_inside_string_grows_to_quotes() raises:
     assert_equal(s[1], 7); assert_equal(s[3], 20)
 
 
-fn test_cmd_up_brackets_then_line_then_file() raises:
+def test_cmd_up_brackets_then_line_then_file() raises:
     var ed = Editor(String("a = [1, 2, 3]"))
     _set_caret(ed, 0, 8)  # on "2"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -91,7 +91,7 @@ fn test_cmd_up_brackets_then_line_then_file() raises:
     assert_equal(s[1], 0); assert_equal(s[3], 13)
 
 
-fn test_cmd_up_grows_to_indent_block_and_file() raises:
+def test_cmd_up_grows_to_indent_block_and_file() raises:
     var ed = Editor(String("def f():\n    x = 1\n    y = 2\n\nz = 3\n"))
     _set_caret(ed, 1, 4)  # on "x"
     # word
@@ -119,7 +119,7 @@ fn test_cmd_up_grows_to_indent_block_and_file() raises:
     assert_equal(s[0], 0); assert_equal(s[2], 2)
 
 
-fn test_cmd_down_rewinds_through_history() raises:
+def test_cmd_down_rewinds_through_history() raises:
     var ed = Editor(String("hello world"))
     _set_caret(ed, 0, 2)
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)  # word
@@ -134,7 +134,7 @@ fn test_cmd_down_rewinds_through_history() raises:
     assert_equal(ed.cursor_col, 2)
 
 
-fn test_other_key_resets_smart_select_history() raises:
+def test_other_key_resets_smart_select_history() raises:
     var ed = Editor(String("hello world"))
     _set_caret(ed, 0, 2)
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -147,7 +147,7 @@ fn test_other_key_resets_smart_select_history() raises:
     assert_equal(ed.cursor_col, before_col)
 
 
-fn test_cmd_down_with_empty_history_is_noop() raises:
+def test_cmd_down_with_empty_history_is_noop() raises:
     var ed = Editor(String("abc"))
     _set_caret(ed, 0, 1)
     _ = ed.handle_key(_key(KEY_DOWN, MOD_META), _VIEW)
@@ -155,7 +155,7 @@ fn test_cmd_down_with_empty_history_is_noop() raises:
     assert_false(ed.has_selection())
 
 
-fn test_cmd_up_grows_through_nested_brackets() raises:
+def test_cmd_up_grows_through_nested_brackets() raises:
     var ed = Editor(String("foo(bar(x, y), z)"))
     _set_caret(ed, 0, 8)  # on "x"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -175,7 +175,7 @@ fn test_cmd_up_grows_through_nested_brackets() raises:
     assert_equal(s[1], 4); assert_equal(s[3], 16)
 
 
-fn test_cmd_up_grows_across_multiline_brackets() raises:
+def test_cmd_up_grows_across_multiline_brackets() raises:
     var ed = Editor(String("foo(\n    a,\n    b,\n)"))
     _set_caret(ed, 1, 4)  # on "a"
     _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
@@ -193,7 +193,7 @@ fn test_cmd_up_grows_across_multiline_brackets() raises:
     assert_true(crossed)
 
 
-fn test_cmd_up_grows_existing_user_selection() raises:
+def test_cmd_up_grows_existing_user_selection() raises:
     var ed = Editor(String("hello world"))
     # Manual selection of just "ell" via shift+right.
     _set_caret(ed, 0, 1)
@@ -211,7 +211,7 @@ fn test_cmd_up_grows_existing_user_selection() raises:
     assert_true(s[1] <= 1 and s[3] >= 4)
 
 
-fn test_cmd_up_at_whole_file_is_noop() raises:
+def test_cmd_up_at_whole_file_is_noop() raises:
     var ed = Editor(String("only"))
     _set_caret(ed, 0, 0)
     # Repeatedly press Cmd+Up; eventually we hit whole file.
@@ -222,7 +222,7 @@ fn test_cmd_up_at_whole_file_is_noop() raises:
     assert_equal(s[2], 0); assert_equal(s[3], 4)
 
 
-fn main() raises:
+def main() raises:
     test_cmd_up_on_caret_selects_word()
     test_cmd_up_after_word_extends_to_dotted_path()
     test_cmd_up_inside_string_grows_to_quotes()

@@ -63,10 +63,10 @@ struct InstallResult(ImplicitlyCopyable, Movable):
     var status: Int32
     var output: String
 
-    fn exit_code(self) -> Int:
+    def exit_code(self) -> Int:
         return (Int(self.status) >> 8) & 0xFF
 
-    fn ok(self) -> Bool:
+    def ok(self) -> Bool:
         return self.exit_code() == 0
 
 
@@ -78,7 +78,7 @@ struct InstallRunner(Movable):
     var output: String          # rolling capture (capped at _OUTPUT_CAP)
     var _spinner_anchor_ms: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.label = String("")
         self.command = String("")
@@ -86,10 +86,10 @@ struct InstallRunner(Movable):
         self.output = String("")
         self._spinner_anchor_ms = 0
 
-    fn is_active(self) -> Bool:
+    def is_active(self) -> Bool:
         return self.active
 
-    fn start(mut self, var label: String, var command: String) raises:
+    def start(mut self, var label: String, var command: String) raises:
         """Spawn ``sh -c command`` and start tracking it. Raises if a run
         is already in flight (single-slot — host should check first)."""
         if self.active:
@@ -105,7 +105,7 @@ struct InstallRunner(Movable):
         self._spinner_anchor_ms = monotonic_ms()
         self.active = True
 
-    fn tick(mut self) -> Optional[InstallResult]:
+    def tick(mut self) -> Optional[InstallResult]:
         """Drain whatever's available on the child's stdout / stderr and
         check whether it has exited. Returns the ``InstallResult`` once
         on the tick where the child reaps; ``None`` on every other tick.
@@ -135,7 +135,7 @@ struct InstallRunner(Movable):
         self._reset()
         return Optional[InstallResult](result^)
 
-    fn _drain_fd(mut self, fd: Int32):
+    def _drain_fd(mut self, fd: Int32):
         """Read everything currently available on ``fd`` into ``output``.
         Both pipes are non-blocking (``LspProcess.spawn`` set that up),
         so we loop until ``poll`` says no more data or ``read`` returns
@@ -161,7 +161,7 @@ struct InstallRunner(Movable):
                 unsafe_from_utf8=ob[len(ob) - _OUTPUT_CAP:],
             ))
 
-    fn _reset(mut self):
+    def _reset(mut self):
         # Close the parent ends of the pipes that we still own; the child
         # was reaped by ``waitpid_nohang`` so its side is already gone.
         if self.process.stdin_fd  >= 0: _ = close_fd(self.process.stdin_fd)
@@ -176,7 +176,7 @@ struct InstallRunner(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    fn paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, screen: Rect):
         """Render the bottom-right progress popup. No-op when inactive.
 
         The popup is non-modal: it overlays whatever's underneath, and
@@ -226,7 +226,7 @@ struct InstallRunner(Movable):
                 canvas, Point(inner_left, inner_top + i), tail[i], bg,
             )
 
-    fn _spinner_glyph(self) -> String:
+    def _spinner_glyph(self) -> String:
         var elapsed = monotonic_ms() - self._spinner_anchor_ms
         if elapsed < 0:
             elapsed = 0
@@ -241,7 +241,7 @@ struct InstallRunner(Movable):
 # --- helpers ----------------------------------------------------------------
 
 
-fn _last_lines(text: String, n: Int) -> List[String]:
+def _last_lines(text: String, n: Int) -> List[String]:
     """Return the last ``n`` non-empty lines of ``text``, oldest first.
 
     Trailing whitespace is stripped per line so a stray ``\\r`` (CRLF

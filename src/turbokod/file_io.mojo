@@ -26,14 +26,14 @@ comptime STAT_BUF_SIZE: Int = 256       # generous upper bound for any platform
 # bits/struct_stat.h on glibc.
 
 
-fn _stat_size_offset() -> Int:
+def _stat_size_offset() -> Int:
     comptime if CompilationTarget.is_macos():
         return 96    # off_t st_size on Darwin
     else:
         return 48    # off_t st_size on Linux/x86-64 + arm64
 
 
-fn _stat_mtime_offset() -> Int:
+def _stat_mtime_offset() -> Int:
     """Byte offset of st_mtim.tv_sec (Linux) / st_mtimespec.tv_sec (Darwin)."""
     comptime if CompilationTarget.is_macos():
         return 48    # st_mtimespec.tv_sec (time_t = 8 bytes)
@@ -53,11 +53,11 @@ struct FileInfo(ImplicitlyCopyable, Movable):
     var mode: UInt32
     var ok: Bool
 
-    fn is_dir(self) -> Bool:
+    def is_dir(self) -> Bool:
         return (self.mode & _S_IFMT) == _S_IFDIR
 
 
-fn _stat_mode(buf: List[UInt8]) -> UInt32:
+def _stat_mode(buf: List[UInt8]) -> UInt32:
     """``st_mode`` is uint16 at offset 4 on Darwin, uint32 at offset 24 on Linux."""
     comptime if CompilationTarget.is_macos():
         return UInt32(buf.unsafe_ptr().bitcast[UInt16]()[2])
@@ -65,7 +65,7 @@ fn _stat_mode(buf: List[UInt8]) -> UInt32:
         return buf.unsafe_ptr().bitcast[UInt32]()[6]
 
 
-fn stat_file(path: String) -> FileInfo:
+def stat_file(path: String) -> FileInfo:
     """Best-effort stat. Returns ``ok=False`` on any error (missing file, etc.)."""
     var c_path = path + String("\0")
     var buf = alloc_zero_buffer(STAT_BUF_SIZE)
@@ -79,7 +79,7 @@ fn stat_file(path: String) -> FileInfo:
     return FileInfo(size, mtime, mode, True)
 
 
-fn read_file(path: String) raises -> String:
+def read_file(path: String) raises -> String:
     """Read the entire file as a UTF-8 string. Empty string on error."""
     var c_path = path + String("\0")
     var fd = external_call["open", Int32](c_path.unsafe_ptr(), O_RDONLY)
@@ -98,7 +98,7 @@ fn read_file(path: String) raises -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=got))
 
 
-fn write_file(path: String, content: String) -> Bool:
+def write_file(path: String, content: String) -> Bool:
     """Write ``content`` to ``path``, replacing any existing file. Returns
     True on success.
 
@@ -122,7 +122,7 @@ fn write_file(path: String, content: String) -> Bool:
 # --- Directory listing -----------------------------------------------------
 
 
-fn list_directory(path: String) -> List[String]:
+def list_directory(path: String) -> List[String]:
     """Names in ``path``. Returns an empty list on error.
 
     Uses a thin C wrapper around ``opendir``/``readdir`` (declared in
@@ -165,7 +165,7 @@ fn list_directory(path: String) -> List[String]:
     return out^
 
 
-fn join_path(dir: String, name: String) -> String:
+def join_path(dir: String, name: String) -> String:
     """Join ``dir`` and ``name`` with a single ``/`` separator."""
     var d = dir
     var dbytes = d.as_bytes()
@@ -176,7 +176,7 @@ fn join_path(dir: String, name: String) -> String:
     return d + String("/") + name
 
 
-fn parent_path(path: String) -> String:
+def parent_path(path: String) -> String:
     """Return the parent directory of ``path`` (or ``"/"`` at the root)."""
     var bytes = path.as_bytes()
     var n = len(bytes)
@@ -195,7 +195,7 @@ fn parent_path(path: String) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[:i]))
 
 
-fn ci_less(a: String, b: String) -> Bool:
+def ci_less(a: String, b: String) -> Bool:
     """``True`` iff ``a < b`` lexicographically, ignoring ASCII case.
 
     Non-ASCII bytes compare via raw byte value (no Unicode case folding) —
@@ -217,7 +217,7 @@ fn ci_less(a: String, b: String) -> Bool:
     return len(ab) < len(bb)
 
 
-fn sort_directory_listing(
+def sort_directory_listing(
     mut names: List[String], mut is_dirs: List[Bool],
 ):
     """Reorder the parallel ``names`` / ``is_dirs`` lists so directories
@@ -252,7 +252,7 @@ fn sort_directory_listing(
             j -= 1
 
 
-fn basename(path: String) -> String:
+def basename(path: String) -> String:
     """Return the last path component of ``path`` (no trailing slash).
 
     ``"/foo/bar"`` → ``"bar"``; ``"foo"`` → ``"foo"``; ``"/"`` → ``"/"``.
@@ -273,7 +273,7 @@ fn basename(path: String) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[i + 1:n]))
 
 
-fn find_git_project(start_path: String) -> Optional[String]:
+def find_git_project(start_path: String) -> Optional[String]:
     """Walk up from ``start_path`` looking for a ``.git`` entry.
 
     Returns the directory that contains ``.git`` (the project root) on

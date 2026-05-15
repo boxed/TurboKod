@@ -81,20 +81,20 @@ struct DapClient(Copyable, Movable):
     var process: LspProcess
     var _next_seq: Int
 
-    fn __init__(out self, var process: LspProcess):
+    def __init__(out self, var process: LspProcess):
         self.process = process^
         self._next_seq = 1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.process = LspProcess()
         self._next_seq = 1
 
     @staticmethod
-    fn spawn(argv: List[String]) raises -> Self:
+    def spawn(argv: List[String]) raises -> Self:
         var p = LspProcess.spawn(argv)
         return DapClient(p^)
 
-    fn send_request(
+    def send_request(
         mut self, command: String, arguments: JsonValue,
     ) raises -> Int:
         """Send a DAP request and return the issued seq number.
@@ -112,7 +112,7 @@ struct DapClient(Copyable, Movable):
         self.process.write_message(encode_json(envelope))
         return seq
 
-    fn send_response(
+    def send_response(
         mut self, request_seq: Int, command: String, success: Bool,
         body: JsonValue,
     ) raises:
@@ -129,21 +129,21 @@ struct DapClient(Copyable, Movable):
         envelope.put(String("body"), body)
         self.process.write_message(encode_json(envelope))
 
-    fn poll(mut self, timeout_ms: Int32) raises -> Optional[DapIncoming]:
+    def poll(mut self, timeout_ms: Int32) raises -> Optional[DapIncoming]:
         var maybe = self.process.poll_message(timeout_ms)
         if not maybe:
             return Optional[DapIncoming]()
         var v = parse_json(maybe.value())
         return Optional[DapIncoming](classify_dap_message(v))
 
-    fn terminate(mut self):
+    def terminate(mut self):
         self.process.terminate()
 
 
 # --- classification --------------------------------------------------------
 
 
-fn classify_dap_message(v: JsonValue) -> DapIncoming:
+def classify_dap_message(v: JsonValue) -> DapIncoming:
     """Examine a parsed DAP envelope and tag it as response / event /
     (reverse) request. Top-level utility for tests + clients.
 
@@ -207,7 +207,7 @@ fn classify_dap_message(v: JsonValue) -> DapIncoming:
 # --- High-level helpers used by tests + dispatch ---------------------------
 
 
-fn dap_initialize_arguments(client_id: String, adapter_id: String) -> JsonValue:
+def dap_initialize_arguments(client_id: String, adapter_id: String) -> JsonValue:
     """Build the bare-minimum ``initialize`` arguments most adapters accept.
 
     ``adapterID`` is required by the spec; ``debugpy`` and ``lldb-dap``

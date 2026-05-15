@@ -55,14 +55,14 @@ struct GitignoreMatcher(Copyable, Movable):
     """
     var patterns: List[GitignorePattern]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.patterns = List[GitignorePattern]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.patterns = copy.patterns.copy()
 
     @staticmethod
-    fn from_text(text: String) -> Self:
+    def from_text(text: String) -> Self:
         var m = GitignoreMatcher()
         var lines = split_lines_no_trailing(text)
         for li in range(len(lines)):
@@ -92,7 +92,7 @@ struct GitignoreMatcher(Copyable, Movable):
             m.patterns.append(GitignorePattern(glob, dir_only, anchored, negate))
         return m^
 
-    fn ignored(self, rel_path: String, is_dir: Bool) -> Bool:
+    def ignored(self, rel_path: String, is_dir: Bool) -> Bool:
         """Is ``rel_path`` (relative to the gitignore's directory) ignored?
 
         ``rel_path`` should use ``/`` separators and not start with ``/``.
@@ -107,7 +107,7 @@ struct GitignoreMatcher(Copyable, Movable):
         return result
 
 
-fn _strip(s: String) -> String:
+def _strip(s: String) -> String:
     var b = s.as_bytes()
     var n = len(b)
     var i = 0
@@ -121,7 +121,7 @@ fn _strip(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[i:j]))
 
 
-fn _split_path_components(path: String) -> List[String]:
+def _split_path_components(path: String) -> List[String]:
     var out = List[String]()
     var b = path.as_bytes()
     var start = 0
@@ -137,11 +137,11 @@ fn _split_path_components(path: String) -> List[String]:
     return out^
 
 
-fn _glob_match(pattern: String, text: String) -> Bool:
+def _glob_match(pattern: String, text: String) -> Bool:
     return _glob_match_at(pattern, 0, text, 0)
 
 
-fn _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
+def _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
     var pb = pattern.as_bytes()
     var tb = text.as_bytes()
     var p = pi
@@ -179,7 +179,7 @@ fn _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
     return t == len(tb)
 
 
-fn _has_byte(s: String, b: UInt8) -> Bool:
+def _has_byte(s: String, b: UInt8) -> Bool:
     var bs = s.as_bytes()
     for i in range(len(bs)):
         if bs[i] == b:
@@ -187,7 +187,7 @@ fn _has_byte(s: String, b: UInt8) -> Bool:
     return False
 
 
-fn _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
+def _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
     if p.anchored:
         return _glob_match(p.glob, rel)
     var glob_has_slash = _has_byte(p.glob, 0x2F)
@@ -210,7 +210,7 @@ fn _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
     return False
 
 
-fn load_project_gitignore(root: String) -> GitignoreMatcher:
+def load_project_gitignore(root: String) -> GitignoreMatcher:
     var path = join_path(root, String(".gitignore"))
     var info = stat_file(path)
     if not info.ok:
@@ -223,7 +223,7 @@ fn load_project_gitignore(root: String) -> GitignoreMatcher:
     return GitignoreMatcher.from_text(text)
 
 
-fn walk_project_files(
+def walk_project_files(
     root: String, respect_gitignore: Bool = True,
 ) -> List[String]:
     """Iterative DFS — absolute paths of every regular file under ``root``.
@@ -265,7 +265,7 @@ fn walk_project_files(
     return out^
 
 
-fn _looks_binary(text: String) -> Bool:
+def _looks_binary(text: String) -> Bool:
     var bytes = text.as_bytes()
     var n = len(bytes)
     if n > 4096:
@@ -276,7 +276,7 @@ fn _looks_binary(text: String) -> Bool:
     return False
 
 
-fn _project_relative(root: String, full: String) -> String:
+def _project_relative(root: String, full: String) -> String:
     var rb = root.as_bytes()
     var fb = full.as_bytes()
     if len(fb) <= len(rb) + 1:
@@ -289,7 +289,7 @@ fn _project_relative(root: String, full: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
-fn _replace_all_in_string(
+def _replace_all_in_string(
     haystack: String, needle: String, replacement: String,
 ) -> String:
     var hb = haystack.as_bytes()
@@ -322,7 +322,7 @@ fn _replace_all_in_string(
     return out
 
 
-fn _contains_bytes(line: String, needle: String) -> Bool:
+def _contains_bytes(line: String, needle: String) -> Bool:
     var lb = line.as_bytes()
     var nb = needle.as_bytes()
     var n = len(nb)
@@ -342,7 +342,7 @@ fn _contains_bytes(line: String, needle: String) -> Bool:
     return False
 
 
-fn find_in_project(
+def find_in_project(
     root: String, needle: String,
     opts: SearchOptions = default_search_options(),
 ) raises -> List[ProjectMatch]:
@@ -379,7 +379,7 @@ fn find_in_project(
     return out^
 
 
-fn replace_in_project(
+def replace_in_project(
     root: String, needle: String, replacement: String,
     opts: SearchOptions = default_search_options(),
 ) raises -> Tuple[Int, Int]:
@@ -444,7 +444,7 @@ fn replace_in_project(
     return (files_changed, total)
 
 
-fn _regex_replace_count(
+def _regex_replace_count(
     text: String, rx: OnigRegex, replacement: String,
 ) -> Tuple[String, Int]:
     """Walk libonig matches across ``text`` rebuilding the file with

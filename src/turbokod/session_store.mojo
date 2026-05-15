@@ -69,7 +69,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
     var scroll_x: Int
     var scroll_y: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.path = String("")
         self.rect_a_x = 0
         self.rect_a_y = 0
@@ -85,7 +85,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.scroll_x = 0
         self.scroll_y = 0
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.path = copy.path
         self.rect_a_x = copy.rect_a_x
         self.rect_a_y = copy.rect_a_y
@@ -113,38 +113,38 @@ struct Session(Movable):
     var z_order: List[Int]
     var focused: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.windows = List[SessionWindow]()
         self.z_order = List[Int]()
         self.focused = -1
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.windows = copy.windows.copy()
         self.z_order = copy.z_order.copy()
         self.focused = copy.focused
 
 
-fn _session_dir(project_root: String) -> String:
+def _session_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
     return join_path(project_root, SESSION_DIR)
 
 
-fn _session_path(project_root: String) -> String:
+def _session_path(project_root: String) -> String:
     var dir = _session_dir(project_root)
     if len(dir.as_bytes()) == 0:
         return String("")
     return join_path(dir, SESSION_FILE)
 
 
-fn _ensure_dir(path: String):
+def _ensure_dir(path: String):
     if len(path.as_bytes()) == 0:
         return
     var c_path = path + String("\0")
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-fn _has_prefix(s: String, prefix: String) -> Bool:
+def _has_prefix(s: String, prefix: String) -> Bool:
     var sb = s.as_bytes()
     var pb = prefix.as_bytes()
     if len(pb) > len(sb):
@@ -155,7 +155,7 @@ fn _has_prefix(s: String, prefix: String) -> Bool:
     return True
 
 
-fn _session_relative(project_root: String, full: String) -> String:
+def _session_relative(project_root: String, full: String) -> String:
     """Project-relative form of ``full``, or ``full`` unchanged when the
     file lives outside the project. Mirrors ``_project_relative`` in
     ``project.mojo`` but used at save time so the on-disk session
@@ -174,7 +174,7 @@ fn _session_relative(project_root: String, full: String) -> String:
     return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
-fn _resolve_session_path(project_root: String, stored: String) -> String:
+def _resolve_session_path(project_root: String, stored: String) -> String:
     """Inverse of ``_session_relative``: anchor a stored relative path
     onto the project root. Absolute paths and empty roots pass
     through. ``..``-prefixed entries are kept as-is — the user is
@@ -189,7 +189,7 @@ fn _resolve_session_path(project_root: String, stored: String) -> String:
     return join_path(project_root, stored)
 
 
-fn _int_array(value: JsonValue) -> List[Int]:
+def _int_array(value: JsonValue) -> List[Int]:
     var out = List[Int]()
     if not value.is_array():
         return out^
@@ -200,7 +200,7 @@ fn _int_array(value: JsonValue) -> List[Int]:
     return out^
 
 
-fn _read_int_pair(
+def _read_int_pair(
     obj: JsonValue, key: String, fallback_a: Int, fallback_b: Int,
 ) -> Tuple[Int, Int]:
     var v = obj.object_get(key)
@@ -212,7 +212,7 @@ fn _read_int_pair(
     return (fallback_a, fallback_b)
 
 
-fn _read_int_quad(
+def _read_int_quad(
     obj: JsonValue, key: String,
     fa: Int, fb: Int, fc: Int, fd: Int,
 ) -> Tuple[Int, Int, Int, Int]:
@@ -227,7 +227,7 @@ fn _read_int_quad(
     return (fa, fb, fc, fd)
 
 
-fn _parse_session_window(node: JsonValue) -> SessionWindow:
+def _parse_session_window(node: JsonValue) -> SessionWindow:
     var w = SessionWindow()
     if not node.is_object():
         return w^
@@ -255,7 +255,7 @@ fn _parse_session_window(node: JsonValue) -> SessionWindow:
     return w^
 
 
-fn load_session(project_root: String) -> Session:
+def load_session(project_root: String) -> Session:
     """Parse ``<project>/.turbokod/session.json``. Any failure (missing
     file, malformed JSON, missing keys) yields an empty session — the
     caller distinguishes by checking ``len(session.windows)``."""
@@ -298,14 +298,14 @@ fn load_session(project_root: String) -> Session:
     return out^
 
 
-fn _encode_int_pair(a: Int, b: Int) -> JsonValue:
+def _encode_int_pair(a: Int, b: Int) -> JsonValue:
     var arr = json_array()
     arr.append(json_int(a))
     arr.append(json_int(b))
     return arr^
 
 
-fn _encode_int_quad(a: Int, b: Int, c: Int, d: Int) -> JsonValue:
+def _encode_int_quad(a: Int, b: Int, c: Int, d: Int) -> JsonValue:
     var arr = json_array()
     arr.append(json_int(a))
     arr.append(json_int(b))
@@ -314,7 +314,7 @@ fn _encode_int_quad(a: Int, b: Int, c: Int, d: Int) -> JsonValue:
     return arr^
 
 
-fn _encode_session_window(w: SessionWindow) -> JsonValue:
+def _encode_session_window(w: SessionWindow) -> JsonValue:
     var obj = json_object()
     obj.put(String("path"), json_str(w.path))
     obj.put(
@@ -333,7 +333,7 @@ fn _encode_session_window(w: SessionWindow) -> JsonValue:
     return obj^
 
 
-fn encode_session(session: Session) -> String:
+def encode_session(session: Session) -> String:
     """Serialize ``session`` to the on-disk JSON form. Pure function —
     used both for the actual write and for change detection (the
     Desktop caches the previous encoding and only writes when the new
@@ -351,7 +351,7 @@ fn encode_session(session: Session) -> String:
     return encode_json(root) + String("\n")
 
 
-fn save_session(project_root: String, session: Session) -> Bool:
+def save_session(project_root: String, session: Session) -> Bool:
     """Rewrite ``<project>/.turbokod/session.json`` from ``session``.
     Creates the ``.turbokod`` directory if missing. Returns the
     underlying ``write_file`` success bool — the Desktop ignores

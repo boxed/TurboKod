@@ -31,7 +31,7 @@ comptime CLIP_PASTE      = UInt8(3)
 comptime CLIP_SELECT_ALL = UInt8(4)
 
 
-fn clipboard_chord(event: Event) -> UInt8:
+def clipboard_chord(event: Event) -> UInt8:
     """Classify a key event as a clipboard hotkey: Ctrl/Cmd + A / C / X / V.
 
     Either Ctrl or Cmd (``MOD_META``) counts as the chord modifier —
@@ -60,21 +60,21 @@ fn clipboard_chord(event: Event) -> UInt8:
     return CLIP_NONE
 
 
-fn _copy_command() -> String:
+def _copy_command() -> String:
     comptime if CompilationTarget.is_macos():
         return String("pbcopy")
     else:
         return String("xclip -selection clipboard 2>/dev/null")
 
 
-fn _paste_command() -> String:
+def _paste_command() -> String:
     comptime if CompilationTarget.is_macos():
         return String("pbpaste")
     else:
         return String("xclip -selection clipboard -o 2>/dev/null")
 
 
-fn _strip_macos_malloc_debug_env():
+def _strip_macos_malloc_debug_env():
     """Remove the macOS malloc-debug env vars from our environment.
 
     The native wrapper sets ``MallocScribble=1`` on the Mojo backend as
@@ -99,7 +99,7 @@ fn _strip_macos_malloc_debug_env():
     _ = external_call["unsetenv", Int32](ge.unsafe_ptr())
 
 
-fn clipboard_copy(text: String):
+def clipboard_copy(text: String):
     """Push ``text`` to the system clipboard. Silent failure on error.
 
     Bypassed when ``TURBOKOD_FAKE_CLIPBOARD`` is set so the test suite
@@ -122,7 +122,7 @@ fn clipboard_copy(text: String):
     _ = external_call["pclose", Int32](fp)
 
 
-fn clipboard_paste() -> String:
+def clipboard_paste() -> String:
     """Read the system clipboard. Returns empty string on error."""
     if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
         return String("")

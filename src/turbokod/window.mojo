@@ -40,7 +40,7 @@ comptime MIN_WIN_H: Int = 2
 # borders simultaneously; the interior is empty at that height.
 
 
-fn _grow_to_min(rect: Rect) -> Rect:
+def _grow_to_min(rect: Rect) -> Rect:
     """Extend ``rect`` toward bottom-right so it is at least
     ``MIN_WIN_W`` wide and ``MIN_WIN_H`` tall. Used at construction
     time, before there's a workspace to clamp against."""
@@ -53,7 +53,7 @@ fn _grow_to_min(rect: Rect) -> Rect:
     return Rect(rect.a.x, rect.a.y, bx, by)
 
 
-fn _fit_min_in_workspace(rect: Rect, workspace: Rect) -> Rect:
+def _fit_min_in_workspace(rect: Rect, workspace: Rect) -> Rect:
     """Return ``rect`` grown to at least ``MIN_WIN_W`` x ``MIN_WIN_H``,
     extending toward bottom-right; if that would push past
     ``workspace``, pull the top-left back the rest of the way.
@@ -82,7 +82,7 @@ fn _fit_min_in_workspace(rect: Rect, workspace: Rect) -> Rect:
     return Rect(ax, ay, bx, by)
 
 
-fn _scale_coord(c: Int, old_origin: Int, old_size: Int, new_origin: Int, new_size: Int) -> Int:
+def _scale_coord(c: Int, old_origin: Int, old_size: Int, new_origin: Int, new_size: Int) -> Int:
     """Map ``c`` from ``[old_origin, old_origin + old_size]`` to
     ``[new_origin, new_origin + new_size]`` with round-half-up. Two
     inputs at the same value map to the same output, which is what
@@ -100,7 +100,7 @@ fn _scale_coord(c: Int, old_origin: Int, old_size: Int, new_origin: Int, new_siz
     return new_origin + scaled
 
 
-fn _scale_rect(r: Rect, old_ws: Rect, new_ws: Rect) -> Rect:
+def _scale_rect(r: Rect, old_ws: Rect, new_ws: Rect) -> Rect:
     """Apply ``_scale_coord`` to all four edges of ``r``, then clamp
     inside ``new_ws`` and guarantee at least one cell along each axis
     so the result is always a non-empty rect."""
@@ -129,7 +129,7 @@ fn _scale_rect(r: Rect, old_ws: Rect, new_ws: Rect) -> Rect:
     return _fit_min_in_workspace(Rect(ax, ay, bx, by), new_ws)
 
 
-fn paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
+def paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
     """Draw the ``[■]`` close-button decoration at a frame's top-LEFT
     corner. ``top_left`` is the frame's top-left cell — the bracket
     starts one column in. ``border`` is the frame's existing border
@@ -154,7 +154,7 @@ fn paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
     )
 
 
-fn hit_close_button(top_left: Point, p: Point) -> Bool:
+def hit_close_button(top_left: Point, p: Point) -> Bool:
     """Hit-test counterpart for ``paint_close_button``: True iff
     ``p`` lies on any of the three cells the button paints. Named
     ``hit_*`` rather than ``*_hit`` so the free function doesn't
@@ -165,7 +165,7 @@ fn hit_close_button(top_left: Point, p: Point) -> Bool:
         and top_left.x + 1 <= p.x and p.x <= top_left.x + 3
 
 
-fn paint_window_title(
+def paint_window_title(
     mut canvas: Canvas, rect: Rect, title: String,
     title_attr: Attr, body_bg: Attr,
 ):
@@ -188,7 +188,7 @@ fn paint_window_title(
     _ = canvas.put_text(Point(tx, rect.a.y), title, enforced)
 
 
-fn paint_window_title_at(
+def paint_window_title_at(
     mut canvas: Canvas, p: Point, title: String,
     title_attr: Attr, body_bg: Attr,
 ):
@@ -232,7 +232,7 @@ struct TitleCommandHit(ImplicitlyCopyable, Movable):
     var x_end: Int
 
 
-fn _label_cell_count(s: String) -> Int:
+def _label_cell_count(s: String) -> Int:
     """Codepoint count of ``s`` — matches the per-codepoint advance
     ``Canvas.put_text`` uses, so a label's painted width equals this
     when nothing was clipped."""
@@ -248,7 +248,7 @@ fn _label_cell_count(s: String) -> Int:
     return cells
 
 
-fn paint_title_commands(
+def paint_title_commands(
     mut canvas: Canvas, p: Point,
     commands: List[TitleCommand],
     sep_attr: Attr, cmd_attr: Attr, body_bg: Attr,
@@ -300,7 +300,7 @@ fn paint_title_commands(
     return hits^
 
 
-fn hit_title_command(
+def hit_title_command(
     hits: List[TitleCommandHit], pos: Point,
 ) -> String:
     """Returns the ``id`` of the command at ``pos``, or empty string
@@ -329,7 +329,7 @@ comptime PANEL_STATE_MINIMIZED = UInt8(1)
 comptime PANEL_STATE_MAXIMIZED = UInt8(2)
 
 
-fn paint_panel_button(
+def paint_panel_button(
     mut canvas: Canvas, painter: Painter,
     top_left: Point, border: Attr, glyph: String,
 ):
@@ -361,35 +361,35 @@ struct PanelChromeHits(ImplicitlyCopyable, Movable):
     when the panel doesn't render one — see ``BottomDockedPanel.
     close_button_id``."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.top_y = -1
         self.min_btn_x = -1
         self.max_btn_x = -1
         self.close_btn_x = -1
 
-    fn on_min(self, pos: Point) -> Bool:
+    def on_min(self, pos: Point) -> Bool:
         return self.min_btn_x >= 0 \
             and pos.y == self.top_y \
             and pos.x >= self.min_btn_x \
             and pos.x < self.min_btn_x + 3
 
-    fn on_max(self, pos: Point) -> Bool:
+    def on_max(self, pos: Point) -> Bool:
         return self.max_btn_x >= 0 \
             and pos.y == self.top_y \
             and pos.x >= self.max_btn_x \
             and pos.x < self.max_btn_x + 3
 
-    fn on_close(self, pos: Point) -> Bool:
+    def on_close(self, pos: Point) -> Bool:
         return self.close_btn_x >= 0 \
             and pos.y == self.top_y \
             and pos.x >= self.close_btn_x \
             and pos.x < self.close_btn_x + 3
 
-    fn on_any(self, pos: Point) -> Bool:
+    def on_any(self, pos: Point) -> Bool:
         return self.on_min(pos) or self.on_max(pos) or self.on_close(pos)
 
 
-fn paint_panel_window_buttons(
+def paint_panel_window_buttons(
     mut canvas: Canvas, painter: Painter,
     top_y: Int, panel: Rect,
     state: UInt8, border: Attr,
@@ -504,7 +504,7 @@ struct BottomDockedPanel(Copyable, Movable):
     button — panels that aren't user-dismissible (e.g. the debug pane,
     which the host owns) leave this unset."""
 
-    fn __init__(out self, preferred_height: Int = 14):
+    def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
         self.preferred_height = preferred_height
         self.commands = List[TitleCommand]()
@@ -514,7 +514,7 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resizing = False
         self.close_button_id = String("")
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.state = copy.state
         self.preferred_height = copy.preferred_height
         self.commands = copy.commands.copy()
@@ -524,16 +524,16 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resizing = copy.resizing
         self.close_button_id = copy.close_button_id
 
-    fn is_minimized(self) -> Bool:
+    def is_minimized(self) -> Bool:
         return self.state == PANEL_STATE_MINIMIZED
 
-    fn is_maximized(self) -> Bool:
+    def is_maximized(self) -> Bool:
         return self.state == PANEL_STATE_MAXIMIZED
 
-    fn is_resizing(self) -> Bool:
+    def is_resizing(self) -> Bool:
         return self.resizing
 
-    fn set_state(mut self, s: UInt8):
+    def set_state(mut self, s: UInt8):
         """Mutate ``state`` and clear an in-flight resize drag if the
         new state isn't NORMAL — the top border becomes a button strip
         in min/max, not a draggable handle."""
@@ -541,15 +541,15 @@ struct BottomDockedPanel(Copyable, Movable):
         if s != PANEL_STATE_NORMAL:
             self.resizing = False
 
-    fn set_commands(mut self, var commands: List[TitleCommand]):
+    def set_commands(mut self, var commands: List[TitleCommand]):
         self.commands = commands^
 
-    fn consume_command_id(mut self) -> String:
+    def consume_command_id(mut self) -> String:
         var s = self.pending_command_id
         self.pending_command_id = String("")
         return s^
 
-    fn effective_height(self, screen: Rect, bottom_chrome_h: Int) -> Int:
+    def effective_height(self, screen: Rect, bottom_chrome_h: Int) -> Int:
         """Rendered height accounting for the state machine.
         NORMAL → ``preferred_height``. MINIMIZED → 1 (header only).
         MAXIMIZED → fill the workspace above the bottom chrome."""
@@ -562,7 +562,7 @@ struct BottomDockedPanel(Copyable, Movable):
             return avail
         return self.preferred_height
 
-    fn clamp_height(self, want: Int, panel: Rect) -> Int:
+    def clamp_height(self, want: Int, panel: Rect) -> Int:
         """Pin a proposed height to a usable range. Lower bound keeps
         the title bar plus a couple of body rows on screen; upper
         bound leaves at least 5 rows of workspace above the panel."""
@@ -574,7 +574,7 @@ struct BottomDockedPanel(Copyable, Movable):
             h = DOCK_MIN_HEIGHT
         return h
 
-    fn is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
+    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
         """Hit-test the top-border row — the drag handle. Resize is
         only available in NORMAL state, and the button cells (top-
         right) are excluded so the cursor stays default over them."""
@@ -591,7 +591,7 @@ struct BottomDockedPanel(Copyable, Movable):
         return True
 
 
-fn paint_bottom_dock_chrome(
+def paint_bottom_dock_chrome(
     mut canvas: Canvas, painter: Painter, panel: Rect,
     title: String, focused: Bool,
     mut dock: BottomDockedPanel,
@@ -694,7 +694,7 @@ struct DockChromeMouseResult(Copyable, Movable):
     var focus_request: Bool
 
 
-fn handle_bottom_dock_chrome_mouse(
+def handle_bottom_dock_chrome_mouse(
     event: Event, panel: Rect, mut dock: BottomDockedPanel,
 ) -> DockChromeMouseResult:
     """Process a mouse event against the chrome row or an in-flight
@@ -759,7 +759,7 @@ fn handle_bottom_dock_chrome_mouse(
     return DockChromeMouseResult(False, False)
 
 
-fn handle_bottom_dock_esc(mut dock: BottomDockedPanel) -> Bool:
+def handle_bottom_dock_esc(mut dock: BottomDockedPanel) -> Bool:
     """ESC walks max → normal → min. Returns True when the state
     changed (so the pane's own ESC handling skips its further branches).
     MINIMIZED is the terminal step — ESC there falls through so the
@@ -802,7 +802,7 @@ struct DockedSection(ImplicitlyCopyable, Movable):
     var state: UInt8
     var chrome_hits: PanelChromeHits
 
-    fn __init__(out self, var title: String):
+    def __init__(out self, var title: String):
         self.title = title^
         self.state = PANEL_STATE_NORMAL
         self.chrome_hits = PanelChromeHits()
@@ -816,11 +816,11 @@ struct DockChromeHit(ImplicitlyCopyable, Movable):
     var section_idx: Int
     var is_max: Bool
 
-    fn __init__(out self):
+    def __init__(out self):
         self.section_idx = -1
         self.is_max = False
 
-    fn hit(self) -> Bool:
+    def hit(self) -> Bool:
         return self.section_idx >= 0
 
 
@@ -838,26 +838,26 @@ struct DockedPanelStack(Movable):
     """
     var sections: List[DockedSection]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.sections = List[DockedSection]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.sections = copy.sections.copy()
 
-    fn add(mut self, var title: String) -> Int:
+    def add(mut self, var title: String) -> Int:
         """Append a section, return its 0-based index."""
         self.sections.append(DockedSection(title^))
         return len(self.sections) - 1
 
-    fn count(self) -> Int:
+    def count(self) -> Int:
         return len(self.sections)
 
-    fn state(self, idx: Int) -> UInt8:
+    def state(self, idx: Int) -> UInt8:
         if idx < 0 or idx >= len(self.sections):
             return PANEL_STATE_NORMAL
         return self.sections[idx].state
 
-    fn effective_states(self) -> List[UInt8]:
+    def effective_states(self) -> List[UInt8]:
         """Resolve visual state per section. If any section is
         MAXIMIZED, the others paint as MINIMIZED regardless of their
         stored state. Otherwise returns each section's stored state
@@ -878,7 +878,7 @@ struct DockedPanelStack(Movable):
                 out.append(self.sections[i].state)
         return out^
 
-    fn all_normal(self) -> Bool:
+    def all_normal(self) -> Bool:
         """True iff every section is in PANEL_STATE_NORMAL — used by
         callers to decide whether splitter-drag should be active."""
         for i in range(len(self.sections)):
@@ -886,7 +886,7 @@ struct DockedPanelStack(Movable):
                 return False
         return True
 
-    fn layout(self, top: Int, bottom: Int) -> List[Int]:
+    def layout(self, top: Int, bottom: Int) -> List[Int]:
         """Return ``[s0_top, s0_h, s1_top, s1_h, ...]`` — per-section
         ``(top, height)`` pairs. One splitter row between each pair is
         not counted in any section's height; caller paints the splitter
@@ -964,7 +964,7 @@ struct DockedPanelStack(Movable):
             y += heights[i] + 1  # +1 for splitter between sections
         return out^
 
-    fn paint_headers(
+    def paint_headers(
         mut self, mut canvas: Canvas,
         left: Int, right_excl: Int,
         layout: List[Int],
@@ -1010,7 +1010,7 @@ struct DockedPanelStack(Movable):
                 states[i], section_attr,
             )
 
-    fn toggle_max(mut self, idx: Int):
+    def toggle_max(mut self, idx: Int):
         """Click on section ``idx``'s maximize/restore button.
 
         Toggles between MAXIMIZED and NORMAL on ``idx``. Setting one to
@@ -1028,7 +1028,7 @@ struct DockedPanelStack(Movable):
             self.sections[i].state = PANEL_STATE_NORMAL
         self.sections[idx].state = PANEL_STATE_MAXIMIZED
 
-    fn toggle_min(mut self, idx: Int):
+    def toggle_min(mut self, idx: Int):
         """Click on section ``idx``'s minimize/restore button.
 
         Toggles between MINIMIZED and NORMAL on the targeted section.
@@ -1050,13 +1050,13 @@ struct DockedPanelStack(Movable):
             return
         self.sections[idx].state = PANEL_STATE_MINIMIZED
 
-    fn reset(mut self):
+    def reset(mut self):
         """Restore every section to NORMAL. Useful on close/reopen."""
         for i in range(len(self.sections)):
             self.sections[i].state = PANEL_STATE_NORMAL
             self.sections[i].chrome_hits = PanelChromeHits()
 
-    fn hit_chrome(self, pos: Point) -> DockChromeHit:
+    def hit_chrome(self, pos: Point) -> DockChromeHit:
         """Return the section + button under ``pos``. Returns a hit
         with ``section_idx == -1`` if the click misses every chrome
         button. Hosts call this from ``handle_mouse`` and route to
@@ -1099,7 +1099,7 @@ struct Window(Copyable, Movable):
     var _has_baseline: Bool
     var _last_observed_rect: Rect
 
-    fn __init__(out self, var title: String, rect: Rect, var content: List[String]):
+    def __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
         var sized = _grow_to_min(rect)
         self.rect = sized
@@ -1114,7 +1114,7 @@ struct Window(Copyable, Movable):
         self._last_observed_rect = sized
 
     @staticmethod
-    fn editor_window(var title: String, rect: Rect, var text: String) -> Self:
+    def editor_window(var title: String, rect: Rect, var text: String) -> Self:
         """Convenience constructor for an editable text window."""
         var w = Window(title^, rect, List[String]())
         w.editor = Editor(text^)
@@ -1122,14 +1122,14 @@ struct Window(Copyable, Movable):
         return w^
 
     @staticmethod
-    fn from_file(var title: String, rect: Rect, var path: String) raises -> Self:
+    def from_file(var title: String, rect: Rect, var path: String) raises -> Self:
         """Open a file as an editor window, with external-change detection."""
         var w = Window(title^, rect, List[String]())
         w.editor = Editor.from_file(path^)
         w.is_editor = True
         return w^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.title = copy.title
         self.rect = copy.rect
         self.content = copy.content.copy()
@@ -1142,25 +1142,25 @@ struct Window(Copyable, Movable):
         self._has_baseline = copy._has_baseline
         self._last_observed_rect = copy._last_observed_rect
 
-    fn interior(self) -> Rect:
+    def interior(self) -> Rect:
         """Region inside the border where content / editor paints. Public
         so hosts can compute view-relative things — e.g. ``reveal_cursor``
         after a goto-definition jump."""
         return Rect(self.rect.a.x + 1, self.rect.a.y + 1,
                     self.rect.b.x - 1, self.rect.b.y - 1)
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.is_editor:
             return False
         return self.editor.handle_key(event, self.interior())
 
-    fn handle_mouse_in_body(mut self, event: Event) -> Bool:
+    def handle_mouse_in_body(mut self, event: Event) -> Bool:
         """Editor mouse handling for clicks/drags inside the window body."""
         if not self.is_editor:
             return False
         return self.editor.handle_mouse(event, self.interior())
 
-    fn toggle_maximize(mut self, workspace: Rect):
+    def toggle_maximize(mut self, workspace: Rect):
         if self.is_maximized:
             self.rect = self._restore_rect
             self.is_maximized = False
@@ -1169,7 +1169,7 @@ struct Window(Copyable, Movable):
             self.rect = workspace
             self.is_maximized = True
 
-    fn paint(
+    def paint(
         self, mut canvas: Canvas, display_title: String,
         focused: Bool, number: Int, subdued: Bool = False,
     ):
@@ -1278,7 +1278,7 @@ struct Window(Copyable, Movable):
     # thin wrappers so existing callers (WindowManager mouse routing)
     # don't have to know the primitive exists.
 
-    fn _v_scrollbar(self) -> VScrollbar:
+    def _v_scrollbar(self) -> VScrollbar:
         """Vertical scrollbar value for this window's editor pane.
 
         Returns a degenerate bar (``bottom < top``) — and therefore
@@ -1304,7 +1304,7 @@ struct Window(Copyable, Movable):
             total, visible, self.editor.scroll_y,
         )
 
-    fn _h_scrollbar(self) -> HScrollbar:
+    def _h_scrollbar(self) -> HScrollbar:
         """Horizontal scrollbar value. Soft-wrap mode and too-narrow
         windows produce a degenerate bar (``right < left``)."""
         if not self.is_editor or self.editor.soft_wrap \
@@ -1324,13 +1324,13 @@ struct Window(Copyable, Movable):
             self.editor.scroll_x,
         )
 
-    fn _paint_v_scrollbar(
+    def _paint_v_scrollbar(
         self, mut canvas: Canvas, painter: Painter, border: Attr,
     ):
         """Vertical scroll bar overlaying the right ``│`` border."""
         self._v_scrollbar().paint(canvas, painter, border)
 
-    fn _paint_h_scrollbar(
+    def _paint_h_scrollbar(
         self, mut canvas: Canvas, painter: Painter, border: Attr,
     ):
         """Horizontal scroll bar + ``row:col`` indicator on the bottom border.
@@ -1355,13 +1355,13 @@ struct Window(Copyable, Movable):
     # for parts 2 / 3 / 4 — used as the drag anchor for thumb (3) and as
     # the jump target for the page areas (2, 4).
 
-    fn v_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
+    def v_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
         return self._v_scrollbar().hit(p)
 
-    fn h_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
+    def h_scrollbar_hit(self, p: Point) -> Tuple[Int, Int]:
         return self._h_scrollbar().hit(p)
 
-    fn v_scroll_by(mut self, lines: Int):
+    def v_scroll_by(mut self, lines: Int):
         """Scroll the editor vertically by ``lines`` (negative = up). Cursor
         does not move; same convention as wheel scrolling."""
         if not self.is_editor: return
@@ -1371,7 +1371,7 @@ struct Window(Copyable, Movable):
         if ny > max_y: ny = max_y
         self.editor.scroll_y = ny
 
-    fn h_scroll_by(mut self, cols: Int):
+    def h_scroll_by(mut self, cols: Int):
         if not self.is_editor: return
         var view = self.interior()
         var max_x = self.editor.longest_line_width() - view.width()
@@ -1381,7 +1381,7 @@ struct Window(Copyable, Movable):
         if nx > max_x: nx = max_x
         self.editor.scroll_x = nx
 
-    fn v_scroll_to_track_pos(mut self, track_pos: Int):
+    def v_scroll_to_track_pos(mut self, track_pos: Int):
         """Jump so the buffer row whose minimap projection falls at
         ``track_pos`` (track-relative, 0..track_h) sits centered in the
         editor view. Triggered by clicks in the page-up / page-down zones
@@ -1390,14 +1390,14 @@ struct Window(Copyable, Movable):
         if not self.is_editor: return
         self.editor.scroll_y = self._v_scrollbar().track_jump(track_pos)
 
-    fn h_scroll_to_track_pos(mut self, track_pos: Int):
+    def h_scroll_to_track_pos(mut self, track_pos: Int):
         """Horizontal twin of :func:`v_scroll_to_track_pos` — clicking in
         the page-left / page-right zones jumps to that proportional column
         with the target column horizontally centered in the view."""
         if not self.is_editor: return
         self.editor.scroll_x = self._h_scrollbar().track_jump(track_pos)
 
-    fn v_drag_thumb_to(mut self, mouse_y: Int, drag_offset: Int):
+    def v_drag_thumb_to(mut self, mouse_y: Int, drag_offset: Int):
         """Reposition ``scroll_y`` so the thumb's top sits at
         ``mouse_y - drag_offset``. Used while dragging the v-thumb."""
         if not self.is_editor: return
@@ -1405,25 +1405,25 @@ struct Window(Copyable, Movable):
         if not bar.metrics().present: return
         self.editor.scroll_y = bar.drag_to(mouse_y, drag_offset)
 
-    fn h_drag_thumb_to(mut self, mouse_x: Int, drag_offset: Int):
+    def h_drag_thumb_to(mut self, mouse_x: Int, drag_offset: Int):
         if not self.is_editor: return
         var bar = self._h_scrollbar()
         if not bar.metrics().present: return
         self.editor.scroll_x = bar.drag_to(mouse_x, drag_offset)
 
-    fn close_button_hit(self, p: Point) -> Bool:
+    def close_button_hit(self, p: Point) -> Bool:
         return hit_close_button(Point(self.rect.a.x, self.rect.a.y), p)
 
-    fn maximize_button_hit(self, p: Point) -> Bool:
+    def maximize_button_hit(self, p: Point) -> Bool:
         # The `[↑]` / `[↓]` triplet sits one cell in from the right corner.
         return p.y == self.rect.a.y and self.rect.b.x - 4 <= p.x and p.x <= self.rect.b.x - 2
 
-    fn title_bar_hit(self, p: Point) -> Bool:
+    def title_bar_hit(self, p: Point) -> Bool:
         return p.y == self.rect.a.y \
             and not self.close_button_hit(p) \
             and not self.maximize_button_hit(p)
 
-    fn resize_edges_hit(self, p: Point) -> Tuple[Bool, Bool, Bool]:
+    def resize_edges_hit(self, p: Point) -> Tuple[Bool, Bool, Bool]:
         """Which edges of the border ``p`` is on: ``(left, right, bottom)``.
 
         The top row is reserved for the title bar (drag-to-move), so it never
@@ -1437,7 +1437,7 @@ struct Window(Copyable, Movable):
         return (left, right, bottom)
 
 
-fn compute_display_titles(windows: List[Window]) -> List[String]:
+def compute_display_titles(windows: List[Window]) -> List[String]:
     """Return a parallel list of display titles for ``windows``. When
     two file-backed windows share a basename but have distinct paths,
     each colliding title is prefixed with its parent-directory
@@ -1523,7 +1523,7 @@ struct WindowManager(Movable):
     var _last_workspace: Rect
     var _has_last_workspace: Bool
 
-    fn __init__(out self):
+    def __init__(out self):
         self.windows = List[Window]()
         self.focused = -1
         self.z_order = List[Int]()
@@ -1545,13 +1545,13 @@ struct WindowManager(Movable):
         self._last_workspace = Rect.empty()
         self._has_last_workspace = False
 
-    fn add(mut self, var window: Window):
+    def add(mut self, var window: Window):
         self.windows.append(window^)
         var idx = len(self.windows) - 1
         self.z_order.append(idx)
         self.focused = idx
 
-    fn fit_into(mut self, workspace: Rect):
+    def fit_into(mut self, workspace: Rect):
         """Reflow every window into ``workspace`` after it changes.
 
         The workspace changes for three reasons: terminal resize, a side
@@ -1610,7 +1610,7 @@ struct WindowManager(Movable):
         self._last_workspace = workspace
         self._has_last_workspace = True
 
-    fn note_workspace(mut self, workspace: Rect):
+    def note_workspace(mut self, workspace: Rect):
         """Reset the workspace + every window's baseline without touching
         any rect.
 
@@ -1630,7 +1630,7 @@ struct WindowManager(Movable):
             self.windows[i]._has_baseline = True
             self.windows[i]._last_observed_rect = self.windows[i].rect
 
-    fn _clip_into(mut self, workspace: Rect):
+    def _clip_into(mut self, workspace: Rect):
         """Move-and-clip fallback used on the first ``fit_into`` call,
         before there's a baseline workspace to scale relative to.
 
@@ -1658,7 +1658,7 @@ struct WindowManager(Movable):
                     Rect(ax, ay, ax + w, ay + h), workspace,
                 )
 
-    fn _scale_from_baselines(mut self, prev_ws: Rect, new_ws: Rect):
+    def _scale_from_baselines(mut self, prev_ws: Rect, new_ws: Rect):
         """Workspace just changed. Scale every non-maximized window's
         rect from its own baseline pair to ``new_ws``; pin maximized
         windows to ``new_ws`` and proportionally scale their
@@ -1689,7 +1689,7 @@ struct WindowManager(Movable):
                 )
             self.windows[i]._last_observed_rect = self.windows[i].rect
 
-    fn _rebase_user_changes(mut self, workspace: Rect):
+    def _rebase_user_changes(mut self, workspace: Rect):
         """Workspace unchanged since last pass. Any window whose rect
         differs from ``_last_observed_rect`` was mutated by user action
         (drag, edge resize, maximize toggle, new-window insertion) —
@@ -1709,14 +1709,14 @@ struct WindowManager(Movable):
                 self.windows[i]._has_baseline = True
             self.windows[i]._last_observed_rect = self.windows[i].rect
 
-    fn focus_by_title(mut self, title: String):
+    def focus_by_title(mut self, title: String):
         for i in range(len(self.windows)):
             if self.windows[i].title == title:
                 self.focused = i
                 self._raise_in_z(i)
                 return
 
-    fn focus_by_index(mut self, idx: Int):
+    def focus_by_index(mut self, idx: Int):
         """Focus window ``idx`` and raise it to the top of the z-order.
 
         Out-of-range indices are silently ignored — useful for stale menu
@@ -1729,7 +1729,7 @@ struct WindowManager(Movable):
         self.focused = idx
         self._raise_in_z(idx)
 
-    fn rotate_focus(mut self, forward: Bool):
+    def rotate_focus(mut self, forward: Bool):
         """Cycle focus to the next (forward) or previous window in the
         stable insertion order. No-op when there are 0 or 1 windows.
         Stable order — not z-order — keeps rotation predictable: the
@@ -1745,7 +1745,7 @@ struct WindowManager(Movable):
         self.focused = nxt
         self._raise_in_z(nxt)
 
-    fn close_focused(mut self) -> Bool:
+    def close_focused(mut self) -> Bool:
         """Close the focused window. Focus moves to whichever window was
         next-most-recently focused (the new top of ``z_order``); ``-1`` when
         the last window is closed. Returns True if a window was closed.
@@ -1771,26 +1771,26 @@ struct WindowManager(Movable):
             self.focused = -1
         return True
 
-    fn maximize_all(mut self, workspace: Rect):
+    def maximize_all(mut self, workspace: Rect):
         """Maximize every window into ``workspace``. Each window's pre-max
         rect is preserved in ``_restore_rect`` so ``restore_all`` can undo."""
         for i in range(len(self.windows)):
             if not self.windows[i].is_maximized:
                 self.windows[i].toggle_maximize(workspace)
 
-    fn restore_all(mut self):
+    def restore_all(mut self):
         """Drop every window out of maximized mode, back to its pre-max rect."""
         for i in range(len(self.windows)):
             if self.windows[i].is_maximized:
                 self.windows[i].rect = self.windows[i]._restore_rect
                 self.windows[i].is_maximized = False
 
-    fn focused_is_editor(self) -> Bool:
+    def focused_is_editor(self) -> Bool:
         if self.focused < 0 or self.focused >= len(self.windows):
             return False
         return self.windows[self.focused].is_editor
 
-    fn check_external_changes(mut self) raises -> List[Int]:
+    def check_external_changes(mut self) raises -> List[Int]:
         """Re-stat every file-backed editor window and react to any
         out-of-band write. Returns the list of window indices whose
         merge produced conflicts — the host opens a diff view for
@@ -1806,7 +1806,7 @@ struct WindowManager(Movable):
                 conflicts.append(i)
         return conflicts^
 
-    fn _raise_in_z(mut self, idx: Int):
+    def _raise_in_z(mut self, idx: Int):
         """Move ``idx`` to the end of ``z_order`` (making it the topmost
         window in the paint stack)."""
         var new_z = List[Int]()
@@ -1816,7 +1816,7 @@ struct WindowManager(Movable):
         new_z.append(idx)
         self.z_order = new_z^
 
-    fn paint(
+    def paint(
         self, mut canvas: Canvas,
         subdued: List[Bool] = List[Bool](),
         windows_active: Bool = True,
@@ -1838,7 +1838,7 @@ struct WindowManager(Movable):
                 canvas, titles[i], fwin, i + 1, sub,
             )
 
-    fn paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):
+    def paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):
         """Overlay the full-path tooltip for whichever editor window's
         title bar is currently being hovered, if any. Painted by the
         host after ``paint`` so the popup z-orders above every window.
@@ -1888,13 +1888,13 @@ struct WindowManager(Movable):
         if msg_rect.width() > 0 and msg_rect.height() > 0:
             _ = canvas.put_wrapped_text(msg_rect, path, attr)
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         """Forward a key event to the focused window's editor (if it has one)."""
         if 0 <= self.focused and self.focused < len(self.windows):
             return self.windows[self.focused].handle_key(event)
         return False
 
-    fn handle_mouse(mut self, event: Event, workspace: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, workspace: Rect) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
         # Wheel events: scroll the editor under the cursor (top-most hit).
@@ -1978,7 +1978,7 @@ struct WindowManager(Movable):
             self._resize_bottom = False
             return True
 
-    fn _handle_press(mut self, event: Event, workspace: Rect) -> Bool:
+    def _handle_press(mut self, event: Event, workspace: Rect) -> Bool:
         # Hit-test top-down using ``z_order`` (last entry = topmost window).
         var clicked = -1
         var k = len(self.z_order) - 1
@@ -2044,7 +2044,7 @@ struct WindowManager(Movable):
             self._editor_dragging = self.focused
         return True
 
-    fn _handle_motion(mut self, event: Event, workspace: Rect) -> Bool:
+    def _handle_motion(mut self, event: Event, workspace: Rect) -> Bool:
         if self._dragging >= 0:
             var width = self.windows[self._dragging].rect.width()
             var height = self.windows[self._dragging].rect.height()

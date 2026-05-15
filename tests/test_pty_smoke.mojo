@@ -30,7 +30,7 @@ from turbokod.pty import PtyProcess
 from turbokod.vt import Vt
 
 
-fn _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
+def _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
     """Pump bytes off ``pty.master_fd`` into ``vt`` until the child
     exits, with a hard deadline. We poll with a short timeout so the
     loop doesn't spin and so a missing EOF (rare but possible if the
@@ -65,7 +65,7 @@ fn _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
         waited += 20
 
 
-fn test_pty_echo_writes_into_grid() raises:
+def test_pty_echo_writes_into_grid() raises:
     # ``/bin/echo hi`` — the most boring possible child. After it
     # exits, the grid's first row should contain "hi".
     var argv = List[String]()
@@ -81,7 +81,7 @@ fn test_pty_echo_writes_into_grid() raises:
     assert_equal(vt.cell_at(0, 1).glyph, String("i"))
 
 
-fn test_pty_printf_ansi_color_lands_as_red_fg() raises:
+def test_pty_printf_ansi_color_lands_as_red_fg() raises:
     # ``printf '\\e[31mR\\e[0m'`` — exercises the SGR parser at the
     # other end. After draining, cell (0,0) should hold ``R`` with
     # red foreground.
@@ -97,7 +97,7 @@ fn test_pty_printf_ansi_color_lands_as_red_fg() raises:
     assert_equal(Int(vt.cell_at(0, 0).attr.fg), Int(UInt8(1)))
 
 
-fn test_pty_child_runs_in_requested_cwd() raises:
+def test_pty_child_runs_in_requested_cwd() raises:
     # ``/bin/pwd`` prints its working directory. Spawning it with
     # ``cwd="/tmp"`` should produce ``/tmp`` (a path that exists on
     # every POSIX system). Regression for "new terminal panes should
@@ -116,7 +116,7 @@ fn test_pty_child_runs_in_requested_cwd() raises:
     assert_true(ok)
 
 
-fn test_pty_isatty_detected_by_child() raises:
+def test_pty_isatty_detected_by_child() raises:
     # The whole point of switching to a pty: ``test -t 0`` (which
     # ``[ -t 0 ]`` in /bin/sh reduces to) must exit 0 when stdin is
     # a tty. With pipes it exited 1, which is what caused ``claude``
@@ -139,7 +139,7 @@ fn test_pty_isatty_detected_by_child() raises:
     assert_equal(vt.cell_at(0, 2).glyph, String("Y"))
 
 
-fn main() raises:
+def main() raises:
     test_pty_echo_writes_into_grid()
     test_pty_printf_ansi_color_lands_as_red_fg()
     test_pty_child_runs_in_requested_cwd()

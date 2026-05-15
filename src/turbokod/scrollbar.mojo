@@ -58,7 +58,7 @@ struct ScrollbarMetrics(ImplicitlyCopyable, Movable):
     """Maximum value of ``scroll`` (i.e. ``total - visible``)."""
 
 
-fn _metrics(
+def _metrics(
     bar_size: Int, total: Int, visible: Int, scroll: Int,
 ) -> ScrollbarMetrics:
     """Pure-math scrollbar geometry.
@@ -97,7 +97,7 @@ fn _metrics(
     return ScrollbarMetrics(True, track_size, knob_off, knob_size, max_scroll)
 
 
-fn _hit_axis(
+def _hit_axis(
     pos: Int, axis_start: Int, axis_end: Int, m: ScrollbarMetrics,
 ) -> Tuple[Int, Int]:
     """Map a 1D position along the scrollbar axis to ``(part, rel)``.
@@ -120,7 +120,7 @@ fn _hit_axis(
     return (3, rel - m.knob_off)
 
 
-fn _drag_to_axis(
+def _drag_to_axis(
     pos: Int, axis_start: Int, drag_offset: Int, m: ScrollbarMetrics,
 ) -> Int:
     """New ``scroll`` value when the user drags the thumb so its
@@ -144,7 +144,7 @@ fn _drag_to_axis(
     return ns
 
 
-fn _track_jump_axis(
+def _track_jump_axis(
     track_pos: Int, visible: Int, m: ScrollbarMetrics,
 ) -> Int:
     """New ``scroll`` value for a click in the page-up/page-down zone
@@ -183,12 +183,12 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
     var visible: Int
     var scroll: Int
 
-    fn metrics(self) -> ScrollbarMetrics:
+    def metrics(self) -> ScrollbarMetrics:
         return _metrics(
             self.bottom - self.top + 1, self.total, self.visible, self.scroll,
         )
 
-    fn paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
+    def paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
         var m = self.metrics()
         if not m.present:
             return
@@ -203,15 +203,15 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
                 ch = String("░")
             painter.set(canvas, self.x, track_y0 + i, Cell(ch, attr, 1))
 
-    fn hit(self, p: Point) -> Tuple[Int, Int]:
+    def hit(self, p: Point) -> Tuple[Int, Int]:
         if p.x != self.x:
             return (0, 0)
         return _hit_axis(p.y, self.top, self.bottom, self.metrics())
 
-    fn drag_to(self, mouse_y: Int, drag_offset: Int) -> Int:
+    def drag_to(self, mouse_y: Int, drag_offset: Int) -> Int:
         return _drag_to_axis(mouse_y, self.top, drag_offset, self.metrics())
 
-    fn track_jump(self, track_pos: Int) -> Int:
+    def track_jump(self, track_pos: Int) -> Int:
         return _track_jump_axis(track_pos, self.visible, self.metrics())
 
 
@@ -227,12 +227,12 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
     var visible: Int
     var scroll: Int
 
-    fn metrics(self) -> ScrollbarMetrics:
+    def metrics(self) -> ScrollbarMetrics:
         return _metrics(
             self.right - self.left + 1, self.total, self.visible, self.scroll,
         )
 
-    fn paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
+    def paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
         var m = self.metrics()
         if not m.present:
             return
@@ -247,13 +247,13 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
                 ch = String("░")
             painter.set(canvas, track_x0 + i, self.y, Cell(ch, attr, 1))
 
-    fn hit(self, p: Point) -> Tuple[Int, Int]:
+    def hit(self, p: Point) -> Tuple[Int, Int]:
         if p.y != self.y:
             return (0, 0)
         return _hit_axis(p.x, self.left, self.right, self.metrics())
 
-    fn drag_to(self, mouse_x: Int, drag_offset: Int) -> Int:
+    def drag_to(self, mouse_x: Int, drag_offset: Int) -> Int:
         return _drag_to_axis(mouse_x, self.left, drag_offset, self.metrics())
 
-    fn track_jump(self, track_pos: Int) -> Int:
+    def track_jump(self, track_pos: Int) -> Int:
         return _track_jump_axis(track_pos, self.visible, self.metrics())

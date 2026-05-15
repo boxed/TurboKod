@@ -26,18 +26,18 @@ comptime SEQ_ANY_EVENT_ON  = String("\x1b[?1003h")
 comptime SEQ_ANY_EVENT_OFF = String("\x1b[?1003l")
 
 
-fn _hex_nibble(n: Int) -> String:
+def _hex_nibble(n: Int) -> String:
     if n < 10:
         return String(chr(0x30 + n))
     return String(chr(0x61 + (n - 10)))
 
 
-fn _hex_byte(b: UInt8) -> String:
+def _hex_byte(b: UInt8) -> String:
     var v = Int(b)
     return _hex_nibble(v >> 4) + _hex_nibble(v & 0xF)
 
 
-fn _printable(b: UInt8) -> String:
+def _printable(b: UInt8) -> String:
     var v = Int(b)
     if v == 0x1B: return String("ESC")
     if v == 0x0D: return String("\\r")
@@ -49,7 +49,7 @@ fn _printable(b: UInt8) -> String:
     return String(".")
 
 
-fn _decode_sgr_mouse(buf: List[UInt8], start: Int, end: Int) -> String:
+def _decode_sgr_mouse(buf: List[UInt8], start: Int, end: Int) -> String:
     """If ``buf[start..end]`` looks like CSI < B ; X ; Y M|m, decode it."""
     if end - start < 6: return String("")
     if buf[start] != 0x1B or buf[start + 1] != 0x5B or buf[start + 2] != 0x3C:
@@ -108,7 +108,7 @@ fn _decode_sgr_mouse(buf: List[UInt8], start: Int, end: Int) -> String:
     )
 
 
-fn _emit_burst(buf: List[UInt8], n: Int):
+def _emit_burst(buf: List[UInt8], n: Int):
     """Write one human-readable line per read() burst."""
     var hex_part = String("")
     var asc_part = String("")
@@ -126,7 +126,7 @@ fn _emit_burst(buf: List[UInt8], n: Int):
         write_string(STDOUT_FD, decoded)
 
 
-fn main() raises:
+def main() raises:
     write_string(STDOUT_FD, String(
         "Mouse probe — click / drag / scroll in this window. Press 'q' to quit.\r\n"
         "Modifiers reported by the terminal: Shift, Alt(Meta), Ctrl.\r\n"

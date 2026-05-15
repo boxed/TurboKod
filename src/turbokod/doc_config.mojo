@@ -41,7 +41,7 @@ struct DocSpec(Copyable, Movable):
     var slug: String
     var display: String
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var slug: String,
@@ -52,21 +52,21 @@ struct DocSpec(Copyable, Movable):
         self.slug = slug^
         self.display = display^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.slug = copy.slug
         self.display = copy.display
 
 
-fn _exts(*items: String) -> List[String]:
+def _exts(*items: String) -> List[String]:
     var out = List[String]()
     for x in items:
         out.append(String(x))
     return out^
 
 
-fn built_in_docsets() -> List[DocSpec]:
+def built_in_docsets() -> List[DocSpec]:
     """Curated set of DevDocs slugs matching the languages we already
     grammar-highlight or run an LSP for.
 
@@ -132,7 +132,7 @@ fn built_in_docsets() -> List[DocSpec]:
     return out^
 
 
-fn find_docset_for_extension(specs: List[DocSpec], ext: String) -> Int:
+def find_docset_for_extension(specs: List[DocSpec], ext: String) -> Int:
     """Index of the spec whose ``file_types`` contains ``ext``, or -1."""
     if len(ext.as_bytes()) == 0:
         return -1
@@ -143,7 +143,7 @@ fn find_docset_for_extension(specs: List[DocSpec], ext: String) -> Int:
     return -1
 
 
-fn find_docset_by_language(
+def find_docset_by_language(
     specs: List[DocSpec], language_id: String,
 ) -> Int:
     for i in range(len(specs)):
@@ -152,7 +152,7 @@ fn find_docset_by_language(
     return -1
 
 
-fn docs_install_command(slug: String, dest_dir: String) -> String:
+def docs_install_command(slug: String, dest_dir: String) -> String:
     """Shell command that mkdirs ``dest_dir`` and curls both DevDocs
     JSON files into it.
 

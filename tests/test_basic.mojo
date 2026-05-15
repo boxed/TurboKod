@@ -201,12 +201,12 @@ from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
 
-fn test_claude_detect_empty_buffer_returns_none() raises:
+def test_claude_detect_empty_buffer_returns_none() raises:
     var lines = List[String]()
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
 
 
-fn test_claude_detect_plain_shell_output_returns_none() raises:
+def test_claude_detect_plain_shell_output_returns_none() raises:
     var lines = List[String]()
     lines.append(String("$ ls"))
     lines.append(String("foo.txt   bar.txt"))
@@ -215,7 +215,7 @@ fn test_claude_detect_plain_shell_output_returns_none() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
 
 
-fn test_claude_detect_spinner_row_returns_working() raises:
+def test_claude_detect_spinner_row_returns_working() raises:
     var lines = List[String]()
     lines.append(String("> add tests for the detector"))
     lines.append(
@@ -224,7 +224,7 @@ fn test_claude_detect_spinner_row_returns_working() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
 
 
-fn test_claude_detect_spinner_small_dot_frame_returns_working() raises:
+def test_claude_detect_spinner_small_dot_frame_returns_working() raises:
     # The spinner animation throbs: at the trough of the throb the
     # glyph drops to a small ``·``. Detection must still fire — the
     # row layout is identical apart from the swapped glyph.
@@ -234,7 +234,7 @@ fn test_claude_detect_spinner_small_dot_frame_returns_working() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
 
 
-fn test_claude_detect_spinner_other_glyph_frames_return_working() raises:
+def test_claude_detect_spinner_other_glyph_frames_return_working() raises:
     # Walk through the rest of the throbbing-asterisk frames. The
     # ``(...)`` timer block is the disambiguator; without it the same
     # leading-glyph pattern would collide with the welcome banner.
@@ -255,7 +255,7 @@ fn test_claude_detect_spinner_other_glyph_frames_return_working() raises:
         )
 
 
-fn test_claude_detect_spinner_glyph_in_welcome_banner_is_not_working() raises:
+def test_claude_detect_spinner_glyph_in_welcome_banner_is_not_working() raises:
     # The legacy welcome banner starts with ``✻ Welcome to Claude
     # Code!`` — same leading-glyph-plus-space pattern as the spinner
     # row, but no parens. Without the open-paren guard the spinner
@@ -267,7 +267,7 @@ fn test_claude_detect_spinner_glyph_in_welcome_banner_is_not_working() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_CLEAN))
 
 
-fn test_claude_detect_welcome_banner_returns_clean() raises:
+def test_claude_detect_welcome_banner_returns_clean() raises:
     var lines = List[String]()
     lines.append(String("✻ Welcome to Claude Code!"))
     lines.append(String("  /help for help, /status for your current setup"))
@@ -275,7 +275,7 @@ fn test_claude_detect_welcome_banner_returns_clean() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_CLEAN))
 
 
-fn test_claude_detect_mascot_version_banner_returns_clean() raises:
+def test_claude_detect_mascot_version_banner_returns_clean() raises:
     # Recent Claude Code builds drop the ``Welcome to Claude Code`` line
     # and print only the quadrant-block mascot plus a ``Claude Code
     # v<version>`` row on the post-``/clear`` banner. The version string
@@ -287,7 +287,7 @@ fn test_claude_detect_mascot_version_banner_returns_clean() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_CLEAN))
 
 
-fn test_claude_detect_mascot_banner_with_prompt_below_returns_clean() raises:
+def test_claude_detect_mascot_banner_with_prompt_below_returns_clean() raises:
     # The mascot sits a few rows above the bottom of the pane in real
     # use — the input box and shortcut strip live below it. The tail
     # window has to be wide enough to still see the mascot when those
@@ -307,7 +307,7 @@ fn test_claude_detect_mascot_banner_with_prompt_below_returns_clean() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_CLEAN))
 
 
-fn test_claude_detect_idle_prompt_returns_waiting() raises:
+def test_claude_detect_idle_prompt_returns_waiting() raises:
     var lines = List[String]()
     lines.append(String("╭─────────────────────────────────────────╮"))
     lines.append(String("│ >                                       │"))
@@ -316,7 +316,7 @@ fn test_claude_detect_idle_prompt_returns_waiting() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WAITING))
 
 
-fn test_claude_detect_working_wins_over_waiting() raises:
+def test_claude_detect_working_wins_over_waiting() raises:
     # Right after the user submits, the prompt hint can briefly co-exist
     # with the spinner row in the visible tail. Working should win — the
     # user cares more about "is it still going?" than "is the prompt
@@ -329,7 +329,7 @@ fn test_claude_detect_working_wins_over_waiting() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
 
 
-fn test_claude_detect_generic_marker_returns_active() raises:
+def test_claude_detect_generic_marker_returns_active() raises:
     # Only the brand glyph is in view — Claude is on screen somewhere
     # but we can't tell which precise state. Better to say ``active``
     # than to fall back to ``none`` and let the title pretend Claude
@@ -340,7 +340,7 @@ fn test_claude_detect_generic_marker_returns_active() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_ACTIVE))
 
 
-fn test_claude_detect_marker_outside_tail_window_is_ignored() raises:
+def test_claude_detect_marker_outside_tail_window_is_ignored() raises:
     # Only the most recent ~20 rows count — the marker must be in the
     # currently-visible tail, not in scrollback that's drifted off.
     var lines = List[String]()
@@ -350,7 +350,7 @@ fn test_claude_detect_marker_outside_tail_window_is_ignored() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_NONE))
 
 
-fn test_claude_detect_finds_marker_inside_ansi_wrapped_line() raises:
+def test_claude_detect_finds_marker_inside_ansi_wrapped_line() raises:
     # In the real pane, color escapes wrap the marker text. The detector
     # is a byte-level substring search so the escapes don't disturb the
     # match as long as the marker bytes themselves are contiguous.
@@ -360,7 +360,7 @@ fn test_claude_detect_finds_marker_inside_ansi_wrapped_line() raises:
     assert_equal(Int(detect_claude_state(lines)), Int(CLAUDE_WORKING))
 
 
-fn test_claude_state_label_round_trip() raises:
+def test_claude_state_label_round_trip() raises:
     assert_equal(claude_state_label(CLAUDE_NONE),    String(""))
     assert_equal(claude_state_label(CLAUDE_CLEAN),   String("clean"))
     assert_equal(claude_state_label(CLAUDE_WAITING), String("waiting"))
@@ -368,7 +368,7 @@ fn test_claude_state_label_round_trip() raises:
     assert_equal(claude_state_label(CLAUDE_ACTIVE),  String("active"))
 
 
-fn test_point_arithmetic() raises:
+def test_point_arithmetic() raises:
     var p = Point(2, 3)
     var q = Point(5, 7)
     assert_true((p + q) == Point(7, 10))
@@ -377,7 +377,7 @@ fn test_point_arithmetic() raises:
     assert_false(p == q)
 
 
-fn test_rect_basics() raises:
+def test_rect_basics() raises:
     var r = Rect(0, 0, 10, 5)
     assert_equal(r.width(), 10)
     assert_equal(r.height(), 5)
@@ -396,14 +396,14 @@ fn test_rect_basics() raises:
     assert_true(Rect(0, 0, 0, 0).is_empty())
 
 
-fn test_rect_helpers() raises:
+def test_rect_helpers() raises:
     var r = Rect.sized(Point(3, 4), 7, 2)
     assert_true(r == Rect(3, 4, 10, 6))
     assert_true(r.translated(Point(1, 1)) == Rect(4, 5, 11, 7))
     assert_true(r.inset(1, 0) == Rect(4, 4, 9, 6))
 
 
-fn test_attr() raises:
+def test_attr() raises:
     var a = Attr(WHITE, BLUE)
     var b = a.with_fg(YELLOW)
     assert_true(a.fg == WHITE)
@@ -412,7 +412,7 @@ fn test_attr() raises:
     assert_false(a == b)
 
 
-fn test_attr_to_sgr_plain_underline() raises:
+def test_attr_to_sgr_plain_underline() raises:
     """Default underline emits SGR ``;4`` (no colon, no separate
     color) — same as the pre-extension shape so non-curly callers
     don't accidentally trigger 4:3 parsing in older terminals."""
@@ -423,7 +423,7 @@ fn test_attr_to_sgr_plain_underline() raises:
     assert_false(_substring_present(s, String(";58;")))
 
 
-fn test_attr_to_sgr_curly_colored_underline() raises:
+def test_attr_to_sgr_curly_colored_underline() raises:
     """Curly bit + explicit underline color emits ``;4:3`` and a
     ``;58;5;<color>`` parameter — the VS-Code-squiggle SGR."""
     var a = Attr(WHITE, BLUE, STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY) \
@@ -435,7 +435,7 @@ fn test_attr_to_sgr_curly_colored_underline() raises:
     )
 
 
-fn _substring_present(haystack: String, needle: String) -> Bool:
+def _substring_present(haystack: String, needle: String) -> Bool:
     var hb = haystack.as_bytes()
     var nb = needle.as_bytes()
     if len(nb) > len(hb):
@@ -451,7 +451,7 @@ fn _substring_present(haystack: String, needle: String) -> Bool:
     return False
 
 
-fn test_canvas_put_text() raises:
+def test_canvas_put_text() raises:
     var c = Canvas(20, 5)
     var n = c.put_text(Point(2, 1), String("hello"), default_attr())
     assert_equal(n, 5)
@@ -460,7 +460,7 @@ fn test_canvas_put_text() raises:
     assert_equal(c.get(7, 1).glyph, String(" "))  # untouched
 
 
-fn test_paint_title_commands_renders_separator_and_labels() raises:
+def test_paint_title_commands_renders_separator_and_labels() raises:
     """``paint_title_commands`` paints ``- <cmd1> <cmd2>`` after the
     given start point, returning one hit rect per fully-painted
     label (with x_end exclusive). The body-bg rule from
@@ -494,7 +494,7 @@ fn test_paint_title_commands_renders_separator_and_labels() raises:
     assert_equal(hits[1].x_end, 12)
 
 
-fn test_paint_title_commands_drops_clipped_label() raises:
+def test_paint_title_commands_drops_clipped_label() raises:
     """A label whose right edge would land past ``max_x`` must be
     skipped — we'd rather drop it than register a hit on a
     half-painted button."""
@@ -512,7 +512,7 @@ fn test_paint_title_commands_drops_clipped_label() raises:
     assert_equal(hits[0].id, String("a"))
 
 
-fn test_hit_title_command_returns_id_under_cursor() raises:
+def test_hit_title_command_returns_id_under_cursor() raises:
     var c = Canvas(40, 1)
     var commands = List[TitleCommand]()
     commands.append(TitleCommand(String("[X]"), String("first")))
@@ -531,7 +531,7 @@ fn test_hit_title_command_returns_id_under_cursor() raises:
     assert_equal(hit_title_command(hits, Point(3, 1)), String(""))
 
 
-fn test_canvas_box() raises:
+def test_canvas_box() raises:
     var c = Canvas(10, 5)
     c.draw_box(Rect(0, 0, 10, 5), default_attr(), False)
     assert_equal(c.get(0, 0).glyph, String("┌"))
@@ -541,7 +541,7 @@ fn test_canvas_box() raises:
     assert_equal(c.get(5, 0).glyph, String("─"))
 
 
-fn test_canvas_fill() raises:
+def test_canvas_fill() raises:
     var c = Canvas(5, 3)
     c.fill(Rect(1, 1, 4, 2), String("X"), default_attr())
     assert_equal(c.get(0, 0).glyph, String(" "))
@@ -550,7 +550,7 @@ fn test_canvas_fill() raises:
     assert_equal(c.get(4, 1).glyph, String(" "))
 
 
-fn test_event_factories() raises:
+def test_event_factories() raises:
     var k = Event.key_event(KEY_ENTER)
     assert_true(k.kind == EVENT_KEY)
     assert_true(k.is_key(KEY_ENTER))
@@ -563,7 +563,7 @@ fn test_event_factories() raises:
     assert_true(r.pos == Point(80, 24))
 
 
-fn test_parse_input_keys() raises:
+def test_parse_input_keys() raises:
     # Lone ESC could be a real keypress or the start of a partial sequence
     # whose tail hasn't arrived yet — the parser defers the decision via
     # (EVENT_NONE, 0). Terminal.poll_event disambiguates with a timeout.
@@ -596,7 +596,7 @@ fn test_parse_input_keys() raises:
     assert_equal(alt_lf[0].mods, MOD_ALT)
 
 
-fn test_parse_window_size_report() raises:
+def test_parse_window_size_report() raises:
     # ``CSI 8 ; rows ; cols t`` — xterm window-size report. The native
     # wrapper pushes this on every resize so turbokod sees the new
     # dimensions immediately; we should turn it into an EVENT_RESIZE
@@ -614,7 +614,7 @@ fn test_parse_window_size_report() raises:
     assert_equal(ev2[0].pos.y, 50)
 
 
-fn test_parse_input_focus_events() raises:
+def test_parse_input_focus_events() raises:
     """Xterm focus reporting: ``ESC[I`` is focus-in, ``ESC[O`` is
     focus-out. Both are bare CSI finals and the parser must consume
     the full 3 bytes — leaving any tail behind would let the rest of
@@ -628,7 +628,7 @@ fn test_parse_input_focus_events() raises:
     assert_true(fout[0].kind == EVENT_FOCUS_OUT)
 
 
-fn test_parse_input_sgr_mouse() raises:
+def test_parse_input_sgr_mouse() raises:
     # Left-button press at (10, 5). Terminal reports 1-based; we expose 0-based.
     var press = parse_input(String("\x1b[<0;11;6M"))
     assert_true(press[0].kind == 2)  # EVENT_MOUSE
@@ -653,7 +653,7 @@ fn test_parse_input_sgr_mouse() raises:
     assert_equal(two[1], 9)  # first sequence is 9 bytes
 
 
-fn test_centered() raises:
+def test_centered() raises:
     var outer = Rect(0, 0, 80, 24)
     var inner = centered(outer, 20, 6)
     assert_true(inner == Rect(30, 9, 50, 15))
@@ -662,7 +662,7 @@ fn test_centered() raises:
 # ----- Scrollbar primitive tests --------------------------------------------
 
 
-fn test_scrollbar_hidden_when_content_fits() raises:
+def test_scrollbar_hidden_when_content_fits() raises:
     """No bar is drawn when total ≤ visible — there's nothing to
     scroll, so paint and hit-test must short-circuit."""
     var bar = VScrollbar(10, 0, 9, 5, 10, 0)
@@ -677,14 +677,14 @@ fn test_scrollbar_hidden_when_content_fits() raises:
     assert_equal(hit[0], 0)
 
 
-fn test_scrollbar_hidden_when_too_short() raises:
+def test_scrollbar_hidden_when_too_short() raises:
     """A 2-cell bar can't fit ▲ + ▼ + at least one track cell, so it
     stays hidden even when content overflows."""
     var bar = VScrollbar(10, 0, 1, 100, 5, 0)
     assert_false(bar.metrics().present)
 
 
-fn test_scrollbar_paints_arrows_and_thumb() raises:
+def test_scrollbar_paints_arrows_and_thumb() raises:
     """The bar paints ▲ at the top, ▼ at the bottom, and a █ thumb
     proportional to ``visible / total`` somewhere on the rail."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)
@@ -705,7 +705,7 @@ fn test_scrollbar_paints_arrows_and_thumb() raises:
     assert_equal(c.get(10, 8).glyph, String("░"))
 
 
-fn test_scrollbar_thumb_tracks_scroll_position() raises:
+def test_scrollbar_thumb_tracks_scroll_position() raises:
     """As ``scroll`` advances toward ``max_scroll``, the thumb's
     ``knob_off`` must end up at the bottom of the track."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 90)  # max_scroll = 90
@@ -715,7 +715,7 @@ fn test_scrollbar_thumb_tracks_scroll_position() raises:
     assert_equal(m.knob_off, 7)
 
 
-fn test_scrollbar_hit_arrow_zones() raises:
+def test_scrollbar_hit_arrow_zones() raises:
     """Top and bottom of the bar are arrow hits, with no rel."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)
     var up = bar.hit(Point(10, 0))
@@ -724,7 +724,7 @@ fn test_scrollbar_hit_arrow_zones() raises:
     assert_equal(down[0], 5)  # trailing arrow
 
 
-fn test_scrollbar_hit_thumb_returns_drag_offset() raises:
+def test_scrollbar_hit_thumb_returns_drag_offset() raises:
     """Clicking on the thumb returns part=3 with the click's offset
     inside the thumb so the drag preserves the press point."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)  # thumb at track row 0
@@ -733,7 +733,7 @@ fn test_scrollbar_hit_thumb_returns_drag_offset() raises:
     assert_equal(on_thumb[1], 0)
 
 
-fn test_scrollbar_hit_page_zones() raises:
+def test_scrollbar_hit_page_zones() raises:
     """Above the thumb is part=2 (page-up), below is part=4 (page-down)."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 90)  # thumb at the bottom
     # Track rows 1..8. Thumb at knob_off=7, so row 1 (rel=0) is page-up.
@@ -747,14 +747,14 @@ fn test_scrollbar_hit_page_zones() raises:
     assert_equal(pdn[0], 4)
 
 
-fn test_scrollbar_hit_off_axis_returns_none() raises:
+def test_scrollbar_hit_off_axis_returns_none() raises:
     """A click in a different column (V-bar) must not fire."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)
     var miss = bar.hit(Point(11, 5))
     assert_equal(miss[0], 0)
 
 
-fn test_scrollbar_drag_to_extremes() raises:
+def test_scrollbar_drag_to_extremes() raises:
     """Dragging the thumb's leading cell to the bottom of the track
     yields ``scroll == max_scroll``; to the top yields 0."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)
@@ -767,7 +767,7 @@ fn test_scrollbar_drag_to_extremes() raises:
     assert_equal(bar.drag_to(1000, 0), 90)
 
 
-fn test_scrollbar_track_jump_centers_target() raises:
+def test_scrollbar_track_jump_centers_target() raises:
     """A click in the middle of the track jumps so the target row is
     centered in the visible area."""
     var bar = VScrollbar(10, 0, 9, 100, 10, 0)
@@ -779,7 +779,7 @@ fn test_scrollbar_track_jump_centers_target() raises:
     assert_equal(bar.track_jump(7), 82)
 
 
-fn test_scrollbar_horizontal_paints_arrows_on_axis() raises:
+def test_scrollbar_horizontal_paints_arrows_on_axis() raises:
     """``HScrollbar`` is the same primitive rotated 90° — ◄ at the
     leading cell, ► at the trailing cell, █/░ along the row."""
     var bar = HScrollbar(5, 0, 9, 100, 10, 0)
@@ -799,11 +799,11 @@ comptime _VIEW = Rect(0, 0, 80, 24)
 comptime _SCREEN = Rect(0, 0, 100, 30)
 
 
-fn _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
+def _key(k: UInt32, mods: UInt8 = MOD_NONE) -> Event:
     return Event.key_event(k, mods)
 
 
-fn test_text_buffer_split_and_join() raises:
+def test_text_buffer_split_and_join() raises:
     var b = TextBuffer(String("ab\ncd"))
     assert_equal(b.line_count(), 2)
     assert_equal(b.line(0), String("ab"))
@@ -821,7 +821,7 @@ fn test_text_buffer_split_and_join() raises:
     assert_equal(b.line(0), String("ab"))
 
 
-fn test_editor_typing_and_arrows() raises:
+def test_editor_typing_and_arrows() raises:
     var ed = Editor(String("hello"))
     assert_equal(ed.cursor_col, 0)
     _ = ed.handle_key(_key(KEY_END), _VIEW)
@@ -835,7 +835,7 @@ fn test_editor_typing_and_arrows() raises:
     assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_word_movement() raises:
+def test_editor_word_movement() raises:
     var ed = Editor(String("hello world foo"))
     # Ctrl+Right from start: lands at start of "world" (col 6).
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
@@ -855,7 +855,7 @@ fn test_editor_word_movement() raises:
     assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_word_movement_across_lines() raises:
+def test_editor_word_movement_across_lines() raises:
     var ed = Editor(String("abc\ndef"))
     # Ctrl+Right from start: end of "abc" on line 0.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
@@ -868,7 +868,7 @@ fn test_editor_word_movement_across_lines() raises:
     assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 3)
 
 
-fn test_editor_shift_arrow_extends_selection() raises:
+def test_editor_shift_arrow_extends_selection() raises:
     var ed = Editor(String("hello"))
     assert_false(ed.has_selection())
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
@@ -882,7 +882,7 @@ fn test_editor_shift_arrow_extends_selection() raises:
     assert_equal(ed.cursor_col, 3); assert_equal(ed.anchor_col, 3)
 
 
-fn test_editor_shift_ctrl_arrow_composes() raises:
+def test_editor_shift_ctrl_arrow_composes() raises:
     """Selection and word movement compose: Shift+Ctrl+Right keeps the anchor
     while jumping by a whole word."""
     var ed = Editor(String("hello world foo"))
@@ -897,7 +897,7 @@ fn test_editor_shift_ctrl_arrow_composes() raises:
     assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
 
 
-fn test_editor_cmd_arrow_line_navigation() raises:
+def test_editor_cmd_arrow_line_navigation() raises:
     """Cmd+Right jumps to end of line; Cmd+Left jumps to first non-space,
     then to col 0 on a second press. Shift extends the selection."""
     var ed = Editor(String("    hello world"))
@@ -929,7 +929,7 @@ fn test_editor_cmd_arrow_line_navigation() raises:
     assert_equal(ed2.cursor_col, 0)
 
 
-fn test_editor_cmd_letter_does_not_insert() raises:
+def test_editor_cmd_letter_does_not_insert() raises:
     """Cmd+B (or any unbound Cmd chord) used to fall through the
     editor's modifier guard and insert ``b`` into the buffer — the
     check only excluded MOD_CTRL / MOD_ALT. The editor now reports
@@ -941,7 +941,7 @@ fn test_editor_cmd_letter_does_not_insert() raises:
     assert_equal(ed.buffer.line(0), String("hello"))
 
 
-fn test_editor_cmd_a_selects_all() raises:
+def test_editor_cmd_a_selects_all() raises:
     """Cmd+A should select the whole buffer — same as Ctrl+A on
     Linux/Windows. Without MOD_META in ``clipboard_chord`` only
     Ctrl+A worked, and Cmd+A inserted ``a`` instead."""
@@ -955,7 +955,7 @@ fn test_editor_cmd_a_selects_all() raises:
     assert_equal(ed.cursor_col, 8)
 
 
-fn test_editor_typing_replaces_selection() raises:
+def test_editor_typing_replaces_selection() raises:
     var ed = Editor(String("hello"))
     # Select first 4 chars
     for _ in range(4):
@@ -967,7 +967,7 @@ fn test_editor_typing_replaces_selection() raises:
     assert_equal(ed.cursor_col, 1)
 
 
-fn test_editor_backspace_deletes_selection() raises:
+def test_editor_backspace_deletes_selection() raises:
     var ed = Editor(String("hello"))
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)         # cursor at 1
     for _ in range(3):
@@ -978,7 +978,7 @@ fn test_editor_backspace_deletes_selection() raises:
     assert_false(ed.has_selection())
 
 
-fn test_editor_mouse_click_sets_cursor() raises:
+def test_editor_mouse_click_sets_cursor() raises:
     var ed = Editor(String("hello"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(3, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -988,7 +988,7 @@ fn test_editor_mouse_click_sets_cursor() raises:
     assert_false(ed.has_selection())
 
 
-fn test_editor_mouse_drag_extends_selection() raises:
+def test_editor_mouse_drag_extends_selection() raises:
     var ed = Editor(String("hello world"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(1, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1003,7 +1003,7 @@ fn test_editor_mouse_drag_extends_selection() raises:
     assert_equal(ed.anchor_col, 1); assert_equal(ed.cursor_col, 7)
 
 
-fn test_editor_mouse_click_clamps_to_line() raises:
+def test_editor_mouse_click_clamps_to_line() raises:
     var ed = Editor(String("hi"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(50, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1013,7 +1013,7 @@ fn test_editor_mouse_click_clamps_to_line() raises:
     assert_equal(ed.cursor_col, 2)
 
 
-fn test_editor_double_click_selects_word() raises:
+def test_editor_double_click_selects_word() raises:
     var ed = Editor(String("hello world foo"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1027,7 +1027,7 @@ fn test_editor_double_click_selects_word() raises:
     assert_equal(ed.selection_text(), String("world"))
 
 
-fn test_editor_double_click_selects_unicode_word() raises:
+def test_editor_double_click_selects_unicode_word() raises:
     """Double-clicking inside a non-ASCII word selects the whole word.
     Pre-fix this would have selected only ``Godk`` (the ASCII prefix
     up to the first non-letter byte)."""
@@ -1046,7 +1046,7 @@ fn test_editor_double_click_selects_unicode_word() raises:
     assert_equal(ed.selection_text(), String("Godkänn"))
 
 
-fn test_editor_double_click_drag_extends_by_word_forward() raises:
+def test_editor_double_click_drag_extends_by_word_forward() raises:
     var ed = Editor(String("hello world foo bar"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(8, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1063,7 +1063,7 @@ fn test_editor_double_click_drag_extends_by_word_forward() raises:
     assert_equal(ed.selection_text(), String("world foo bar"))
 
 
-fn test_editor_double_click_drag_extends_by_word_backward() raises:
+def test_editor_double_click_drag_extends_by_word_backward() raises:
     var ed = Editor(String("hello world foo bar"))
     _ = ed.handle_mouse(
         Event.mouse_event(Point(13, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1080,7 +1080,7 @@ fn test_editor_double_click_drag_extends_by_word_backward() raises:
     assert_equal(ed.selection_text(), String("hello world foo"))
 
 
-fn test_editor_triple_click_selects_line() raises:
+def test_editor_triple_click_selects_line() raises:
     var ed = Editor(String("first line\nsecond line\nthird line"))
     # Three quick presses on row 1, col 4.
     for _ in range(3):
@@ -1092,7 +1092,7 @@ fn test_editor_triple_click_selects_line() raises:
     assert_equal(ed.selection_text(), String("second line\n"))
 
 
-fn test_editor_triple_click_last_line_no_newline() raises:
+def test_editor_triple_click_last_line_no_newline() raises:
     var ed = Editor(String("first\nlast"))
     for _ in range(3):
         _ = ed.handle_mouse(
@@ -1103,7 +1103,7 @@ fn test_editor_triple_click_last_line_no_newline() raises:
     assert_equal(ed.selection_text(), String("last"))
 
 
-fn test_editor_triple_click_drag_extends_by_line_forward() raises:
+def test_editor_triple_click_drag_extends_by_line_forward() raises:
     var ed = Editor(String("alpha\nbeta\ngamma\ndelta"))
     for _ in range(3):
         _ = ed.handle_mouse(
@@ -1117,7 +1117,7 @@ fn test_editor_triple_click_drag_extends_by_line_forward() raises:
     assert_equal(ed.selection_text(), String("beta\ngamma\n"))
 
 
-fn test_editor_triple_click_drag_extends_by_line_backward() raises:
+def test_editor_triple_click_drag_extends_by_line_backward() raises:
     var ed = Editor(String("alpha\nbeta\ngamma\ndelta"))
     for _ in range(3):
         _ = ed.handle_mouse(
@@ -1131,7 +1131,7 @@ fn test_editor_triple_click_drag_extends_by_line_backward() raises:
     assert_equal(ed.selection_text(), String("alpha\nbeta\ngamma\n"))
 
 
-fn test_editor_cut_whole_line_when_no_selection() raises:
+def test_editor_cut_whole_line_when_no_selection() raises:
     var ed = Editor(String("first\nsecond\nthird"))
     ed.move_to(1, 3, False)
     ed.cut_to_clipboard()
@@ -1141,7 +1141,7 @@ fn test_editor_cut_whole_line_when_no_selection() raises:
     assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_cut_whole_line_only_line() raises:
+def test_editor_cut_whole_line_only_line() raises:
     var ed = Editor(String("only line"))
     ed.move_to(0, 4, False)
     ed.cut_to_clipboard()
@@ -1150,7 +1150,7 @@ fn test_editor_cut_whole_line_only_line() raises:
     assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_smart_indent_mirrors_previous_line() raises:
+def test_editor_smart_indent_mirrors_previous_line() raises:
     var ed = Editor(String("    hello"))
     ed.move_to(0, 9, False)
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
@@ -1159,7 +1159,7 @@ fn test_editor_smart_indent_mirrors_previous_line() raises:
     assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 4)
 
 
-fn test_editor_smart_indent_after_open_brace() raises:
+def test_editor_smart_indent_after_open_brace() raises:
     var ed = Editor(String("if (x) {"))
     ed.move_to(0, 8, False)
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
@@ -1167,7 +1167,7 @@ fn test_editor_smart_indent_after_open_brace() raises:
     assert_equal(ed.cursor_col, 4)
 
 
-fn test_editor_smart_indent_after_colon() raises:
+def test_editor_smart_indent_after_colon() raises:
     var ed = Editor(String("    def foo():"))
     ed.move_to(0, 14, False)
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
@@ -1175,7 +1175,7 @@ fn test_editor_smart_indent_after_colon() raises:
     assert_equal(ed.cursor_col, 8)
 
 
-fn test_terminal_parses_modified_arrows() raises:
+def test_terminal_parses_modified_arrows() raises:
     """The CSI ``ESC[1;<mod><letter>`` form gives us shift/ctrl on arrows."""
     var shift_right = parse_input(String("\x1b[1;2C"))
     assert_true(shift_right[0].kind == EVENT_KEY)
@@ -1206,7 +1206,7 @@ fn test_terminal_parses_modified_arrows() raises:
     assert_true((both_right[0].mods & MOD_CTRL) != 0)
 
 
-fn test_terminal_parses_shift_tab() raises:
+def test_terminal_parses_shift_tab() raises:
     """Backtab (CSI Z) and the modifier-reporting form (CSI 1;2 Z) both
     arrive as KEY_TAB with MOD_SHIFT so the editor can treat Shift+Tab
     as the inverse of Tab."""
@@ -1221,7 +1221,7 @@ fn test_terminal_parses_shift_tab() raises:
     assert_true((modreport[0].mods & MOD_SHIFT) != 0)
 
 
-fn test_editor_selection_text() raises:
+def test_editor_selection_text() raises:
     var ed = Editor(String("hello world"))
     # Select "hello "
     for _ in range(6):
@@ -1229,7 +1229,7 @@ fn test_editor_selection_text() raises:
     assert_equal(ed.selection_text(), String("hello "))
 
 
-fn test_editor_cut_selection() raises:
+def test_editor_cut_selection() raises:
     var ed = Editor(String("hello world"))
     for _ in range(5):
         _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
@@ -1239,7 +1239,7 @@ fn test_editor_cut_selection() raises:
     assert_false(ed.has_selection())
 
 
-fn test_editor_paste_text_single_line() raises:
+def test_editor_paste_text_single_line() raises:
     var ed = Editor(String("hello"))
     ed.move_to(0, 5, False)
     ed.paste_text(String(" world"))
@@ -1247,7 +1247,7 @@ fn test_editor_paste_text_single_line() raises:
     assert_equal(ed.cursor_col, 11)
 
 
-fn test_editor_paste_text_multiline() raises:
+def test_editor_paste_text_multiline() raises:
     var ed = Editor(String("hello"))
     ed.move_to(0, 5, False)
     ed.paste_text(String("\nworld\nfoo"))
@@ -1259,7 +1259,7 @@ fn test_editor_paste_text_multiline() raises:
     assert_equal(ed.cursor_col, 3)
 
 
-fn test_editor_paste_replaces_selection() raises:
+def test_editor_paste_replaces_selection() raises:
     var ed = Editor(String("hello world"))
     for _ in range(5):
         _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
@@ -1268,7 +1268,7 @@ fn test_editor_paste_replaces_selection() raises:
     assert_false(ed.has_selection())
 
 
-fn test_editor_selection_text_multiline() raises:
+def test_editor_selection_text_multiline() raises:
     var ed = Editor(String("ab\ncd\nef"))
     # Select from (0,1) to (2,1) — i.e., "b\ncd\ne"
     ed.move_to(0, 1, False)
@@ -1276,7 +1276,7 @@ fn test_editor_selection_text_multiline() raises:
     assert_equal(ed.selection_text(), String("b\ncd\ne"))
 
 
-fn test_editor_goto_line() raises:
+def test_editor_goto_line() raises:
     var ed = Editor(String("a\nb\nc\nd\ne"))
     ed.goto_line(3)
     assert_equal(ed.cursor_row, 2)
@@ -1288,7 +1288,7 @@ fn test_editor_goto_line() raises:
     assert_equal(ed.cursor_row, 0)
 
 
-fn test_editor_find_next() raises:
+def test_editor_find_next() raises:
     var ed = Editor(String("foo bar foo baz"))
     var hit1 = ed.find_next(String("foo"))
     assert_true(hit1)
@@ -1304,7 +1304,7 @@ fn test_editor_find_next() raises:
     assert_equal(ed.cursor_col, 3)
 
 
-fn test_editor_find_next_case_insensitive() raises:
+def test_editor_find_next_case_insensitive() raises:
     """Cc OFF (case_sensitive=False, the default) should match
     across letter case; Cc ON should require an exact byte match."""
     var ed = Editor(String("Foo bar FOO baz"))
@@ -1323,7 +1323,7 @@ fn test_editor_find_next_case_insensitive() raises:
     assert_equal(ed.selection_text(), String("Foo"))
 
 
-fn test_editor_find_next_whole_word() raises:
+def test_editor_find_next_whole_word() raises:
     """Whole-word toggle should reject substring matches."""
     var ed = Editor(String("foobar foo bar"))
     var opts = SearchOptions(True, True, False)  # case-sensitive + whole-word
@@ -1334,7 +1334,7 @@ fn test_editor_find_next_whole_word() raises:
     assert_equal(ed.cursor_col, 10)
 
 
-fn test_editor_find_next_regex() raises:
+def test_editor_find_next_regex() raises:
     """Regex toggle should let the user write a real pattern.
     ``find_next`` skips the byte at the cursor (so a repeated press
     walks forward), so the first hit from cursor=(0,0) is the
@@ -1346,7 +1346,7 @@ fn test_editor_find_next_regex() raises:
     assert_equal(ed.selection_text(), String("b2"))
 
 
-fn test_editor_replace_all_case_insensitive() raises:
+def test_editor_replace_all_case_insensitive() raises:
     var ed = Editor(String("Foo foo FOO"))
     var opts = SearchOptions(False, False, False)  # ci, no-word, no-regex
     var n = ed.replace_all(String("foo"), String("bar"), opts)
@@ -1354,7 +1354,7 @@ fn test_editor_replace_all_case_insensitive() raises:
     assert_equal(ed.buffer.line(0), String("bar bar bar"))
 
 
-fn test_find_in_project_options_smoke() raises:
+def test_find_in_project_options_smoke() raises:
     """Sanity check that project search compiles and runs with
     options. Picks a string the test file itself contains."""
     var root = find_git_project(String("examples/hello.mojo"))
@@ -1366,7 +1366,7 @@ fn test_find_in_project_options_smoke() raises:
     assert_true(len(matches) >= 1)
 
 
-fn test_editor_toggle_comment_single_line() raises:
+def test_editor_toggle_comment_single_line() raises:
     var ed = Editor(String("hello"))
     ed.toggle_comment()
     assert_equal(ed.buffer.line(0), String("// hello"))
@@ -1374,7 +1374,7 @@ fn test_editor_toggle_comment_single_line() raises:
     assert_equal(ed.buffer.line(0), String("hello"))
 
 
-fn test_editor_toggle_comment_selection() raises:
+def test_editor_toggle_comment_selection() raises:
     var ed = Editor(String("a\nb\nc"))
     ed.move_to(0, 0, False)
     ed.move_to(2, 1, True)
@@ -1387,7 +1387,7 @@ fn test_editor_toggle_comment_selection() raises:
     assert_equal(ed.buffer.line(2), String("c"))
 
 
-fn test_editor_toggle_comment_language_aware() raises:
+def test_editor_toggle_comment_language_aware() raises:
     # Python: `# ` prefix derived from .py extension.
     var py = Editor(String("hello"))
     py.file_path = String("foo.py")
@@ -1417,7 +1417,7 @@ fn test_editor_toggle_comment_language_aware() raises:
     assert_equal(unknown.buffer.line(0), String("// data"))
 
 
-fn test_editor_toggle_comment_indented() raises:
+def test_editor_toggle_comment_indented() raises:
     # Single line: prefix lands at the first non-whitespace column,
     # preserving the line's leading indent.
     var py = Editor(String("    foo()"))
@@ -1428,7 +1428,7 @@ fn test_editor_toggle_comment_indented() raises:
     assert_equal(py.buffer.line(0), String("    foo()"))
 
 
-fn test_editor_toggle_comment_common_indent() raises:
+def test_editor_toggle_comment_common_indent() raises:
     # Multi-line: prefix uses the shared leading whitespace, so the
     # deeper inner line keeps its extra indent visible after the marker.
     var py = Editor(String("    foo()\n        bar()\n    baz()"))
@@ -1445,7 +1445,7 @@ fn test_editor_toggle_comment_common_indent() raises:
     assert_equal(py.buffer.line(2), String("    baz()"))
 
 
-fn test_editor_toggle_comment_skips_blank_lines() raises:
+def test_editor_toggle_comment_skips_blank_lines() raises:
     # Blank lines in the range are left untouched and don't block the
     # "all commented" vote — uncommenting still works around them.
     var py = Editor(String("    foo()\n\n    bar()"))
@@ -1462,7 +1462,7 @@ fn test_editor_toggle_comment_skips_blank_lines() raises:
     assert_equal(py.buffer.line(2), String("    bar()"))
 
 
-fn test_editor_toggle_case() raises:
+def test_editor_toggle_case() raises:
     var ed = Editor(String("Hello World"))
     ed.move_to(0, 0, False)
     ed.move_to(0, 5, True)         # select "Hello"
@@ -1470,7 +1470,7 @@ fn test_editor_toggle_case() raises:
     assert_equal(ed.buffer.line(0), String("hELLO World"))
 
 
-fn test_editor_dirty_flag() raises:
+def test_editor_dirty_flag() raises:
     var ed = Editor(String("hello"))
     assert_false(ed.dirty)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)        # navigation, not dirty
@@ -1479,7 +1479,7 @@ fn test_editor_dirty_flag() raises:
     assert_true(ed.dirty)
 
 
-fn test_file_io_read_and_stat() raises:
+def test_file_io_read_and_stat() raises:
     """Check we can read & stat a file we know exists in the repo."""
     var path = String("examples/hello.mojo")
     var info = stat_file(path)
@@ -1489,7 +1489,7 @@ fn test_file_io_read_and_stat() raises:
     assert_equal(Int(info.size), len(text.as_bytes()))
 
 
-fn test_editor_from_file() raises:
+def test_editor_from_file() raises:
     var ed = Editor.from_file(String("examples/hello.mojo"))
     assert_true(ed.buffer.line_count() > 5)
     assert_false(ed.dirty)
@@ -1499,7 +1499,7 @@ fn test_editor_from_file() raises:
     assert_equal(ed.check_for_external_change(), EXT_CHANGE_NONE)
 
 
-fn test_terminal_parses_alt_letter_as_letter() raises:
+def test_terminal_parses_alt_letter_as_letter() raises:
     """``ESC <letter>`` parses as the letter with MOD_ALT — including 'f'
     and 'b'. The framework now uses these for menu mnemonics
     (Alt+F → File menu); word-jump still works via Ctrl+arrow and via
@@ -1515,7 +1515,7 @@ fn test_terminal_parses_alt_letter_as_letter() raises:
     assert_true((alt_b[0].mods & MOD_ALT) != 0)
 
 
-fn test_editor_alt_arrow_word_jump() raises:
+def test_editor_alt_arrow_word_jump() raises:
     """MOD_ALT triggers word movement (macOS convention)."""
     var ed = Editor(String("hello world foo"))
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
@@ -1526,7 +1526,7 @@ fn test_editor_alt_arrow_word_jump() raises:
     assert_equal(ed.cursor_col, 6)
 
 
-fn test_editor_word_jump_traverses_unicode_letters() raises:
+def test_editor_word_jump_traverses_unicode_letters() raises:
     """Word-jump must skip a whole Unicode word in one press, not stop
     at every multi-byte boundary inside it. Pre-fix, ``Godkänn`` was
     three "words" and Alt+Right would stop at the byte after ``Godk``,
@@ -1542,7 +1542,7 @@ fn test_editor_word_jump_traverses_unicode_letters() raises:
     assert_equal(ed.cursor_col, 0)
 
 
-fn test_path_helpers() raises:
+def test_path_helpers() raises:
     assert_equal(join_path(String("a"), String("b")), String("a/b"))
     assert_equal(join_path(String("a/"), String("b")), String("a/b"))
     assert_equal(join_path(String(""), String("b")), String("b"))
@@ -1551,14 +1551,14 @@ fn test_path_helpers() raises:
     assert_equal(parent_path(String("foo")), String("."))
 
 
-fn test_basename() raises:
+def test_basename() raises:
     assert_equal(basename(String("/foo/bar")), String("bar"))
     assert_equal(basename(String("/foo/bar/")), String("bar"))
     assert_equal(basename(String("foo")), String("foo"))
     assert_equal(basename(String("/")), String("/"))
 
 
-fn test_find_git_project() raises:
+def test_find_git_project() raises:
     """Tests run from the repo root, which has a .git folder, so opening
     a file inside the repo should locate the project root."""
     var root = find_git_project(String("examples/hello.mojo"))
@@ -1570,11 +1570,11 @@ fn test_find_git_project() raises:
     assert_true(examples.ok)
 
 
-fn _empty_menu(label: String) -> Menu:
+def _empty_menu(label: String) -> Menu:
     return Menu(label, List[MenuItem]())
 
 
-fn test_menu_layout_pins_file_edit_window_help() raises:
+def test_menu_layout_pins_file_edit_window_help() raises:
     """Display order must always be File, Edit, [middle], Window, Help —
     regardless of insertion order. ``self.menus`` retains insertion order
     (so cached indices stay valid); only the layout rects reorder."""
@@ -1617,7 +1617,7 @@ fn test_menu_layout_pins_file_edit_window_help() raises:
     assert_equal(bar.menus[5].label, String("Edit"))
 
 
-fn test_system_menu_pins_to_left_edge() raises:
+def test_system_menu_pins_to_left_edge() raises:
     """The hamburger (``is_system``) menu always occupies cells 0..3, the
     same slot the static glyph used to live in, regardless of insertion
     order or what other left-aligned menus are present."""
@@ -1637,7 +1637,7 @@ fn test_system_menu_pins_to_left_edge() raises:
     assert_equal(rects[0].b.x, 3 + len(String("File").as_bytes()) + 2)
 
 
-fn test_right_aligned_menu_layout() raises:
+def test_right_aligned_menu_layout() raises:
     """A right-aligned menu sits flush with the screen's right edge, with
     its hit-test rect ending at exactly screen_width."""
     var bar = MenuBar()
@@ -1657,7 +1657,7 @@ fn test_right_aligned_menu_layout() raises:
     assert_equal(rects[1].a.x, 80 - right_w)
 
 
-fn test_desktop_project_lifecycle() raises:
+def test_desktop_project_lifecycle() raises:
     var d = Desktop()
     assert_false(d.project)
     # The project menu is created at construction time so the recents
@@ -1713,7 +1713,7 @@ fn test_desktop_project_lifecycle() raises:
     assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
 
 
-fn test_file_tree_expand_collapse() raises:
+def test_file_tree_expand_collapse() raises:
     var t = FileTree()
     t.open(String("."))   # repo root, contains examples/, src/, tests/, ...
     var initial_count = len(t.entries)
@@ -1737,7 +1737,7 @@ fn test_file_tree_expand_collapse() raises:
     assert_equal(len(t.entries), initial_count)
 
 
-fn test_file_tree_filters_dotfiles() raises:
+def test_file_tree_filters_dotfiles() raises:
     var t = FileTree()
     t.open(String("."))
     # ``.git`` must always be hidden, and ``.gitignore``'d entries
@@ -1763,7 +1763,7 @@ fn test_file_tree_filters_dotfiles() raises:
     assert_true(saw_gitignore)
 
 
-fn test_desktop_workspace_shrinks_with_file_tree() raises:
+def test_desktop_workspace_shrinks_with_file_tree() raises:
     var d = Desktop()
     var screen = Rect(0, 0, 100, 30)
     var ws_no_tree = d.workspace_rect(screen)
@@ -1789,7 +1789,7 @@ fn test_desktop_workspace_shrinks_with_file_tree() raises:
     )
 
 
-fn test_window_min_size_enforced_at_construction() raises:
+def test_window_min_size_enforced_at_construction() raises:
     """Framework guarantees the rect is wide enough for close + maximize
     chrome and tall enough to hold both borders, even if the caller
     passed a smaller rect."""
@@ -1801,7 +1801,7 @@ fn test_window_min_size_enforced_at_construction() raises:
     assert_true(ed.rect.height() >= 2)
 
 
-fn test_window_min_size_survives_workspace_shrink() raises:
+def test_window_min_size_survives_workspace_shrink() raises:
     """``fit_into`` must not produce a sub-minimum window when scaling
     into a workspace that's smaller than the caller's original."""
     var wm = WindowManager()
@@ -1812,7 +1812,7 @@ fn test_window_min_size_survives_workspace_shrink() raises:
     assert_true(wm.windows[0].rect.height() >= 2)
 
 
-fn test_window_manager_fit_into_moves_then_resizes() raises:
+def test_window_manager_fit_into_moves_then_resizes() raises:
     """``fit_into`` prefers moving over resizing; resizes only when the window
     is wider/taller than the new workspace."""
     var wm = WindowManager()
@@ -1831,14 +1831,14 @@ fn test_window_manager_fit_into_moves_then_resizes() raises:
     assert_equal(wm.windows[1].rect.width(), 80)
 
 
-fn _temp_path(suffix: String) -> String:
+def _temp_path(suffix: String) -> String:
     """Cheap unique path under /tmp; pid+suffix is enough for our serial test
     suite (no parallelism)."""
     var pid = external_call["getpid", Int32]()
     return String("/tmp/turbokod_test_") + String(Int(pid)) + suffix
 
 
-fn test_write_file_round_trip() raises:
+def test_write_file_round_trip() raises:
     var path = _temp_path(String("_rt.txt"))
     var payload = String("line one\nline two\nno-trailing-newline")
     assert_true(write_file(path, payload))
@@ -1854,7 +1854,7 @@ fn test_write_file_round_trip() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_save_clears_dirty() raises:
+def test_editor_save_clears_dirty() raises:
     var path = _temp_path(String("_save.txt"))
     assert_true(write_file(path, String("hello\nworld\n")))
     var ed = Editor.from_file(path)
@@ -1873,7 +1873,7 @@ fn test_editor_save_clears_dirty() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_save_as_adopts_path() raises:
+def test_editor_save_as_adopts_path() raises:
     var path = _temp_path(String("_saveas.txt"))
     var ed = Editor(String("alpha\nbeta\n"))
     assert_equal(ed.file_path, String(""))
@@ -1884,7 +1884,7 @@ fn test_editor_save_as_adopts_path() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn _lines_from(text: String) -> List[String]:
+def _lines_from(text: String) -> List[String]:
     """Mirror ``TextBuffer.__init__`` for tests that need a plain
     ``List[String]`` line view of a string (used by ``diff3_merge``
     cases below)."""
@@ -1901,7 +1901,7 @@ fn _lines_from(text: String) -> List[String]:
     return out^
 
 
-fn test_diff3_merge_clean_when_only_ours_changed() raises:
+def test_diff3_merge_clean_when_only_ours_changed() raises:
     """If theirs equals base, the merge takes ours unmodified."""
     var base = _lines_from(String("a\nb\nc\n"))
     var ours = _lines_from(String("a\nB\nc\n"))
@@ -1914,7 +1914,7 @@ fn test_diff3_merge_clean_when_only_ours_changed() raises:
         assert_equal(m.lines[i], ours[i])
 
 
-fn test_diff3_merge_clean_when_only_theirs_changed() raises:
+def test_diff3_merge_clean_when_only_theirs_changed() raises:
     """Symmetric: if ours equals base, the merge takes theirs."""
     var base = _lines_from(String("a\nb\nc\n"))
     var ours = _lines_from(String("a\nb\nc\n"))
@@ -1925,7 +1925,7 @@ fn test_diff3_merge_clean_when_only_theirs_changed() raises:
         assert_equal(m.lines[i], theirs[i])
 
 
-fn test_diff3_merge_clean_when_changes_disjoint() raises:
+def test_diff3_merge_clean_when_changes_disjoint() raises:
     """Both sides changed, but in different regions — auto-merges."""
     var base = _lines_from(String("a\nb\nc\nd\ne\n"))
     var ours = _lines_from(String("A\nb\nc\nd\ne\n"))
@@ -1938,7 +1938,7 @@ fn test_diff3_merge_clean_when_changes_disjoint() raises:
         assert_equal(m.lines[i], want[i])
 
 
-fn test_diff3_merge_identical_changes_dont_conflict() raises:
+def test_diff3_merge_identical_changes_dont_conflict() raises:
     """When both sides edit the same region to the same result, take it."""
     var base = _lines_from(String("a\nb\nc\n"))
     var ours = _lines_from(String("a\nB\nc\n"))
@@ -1950,7 +1950,7 @@ fn test_diff3_merge_identical_changes_dont_conflict() raises:
         assert_equal(m.lines[i], want[i])
 
 
-fn test_diff3_merge_conflict_when_both_edit_same_line() raises:
+def test_diff3_merge_conflict_when_both_edit_same_line() raises:
     """Same base line, two different changes → conflict markers."""
     var base = _lines_from(String("a\nb\nc\n"))
     var ours = _lines_from(String("a\nOURS\nc\n"))
@@ -1984,7 +1984,7 @@ fn test_diff3_merge_conflict_when_both_edit_same_line() raises:
     assert_equal(m.first_conflict_row, open_idx)
 
 
-fn test_editor_external_change_clean_reload_when_buffer_clean() raises:
+def test_editor_external_change_clean_reload_when_buffer_clean() raises:
     """Buffer is clean: an external write triggers a verbatim reload."""
     var path = _temp_path(String("_ext_clean.txt"))
     assert_true(write_file(path, String("alpha\nbeta\n")))
@@ -2001,7 +2001,7 @@ fn test_editor_external_change_clean_reload_when_buffer_clean() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_external_change_refreshes_highlights() raises:
+def test_editor_external_change_refreshes_highlights() raises:
     """Reload from disk must produce highlights matching the new
     content — not stale entries pointing into the previous buffer.
     Exercises a scope-changing case (block comment over multiple
@@ -2042,7 +2042,7 @@ fn test_editor_external_change_refreshes_highlights() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_external_change_auto_merges_disjoint_edits() raises:
+def test_editor_external_change_auto_merges_disjoint_edits() raises:
     """Buffer edits and disk edits in different regions → silent merge."""
     var path = _temp_path(String("_ext_merge.txt"))
     assert_true(write_file(path, String("a\nb\nc\nd\ne\n")))
@@ -2065,7 +2065,7 @@ fn test_editor_external_change_auto_merges_disjoint_edits() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_external_change_clears_dirty_when_disk_already_has_our_edits() raises:
+def test_editor_external_change_clears_dirty_when_disk_already_has_our_edits() raises:
     """If disk happens to already match our buffer (someone applied
     the same edit externally), the merge resolves to clean and the
     buffer goes back to non-dirty."""
@@ -2086,7 +2086,7 @@ fn test_editor_external_change_clears_dirty_when_disk_already_has_our_edits() ra
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_external_change_conflict_inserts_markers() raises:
+def test_editor_external_change_conflict_inserts_markers() raises:
     """Both buffer and disk modified the same line → conflict markers
     are embedded, cursor jumps to the first marker, and a pre-rendered
     diff is queued for the host to display."""
@@ -2137,7 +2137,7 @@ fn test_editor_external_change_conflict_inserts_markers() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_replace_all() raises:
+def test_editor_replace_all() raises:
     var ed = Editor(String("foo bar foo\nfoo\nbaz\n"))
     var n = ed.replace_all(String("foo"), String("XX"))
     assert_equal(n, 3)
@@ -2153,7 +2153,7 @@ fn test_editor_replace_all() raises:
     assert_equal(ed.replace_all(String(""), String("Q")), 0)
 
 
-fn test_editorconfig_parse_basic() raises:
+def test_editorconfig_parse_basic() raises:
     """Parser walks an INI-ish blob into sections + global ``root`` flag."""
     var text = String(
         "# leading comment\n"
@@ -2174,7 +2174,7 @@ fn test_editorconfig_parse_basic() raises:
     assert_equal(f.sections[1].pattern, String("*.{c,h}"))
 
 
-fn test_editorconfig_match_section() raises:
+def test_editorconfig_match_section() raises:
     # No-slash patterns match basenames at any depth.
     assert_true(match_section(String("*.py"), String("foo.py")))
     assert_true(match_section(String("*.py"), String("a/b/foo.py")))
@@ -2201,7 +2201,7 @@ fn test_editorconfig_match_section() raises:
     assert_false(match_section(String("[a-z].txt"), String("K.txt")))
 
 
-fn test_editorconfig_load_from_fixture() raises:
+def test_editorconfig_load_from_fixture() raises:
     """The fixture: top-level config sets 4-space LF + trim + final-NL,
     overrides ``*.{c,h}`` to tab/2 and ``Makefile`` to tab. The ``sub/``
     dir's file overrides ``*.py`` to indent_size=2 — and inherits the
@@ -2226,7 +2226,7 @@ fn test_editorconfig_load_from_fixture() raises:
     assert_equal(c3.end_of_line, String("lf"))
 
 
-fn test_editor_uses_editorconfig_indent() raises:
+def test_editor_uses_editorconfig_indent() raises:
     """Tab key respects ``indent_style`` / ``indent_size`` from editorconfig.
     The fixture sets ``[*.{c,h}]`` to ``indent_style=tab``, so opening a
     .c file under that tree should make Tab insert a literal tab."""
@@ -2239,7 +2239,7 @@ fn test_editor_uses_editorconfig_indent() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_tab_indents_selected_lines() raises:
+def test_editor_tab_indents_selected_lines() raises:
     """With a selection, Tab prepends one indent unit to every spanned
     line. A selection ending at column 0 of the next line excludes that
     trailing line — only the visibly-selected rows are touched."""
@@ -2253,7 +2253,7 @@ fn test_editor_tab_indents_selected_lines() raises:
     assert_equal(ed.buffer.line(2), String("gamma"))
 
 
-fn test_editor_shift_tab_dedents_selected_lines() raises:
+def test_editor_shift_tab_dedents_selected_lines() raises:
     """Shift+Tab on a selection removes one indent unit from each row.
     Lines without leading whitespace are left alone. The selection's
     cursor and anchor cols shrink by the bytes removed on their row."""
@@ -2269,7 +2269,7 @@ fn test_editor_shift_tab_dedents_selected_lines() raises:
     assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
+def test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
     """Shift+Tab with no selection dedents only the cursor's line."""
     var ed = Editor(String("    alpha\n    beta"))
     ed.move_to(1, 6, False)         # row 1, somewhere inside "beta"
@@ -2279,7 +2279,7 @@ fn test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
     assert_equal(ed.cursor_col, 2)
 
 
-fn test_editor_shift_tab_no_indent_is_noop() raises:
+def test_editor_shift_tab_no_indent_is_noop() raises:
     """Shift+Tab on lines with no leading whitespace must not push an
     undo entry — otherwise undo would step through dead-no-op states."""
     var ed = Editor(String("alpha\nbeta"))
@@ -2291,7 +2291,7 @@ fn test_editor_shift_tab_no_indent_is_noop() raises:
     assert_equal(before, after)
 
 
-fn test_editor_save_applies_editorconfig_transforms() raises:
+def test_editor_save_applies_editorconfig_transforms() raises:
     """``save`` should trim trailing whitespace and ensure a final newline
     when the editorconfig says to. The fixture's top-level ``[*]`` sets
     both, so saving a .txt file inside the fixture tree exercises both."""
@@ -2309,7 +2309,7 @@ fn test_editor_save_applies_editorconfig_transforms() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_save_uses_editorconfig_line_endings() raises:
+def test_editor_save_uses_editorconfig_line_endings() raises:
     """When ``end_of_line`` is ``crlf``, ``save`` should join lines with
     ``\\r\\n`` even though the buffer uses ``\\n`` internally."""
     var dir = String("/tmp/turbokod_ec_eol_") + String(
@@ -2334,7 +2334,7 @@ fn test_editor_save_uses_editorconfig_line_endings() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
-fn test_text_buffer_strips_crlf_on_split() raises:
+def test_text_buffer_strips_crlf_on_split() raises:
     """A CRLF-encoded payload must split into clean lines — leaving the
     ``\\r`` byte attached to each line would later corrupt the terminal
     paint (stray ``\\r`` resets the cursor to column 0 mid-row) and
@@ -2351,7 +2351,7 @@ fn test_text_buffer_strips_crlf_on_split() raises:
     assert_equal(b2.line(0), String("only"))
 
 
-fn test_editor_preserves_crlf_round_trip() raises:
+def test_editor_preserves_crlf_round_trip() raises:
     """Opening a CRLF file with no editorconfig and saving it again must
     produce the original bytes verbatim — otherwise every CRLF file we
     open would show a full-file diff on the next save."""
@@ -2379,7 +2379,7 @@ fn test_editor_preserves_crlf_round_trip() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
-fn test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
+def test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
     """Opening a CRLF file shouldn't make the git gutter flag every row
     as MODIFIED. The buffer strips trailing ``\\r``; the cached HEAD
     text must do the same on ingress so the diff aligns. Also covers
@@ -2402,7 +2402,7 @@ fn test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
         assert_equal(diff[i], GIT_CHANGE_NONE)
 
 
-fn test_canvas_substitutes_control_glyphs() raises:
+def test_canvas_substitutes_control_glyphs() raises:
     """``Canvas.put_text`` must never emit a raw control byte — paint
     a string containing ``\\r`` and confirm the cell glyph is the
     Unicode 'Control Pictures' substitute (U+240D, ``␍``) rather than
@@ -2423,7 +2423,7 @@ fn test_canvas_substitutes_control_glyphs() raises:
     assert_equal(c.get(2, 0).glyph, String("b"))
 
 
-fn test_walk_project_files_finds_known_files() raises:
+def test_walk_project_files_finds_known_files() raises:
     """The repo root has examples/, src/, tests/ — all should be reachable.
 
     ``.gitignore`` itself must be reachable (quick open lists it), but
@@ -2452,7 +2452,7 @@ fn test_walk_project_files_finds_known_files() raises:
     assert_false(saw_dotfile)
 
 
-fn _ends_with(s: String, suffix: String) -> Bool:
+def _ends_with(s: String, suffix: String) -> Bool:
     var sb = s.as_bytes()
     var fb = suffix.as_bytes()
     if len(fb) > len(sb):
@@ -2463,7 +2463,7 @@ fn _ends_with(s: String, suffix: String) -> Bool:
     return True
 
 
-fn _contains(s: String, sub: String) -> Bool:
+def _contains(s: String, sub: String) -> Bool:
     var sb = s.as_bytes()
     var nb = sub.as_bytes()
     var n = len(nb)
@@ -2483,7 +2483,7 @@ fn _contains(s: String, sub: String) -> Bool:
     return False
 
 
-fn test_find_in_project_locates_string() raises:
+def test_find_in_project_locates_string() raises:
     """Search the repo for a string that's known to live in exactly one place."""
     var root = find_git_project(String("examples/hello.mojo"))
     assert_true(root)
@@ -2497,7 +2497,7 @@ fn test_find_in_project_locates_string() raises:
     assert_true(found_in_init)
 
 
-fn test_desktop_dispatch_editor_save_passes_through_when_no_editor() raises:
+def test_desktop_dispatch_editor_save_passes_through_when_no_editor() raises:
     """Save with no editor focused should be a no-op intercepted by Desktop —
     the action does not bubble back to the caller."""
     var d = Desktop()
@@ -2505,14 +2505,14 @@ fn test_desktop_dispatch_editor_save_passes_through_when_no_editor() raises:
     assert_false(Bool(maybe))
 
 
-fn test_desktop_dispatch_passes_through_unknown_actions() raises:
+def test_desktop_dispatch_passes_through_unknown_actions() raises:
     var d = Desktop()
     var maybe = d.dispatch_action(String("focus:About"), _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), String("focus:About"))
 
 
-fn test_desktop_dispatch_editor_save_writes_focused_editor() raises:
+def test_desktop_dispatch_editor_save_writes_focused_editor() raises:
     var path = _temp_path(String("_dsave.txt"))
     assert_true(write_file(path, String("hello\n")))
     var d = Desktop()
@@ -2532,7 +2532,7 @@ fn test_desktop_dispatch_editor_save_writes_focused_editor() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_desktop_replace_chains_two_prompts() raises:
+def test_desktop_replace_chains_two_prompts() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
@@ -2553,7 +2553,7 @@ fn test_desktop_replace_chains_two_prompts() raises:
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar BAR"))
 
 
-fn test_desktop_find_seeds_from_editor_selection() raises:
+def test_desktop_find_seeds_from_editor_selection() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("foo bar baz\n"),
@@ -2570,7 +2570,7 @@ fn test_desktop_find_seeds_from_editor_selection() raises:
     assert_equal(d.prompt.input.selection_text(), String("bar"))
 
 
-fn test_desktop_find_skips_seed_for_multiline_selection() raises:
+def test_desktop_find_skips_seed_for_multiline_selection() raises:
     # A find term must be single-line; a multi-line editor selection
     # is not a meaningful default for the prompt.
     var d = Desktop()
@@ -2584,7 +2584,7 @@ fn test_desktop_find_skips_seed_for_multiline_selection() raises:
     assert_equal(d.prompt.input.text, String(""))
 
 
-fn test_desktop_find_no_selection_no_prefill() raises:
+def test_desktop_find_no_selection_no_prefill() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("foo bar baz\n"),
@@ -2594,7 +2594,7 @@ fn test_desktop_find_no_selection_no_prefill() raises:
     assert_equal(d.prompt.input.text, String(""))
 
 
-fn test_desktop_open_file_uses_80_percent_size() raises:
+def test_desktop_open_file_uses_80_percent_size() raises:
     var path = _temp_path(String("_open80.txt"))
     assert_true(write_file(path, String("hello\n")))
     var d = Desktop()
@@ -2608,7 +2608,7 @@ fn test_desktop_open_file_uses_80_percent_size() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_desktop_open_file_cascades_by_one() raises:
+def test_desktop_open_file_cascades_by_one() raises:
     var path_a = _temp_path(String("_cascade_a.txt"))
     var path_b = _temp_path(String("_cascade_b.txt"))
     var path_c = _temp_path(String("_cascade_c.txt"))
@@ -2631,7 +2631,7 @@ fn test_desktop_open_file_cascades_by_one() raises:
     _ = external_call["unlink", Int32]((path_c + String("\0")).unsafe_ptr())
 
 
-fn test_desktop_open_file_focuses_existing() raises:
+def test_desktop_open_file_focuses_existing() raises:
     """Re-opening an already-open path focuses that window instead of
     creating a duplicate."""
     var path_a = _temp_path(String("_dedup_a.txt"))
@@ -2651,7 +2651,7 @@ fn test_desktop_open_file_focuses_existing() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_desktop_open_file_inherits_maximize_state() raises:
+def test_desktop_open_file_inherits_maximize_state() raises:
     var path_a = _temp_path(String("_maxinh_a.txt"))
     var path_b = _temp_path(String("_maxinh_b.txt"))
     assert_true(write_file(path_a, String("m\n")))
@@ -2675,7 +2675,7 @@ fn test_desktop_open_file_inherits_maximize_state() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_desktop_new_file_creates_untitled_editor_window() raises:
+def test_desktop_new_file_creates_untitled_editor_window() raises:
     """``new_file`` opens an empty editor with no backing path so Save
     falls through to Save As, and successive calls get unique titles."""
     var d = Desktop()
@@ -2691,7 +2691,7 @@ fn test_desktop_new_file_creates_untitled_editor_window() raises:
     assert_equal(d.windows.windows[1].title, String("Untitled 2"))
 
 
-fn test_desktop_dispatch_editor_new_opens_window() raises:
+def test_desktop_dispatch_editor_new_opens_window() raises:
     """The framework intercepts ``EDITOR_NEW`` so apps wired to the action
     don't need any extra handling for File → New."""
     var d = Desktop()
@@ -2702,7 +2702,7 @@ fn test_desktop_dispatch_editor_new_opens_window() raises:
     assert_equal(d.windows.windows[0].editor.file_path, String(""))
 
 
-fn test_desktop_window_menu_lists_open_windows() raises:
+def test_desktop_window_menu_lists_open_windows() raises:
     var d = Desktop()
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("beta"),  Rect(0, 1, 20, 5), List[String]()))
@@ -2719,7 +2719,7 @@ fn test_desktop_window_menu_lists_open_windows() raises:
     assert_equal(menu.items[4].label, String("Restore all"))
 
 
-fn test_desktop_window_menu_when_empty() raises:
+def test_desktop_window_menu_when_empty() raises:
     var d = Desktop()
     d._rebuild_window_menu()
     var menu = d.menu_bar.menus[d._window_menu_idx].copy()
@@ -2729,7 +2729,7 @@ fn test_desktop_window_menu_when_empty() raises:
     assert_equal(menu.items[1].label, String("Restore all"))
 
 
-fn test_desktop_window_focus_action_focuses_window() raises:
+def test_desktop_window_focus_action_focuses_window() raises:
     var d = Desktop()
     d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
@@ -2746,7 +2746,7 @@ fn test_desktop_window_focus_action_focuses_window() raises:
     assert_equal(d.windows.z_order[len(d.windows.z_order) - 1], 0)
 
 
-fn test_desktop_maximize_all_and_restore_all() raises:
+def test_desktop_maximize_all_and_restore_all() raises:
     var d = Desktop()
     d.windows.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("b"), Rect(5, 6, 30, 12), List[String]()))
@@ -2762,7 +2762,7 @@ fn test_desktop_maximize_all_and_restore_all() raises:
     assert_true(d.windows.windows[1].rect == Rect(5, 6, 30, 12))
 
 
-fn test_desktop_project_find_requires_active_project() raises:
+def test_desktop_project_find_requires_active_project() raises:
     var d = Desktop()
     # No project: dispatch is a no-op (the modal stays closed).
     _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
@@ -2773,7 +2773,7 @@ fn test_desktop_project_find_requires_active_project() raises:
     assert_true(d.project_find.active)
 
 
-fn test_nav_history_records_initial_open() raises:
+def test_nav_history_records_initial_open() raises:
     """Opening a file seeds the nav stack with the file's starting
     cursor position so the very first Cmd+[ has somewhere to go."""
     var path = _temp_path(String("_nav_init.txt"))
@@ -2789,7 +2789,7 @@ fn test_nav_history_records_initial_open() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_ignores_small_drift() raises:
+def test_nav_history_ignores_small_drift() raises:
     """Movement under the row / col threshold inside the same file
     does not push a new entry — the stack only captures real jumps."""
     var path = _temp_path(String("_nav_drift.txt"))
@@ -2818,7 +2818,7 @@ fn test_nav_history_ignores_small_drift() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_records_file_change() raises:
+def test_nav_history_records_file_change() raises:
     """A focus change to a different file always records, regardless of
     where the cursor lands — cross-file motion is what the back button
     is most useful for."""
@@ -2839,7 +2839,7 @@ fn test_nav_history_records_file_change() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_back_and_forward() raises:
+def test_nav_history_back_and_forward() raises:
     """Cmd+[ steps back through stored entries; Cmd+] returns forward.
     Both bottom-out as no-ops at the ends of the stack."""
     var path_a = _temp_path(String("_nav_ba.txt"))
@@ -2869,7 +2869,7 @@ fn test_nav_history_back_and_forward() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_branching_truncates_forward() raises:
+def test_nav_history_branching_truncates_forward() raises:
     """After going back, a fresh navigation drops the forward portion
     of the stack — same model as edit-after-undo wiping redo."""
     var path = _temp_path(String("_nav_branch.txt"))
@@ -2900,7 +2900,7 @@ fn test_nav_history_branching_truncates_forward() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_back_via_dispatch_action() raises:
+def test_nav_history_back_via_dispatch_action() raises:
     """The Cmd+[ binding routes through ``dispatch_action`` like any
     other framework action — the same call should drive the back step."""
     var path_a = _temp_path(String("_nav_da.txt"))
@@ -2922,7 +2922,7 @@ fn test_nav_history_back_via_dispatch_action() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
+def test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
     """The Cmd+[ event arrives as ``(0x5B, MOD_META)`` — brackets aren't
     letters so the parser doesn't collapse them to ESC, and Cmd is kept
     distinct from Ctrl. The hotkey table must turn those into nav
@@ -2949,7 +2949,7 @@ fn test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
+def test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
     """Sanity-check: the terminal parser must NOT collapse Cmd+[
     down to ESC, AND must keep Cmd+ distinct from Ctrl+ on non-letter
     keys — otherwise we couldn't bind Cmd+2 (step over) separately
@@ -2987,7 +2987,7 @@ fn test_normalize_ctrl_letter_preserves_cmd_bracket() raises:
     assert_equal(ev_ctrl_s[0].mods, MOD_CTRL)
 
 
-fn test_window_manager_close_focused() raises:
+def test_window_manager_close_focused() raises:
     var wm = WindowManager()
     wm.add(Window(String("a"), Rect(0, 1, 20, 5), List[String]()))
     wm.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
@@ -3004,7 +3004,7 @@ fn test_window_manager_close_focused() raises:
     assert_equal(wm.focused, -1)
 
 
-fn test_ctrl_n_focuses_window_by_number() raises:
+def test_ctrl_n_focuses_window_by_number() raises:
     """Ctrl+1..Ctrl+9 focus the corresponding window. The event has to
     arrive in the modifyOtherKeys form (mods=MOD_CTRL on a digit) since
     bare Ctrl+digit isn't representable as a control byte — but the
@@ -3032,7 +3032,7 @@ fn test_ctrl_n_focuses_window_by_number() raises:
     assert_equal(d.windows.windows[d.windows.focused].title, String("b"))
 
 
-fn test_focus_changes_keep_window_list_order_stable() raises:
+def test_focus_changes_keep_window_list_order_stable() raises:
     """Repeated focus changes must not reshuffle ``windows``; only ``z_order``
     moves. This is what keeps Ctrl+N bindings (and the Window menu items)
     pointing at the same windows across rapid focus changes."""
@@ -3051,7 +3051,7 @@ fn test_focus_changes_keep_window_list_order_stable() raises:
     assert_equal(wm.z_order[len(wm.z_order) - 1], 0)
 
 
-fn test_window_manager_rotate_focus_cycles_in_stable_order() raises:
+def test_window_manager_rotate_focus_cycles_in_stable_order() raises:
     """Cmd+` rotation walks the windows in insertion order and wraps
     past the end. Reverse rotation walks the same sequence backwards."""
     var wm = WindowManager()
@@ -3076,7 +3076,7 @@ fn test_window_manager_rotate_focus_cycles_in_stable_order() raises:
     assert_equal(wm.z_order[len(wm.z_order) - 1], 1)
 
 
-fn test_window_manager_rotate_focus_noop_when_fewer_than_two_windows() raises:
+def test_window_manager_rotate_focus_noop_when_fewer_than_two_windows() raises:
     """Rotation must do nothing when there's nothing to rotate to —
     no crash, no spurious focus change."""
     var wm0 = WindowManager()
@@ -3090,7 +3090,7 @@ fn test_window_manager_rotate_focus_noop_when_fewer_than_two_windows() raises:
     assert_equal(wm1.focused, 0)
 
 
-fn test_window_menu_items_show_ctrl_n_shortcut() raises:
+def test_window_menu_items_show_ctrl_n_shortcut() raises:
     """The Window menu items (rebuilt every paint) carry the matching
     Ctrl+N shortcut for the first nine windows."""
     var d = Desktop()
@@ -3105,7 +3105,7 @@ fn test_window_menu_items_show_ctrl_n_shortcut() raises:
     assert_equal(menu.items[1].shortcut, String("Ctrl+2"))
 
 
-fn test_cmd_w_closes_focused_window() raises:
+def test_cmd_w_closes_focused_window() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("first"), Rect(0, 1, 40, 12), String("hello\n"),
@@ -3121,7 +3121,7 @@ fn test_cmd_w_closes_focused_window() raises:
     assert_equal(d.windows.windows[0].title, String("first"))
 
 
-fn test_format_hotkey_renders_combinations() raises:
+def test_format_hotkey_renders_combinations() raises:
     # Plain Ctrl+letter — canonical form is (lowercase letter, MOD_CTRL).
     assert_equal(format_hotkey(ctrl_key(String("q")), MOD_CTRL), String("Ctrl+Q"))
     assert_equal(format_hotkey(ctrl_key(String("s")), MOD_CTRL), String("Ctrl+S"))
@@ -3135,7 +3135,7 @@ fn test_format_hotkey_renders_combinations() raises:
     assert_equal(format_hotkey(KEY_UP, MOD_SHIFT), String("Shift+Up"))
 
 
-fn test_menu_items_get_shortcut_text_after_refresh() raises:
+def test_menu_items_get_shortcut_text_after_refresh() raises:
     """Once Desktop's _refresh_shortcuts runs, every menu item that maps to
     a registered hotkey has the matching shortcut string stamped onto it."""
     var d = Desktop()
@@ -3160,7 +3160,7 @@ fn test_menu_items_get_shortcut_text_after_refresh() raises:
     assert_equal(fm.items[3].shortcut, String(""))
 
 
-fn test_dropdown_reserves_indent_for_checkable_items() raises:
+def test_dropdown_reserves_indent_for_checkable_items() raises:
     """A dropdown that contains any checkable item must reserve a 2-cell
     label-indent so the ``✓`` glyph slot is consistent across rows.
     ``set_item_checked`` flips state by action without disturbing the
@@ -3188,7 +3188,7 @@ fn test_dropdown_reserves_indent_for_checkable_items() raises:
     assert_false(bar.menus[0].items[0].checked)
 
 
-fn test_dropdown_widens_to_fit_shortcut() raises:
+def test_dropdown_widens_to_fit_shortcut() raises:
     """The dropdown rect must accommodate label + gap + shortcut; without
     the widening, ``Cmd+Shift+F`` would overlap the menu item label."""
     var bar = MenuBar()
@@ -3209,7 +3209,7 @@ fn test_dropdown_widens_to_fit_shortcut() raises:
     assert_true(dr.b.x - dr.a.x >= expected_min_w)
 
 
-fn test_parse_csi_modify_other_keys_normalizes_ctrl_q() raises:
+def test_parse_csi_modify_other_keys_normalizes_ctrl_q() raises:
     """``ESC[27;5;113~`` (xterm modifyOtherKeys=2 form for Ctrl+Q) parses
     to the canonical ``(ord('q'), MOD_CTRL)``. Bare-byte Ctrl+Q from
     terminals without modifyOtherKeys lands at the same shape via the
@@ -3223,7 +3223,7 @@ fn test_parse_csi_modify_other_keys_normalizes_ctrl_q() raises:
     assert_equal(ev[1], len(String("\x1b[27;5;113~").as_bytes()))
 
 
-fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
+def test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
     """``ESC[27;6;102~`` is Ctrl+Shift+F. Shift is preserved (so the
     project-find hotkey can match it); only plain Ctrl+letter is normalized."""
     var ev = parse_input(String("\x1b[27;6;102~"))
@@ -3233,7 +3233,7 @@ fn test_parse_csi_modify_other_keys_ctrl_shift_f() raises:
     assert_true((ev[0].mods & MOD_SHIFT) != 0)
 
 
-fn test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta() raises:
+def test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta() raises:
     """``ESC[27;10;102~`` is the meta-bit form (mod = 1 + 1 + 8) of
     Cmd+Shift+F. This surfaces as ``(ord('f'), MOD_META|MOD_SHIFT)``
     and binds to PROJECT_FIND (Cmd+Shift+F). Ctrl+Shift+F is *not*
@@ -3246,7 +3246,7 @@ fn test_parse_csi_modify_other_keys_cmd_shift_f_keeps_meta() raises:
     assert_true((ev[0].mods & MOD_CTRL) == 0)
 
 
-fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
+def test_parse_csi_unknown_sequence_is_consumed_whole() raises:
     """Any unrecognized CSI sequence must be eaten in one bite — without
     that, trailing bytes (digits, ``~``) get re-parsed as printable keys
     and end up in the focused editor."""
@@ -3258,7 +3258,7 @@ fn test_parse_csi_unknown_sequence_is_consumed_whole() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
-fn test_parse_osc_open_path_emits_event_open_path() raises:
+def test_parse_osc_open_path_emits_event_open_path() raises:
     """The native wrapper forwards a second-instance argv as ``OSC 2;
     __mvc_open:<path> BEL``. The terminal parser must recognise it, emit
     EVENT_OPEN_PATH carrying the path, and consume the entire sequence.
@@ -3270,7 +3270,7 @@ fn test_parse_osc_open_path_emits_event_open_path() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
-fn test_parse_osc_open_path_with_line_suffix() raises:
+def test_parse_osc_open_path_with_line_suffix() raises:
     """The wrapper appends ``\\x1f<line>`` to the path when translating
     a ``turbokod://open?...&line=N`` URL. Path comes through clean and
     ``ev.pos.y`` carries the 1-based line number; without the suffix
@@ -3283,7 +3283,7 @@ fn test_parse_osc_open_path_with_line_suffix() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
-fn test_parse_osc_open_path_st_terminator() raises:
+def test_parse_osc_open_path_st_terminator() raises:
     """OSC's other valid terminator is ``ESC \\``. We must accept both;
     xterm style guides recommend it for any payload that might contain a
     BEL byte (paths can't, but the parser shouldn't care about that)."""
@@ -3294,7 +3294,7 @@ fn test_parse_osc_open_path_st_terminator() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
-fn test_parse_osc_unknown_is_consumed_silently() raises:
+def test_parse_osc_unknown_is_consumed_silently() raises:
     """Unrecognised OSC (window-title sets, palette queries, etc.) must
     be swallowed — leaking the trailing bytes through the generic ESC
     handler would emit an ``Alt+]`` keypress and corrupt the editor."""
@@ -3304,7 +3304,7 @@ fn test_parse_osc_unknown_is_consumed_silently() raises:
     assert_equal(ev[1], len(s.as_bytes()))
 
 
-fn test_parse_osc_partial_defers() raises:
+def test_parse_osc_partial_defers() raises:
     """Without a terminator yet, parse_input should signal "not enough
     data" via (EVENT_NONE, 0) so Terminal.poll_event saves the bytes for
     the next read instead of misinterpreting them."""
@@ -3314,7 +3314,7 @@ fn test_parse_osc_partial_defers() raises:
     assert_equal(ev[1], 0)
 
 
-fn test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
+def test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
     """``ESC[27;9;115~`` is the meta-bit form (mod = 1 + 8) of Cmd+S that
     the native Rust host emits for ``super_key()``. The parser surfaces
     it as ``(ord('s'), MOD_META)`` so Cmd+S and Ctrl+S can be bound to
@@ -3325,7 +3325,7 @@ fn test_parse_csi_modify_other_keys_cmd_letter_keeps_meta() raises:
     assert_equal(Int(ev[0].mods), Int(MOD_META))
 
 
-fn test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
+def test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
     """Cmd+\\` arrives as ``ESC[27;9;96~`` (mod=9 → meta-only, cp=0x60).
     The event keeps its 0x60 key code with MOD_META intact, so hotkey
     tables can bind Cmd+\\` separately from Ctrl+\\`."""
@@ -3335,7 +3335,7 @@ fn test_parse_csi_modify_other_keys_cmd_backtick_keeps_key_intact() raises:
     assert_equal(Int(ev[0].mods), Int(MOD_META))
 
 
-fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
+def test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
     """End-to-end: a Cmd+S event delivered as ``CSI 27;9;115~`` parses as
     ``(ord('s'), MOD_META)`` and triggers ``EDITOR_SAVE`` via the Cmd+S
     binding. Ctrl+S is intentionally *not* bound — Ctrl is reserved for
@@ -3352,7 +3352,7 @@ fn test_cmd_s_via_modify_other_keys_triggers_save_hotkey() raises:
     assert_false(Bool(maybe))
 
 
-fn test_parse_csi_kitty_u_ctrl_letter() raises:
+def test_parse_csi_kitty_u_ctrl_letter() raises:
     """Kitty kbd protocol: ``CSI <cp> ; <mod> u``. ``ESC[113;5u`` (Ctrl+Q)
     parses to the canonical ``(ord('q'), MOD_CTRL)``."""
     var ev = parse_input(String("\x1b[113;5u"))
@@ -3361,7 +3361,7 @@ fn test_parse_csi_kitty_u_ctrl_letter() raises:
     assert_equal(Int(ev[0].mods), Int(MOD_CTRL))
 
 
-fn test_editor_rejects_modified_letter_typing() raises:
+def test_editor_rejects_modified_letter_typing() raises:
     """Alt+Q and Ctrl+Q (when delivered as printable letter + mod) must
     not be inserted into the buffer — they're commands, not text."""
     var ed = Editor(String("hello"))
@@ -3375,7 +3375,7 @@ fn test_editor_rejects_modified_letter_typing() raises:
     assert_equal(ed.buffer.line(0), String("helloQ"))
 
 
-fn test_cmd_q_modifyOtherKeys_triggers_quit_action() raises:
+def test_cmd_q_modifyOtherKeys_triggers_quit_action() raises:
     """End-to-end: a Cmd+Q event delivered as the modifyOtherKeys form
     parses to ``(ord('q'), MOD_META)`` and matches the default Cmd+Q
     hotkey. The Desktop returns APP_QUIT_ACTION; nothing is inserted
@@ -3394,7 +3394,7 @@ fn test_cmd_q_modifyOtherKeys_triggers_quit_action() raises:
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("hello"))
 
 
-fn test_ctrl_key_helper() raises:
+def test_ctrl_key_helper() raises:
     """``ctrl_key`` returns the canonical key codepoint for a
     ``Ctrl+letter`` hotkey: the lowercase letter codepoint (paired
     with ``MOD_CTRL`` at registration)."""
@@ -3405,7 +3405,7 @@ fn test_ctrl_key_helper() raises:
     assert_equal(Int(ctrl_key(String("f"))), Int(ord("f")))
 
 
-fn test_menu_keyboard_nav_arrows_and_enter() raises:
+def test_menu_keyboard_nav_arrows_and_enter() raises:
     """Up/Down step the dropdown selection (skipping separators), Left/Right
     rotate to the next visible menu, Enter triggers the selected item's
     action."""
@@ -3452,7 +3452,7 @@ fn test_menu_keyboard_nav_arrows_and_enter() raises:
     assert_false(d.menu_bar.is_open())
 
 
-fn test_alt_letter_opens_menu_by_mnemonic() raises:
+def test_alt_letter_opens_menu_by_mnemonic() raises:
     """Alt+<letter> opens the first visible menu whose label starts with
     that letter (case-insensitive). The leading letter is what the menu
     bar paints in red as the mnemonic hint."""
@@ -3486,7 +3486,7 @@ fn test_alt_letter_opens_menu_by_mnemonic() raises:
     assert_false(d.menu_bar.is_open())
 
 
-fn test_esc_prefix_opens_menu_by_mnemonic() raises:
+def test_esc_prefix_opens_menu_by_mnemonic() raises:
     """Classic TV / DOS-style two-key sequence: ESC, then a letter, opens
     the matching menu. Lets users on macOS terminals (where Option+F is
     intercepted by the OS) still reach the mnemonic without reconfiguring
@@ -3512,7 +3512,7 @@ fn test_esc_prefix_opens_menu_by_mnemonic() raises:
     assert_equal(d.menu_bar.open_idx, file_idx)
 
 
-fn test_esc_prefix_disarms_after_one_keystroke() raises:
+def test_esc_prefix_disarms_after_one_keystroke() raises:
     """A non-letter (or unmatched letter) following ESC must disarm the
     prefix; the third keystroke is plain again."""
     var d = Desktop()
@@ -3533,7 +3533,7 @@ fn test_esc_prefix_disarms_after_one_keystroke() raises:
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("zf"))
 
 
-fn test_top_level_esc_does_not_quit() raises:
+def test_top_level_esc_does_not_quit() raises:
     """Top-level ESC must not bubble up an action — quit is reserved for
     explicit bindings (Ctrl+Q etc.). It still closes a modal layer when
     one is open."""
@@ -3549,7 +3549,7 @@ fn test_top_level_esc_does_not_quit() raises:
     assert_false(d.menu_bar.is_open())
 
 
-fn test_default_hotkey_cmd_q_returns_quit() raises:
+def test_default_hotkey_cmd_q_returns_quit() raises:
     var d = Desktop()
     var ev = Event.key_event(UInt32(ord("q")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
@@ -3557,7 +3557,7 @@ fn test_default_hotkey_cmd_q_returns_quit() raises:
     assert_equal(maybe.value(), APP_QUIT_ACTION)
 
 
-fn test_default_hotkey_cmd_f_opens_find_prompt() raises:
+def test_default_hotkey_cmd_f_opens_find_prompt() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("hello\n"),
@@ -3570,7 +3570,7 @@ fn test_default_hotkey_cmd_f_opens_find_prompt() raises:
     assert_true(d.prompt.active)
 
 
-fn test_default_hotkey_cmd_s_saves_focused_editor() raises:
+def test_default_hotkey_cmd_s_saves_focused_editor() raises:
     var path = _temp_path(String("_hkeys.txt"))
     assert_true(write_file(path, String("hello\n")))
     var d = Desktop()
@@ -3589,7 +3589,7 @@ fn test_default_hotkey_cmd_s_saves_focused_editor() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_hotkey_overrides_default_when_registered_later() raises:
+def test_hotkey_overrides_default_when_registered_later() raises:
     """Registrations are scanned newest-first, so a later-registered binding
     for the same key/mods pair wins."""
     var d = Desktop()
@@ -3602,7 +3602,7 @@ fn test_hotkey_overrides_default_when_registered_later() raises:
     assert_equal(maybe.value(), String("custom:thing"))
 
 
-fn test_hotkey_does_not_fire_while_prompt_active() raises:
+def test_hotkey_does_not_fire_while_prompt_active() raises:
     """Prompt modal keys must reach the prompt, not the hotkey table."""
     var d = Desktop()
     d.prompt.open(String("Find: "))
@@ -3613,7 +3613,7 @@ fn test_hotkey_does_not_fire_while_prompt_active() raises:
     assert_true(d.prompt.active)
 
 
-fn test_gitignore_matches_directory_pattern() raises:
+def test_gitignore_matches_directory_pattern() raises:
     var m = GitignoreMatcher.from_text(String("tvision/\n"))
     assert_true(m.ignored(String("tvision"), True))
     assert_false(m.ignored(String("tvision"), False))   # dir-only pattern
@@ -3621,7 +3621,7 @@ fn test_gitignore_matches_directory_pattern() raises:
     assert_false(m.ignored(String("examples"), True))
 
 
-fn test_gitignore_matches_glob_and_negate() raises:
+def test_gitignore_matches_glob_and_negate() raises:
     var m = GitignoreMatcher.from_text(
         String("# build artefacts\n*.o\n!keep.o\nbuild/\n")
     )
@@ -3633,7 +3633,7 @@ fn test_gitignore_matches_glob_and_negate() raises:
     assert_false(m.ignored(String("hello.mojo"), False))
 
 
-fn test_walk_project_files_respects_gitignore() raises:
+def test_walk_project_files_respects_gitignore() raises:
     """The repo's .gitignore lists ``tvision/`` — that subtree must be
     excluded from the default walk, but visible when explicitly opted out."""
     var root = find_git_project(String("examples/hello.mojo"))
@@ -3655,14 +3655,14 @@ fn test_walk_project_files_respects_gitignore() raises:
     assert_true(any_tvision)
 
 
-fn _hl_lines(*texts: String) -> List[String]:
+def _hl_lines(*texts: String) -> List[String]:
     var out = List[String]()
     for t in texts:
         out.append(String(t))
     return out^
 
 
-fn test_downloadable_grammar_registry_has_elm() raises:
+def test_downloadable_grammar_registry_has_elm() raises:
     """The seed entry — opening a ``.elm`` file is what triggers the
     download prompt in ``Desktop._maybe_prompt_grammar_install``."""
     var specs = built_in_downloadable_grammars()
@@ -3674,7 +3674,7 @@ fn test_downloadable_grammar_registry_has_elm() raises:
     assert_equal(by_lang, idx)
 
 
-fn test_downloadable_grammar_registry_misses_unknown() raises:
+def test_downloadable_grammar_registry_misses_unknown() raises:
     """``txt`` shouldn't trigger a grammar prompt — keeps the prompt
     machinery from firing on every file the user opens."""
     var specs = built_in_downloadable_grammars()
@@ -3682,7 +3682,7 @@ fn test_downloadable_grammar_registry_misses_unknown() raises:
     assert_equal(idx, -1)
 
 
-fn test_grammar_install_command_targets_user_config() raises:
+def test_grammar_install_command_targets_user_config() raises:
     """The shell command must mkdir the per-language dir and curl the
     grammar JSON to the path the highlighter probes
     (``user_grammar_path_for_ext``). Verified by string-match because
@@ -3703,7 +3703,7 @@ fn test_grammar_install_command_targets_user_config() raises:
         assert_true(_contains(cmd, dest))
 
 
-fn test_user_grammar_path_for_ext_misses_when_not_installed() raises:
+def test_user_grammar_path_for_ext_misses_when_not_installed() raises:
     """When no user grammar is on disk, the helper returns empty so
     ``_grammar_path_for_ext`` falls through to the generic per-language
     fallback rather than handing the loader a non-existent path."""
@@ -3722,7 +3722,7 @@ fn test_user_grammar_path_for_ext_misses_when_not_installed() raises:
     assert_equal(user_grammar_path_for_ext(String("zzz")), String(""))
 
 
-fn test_on_save_action_default_is_empty() raises:
+def test_on_save_action_default_is_empty() raises:
     """Default ``OnSaveAction`` is the natural identity element — empty
     fields and an empty args list. Settings ▸ Add starts here."""
     var act = OnSaveAction()
@@ -3732,7 +3732,7 @@ fn test_on_save_action_default_is_empty() raises:
     assert_equal(act.cwd, String(""))
 
 
-fn test_on_save_action_copy_preserves_args() raises:
+def test_on_save_action_copy_preserves_args() raises:
     """``List[String]`` doesn't have implicit copy semantics, so the
     explicit copyinit must clone the args. Without it, two clones
     would share the same list and edits to one would leak to the
@@ -3752,7 +3752,7 @@ fn test_on_save_action_copy_preserves_args() raises:
     assert_equal(len(a.args), 2)
 
 
-fn test_settings_open_seeds_state() raises:
+def test_settings_open_seeds_state() raises:
     """``open`` snapshots the host list and parks the selection on
     row 0 (or -1 when the list is empty). Focus starts on the section
     rail so arrow keys move sections rather than rows."""
@@ -3777,7 +3777,7 @@ fn test_settings_open_seeds_state() raises:
     assert_equal(len(s.actions), 0)
 
 
-fn test_settings_open_empty_parks_selection_at_minus_one() raises:
+def test_settings_open_empty_parks_selection_at_minus_one() raises:
     """Opening with no actions: selection = -1 so ``Edit`` / ``Remove``
     skip themselves in the focus walk and the right pane shows the
     "(no actions configured)" hint."""
@@ -3788,7 +3788,7 @@ fn test_settings_open_empty_parks_selection_at_minus_one() raises:
     assert_equal(s.selected_action, -1)
 
 
-fn test_settings_remove_marks_dirty() raises:
+def test_settings_remove_marks_dirty() raises:
     """Removing the highlighted entry must (a) shrink the list,
     (b) raise ``dirty`` so the host knows to persist, (c) keep the
     selection on a valid row (or move to -1 when the list empties)."""
@@ -3805,7 +3805,7 @@ fn test_settings_remove_marks_dirty() raises:
     assert_true(s.dirty)
 
 
-fn test_settings_editor_submit_appends_new_entry() raises:
+def test_settings_editor_submit_appends_new_entry() raises:
     """The full Add → Edit → Save round-trip: opening Add starts the
     editor with ``edit_index = -1``; setting fields and flipping
     ``submitted`` then driving ``_maybe_consume_editor`` must append
@@ -3827,7 +3827,7 @@ fn test_settings_editor_submit_appends_new_entry() raises:
     assert_true(s.dirty)
 
 
-fn test_settings_editor_submit_replaces_existing_entry() raises:
+def test_settings_editor_submit_replaces_existing_entry() raises:
     """``edit_index >= 0`` triggers an in-place replace, not an append.
     The selection stays on the edited row so the user keeps their place
     in the list."""
@@ -3849,7 +3849,7 @@ fn test_settings_editor_submit_replaces_existing_entry() raises:
     assert_true(s.dirty)
 
 
-fn test_settings_open_seeds_save_behavior_dropdown() raises:
+def test_settings_open_seeds_save_behavior_dropdown() raises:
     """``open(actions, auto_save)`` must seed both the working copy
     and the dropdown's index so the painted strip and the persisted
     value agree on first paint."""
@@ -3863,7 +3863,7 @@ fn test_settings_open_seeds_save_behavior_dropdown() raises:
     assert_equal(s._save_dropdown.index, 0)
 
 
-fn test_settings_save_behavior_commit_marks_dirty() raises:
+def test_settings_save_behavior_commit_marks_dirty() raises:
     """Switching the dropdown commits Manual → Automatic, mirrors the
     new value into ``auto_save``, and raises ``dirty`` so the host
     persists ``TurbokodConfig.auto_save`` on the next paint."""
@@ -3879,7 +3879,7 @@ fn test_settings_save_behavior_commit_marks_dirty() raises:
     assert_true(s.dirty)
 
 
-fn test_settings_save_behavior_no_change_no_dirty() raises:
+def test_settings_save_behavior_no_change_no_dirty() raises:
     """Re-committing the same value (Manual → Manual) must not raise
     ``dirty`` — otherwise the host would write the config on every
     open/close cycle even when nothing changed."""
@@ -3893,7 +3893,7 @@ fn test_settings_save_behavior_no_change_no_dirty() raises:
     assert_false(s.dirty)
 
 
-fn test_language_catalog_carries_comment_tokens() raises:
+def test_language_catalog_carries_comment_tokens() raises:
     """Helix's ``languages.toml`` defines ``comment-token`` per language;
     the refresh script lifts it into ``languages.json`` and the loader
     populates ``LanguageSpec.comment_token``. This is what drives the
@@ -3911,7 +3911,7 @@ fn test_language_catalog_carries_comment_tokens() raises:
         assert_equal(specs[sql_idx].comment_token, String("--"))
 
 
-fn test_apply_language_overrides_replaces_candidates() raises:
+def test_apply_language_overrides_replaces_candidates() raises:
     """An override matching a built-in language replaces the candidate
     list verbatim and preserves the built-in's ``file_types`` (we only
     override what the user explicitly chose)."""
@@ -3939,7 +3939,7 @@ fn test_apply_language_overrides_replaces_candidates() raises:
     assert_true(len(merged[idx].file_types) > 0)
 
 
-fn test_apply_language_overrides_adds_new_language() raises:
+def test_apply_language_overrides_adds_new_language() raises:
     """A user override for a language id absent from the catalog adds
     a brand-new ``LanguageSpec`` whose file_types come from the
     override."""
@@ -3964,7 +3964,7 @@ fn test_apply_language_overrides_adds_new_language() raises:
     assert_equal(len(merged[0].candidates), 1)
 
 
-fn test_settings_languages_section_seeded() raises:
+def test_settings_languages_section_seeded() raises:
     """``open(... , language_overrides)`` must populate
     ``language_overrides`` and rebuild the effective ``languages_view``
     so the right pane has rows on first paint."""
@@ -3989,7 +3989,7 @@ fn test_settings_languages_section_seeded() raises:
     assert_true(found)
 
 
-fn test_settings_open_selects_current_language() raises:
+def test_settings_open_selects_current_language() raises:
     """When ``open`` receives the focused editor's extension, the
     Languages section must pre-select the matching row so the user
     lands on the language they're editing — and the scroll-snap in
@@ -4001,7 +4001,7 @@ fn test_settings_open_selects_current_language() raises:
     assert_equal(selected_id, String("python"))
 
 
-fn test_settings_open_unknown_extension_falls_back_to_first() raises:
+def test_settings_open_unknown_extension_falls_back_to_first() raises:
     """An unrecognized extension shouldn't strand the selection on
     -1 — the user can still navigate the list. Fall back to row 0."""
     var s = Settings()
@@ -4010,7 +4010,7 @@ fn test_settings_open_unknown_extension_falls_back_to_first() raises:
     assert_equal(s.selected_language, 0)
 
 
-fn test_settings_remove_language_override_marks_dirty() raises:
+def test_settings_remove_language_override_marks_dirty() raises:
     """Removing the override for a custom language drops it from
     ``language_overrides``, marks ``dirty``, and rebuilds the view so
     the row disappears (since the language has no built-in fallback)."""
@@ -4037,7 +4037,7 @@ fn test_settings_remove_language_override_marks_dirty() raises:
         assert_true(s.languages_view[i].language_id != String("xyzlang"))
 
 
-fn test_language_editor_save_emits_override() raises:
+def test_language_editor_save_emits_override() raises:
     """The editor's ``value()`` after Save must surface the user's
     fields verbatim — language id, file types, and the joined argv
     list split back into argv arrays."""
@@ -4059,7 +4059,7 @@ fn test_language_editor_save_emits_override() raises:
     assert_equal(out.argvs[1][0], String("other"))
 
 
-fn test_list_box_paint_never_overflows_bounds() raises:
+def test_list_box_paint_never_overflows_bounds() raises:
     """Framework guarantee: a ``ListBox`` whose item text is wider than
     its rect must clip at the rect boundary on every side. No paint
     pixel may land outside the list's ``bounds`` — that's what saves
@@ -4096,7 +4096,7 @@ fn test_list_box_paint_never_overflows_bounds() raises:
                 assert_equal(c.get(x, y).glyph, String("·"))
 
 
-fn test_list_box_paint_empty_hint_clipped() raises:
+def test_list_box_paint_empty_hint_clipped() raises:
     """``paint_empty_hint`` writes a single line inside the list rect;
     a hint longer than the rect must still not leak into the cells on
     the right."""
@@ -4122,7 +4122,7 @@ fn test_list_box_paint_empty_hint_clipped() raises:
                 assert_equal(c.get(x, y).glyph, String("·"))
 
 
-fn test_list_box_mouse_wheel_clamps_to_item_count() raises:
+def test_list_box_mouse_wheel_clamps_to_item_count() raises:
     """Wheel-down past the last visible row must not advance the
     scroll origin past ``items - height`` — otherwise the next paint
     sees an out-of-range index and silently shows nothing."""
@@ -4142,7 +4142,7 @@ fn test_list_box_mouse_wheel_clamps_to_item_count() raises:
     assert_equal(lb._scroll, 2)
 
 
-fn test_language_editor_paint_does_not_damage_dialog_border() raises:
+def test_language_editor_paint_does_not_damage_dialog_border() raises:
     """End-to-end regression: open the editor with an argv string that
     exceeds the list width, paint it, and assert the dialog's right
     border at every list row is still a vertical bar — proving the
@@ -4176,7 +4176,7 @@ fn test_language_editor_paint_does_not_damage_dialog_border() raises:
         assert_equal(glyph, String("║"))
 
 
-fn test_type_ahead_pick_returns_index_or_minus_one() raises:
+def test_type_ahead_pick_returns_index_or_minus_one() raises:
     """The framework helper any list widget can call: append the
     keystroke, return the matching index, or -1 on no match. Empty
     sentinel rows are skipped so a typed letter doesn't snap to the
@@ -4191,7 +4191,7 @@ fn test_type_ahead_pick_returns_index_or_minus_one() raises:
     assert_equal(type_ahead_pick(ta, opts, String("z")), -1)
 
 
-fn test_type_ahead_pick_solo_fallback() raises:
+def test_type_ahead_pick_solo_fallback() raises:
     """When the accumulated prefix doesn't match, retry with just
     the new char so a stale chain doesn't make the next keystroke
     feel like a dead key."""
@@ -4205,7 +4205,7 @@ fn test_type_ahead_pick_solo_fallback() raises:
     assert_equal(type_ahead_pick(ta, opts, String("z")), 2)
 
 
-fn test_settings_languages_list_type_to_jump() raises:
+def test_settings_languages_list_type_to_jump() raises:
     """The Languages section list is type-to-jump. After focusing the
     list, typing a letter must move ``selected_language`` to the
     first language whose id starts with the typed prefix — no
@@ -4236,7 +4236,7 @@ fn test_settings_languages_list_type_to_jump() raises:
     assert_equal(s.selected_language, expected)
 
 
-fn test_settings_actions_list_type_to_jump() raises:
+def test_settings_actions_list_type_to_jump() raises:
     """Same framework feature in the Actions section: typing a letter
     moves ``selected_action`` to the first row whose label
     (language id + program) starts with that letter."""
@@ -4262,7 +4262,7 @@ fn test_settings_actions_list_type_to_jump() raises:
     assert_equal(s.selected_action, 1)
 
 
-fn test_language_editor_list_type_to_jump() raises:
+def test_language_editor_list_type_to_jump() raises:
     """The candidate list in the LanguageEditor is also a list
     widget — typing 'p' lands on the first server whose argv starts
     with 'p'. Argv strip mirrors the new selection so the user
@@ -4281,7 +4281,7 @@ fn test_language_editor_list_type_to_jump() raises:
     assert_equal(ed.argv_tf.text, String("pyright"))
 
 
-fn test_file_tree_type_to_jump() raises:
+def test_file_tree_type_to_jump() raises:
     """File tree picks up the framework feature: typing a letter
     while the pane has keyboard focus jumps the highlight to the
     first entry whose name starts with that letter."""
@@ -4304,7 +4304,7 @@ fn test_file_tree_type_to_jump() raises:
     assert_equal(tree.selected, 2)
 
 
-fn test_menu_open_dropdown_type_to_jump() raises:
+def test_menu_open_dropdown_type_to_jump() raises:
     """An open menu dropdown jumps to the first item whose label
     starts with the typed letter. Mnemonics use Alt+letter and run
     at the Desktop layer, so plain letters are free for in-dropdown
@@ -4323,7 +4323,7 @@ fn test_menu_open_dropdown_type_to_jump() raises:
     assert_equal(bar.selected_item, 2)  # Save
 
 
-fn test_is_printable_ascii_gates_search_keys() raises:
+def test_is_printable_ascii_gates_search_keys() raises:
     """The framework predicate that decides "is this a search
     keystroke or a control key" — must include letters / digits /
     punctuation and exclude DEL, NUL, arrow-key codes, etc."""
@@ -4335,7 +4335,7 @@ fn test_is_printable_ascii_gates_search_keys() raises:
     assert_false(is_printable_ascii(UInt32(0x7F)))  # DEL
 
 
-fn test_language_editor_move_candidate_reorders() raises:
+def test_language_editor_move_candidate_reorders() raises:
     """Up/Down buttons swap the selected entry with its neighbour,
     keeping the cursor on the just-moved row."""
     var ed = LanguageEditor()
@@ -4358,7 +4358,7 @@ fn test_language_editor_move_candidate_reorders() raises:
     assert_equal(ed.candidates[2], String("c"))
 
 
-fn test_action_editor_lang_dropdown_has_options() raises:
+def test_action_editor_lang_dropdown_has_options() raises:
     """The dropdown's language options are sourced from
     ``built_in_servers()``. If that returns an empty list (e.g. because
     the bundled languages.json isn't on disk relative to cwd), the
@@ -4377,7 +4377,7 @@ fn test_action_editor_lang_dropdown_has_options() raises:
                    "returned no languages (cwd missing the bundled JSON?)"))
 
 
-fn test_action_editor_enter_opens_lang_popup() raises:
+def test_action_editor_enter_opens_lang_popup() raises:
     """Pressing Enter on the focused (closed) language dropdown opens
     its popup. Without this, clicks/Enter were no-ops and users had no
     way to discover the available languages — earlier code rebuilt the
@@ -4397,7 +4397,7 @@ fn test_action_editor_enter_opens_lang_popup() raises:
     assert_true(ed.active)
 
 
-fn test_dropdown_type_to_search_jumps_to_prefix() raises:
+def test_dropdown_type_to_search_jumps_to_prefix() raises:
     """Typing while a popup is open jumps the highlight to the first
     option matching the accumulated prefix. Mirrors the file-list
     behavior so the muscle memory transfers."""
@@ -4415,7 +4415,7 @@ fn test_dropdown_type_to_search_jumps_to_prefix() raises:
     assert_equal(dd.highlight, 3)  # blueberry (prefix "bl")
 
 
-fn test_dropdown_type_to_search_skips_empty_sentinel() raises:
+def test_dropdown_type_to_search_skips_empty_sentinel() raises:
     """The empty "" option (most callers prepend one as the "(none)"
     sentinel) is not a search target. A user typing 'p' wants
     "python", not the blank row at index 0."""
@@ -4429,7 +4429,7 @@ fn test_dropdown_type_to_search_skips_empty_sentinel() raises:
     assert_equal(dd.highlight, 1)  # python, not the empty sentinel
 
 
-fn test_dropdown_type_to_search_recovers_from_stale_prefix() raises:
+def test_dropdown_type_to_search_recovers_from_stale_prefix() raises:
     """When the accumulated prefix doesn't match anything, retry with
     just the new char. Otherwise typing 'b' then 'z' would silently
     do nothing — confusing, since the user clearly intends to jump
@@ -4448,7 +4448,7 @@ fn test_dropdown_type_to_search_recovers_from_stale_prefix() raises:
     assert_equal(dd.highlight, 2)
 
 
-fn test_dropdown_type_to_search_resets_on_close() raises:
+def test_dropdown_type_to_search_resets_on_close() raises:
     """Closing the popup discards the type-to-search prefix so the
     next open starts fresh. A stale prefix surviving across reopens
     would silently misroute the first keystroke."""
@@ -4463,7 +4463,7 @@ fn test_dropdown_type_to_search_resets_on_close() raises:
     assert_equal(dd._type_ahead.buf, String(""))
 
 
-fn test_action_editor_consumes_browse_path() raises:
+def test_action_editor_consumes_browse_path() raises:
     """When the embedded file dialog submits, the picked path must
     land in the program field (not the cwd field, not nowhere). This
     is the contract that lets the user click a file in Browse and end
@@ -4478,7 +4478,7 @@ fn test_action_editor_consumes_browse_path() raises:
     assert_equal(ed.form.text(UInt8(1)), String("/usr/bin/black"))
 
 
-fn test_action_editor_args_field_accepts_spaces() raises:
+def test_action_editor_args_field_accepts_spaces() raises:
     """Typing ``a b c`` into the Arguments field used to drop the
     interior spaces because the field round-tripped through
     ``_split_args``/``_join_args`` on every keystroke. The fix holds a
@@ -4505,7 +4505,7 @@ fn test_action_editor_args_field_accepts_spaces() raises:
     assert_equal(ed.entry.args[2], String("c"))
 
 
-fn test_action_editor_args_buffer_seeded_from_entry() raises:
+def test_action_editor_args_buffer_seeded_from_entry() raises:
     """Editing an existing action seeds the args edit-buffer with the
     space-joined existing args. Without this, opening a record with
     args ``["--quiet", "$FilePath$"]`` would show an empty Arguments
@@ -4521,7 +4521,7 @@ fn test_action_editor_args_buffer_seeded_from_entry() raises:
     assert_equal(ed.form.text(UInt8(3)), String("--quiet $FilePath$"))
 
 
-fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
+def test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
     """Formatters like ``black`` rewrite the file on disk; without a
     reload the buffer drifts to the pre-format text and the next edit
     silently overwrites the formatter's output. After the action runs,
@@ -4574,7 +4574,7 @@ fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_expand_save_placeholders_substitutes_filepath() raises:
+def test_expand_save_placeholders_substitutes_filepath() raises:
     """``$FilePath$`` in an arg is replaced by the saved file path at
     spawn time. This is the only placeholder we recognise today."""
     var got = _expand_save_placeholders(
@@ -4602,7 +4602,7 @@ fn test_expand_save_placeholders_substitutes_filepath() raises:
     assert_equal(case_sensitive, String("$filepath$"))
 
 
-fn test_extension_of_helper() raises:
+def test_extension_of_helper() raises:
     assert_equal(extension_of(String("foo.mojo")), String("mojo"))
     assert_equal(extension_of(String("a/b/foo.MOJO")), String("mojo"))
     assert_equal(extension_of(String("Makefile")), String(""))
@@ -4610,7 +4610,7 @@ fn test_extension_of_helper() raises:
     assert_equal(extension_of(String("")), String(""))
 
 
-fn test_word_at_helper() raises:
+def test_word_at_helper() raises:
     assert_equal(word_at(String("foo bar"), 0), String("foo"))
     assert_equal(word_at(String("foo bar"), 2), String("foo"))
     assert_equal(word_at(String("foo bar"), 4), String("bar"))
@@ -4627,7 +4627,7 @@ fn test_word_at_helper() raises:
     assert_equal(word_at(String("λambda"), 0), String("λambda"))
 
 
-fn test_highlight_for_extension_recognizes_mojo() raises:
+def test_highlight_for_extension_recognizes_mojo() raises:
     """``fn``/``var`` are keywords, ``"hello"`` is a string, ``# note`` is a
     comment, ``42`` is a number — each gets its own attr."""
     var lines = _hl_lines(
@@ -4668,7 +4668,7 @@ fn test_highlight_for_extension_recognizes_mojo() raises:
     assert_true(saw_number)
 
 
-fn test_highlight_triple_quoted_string_spans_lines() raises:
+def test_highlight_triple_quoted_string_spans_lines() raises:
     """Multi-line triple-quoted strings keep highlight state across rows.
     A docstring (triple-quoted string at statement position) is painted
     with the comment attr; an inline triple-quoted string keeps the
@@ -4713,13 +4713,13 @@ fn test_highlight_triple_quoted_string_spans_lines() raises:
     assert_true(saw_inline_string)
 
 
-fn test_highlight_unknown_extension_returns_empty() raises:
+def test_highlight_unknown_extension_returns_empty() raises:
     var lines = _hl_lines(String("fn main():"), String("  pass"))
     var hls = highlight_for_extension(String("txt"), lines)
     assert_equal(len(hls), 0)
 
 
-fn test_highlight_rust_keywords_strings_comments() raises:
+def test_highlight_rust_keywords_strings_comments() raises:
     """The generic registry-driven tokenizer paints C-family files with
     the same attr palette as the Mojo/Python path: a ``var`` keyword,
     ``"hi"`` string, ``// note`` line comment, ``42`` number. Routed
@@ -4754,7 +4754,7 @@ fn test_highlight_rust_keywords_strings_comments() raises:
     assert_true(saw_number)
 
 
-fn test_highlight_rust_block_comment_spans_lines() raises:
+def test_highlight_rust_block_comment_spans_lines() raises:
     """A ``/* ... */`` block comment that opens on one row and closes on
     a later row keeps every row in between painted as comment. State is
     threaded through ``_highlight_generic`` the same way triple-quoted
@@ -4795,7 +4795,7 @@ fn test_highlight_rust_block_comment_spans_lines() raises:
     assert_true(saw_number)
 
 
-fn test_onig_basic_search() raises:
+def test_onig_basic_search() raises:
     """Sanity-check the libonig FFI: compile a regex and find a match.
     This is the foundation the TextMate-grammar highlighter will sit
     on top of — if it breaks we want a clear test failure, not a
@@ -4811,7 +4811,7 @@ fn test_onig_basic_search() raises:
     assert_true(got)
 
 
-fn test_onig_no_match_returns_none() raises:
+def test_onig_no_match_returns_none() raises:
     """The Optional API surfaces no-match as ``None`` (not as a
     sentinel match with ``start < 0``), matching the rest of the
     codebase's error idioms."""
@@ -4824,7 +4824,7 @@ fn test_onig_no_match_returns_none() raises:
     assert_true(not got)
 
 
-fn test_onig_search_at_offset() raises:
+def test_onig_search_at_offset() raises:
     """``search_at(start)`` skips the first match if it falls before
     ``start`` — this is what the grammar runtime needs for ``\\G``
     continuation in ``begin``/``while`` rules."""
@@ -4845,7 +4845,7 @@ fn test_onig_search_at_offset() raises:
     assert_true(second_ok)
 
 
-fn test_textmate_rust_grammar_paints_keywords_and_strings() raises:
+def test_textmate_rust_grammar_paints_keywords_and_strings() raises:
     """Loading the bundled Rust TextMate grammar and tokenizing a
     small snippet produces keyword / string / comment / number
     highlights at the expected scopes. This is the integration test
@@ -4882,7 +4882,7 @@ fn test_textmate_rust_grammar_paints_keywords_and_strings() raises:
     assert_true(saw_number)
 
 
-fn test_textmate_brackets_paint_as_operators() raises:
+def test_textmate_brackets_paint_as_operators() raises:
     """``()`` / ``[]`` / ``{}`` must be painted with the operator attr
     in TextMate-tokenized files. The vendored Python grammar doesn't
     tag brackets at all, so without the post-pass they fall through
@@ -4939,7 +4939,7 @@ fn test_textmate_brackets_paint_as_operators() raises:
         assert_true(got == str_attr)
 
 
-fn _hl_set(hls: List[Highlight]) -> List[Highlight]:
+def _hl_set(hls: List[Highlight]) -> List[Highlight]:
     """Sort-of-canonicalize a Highlight list: sort by (row, col_start,
     col_end). Two passes that agree should produce equal lists post-sort
     even if they emit highlights in slightly different orders."""
@@ -4969,10 +4969,10 @@ fn _hl_set(hls: List[Highlight]) -> List[Highlight]:
     return sorted^
 
 
-fn test_textmate_incremental_matches_full_retokenize() raises:
-    """The incremental tokenizer must produce the same highlights as a
-    full re-run when given the same buffer + a dirty-row hint. We
-    exercise both shapes of edit:
+def test_textmate_incremental_matches_full_retokenize() raises:
+    """The incremental tokenizer must match a full re-run for the same buffer + dirty-row hint.
+
+    We exercise both shapes of edit:
 
     * a token-level change (adding a comment to one line) — tokenizer
       state at end of the line is unchanged, early-exit fires
@@ -5031,7 +5031,7 @@ fn test_textmate_incremental_matches_full_retokenize() raises:
         assert_equal(s_incr_b[i].col_end, s_full_b[i].col_end)
 
 
-fn test_textmate_html_embeds_css_inside_style_block() raises:
+def test_textmate_html_embeds_css_inside_style_block() raises:
     """The HTML grammar's ``<style>`` block embeds CSS via
     ``include: "source.css"`` inside a ``(?!\\G)``-gated begin/end.
     Our loader follows the include into the bundled CSS grammar
@@ -5069,7 +5069,7 @@ fn test_textmate_html_embeds_css_inside_style_block() raises:
     assert_true(row1_count >= 4)
 
 
-fn test_textmate_capture_patterns_run_inside_group() raises:
+def test_textmate_capture_patterns_run_inside_group() raises:
     """A ``captures`` entry that carries its own ``patterns`` array
     re-tokenizes the captured byte range. We exercise this with a
     string literal grammar that captures the body of a quoted
@@ -5111,7 +5111,7 @@ fn test_textmate_capture_patterns_run_inside_group() raises:
     assert_true(saw_escape)
 
 
-fn test_textmate_while_rule_keeps_scope_open_per_line() raises:
+def test_textmate_while_rule_keeps_scope_open_per_line() raises:
     """``while``-rules: a ``begin`` opens a scope that stays open for
     every subsequent line whose start matches the ``while`` regex.
     Markdown blockquotes use this — every line beginning with ``>``
@@ -5157,7 +5157,7 @@ fn test_textmate_while_rule_keeps_scope_open_per_line() raises:
     assert_true(not saw_kw_outside)
 
 
-fn test_textmate_captures_overlay_on_match() raises:
+def test_textmate_captures_overlay_on_match() raises:
     """A pattern with ``captures`` should emit the outer match scope
     plus a refined per-capture scope inside it. We exercise this
     against a hand-rolled grammar so the assertion is independent
@@ -5196,7 +5196,7 @@ fn test_textmate_captures_overlay_on_match() raises:
     assert_true(ident_at_3_8)
 
 
-fn test_editor_default_text_is_light_green() raises:
+def test_editor_default_text_is_light_green() raises:
     """Cells that no scope claims must paint LIGHT_GREEN on BLUE —
     that's the "identifier" baseline. Variables and bare names in
     languages whose grammar doesn't tag every token (e.g. Python's
@@ -5223,7 +5223,7 @@ fn test_editor_default_text_is_light_green() raises:
     assert_equal(c.get(15, 0).attr.bg, BLUE)
 
 
-fn test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
+def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
     """Grammars use ``end: "\\n(?!\\s)"`` to close a scope at end-of-
     line unless the next line is an indented continuation (Elm/Haskell
     ``import``/``module``). Per-line tokenization never sees ``\\n``,
@@ -5282,7 +5282,7 @@ fn test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
     assert_true(saw_let_kw_row2)
 
 
-fn test_textmate_all_bundled_grammars_load() raises:
+def test_textmate_all_bundled_grammars_load() raises:
     """Every grammar bundled under ``src/turbokod/grammars/`` should
     parse, compile its regexes through libonig, and produce *some*
     highlights for a tiny representative snippet. This catches
@@ -5323,7 +5323,7 @@ fn test_textmate_all_bundled_grammars_load() raises:
         assert_true(len(hls) > 0)
 
 
-fn test_textmate_json_grammar_paints_strings_and_numbers() raises:
+def test_textmate_json_grammar_paints_strings_and_numbers() raises:
     """Adding a new language is just a grammar JSON drop-in plus an
     entry in ``_grammar_path_for_ext``. Verify the JSON grammar
     kicks in for ``.json`` files: keys + values render as strings,
@@ -5352,7 +5352,7 @@ fn test_textmate_json_grammar_paints_strings_and_numbers() raises:
     assert_true(saw_keyword)
 
 
-fn test_intellij_language_injection_html_in_python_string() raises:
+def test_intellij_language_injection_html_in_python_string() raises:
     """A ``# language=html`` marker on the line above a string literal
     re-tokenizes the string body with the HTML grammar. We verify by
     looking for HTML-specific punctuation (``<`` / ``>``) painted as
@@ -5377,7 +5377,7 @@ fn test_intellij_language_injection_html_in_python_string() raises:
     assert_true(saw_op_inside_body)
 
 
-fn test_intellij_language_injection_inline_marker() raises:
+def test_intellij_language_injection_inline_marker() raises:
     """The marker can sit on the same line as the string when written
     in a block-comment form (``/* language=css */``). The injection
     pass scans forward from the marker's end, so the trailing
@@ -5405,7 +5405,7 @@ fn test_intellij_language_injection_inline_marker() raises:
     assert_true(non_string_in_body > 0)
 
 
-fn test_intellij_language_injection_unknown_language_no_op() raises:
+def test_intellij_language_injection_unknown_language_no_op() raises:
     """A marker pointing at a language we don't have a grammar for
     is a silent no-op — the host grammar's highlights stay
     untouched. ``language=brainfuck`` has no entry in
@@ -5434,7 +5434,7 @@ fn test_intellij_language_injection_unknown_language_no_op() raises:
     assert_true(not saw_op_inside_body)
 
 
-fn test_embedded_language_extensions_collects_unique_languages() raises:
+def test_embedded_language_extensions_collects_unique_languages() raises:
     """``embedded_language_extensions`` should de-dup and return the
     extension for each ``language=NAME`` marker. Languages mapped to
     bundled extensions (e.g. ``html`` → ``html``) and languages
@@ -5472,7 +5472,7 @@ fn test_embedded_language_extensions_collects_unique_languages() raises:
     assert_equal(html_count, 1)
 
 
-fn test_embedded_language_extensions_skips_unknown_languages() raises:
+def test_embedded_language_extensions_skips_unknown_languages() raises:
     """An ``unknown`` language with no entry in ``_ext_for_language``
     and no downloadable spec should be silently dropped — the
     install prompt only knows how to act on extensions in the
@@ -5485,7 +5485,7 @@ fn test_embedded_language_extensions_skips_unknown_languages() raises:
     assert_equal(len(exts), 0)
 
 
-fn test_intellij_language_injection_triple_quoted_python() raises:
+def test_intellij_language_injection_triple_quoted_python() raises:
     """Triple-quoted Python strings span multiple lines. The injection
     pass walks across rows to find the closing ``\"\"\"`` and
     tokenizes every body row with the injected grammar. Verified by
@@ -5509,7 +5509,7 @@ fn test_intellij_language_injection_triple_quoted_python() raises:
     assert_true(saw_op_on_row2)
 
 
-fn test_textmate_rust_block_comment_spans_lines() raises:
+def test_textmate_rust_block_comment_spans_lines() raises:
     """The TextMate runtime threads its scope stack across lines, so
     a ``/* ... */`` that opens on one line and closes on a later one
     paints every row in between as comment. This is the same
@@ -5538,7 +5538,7 @@ fn test_textmate_rust_block_comment_spans_lines() raises:
     assert_true(have_2_keyword)
 
 
-fn test_onig_invalid_pattern_raises() raises:
+def test_onig_invalid_pattern_raises() raises:
     """A malformed pattern surfaces as a ``raise`` from the
     constructor, with libonig's nonzero rc embedded in the message —
     enough to grep the source."""
@@ -5551,7 +5551,7 @@ fn test_onig_invalid_pattern_raises() raises:
     assert_true(raised)
 
 
-fn test_editor_refreshes_highlights_after_edits() raises:
+def test_editor_refreshes_highlights_after_edits() raises:
     """Newly typed text gets re-tokenized: typing ``fn`` produces a keyword
     highlight that wasn't there a moment ago.
 
@@ -5581,7 +5581,7 @@ fn test_editor_refreshes_highlights_after_edits() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_paint_overlays_highlight_attr() raises:
+def test_editor_paint_overlays_highlight_attr() raises:
     """The highlight attr lands on the right cells in the canvas after
     ``editor.paint``."""
     var path = _temp_path(String("_hlpaint.mojo"))
@@ -5601,7 +5601,7 @@ fn test_editor_paint_overlays_highlight_attr() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_alt_click_emits_definition_request() raises:
+def test_editor_alt_click_emits_definition_request() raises:
     # Cmd+click in iTerm2 is delivered to the app as Left+Alt — the editor
     # treats Alt+left-click as the goto-definition trigger.
     var ed = Editor(String("foo bar baz"))
@@ -5623,7 +5623,7 @@ fn test_editor_alt_click_emits_definition_request() raises:
     assert_false(Bool(req2))
 
 
-fn test_editor_alt_click_outside_identifier_is_silent() raises:
+def test_editor_alt_click_outside_identifier_is_silent() raises:
     var ed = Editor(String("foo  bar"))
     # Click on the space between words.
     var ev = Event.mouse_event(
@@ -5635,7 +5635,7 @@ fn test_editor_alt_click_outside_identifier_is_silent() raises:
     assert_false(Bool(req))
 
 
-fn test_editor_gutter_click_emits_breakpoint_toggle() raises:
+def test_editor_gutter_click_emits_breakpoint_toggle() raises:
     # Line-number gutter on → 2 cells of gutter at the left edge. A
     # left-click there must surface as a pending breakpoint toggle for
     # the corresponding buffer row, without moving the cursor.
@@ -5655,7 +5655,7 @@ fn test_editor_gutter_click_emits_breakpoint_toggle() raises:
     assert_false(Bool(ed.consume_breakpoint_toggle()))
 
 
-fn test_editor_text_click_does_not_toggle_breakpoint() raises:
+def test_editor_text_click_does_not_toggle_breakpoint() raises:
     # Click past the gutter — normal cursor placement, no toggle.
     var ed = Editor(String("alpha\nbeta\ngamma"))
     ed.line_numbers = True
@@ -5668,7 +5668,7 @@ fn test_editor_text_click_does_not_toggle_breakpoint() raises:
     assert_equal(ed.cursor_row, 1)
 
 
-fn test_editor_gutter_click_below_eof_is_ignored() raises:
+def test_editor_gutter_click_below_eof_is_ignored() raises:
     # Click in the gutter on a screen row past the last buffer line —
     # no breakpoint should be toggled (matches "click on empty space"
     # being a no-op for cursor placement, just without the cursor side
@@ -5683,7 +5683,7 @@ fn test_editor_gutter_click_below_eof_is_ignored() raises:
     assert_false(Bool(ed.consume_breakpoint_toggle()))
 
 
-fn test_editor_gutter_drag_motion_does_not_toggle() raises:
+def test_editor_gutter_drag_motion_does_not_toggle() raises:
     # Drag motion through the gutter must not flood pending toggles.
     var ed = Editor(String("alpha\nbeta\ngamma"))
     ed.line_numbers = True
@@ -5695,7 +5695,7 @@ fn test_editor_gutter_drag_motion_does_not_toggle() raises:
     assert_false(Bool(ed.consume_breakpoint_toggle()))
 
 
-fn test_quick_open_match_rules() raises:
+def test_quick_open_match_rules() raises:
     """Locked-in spec: the query is split on spaces into tokens, and each
     token is then split around every ``/`` (with ``/`` kept as its own
     one-byte part). Each part must appear as a case-insensitive substring
@@ -5721,7 +5721,7 @@ fn test_quick_open_match_rules() raises:
     assert_false(quick_open_match(String("cell mojo"), String("mojo cell")))
 
 
-fn test_quick_open_match_case_and_separator_shapes() raises:
+def test_quick_open_match_case_and_separator_shapes() raises:
     # Case-insensitive substring matching across mixed case.
     assert_true(quick_open_match(String("HelloWorld"), String("h w")))
     assert_true(quick_open_match(String("Helloworld"), String("h")))
@@ -5731,7 +5731,7 @@ fn test_quick_open_match_case_and_separator_shapes() raises:
     assert_true(quick_open_match(String("a/b/c"), String("a b c")))
 
 
-fn test_quick_open_slash_in_query_requires_directory_separator() raises:
+def test_quick_open_slash_in_query_requires_directory_separator() raises:
     """A space-separated query like ``foo bar`` matches when both ``foo``
     and ``bar`` appear as substrings of the path, in that order. A slash
     in the query — ``foo/bar`` — works the same way, except the slash
@@ -5759,7 +5759,7 @@ fn test_quick_open_slash_in_query_requires_directory_separator() raises:
     ))
 
 
-fn test_quick_open_filters_as_you_type() raises:
+def test_quick_open_filters_as_you_type() raises:
     var root = find_git_project(String("examples/hello.mojo"))
     assert_true(root)
     var qo = QuickOpen()
@@ -5784,7 +5784,7 @@ fn test_quick_open_filters_as_you_type() raises:
     assert_true(_starts_with(qo.selected_path, root.value()))
 
 
-fn _starts_with(s: String, prefix: String) -> Bool:
+def _starts_with(s: String, prefix: String) -> Bool:
     var sb = s.as_bytes()
     var pb = prefix.as_bytes()
     if len(pb) > len(sb):
@@ -5795,7 +5795,7 @@ fn _starts_with(s: String, prefix: String) -> Bool:
     return True
 
 
-fn test_cmd_o_bubbles_file_open() raises:
+def test_cmd_o_bubbles_file_open() raises:
     """Cmd+O always bubbles ``EDITOR_OPEN`` up to the host so the
     framework's ``FileDialog`` can be used; the project-aware Quick
     Open picker is on Cmd+Shift+O."""
@@ -5808,7 +5808,7 @@ fn test_cmd_o_bubbles_file_open() raises:
     assert_false(d.quick_open.active)
 
 
-fn test_cmd_shift_o_opens_quick_open_when_project_active() raises:
+def test_cmd_shift_o_opens_quick_open_when_project_active() raises:
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
     var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
@@ -5817,7 +5817,7 @@ fn test_cmd_shift_o_opens_quick_open_when_project_active() raises:
     assert_true(d.quick_open.active)
 
 
-fn test_cmd_shift_o_bubbles_when_no_project() raises:
+def test_cmd_shift_o_bubbles_when_no_project() raises:
     var d = Desktop()
     var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
     var maybe = d.handle_event(ev, _SCREEN)
@@ -5826,7 +5826,7 @@ fn test_cmd_shift_o_bubbles_when_no_project() raises:
     assert_false(d.quick_open.active)
 
 
-fn test_replace_in_project_round_trip() raises:
+def test_replace_in_project_round_trip() raises:
     """Set up a tiny scratch tree, replace across it, verify writes."""
     var root = _temp_path(String("_proj"))
     _ = external_call["mkdir", Int32]((root + String("\0")).unsafe_ptr(), Int32(0o755))
@@ -5844,7 +5844,7 @@ fn test_replace_in_project_round_trip() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
+def test_window_manager_fit_into_keeps_maximized_pinned() raises:
     var wm = WindowManager()
     var w = Window(String("M"), Rect(0, 1, 100, 25), List[String]())
     w.is_maximized = True
@@ -5854,7 +5854,7 @@ fn test_window_manager_fit_into_keeps_maximized_pinned() raises:
     assert_true(wm.windows[0].rect == smaller)
 
 
-fn test_window_manager_fit_into_scales_side_by_side_on_grow() raises:
+def test_window_manager_fit_into_scales_side_by_side_on_grow() raises:
     """Two windows tiled side by side covering the workspace must still
     cover it after the terminal grows, with their shared edge staying
     seamless and the width ratio between them preserved."""
@@ -5880,7 +5880,7 @@ fn test_window_manager_fit_into_scales_side_by_side_on_grow() raises:
     assert_equal(wm.windows[0].rect.b.y, 25)
 
 
-fn test_window_manager_fit_into_scales_side_by_side_on_shrink() raises:
+def test_window_manager_fit_into_scales_side_by_side_on_shrink() raises:
     """Same as the grow test, but the terminal shrinks. The shared seam
     and the full-coverage invariant must still hold."""
     var wm = WindowManager()
@@ -5897,7 +5897,7 @@ fn test_window_manager_fit_into_scales_side_by_side_on_shrink() raises:
     assert_equal(wm.windows[1].rect.width(), 30)
 
 
-fn test_window_manager_fit_into_scales_stacked_on_resize() raises:
+def test_window_manager_fit_into_scales_stacked_on_resize() raises:
     """Same proportional behavior on the y-axis: two windows stacked
     vertically and covering the workspace stay covering it."""
     var wm = WindowManager()
@@ -5915,7 +5915,7 @@ fn test_window_manager_fit_into_scales_stacked_on_resize() raises:
     assert_equal(wm.windows[1].rect.height(), 24)
 
 
-fn test_window_manager_fit_into_proportional_2x2_grid() raises:
+def test_window_manager_fit_into_proportional_2x2_grid() raises:
     """A 2x2 tile fully covering the workspace stays fully covering it
     after a resize; all four interior seams stay aligned."""
     var wm = WindowManager()
@@ -5943,7 +5943,7 @@ fn test_window_manager_fit_into_proportional_2x2_grid() raises:
     assert_equal(wm.windows[0].rect.b.y, wm.windows[1].rect.b.y)
 
 
-fn test_window_manager_fit_into_baseline_no_scale_on_first_call() raises:
+def test_window_manager_fit_into_baseline_no_scale_on_first_call() raises:
     """The first ``fit_into`` after construction has no baseline to scale
     against, so it falls back to clip-and-move — preserves the move-only
     behavior the existing test suite (and session restore startup) rely
@@ -5956,7 +5956,7 @@ fn test_window_manager_fit_into_baseline_no_scale_on_first_call() raises:
     assert_equal(wm.windows[0].rect.b.x, 80)       # slid against right edge
 
 
-fn test_window_manager_note_workspace_suppresses_next_scale() raises:
+def test_window_manager_note_workspace_suppresses_next_scale() raises:
     """``note_workspace`` rebases the snapshot without touching rects,
     so a workspace change reported via ``note_workspace`` followed by a
     matching ``fit_into`` doesn't trigger proportional scaling — this is
@@ -5974,7 +5974,7 @@ fn test_window_manager_note_workspace_suppresses_next_scale() raises:
     assert_true(wm.windows[0].rect == before)
 
 
-fn test_window_manager_fit_into_round_trip_is_lossless() raises:
+def test_window_manager_fit_into_round_trip_is_lossless() raises:
     """Two windows split 50/50 covering the workspace must come back to
     exactly 50/50 after a shrink-then-grow round trip. The naive
     "scale the current rect every time" approach accumulates integer
@@ -5996,7 +5996,7 @@ fn test_window_manager_fit_into_round_trip_is_lossless() raises:
     assert_equal(wm.windows[1].rect.b.x, 101)
 
 
-fn test_window_manager_fit_into_user_drag_rebases_baseline() raises:
+def test_window_manager_fit_into_user_drag_rebases_baseline() raises:
     """A user edge-drag captured between paints must rebase the
     baseline. Without that, resizing the terminal after the drag would
     scale from the stale pre-drag baseline, undoing the drag."""
@@ -6017,7 +6017,7 @@ fn test_window_manager_fit_into_user_drag_rebases_baseline() raises:
     assert_equal(wm.windows[0].rect.b.x, 120)
 
 
-fn test_window_manager_fit_into_scales_restore_rect_for_maximized() raises:
+def test_window_manager_fit_into_scales_restore_rect_for_maximized() raises:
     """A maximized window's ``_restore_rect`` is scaled along with the
     workspace so un-maximizing after a terminal resize lands at the
     proportionally-correct place rather than reverting to the
@@ -6041,7 +6041,7 @@ fn test_window_manager_fit_into_scales_restore_rect_for_maximized() raises:
     assert_equal(wm.windows[0]._restore_rect.b.y, 29)
 
 
-fn test_window_manager_title_hover_arms_for_editor_with_path() raises:
+def test_window_manager_title_hover_arms_for_editor_with_path() raises:
     """Bare hover over the title bar of a file-backed editor window
     arms the title-tooltip tracker; hovering elsewhere clears it. A
     left-click anywhere also drops the tracker so a stale popup
@@ -6077,7 +6077,7 @@ fn test_window_manager_title_hover_arms_for_editor_with_path() raises:
     assert_equal(wm._title_hover_idx, -1)
 
 
-fn test_window_manager_title_hover_skips_unbacked_buffers() raises:
+def test_window_manager_title_hover_skips_unbacked_buffers() raises:
     """Untitled / file-less editor windows must not arm the tooltip —
     a centered ``Untitled`` title with no path has nothing useful to
     show in a popup."""
@@ -6094,7 +6094,7 @@ fn test_window_manager_title_hover_skips_unbacked_buffers() raises:
     assert_equal(wm._title_hover_idx, -1)
 
 
-fn test_painter_clips_text_at_right_edge() raises:
+def test_painter_clips_text_at_right_edge() raises:
     """Long text passed to ``Painter.put_text`` must not bleed past the
     clip's right edge — every cell beyond ``clip.b.x`` stays untouched."""
     var canvas = Canvas(20, 3)
@@ -6118,7 +6118,7 @@ fn test_painter_clips_text_at_right_edge() raises:
     assert_equal(canvas.get(2, 0).glyph, String("·"))
 
 
-fn test_painter_skips_codepoints_left_of_clip() raises:
+def test_painter_skips_codepoints_left_of_clip() raises:
     """When the start point is left of the clip, leading codepoints
     must be skipped one cell at a time (codepoint-aware) so the
     remaining glyphs land at the right visual columns. ``café WORLD``
@@ -6148,7 +6148,7 @@ fn test_painter_skips_codepoints_left_of_clip() raises:
     assert_equal(canvas.get(15, 0).glyph, String("·"))
 
 
-fn test_painter_fill_intersects_with_clip() raises:
+def test_painter_fill_intersects_with_clip() raises:
     var canvas = Canvas(10, 5)
     canvas.fill(Rect(0, 0, 10, 5), String("·"), Attr(BLACK, BLUE))
     var painter = Painter(Rect(2, 1, 7, 4))
@@ -6161,7 +6161,7 @@ fn test_painter_fill_intersects_with_clip() raises:
     assert_equal(canvas.get(2, 4).glyph, String("·"))   # one below clip
 
 
-fn test_dir_browser_long_name_does_not_overflow_listing() raises:
+def test_dir_browser_long_name_does_not_overflow_listing() raises:
     """Regression: a directory entry far longer than the listing rect
     must not overwrite cells outside the rect, on any side. Drives the
     overflow with a 200-char synthetic entry — anything longer than
@@ -6192,7 +6192,7 @@ fn test_dir_browser_long_name_does_not_overflow_listing() raises:
                 assert_equal(canvas.get(x, y).glyph, String("·"))
 
 
-fn test_file_dialog_lists_and_navigates() raises:
+def test_file_dialog_lists_and_navigates() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     assert_true(dlg.active)
@@ -6206,7 +6206,7 @@ fn test_file_dialog_lists_and_navigates() raises:
     assert_equal(dlg.browser.selected, 0)
 
 
-fn test_partial_sgr_mouse_does_not_emit_esc() raises:
+def test_partial_sgr_mouse_does_not_emit_esc() raises:
     """A scroll-wheel event split across two reads must NOT emit KEY_ESC —
     that would make every quit-on-Esc app exit at random when scrolling.
 
@@ -6238,13 +6238,13 @@ fn test_partial_sgr_mouse_does_not_emit_esc() raises:
     assert_equal(partial_mod[1], 0)
 
 
-fn test_sgr_mouse_wheel_up() raises:
+def test_sgr_mouse_wheel_up() raises:
     var ev = parse_input(String("\x1b[<64;15;5M"))
     assert_true(ev[0].kind == EVENT_MOUSE)
     assert_true(ev[0].button == MOUSE_WHEEL_UP)
 
 
-fn test_sgr_mouse_motion_no_button() raises:
+def test_sgr_mouse_motion_no_button() raises:
     """Mouse-mode 1003 reports motion with no button held as raw button-bits
     ``3 | 32`` (35). The parser must surface that as MOUSE_BUTTON_NONE +
     motion=True; mapping it to RIGHT (the legacy bug) made every hover look
@@ -6257,7 +6257,7 @@ fn test_sgr_mouse_motion_no_button() raises:
     assert_equal(ev[0].pos.y, 0)
 
 
-fn test_menu_hover_switches_open_menu() raises:
+def test_menu_hover_switches_open_menu() raises:
     """While a menu is open, hovering (button=NONE, motion=True) over a
     different menu in the bar switches the open menu to it. This is the
     macOS-style sticky behavior the user gets after a click-then-move."""
@@ -6279,7 +6279,7 @@ fn test_menu_hover_switches_open_menu() raises:
     assert_equal(bar.open_idx, 1)
 
 
-fn test_menu_drag_release_on_item_triggers() raises:
+def test_menu_drag_release_on_item_triggers() raises:
     """Click-and-hold on File, drag down into the dropdown, release on the
     Save row → the release fires EDITOR_SAVE without an extra click."""
     var bar = MenuBar()
@@ -6313,7 +6313,7 @@ fn test_menu_drag_release_on_item_triggers() raises:
     assert_false(bar.tracking)
 
 
-fn test_menu_drag_release_outside_closes() raises:
+def test_menu_drag_release_outside_closes() raises:
     """Click-and-hold on File, drag off the bar and dropdown, release in
     empty space → the menu closes (drag-select cancellation)."""
     var bar = MenuBar()
@@ -6341,7 +6341,7 @@ fn test_menu_drag_release_outside_closes() raises:
     assert_false(bar.tracking)
 
 
-fn test_menu_click_then_click_flow() raises:
+def test_menu_click_then_click_flow() raises:
     """Sticky/Mac-style flow: a click that lands on File and releases there
     leaves the menu open in non-tracking mode; a separate later click on a
     dropdown item then triggers it."""
@@ -6374,7 +6374,7 @@ fn test_menu_click_then_click_flow() raises:
     assert_false(bar.is_open())
 
 
-fn test_file_dialog_selects_a_file() raises:
+def test_file_dialog_selects_a_file() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     # Find hello.mojo in the listing and step to it.
@@ -6391,7 +6391,7 @@ fn test_file_dialog_selects_a_file() raises:
     assert_equal(dlg.selected_path, String("examples/hello.mojo"))
 
 
-fn test_file_dialog_mouse_click_selects() raises:
+def test_file_dialog_mouse_click_selects() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     var screen = Rect(0, 0, 80, 24)
@@ -6405,7 +6405,7 @@ fn test_file_dialog_mouse_click_selects() raises:
     assert_false(dlg.submitted)
 
 
-fn test_file_dialog_double_click_opens() raises:
+def test_file_dialog_double_click_opens() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     # Find hello.mojo, then click it twice.
@@ -6432,7 +6432,7 @@ fn test_file_dialog_double_click_opens() raises:
     assert_equal(dlg.selected_path, String("examples/hello.mojo"))
 
 
-fn test_file_dialog_wheel_scrolls() raises:
+def test_file_dialog_wheel_scrolls() raises:
     var dlg = FileDialog()
     dlg.open(String("examples"))
     var screen = Rect(0, 0, 80, 24)
@@ -6453,7 +6453,7 @@ fn test_file_dialog_wheel_scrolls() raises:
     assert_true(dlg.browser.scroll <= initial + 3)
 
 
-fn test_file_dialog_directory_mode_picks_current_dir() raises:
+def test_file_dialog_directory_mode_picks_current_dir() raises:
     """``open_directory`` filters the listing to directories and sets
     up the right-aligned " Open Project " button. Clicking that
     button submits ``browser.dir`` (not a clicked entry), so the host
@@ -6493,7 +6493,7 @@ fn test_file_dialog_directory_mode_picks_current_dir() raises:
     assert_equal(dlg.selected_path, String("."))
 
 
-fn test_file_dialog_directory_mode_enter_does_not_submit() raises:
+def test_file_dialog_directory_mode_enter_does_not_submit() raises:
     """In dirs-only mode every entry is navigable, so Enter on a
     directory descends rather than submitting. Submission goes
     exclusively through the Open button — otherwise the user could
@@ -6510,7 +6510,7 @@ fn test_file_dialog_directory_mode_enter_does_not_submit() raises:
     assert_true(dlg.browser.dir != initial_dir)
 
 
-fn test_save_as_dialog_seeds_from_existing_path() raises:
+def test_save_as_dialog_seeds_from_existing_path() raises:
     """``open(start_path)`` splits the path: directory feeds the listing,
     basename pre-fills the filename input, focus starts on the input.
     Listing must be dirs-only (the user is picking a folder)."""
@@ -6535,7 +6535,7 @@ fn test_save_as_dialog_seeds_from_existing_path() raises:
     assert_true(saw_real_entry)
 
 
-fn test_save_as_dialog_typing_updates_filename() raises:
+def test_save_as_dialog_typing_updates_filename() raises:
     var dlg = SaveAsDialog()
     dlg.open(String(""))
     assert_equal(dlg.filename.text, String(""))
@@ -6551,7 +6551,7 @@ fn test_save_as_dialog_typing_updates_filename() raises:
     assert_equal(dlg.filename.text, String("ab.tx"))
 
 
-fn test_save_as_dialog_enter_submits_joined_path() raises:
+def test_save_as_dialog_enter_submits_joined_path() raises:
     var dlg = SaveAsDialog()
     dlg.open(String("examples/hello.mojo"))
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
@@ -6559,7 +6559,7 @@ fn test_save_as_dialog_enter_submits_joined_path() raises:
     assert_equal(dlg.selected_path, String("examples/hello.mojo"))
 
 
-fn test_save_as_dialog_tab_focus_then_listing_navigation() raises:
+def test_save_as_dialog_tab_focus_then_listing_navigation() raises:
     """Tab moves focus to the listing; Enter on the listing descends
     rather than submitting, since the user is still picking a folder."""
     var dlg = SaveAsDialog()
@@ -6587,14 +6587,14 @@ fn test_save_as_dialog_tab_focus_then_listing_navigation() raises:
         assert_equal(Int(b[n - hn + i]), Int(hello[i]))
 
 
-fn test_save_as_dialog_empty_filename_blocks_submit() raises:
+def test_save_as_dialog_empty_filename_blocks_submit() raises:
     var dlg = SaveAsDialog()
     dlg.open(String(""))
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
     assert_false(dlg.submitted)
 
 
-fn test_editor_sticky_col_down_through_short_line() raises:
+def test_editor_sticky_col_down_through_short_line() raises:
     """Down-arrowing from a wide line through a short one and back to a wider
     one returns the cursor to the original column."""
     var ed = Editor(String("hello world\nab\nabcdefghij"))
@@ -6614,7 +6614,7 @@ fn test_editor_sticky_col_down_through_short_line() raises:
     assert_equal(ed.desired_col, 11)
 
 
-fn test_editor_sticky_col_up_through_short_line() raises:
+def test_editor_sticky_col_up_through_short_line() raises:
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
@@ -6632,7 +6632,7 @@ fn test_editor_sticky_col_up_through_short_line() raises:
     assert_equal(ed.desired_col, 10)
 
 
-fn test_editor_sticky_col_reset_by_left_arrow() raises:
+def test_editor_sticky_col_reset_by_left_arrow() raises:
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
@@ -6646,7 +6646,7 @@ fn test_editor_sticky_col_reset_by_left_arrow() raises:
     assert_equal(ed.cursor_col, 1)
 
 
-fn test_editor_sticky_col_reset_by_right_arrow() raises:
+def test_editor_sticky_col_reset_by_right_arrow() raises:
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
@@ -6657,7 +6657,7 @@ fn test_editor_sticky_col_reset_by_right_arrow() raises:
     assert_equal(ed.desired_col, 0)
 
 
-fn test_editor_sticky_col_reset_by_typing() raises:
+def test_editor_sticky_col_reset_by_typing() raises:
     var ed = Editor(String("hello world\nab"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
@@ -6667,7 +6667,7 @@ fn test_editor_sticky_col_reset_by_typing() raises:
     assert_equal(ed.desired_col, 3)
 
 
-fn test_editor_sticky_col_reset_by_click() raises:
+def test_editor_sticky_col_reset_by_click() raises:
     var ed = Editor(String("hello world\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     assert_equal(ed.desired_col, 11)
@@ -6680,7 +6680,7 @@ fn test_editor_sticky_col_reset_by_click() raises:
     assert_equal(ed.desired_col, 3)
 
 
-fn test_editor_sticky_col_reset_by_home_end() raises:
+def test_editor_sticky_col_reset_by_home_end() raises:
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)        # desired=11
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)       # row 1, col 2, desired 11
@@ -6692,7 +6692,7 @@ fn test_editor_sticky_col_reset_by_home_end() raises:
     assert_equal(ed.cursor_col, 0)
 
 
-fn test_editor_sticky_col_pageup_pagedown() raises:
+def test_editor_sticky_col_pageup_pagedown() raises:
     var ed = Editor(
         String("0123456789\n0123456789\nab\n0123456789\n0123456789\n0123456789")
     )
@@ -6716,7 +6716,7 @@ fn test_editor_sticky_col_pageup_pagedown() raises:
     assert_equal(ed.desired_col, 10)
 
 
-fn test_editor_sticky_col_shift_down_keeps_anchor() raises:
+def test_editor_sticky_col_shift_down_keeps_anchor() raises:
     """Shift+Down should extend selection and use the sticky column too."""
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
@@ -6733,7 +6733,7 @@ fn test_editor_sticky_col_shift_down_keeps_anchor() raises:
     assert_equal(ed.desired_col, 11)
 
 
-fn test_editor_left_right_steps_over_multibyte_codepoint() raises:
+def test_editor_left_right_steps_over_multibyte_codepoint() raises:
     """Arrow keys must move by whole UTF-8 codepoints — never park the
     cursor in the middle of a multi-byte sequence."""
     # "café" — bytes: c(0), a(1), f(2), é(3-4). 4 codepoints, 5 bytes.
@@ -6750,7 +6750,7 @@ fn test_editor_left_right_steps_over_multibyte_codepoint() raises:
     assert_equal(ed.cursor_col, 2)        # ASCII step works as before
 
 
-fn test_editor_backspace_removes_whole_codepoint() raises:
+def test_editor_backspace_removes_whole_codepoint() raises:
     """Backspace at the end of a line containing é must remove all of é."""
     var ed = Editor(String("café"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
@@ -6760,7 +6760,7 @@ fn test_editor_backspace_removes_whole_codepoint() raises:
     assert_equal(ed.cursor_col, 3)
 
 
-fn test_editor_delete_key_removes_whole_codepoint() raises:
+def test_editor_delete_key_removes_whole_codepoint() raises:
     """Delete (forward) at the boundary before é must remove all of é and
     leave the buffer as valid UTF-8."""
     var ed = Editor(String("café"))
@@ -6773,7 +6773,7 @@ fn test_editor_delete_key_removes_whole_codepoint() raises:
     assert_equal(ed.cursor_col, 3)
 
 
-fn test_editor_vertical_movement_uses_cell_column() raises:
+def test_editor_vertical_movement_uses_cell_column() raises:
     """Down through a row of multi-byte characters preserves the visual
     column, not the byte offset. ``ééé`` is 6 bytes / 3 cells; landing
     column 2 (cells) on it must be byte 4, not byte 2 (mid-codepoint)."""
@@ -6793,7 +6793,7 @@ fn test_editor_vertical_movement_uses_cell_column() raises:
     assert_equal(ed.cursor_col, 2)
 
 
-fn test_editor_mouse_click_lands_on_codepoint_boundary() raises:
+def test_editor_mouse_click_lands_on_codepoint_boundary() raises:
     """A click at cell column N inside a multi-byte run must drop the cursor
     at the *codepoint* at column N, never mid-sequence."""
     var ed = Editor(String("ééé"))
@@ -6813,7 +6813,7 @@ fn test_editor_mouse_click_lands_on_codepoint_boundary() raises:
     assert_equal(ed.cursor_col, 6)
 
 
-fn test_window_v_scrollbar_hit_arrows_and_thumb() raises:
+def test_window_v_scrollbar_hit_arrows_and_thumb() raises:
     var lines = String("")
     for i in range(50):
         lines = lines + String("line ") + String(i) + String("\n")
@@ -6833,7 +6833,7 @@ fn test_window_v_scrollbar_hit_arrows_and_thumb() raises:
     assert_equal(miss[0], 0)
 
 
-fn test_window_v_scroll_by_clamps() raises:
+def test_window_v_scroll_by_clamps() raises:
     var lines = String("")
     for i in range(50):
         lines = lines + String("L") + String(i) + String("\n")
@@ -6850,7 +6850,7 @@ fn test_window_v_scroll_by_clamps() raises:
     assert_equal(w.editor.scroll_y, 0)
 
 
-fn test_window_v_scrollbar_track_click_centers_target() raises:
+def test_window_v_scrollbar_track_click_centers_target() raises:
     """A click in the page area of the v-scrollbar jumps to the
     proportional buffer row and centers it in the view, instead of
     scrolling by one page. With 51 buffer rows in an 8-row view and a
@@ -6881,7 +6881,7 @@ fn test_window_v_scrollbar_track_click_centers_target() raises:
     assert_equal(w.editor.scroll_y, 38)
 
 
-fn test_window_v_scroll_drag_to_end() raises:
+def test_window_v_scroll_drag_to_end() raises:
     var lines = String("")
     for i in range(50):
         lines = lines + String("L") + String(i) + String("\n")
@@ -6899,7 +6899,7 @@ fn test_window_v_scroll_drag_to_end() raises:
 # --- Phase-2 LSP plumbing tests --------------------------------------------
 
 
-fn _bytes_of(s: String) -> List[UInt8]:
+def _bytes_of(s: String) -> List[UInt8]:
     var out = List[UInt8]()
     var b = s.as_bytes()
     for i in range(len(b)):
@@ -6907,7 +6907,7 @@ fn _bytes_of(s: String) -> List[UInt8]:
     return out^
 
 
-fn test_json_round_trip_lsp_envelope() raises:
+def test_json_round_trip_lsp_envelope() raises:
     """A representative JSON-RPC request envelope round-trips."""
     var params = json_object()
     params.put(String("processId"), json_int(0))
@@ -6933,7 +6933,7 @@ fn test_json_round_trip_lsp_envelope() raises:
     assert_true(p.object_get(String("capabilities")).value().is_object())
 
 
-fn test_json_string_escapes() raises:
+def test_json_string_escapes() raises:
     # Includes a literal 0x01 byte to exercise the \uXXXX path.
     var raw = String("a\"b\\c\nd\te") + chr(1) + String("f")
     var enc = encode_json(json_str(raw))
@@ -6943,7 +6943,7 @@ fn test_json_string_escapes() raises:
     assert_equal(dec.as_str(), raw)
 
 
-fn test_json_parse_errors_raise() raises:
+def test_json_parse_errors_raise() raises:
     var ok = True
     try:
         _ = parse_json(String("{"))
@@ -6965,13 +6965,13 @@ fn test_json_parse_errors_raise() raises:
     assert_true(ok)
 
 
-fn test_json_floats_round_trip_as_text() raises:
+def test_json_floats_round_trip_as_text() raises:
     var v = parse_json(String("3.14"))
     assert_true(v.is_float())
     assert_equal(encode_json(v), String("3.14"))
 
 
-fn test_language_registry_loads_from_bundled_json() raises:
+def test_language_registry_loads_from_bundled_json() raises:
     """The catalog imported from Helix's languages.toml should load cleanly
     and contain at least the long-tail languages we now expect."""
     var specs = built_in_servers()
@@ -6995,7 +6995,7 @@ fn test_language_registry_loads_from_bundled_json() raises:
     assert_true(len(specs[py_idx].install_hint.as_bytes()) > 0)
 
 
-fn test_lsp_framer_finds_double_crlf() raises:
+def test_lsp_framer_finds_double_crlf() raises:
     var buf = _bytes_of(String("Content-Length: 5\r\n\r\nhello"))
     var idx = _find_double_crlf(buf)
     assert_equal(idx, 17)
@@ -7003,7 +7003,7 @@ fn test_lsp_framer_finds_double_crlf() raises:
     assert_equal(_find_double_crlf(none_buf), -1)
 
 
-fn test_lsp_framer_parses_content_length() raises:
+def test_lsp_framer_parses_content_length() raises:
     var buf = _bytes_of(String("Content-Length: 42\r\n\r\n"))
     var hdr_end = _find_double_crlf(buf)
     assert_equal(_parse_content_length(buf, hdr_end), 42)
@@ -7016,7 +7016,7 @@ fn test_lsp_framer_parses_content_length() raises:
     assert_equal(_parse_content_length(buf3, _find_double_crlf(buf3)), 11)
 
 
-fn test_lsp_framer_extract_one_message() raises:
+def test_lsp_framer_extract_one_message() raises:
     var p = LspProcess()
     var hello = String("Content-Length: 5\r\n\r\nhello")
     var hb = hello.as_bytes()
@@ -7050,7 +7050,7 @@ fn test_lsp_framer_extract_one_message() raises:
     assert_equal(done.value(), String("abcd"))
 
 
-fn test_lsp_drop_prefix_helper() raises:
+def test_lsp_drop_prefix_helper() raises:
     var b = _bytes_of(String("hello world"))
     var rest = _drop_prefix(b^, 6)
     assert_equal(len(rest), 5)
@@ -7058,7 +7058,7 @@ fn test_lsp_drop_prefix_helper() raises:
     assert_equal(s, String("world"))
 
 
-fn test_lsp_classify_message() raises:
+def test_lsp_classify_message() raises:
     var resp = parse_json(String(
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}"
     ))
@@ -7076,7 +7076,7 @@ fn test_lsp_classify_message() raises:
     assert_equal(cn.method.value(), String("window/logMessage"))
 
 
-fn test_lsp_parse_diagnostics_array_minimum_fields() raises:
+def test_lsp_parse_diagnostics_array_minimum_fields() raises:
     """A publishDiagnostics ``diagnostics`` array with only the spec-
     required fields (range only) must still parse. Severity defaults
     to Info per the spec; message/source come back empty."""
@@ -7095,7 +7095,7 @@ fn test_lsp_parse_diagnostics_array_minimum_fields() raises:
     assert_equal(diags[0].source, String(""))
 
 
-fn test_lsp_parse_diagnostics_array_full_fields() raises:
+def test_lsp_parse_diagnostics_array_full_fields() raises:
     """All four severities + message + source round-trip exactly."""
     var v = parse_json(String(
         "["
@@ -7124,7 +7124,7 @@ fn test_lsp_parse_diagnostics_array_full_fields() raises:
     assert_equal(diags[3].severity, DIAG_SEVERITY_HINT)
 
 
-fn test_lsp_parse_completion_result_array_shape() raises:
+def test_lsp_parse_completion_result_array_shape() raises:
     """A bare ``CompletionItem[]`` array (one of the two shapes the
     LSP spec allows) parses to one item per entry. Each item carries
     its label, kind, and detail; ``insert_text`` defaults to the
@@ -7148,7 +7148,7 @@ fn test_lsp_parse_completion_result_array_shape() raises:
     assert_equal(items[1].detail, String("() -> int"))
 
 
-fn test_lsp_parse_completion_result_list_shape() raises:
+def test_lsp_parse_completion_result_list_shape() raises:
     """The CompletionList shape ``{isIncomplete,items:[...]}`` parses
     the same as a bare array. Servers like pyright return this form."""
     var v = parse_json(String(
@@ -7161,7 +7161,7 @@ fn test_lsp_parse_completion_result_list_shape() raises:
     assert_equal(items[0].label, String("x"))
 
 
-fn test_lsp_parse_completion_result_honors_sort_text() raises:
+def test_lsp_parse_completion_result_honors_sort_text() raises:
     """``sortText`` overrides the wire order in the parsed list. The
     server here flags ``zzz`` as the preferred match by giving it a
     leading ``0`` while ``aaa`` gets ``2`` — sorting puts ``zzz`` first
@@ -7185,7 +7185,7 @@ fn test_lsp_parse_completion_result_honors_sort_text() raises:
     assert_equal(items[2].sort_text, String("mmm"))
 
 
-fn test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
+def test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
     """``insertTextFormat == 2`` (snippet) means the body has
     placeholders we don't render. Drop the snippet body and use the
     label as the inserted text — otherwise ``${1:arg}`` markers would
@@ -7201,7 +7201,7 @@ fn test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
     assert_equal(items[0].insert_text, String("print"))
 
 
-fn test_editor_completion_prefix_start_walks_back_through_word() raises:
+def test_editor_completion_prefix_start_walks_back_through_word() raises:
     """``completion_prefix_start`` returns the col where the in-progress
     identifier begins. Used to anchor the popup so accepting an entry
     replaces what the user already typed."""
@@ -7211,7 +7211,7 @@ fn test_editor_completion_prefix_start_walks_back_through_word() raises:
     assert_equal(s, 6)
 
 
-fn test_editor_set_completions_opens_popup() raises:
+def test_editor_set_completions_opens_popup() raises:
     """``set_completions`` flips the popup visible and parks items.
     An empty list closes (or stays closed) so a server response with
     zero matches doesn't paint an empty popup."""
@@ -7238,7 +7238,7 @@ fn test_editor_set_completions_opens_popup() raises:
     assert_false(ed.completion_popup_visible)
 
 
-fn test_editor_typing_word_char_stamps_autotrigger_request() raises:
+def test_editor_typing_word_char_stamps_autotrigger_request() raises:
     """Typing an identifier char (letter, digit, underscore) auto-stamps
     ``pending_completion_request`` so the desktop dispatches a fresh
     LSP query without the user having to press the completion key."""
@@ -7255,7 +7255,7 @@ fn test_editor_typing_word_char_stamps_autotrigger_request() raises:
     assert_true(Bool(req2))
 
 
-fn test_editor_typing_non_word_char_skips_autotrigger() raises:
+def test_editor_typing_non_word_char_skips_autotrigger() raises:
     """Typing punctuation that doesn't extend an identifier (space,
     ``(``, ``=``, …) must NOT auto-stamp a completion request — that
     would fire LSP queries on every keystroke."""
@@ -7266,7 +7266,7 @@ fn test_editor_typing_non_word_char_skips_autotrigger() raises:
     assert_false(Bool(req))
 
 
-fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
+def test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
     """Pressing Left/Right while the cursor stays inside the anchored
     identifier must NOT close the popup — it re-stamps a request so
     the filter follows. Pressing Left past the anchor (or jumping to
@@ -7289,7 +7289,7 @@ fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
     assert_true(Bool(req))
 
 
-fn test_editor_typing_non_word_char_closes_visible_popup() raises:
+def test_editor_typing_non_word_char_closes_visible_popup() raises:
     """A visible popup gets dismissed when the user types a char that
     doesn't extend the in-progress identifier (e.g. space)."""
     var ed = Editor(String(""))
@@ -7306,7 +7306,7 @@ fn test_editor_typing_non_word_char_closes_visible_popup() raises:
     assert_false(ed.completion_popup_visible)
 
 
-fn test_editor_ctrl_space_marks_request_manual() raises:
+def test_editor_ctrl_space_marks_request_manual() raises:
     """Ctrl+Space stamps a ``CompletionRequest`` with ``manual=True``
     so the host can distinguish a user-invoked request (an empty
     response should surface ``<no completion found>``) from the
@@ -7319,7 +7319,7 @@ fn test_editor_ctrl_space_marks_request_manual() raises:
     assert_true(req.value().manual)
 
 
-fn test_editor_autotrigger_request_is_not_manual() raises:
+def test_editor_autotrigger_request_is_not_manual() raises:
     """The as-you-type auto-trigger marks the request ``manual=False``
     — an empty response on this path should dismiss the popup
     silently rather than show ``<no completion found>``."""
@@ -7331,7 +7331,7 @@ fn test_editor_autotrigger_request_is_not_manual() raises:
     assert_false(req.value().manual)
 
 
-fn test_editor_autotrigger_request_debounced_until_settled() raises:
+def test_editor_autotrigger_request_debounced_until_settled() raises:
     """As-you-type completion requests are held in the slot while
     typing is still fresh. Gating ``consume_completion_request`` on a
     ``now_ms`` equal to the stamp leaves the request parked."""
@@ -7345,7 +7345,7 @@ fn test_editor_autotrigger_request_debounced_until_settled() raises:
     assert_true(Bool(ed.pending_completion_request))
 
 
-fn test_editor_autotrigger_request_released_after_debounce() raises:
+def test_editor_autotrigger_request_released_after_debounce() raises:
     """Once ``_COMPLETION_DEBOUNCE_MS`` has elapsed since the last
     keystroke, the gated consume releases the parked request."""
     var ed = Editor(String(""))
@@ -7357,7 +7357,7 @@ fn test_editor_autotrigger_request_released_after_debounce() raises:
     assert_false(Bool(ed.pending_completion_request))
 
 
-fn test_editor_manual_completion_request_bypasses_debounce() raises:
+def test_editor_manual_completion_request_bypasses_debounce() raises:
     """Ctrl+Space is user-invoked: the user is explicitly waiting on
     results and the request must fire immediately regardless of how
     recently anything was typed."""
@@ -7370,7 +7370,7 @@ fn test_editor_manual_completion_request_bypasses_debounce() raises:
     assert_true(unwrapped.manual)
 
 
-fn test_editor_close_completion_popup_clears_pending_request() raises:
+def test_editor_close_completion_popup_clears_pending_request() raises:
     """Dismissing the popup clears any queued pending request *and*
     latches the cancel flag so the host can tell the LSP to drop
     in-flight work. Without this a late response would re-open the
@@ -7385,7 +7385,7 @@ fn test_editor_close_completion_popup_clears_pending_request() raises:
     assert_false(ed.consume_completion_cancel())
 
 
-fn _popup_items_one() -> List[CompletionItem]:
+def _popup_items_one() -> List[CompletionItem]:
     var items = List[CompletionItem]()
     items.append(CompletionItem(
         String("foobar"), String("foobar"), 6, String(""), String("foobar"),
@@ -7395,7 +7395,7 @@ fn _popup_items_one() -> List[CompletionItem]:
     return items^
 
 
-fn test_desktop_esc_dismisses_completion_popup() raises:
+def test_desktop_esc_dismisses_completion_popup() raises:
     """ESC routed through the Desktop must close the focused editor's
     completion popup before any other ESC-bound action (menu close /
     multi-caret clear / esc-prefix arm). Without this the popup would
@@ -7416,7 +7416,7 @@ fn test_desktop_esc_dismisses_completion_popup() raises:
     assert_false(d._esc_armed)
 
 
-fn test_desktop_left_click_outside_popup_dismisses_it() raises:
+def test_desktop_left_click_outside_popup_dismisses_it() raises:
     """A left-click anywhere outside the popup's screen rect dismisses
     it. The click still proceeds to its normal target — the popup is
     just a transient overlay."""
@@ -7440,7 +7440,7 @@ fn test_desktop_left_click_outside_popup_dismisses_it() raises:
     assert_false(d.windows.windows[0].editor.completion_popup_visible)
 
 
-fn test_desktop_left_click_inside_popup_keeps_it_open() raises:
+def test_desktop_left_click_inside_popup_keeps_it_open() raises:
     """A left-click that lands *inside* the popup rect must not dismiss
     it — that lane is reserved for future item-click acceptance."""
     var d = Desktop()
@@ -7466,7 +7466,7 @@ fn test_desktop_left_click_inside_popup_keeps_it_open() raises:
     assert_true(d.windows.windows[0].editor.completion_popup_visible)
 
 
-fn test_editor_show_no_completion_message_opens_unselectable_popup() raises:
+def test_editor_show_no_completion_message_opens_unselectable_popup() raises:
     """``show_no_completion_message`` opens a popup with a single
     non-acceptable ``<no completion found>`` entry. Arrow keys must
     not move the highlight and Enter must dismiss without inserting."""
@@ -7490,7 +7490,7 @@ fn test_editor_show_no_completion_message_opens_unselectable_popup() raises:
     assert_equal(ed.buffer.line(0), String("foo"))
 
 
-fn test_editor_accept_completion_replaces_prefix() raises:
+def test_editor_accept_completion_replaces_prefix() raises:
     """Accepting a completion replaces ``[anchor_col, cursor_col)``
     with the chosen ``insert_text`` and leaves the cursor at the end
     of the replacement."""
@@ -7510,7 +7510,7 @@ fn test_editor_accept_completion_replaces_prefix() raises:
     assert_false(ed.completion_popup_visible)
 
 
-fn test_editor_accept_completion_overlap_widens_anchor() raises:
+def test_editor_accept_completion_overlap_widens_anchor() raises:
     """When the server returns a label-only entry (no textEdit), the
     accept logic widens the replacement span by looking for the
     longest suffix of the typed line that is a byte-exact prefix of
@@ -7535,7 +7535,7 @@ fn test_editor_accept_completion_overlap_widens_anchor() raises:
     assert_equal(ed.cursor_col, 26)
 
 
-fn test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
+def test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
     """When the inserted text shares no prefix with what's left of the
     cursor, the overlap heuristic must not widen the replacement —
     accepting falls back to the word-boundary anchor. Otherwise typing
@@ -7557,7 +7557,7 @@ fn test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
     assert_equal(ed.buffer.line(0), String("bar"))
 
 
-fn test_editor_accept_completion_uses_text_edit_range() raises:
+def test_editor_accept_completion_uses_text_edit_range() raises:
     """When the item carries a ``textEdit`` range, the replacement
     span comes from the server — not from ``completion_prefix_start``.
     The path-completion case: the buffer holds ``reviews/re`` and the
@@ -7586,7 +7586,7 @@ fn test_editor_accept_completion_uses_text_edit_range() raises:
     assert_false(ed.completion_popup_visible)
 
 
-fn test_editor_accept_completion_applies_additional_text_edits() raises:
+def test_editor_accept_completion_applies_additional_text_edits() raises:
     """Auto-import case: pyright returns a completion for ``foo_func``
     plus an ``additionalTextEdits`` entry that inserts an
     ``import foo_func\\n`` line at the top of the file. Accepting the
@@ -7623,7 +7623,7 @@ fn test_editor_accept_completion_applies_additional_text_edits() raises:
     assert_false(ed.completion_popup_visible)
 
 
-fn test_lsp_parse_completion_result_extracts_additional_text_edits() raises:
+def test_lsp_parse_completion_result_extracts_additional_text_edits() raises:
     """``additionalTextEdits`` survives parsing as a list of
     ``TextEditEntry``. Auto-import responses (the canonical user)
     look like this — primary insert is the bare name, plus one
@@ -7649,7 +7649,7 @@ fn test_lsp_parse_completion_result_extracts_additional_text_edits() raises:
     assert_equal(aux.new_text, String("import foo\n"))
 
 
-fn test_lsp_parse_completion_result_extracts_text_edit_range() raises:
+def test_lsp_parse_completion_result_extracts_text_edit_range() raises:
     """A ``textEdit`` with a ``range`` populates ``has_range`` plus
     the start/end coords so the editor can replace exactly what the
     server intended, even across non-word punctuation."""
@@ -7673,7 +7673,7 @@ fn test_lsp_parse_completion_result_extracts_text_edit_range() raises:
     assert_equal(items[0].range_end_char, 22)
 
 
-fn test_lsp_parse_completion_result_extracts_insert_replace_edit() raises:
+def test_lsp_parse_completion_result_extracts_insert_replace_edit() raises:
     """``InsertReplaceEdit`` uses ``replace`` (not ``insert``) so
     accepting the completion overwrites the existing text rather than
     leaving a trailing suffix past the cursor."""
@@ -7694,7 +7694,7 @@ fn test_lsp_parse_completion_result_extracts_insert_replace_edit() raises:
     assert_equal(items[0].range_end_char, 8)  # ``replace`` wins over ``insert``
 
 
-fn test_lsp_parse_diagnostics_skips_malformed_entries() raises:
+def test_lsp_parse_diagnostics_skips_malformed_entries() raises:
     """Entries missing ``range`` are dropped; malformed ones don't
     poison neighbors. The good entries either side must parse."""
     var v = parse_json(String(
@@ -7715,7 +7715,7 @@ fn test_lsp_parse_diagnostics_skips_malformed_entries() raises:
     assert_equal(diags[1].message, String("third"))
 
 
-fn test_editor_set_diagnostics_builds_per_row_severity_index() raises:
+def test_editor_set_diagnostics_builds_per_row_severity_index() raises:
     """``Editor.set_diagnostics`` populates ``diagnostic_lines`` so
     that each row carries the *winning* (lowest-numbered) severity.
     A row with both an error and a warning surfaces as Error; the
@@ -7744,7 +7744,7 @@ fn test_editor_set_diagnostics_builds_per_row_severity_index() raises:
     assert_equal(ed.diagnostic_lines[3], 0)
 
 
-fn test_editor_minimap_kind_prioritizes_error_over_git_and_spell() raises:
+def test_editor_minimap_kind_prioritizes_error_over_git_and_spell() raises:
     """An LSP error on a row outranks both an uncommitted-change marker
     and a spell flag on the same row — the user shouldn't have to scroll
     past whitespace edits to see real problems on the minimap."""
@@ -7773,7 +7773,7 @@ fn test_editor_minimap_kind_prioritizes_error_over_git_and_spell() raises:
     assert_equal(ed._minimap_kind_in_slice(2, 3), 0)
 
 
-fn test_editor_minimap_warning_outranks_git_change() raises:
+def test_editor_minimap_warning_outranks_git_change() raises:
     """Same priority test, one notch lower: warning beats git change."""
     var ed = Editor(String("a\nb"))
     var git = List[Int]()
@@ -7788,7 +7788,7 @@ fn test_editor_minimap_warning_outranks_git_change() raises:
     assert_equal(ed._minimap_kind_in_slice(0, 1), 4)
 
 
-fn test_editor_minimap_hint_loses_to_spell() raises:
+def test_editor_minimap_hint_loses_to_spell() raises:
     """Hints sit at the bottom of the priority ladder so a 'consider
     renaming' message can't drown a real misspelling on the minimap."""
     var ed = Editor(String("a\nb"))
@@ -7805,7 +7805,7 @@ fn test_editor_minimap_hint_loses_to_spell() raises:
     assert_equal(ed._minimap_kind_in_slice(0, 1), 2)
 
 
-fn test_editor_clear_diagnostics_drops_per_row_index() raises:
+def test_editor_clear_diagnostics_drops_per_row_index() raises:
     """``clear_diagnostics`` empties both lists so the minimap collapses
     back to git/spell-only kinds — used when an LSP server crashes or
     a buffer is closed."""
@@ -7821,7 +7821,7 @@ fn test_editor_clear_diagnostics_drops_per_row_index() raises:
     assert_equal(len(ed.diagnostic_lines), 0)
 
 
-fn test_lsp_subprocess_round_trip_via_cat() raises:
+def test_lsp_subprocess_round_trip_via_cat() raises:
     """End-to-end pipe + framer test using ``/bin/cat``."""
     var cat_info = stat_file(String("/bin/cat"))
     if not cat_info.ok:
@@ -7851,7 +7851,7 @@ fn test_lsp_subprocess_round_trip_via_cat() raises:
     p.terminate()
 
 
-fn test_lsp_write_message_queues_bytes_when_fd_is_unavailable() raises:
+def test_lsp_write_message_queues_bytes_when_fd_is_unavailable() raises:
     """The queued path means ``write_message`` never blocks: with no
     real stdin (default-constructed ``LspProcess``, ``stdin_fd == -1``)
     the framed bytes accumulate in ``_pending_write`` instead of
@@ -7870,7 +7870,7 @@ fn test_lsp_write_message_queues_bytes_when_fd_is_unavailable() raises:
     assert_false(p.write_overflowed())
 
 
-fn test_lsp_write_overflow_resets_queue_and_latches_flag() raises:
+def test_lsp_write_overflow_resets_queue_and_latches_flag() raises:
     """Past the 16 MB safety cap, the queue is dropped and
     ``write_overflowed`` latches True so the manager can fail the
     session rather than silently lose bytes mid-frame.
@@ -7889,7 +7889,7 @@ fn test_lsp_write_overflow_resets_queue_and_latches_flag() raises:
     assert_equal(len(p._pending_write), 0)
 
 
-fn test_install_runner_last_lines_picks_tail_skipping_blanks() raises:
+def test_install_runner_last_lines_picks_tail_skipping_blanks() raises:
     """``_last_lines`` is the helper the install popup uses to render the
     rolling 5-line tail. Trailing blanks should be dropped (so the popup
     doesn't fill its window with empty rows when the installer ends with
@@ -7919,7 +7919,7 @@ fn test_install_runner_last_lines_picks_tail_skipping_blanks() raises:
     assert_equal(blanks[1], String("second"))
 
 
-fn test_install_runner_runs_sh_command_to_completion() raises:
+def test_install_runner_runs_sh_command_to_completion() raises:
     """End-to-end: spawn ``sh -c "echo hello"`` via the runner and tick
     until the child reaps. The returned ``InstallResult`` should carry
     exit 0, the captured ``hello`` output, and the original label /
@@ -7950,7 +7950,7 @@ fn test_install_runner_runs_sh_command_to_completion() raises:
     assert_false(r.is_active())
 
 
-fn test_install_runner_failure_carries_nonzero_exit() raises:
+def test_install_runner_failure_carries_nonzero_exit() raises:
     """A non-zero exit must be visible to the host so it knows to open
     the failure-output editor window. ``sh -c 'exit 7'`` is the minimal
     deterministic failure."""
@@ -7967,7 +7967,7 @@ fn test_install_runner_failure_carries_nonzero_exit() raises:
     assert_equal(result.exit_code(), 7)
 
 
-fn test_lsp_initialize_against_mojo_lsp_server() raises:
+def test_lsp_initialize_against_mojo_lsp_server() raises:
     """Spawn ``mojo-lsp-server`` and round-trip an ``initialize`` request.
     Skipped silently if the binary isn't installed."""
     var server = String(".pixi/envs/default/bin/mojo-lsp-server")
@@ -8016,7 +8016,7 @@ fn test_lsp_initialize_against_mojo_lsp_server() raises:
         client.terminate()
 
 
-fn test_dap_classify_response() raises:
+def test_dap_classify_response() raises:
     var resp = parse_json(String(
         "{\"seq\":3,\"type\":\"response\",\"request_seq\":1,"
         + "\"success\":true,\"command\":\"initialize\","
@@ -8033,7 +8033,7 @@ fn test_dap_classify_response() raises:
     assert_true(Bool(c.body))
 
 
-fn test_dap_classify_event() raises:
+def test_dap_classify_event() raises:
     var ev = parse_json(String(
         "{\"seq\":4,\"type\":\"event\",\"event\":\"stopped\","
         + "\"body\":{\"reason\":\"breakpoint\",\"threadId\":1,"
@@ -8046,7 +8046,7 @@ fn test_dap_classify_event() raises:
     assert_true(Bool(c.body))
 
 
-fn test_dap_classify_reverse_request() raises:
+def test_dap_classify_reverse_request() raises:
     var rq = parse_json(String(
         "{\"seq\":5,\"type\":\"request\",\"command\":\"runInTerminal\","
         + "\"arguments\":{\"args\":[\"/usr/bin/echo\"]}}"
@@ -8057,7 +8057,7 @@ fn test_dap_classify_reverse_request() raises:
     assert_true(Bool(c.arguments))
 
 
-fn test_dap_classify_response_with_failure() raises:
+def test_dap_classify_response_with_failure() raises:
     var resp = parse_json(String(
         "{\"seq\":7,\"type\":\"response\",\"request_seq\":2,"
         + "\"success\":false,\"command\":\"launch\","
@@ -8071,7 +8071,7 @@ fn test_dap_classify_response_with_failure() raises:
     assert_equal(c.message.value(), String("file not found"))
 
 
-fn test_dap_initialize_arguments_shape() raises:
+def test_dap_initialize_arguments_shape() raises:
     var args = dap_initialize_arguments(
         String("turbokod"), String("debugpy"),
     )
@@ -8085,7 +8085,7 @@ fn test_dap_initialize_arguments_shape() raises:
     assert_false(lstart.value().as_bool())
 
 
-fn test_dap_seq_autoincrement_via_cat() raises:
+def test_dap_seq_autoincrement_via_cat() raises:
     """End-to-end: sequence numbers increment monotonically across
     requests. ``/bin/cat`` is the cheapest pipe-back fixture available."""
     var cat_info = stat_file(String("/bin/cat"))
@@ -8102,7 +8102,7 @@ fn test_dap_seq_autoincrement_via_cat() raises:
     client.terminate()
 
 
-fn test_dap_parse_threads() raises:
+def test_dap_parse_threads() raises:
     var body = parse_json(String(
         "{\"threads\":[{\"id\":1,\"name\":\"main\"},"
         + "{\"id\":2,\"name\":\"worker\"}]}"
@@ -8115,7 +8115,7 @@ fn test_dap_parse_threads() raises:
     assert_equal(threads[1].name, String("worker"))
 
 
-fn test_dap_parse_stack_trace_zero_based() raises:
+def test_dap_parse_stack_trace_zero_based() raises:
     """Adapters return 1-based lines (debugpy + delve always; lldb-dap
     honors our linesStartAt1=false flag). The parser normalizes to
     0-based to match Editor's row index."""
@@ -8133,7 +8133,7 @@ fn test_dap_parse_stack_trace_zero_based() raises:
     assert_equal(frames[0].column, 0)
 
 
-fn test_dap_parse_scopes_and_variables() raises:
+def test_dap_parse_scopes_and_variables() raises:
     var scopes_body = parse_json(String(
         "{\"scopes\":[{\"name\":\"Locals\",\"variablesReference\":7,"
         + "\"expensive\":false}]}"
@@ -8158,7 +8158,7 @@ fn test_dap_parse_scopes_and_variables() raises:
     assert_equal(variables[1].variables_reference, 11)
 
 
-fn test_dap_registry_lookup() raises:
+def test_dap_registry_lookup() raises:
     var debs = built_in_debuggers()
     assert_true(len(debs) >= 3)
     var py = find_debugger_for_language(debs, String("python"))
@@ -8168,7 +8168,7 @@ fn test_dap_registry_lookup() raises:
     assert_equal(unknown, -1)
 
 
-fn test_dap_launch_arguments_for_debugpy() raises:
+def test_dap_launch_arguments_for_debugpy() raises:
     var debs = built_in_debuggers()
     var idx = find_debugger_for_language(debs, String("python"))
     assert_true(idx >= 0)
@@ -8192,7 +8192,7 @@ fn test_dap_launch_arguments_for_debugpy() raises:
     assert_equal(arr.value().array_at(0).as_str(), String("--verbose"))
 
 
-fn test_dap_launch_arguments_for_debugpy_module_mode() raises:
+def test_dap_launch_arguments_for_debugpy_module_mode() raises:
     """``python -m pytest tests/x.py`` should be rewritten to debugpy's
     ``module`` field — debugpy can't ``runpy`` the python binary."""
     var debs = built_in_debuggers()
@@ -8223,7 +8223,7 @@ fn test_dap_launch_arguments_for_debugpy_module_mode() raises:
     assert_equal(arr.value().array_at(0).as_str(), String("tests/x.py"))
 
 
-fn test_dap_launch_arguments_for_debugpy_versioned_python() raises:
+def test_dap_launch_arguments_for_debugpy_versioned_python() raises:
     """``python3.11 -m unittest`` should also trigger module-mode
     rewriting — versioned interpreter basenames are still Python."""
     var debs = built_in_debuggers()
@@ -8245,7 +8245,7 @@ fn test_dap_launch_arguments_for_debugpy_versioned_python() raises:
     )
 
 
-fn test_dap_launch_arguments_for_debugpy_non_python_program() raises:
+def test_dap_launch_arguments_for_debugpy_non_python_program() raises:
     """A real script path (not the python binary) keeps ``program``
     mode even when ``-m`` happens to be in args, because that's a
     plain CLI flag at that point."""
@@ -8265,7 +8265,7 @@ fn test_dap_launch_arguments_for_debugpy_non_python_program() raises:
     assert_true(not body.object_get(String("module")))
 
 
-fn test_dap_launch_arguments_for_debugpy_script_mode() raises:
+def test_dap_launch_arguments_for_debugpy_script_mode() raises:
     """``python manage.py runserver`` should rewrite ``program`` to the
     script path (not the python binary) so debugpy actually runs the
     script. Without this, debugpy tries to ``runpy`` the python
@@ -8295,7 +8295,7 @@ fn test_dap_launch_arguments_for_debugpy_script_mode() raises:
     assert_equal(arr.value().array_at(0).as_str(), String("runserver"))
 
 
-fn test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
+def test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
     """When the first arg starts with a dash (e.g. ``-c``, ``-W``) we
     leave ``program`` alone — those flags need bespoke handling we
     don't do yet, so forwarding the unrewritten args lets debugpy
@@ -8320,7 +8320,7 @@ fn test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
     assert_true(not body.object_get(String("module")))
 
 
-fn test_dap_launch_arguments_for_delve() raises:
+def test_dap_launch_arguments_for_delve() raises:
     var debs = built_in_debuggers()
     var idx = find_debugger_for_language(debs, String("go"))
     assert_true(idx >= 0)
@@ -8333,7 +8333,7 @@ fn test_dap_launch_arguments_for_delve() raises:
     )
 
 
-fn test_dap_manager_breakpoint_toggle() raises:
+def test_dap_manager_breakpoint_toggle() raises:
     """Local breakpoint state mutates correctly even with no adapter
     spawned. Toggle semantics: add → remove → add."""
     var mgr = DapManager()
@@ -8349,7 +8349,7 @@ fn test_dap_manager_breakpoint_toggle() raises:
     assert_true(mgr.has_breakpoint(String("/tmp/x.py"), 12))
 
 
-fn test_dap_manager_breakpoint_enabled_default_and_toggle() raises:
+def test_dap_manager_breakpoint_enabled_default_and_toggle() raises:
     """New breakpoints default to enabled. ``set_breakpoint_enabled``
     flips the flag; the BP stays in the list (so the gutter still
     shows it) but is omitted from ``setBreakpoints`` payloads."""
@@ -8364,7 +8364,7 @@ fn test_dap_manager_breakpoint_enabled_default_and_toggle() raises:
     assert_true(mgr.breakpoint_enabled(String("/tmp/x.py"), 7))
 
 
-fn test_dap_manager_breakpoints_info_for() raises:
+def test_dap_manager_breakpoints_info_for() raises:
     """``breakpoints_info_for`` returns parallel lines / enabled /
     conditional lists for one path. The editor uses these to colour
     the gutter dot per-row."""
@@ -8387,7 +8387,7 @@ fn test_dap_manager_breakpoints_info_for() raises:
     assert_false(info[2][2])
 
 
-fn test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
+def test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
     """A BP with a non-empty wait-for stays disarmed until
     ``arm_dependents`` is called for the matching ``"path:line"``
     key. Setting and clearing ``wait_for`` flips the armed state in
@@ -8422,7 +8422,7 @@ fn test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
     assert_equal(mgr.breakpoint_wait_for(String("/tmp/x.py"), 12), String(""))
 
 
-fn test_dap_manager_captures_condition_exception_from_output() raises:
+def test_dap_manager_captures_condition_exception_from_output() raises:
     """A pydevd ``Error while evaluating expression in conditional
     breakpoint`` output event must be parsed into the condition + the
     short error summary (last non-empty traceback line). The full text
@@ -8451,7 +8451,7 @@ fn test_dap_manager_captures_condition_exception_from_output() raises:
     assert_false(Bool(mgr.take_condition_exception()))
 
 
-fn test_dap_manager_condition_exception_ignores_unrelated_output() raises:
+def test_dap_manager_condition_exception_ignores_unrelated_output() raises:
     """Plain stdout / stderr lines must not trip the condition-exception
     parser; otherwise random app output containing the word ``error``
     would pop the dialog."""
@@ -8472,7 +8472,7 @@ fn test_dap_manager_condition_exception_ignores_unrelated_output() raises:
     assert_false(mgr.has_condition_exception())
 
 
-fn test_editor_right_click_on_breakpoint_emits_menu_request() raises:
+def test_editor_right_click_on_breakpoint_emits_menu_request() raises:
     """Right-click in the gutter over a row that has a breakpoint
     surfaces a ``BreakpointMenuRequest``. A right-click on a gutter
     row *without* a breakpoint is a no-op."""
@@ -8496,7 +8496,7 @@ fn test_editor_right_click_on_breakpoint_emits_menu_request() raises:
     assert_false(Bool(ed.consume_breakpoint_menu()))
 
 
-fn test_project_targets_load_parses_fields() raises:
+def test_project_targets_load_parses_fields() raises:
     """A minimal config with one run-only and one run+debug target
     must round-trip through the loader with all fields populated."""
     var root = _temp_path(String("_targets"))
@@ -8542,7 +8542,7 @@ fn test_project_targets_load_parses_fields() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_project_targets_save_roundtrips_active() raises:
+def test_project_targets_save_roundtrips_active() raises:
     """``save_project_targets`` must rewrite the ``active`` pointer
     so the next ``load_project_targets`` returns the new selection."""
     var root = _temp_path(String("_targets_save"))
@@ -8575,7 +8575,7 @@ fn test_project_targets_save_roundtrips_active() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_project_targets_resolve_paths() raises:
+def test_project_targets_resolve_paths() raises:
     """``resolved_cwd`` anchors relative cwds on the project root.
     ``resolved_program`` mirrors shell semantics: a bare name (no
     slash) is left alone for ``$PATH`` resolution, anything with a
@@ -8610,7 +8610,7 @@ fn test_project_targets_resolve_paths() raises:
     )
 
 
-fn test_resolve_python_interpreter() raises:
+def test_resolve_python_interpreter() raises:
     """Bare ``python`` swaps to ``<project>/.venv/bin/python`` when one
     exists; otherwise it's returned unchanged for ``$PATH`` lookup.
     Anything that isn't ``python`` / ``python3`` is also pass-through
@@ -8665,7 +8665,7 @@ fn test_resolve_python_interpreter() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_python_venv_dir_finds_dotvenv() raises:
+def test_python_venv_dir_finds_dotvenv() raises:
     """``python_venv_dir`` returns the venv root when ``<root>/.venv``
     exists with a ``bin/python`` inside; an empty bare directory
     called ``venv`` (no ``bin/python``) doesn't count, so we don't
@@ -8706,7 +8706,7 @@ fn test_python_venv_dir_finds_dotvenv() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_python_debugger_spec_for_venv_prepends_venv_python() raises:
+def test_python_debugger_spec_for_venv_prepends_venv_python() raises:
     """``python_debugger_spec_for_venv`` adds a ``<venv>/bin/python -m
     debugpy.adapter`` candidate at the front of the python spec's
     candidate list when ``<venv>/bin/python`` exists, leaving the
@@ -8753,7 +8753,7 @@ fn test_python_debugger_spec_for_venv_prepends_venv_python() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_detect_project_language_python_markers() raises:
+def test_detect_project_language_python_markers() raises:
     """``detect_project_language`` flags any project root that
     contains a known Python marker file (``pyproject.toml`` /
     ``setup.py`` / ``setup.cfg``) as ``python``. A bare ``*.py``
@@ -8789,7 +8789,7 @@ fn test_detect_project_language_python_markers() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_detect_project_language_no_match() raises:
+def test_detect_project_language_no_match() raises:
     """A project root with no known markers returns the empty string,
     which the caller surfaces as a "couldn't detect" status hint
     rather than picking the wrong runner."""
@@ -8804,7 +8804,7 @@ fn test_detect_project_language_no_match() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
-fn test_status_bar_tab_hit_test() raises:
+def test_status_bar_tab_hit_test() raises:
     """Painting the bar captures per-tab rects; ``hit_test_tab`` then
     routes a click on each tab to its index, and a click outside
     the strip to -1."""
@@ -8826,7 +8826,7 @@ fn test_status_bar_tab_hit_test() raises:
     assert_equal(sb.hit_test_tab(Point(2, 0), Rect(0, 0, 80, 10)), -1)
 
 
-fn test_shadow_button_paints_face_and_shadow() raises:
+def test_shadow_button_paints_face_and_shadow() raises:
     """The shared button widget must paint the label on a green
     face and drop a half-block shadow on the right column + the
     row below — same idiom the dir_browser jump strip uses."""
@@ -8850,7 +8850,7 @@ fn test_shadow_button_paints_face_and_shadow() raises:
     assert_equal(canvas.get(1, 1).attr.bg, LIGHT_GRAY)
 
 
-fn test_shadow_button_hit_includes_shadow_rows() raises:
+def test_shadow_button_hit_includes_shadow_rows() raises:
     """A click on the bottom-shadow row should still register —
     users miss-click downward routinely. Clicks outside the hit
     rect (or on motion / non-press events) must be rejected."""
@@ -8874,7 +8874,7 @@ fn test_shadow_button_hit_includes_shadow_rows() raises:
     assert_false(shadow_button_hit(btn, release))
 
 
-fn test_canvas_darken_rect_preserves_glyph() raises:
+def test_canvas_darken_rect_preserves_glyph() raises:
     """``darken_rect`` is the compositor primitive for drop shadows:
     it changes a cell's attr to dim-on-black but must leave the
     glyph (and width) alone, so whatever the caller painted there
@@ -8900,7 +8900,7 @@ fn test_canvas_darken_rect_preserves_glyph() raises:
     assert_equal(c.get(4, 0).attr.fg, WHITE)
 
 
-fn test_paint_drop_shadow_targets_right_and_bottom() raises:
+def test_paint_drop_shadow_targets_right_and_bottom() raises:
     """``paint_drop_shadow`` darkens the 2-cell right strip (offset
     one row down from the top edge) and the 1-row bottom strip
     (offset 2 cells right of the left edge), matching the diagonal
@@ -8931,7 +8931,7 @@ fn test_paint_drop_shadow_targets_right_and_bottom() raises:
     assert_equal(c.get(5, 3).attr.bg, BLUE)
 
 
-fn test_debug_pane_default_title_is_debug() raises:
+def test_debug_pane_default_title_is_debug() raises:
     """``DebugPane`` defaults to DEBUG mode — the pane's top border
     paints ``Debug`` so existing callers see no behavioural change."""
     var pane = DebugPane()
@@ -8944,7 +8944,7 @@ fn test_debug_pane_default_title_is_debug() raises:
     assert_equal(c.get(5, 0).glyph, String("b"))
 
 
-fn test_debug_pane_run_mode_swaps_title() raises:
+def test_debug_pane_run_mode_swaps_title() raises:
     """RUN mode flips the title to ``Run`` — the pane's the same
     code path, just a different label."""
     var pane = DebugPane()
@@ -8957,7 +8957,7 @@ fn test_debug_pane_run_mode_swaps_title() raises:
     assert_equal(c.get(5, 0).glyph, String("n"))
 
 
-fn test_debug_pane_run_mode_hides_inspect_divider() raises:
+def test_debug_pane_run_mode_hides_inspect_divider() raises:
     """RUN mode collapses Stack/Locals (always empty there) so Output
     fills the pane. The ``─ Output ─`` divider row that DEBUG paints
     between the two sections must NOT be drawn — a row of ``─``
@@ -8978,7 +8978,7 @@ fn test_debug_pane_run_mode_hides_inspect_divider() raises:
             assert_true(False)
 
 
-fn test_debug_pane_run_mode_uses_full_height_for_output() raises:
+def test_debug_pane_run_mode_uses_full_height_for_output() raises:
     """The most recent output line must reach the bottom row of the
     panel — RUN mode saves the divider row that DEBUG mode would have
     painted, and that row goes to Output instead."""
@@ -8996,7 +8996,7 @@ fn test_debug_pane_run_mode_uses_full_height_for_output() raises:
     assert_equal(c.get(4, 9).glyph, String("n"))
 
 
-fn test_debug_pane_debug_mode_keeps_output_divider() raises:
+def test_debug_pane_debug_mode_keeps_output_divider() raises:
     """DEBUG mode with inspect content paints the ``─ Output ─`` divider
     so the Stack / Locals columns read as a separate section above the
     log."""
@@ -9021,7 +9021,7 @@ fn test_debug_pane_debug_mode_keeps_output_divider() raises:
     assert_true(found)
 
 
-fn test_debug_pane_subtle_frame_paints_dim() raises:
+def test_debug_pane_subtle_frame_paints_dim() raises:
     """A frame the adapter marked subtle (library / external code)
     paints in DARK_GRAY rather than WHITE so the user can still see
     the full call chain but visually distinguish their own code. The
@@ -9072,7 +9072,7 @@ fn test_debug_pane_subtle_frame_paints_dim() raises:
     assert_true(c.get(user_x, user_y).attr.fg != DARK_GRAY)
 
 
-fn test_debug_pane_debug_mode_running_hides_inspect() raises:
+def test_debug_pane_debug_mode_running_hides_inspect() raises:
     """DEBUG mode with no inspect rows (the program is running but not
     paused) drops the Stack / Locals columns and the ``─ Output ─``
     divider — same layout as RUN mode. Until a ``stopped`` event fires
@@ -9090,7 +9090,7 @@ fn test_debug_pane_debug_mode_running_hides_inspect() raises:
             assert_true(False)
 
 
-fn _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
+def _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
     """Locate the first column at row ``y`` whose glyph matches
     ``glyph``. Returns -1 when not found."""
     for x in range(c.width):
@@ -9099,7 +9099,7 @@ fn _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
     return -1
 
 
-fn test_debug_pane_traceback_link_underlines_span() raises:
+def test_debug_pane_traceback_link_underlines_span() raises:
     """A Python-style ``File "<path>", line N`` entry in the output log
     must paint with an underline + LIGHT_BLUE foreground over the whole
     ``File "..." , line N`` span so users see it as a clickable link."""
@@ -9142,7 +9142,7 @@ fn test_debug_pane_traceback_link_underlines_span() raises:
     assert_true((after.attr.style & STYLE_UNDERLINE) == 0)
 
 
-fn test_debug_pane_plain_output_has_no_link_styling() raises:
+def test_debug_pane_plain_output_has_no_link_styling() raises:
     """A line that doesn't match the traceback pattern is painted with
     the normal output attribute — no underline, default foreground."""
     var pane = DebugPane()
@@ -9162,7 +9162,7 @@ fn test_debug_pane_plain_output_has_no_link_styling() raises:
         assert_true((cell.attr.style & STYLE_UNDERLINE) == 0)
 
 
-fn test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
+def test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
     """Clicking inside the link span stores ``(path, line)`` for the
     host to consume. The trailing ``in main`` text is *not* part of the
     span, so a click on ``in`` falls through to the autoscroll-toggle
@@ -9211,7 +9211,7 @@ fn test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
     assert_equal(req3[0], String(""))
 
 
-fn test_text_view_wrap_lines_breaks_at_width() raises:
+def test_text_view_wrap_lines_breaks_at_width() raises:
     """``wrap_lines`` produces one ``VisualLine`` per painted row,
     splitting at exactly ``content_w`` cells with no overlap."""
     var lines = List[String]()
@@ -9235,7 +9235,7 @@ fn test_text_view_wrap_lines_breaks_at_width() raises:
     assert_equal(wrapped[4].cell_count, 2)
 
 
-fn test_text_view_wrap_lines_word_aware_with_indent() raises:
+def test_text_view_wrap_lines_word_aware_with_indent() raises:
     """Editor mode: word-aware wrap that backs up to the last
     non-word ASCII byte and indents continuations under the parent's
     leading whitespace plus one indent unit."""
@@ -9255,7 +9255,7 @@ fn test_text_view_wrap_lines_word_aware_with_indent() raises:
     assert_equal(rows[1].indent_cells, 8)
 
 
-fn test_text_view_selection_extracts_text() raises:
+def test_text_view_selection_extracts_text() raises:
     """``Selection.extracted_text`` slices a flat ``List[String]`` by
     cell coordinates and joins lines with ``\\n``."""
     var lines = List[String]()
@@ -9279,7 +9279,7 @@ fn test_text_view_selection_extracts_text() raises:
     assert_equal(rev.extracted_text(lines), String("line"))
 
 
-fn test_string_utils_slice_codepoints_handles_multibyte() raises:
+def test_string_utils_slice_codepoints_handles_multibyte() raises:
     """``slice_codepoints`` slices by codepoint, not byte, so multi-byte
     characters survive intact and cell offsets line up with cursor
     positions."""
@@ -9291,7 +9291,7 @@ fn test_string_utils_slice_codepoints_handles_multibyte() raises:
     assert_equal(slice_codepoints(s, 3, 3), String(""))
 
 
-fn test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
+def test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
     """When the run/debug output overflows the visible area, a vertical
     scrollbar must be painted in the right margin (column ``panel.b.x - 1``)
     with ▲ at the top and ▼ at the bottom of the output rect."""
@@ -9315,7 +9315,7 @@ fn test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
     assert_true(thumb_seen)
 
 
-fn test_debug_pane_run_log_no_scrollbar_when_content_fits() raises:
+def test_debug_pane_run_log_no_scrollbar_when_content_fits() raises:
     """A short log fits in the output area, so no scrollbar should
     be painted — the rightmost column stays as the panel background."""
     var pane = DebugPane()
@@ -9333,7 +9333,7 @@ fn test_debug_pane_run_log_no_scrollbar_when_content_fits() raises:
         )
 
 
-fn test_debug_pane_run_log_arrow_click_scrolls_output() raises:
+def test_debug_pane_run_log_arrow_click_scrolls_output() raises:
     """A click on the ▼ arrow at the bottom of the scrollbar nudges
     the output down — autoscroll engages because we hit the bottom,
     then a click on the ▲ pulls scroll back up and disengages it."""
@@ -9355,7 +9355,7 @@ fn test_debug_pane_run_log_arrow_click_scrolls_output() raises:
     assert_false(pane.output.autoscroll)
 
 
-fn test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
+def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
     """Pressing on the thumb starts a drag; mouse motion moves scroll;
     release ends the drag. Verifies the wiring end-to-end."""
     var pane = DebugPane()
@@ -9392,7 +9392,7 @@ fn test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
     )
 
 
-fn test_debug_pane_long_output_line_soft_wraps() raises:
+def test_debug_pane_long_output_line_soft_wraps() raises:
     """A line longer than the panel content width paints across
     multiple visual rows. Verifies the line shows up on more than
     one row and that the second row continues with the next chars."""
@@ -9415,7 +9415,7 @@ fn test_debug_pane_long_output_line_soft_wraps() raises:
     assert_true(second_x >= 0)
 
 
-fn test_debug_pane_drag_selects_output_text() raises:
+def test_debug_pane_drag_selects_output_text() raises:
     """Dragging across output text marks a selection — verified
     through ``selected_text``. A press without a drag clears the
     selection (no zero-width selection on a plain click)."""
@@ -9454,7 +9454,7 @@ fn test_debug_pane_drag_selects_output_text() raises:
     assert_equal(pane.selected_text(), String("hello world"))
 
 
-fn test_debug_pane_selection_spans_multiple_lines() raises:
+def test_debug_pane_selection_spans_multiple_lines() raises:
     """A selection that starts on one logical line and ends on
     another joins the two slices with a newline."""
     var pane = DebugPane()
@@ -9502,7 +9502,7 @@ fn test_debug_pane_selection_spans_multiple_lines() raises:
     )
 
 
-fn test_debug_pane_plain_click_clears_selection() raises:
+def test_debug_pane_plain_click_clears_selection() raises:
     """A press without any drag motion produces no selection — the
     user just landed on a row, didn't ask to copy anything."""
     var pane = DebugPane()
@@ -9533,7 +9533,7 @@ fn test_debug_pane_plain_click_clears_selection() raises:
     assert_equal(pane.selected_text(), String(""))
 
 
-fn test_targets_dialog_edit_and_submit() raises:
+def test_targets_dialog_edit_and_submit() raises:
     """A dialog round-trip: open with two existing targets, type a
     new name into the focused input, then add a third target — the
     final ``into_targets`` must reflect both edits and place the
@@ -9566,7 +9566,7 @@ fn test_targets_dialog_edit_and_submit() raises:
     assert_equal(rebuilt.targets[rebuilt.active].name, String("betaX"))
 
 
-fn test_targets_dialog_add_and_remove() raises:
+def test_targets_dialog_add_and_remove() raises:
     """Adding then removing yields the original list (modulo empty
     ``run`` field on the new entry, which is fine for this test —
     we never persist it)."""
@@ -9592,7 +9592,7 @@ fn test_targets_dialog_add_and_remove() raises:
     assert_equal(dlg.entries[0].name, String("only"))
 
 
-fn test_targets_dialog_save_button_submits() raises:
+def test_targets_dialog_save_button_submits() raises:
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("only")
@@ -9605,7 +9605,7 @@ fn test_targets_dialog_save_button_submits() raises:
     assert_true(dlg.submitted)
 
 
-fn test_targets_dialog_esc_discards_edits() raises:
+def test_targets_dialog_esc_discards_edits() raises:
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("a")
@@ -9622,7 +9622,7 @@ fn test_targets_dialog_esc_discards_edits() raises:
     assert_false(dlg.submitted)
 
 
-fn test_run_session_lifecycle() raises:
+def test_run_session_lifecycle() raises:
     """``RunSession.start`` spawns ``program`` + ``args``;
     ``poll_run_exit`` reaps the child and exposes its exit code."""
     var s = RunSession()
@@ -9664,7 +9664,7 @@ fn test_run_session_lifecycle() raises:
     assert_true(has_hi)
 
 
-fn test_doc_registry_lookup() raises:
+def test_doc_registry_lookup() raises:
     """Built-in docsets should resolve every language id we ship with
     a server in the LSP catalog (so the user can hit Ctrl+K on the
     same files Cmd+click works on), and every spec's language_id must
@@ -9689,7 +9689,7 @@ fn test_doc_registry_lookup() raises:
     assert_equal(find_docset_for_extension(specs, String("xyz")), -1)
 
 
-fn test_doc_install_command_shape() raises:
+def test_doc_install_command_shape() raises:
     """The install command must:
     * mkdir the destination dir,
     * curl both index.json and db.json,
@@ -9752,7 +9752,7 @@ fn test_doc_install_command_shape() raises:
     assert_true(has_mkdir)
 
 
-fn test_html_to_text_basics() raises:
+def test_html_to_text_basics() raises:
     """Tags strip cleanly, entities decode, ``<b>`` becomes ``**``, and
     paragraphs are separated by a blank line."""
     var rendered = html_to_text(String(
@@ -9808,7 +9808,7 @@ fn test_html_to_text_basics() raises:
         assert_true(b[i] != 0x3C and b[i] != 0x3E)
 
 
-fn test_html_to_text_headings_become_hashes() raises:
+def test_html_to_text_headings_become_hashes() raises:
     """``<h1>`` -> ``#``, ``<h2>`` -> ``##``, … with a blank line below."""
     var rendered = html_to_text(String(
         "<h1>Title</h1><h2>Sub</h2><p>Body.</p>"
@@ -9829,7 +9829,7 @@ fn test_html_to_text_headings_become_hashes() raises:
     assert_true(found)
 
 
-fn test_html_to_text_lists_and_inline() raises:
+def test_html_to_text_lists_and_inline() raises:
     """``<ul>`` items get ``- ``, ``<ol>`` items get ``1. ``,
     ``<code>`` becomes backticks, ``<a href>`` becomes
     ``[text](href)``."""
@@ -9897,7 +9897,7 @@ fn test_html_to_text_lists_and_inline() raises:
     assert_true(ol_found)
 
 
-fn test_html_to_text_pre_uses_fence() raises:
+def test_html_to_text_pre_uses_fence() raises:
     """``<pre>`` blocks are wrapped in ```` ``` ```` fences while
     keeping their internal whitespace verbatim."""
     var rendered = html_to_text(String(
@@ -9919,7 +9919,7 @@ fn test_html_to_text_pre_uses_fence() raises:
     assert_true(found)
 
 
-fn test_html_to_text_preserves_pre() raises:
+def test_html_to_text_preserves_pre() raises:
     """``<pre>`` blocks must keep their internal whitespace verbatim —
     that's the whole point of code samples in the docs.
 
@@ -9948,7 +9948,7 @@ fn test_html_to_text_preserves_pre() raises:
     assert_true(found)
 
 
-fn test_find_doc_entry_exact_match_wins() raises:
+def test_find_doc_entry_exact_match_wins() raises:
     """Exact name match beats both case-insensitive and suffix matches.
 
     Without this priority a click on ``find`` (which has a top-level
@@ -9971,7 +9971,7 @@ fn test_find_doc_entry_exact_match_wins() raises:
     assert_equal(idx, 1)
 
 
-fn test_find_doc_entry_falls_back_to_suffix_match() raises:
+def test_find_doc_entry_falls_back_to_suffix_match() raises:
     """When no entry matches the bare word, ``foo`` should still resolve
     to ``Type.foo`` so a Cmd+click on ``s.find()`` opens ``str.find``."""
     var entries = List[DocEntry]()
@@ -9987,7 +9987,7 @@ fn test_find_doc_entry_falls_back_to_suffix_match() raises:
     assert_equal(idx, 1)
 
 
-fn test_find_doc_entry_returns_minus_one_when_no_match() raises:
+def test_find_doc_entry_returns_minus_one_when_no_match() raises:
     var entries = List[DocEntry]()
     entries.append(DocEntry(
         String("abs"), String("library/functions"),
@@ -10001,7 +10001,7 @@ fn test_find_doc_entry_returns_minus_one_when_no_match() raises:
     assert_equal(_find_doc_entry_for_word(entries, String("")), -1)
 
 
-fn test_find_doc_entry_case_insensitive_when_no_exact() raises:
+def test_find_doc_entry_case_insensitive_when_no_exact() raises:
     """CSS / HTML docs spell some entries lowercase even if the source
     site uses TitleCase; a Cmd+click that comes back empty from the
     LSP should still find the entry. Exact match would have already
@@ -10016,7 +10016,7 @@ fn test_find_doc_entry_case_insensitive_when_no_exact() raises:
     assert_equal(idx, 0)
 
 
-fn test_html_to_text_strips_script_and_style() raises:
+def test_html_to_text_strips_script_and_style() raises:
     """``<script>`` / ``<style>`` content must not leak into the
     rendered text. DevDocs HTML doesn't ship script tags, but vendored
     HTML from arbitrary doc sources sometimes does, and surfacing
@@ -10040,7 +10040,7 @@ fn test_html_to_text_strips_script_and_style() raises:
     assert_false(leaked)
 
 
-fn test_html_to_text_table_renders_as_gfm_table() raises:
+def test_html_to_text_table_renders_as_gfm_table() raises:
     """``<table>`` becomes a GFM table: pipe-bordered rows, a separator
     after the first row, columns padded to the widest cell, and inline
     markup inside cells survives the recursive cell render. The earlier
@@ -10081,7 +10081,7 @@ fn test_html_to_text_table_renders_as_gfm_table() raises:
     assert_true(found)
 
 
-fn test_html_to_text_table_escapes_pipes_in_cells() raises:
+def test_html_to_text_table_escapes_pipes_in_cells() raises:
     """A literal ``|`` inside a cell would otherwise terminate the cell
     early and shift every column to its right; we escape as ``\\|``."""
     var rendered = html_to_text(String(
@@ -10103,7 +10103,7 @@ fn test_html_to_text_table_escapes_pipes_in_cells() raises:
     assert_true(found)
 
 
-fn test_session_round_trip() raises:
+def test_session_round_trip() raises:
     """A persisted session should decode to the same fields it was
     encoded from. Covers the full ``encode_session`` → ``parse_json``
     → ``load_session`` path against a temp project root so the test
@@ -10175,7 +10175,7 @@ fn test_session_round_trip() raises:
     )
 
 
-fn test_session_load_missing_returns_empty() raises:
+def test_session_load_missing_returns_empty() raises:
     """A project root with no ``.turbokod/session.json`` should yield
     an empty session — that's the signal ``_restore_session`` uses to
     skip the restore path entirely."""
@@ -10185,7 +10185,7 @@ fn test_session_load_missing_returns_empty() raises:
     assert_equal(s.focused, -1)
 
 
-fn test_breakpoint_store_round_trip() raises:
+def test_breakpoint_store_round_trip() raises:
     """Persisted breakpoints decode to the same fields they were
     encoded from. Inside-project paths are stored project-relative so
     the file survives moving the project directory; absolute paths
@@ -10239,13 +10239,13 @@ fn test_breakpoint_store_round_trip() raises:
     )
 
 
-fn test_breakpoint_store_load_missing_returns_empty() raises:
+def test_breakpoint_store_load_missing_returns_empty() raises:
     """No file → empty list. Mirrors the session-store contract."""
     var bps = load_breakpoints(String("/tmp/turbokod_bp_does_not_exist_xyz"))
     assert_equal(len(bps), 0)
 
 
-fn test_breakpoint_store_per_user_path() raises:
+def test_breakpoint_store_per_user_path() raises:
     """The on-disk file lives under ``per_user/<USER>/``. Verify by
     overriding ``$USER`` for the test and checking the file appears at
     the expected sub-path. Without this isolation an accidental
@@ -10273,7 +10273,7 @@ fn test_breakpoint_store_per_user_path() raises:
     )
 
 
-fn test_view_state_store_round_trip() raises:
+def test_view_state_store_round_trip() raises:
     """Persisted per-file view states decode back to the same fields.
     Inside-project paths are stored project-relative so the file
     survives moving the project; absolute paths pass through. The
@@ -10309,7 +10309,7 @@ fn test_view_state_store_round_trip() raises:
     )
 
 
-fn test_view_state_store_load_missing_returns_empty() raises:
+def test_view_state_store_load_missing_returns_empty() raises:
     """No file → empty list. Same contract as the sibling stores so
     the Desktop can blindly load on every project open."""
     var vs = load_view_states(
@@ -10318,7 +10318,7 @@ fn test_view_state_store_load_missing_returns_empty() raises:
     assert_equal(len(vs), 0)
 
 
-fn test_view_state_store_per_user_path() raises:
+def test_view_state_store_per_user_path() raises:
     """The on-disk file lives under ``per_user/<USER>/`` next to
     breakpoints.json — keeps each developer's scroll positions
     separate, so an accidental ``git add .turbokod`` doesn't replace
@@ -10346,7 +10346,7 @@ fn test_view_state_store_per_user_path() raises:
     )
 
 
-fn test_session_relative_path_round_trip() raises:
+def test_session_relative_path_round_trip() raises:
     """``_session_relative`` strips the project prefix; the inverse
     re-anchors. Files outside the project keep their absolute form
     on the way out and pass through on the way back in."""
@@ -10363,7 +10363,7 @@ fn test_session_relative_path_round_trip() raises:
     assert_equal(resolved_out, outside)
 
 
-fn test_desktop_restores_session_from_disk() raises:
+def test_desktop_restores_session_from_disk() raises:
     """Open a project that already has a ``.turbokod/session.json`` and
     confirm the desktop replays it: a window for the saved file shows
     up, the rect / cursor / scroll are reapplied, and the focused
@@ -10418,7 +10418,7 @@ fn test_desktop_restores_session_from_disk() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_resize_reapplies_clipped_session_rect() raises:
+def test_desktop_resize_reapplies_clipped_session_rect() raises:
     """When the first restore lands on a smaller-than-saved workspace
     (the host pushes its real dimensions a few ms after startup), the
     saved rects get clipped down. A subsequent resize event must re-
@@ -10472,7 +10472,7 @@ fn test_desktop_resize_reapplies_clipped_session_rect() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
+def test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
     """``_set_project`` must arm the session restore even when host-added
     placeholder windows are already present. Regression for: a host that
     adds non-file-backed demo windows before opening a file blocked the
@@ -10498,7 +10498,7 @@ fn test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
+def test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
     """When a saved window's ``rect`` differs from its ``restore_rect``
     (e.g. user dragged a non-maximized window after creation, so the
     constructor-stamped ``_restore_rect`` is now stale), restoring it
@@ -10554,7 +10554,7 @@ fn test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_snapshot_captures_per_window_rects() raises:
+def test_desktop_snapshot_captures_per_window_rects() raises:
     """Each open file-backed window must show up in the snapshot with
     its own rect. Regression guard: a copy bug or wrong loop variable
     would yield identical rects across the session entries."""
@@ -10613,7 +10613,7 @@ fn test_desktop_snapshot_captures_per_window_rects() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_restores_multiple_windows_at_distinct_positions() raises:
+def test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     """Two saved windows must come back at the *two* rects on disk —
     not both at the same position. Regression guard against snapshot
     or restore code accidentally copying one window's rect into the
@@ -10690,7 +10690,7 @@ fn test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raises:
+def test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raises:
     """A saved maximized window must come back maximized AND keep its
     own ``_restore_rect`` so un-maximizing returns to the user's
     pre-max layout — not to the shared workspace rect. Regression for
@@ -10736,7 +10736,7 @@ fn test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raises
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_save_then_restore_round_trip_through_paint() raises:
+def test_desktop_save_then_restore_round_trip_through_paint() raises:
     """End-to-end: open two files in a project at distinct rects via
     ``paint`` (which writes the session), then construct a fresh
     ``Desktop`` against the same project and confirm the saved layout
@@ -10803,7 +10803,7 @@ fn test_desktop_save_then_restore_round_trip_through_paint() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
-fn test_desktop_snapshot_skips_untitled_windows() raises:
+def test_desktop_snapshot_skips_untitled_windows() raises:
     """``_snapshot_session`` filters out non-editor windows and
     file-less editors (Untitled buffers). Only file-backed editors
     show up in the saved session."""
@@ -10826,7 +10826,7 @@ fn test_desktop_snapshot_skips_untitled_windows() raises:
     assert_equal(path, String("examples/hello.mojo"))
 
 
-fn test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
+def test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
     """The bundled diff TextMate grammar maps ``-`` lines to the string
     color (red), ``+`` lines to the ident color (green), and the
     ``@@`` hunk header to the decorator color (cyan)."""
@@ -10855,7 +10855,7 @@ fn test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
     assert_true(saw_range)
 
 
-fn test_diff_identical_inputs_have_no_hunks() raises:
+def test_diff_identical_inputs_have_no_hunks() raises:
     """Two identical inputs produce only the file headers — no ``@@``."""
     var same = String("alpha\nbeta\ngamma\n")
     var out = unified_diff(same, same, String("a"), String("b"))
@@ -10863,7 +10863,7 @@ fn test_diff_identical_inputs_have_no_hunks() raises:
     assert_equal(idx, -1)
 
 
-fn test_diff_lines_pure_insert() raises:
+def test_diff_lines_pure_insert() raises:
     """Inserting one line in the middle: one delete-free, one insert op."""
     var a = List[String]()
     a.append(String("one"))
@@ -10888,7 +10888,7 @@ fn test_diff_lines_pure_insert() raises:
     assert_equal(deletes, 0)
 
 
-fn test_diff_lines_pure_delete() raises:
+def test_diff_lines_pure_delete() raises:
     """Removing one line: one delete op, no inserts."""
     var a = List[String]()
     a.append(String("one"))
@@ -10913,7 +10913,7 @@ fn test_diff_lines_pure_delete() raises:
     assert_equal(deletes, 1)
 
 
-fn test_diff_lines_replace_round_trips() raises:
+def test_diff_lines_replace_round_trips() raises:
     """Applying the edit script must turn ``a`` into ``b`` exactly."""
     var a = List[String]()
     a.append(String("the quick brown fox"))
@@ -10939,7 +10939,7 @@ fn test_diff_lines_replace_round_trips() raises:
         assert_equal(produced[i], b[i])
 
 
-fn test_unified_diff_renders_hunk_header_and_marks() raises:
+def test_unified_diff_renders_hunk_header_and_marks() raises:
     """A simple replace: hunk header present, ``-old`` and ``+new`` lines
     emitted, surrounding equals appear with a leading space."""
     var a = String("alpha\nbeta\ngamma\n")
@@ -10954,7 +10954,7 @@ fn test_unified_diff_renders_hunk_header_and_marks() raises:
     assert_true(out.find(String(" gamma")) >= 0)
 
 
-fn test_git_blame_parses_two_line_porcelain() raises:
+def test_git_blame_parses_two_line_porcelain() raises:
     """Two source lines, two distinct commits — parser must emit one
     ``BlameLine`` per line with the right short-SHA + author. Each
     record's first occurrence carries metadata; that author should
@@ -10980,7 +10980,7 @@ fn test_git_blame_parses_two_line_porcelain() raises:
     assert_equal(lines[1].author, String("Bob"))
 
 
-fn test_git_blame_propagates_cached_author_for_repeated_sha() raises:
+def test_git_blame_propagates_cached_author_for_repeated_sha() raises:
     """Lines 2..N of a same-commit group only carry ``<sha> <orig> <final>``
     + ``\\t<content>`` — no metadata. The parser must remember the
     author from the first occurrence so the repeated lines still get
@@ -11002,7 +11002,7 @@ fn test_git_blame_propagates_cached_author_for_repeated_sha() raises:
     assert_equal(lines[1].author, String("Carol"))
 
 
-fn test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder() raises:
+def test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder() raises:
     """Git emits a 40-char zero SHA and ``Not Committed Yet`` author
     for lines that exist only in the worktree. The parser preserves
     that — tests downstream rendering doesn't crash on the all-zero
@@ -11019,7 +11019,7 @@ fn test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder() raises:
     assert_equal(lines[0].author, String("Not Committed Yet"))
 
 
-fn test_editor_blame_gutter_widens_total_gutter() raises:
+def test_editor_blame_gutter_widens_total_gutter() raises:
     """``set_blame`` enables the gutter; the editor's overall left
     margin grows to make room for ``<sha> <author>`` (8+1+14+1 = 24
     cells). Toggling off shrinks the margin back."""
@@ -11035,7 +11035,7 @@ fn test_editor_blame_gutter_widens_total_gutter() raises:
     assert_equal(ed._blame_gutter(), 0)
 
 
-fn test_parse_unified_diff_splits_two_files() raises:
+def test_parse_unified_diff_splits_two_files() raises:
     """Two files in one diff stream — the parser must split on the
     ``diff --git`` boundary and pull each path from the ``+++ b/...``
     header. The first file's chunk gets ``+++ b/foo.txt`` so its path
@@ -11063,7 +11063,7 @@ fn test_parse_unified_diff_splits_two_files() raises:
     assert_equal(files[1].path, String("dir/bar.mojo"))
 
 
-fn test_parse_unified_diff_handles_pure_delete() raises:
+def test_parse_unified_diff_handles_pure_delete() raises:
     """A pure file delete shows ``+++ /dev/null``; the parser must
     fall back to ``--- a/<path>`` so the sidebar still has a real
     name to show."""
@@ -11081,7 +11081,7 @@ fn test_parse_unified_diff_handles_pure_delete() raises:
     assert_equal(files[0].path, String("gone.txt"))
 
 
-fn test_diff_buffer_against_head_marks_added_and_modified() raises:
+def test_diff_buffer_against_head_marks_added_and_modified() raises:
     """Diffing the editor's in-memory line list against the HEAD blob
     marks pure inserts as ADDED and inserts paired with deletes as
     MODIFIED. Lines untouched on either side land as NONE."""
@@ -11107,7 +11107,7 @@ fn test_diff_buffer_against_head_marks_added_and_modified() raises:
     assert_equal(marks[4], GIT_CHANGE_NONE)
 
 
-fn test_compute_revert_block_modified_line() raises:
+def test_compute_revert_block_modified_line() raises:
     """Reverting a modified line maps the buffer row back to the run's
     HEAD lines so the editor can splice them in place."""
     var head = (
@@ -11129,7 +11129,7 @@ fn test_compute_revert_block_modified_line() raises:
     assert_equal(block.head_lines[0], String("beta"))
 
 
-fn test_compute_revert_block_added_line() raises:
+def test_compute_revert_block_added_line() raises:
     """Reverting a pure-insert run yields an empty HEAD slice — the
     editor splices nothing in, effectively deleting the buffer rows."""
     var head = (
@@ -11149,7 +11149,7 @@ fn test_compute_revert_block_added_line() raises:
     assert_equal(len(block.head_lines), 0)
 
 
-fn test_compute_revert_block_unchanged_returns_empty() raises:
+def test_compute_revert_block_unchanged_returns_empty() raises:
     """A row that matches HEAD has nothing to revert."""
     var head = (
         String("alpha\n")
@@ -11163,7 +11163,7 @@ fn test_compute_revert_block_unchanged_returns_empty() raises:
     assert_true(not Bool(block_opt))
 
 
-fn test_editor_git_changes_gutter_widens_total_gutter() raises:
+def test_editor_git_changes_gutter_widens_total_gutter() raises:
     """``set_git_changes`` flips the column on; the editor's overall
     left margin grows by exactly one cell. ``invalidate_git_changes``
     drops the cache so the gutter goes away again."""
@@ -11180,7 +11180,7 @@ fn test_editor_git_changes_gutter_widens_total_gutter() raises:
     assert_equal(ed._git_changes_gutter(), 0)
 
 
-fn test_editor_right_gutter_paints_gray_square_for_changes() raises:
+def test_editor_right_gutter_paints_gray_square_for_changes() raises:
     """When the file fits in the view, the right-edge column maps 1:1
     onto buffer rows: a gray ``■`` lands on each row whose status is
     ADDED or MODIFIED, and rows with no change leave the column blank."""
@@ -11206,7 +11206,7 @@ fn test_editor_right_gutter_paints_gray_square_for_changes() raises:
     assert_equal(ed._right_gutter(), 0)
 
 
-fn test_editor_right_gutter_projects_full_file_when_scrolled() raises:
+def test_editor_right_gutter_projects_full_file_when_scrolled() raises:
     """The right gutter is a minimap of the whole file, not of the
     visible region: scrolling past the changed line still paints the
     square at the projected screen row, computed off ``line_count`` and
@@ -11238,7 +11238,7 @@ fn test_editor_right_gutter_projects_full_file_when_scrolled() raises:
     assert_equal(canvas.get(39, 3).glyph, String(" "))
 
 
-fn test_local_changes_open_records_status_when_clean() raises:
+def test_local_changes_open_records_status_when_clean() raises:
     """Pointing the widget at ``/tmp`` (not a git repo) makes
     ``compute_local_changes`` return empty; ``open`` should record a
     user-readable status string and end up with no files."""
@@ -11251,7 +11251,7 @@ fn test_local_changes_open_records_status_when_clean() raises:
     assert_false(lc.active)
 
 
-fn test_local_changes_sidebar_splitter_drag_resizes_right_pane() raises:
+def test_local_changes_sidebar_splitter_drag_resizes_right_pane() raises:
     """A press on the vertical ``│`` splitter followed by a drag-motion
     must update ``sidebar_width_user``, which is what shrinks the
     sidebar and grows the right-side window. Verifies the artificial
@@ -11312,7 +11312,7 @@ fn test_local_changes_sidebar_splitter_drag_resizes_right_pane() raises:
     lc.close()
 
 
-fn test_docked_panel_stack_layout_normal_split() raises:
+def test_docked_panel_stack_layout_normal_split() raises:
     """All sections NORMAL → equal share of available content rows."""
     var dock = DockedPanelStack()
     _ = dock.add(String("A"))
@@ -11330,7 +11330,7 @@ fn test_docked_panel_stack_layout_normal_split() raises:
     assert_equal(lay[5], 7)
 
 
-fn test_docked_panel_stack_max_collapses_others() raises:
+def test_docked_panel_stack_max_collapses_others() raises:
     """Maximizing one section should give it nearly all the content
     while the other two collapse to header-only (height 1)."""
     var dock = DockedPanelStack()
@@ -11352,7 +11352,7 @@ fn test_docked_panel_stack_max_collapses_others() raises:
     assert_equal(lay[4], 22)  # 2 + 19 + 1 splitter
 
 
-fn test_docked_panel_stack_max_then_restore_resets_all() raises:
+def test_docked_panel_stack_max_then_restore_resets_all() raises:
     """Toggling max twice on the same section restores everyone to
     NORMAL (and clears the other sections' visually-min'd state too)."""
     var dock = DockedPanelStack()
@@ -11366,7 +11366,7 @@ fn test_docked_panel_stack_max_then_restore_resets_all() raises:
     assert_true(dock.all_normal())
 
 
-fn test_docked_panel_stack_min_collapses_one() raises:
+def test_docked_panel_stack_min_collapses_one() raises:
     """A single minimized section stays at height 1; the rest split
     the leftover."""
     var dock = DockedPanelStack()
@@ -11381,7 +11381,7 @@ fn test_docked_panel_stack_min_collapses_one() raises:
     assert_equal(lay[5], 10)
 
 
-fn test_docked_panel_stack_min_on_max_sibling_clears_max() raises:
+def test_docked_panel_stack_min_on_max_sibling_clears_max() raises:
     """If section A is MAXIMIZED (so B is visually min'd), clicking
     B's min/restore button must clear A's max and restore B to NORMAL —
     the ``effective`` state on B was MINIMIZED (because of A), so the
@@ -11399,7 +11399,7 @@ fn test_docked_panel_stack_min_on_max_sibling_clears_max() raises:
     assert_true(dock.all_normal())
 
 
-fn test_build_minimal_patch_keeps_only_target_plus_line() raises:
+def test_build_minimal_patch_keeps_only_target_plus_line() raises:
     """A pure-add hunk with two ``+`` lines: targeting one of them
     must produce a patch with just that one as ``+`` and the other
     dropped, leaving context lines intact. ``--recount`` will fix the
@@ -11435,7 +11435,7 @@ fn test_build_minimal_patch_keeps_only_target_plus_line() raises:
     assert_true(String("+++ b/x") in patch)
 
 
-fn test_build_minimal_patch_demotes_paired_minus_to_context() raises:
+def test_build_minimal_patch_demotes_paired_minus_to_context() raises:
     """A replacement hunk (``-`` paired with ``+``): targeting the
     ``+`` line forward (staging) must convert the ``-`` line into
     context so the LEFT side still matches the index. Otherwise the
@@ -11458,7 +11458,7 @@ fn test_build_minimal_patch_demotes_paired_minus_to_context() raises:
     assert_true(String(" old_line") in patch)
 
 
-fn test_build_minimal_patch_reverse_drops_paired_minus() raises:
+def test_build_minimal_patch_reverse_drops_paired_minus() raises:
     """In the staged section we use --reverse. Targeting a ``+`` line
     must convert other ``+`` lines to context (so the RIGHT side still
     matches the index) and drop other ``-`` lines (their would-be
@@ -11481,7 +11481,7 @@ fn test_build_minimal_patch_reverse_drops_paired_minus() raises:
     assert_false(String(" old_line") in patch)
 
 
-fn test_build_minimal_patch_returns_empty_for_non_pm_lines() raises:
+def test_build_minimal_patch_returns_empty_for_non_pm_lines() raises:
     """Cursor on a context / header line: nothing to stage, return
     empty so the caller can no-op cleanly."""
     var diff = String(
@@ -11501,7 +11501,7 @@ fn test_build_minimal_patch_returns_empty_for_non_pm_lines() raises:
     assert_equal(len(build_minimal_patch(diff, 0, False).as_bytes()), 0)
 
 
-fn _run_git(root: String, var args: List[String]) raises -> Int:
+def _run_git(root: String, var args: List[String]) raises -> Int:
     """Wrapper around ``capture_command`` for the staging integration
     test below. Returns the exit status. We rebuild the argv with
     ``git -C <root>`` in front so the test doesn't have to repeat it."""
@@ -11515,7 +11515,7 @@ fn _run_git(root: String, var args: List[String]) raises -> Int:
     return Int(r.status)
 
 
-fn _ensure_dir(path: String) raises:
+def _ensure_dir(path: String) raises:
     var argv = List[String]()
     argv.append(String("mkdir"))
     argv.append(String("-p"))
@@ -11523,7 +11523,7 @@ fn _ensure_dir(path: String) raises:
     _ = capture_command(argv)
 
 
-fn _rm_rf(path: String) raises:
+def _rm_rf(path: String) raises:
     var argv = List[String]()
     argv.append(String("rm"))
     argv.append(String("-rf"))
@@ -11531,7 +11531,7 @@ fn _rm_rf(path: String) raises:
     _ = capture_command(argv)
 
 
-fn test_git_state_mtimes_zero_for_non_repo() raises:
+def test_git_state_mtimes_zero_for_non_repo() raises:
     """``git_state_mtimes`` returns zeros for a directory that isn't a
     git repo, and for the empty-string root. The desktop's polling
     loop reads the zero baseline as "no comparison yet" and skips
@@ -11547,7 +11547,7 @@ fn test_git_state_mtimes_zero_for_non_repo() raises:
     _rm_rf(dir)
 
 
-fn test_git_state_mtimes_nonzero_after_init_commit() raises:
+def test_git_state_mtimes_nonzero_after_init_commit() raises:
     """A fresh ``git init`` + commit produces nonzero mtimes for both
     ``.git/HEAD`` and ``.git/index`` — the polling loop's "something
     changed" comparison only fires once a real baseline exists."""
@@ -11597,7 +11597,7 @@ fn test_git_state_mtimes_nonzero_after_init_commit() raises:
     _rm_rf(dir)
 
 
-fn test_stage_unstage_round_trip_against_real_git() raises:
+def test_stage_unstage_round_trip_against_real_git() raises:
     """End-to-end: spin up a throwaway git repo, modify a file, walk it
     through stage_file → fetch_git_status → unstage_file. Asserts the
     porcelain X/Y columns flip the way we expect, which is the contract
@@ -11709,7 +11709,7 @@ fn test_stage_unstage_round_trip_against_real_git() raises:
     _rm_rf(dir)
 
 
-fn test_build_minimal_patch_drops_other_hunks() raises:
+def test_build_minimal_patch_drops_other_hunks() raises:
     """A diff with two hunks: targeting a line in the first must produce
     output containing only that hunk; the second hunk's lines must not
     appear at all (otherwise we'd accidentally stage other changes)."""
@@ -11732,7 +11732,7 @@ fn test_build_minimal_patch_drops_other_hunks() raises:
     assert_false(String("@@ -10,1") in patch)
 
 
-fn test_canvas_put_wrapped_text_paints_inside_rect_only() raises:
+def test_canvas_put_wrapped_text_paints_inside_rect_only() raises:
     """Framework primitive: long text rendered through
     ``put_wrapped_text`` must wrap inside the rect and never colour a
     cell outside it. The Prompt overflow fix relies on this contract,
@@ -11756,7 +11756,7 @@ fn test_canvas_put_wrapped_text_paints_inside_rect_only() raises:
             assert_equal(canvas.get(x, y).attr.bg, BLUE)
 
 
-fn test_canvas_put_wrapped_text_returns_zero_for_empty_rect() raises:
+def test_canvas_put_wrapped_text_returns_zero_for_empty_rect() raises:
     var canvas = Canvas(20, 5)
     canvas.clear(Attr(BLACK, BLUE))
     var rows = canvas.put_wrapped_text(
@@ -11765,13 +11765,13 @@ fn test_canvas_put_wrapped_text_returns_zero_for_empty_rect() raises:
     assert_equal(rows, 0)
 
 
-fn test_prompt_wrap_short_text_stays_on_one_line() raises:
+def test_prompt_wrap_short_text_stays_on_one_line() raises:
     var lines = wrap_to_width(String("Find: "), 56)
     assert_equal(len(lines), 1)
     assert_equal(lines[0], String("Find: "))
 
 
-fn test_prompt_wrap_breaks_at_last_space_within_budget() raises:
+def test_prompt_wrap_breaks_at_last_space_within_budget() raises:
     var lines = wrap_to_width(
         String("Install rust LSP? 'rustup component add rust-analyzer' (y/N): "),
         20,
@@ -11794,7 +11794,7 @@ fn test_prompt_wrap_breaks_at_last_space_within_budget() raises:
     )
 
 
-fn test_prompt_wrap_hard_breaks_an_unbreakable_word() raises:
+def test_prompt_wrap_hard_breaks_an_unbreakable_word() raises:
     # No spaces — the wrapper must still chop the input into width-sized
     # chunks rather than emit one giant overflowing line.
     var lines = wrap_to_width(String("aaaaaaaaaaaaaaaaaaaa"), 6)
@@ -11805,12 +11805,12 @@ fn test_prompt_wrap_hard_breaks_an_unbreakable_word() raises:
     assert_equal(lines[3], String("aa"))
 
 
-fn test_prompt_wrap_empty_returns_empty_list() raises:
+def test_prompt_wrap_empty_returns_empty_list() raises:
     var lines = wrap_to_width(String(""), 60)
     assert_equal(len(lines), 0)
 
 
-fn test_prompt_paint_clamps_long_label_inside_dialog() raises:
+def test_prompt_paint_clamps_long_label_inside_dialog() raises:
     """The painted cells of a long-label prompt must all live inside
     the prompt's dialog rect — nothing leaks into the surrounding
     workspace cells the way the un-clamped ``put_text`` used to."""
@@ -11850,7 +11850,7 @@ fn test_prompt_paint_clamps_long_label_inside_dialog() raises:
             assert_equal(c.attr.bg, BLUE)
 
 
-fn test_confirm_dialog_y_key_resolves_yes() raises:
+def test_confirm_dialog_y_key_resolves_yes() raises:
     var d = ConfirmDialog()
     d.open(String("Install rust LSP?"))
     assert_true(d.active)
@@ -11860,7 +11860,7 @@ fn test_confirm_dialog_y_key_resolves_yes() raises:
     assert_true(d.confirmed)
 
 
-fn test_confirm_dialog_n_key_resolves_no() raises:
+def test_confirm_dialog_n_key_resolves_no() raises:
     var d = ConfirmDialog()
     d.open(String("Install rust LSP?"))
     _ = d.handle_key(Event.key_event(UInt32(ord("n"))))
@@ -11868,7 +11868,7 @@ fn test_confirm_dialog_n_key_resolves_no() raises:
     assert_false(d.confirmed)
 
 
-fn test_confirm_dialog_esc_cancels() raises:
+def test_confirm_dialog_esc_cancels() raises:
     var d = ConfirmDialog()
     d.open(String("Install rust LSP?"))
     _ = d.handle_key(Event.key_event(KEY_ESC))
@@ -11876,7 +11876,7 @@ fn test_confirm_dialog_esc_cancels() raises:
     assert_false(d.confirmed)
 
 
-fn test_confirm_dialog_enter_uses_focused_button() raises:
+def test_confirm_dialog_enter_uses_focused_button() raises:
     """Default focus is No (safer for installs); Tab toggles to Yes;
     Enter resolves whichever side is focused."""
     var d = ConfirmDialog()
@@ -11892,7 +11892,7 @@ fn test_confirm_dialog_enter_uses_focused_button() raises:
     assert_true(d2.confirmed)
 
 
-fn test_confirm_dialog_default_yes_focuses_yes() raises:
+def test_confirm_dialog_default_yes_focuses_yes() raises:
     """Callers that want Enter to mean Yes pass ``default_yes=True``."""
     var d = ConfirmDialog()
     d.open(String("Save changes?"), default_yes=True)
@@ -11901,7 +11901,7 @@ fn test_confirm_dialog_default_yes_focuses_yes() raises:
     assert_true(d.confirmed)
 
 
-fn test_confirm_dialog_paints_inside_dialog_rect() raises:
+def test_confirm_dialog_paints_inside_dialog_rect() raises:
     """Same overflow guarantee as the Prompt: a long install hint
     must stay inside the centered dialog rect (plus the drop shadow)."""
     var screen = Rect(0, 0, 80, 24)
@@ -11925,7 +11925,7 @@ fn test_confirm_dialog_paints_inside_dialog_rect() raises:
             assert_true(x >= dx and x < dx + dialog_w + 2)
 
 
-fn test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
+def test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
     """Smoke-test the wiring: typing a confirm dialog into the
     grammar-install pending action and pressing 'y' must clear the
     dialog and leave a grammar-install language recorded on the
@@ -11949,7 +11949,7 @@ fn test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
     assert_equal(d._pending_arg, String(""))
 
 
-fn test_desktop_confirm_dialog_no_clears_pending_action() raises:
+def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
     d._pending_arg = String("rust")
@@ -11964,7 +11964,7 @@ fn test_desktop_confirm_dialog_no_clears_pending_action() raises:
     assert_false(d.install_runner.is_active())
 
 
-fn _spell_with_dict(words: List[String]) -> Speller:
+def _spell_with_dict(words: List[String]) -> Speller:
     """Build a Speller seeded with an explicit small dictionary so the
     tests don't depend on whichever ``/usr/share/dict/words`` happens to
     ship with the host."""
@@ -11973,7 +11973,7 @@ fn _spell_with_dict(words: List[String]) -> Speller:
     return s^
 
 
-fn test_speller_check_word_basic() raises:
+def test_speller_check_word_basic() raises:
     var words = List[String]()
     words.append(String("hello"))
     words.append(String("world"))
@@ -11985,7 +11985,7 @@ fn test_speller_check_word_basic() raises:
     assert_false(s.check_word(String("xyzzy")))
 
 
-fn test_speller_strips_common_suffixes() raises:
+def test_speller_strips_common_suffixes() raises:
     var words = List[String]()
     words.append(String("dog"))
     words.append(String("dish"))
@@ -12003,7 +12003,7 @@ fn test_speller_strips_common_suffixes() raises:
     assert_false(s.check_word(String("foob")))
 
 
-fn test_speller_handles_english_contractions() raises:
+def test_speller_handles_english_contractions() raises:
     """Contractions like ``hasn't`` and ``wouldn't`` must validate against
     their bare-verb head (``has``, ``would``). Without this the editor
     flags ``hasn`` / ``wouldn`` as misspelled because the OS dict
@@ -12044,7 +12044,7 @@ fn test_speller_handles_english_contractions() raises:
     assert_equal(len(runs), 0)
 
 
-fn test_find_misspelled_runs_keeps_unicode_letters_in_word() raises:
+def test_find_misspelled_runs_keeps_unicode_letters_in_word() raises:
     """``Godkänn`` (Swedish ``approve``) used to tokenize as three runs:
     ``Godk`` (4 letters, flagged), the lone ``ä`` (skipped as non-letter),
     and ``nn`` (skipped as <4). After the UTF-8 fix the whole word is
@@ -12073,7 +12073,7 @@ fn test_find_misspelled_runs_keeps_unicode_letters_in_word() raises:
     assert_equal(rng[1], 8)
 
 
-fn test_speller_unloaded_returns_true_for_everything() raises:
+def test_speller_unloaded_returns_true_for_everything() raises:
     """When no dictionary is loaded, ``check_word`` must say "fine" for
     every input — better silent than a screen full of bogus underlines
     on systems without ``/usr/share/dict/words``."""
@@ -12081,7 +12081,7 @@ fn test_speller_unloaded_returns_true_for_everything() raises:
     assert_true(s.check_word(String("definitelynotaword")))
 
 
-fn test_speller_set_project_loads_idea_dictionary() raises:
+def test_speller_set_project_loads_idea_dictionary() raises:
     """Words inside ``<project>/.idea/dictionaries/*.xml`` should be
     treated as correctly spelled — that's the team's shared vocabulary
     of names and domain terms. ``set_project`` folds them into
@@ -12138,7 +12138,7 @@ fn test_speller_set_project_loads_idea_dictionary() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
-fn test_speller_set_project_with_no_idea_dir_is_noop() raises:
+def test_speller_set_project_with_no_idea_dir_is_noop() raises:
     """A project without a ``.idea/dictionaries/`` directory must not
     raise and must leave the existing dictionary untouched."""
     var s = Speller()
@@ -12150,7 +12150,7 @@ fn test_speller_set_project_with_no_idea_dir_is_noop() raises:
     assert_false(s.check_word(String("xyzzy")))
 
 
-fn test_speller_add_user_word_persists_and_check_word_passes() raises:
+def test_speller_add_user_word_persists_and_check_word_passes() raises:
     """``add_user_word`` should both flip ``check_word`` to True for
     that word *and* append it to ``~/.config/turbokod/dictionary.txt``
     so the addition survives a restart. Tests run with ``HOME`` set to
@@ -12186,7 +12186,7 @@ fn test_speller_add_user_word_persists_and_check_word_passes() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_speller_load_default_includes_bundled_programmer_terms() raises:
+def test_speller_load_default_includes_bundled_programmer_terms() raises:
     """``load_default`` must layer the bundled cspell-derived wordlists
     on top of the OS dict so common programmer vocabulary that
     ``/usr/share/dict/words`` lacks (``tokenizer``, ``bitwise``,
@@ -12206,7 +12206,7 @@ fn test_speller_load_default_includes_bundled_programmer_terms() raises:
     assert_true(s.check_word(String("hashable")))
 
 
-fn test_speller_load_default_layers_user_dictionary() raises:
+def test_speller_load_default_layers_user_dictionary() raises:
     """A subsequent ``Speller`` started after ``add_user_word`` writes
     the file should pick the addition up via ``load_default``. Verifies
     the persistence round-trips end to end."""
@@ -12229,7 +12229,7 @@ fn test_speller_load_default_layers_user_dictionary() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_speller_normalizes_unicode_for_lookup() raises:
+def test_speller_normalizes_unicode_for_lookup() raises:
     """Lookup keys must fold both case and Unicode form so a Swedish
     word like ``Övrigt`` (Ö = U+00D6) matches the on-disk lowercase
     NFC form ``övrigt`` (ö = U+00F6), and so does the NFD form
@@ -12260,7 +12260,7 @@ fn test_speller_normalizes_unicode_for_lookup() raises:
     assert_true(s.check_word(cafe_nfd))
 
 
-fn test_speller_load_default_layers_user_language_dictionaries() raises:
+def test_speller_load_default_layers_user_language_dictionaries() raises:
     """A wordlist dropped under ``~/.config/turbokod/dictionaries/`` is
     picked up by ``load_default``, mirroring the bundled-wordlists
     layer. This is the on-disk shape Settings ▸ Spell-check writes via
@@ -12288,7 +12288,7 @@ fn test_speller_load_default_layers_user_language_dictionaries() raises:
     _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
 
 
-fn test_speller_reload_drops_removed_dictionary() raises:
+def test_speller_reload_drops_removed_dictionary() raises:
     """``reload`` must rebuild the bucket set from disk so removing the
     on-disk wordlist makes its words fall back to "misspelled" without
     restarting the editor. Used by Settings ▸ Spell-check ▸ Remove."""
@@ -12320,7 +12320,7 @@ fn test_speller_reload_drops_removed_dictionary() raises:
     assert_false(s.check_word(String("smörgåsbord")))
 
 
-fn test_speller_add_project_word_persists_in_project_dir() raises:
+def test_speller_add_project_word_persists_in_project_dir() raises:
     """``add_project_word`` writes ``<project>/.turbokod/dictionary.txt``
     and updates ``project_buckets`` in memory. ``set_project`` must
     have been called first; without it the call is a no-op."""
@@ -12363,7 +12363,7 @@ fn test_speller_add_project_word_persists_in_project_dir() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
-fn test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
+def test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
     """Alt+Enter while the cursor is parked inside a misspelled-word
     underline should stamp ``pending_spell_action`` with that word
     rather than splitting the line. The editor must NOT touch the
@@ -12400,7 +12400,7 @@ fn test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
+def test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
     """Alt+Enter on a row without any misspelling must fall through —
     the editor returns False so the host's hotkey table can bind it
     to something else. No buffer mutation either way."""
@@ -12423,7 +12423,7 @@ fn test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_invalidate_spell_drops_overlay_after_word_added() raises:
+def test_editor_invalidate_spell_drops_overlay_after_word_added() raises:
     """After ``Speller.add_user_word`` and ``Editor.invalidate_spell``,
     the next ``flush_highlights`` should clear the underline for the
     newly-accepted word — verifying the refresh hook actually loops
@@ -12449,7 +12449,7 @@ fn test_editor_invalidate_spell_drops_overlay_after_word_added() raises:
     _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
 
 
-fn test_spell_menu_open_close_default_selection() raises:
+def test_spell_menu_open_close_default_selection() raises:
     """Open positions selection on row 0 (user dict) regardless of
     whether the project row is enabled — that's the safe default
     every time, easier to undo than accidentally training the team
@@ -12468,7 +12468,7 @@ fn test_spell_menu_open_close_default_selection() raises:
     assert_false(m.has_project)
 
 
-fn test_spell_menu_enter_on_user_resolves_with_add_user() raises:
+def test_spell_menu_enter_on_user_resolves_with_add_user() raises:
     var m = SpellMenu()
     m.open(String("helo"), Point(0, 0), True)
     var ev = Event.key_event(KEY_ENTER)
@@ -12477,7 +12477,7 @@ fn test_spell_menu_enter_on_user_resolves_with_add_user() raises:
     assert_equal(m.action, SPELL_ACTION_ADD_USER)
 
 
-fn test_spell_menu_enter_on_project_disabled_stays_open() raises:
+def test_spell_menu_enter_on_project_disabled_stays_open() raises:
     """When ``has_project=False``, pressing Enter on the project row
     must NOT submit — the menu stays open so the user can arrow back
     up to the user-dict row."""
@@ -12496,7 +12496,7 @@ fn test_spell_menu_enter_on_project_disabled_stays_open() raises:
     assert_equal(m.action, SPELL_ACTION_ADD_USER)
 
 
-fn test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
+def test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
     var m = SpellMenu()
     m.open(String("helo"), Point(0, 0), True)
     _ = m.handle_key(Event.key_event(KEY_DOWN))
@@ -12505,7 +12505,7 @@ fn test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
     assert_equal(m.action, SPELL_ACTION_ADD_PROJECT)
 
 
-fn test_spell_menu_esc_dismisses() raises:
+def test_spell_menu_esc_dismisses() raises:
     var m = SpellMenu()
     m.open(String("helo"), Point(0, 0), True)
     _ = m.handle_key(Event.key_event(KEY_ESC))
@@ -12513,7 +12513,7 @@ fn test_spell_menu_esc_dismisses() raises:
     assert_equal(m.action, SPELL_ACTION_NONE)
 
 
-fn find_misspelled_runs_filters_identifiers_and_short_words() raises:
+def find_misspelled_runs_filters_identifiers_and_short_words() raises:
     """Word-shape filters should suppress: <4 letters, all caps, mixed
     case mid-word, identifier fragments with digits/underscores."""
     var words = List[String]()
@@ -12532,7 +12532,7 @@ fn find_misspelled_runs_filters_identifiers_and_short_words() raises:
     assert_equal(second_word, String("world"))
 
 
-fn test_editor_spell_uses_curly_colored_underline_on_supported_terminal() raises:
+def test_editor_spell_uses_curly_colored_underline_on_supported_terminal() raises:
     """When the host terminal advertises support (we spoof
     ``TERM_PROGRAM=iTerm.app``) the spell highlight keeps the comment
     cyan foreground and gets a separate curly red underline channel —
@@ -12573,7 +12573,7 @@ fn test_editor_spell_uses_curly_colored_underline_on_supported_terminal() raises
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
+def test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
     """When a row has both an uncommitted change and a spelling issue,
     the right-side minimap projects the git change color (gray), not
     the spell color (yellow). Spell still paints inline as the
@@ -12601,7 +12601,7 @@ fn test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_minimap_click_scrolls_to_marked_line() raises:
+def test_editor_minimap_click_scrolls_to_marked_line() raises:
     """Clicking on the right-edge minimap column should scroll the
     editor so the buffer row that owns the projected slice is visible
     (and place the cursor on it). With 20 lines in a 5-row view, the
@@ -12633,7 +12633,7 @@ fn test_editor_minimap_click_scrolls_to_marked_line() raises:
     assert_equal(ed.scroll_y, 8)
 
 
-fn test_editor_minimap_hover_records_spell_word() raises:
+def test_editor_minimap_hover_records_spell_word() raises:
     """A bare-hover event over a minimap row that carries a spelling
     issue should populate ``_minimap_hover_*`` with kind=2 and the
     offending word so the tooltip can render it. Clicking elsewhere
@@ -12672,7 +12672,7 @@ fn test_editor_minimap_hover_records_spell_word() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_minimap_hover_paints_tooltip() raises:
+def test_editor_minimap_hover_paints_tooltip() raises:
     """After a hover sets the spell-mark state, ``Editor.paint`` must
     overlay a tooltip box that includes the misspelled word so the user
     can read it."""
@@ -12702,7 +12702,7 @@ fn test_editor_minimap_hover_paints_tooltip() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_text_hover_over_diagnostic_records_kind_and_message() raises:
+def test_editor_text_hover_over_diagnostic_records_kind_and_message() raises:
     """Hovering over a cell covered by a diagnostic underline (in the
     editor surface itself, not the minimap) must populate the same
     hover state the minimap-mark hover does so the tooltip can render.
@@ -12727,7 +12727,7 @@ fn test_editor_text_hover_over_diagnostic_records_kind_and_message() raises:
     )
 
 
-fn test_editor_text_hover_off_diagnostic_clears_state() raises:
+def test_editor_text_hover_off_diagnostic_clears_state() raises:
     """A hover on a cell *outside* a diagnostic range (and not on a
     spell flag) clears the hover state — no stale tooltip lingers
     from a previous frame."""
@@ -12752,7 +12752,7 @@ fn test_editor_text_hover_off_diagnostic_clears_state() raises:
     assert_equal(ed._minimap_hover_kind, 0)
 
 
-fn test_editor_text_hover_picks_most_severe_diagnostic_on_overlap() raises:
+def test_editor_text_hover_picks_most_severe_diagnostic_on_overlap() raises:
     """When multiple diagnostics overlap a cell, the most severe one
     wins (lowest numeric severity = highest priority — error beats
     warning beats info beats hint)."""
@@ -12793,7 +12793,7 @@ fn test_editor_text_hover_picks_most_severe_diagnostic_on_overlap() raises:
     assert_equal(ed._minimap_hover_kind, 6)
 
 
-fn test_editor_text_hover_over_spell_word_records_word() raises:
+def test_editor_text_hover_over_spell_word_records_word() raises:
     """A hover over a misspelled word in the editor surface (not the
     minimap) must populate kind=2 and surface the offending word so
     the same tooltip the minimap uses can render. Confirms the
@@ -12820,7 +12820,7 @@ fn test_editor_text_hover_over_spell_word_records_word() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_text_hover_past_eol_clears_state() raises:
+def test_editor_text_hover_past_eol_clears_state() raises:
     """Cells past the end of a buffer line don't carry a real cell
     (the row only has the visible glyphs); hover-tooltip should not
     fire there even when the row carries diagnostics earlier on."""
@@ -12839,7 +12839,7 @@ fn test_editor_text_hover_past_eol_clears_state() raises:
     assert_equal(ed._minimap_hover_kind, 0)
 
 
-fn test_editor_text_hover_diagnostic_renders_tooltip() raises:
+def test_editor_text_hover_diagnostic_renders_tooltip() raises:
     """End-to-end: an in-text hover over a diagnostic range produces a
     visible tooltip box on the next paint, with the message in it.
     Mirrors the existing minimap-tooltip render test but exercises the
@@ -12874,7 +12874,7 @@ fn test_editor_text_hover_diagnostic_renders_tooltip() raises:
     assert_true(found)
 
 
-fn test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
+def test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
     """Pyright (and other LSPs) often emit diagnostics with literal
     newlines inside the message — an explanation block, an offending
     snippet, then a conclusion. Rendering must honour those breaks
@@ -12956,7 +12956,7 @@ fn test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
     assert_true(found_header)
 
 
-fn test_editor_long_diagnostic_tooltip_through_window() raises:
+def test_editor_long_diagnostic_tooltip_through_window() raises:
     """Same scenario as ``..._fills_popup_interior``, but painted via
     ``Window.paint`` so the window's body fill (LIGHT_GRAY on BLUE)
     runs first and the editor paints into the window's interior. The
@@ -13017,7 +13017,7 @@ fn test_editor_long_diagnostic_tooltip_through_window() raises:
             assert_true(bg != BLUE)
 
 
-fn test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
+def test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
     """A diagnostic message longer than the editor view forces the
     tooltip to wrap onto multiple rows. Every cell inside the popup's
     interior must come from the popup's own paint pass — light-gray
@@ -13088,7 +13088,7 @@ fn test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
             assert_true(bg != BLUE)
 
 
-fn test_editor_text_hover_anchor_aligns_with_underline_left() raises:
+def test_editor_text_hover_anchor_aligns_with_underline_left() raises:
     """The tooltip must sit one row below the underlined span with its
     left edge aligned to the underline's leftmost cell — not anchored
     at the cursor like the minimap-mark hover. Buffer ``alpha beta
@@ -13116,7 +13116,7 @@ fn test_editor_text_hover_anchor_aligns_with_underline_left() raises:
     assert_equal(ed._minimap_hover_y, 1)
 
 
-fn test_editor_minimap_hover_keeps_above_left_anchor() raises:
+def test_editor_minimap_hover_keeps_above_left_anchor() raises:
     """Minimap-source hovers must keep their original above-left
     anchoring — the new below-the-underline behavior is text-area-only.
     A hover on the right-edge minimap column should leave
@@ -13144,7 +13144,7 @@ fn test_editor_minimap_hover_keeps_above_left_anchor() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_has_spell_noinspection_directive_parses_intellij_forms() raises:
+def test_has_spell_noinspection_directive_parses_intellij_forms() raises:
     """Recognized IntelliJ shapes — comma-separated lists, ``All``
     catch-all, multiple comment markers — must all return True.
     Adversarial near-misses (different inspection name, ``noinspection``
@@ -13194,7 +13194,7 @@ fn test_has_spell_noinspection_directive_parses_intellij_forms() raises:
     ))
 
 
-fn test_editor_spell_noinspection_suppresses_next_line() raises:
+def test_editor_spell_noinspection_suppresses_next_line() raises:
     """A ``# noinspection SpellCheckingInspection`` comment must
     suppress spell underlines on the directive line itself (so the
     word ``noinspection`` doesn't get flagged) and on the following
@@ -13228,7 +13228,7 @@ fn test_editor_spell_noinspection_suppresses_next_line() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn test_editor_spell_underlines_misspelled_word_in_comment() raises:
+def test_editor_spell_underlines_misspelled_word_in_comment() raises:
     """End-to-end: a misspelled word inside a ``#`` comment surfaces as
     a ``STYLE_UNDERLINE`` highlight at the right byte range, and the
     row gets marked in ``spell_lines`` so the minimap can project it."""
@@ -13257,7 +13257,7 @@ fn test_editor_spell_underlines_misspelled_word_in_comment() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-fn _assert_visual_eq(a: VisualLine, b: VisualLine) raises:
+def _assert_visual_eq(a: VisualLine, b: VisualLine) raises:
     assert_equal(a.line_idx, b.line_idx)
     assert_equal(a.byte_start, b.byte_start)
     assert_equal(a.byte_end, b.byte_end)
@@ -13266,7 +13266,7 @@ fn _assert_visual_eq(a: VisualLine, b: VisualLine) raises:
     assert_equal(a.indent_cells, b.indent_cells)
 
 
-fn test_text_log_incremental_layout_matches_full_rewrap() raises:
+def test_text_log_incremental_layout_matches_full_rewrap() raises:
     """After streaming appends, ``TextLog.last_visual`` must match a
     fresh ``wrap_lines`` over the same lines at the same width.
 
@@ -13299,7 +13299,7 @@ fn test_text_log_incremental_layout_matches_full_rewrap() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
 
 
-fn test_text_log_incremental_layout_handles_trim() raises:
+def test_text_log_incremental_layout_handles_trim() raises:
     """When ``_push_line`` trims the front to honor ``max_lines``, the
     cached layout drops the dropped lines' visual rows and renumbers
     the survivors. Without that, ``last_visual`` would point at stale
@@ -13320,7 +13320,7 @@ fn test_text_log_incremental_layout_handles_trim() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
 
 
-fn test_editor_paint_collapsed_view_is_cheap() raises:
+def test_editor_paint_collapsed_view_is_cheap() raises:
     """Maximizing the debug pane collapses the workspace to height 0,
     which gives editor windows a negative-height ``interior``. Without
     a guard, ``editor.paint`` would call ``wrap_lines`` with
@@ -13348,7 +13348,7 @@ fn test_editor_paint_collapsed_view_is_cheap() raises:
     ed.paint(canvas, collapsed, False)
 
 
-fn test_text_log_full_rewrap_on_width_change() raises:
+def test_text_log_full_rewrap_on_width_change() raises:
     """Resizing the view (different ``content_w``) forces a full
     re-wrap. The cached layout is keyed on the width that built it."""
     var log = TextLog(default_attr())
@@ -13369,7 +13369,7 @@ fn test_text_log_full_rewrap_on_width_change() raises:
     assert_true(len(log.last_visual) < len(first_pass))
 
 
-fn test_text_field_scrolls_to_keep_cursor_visible() raises:
+def test_text_field_scrolls_to_keep_cursor_visible() raises:
     """Typing past the strip width must scroll horizontally so the
     caret stays inside the strip — otherwise the user can't see what
     they're typing once the field overflows."""
@@ -13389,7 +13389,7 @@ fn test_text_field_scrolls_to_keep_cursor_visible() raises:
     assert_equal(tf._scroll, 7)   # 16 cells - 10 width + 1 caret cell
 
 
-fn test_text_field_scrolls_back_when_cursor_moves_left_of_view() raises:
+def test_text_field_scrolls_back_when_cursor_moves_left_of_view() raises:
     """Pressing Home on an overflowed field jumps the cursor to byte
     0; the visible window must follow so the user lands on the start
     of the text rather than staring at the (now-invisible) caret."""
@@ -13406,7 +13406,7 @@ fn test_text_field_scrolls_back_when_cursor_moves_left_of_view() raises:
     assert_equal(canvas.get(9, 0).glyph, String("j"))
 
 
-fn test_text_field_click_maps_to_text_byte_via_scroll() raises:
+def test_text_field_click_maps_to_text_byte_via_scroll() raises:
     """A click on a scrolled field must land on the codepoint that's
     *visually* under the cursor — i.e. text cell = strip cell +
     scroll. If we ignored scroll the click would always land in the
@@ -13431,7 +13431,7 @@ fn test_text_field_click_maps_to_text_byte_via_scroll() raises:
     assert_equal(tf.cursor, 12)
 
 
-fn test_text_field_cmd_a_selects_all() raises:
+def test_text_field_cmd_a_selects_all() raises:
     """Cmd+A should select the entire field on macOS — the same chord
     that triggers select-all in every other native input. Without the
     MOD_META branch in ``clipboard_chord``, only Ctrl+A worked."""
@@ -13447,7 +13447,7 @@ fn test_text_field_cmd_a_selects_all() raises:
     assert_equal(tf.cursor, 5)
 
 
-fn test_text_field_ctrl_a_still_selects_all() raises:
+def test_text_field_ctrl_a_still_selects_all() raises:
     """The Cmd+A fix must not regress the existing Ctrl+A behavior —
     both modifiers map to select-all (Linux/Windows + macOS muscle
     memory)."""
@@ -13461,7 +13461,7 @@ fn test_text_field_ctrl_a_still_selects_all() raises:
     assert_equal(tf.cursor, 5)
 
 
-fn test_text_field_cmd_letter_does_not_insert() raises:
+def test_text_field_cmd_letter_does_not_insert() raises:
     """Cmd+B (or any unbound Cmd chord) used to fall through the
     modifier check and insert ``b`` as plain text — the check at the
     bottom of ``handle_key`` only excluded MOD_CTRL / MOD_ALT and
@@ -13476,7 +13476,7 @@ fn test_text_field_cmd_letter_does_not_insert() raises:
     assert_equal(tf.text, before)
 
 
-fn test_text_field_ctrl_letter_does_not_insert() raises:
+def test_text_field_ctrl_letter_does_not_insert() raises:
     """Ctrl+B with no clipboard / select-all chord match should also
     leave the field untouched — same reasoning as the Cmd+letter
     case, but on Linux/Windows the modifier is Ctrl."""
@@ -13489,7 +13489,7 @@ fn test_text_field_ctrl_letter_does_not_insert() raises:
     assert_equal(tf.text, before)
 
 
-fn test_text_field_paints_visible_window_after_scroll() raises:
+def test_text_field_paints_visible_window_after_scroll() raises:
     """When scrolled, ``paint`` must render the slice of text starting
     at ``_scroll`` and not draw the leading characters that fall
     before the strip — otherwise the off-screen text would smear into
@@ -13510,7 +13510,7 @@ fn test_text_field_paints_visible_window_after_scroll() raises:
 
 
 
-fn test_vt_da1_reply_on_csi_c() raises:
+def test_vt_da1_reply_on_csi_c() raises:
     """``ESC[c`` (DA1) must enqueue a reply on the Vt's outbound
     queue. Real-world: starship / oh-my-zsh probe with this; without
     a reply the prompt stalls a beat on every redraw."""
@@ -13522,7 +13522,7 @@ fn test_vt_da1_reply_on_csi_c() raises:
     assert_equal(vt.take_reply(), String(""))
 
 
-fn test_vt_dsr_6_reply_uses_1_based_cursor() raises:
+def test_vt_dsr_6_reply_uses_1_based_cursor() raises:
     """``ESC[6n`` (DSR cursor position) must reply with 1-based
     coordinates. The cursor at (cur_r=2, cur_c=3) reports ``3;4R``."""
     var vt = Vt(80, 24)
@@ -13532,7 +13532,7 @@ fn test_vt_dsr_6_reply_uses_1_based_cursor() raises:
     assert_equal(vt.take_reply(), String("\x1b[3;4R"))
 
 
-fn test_vt_decset_2004_bracketed_paste_flag() raises:
+def test_vt_decset_2004_bracketed_paste_flag() raises:
     """``ESC[?2004h`` enables bracketed-paste mode; ``l`` disables.
     The pane reads this flag to decide whether to wrap pasted text."""
     var vt = Vt(80, 24)
@@ -13543,7 +13543,7 @@ fn test_vt_decset_2004_bracketed_paste_flag() raises:
     assert_false(vt.bracketed_paste)
 
 
-fn test_vt_decset_1_app_cursor_keys() raises:
+def test_vt_decset_1_app_cursor_keys() raises:
     """DECCKM (``ESC[?1h``) flips arrow encoding from CSI to SS3 in
     the pane. We just verify the Vt tracks the flag."""
     var vt = Vt(80, 24)
@@ -13554,7 +13554,7 @@ fn test_vt_decset_1_app_cursor_keys() raises:
     assert_false(vt.app_cursor_keys)
 
 
-fn test_vt_decset_1004_focus_events_round_trip() raises:
+def test_vt_decset_1004_focus_events_round_trip() raises:
     """With ``?1004`` on, ``notify_focus_change`` emits ``ESC[I``
     (focus-in) / ``ESC[O`` (focus-out). With it off, nothing."""
     var vt = Vt(80, 24)
@@ -13568,7 +13568,7 @@ fn test_vt_decset_1004_focus_events_round_trip() raises:
     assert_equal(vt.take_reply(), String("\x1b[O"))
 
 
-fn test_vt_osc_52_decodes_base64_to_clipboard() raises:
+def test_vt_osc_52_decodes_base64_to_clipboard() raises:
     """OSC 52 ``c;<base64>`` decodes to bytes the pane can hand to
     the system clipboard. ``aGVsbG8=`` is the canonical 'hello' test
     vector."""
@@ -13579,7 +13579,7 @@ fn test_vt_osc_52_decodes_base64_to_clipboard() raises:
     assert_equal(vt.take_clipboard(), String(""))
 
 
-fn test_vt_osc_52_query_does_not_leak_clipboard() raises:
+def test_vt_osc_52_query_does_not_leak_clipboard() raises:
     """A query (``?`` in place of base64) must not produce a
     clipboard payload — leaking host clipboard contents to whatever
     the child is would be a security regression."""
@@ -13588,7 +13588,7 @@ fn test_vt_osc_52_query_does_not_leak_clipboard() raises:
     assert_equal(vt.take_clipboard(), String(""))
 
 
-fn test_vt_decscusr_tracks_cursor_shape() raises:
+def test_vt_decscusr_tracks_cursor_shape() raises:
     """``CSI 4 SP q`` sets cursor_shape to 4 (steady underline). Out
     of range falls back to 0 so a malformed sequence can't leave the
     field in a nonsense state."""
@@ -13599,7 +13599,7 @@ fn test_vt_decscusr_tracks_cursor_shape() raises:
     assert_equal(Int(vt.cursor_shape), 0)
 
 
-fn test_vt_ris_clears_mode_flags() raises:
+def test_vt_ris_clears_mode_flags() raises:
     """``ESC c`` (RIS) is a hard reset. Mouse tracking, bracketed
     paste, focus events, app-cursor-keys all clear — otherwise a
     fresh shell coming up after vim crashed inherits the dead
@@ -13618,7 +13618,7 @@ fn test_vt_ris_clears_mode_flags() raises:
 
 
 
-fn _run_chunk_00() raises:
+def _run_chunk_00() raises:
     test_claude_detect_empty_buffer_returns_none()
     test_claude_detect_plain_shell_output_returns_none()
     test_claude_detect_spinner_row_returns_working()
@@ -13721,7 +13721,7 @@ fn _run_chunk_00() raises:
     test_editor_backspace_deletes_selection()
 
 
-fn _run_chunk_01() raises:
+def _run_chunk_01() raises:
     test_editor_mouse_click_sets_cursor()
     test_editor_mouse_drag_extends_selection()
     test_editor_mouse_click_clamps_to_line()
@@ -13824,7 +13824,7 @@ fn _run_chunk_01() raises:
     test_settings_open_seeds_state()
 
 
-fn _run_chunk_02() raises:
+def _run_chunk_02() raises:
     test_settings_open_empty_parks_selection_at_minus_one()
     test_settings_remove_marks_dirty()
     test_settings_editor_submit_appends_new_entry()
@@ -13927,7 +13927,7 @@ fn _run_chunk_02() raises:
     test_cmd_shift_o_bubbles_when_no_project()
 
 
-fn _run_chunk_03() raises:
+def _run_chunk_03() raises:
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
@@ -14030,7 +14030,7 @@ fn _run_chunk_03() raises:
     test_window_v_scroll_by_clamps()
 
 
-fn _run_chunk_04() raises:
+def _run_chunk_04() raises:
     test_window_v_scrollbar_track_click_centers_target()
     test_window_v_scroll_drag_to_end()
     test_json_round_trip_lsp_envelope()
@@ -14133,7 +14133,7 @@ fn _run_chunk_04() raises:
     test_text_view_wrap_lines_word_aware_with_indent()
 
 
-fn _run_chunk_05() raises:
+def _run_chunk_05() raises:
     test_text_view_selection_extracts_text()
     test_string_utils_slice_codepoints_handles_multibyte()
     test_debug_pane_long_output_line_soft_wraps()
@@ -14221,7 +14221,7 @@ fn _run_chunk_05() raises:
     test_text_field_paints_visible_window_after_scroll()
     test_vt_osc_52_decodes_base64_to_clipboard()
 
-fn main() raises:
+def main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
     # (which writes to ``~/.config/turbokod/config.json`` via
     # ``_set_project`` → ``save_config``) can't clobber the developer's

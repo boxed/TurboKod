@@ -42,7 +42,7 @@ struct BlameLine(ImplicitlyCopyable, Movable):
     var author: String
 
 
-fn _is_hex(b: Int) -> Bool:
+def _is_hex(b: Int) -> Bool:
     if 0x30 <= b and b <= 0x39: return True
     if 0x61 <= b and b <= 0x66: return True
     if 0x41 <= b and b <= 0x46: return True
@@ -51,7 +51,7 @@ fn _is_hex(b: Int) -> Bool:
 
 
 
-fn _looks_like_header(line: String) -> Bool:
+def _looks_like_header(line: String) -> Bool:
     """A header line begins with 40 hex digits + space."""
     var b = line.as_bytes()
     if len(b) < 41:
@@ -62,7 +62,7 @@ fn _looks_like_header(line: String) -> Bool:
     return b[40] == 0x20
 
 
-fn parse_blame_porcelain(text: String) -> List[BlameLine]:
+def parse_blame_porcelain(text: String) -> List[BlameLine]:
     """Walk porcelain lines, emit one ``BlameLine`` per source line.
 
     State machine:
@@ -147,7 +147,7 @@ fn parse_blame_porcelain(text: String) -> List[BlameLine]:
     return out^
 
 
-fn compute_blame(file_path: String) raises -> List[BlameLine]:
+def compute_blame(file_path: String) raises -> List[BlameLine]:
     """Spawn ``git -C <repo> blame --porcelain -- <abs_path>`` and parse.
 
     ``file_path`` may be relative or absolute; we ``realpath`` it so git's

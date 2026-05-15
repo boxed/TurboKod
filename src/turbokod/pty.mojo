@@ -40,18 +40,18 @@ struct PtyProcess(Copyable, Movable):
     var master_fd: Int32
     var alive: Bool
 
-    fn __init__(out self):
+    def __init__(out self):
         self.pid = -1
         self.master_fd = -1
         self.alive = False
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.pid = -1
         self.master_fd = -1
         self.alive = False
 
     @staticmethod
-    fn spawn(
+    def spawn(
         argv: List[String],
         cwd: String = String(""),
         cols: Int = 80,
@@ -110,7 +110,7 @@ struct PtyProcess(Copyable, Movable):
         proc.alive     = True
         return proc^
 
-    fn set_winsize(self, cols: Int, rows: Int) -> Int:
+    def set_winsize(self, cols: Int, rows: Int) -> Int:
         """Re-send window size to the kernel. The child gets a
         SIGWINCH and (if it handles it) repaints at the new size.
         Returns 0 on success, -1 on failure."""
@@ -120,7 +120,7 @@ struct PtyProcess(Copyable, Movable):
             self.master_fd, Int32(cols), Int32(rows),
         ))
 
-    fn write_bytes(self, ptr: UnsafePointer[UInt8, _], n: Int) -> Int:
+    def write_bytes(self, ptr: UnsafePointer[UInt8, _], n: Int) -> Int:
         """Best-effort non-blocking write to the master. Returns the
         byte count actually written (may be < ``n``). ``tk_write_nb``
         returns 0 on EAGAIN, which we surface to the caller — the
@@ -136,7 +136,7 @@ struct PtyProcess(Copyable, Movable):
             return -1
         return Int(rc)
 
-    fn terminate(mut self):
+    def terminate(mut self):
         """SIGTERM the child and close the master fd. Safe to call
         more than once; subsequent calls are no-ops. The kill +
         waitpid + untrack sequence mirrors what

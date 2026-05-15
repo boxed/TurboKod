@@ -11,7 +11,7 @@ from the desktop copy by exactly one ``<`` vs. ``<=`` in a bounds check).
 from std.collections.list import List
 
 
-fn starts_with(s: String, prefix: String) -> Bool:
+def starts_with(s: String, prefix: String) -> Bool:
     """``True`` iff ``s`` begins with ``prefix`` byte-for-byte."""
     var sb = s.as_bytes()
     var pb = prefix.as_bytes()
@@ -23,7 +23,7 @@ fn starts_with(s: String, prefix: String) -> Bool:
     return True
 
 
-fn split_lines(text: String) -> List[String]:
+def split_lines(text: String) -> List[String]:
     """Split on ``\\n``, keeping a final empty entry when ``text`` ends
     with a newline. This matches ``TextBuffer``'s "trailing newline →
     empty final line" convention used by the diff renderer and most of
@@ -41,7 +41,7 @@ fn split_lines(text: String) -> List[String]:
     return out^
 
 
-fn split_lines_no_trailing(text: String) -> List[String]:
+def split_lines_no_trailing(text: String) -> List[String]:
     """Split on ``\\n``, dropping a trailing-newline-only empty line.
     Use for line-oriented external command output (``git`` porcelain,
     ``ls``-style) where every record is newline-terminated and a phantom
@@ -58,7 +58,7 @@ fn split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
-fn display_columns(s: String) -> Int:
+def display_columns(s: String) -> Int:
     """Count terminal cells ``s`` occupies when painted by
     ``Canvas.put_text`` — i.e. one cell per UTF-8 codepoint.
 
@@ -92,7 +92,7 @@ fn display_columns(s: String) -> Int:
     return cols
 
 
-fn parse_int_all(s: String) -> Int:
+def parse_int_all(s: String) -> Int:
     """Parse ``s`` as a non-negative decimal; return ``-1`` if any byte
     isn't a digit or the string is empty."""
     var b = s.as_bytes()
@@ -107,7 +107,7 @@ fn parse_int_all(s: String) -> Int:
     return n
 
 
-fn codepoint_at(s: String, col: Int) -> Tuple[Int, Int]:
+def codepoint_at(s: String, col: Int) -> Tuple[Int, Int]:
     """Decode one UTF-8 codepoint at byte ``col`` in ``s``.
 
     Returns ``(codepoint, byte_size)``. Past-EOL or truncated UTF-8
@@ -147,7 +147,7 @@ fn codepoint_at(s: String, col: Int) -> Tuple[Int, Int]:
     )
 
 
-fn is_word_codepoint(cp: Int) -> Bool:
+def is_word_codepoint(cp: Int) -> Bool:
     """``True`` if ``cp`` should be treated as part of a word — for
     word-left/right movement, double-click selection, and spell-check
     tokenization. The three sites used to each have their own ASCII-only
@@ -195,7 +195,7 @@ fn is_word_codepoint(cp: Int) -> Bool:
     return False
 
 
-fn word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
+def word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
     """``(is_word_char, byte_advance)`` for the codepoint at byte ``col``.
 
     advance is the UTF-8 byte length of the codepoint, so callers walk
@@ -215,7 +215,7 @@ fn word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
     return (is_word_codepoint(info[0]), info[1])
 
 
-fn prev_codepoint_start(s: String, col: Int) -> Int:
+def prev_codepoint_start(s: String, col: Int) -> Int:
     """Byte offset of the codepoint that ends at ``col``. Use to walk
     a byte array backwards one codepoint at a time. ``col == 0`` returns
     ``0``."""
@@ -228,7 +228,7 @@ fn prev_codepoint_start(s: String, col: Int) -> Int:
     return c
 
 
-fn utf8_codepoint_size(b: Int) -> Int:
+def utf8_codepoint_size(b: Int) -> Int:
     """Byte length of a UTF-8 codepoint with lead byte ``b``. Returns 1
     on invalid leads / continuation bytes so a stray byte never traps a
     walker in an infinite no-op loop. Single source for both editor
@@ -244,7 +244,7 @@ fn utf8_codepoint_size(b: Int) -> Int:
     return 1
 
 
-fn leading_indent_bytes(line: String) -> Int:
+def leading_indent_bytes(line: String) -> Int:
     """Byte count of leading ASCII spaces and tabs. Each space/tab
     counts as one byte under the editor's byte-as-cell column model,
     so the return is also the leading-whitespace cell width. Used by
@@ -257,7 +257,7 @@ fn leading_indent_bytes(line: String) -> Int:
     return i
 
 
-fn slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
+def slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
     """Substring of ``s`` covering codepoints ``[lo_cell, hi_cell)``.
 
     Cells correspond to codepoints under ``Canvas.put_text``'s layout —
@@ -311,7 +311,7 @@ fn slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
     ))
 
 
-fn parse_int_prefix(s: String, start: Int, stop: Int) -> Int:
+def parse_int_prefix(s: String, start: Int, stop: Int) -> Int:
     """Parse digits in ``s[start:stop]`` until the first non-digit (or
     ``stop``). Returns ``-1`` when ``start`` is already past a non-digit
     so callers can distinguish "no number" from "number that happens to

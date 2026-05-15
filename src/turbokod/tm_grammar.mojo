@@ -73,7 +73,7 @@ struct Capture(Copyable, Movable):
     var scope: String
     var nested: List[Int]
 
-    fn __init__(
+    def __init__(
         out self, group: Int, var scope: String,
         var nested: List[Int] = List[Int](),
     ):
@@ -81,7 +81,7 @@ struct Capture(Copyable, Movable):
         self.scope = scope^
         self.nested = nested^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.group = copy.group
         self.scope = copy.scope
         self.nested = copy.nested.copy()
@@ -116,7 +116,7 @@ struct Pattern(Copyable, Movable):
     var captures: List[Capture]   # MATCH or BEGIN_END's beginCaptures
     var end_captures: List[Capture]  # BEGIN_END's endCaptures
 
-    fn __init__(
+    def __init__(
         out self,
         kind: UInt8,
         var name: String,
@@ -138,7 +138,7 @@ struct Pattern(Copyable, Movable):
         self.captures = captures^
         self.end_captures = end_captures^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
         self.name = copy.name
         self.content_name = copy.content_name
@@ -182,7 +182,7 @@ struct Grammar(Copyable, Movable):
     var external_scopes: List[String]
     var external_roots: List[List[Int]]
 
-    fn __init__(
+    def __init__(
         out self,
         var scope_name: String,
         var root_patterns: List[Int],
@@ -202,7 +202,7 @@ struct Grammar(Copyable, Movable):
         self.external_scopes = external_scopes^
         self.external_roots = external_roots^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # Copy semantics: list-of-list fields deep-copy their
         # spines (we want each ``Grammar`` instance to own its own
         # vectors), but ``OnigRegex`` is itself bitwise-aliasing
@@ -222,14 +222,14 @@ struct Grammar(Copyable, Movable):
         self.external_scopes = copy.external_scopes.copy()
         self.external_roots = ext_roots_copy^
 
-    fn lookup_repo(self, key: String) -> Int:
+    def lookup_repo(self, key: String) -> Int:
         """Repository key → pattern index. Returns -1 if unknown."""
         for i in range(len(self.repo_keys)):
             if self.repo_keys[i] == key:
                 return self.repo_pattern_idxs[i]
         return -1
 
-    fn lookup_external(self, scope: String) -> Int:
+    def lookup_external(self, scope: String) -> Int:
         """External-scope index → ``external_roots`` slot, or -1.
 
         The tokenizer uses this to follow ``include: "source.X"``
@@ -241,7 +241,7 @@ struct Grammar(Copyable, Movable):
         return -1
 
 
-fn _path_for_scope(scope: String) -> String:
+def _path_for_scope(scope: String) -> String:
     """Map a TextMate scope name to a bundled grammar JSON path.
 
     Used to resolve external ``include: "source.X"`` references at
@@ -266,7 +266,7 @@ fn _path_for_scope(scope: String) -> String:
     return String("")
 
 
-fn load_grammar_from_file(path: String) raises -> Grammar:
+def load_grammar_from_file(path: String) raises -> Grammar:
     """Read and parse a ``.tmLanguage.json`` from disk.
 
     Recursively follows external ``include: "source.X"`` references
@@ -280,7 +280,7 @@ fn load_grammar_from_file(path: String) raises -> Grammar:
     return _load_grammar_full(text, loaded)
 
 
-fn load_grammar_from_string(text: String) raises -> Grammar:
+def load_grammar_from_string(text: String) raises -> Grammar:
     """Parse a grammar JSON already loaded into a string. Useful for
     tests where embedding the grammar inline beats touching the
     filesystem. Does *not* follow external ``include`` references —
@@ -291,7 +291,7 @@ fn load_grammar_from_string(text: String) raises -> Grammar:
     return _load_grammar_full(text, loaded)
 
 
-fn _load_grammar_full(
+def _load_grammar_full(
     text: String, mut loaded_scopes: List[String],
 ) raises -> Grammar:
     """Inner loader. ``loaded_scopes`` tracks the chain of scopes
@@ -354,7 +354,7 @@ fn _load_grammar_full(
     )
 
 
-fn _maybe_load_external(
+def _maybe_load_external(
     target: String,
     mut patterns: List[Pattern], mut regexes: List[OnigRegex],
     mut external_scopes: List[String],
@@ -465,7 +465,7 @@ fn _maybe_load_external(
         )
 
 
-fn _compile_pattern(
+def _compile_pattern(
     node: JsonValue,
     mut patterns: List[Pattern],
     mut regexes: List[OnigRegex],
@@ -724,7 +724,7 @@ fn _compile_pattern(
     return len(patterns) - 1
 
 
-fn _parse_captures(
+def _parse_captures(
     node: JsonValue, key: String,
     mut patterns: List[Pattern], mut regexes: List[OnigRegex],
     mut external_scopes: List[String],
@@ -804,7 +804,7 @@ fn _parse_captures(
 
 
 
-fn _string_or_empty(node: JsonValue, key: String) -> String:
+def _string_or_empty(node: JsonValue, key: String) -> String:
     var v = node.object_get(key)
     if not v:
         return String("")

@@ -46,10 +46,10 @@ from .colors import Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE
 # label or rebuild a bordered strip can match the field color
 # without re-hardcoding the constants.
 
-fn text_field_bg() -> Attr:
+def text_field_bg() -> Attr:
     return Attr(BLACK, CYAN)
 
-fn text_field_sel_attr() -> Attr:
+def text_field_sel_attr() -> Attr:
     return Attr(WHITE, BLUE)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DELETE, KEY_END,
@@ -165,7 +165,7 @@ struct TextField(Copyable, Movable):
     var _dc_anchor_start: Int
     var _dc_anchor_end: Int
 
-    fn __init__(out self):
+    def __init__(out self):
         self.text = String("")
         self.cursor = 0
         self.anchor = 0
@@ -183,7 +183,7 @@ struct TextField(Copyable, Movable):
         self._dc_anchor_start = 0
         self._dc_anchor_end = 0
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.text = copy.text
         self.cursor = copy.cursor
         self.anchor = copy.anchor
@@ -201,7 +201,7 @@ struct TextField(Copyable, Movable):
         self._dc_anchor_start = copy._dc_anchor_start
         self._dc_anchor_end = copy._dc_anchor_end
 
-    fn copy(self) -> Self:
+    def copy(self) -> Self:
         var out = Self()
         out.text = self.text
         out.cursor = self.cursor
@@ -223,7 +223,7 @@ struct TextField(Copyable, Movable):
 
     # --- programmatic mutation -----------------------------------------
 
-    fn set_text(mut self, var t: String):
+    def set_text(mut self, var t: String):
         """Replace the text; place the cursor at the end and clear
         any selection. The most common pattern when seeding a field
         from a prefill — the user typically wants to keep typing
@@ -246,7 +246,7 @@ struct TextField(Copyable, Movable):
         self._typing_active = False
         self._typing_last_ms = 0
 
-    fn clear(mut self):
+    def clear(mut self):
         self.text = String("")
         self.cursor = 0
         self.anchor = 0
@@ -259,10 +259,10 @@ struct TextField(Copyable, Movable):
 
     # --- undo / redo --------------------------------------------------
 
-    fn _snapshot(self) -> _Snapshot:
+    def _snapshot(self) -> _Snapshot:
         return _Snapshot(self.text, self.cursor, self.anchor)
 
-    fn _push_undo(mut self):
+    def _push_undo(mut self):
         """Record the current state on the undo stack and clear redo.
 
         Call this *before* applying a mutation so ``undo`` rewinds to
@@ -283,7 +283,7 @@ struct TextField(Copyable, Movable):
         self._redo = List[_Snapshot]()
         self._typing_active = False
 
-    fn _restore(mut self, snap: _Snapshot):
+    def _restore(mut self, snap: _Snapshot):
         self.text = snap.text
         self.cursor = snap.cursor
         self.anchor = snap.anchor
@@ -292,7 +292,7 @@ struct TextField(Copyable, Movable):
         # before.
         self._typing_active = False
 
-    fn undo(mut self) -> Bool:
+    def undo(mut self) -> Bool:
         """Roll back the last mutation. Returns False when the stack
         is empty (no edits since ``set_text`` / construction)."""
         if len(self._undo) == 0:
@@ -302,7 +302,7 @@ struct TextField(Copyable, Movable):
         self._restore(snap)
         return True
 
-    fn redo(mut self) -> Bool:
+    def redo(mut self) -> Bool:
         """Replay the most recently undone mutation. False when
         nothing to redo."""
         if len(self._redo) == 0:
@@ -314,26 +314,26 @@ struct TextField(Copyable, Movable):
 
     # --- selection -----------------------------------------------------
 
-    fn has_selection(self) -> Bool:
+    def has_selection(self) -> Bool:
         return self.cursor != self.anchor
 
-    fn _sel_range(self) -> Tuple[Int, Int]:
+    def _sel_range(self) -> Tuple[Int, Int]:
         if self.cursor < self.anchor:
             return (self.cursor, self.anchor)
         return (self.anchor, self.cursor)
 
-    fn selection_text(self) -> String:
+    def selection_text(self) -> String:
         if not self.has_selection():
             return String("")
         var rng = self._sel_range()
         var b = self.text.as_bytes()
         return String(StringSlice(unsafe_from_utf8=b[rng[0]:rng[1]]))
 
-    fn select_all(mut self):
+    def select_all(mut self):
         self.anchor = 0
         self.cursor = len(self.text.as_bytes())
 
-    fn delete_selection(mut self) -> Bool:
+    def delete_selection(mut self) -> Bool:
         """Delete the active selection (if any), collapsing the cursor
         to where the selection started. Returns True if anything was
         removed.
@@ -353,36 +353,36 @@ struct TextField(Copyable, Movable):
 
     # --- cursor movement ----------------------------------------------
 
-    fn _move(mut self, new_cursor: Int, extend: Bool):
+    def _move(mut self, new_cursor: Int, extend: Bool):
         self.cursor = new_cursor
         if not extend:
             self.anchor = new_cursor
 
-    fn _step_left(mut self, extend: Bool):
+    def _step_left(mut self, extend: Bool):
         if not extend and self.has_selection():
             self._move(self._sel_range()[0], False)
             return
         self._move(_utf8_step_backward(self.text, self.cursor), extend)
 
-    fn _step_right(mut self, extend: Bool):
+    def _step_right(mut self, extend: Bool):
         if not extend and self.has_selection():
             self._move(self._sel_range()[1], False)
             return
         self._move(_utf8_step_forward(self.text, self.cursor), extend)
 
-    fn _word_left(mut self, extend: Bool):
+    def _word_left(mut self, extend: Bool):
         self._move(_prev_word_pos(self.text, self.cursor), extend)
 
-    fn _word_right(mut self, extend: Bool):
+    def _word_right(mut self, extend: Bool):
         self._move(_next_word_pos(self.text, self.cursor), extend)
 
-    fn _home(mut self, extend: Bool):
+    def _home(mut self, extend: Bool):
         self._move(0, extend)
 
-    fn _end(mut self, extend: Bool):
+    def _end(mut self, extend: Bool):
         self._move(len(self.text.as_bytes()), extend)
 
-    fn _smart_home(mut self, extend: Bool):
+    def _smart_home(mut self, extend: Bool):
         """Mirror the editor's Cmd+Left: jump to the first non-space
         column; if the cursor is already at or before that column,
         fall all the way to byte 0. Two presses from anywhere in the
@@ -393,7 +393,7 @@ struct TextField(Copyable, Movable):
 
     # --- mutation ------------------------------------------------------
 
-    fn insert(mut self, s: String) -> Bool:
+    def insert(mut self, s: String) -> Bool:
         """Insert ``s`` at the cursor (replacing the selection if any).
         Returns True if anything actually changed (text grew or a
         selection was deleted).
@@ -416,7 +416,7 @@ struct TextField(Copyable, Movable):
         self.anchor = self.cursor
         return True
 
-    fn backspace(mut self) -> Bool:
+    def backspace(mut self) -> Bool:
         if self.has_selection():
             self._push_undo()
             return self.delete_selection()
@@ -429,7 +429,7 @@ struct TextField(Copyable, Movable):
         self.anchor = prev
         return True
 
-    fn delete_forward(mut self) -> Bool:
+    def delete_forward(mut self) -> Bool:
         if self.has_selection():
             self._push_undo()
             return self.delete_selection()
@@ -443,7 +443,7 @@ struct TextField(Copyable, Movable):
 
     # --- main key entrypoint ------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> TextFieldKeyResult:
+    def handle_key(mut self, event: Event) -> TextFieldKeyResult:
         """Apply ``event`` to this field. Returns
         ``(consumed, changed)``; ``consumed`` is True when the event
         was handled (caller should not run its own printable /
@@ -598,7 +598,7 @@ struct TextField(Copyable, Movable):
 
     # --- mouse --------------------------------------------------------
 
-    fn handle_mouse(
+    def handle_mouse(
         mut self, event: Event, input_rect: Rect,
     ) -> Bool:
         """Position the cursor for a click inside ``input_rect`` and
@@ -708,7 +708,7 @@ struct TextField(Copyable, Movable):
             return True
         return False
 
-    fn _byte_at_x(self, cell_x: Int) -> Int:
+    def _byte_at_x(self, cell_x: Int) -> Int:
         """Translate a cell offset within the strip to a byte offset
         in ``self.text``, accounting for ``_scroll`` (the cell at
         strip column 0 is text cell ``_scroll``). Past-text cells map
@@ -727,12 +727,12 @@ struct TextField(Copyable, Movable):
 
     # --- rendering helpers --------------------------------------------
 
-    fn cursor_cell(self) -> Int:
+    def cursor_cell(self) -> Int:
         """Cell column of the cursor relative to the start of
         ``self.text``."""
         return _utf8_cell_of_byte(self.text, self.cursor)
 
-    fn _ensure_visible(mut self, width: Int):
+    def _ensure_visible(mut self, width: Int):
         """Adjust ``_scroll`` so that the cursor sits within the
         ``width``-cell visible window. Also pulls scroll back to the
         left when shrinking text would otherwise leave empty cells at
@@ -758,7 +758,7 @@ struct TextField(Copyable, Movable):
         if self._scroll < 0:
             self._scroll = 0
 
-    fn paint(
+    def paint(
         mut self, mut canvas: Canvas, rect: Rect, focused: Bool,
     ):
         """Render ``self.text`` into ``rect`` (one row) using the
@@ -833,7 +833,7 @@ struct TextField(Copyable, Movable):
                     Cell(glyph, Attr(LIGHT_GRAY, BLACK), 1),
                 )
 
-    fn _text_end_x(self, base_x: Int) -> Int:
+    def _text_end_x(self, base_x: Int) -> Int:
         """Strip column just past the last visible codepoint of
         ``self.text``, anchored at ``base_x``. Used by ``paint`` to
         decide whether the caret sits over a glyph (preserve it under
@@ -872,34 +872,34 @@ struct Form(Movable):
     var _fields: List[TextField]
     var _keys: List[UInt8]
 
-    fn __init__(out self):
+    def __init__(out self):
         self._fields = List[TextField]()
         self._keys = List[UInt8]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self._fields = copy._fields.copy()
         self._keys = copy._keys.copy()
 
-    fn copy(self) -> Self:
+    def copy(self) -> Self:
         var out = Self()
         out._fields = self._fields.copy()
         out._keys = self._keys.copy()
         return out^
 
-    fn add(mut self, focus_key: UInt8):
+    def add(mut self, focus_key: UInt8):
         """Register a fresh empty field bound to ``focus_key``. The
         field's index in ``rects`` (passed to ``handle_mouse`` /
         ``paint_each``) is the order of ``add`` calls."""
         self._fields.append(TextField())
         self._keys.append(focus_key)
 
-    fn _index_of(self, focus_key: UInt8) -> Int:
+    def _index_of(self, focus_key: UInt8) -> Int:
         for i in range(len(self._keys)):
             if self._keys[i] == focus_key:
                 return i
         return -1
 
-    fn handle_mouse(
+    def handle_mouse(
         mut self, event: Event, rects: List[Rect],
     ) -> Optional[UInt8]:
         """Forward ``event`` to every registered field paired with its
@@ -915,7 +915,7 @@ struct Form(Movable):
                 return Optional[UInt8](self._keys[i])
         return Optional[UInt8]()
 
-    fn handle_key(
+    def handle_key(
         mut self, event: Event, focus_key: UInt8,
     ) -> TextFieldKeyResult:
         """Route ``event`` to the field whose registered key is
@@ -928,19 +928,19 @@ struct Form(Movable):
             return TextFieldKeyResult(False, False)
         return self._fields[idx].handle_key(event)
 
-    fn text(self, focus_key: UInt8) -> String:
+    def text(self, focus_key: UInt8) -> String:
         var idx = self._index_of(focus_key)
         if idx < 0:
             return String("")
         return self._fields[idx].text
 
-    fn set_text(mut self, focus_key: UInt8, var text: String):
+    def set_text(mut self, focus_key: UInt8, var text: String):
         var idx = self._index_of(focus_key)
         if idx < 0:
             return
         self._fields[idx].set_text(text^)
 
-    fn paint_field(
+    def paint_field(
         mut self, mut canvas: Canvas, focus_key: UInt8,
         rect: Rect, focused: Bool,
     ):
@@ -957,7 +957,7 @@ struct Form(Movable):
 # --- internals -----------------------------------------------------------
 
 
-fn _sanitize_single_line(text: String) -> String:
+def _sanitize_single_line(text: String) -> String:
     """Strip CR / LF / TAB and other control bytes from a paste payload.
 
     A clipboard chunk with embedded newlines would otherwise smuggle
@@ -979,7 +979,7 @@ fn _sanitize_single_line(text: String) -> String:
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
 
 
-fn _splice(text: String, start: Int, end: Int, replacement: String) -> String:
+def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
     """Return ``text`` with bytes ``[start, end)`` replaced by
     ``replacement``. Boundary-clamped so callers don't have to
     pre-validate."""
@@ -1009,7 +1009,7 @@ fn _splice(text: String, start: Int, end: Int, replacement: String) -> String:
 # --- UTF-8 boundary helpers (mirrors editor.mojo) -----------------------
 
 
-fn _utf8_codepoint_size(b: Int) -> Int:
+def _utf8_codepoint_size(b: Int) -> Int:
     if b < 0x80:
         return 1
     if (b & 0xE0) == 0xC0:
@@ -1021,7 +1021,7 @@ fn _utf8_codepoint_size(b: Int) -> Int:
     return 1
 
 
-fn _utf8_step_forward(text: String, col: Int) -> Int:
+def _utf8_step_forward(text: String, col: Int) -> Int:
     var bytes = text.as_bytes()
     var n = len(bytes)
     if col >= n:
@@ -1033,7 +1033,7 @@ fn _utf8_step_forward(text: String, col: Int) -> Int:
     return nxt
 
 
-fn _utf8_step_backward(text: String, col: Int) -> Int:
+def _utf8_step_backward(text: String, col: Int) -> Int:
     if col <= 0:
         return 0
     var bytes = text.as_bytes()
@@ -1043,7 +1043,7 @@ fn _utf8_step_backward(text: String, col: Int) -> Int:
     return c
 
 
-fn _utf8_cell_of_byte(text: String, byte_col: Int) -> Int:
+def _utf8_cell_of_byte(text: String, byte_col: Int) -> Int:
     if byte_col <= 0:
         return 0
     var bytes = text.as_bytes()
@@ -1058,7 +1058,7 @@ fn _utf8_cell_of_byte(text: String, byte_col: Int) -> Int:
     return cell
 
 
-fn _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
+def _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
     if cell_col <= 0:
         return 0
     var bytes = text.as_bytes()
@@ -1071,7 +1071,7 @@ fn _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
     return i
 
 
-fn _char_class(cp: Int) -> Int:
+def _char_class(cp: Int) -> Int:
     """Three-way character class used by ``_word_range_at``. Word
     chars cluster, whitespace clusters, everything else clusters as
     "punctuation". Mirrors the editor's grouping so double-click in
@@ -1084,7 +1084,7 @@ fn _char_class(cp: Int) -> Int:
     return 3
 
 
-fn _word_range_at(text: String, byte_col: Int) -> Tuple[Int, Int]:
+def _word_range_at(text: String, byte_col: Int) -> Tuple[Int, Int]:
     """Return the (start, end) byte range of the contiguous run of
     same-class codepoints around ``byte_col``. Empty range when
     ``byte_col`` is at end of text. Walks by UTF-8 codepoint so
@@ -1111,7 +1111,7 @@ fn _word_range_at(text: String, byte_col: Int) -> Tuple[Int, Int]:
     return (start, end)
 
 
-fn _next_word_pos(text: String, col: Int) -> Int:
+def _next_word_pos(text: String, col: Int) -> Int:
     """Skip the current word run, then any non-word run. Mirrors
     ``Editor._next_word_pos`` for a single-line buffer (no row
     wrapping). One press = one meaningful jump. Walks by UTF-8
@@ -1135,7 +1135,7 @@ fn _next_word_pos(text: String, col: Int) -> Int:
     return c
 
 
-fn _prev_word_pos(text: String, col: Int) -> Int:
+def _prev_word_pos(text: String, col: Int) -> Int:
     if col <= 0:
         return 0
     var c = col

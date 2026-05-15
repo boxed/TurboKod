@@ -118,7 +118,7 @@ comptime _BTN_LANG_REMOVE  = 8
 comptime _SAVE_DD_W = 16
 
 
-fn _section_labels() -> List[String]:
+def _section_labels() -> List[String]:
     """Section names rendered in the left rail. Add new section names
     here and a matching ``_paint_section_*`` / ``_handle_*`` branch
     below; nothing else needs to change."""
@@ -130,7 +130,7 @@ fn _section_labels() -> List[String]:
     return out^
 
 
-fn _save_behavior_options() -> List[String]:
+def _save_behavior_options() -> List[String]:
     """Dropdown options for the Editor ▸ Save behavior picker. Order
     here is the order rendered in the popup; index 0 is the default
     when no value is committed."""
@@ -224,7 +224,7 @@ struct Settings(Movable):
     stale buffer doesn't misroute the first keystroke after the
     user moves between panes."""
 
-    fn __init__(out self):
+    def __init__(out self):
         self.active = False
         self.dirty = False
         self.actions = List[OnSaveAction]()
@@ -280,7 +280,7 @@ struct Settings(Movable):
         self.language_editor = LanguageEditor()
         self._type_ahead = TypeAhead()
 
-    fn open(
+    def open(
         mut self, var actions: List[OnSaveAction], auto_save: Bool,
         var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
         current_language_ext: String = String(""),
@@ -318,12 +318,12 @@ struct Settings(Movable):
             lang_idx = 0 if len(self.languages_view) > 0 else -1
         self.selected_language = lang_idx
 
-    fn _rebuild_languages_view(mut self):
+    def _rebuild_languages_view(mut self):
         self.languages_view = apply_language_overrides(
             built_in_servers(), self.language_overrides,
         )
 
-    fn close(mut self):
+    def close(mut self):
         self.active = False
         self.actions = List[OnSaveAction]()
         self.auto_save = False
@@ -346,13 +346,13 @@ struct Settings(Movable):
             self._buttons[i].button.pressed = False
             self._buttons[i].button.pressed_inside = False
 
-    fn ack_dirty(mut self):
+    def ack_dirty(mut self):
         """Host calls this after persisting ``self.actions`` to disk."""
         self.dirty = False
 
     # --- painting ---------------------------------------------------
 
-    fn paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
         var rect = self._workspace_rect(screen)
@@ -386,7 +386,7 @@ struct Settings(Movable):
         if self.language_editor.active:
             self.language_editor.paint(canvas, screen)
 
-    fn _workspace_rect(self, screen: Rect) -> Rect:
+    def _workspace_rect(self, screen: Rect) -> Rect:
         """Settings takes the workspace area — ``screen`` minus the
         menu bar (row 0) and status bar (last row). The host paints
         those above/below us so the user keeps their bearings."""
@@ -394,20 +394,20 @@ struct Settings(Movable):
         var bottom = screen.b.y - 1 if screen.b.y > 2 else screen.b.y
         return Rect(screen.a.x, top, screen.b.x, bottom)
 
-    fn _sections_rect(self, rect: Rect) -> Rect:
+    def _sections_rect(self, rect: Rect) -> Rect:
         """Inner area of the left rail (inside the framed border)."""
         return Rect(
             rect.a.x + 2, rect.a.y + 2,
             rect.a.x + 2 + _SECTION_W, rect.b.y - 2,
         )
 
-    fn _right_rect(self, rect: Rect) -> Rect:
+    def _right_rect(self, rect: Rect) -> Rect:
         return Rect(
             rect.a.x + 2 + _SECTION_W + 2, rect.a.y + 2,
             rect.b.x - 2, rect.b.y - 2,
         )
 
-    fn _paint_sections(
+    def _paint_sections(
         self, mut canvas: Canvas, painter: Painter, rect: Rect,
     ):
         var inner = self._sections_rect(rect)
@@ -434,7 +434,7 @@ struct Settings(Movable):
                 canvas, Point(inner.a.x + 1, y), labels[i], attr,
             )
 
-    fn _paint_right_pane(
+    def _paint_right_pane(
         mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
     ):
         var inner = self._right_rect(rect)
@@ -457,7 +457,7 @@ struct Settings(Movable):
         elif self.section == _SECTION_LANGUAGES:
             self._paint_languages_section(canvas, sub, inner)
 
-    fn _paint_actions_section(
+    def _paint_actions_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
         """List of configured on-save actions plus the action-row of
@@ -503,7 +503,7 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_EDIT)
         self._paint_button(canvas, _BTN_REMOVE)
 
-    fn _paint_actions_list(
+    def _paint_actions_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         var visible = list_rect.height()
@@ -549,7 +549,7 @@ struct Settings(Movable):
                 line, attr,
             )
 
-    fn _paint_editor_section(
+    def _paint_editor_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
         """Editor preferences pane. Single row for now: a label and an
@@ -589,7 +589,7 @@ struct Settings(Movable):
             hint,
         )
 
-    fn _paint_spell_section(
+    def _paint_spell_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
         """List of catalog dictionaries with an "[X] installed" marker
@@ -652,7 +652,7 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_DICT_INSTALL)
         self._paint_button(canvas, _BTN_DICT_REMOVE)
 
-    fn _paint_dict_list(
+    def _paint_dict_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         """One row per catalog entry: ``[X] German    (de)``.
@@ -704,7 +704,7 @@ struct Settings(Movable):
                 line, attr,
             )
 
-    fn _paint_languages_section(
+    def _paint_languages_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
         """List of languages (built-in + user) with their effective
@@ -778,7 +778,7 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_LANG_EDIT)
         self._paint_button(canvas, _BTN_LANG_REMOVE)
 
-    fn _paint_languages_list(
+    def _paint_languages_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         var visible = list_rect.height()
@@ -826,7 +826,7 @@ struct Settings(Movable):
                 line, attr,
             )
 
-    fn _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
+    def _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
         var close = self._buttons[_BTN_CLOSE]
         var btn_w = close.button.face_width()
         var btn_x = rect.b.x - 2 - (btn_w + 1)
@@ -834,7 +834,7 @@ struct Settings(Movable):
         self._buttons[_BTN_CLOSE].button.move_to(btn_x, btn_y)
         self._paint_button(canvas, _BTN_CLOSE)
 
-    fn _paint_button(mut self, mut canvas: Canvas, idx: Int):
+    def _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
         var face: Attr
         if not pb.enabled:
@@ -847,7 +847,7 @@ struct Settings(Movable):
 
     # --- key handling -----------------------------------------------
 
-    fn handle_key(mut self, event: Event) -> Bool:
+    def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
         # Editor on top eats events first.
@@ -916,7 +916,7 @@ struct Settings(Movable):
             return True
         return True
 
-    fn _handle_type_to_jump(mut self, ch: String):
+    def _handle_type_to_jump(mut self, ch: String):
         """Route a printable keystroke into the type-to-jump helper
         and update the focused list's selection. No-op when focus is
         on a non-list widget; the keystroke is still consumed by the
@@ -943,7 +943,7 @@ struct Settings(Movable):
             if hit >= 0:
                 self.selected_language = hit
 
-    fn _sync_dropdown_commit(mut self, prev_idx: Int):
+    def _sync_dropdown_commit(mut self, prev_idx: Int):
         """If the dropdown's committed index moved, propagate it back
         to ``auto_save`` and raise ``dirty``. Called after every event
         that's been routed into ``_save_dropdown`` so the host's
@@ -955,7 +955,7 @@ struct Settings(Movable):
             self.auto_save = new_auto
             self.dirty = True
 
-    fn _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
+    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
         # otherwise Tab from the rail would land on Add/Edit even
         # when Editor is selected.
@@ -1013,7 +1013,7 @@ struct Settings(Movable):
             return ordered[(pos - 1 + n) % n]
         return ordered[(pos + 1) % n]
 
-    fn _step_section(mut self, delta: Int):
+    def _step_section(mut self, delta: Int):
         var labels = _section_labels()
         if len(labels) == 0:
             return
@@ -1032,7 +1032,7 @@ struct Settings(Movable):
             self._type_ahead.reset()
         self.section = s
 
-    fn _step_action(mut self, delta: Int):
+    def _step_action(mut self, delta: Int):
         if len(self.actions) == 0:
             return
         var s = self.selected_action + delta
@@ -1042,7 +1042,7 @@ struct Settings(Movable):
             s = len(self.actions) - 1
         self.selected_action = s
 
-    fn _step_dict(mut self, delta: Int):
+    def _step_dict(mut self, delta: Int):
         if len(self.dict_specs) == 0:
             return
         var s = self.selected_dict + delta
@@ -1052,7 +1052,7 @@ struct Settings(Movable):
             s = len(self.dict_specs) - 1
         self.selected_dict = s
 
-    fn _step_language(mut self, delta: Int):
+    def _step_language(mut self, delta: Int):
         if len(self.languages_view) == 0:
             return
         var s = self.selected_language + delta
@@ -1062,14 +1062,14 @@ struct Settings(Movable):
             s = len(self.languages_view) - 1
         self.selected_language = s
 
-    fn _add_language(mut self):
+    def _add_language(mut self):
         var argvs = List[String]()
         var ft = List[String]()
         self.language_editor.open(
             String(""), ft^, argvs^, False,
         )
 
-    fn _edit_language(mut self):
+    def _edit_language(mut self):
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
@@ -1086,7 +1086,7 @@ struct Settings(Movable):
             spec.language_id, file_types^, argvs^, is_existing,
         )
 
-    fn _remove_language_override(mut self):
+    def _remove_language_override(mut self):
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
@@ -1102,7 +1102,7 @@ struct Settings(Movable):
         if self.selected_language >= len(self.languages_view):
             self.selected_language = len(self.languages_view) - 1
 
-    fn _maybe_consume_language_editor(mut self):
+    def _maybe_consume_language_editor(mut self):
         if not self.language_editor.submitted:
             return
         var entry = self.language_editor.value()
@@ -1133,7 +1133,7 @@ struct Settings(Movable):
                 break
         self.focus = _FOCUS_LANG_LIST
 
-    fn _activate_focus(mut self) -> Bool:
+    def _activate_focus(mut self) -> Bool:
         if self.focus == _FOCUS_ADD:
             self._add_new()
             return True
@@ -1187,7 +1187,7 @@ struct Settings(Movable):
             return True
         return True
 
-    fn _request_dict_install(mut self):
+    def _request_dict_install(mut self):
         if self.selected_dict < 0 \
                 or self.selected_dict >= len(self.dict_specs):
             return
@@ -1196,7 +1196,7 @@ struct Settings(Movable):
             return
         self.pending_dict_install_lang = lang
 
-    fn _request_dict_remove(mut self):
+    def _request_dict_remove(mut self):
         if self.selected_dict < 0 \
                 or self.selected_dict >= len(self.dict_specs):
             return
@@ -1205,28 +1205,28 @@ struct Settings(Movable):
             return
         self.pending_dict_remove_lang = lang
 
-    fn ack_dict_install(mut self):
+    def ack_dict_install(mut self):
         """Host calls this after picking up ``pending_dict_install_lang``
         and starting the install — clears the field so the request fires
         once."""
         self.pending_dict_install_lang = String("")
 
-    fn ack_dict_remove(mut self):
+    def ack_dict_remove(mut self):
         """Host calls this after performing the remove."""
         self.pending_dict_remove_lang = String("")
 
-    fn _add_new(mut self):
+    def _add_new(mut self):
         var fresh = OnSaveAction()
         self.editor.open(fresh^, -1)
 
-    fn _edit_selected(mut self):
+    def _edit_selected(mut self):
         if self.selected_action < 0 or self.selected_action >= len(self.actions):
             return
         self.editor.open(
             self.actions[self.selected_action].copy(), self.selected_action,
         )
 
-    fn _remove_selected(mut self):
+    def _remove_selected(mut self):
         if self.selected_action < 0 or self.selected_action >= len(self.actions):
             return
         var rebuilt = List[OnSaveAction]()
@@ -1242,7 +1242,7 @@ struct Settings(Movable):
         elif self.selected_action >= len(self.actions):
             self.selected_action = len(self.actions) - 1
 
-    fn _maybe_consume_editor(mut self):
+    def _maybe_consume_editor(mut self):
         if not self.editor.submitted:
             return
         var idx = self.editor.edit_index
@@ -1260,7 +1260,7 @@ struct Settings(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    fn handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
         if self.editor.active:
@@ -1359,7 +1359,7 @@ struct Settings(Movable):
                 return True
         return True
 
-    fn _dispatch_buttons(mut self, event: Event) -> Bool:
+    def _dispatch_buttons(mut self, event: Event) -> Bool:
         # Only dispatch buttons that belong to the current section (plus
         # the always-on Close button). Buttons not painted this frame
         # still hold their last-painted positions from a different
@@ -1378,7 +1378,7 @@ struct Settings(Movable):
             return True
         return False
 
-    fn _button_active_for_section(self, idx: Int) -> Bool:
+    def _button_active_for_section(self, idx: Int) -> Bool:
         if idx == _BTN_CLOSE:
             return True
         if self.section == _SECTION_ACTIONS:
@@ -1396,7 +1396,7 @@ struct Settings(Movable):
 # --- helpers --------------------------------------------------------------
 
 
-fn _has_override(
+def _has_override(
     overrides: List[LanguageServerOverride], language_id: String,
 ) -> Bool:
     for i in range(len(overrides)):
@@ -1405,7 +1405,7 @@ fn _has_override(
     return False
 
 
-fn _format_language(spec: LanguageSpec, has_override: Bool) -> String:
+def _format_language(spec: LanguageSpec, has_override: Bool) -> String:
     """One-line label: ``<id>  <ext1 ext2>  <count> server(s)``.
 
     A ``*`` prefix marks languages with a user override so the section
@@ -1432,7 +1432,7 @@ fn _format_language(spec: LanguageSpec, has_override: Bool) -> String:
     return line^
 
 
-fn _join_argv(argv: List[String]) -> String:
+def _join_argv(argv: List[String]) -> String:
     """Round-trip-safe join: wrap tokens with shell-significant
     characters (spaces, tabs, or pre-existing quotes) in double quotes
     so the re-parser in ``language_editor._split_space`` reconstructs
@@ -1448,7 +1448,7 @@ fn _join_argv(argv: List[String]) -> String:
     return out^
 
 
-fn _shell_quote(s: String) -> String:
+def _shell_quote(s: String) -> String:
     """Return ``s`` unchanged when it contains no shell-significant
     bytes; otherwise wrap it in double quotes with embedded ``"`` and
     ``\\`` escaped. Single quotes are passed through inside ``"…"``
@@ -1478,7 +1478,7 @@ fn _shell_quote(s: String) -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
 
-fn _format_action(act: OnSaveAction) -> String:
+def _format_action(act: OnSaveAction) -> String:
     """One-line label: ``<lang>  <program> <args>``. Empty language
     renders as ``(any)`` so the user can tell why an action fires for
     every save."""

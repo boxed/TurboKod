@@ -32,7 +32,7 @@ comptime _RECENT_PROJECTS_MAX = 20
 comptime _RECENT_FILES_MAX = 50
 
 
-fn _config_dir() -> String:
+def _config_dir() -> String:
     """Directory that holds the config file. Empty when ``$HOME`` is
     unset (e.g. inside an unusual sandbox); callers treat that as
     "no persistent config available" and skip both load and save."""
@@ -42,14 +42,14 @@ fn _config_dir() -> String:
     return home + String("/.config/turbokod")
 
 
-fn _config_path() -> String:
+def _config_path() -> String:
     var dir = _config_dir()
     if len(dir.as_bytes()) == 0:
         return String("")
     return dir + String("/config.json")
 
 
-fn _ensure_dir(path: String):
+def _ensure_dir(path: String):
     """Best-effort ``mkdir`` ignoring ``EEXIST``. We don't recurse; the
     caller attempts both ``~/.config`` and ``~/.config/turbokod`` to
     cover machines where ``~/.config`` doesn't exist yet."""
@@ -76,12 +76,12 @@ struct LanguageServerOverride(Copyable, Movable):
     var file_types: List[String]
     var argvs: List[List[String]]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.language_id = String("")
         self.file_types = List[String]()
         self.argvs = List[List[String]]()
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String,
         var file_types: List[String],
         var argvs: List[List[String]],
@@ -90,7 +90,7 @@ struct LanguageServerOverride(Copyable, Movable):
         self.file_types = file_types^
         self.argvs = argvs^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         var argvs = List[List[String]]()
@@ -117,13 +117,13 @@ struct OnSaveAction(Copyable, Movable):
     var args: List[String]
     var cwd: String
 
-    fn __init__(out self):
+    def __init__(out self):
         self.language_id = String("")
         self.program = String("")
         self.args = List[String]()
         self.cwd = String("")
 
-    fn __init__(
+    def __init__(
         out self, var language_id: String, var program: String,
         var args: List[String], var cwd: String,
     ):
@@ -132,7 +132,7 @@ struct OnSaveAction(Copyable, Movable):
         self.args = args^
         self.cwd = cwd^
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.program = copy.program
         self.args = copy.args.copy()
@@ -176,7 +176,7 @@ struct TurbokodConfig(Copyable, Movable):
     # unchanged.
     var language_servers: List[LanguageServerOverride]
 
-    fn __init__(out self):
+    def __init__(out self):
         self.line_numbers = False
         self.soft_wrap = False
         self.git_changes = False
@@ -188,7 +188,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.on_save_actions = List[OnSaveAction]()
         self.language_servers = List[LanguageServerOverride]()
 
-    fn __copyinit__(mut self, copy: Self):
+    def __copyinit__(mut self, copy: Self):
         # ``List[String]`` isn't implicitly copyable, so the synthesized
         # copy constructor refuses — spell it out using ``List.copy``.
         self.line_numbers = copy.line_numbers
@@ -203,7 +203,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.language_servers = copy.language_servers.copy()
 
 
-fn record_recent_project(
+def record_recent_project(
     mut config: TurbokodConfig, var path: String,
 ):
     """Promote ``path`` to the front of ``config.recent_projects``,
@@ -221,7 +221,7 @@ fn record_recent_project(
     config.recent_projects = new_list^
 
 
-fn record_recent_file(
+def record_recent_file(
     mut config: TurbokodConfig, var path: String,
 ) -> Bool:
     """Promote ``path`` to the front of ``config.recent_files``, dedup
@@ -244,7 +244,7 @@ fn record_recent_file(
     return True
 
 
-fn load_config() -> TurbokodConfig:
+def load_config() -> TurbokodConfig:
     """Load the saved config, or return defaults on any failure."""
     var cfg = TurbokodConfig()
     var path = _config_path()
@@ -325,7 +325,7 @@ fn load_config() -> TurbokodConfig:
     return cfg^
 
 
-fn save_config(config: TurbokodConfig) -> Bool:
+def save_config(config: TurbokodConfig) -> Bool:
     """Write ``config`` to ``~/.config/turbokod/config.json``. Returns
     True on success. Creates ``~/.config`` and ``~/.config/turbokod``
     if they don't exist yet."""
