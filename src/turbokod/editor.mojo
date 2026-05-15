@@ -50,7 +50,7 @@ from .highlight import (
 )
 from .lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
-    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry,
 )
 from .spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
@@ -1928,6 +1928,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 String("<no completion found>"),
                 String(""), 0, String(""), String(""),
                 False, 0, 0, 0, 0,
+                List[TextEditEntry](),
             )
         )
         self.completion_items = items^
@@ -1986,6 +1987,92 @@ struct Editor(ImplicitlyCopyable, Movable):
             ),
         )
         self._completion_request_stamp_ms = monotonic_ms()
+
+    fn _apply_buffer_edit_raw(
+        mut self, sl: Int, sc: Int, el: Int, ec: Int, new_text: String,
+    ) -> Int:
+        """Apply one LSP ``TextEdit`` at absolute buffer coordinates.
+
+        Replaces the half-open range ``[(sl, sc), (el, ec))`` with
+        ``new_text`` (which may contain ``\\n`` to introduce new
+        lines). Coordinates are clamped to existing buffer extents
+        rather than raising — a server occasionally points past EOF
+        when the file has been edited mid-flight, and silently
+        clamping is less disruptive than dropping the whole edit.
+
+        Returns the net change in line count (positive = lines added).
+        Caller is responsible for cursor / anchor adjustment using
+        that delta — this helper deliberately leaves both alone so
+        it composes cleanly when applying multiple edits in sequence.
+        """
+        var n_lines = self.buffer.line_count()
+        if n_lines == 0 or sl < 0 or sl >= n_lines:
+            return 0
+        var sc2 = sc
+        if sc2 < 0: sc2 = 0
+        var s_line = self.buffer.line(sl)
+        var s_ln = len(s_line.as_bytes())
+        if sc2 > s_ln: sc2 = s_ln
+
+        var el2 = el
+        var ec2 = ec
+        if el2 < sl:
+            el2 = sl
+            ec2 = sc2
+        if el2 >= n_lines:
+            el2 = n_lines - 1
+            ec2 = len(self.buffer.line(el2).as_bytes())
+        var e_line = self.buffer.line(el2)
+        var e_ln = len(e_line.as_bytes())
+        if ec2 < 0: ec2 = 0
+        if ec2 > e_ln: ec2 = e_ln
+        if el2 == sl and ec2 < sc2:
+            ec2 = sc2
+
+        var prefix = _slice(s_line, 0, sc2)
+        var suffix = _slice(e_line, ec2, e_ln)
+
+        # Collapse the deleted span into the start row.
+        self.buffer.lines[sl] = prefix
+        var to_remove = el2 - sl
+        for _ in range(to_remove):
+            _ = self.buffer.lines.pop(sl + 1)
+
+        # Walk ``new_text``, splitting on '\n'. Each newline pushes a
+        # fresh row after the current one (using the same append+shift
+        # dance as ``Buffer.split`` — ``List.insert`` is avoided per
+        # that helper's note about Mojo version compat).
+        var bytes = new_text.as_bytes()
+        var line_start = 0
+        var current_row = sl
+        var i = 0
+        while i < len(bytes):
+            if bytes[i] == 0x0A:
+                if i > line_start:
+                    self.buffer.lines[current_row] = (
+                        self.buffer.lines[current_row]
+                        + _slice(new_text, line_start, i)
+                    )
+                self.buffer.lines.append(String(""))
+                var k = len(self.buffer.lines) - 1
+                while k > current_row + 1:
+                    self.buffer.lines[k] = self.buffer.lines[k - 1]
+                    k -= 1
+                self.buffer.lines[current_row + 1] = String("")
+                current_row += 1
+                line_start = i + 1
+            i += 1
+        if line_start < len(bytes):
+            self.buffer.lines[current_row] = (
+                self.buffer.lines[current_row]
+                + _slice(new_text, line_start, len(bytes))
+            )
+        # Suffix lands on whatever row the last newline left us on.
+        self.buffer.lines[current_row] = (
+            self.buffer.lines[current_row] + suffix
+        )
+
+        return self.buffer.line_count() - n_lines
 
     fn accept_completion(mut self) -> Bool:
         """Apply the currently highlighted completion to the buffer.
@@ -2067,8 +2154,47 @@ struct Editor(ImplicitlyCopyable, Movable):
             self.cursor_col + len(item.insert_text.as_bytes()),
             False,
         )
+        # Apply ``additionalTextEdits`` (typically the auto-import line
+        # that pyright/etc. attach to a name-completion). Sort
+        # descending by start position so an edit at a lower row /
+        # earlier column doesn't shift positions of the edits we still
+        # have to apply. Cursor row is then nudged once per edit that
+        # lands fully above it — ``insert_text`` rarely contains '\n',
+        # but the import edits do (they end with ``\n``), and without
+        # the nudge the cursor would float into the wrong row.
+        var hl_low = pre
+        var aux = item.additional_text_edits.copy()
+        var m = len(aux)
+        if m > 1:
+            for ii in range(1, m):
+                var jj = ii
+                while jj > 0 and (
+                    aux[jj].start_line > aux[jj - 1].start_line
+                    or (
+                        aux[jj].start_line == aux[jj - 1].start_line
+                        and aux[jj].start_char > aux[jj - 1].start_char
+                    )
+                ):
+                    var tmp = aux[jj]
+                    aux[jj] = aux[jj - 1]
+                    aux[jj - 1] = tmp
+                    jj -= 1
+        for k in range(m):
+            var ed = aux[k]
+            var delta = self._apply_buffer_edit_raw(
+                ed.start_line, ed.start_char,
+                ed.end_line, ed.end_char, ed.new_text,
+            )
+            # Edit ended strictly above the cursor's current row →
+            # shift the cursor by the line delta. Same for the anchor
+            # so a subsequent shift-arrow doesn't grab a stale span.
+            if ed.end_line < self.cursor_row and delta != 0:
+                self.cursor_row += delta
+                self.anchor_row += delta
+            if ed.start_line < hl_low:
+                hl_low = ed.start_line
         self.dirty = True
-        self._mark_hl_dirty(pre)
+        self._mark_hl_dirty(hl_low)
         self.close_completion_popup()
         return True
 
@@ -3298,9 +3424,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 break
         self.move_to(buf_row, col, False)
         var target = buf_row - content_h // 2
-        var max_y = n_lines - content_h
-        if max_y < 0:
-            max_y = 0
+        var max_y = self.max_scroll_y(view)
         if target < 0:
             target = 0
         if target > max_y:
@@ -5681,8 +5805,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             return True
         if event.button == MOUSE_WHEEL_DOWN:
             if event.pressed:
-                var max_y = self.buffer.line_count() - view.height()
-                if max_y < 0: max_y = 0
+                var max_y = self.max_scroll_y(view)
                 self.scroll_y += 3
                 if self.scroll_y > max_y: self.scroll_y = max_y
             return True
@@ -6096,6 +6219,60 @@ struct Editor(ImplicitlyCopyable, Movable):
             scroll_cell = cur_cell - w + 1
         self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
 
+    fn max_scroll_y(self, view: Rect) -> Int:
+        """Largest valid ``scroll_y`` for ``view``.
+
+        Hard-wrap: simply ``line_count - view.height()`` — one buffer row
+        per visual row, so the last view-height rows of the buffer sit at
+        the bottom.
+
+        Soft-wrap: walk lines from the END of the buffer backwards summing
+        their visual-row counts. The smallest buffer row whose suffix
+        ``[row..end]`` still fits in ``view.height()`` visual rows is the
+        max ``scroll_y``. Without this, the buffer-line cap
+        (``line_count - view.height()``) underestimates the scrollable
+        range whenever lines wrap — the wheel and scrollbar drag get
+        stuck before the bottom of the wrapped content scrolls into view.
+        """
+        var n_lines = self.buffer.line_count()
+        if n_lines <= 0:
+            return 0
+        var content_h = view.height()
+        if content_h < 1:
+            return 0
+        if not self.soft_wrap:
+            var m = n_lines - content_h
+            return 0 if m < 0 else m
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            content_w = 1
+        var tab = self.editorconfig.effective_indent_size()
+        if tab < 1:
+            tab = 4
+        var rows = 0
+        var i = n_lines - 1
+        while i >= 0:
+            var single = List[String]()
+            single.append(self.buffer.line(i))
+            var v = wrap_lines(
+                single, content_w, indent_size=tab, word_aware=True,
+            )
+            var line_rows = len(v)
+            if line_rows < 1:
+                line_rows = 1
+            if rows + line_rows > content_h:
+                break
+            rows += line_rows
+            i -= 1
+        var ms = i + 1
+        if ms < 0:
+            ms = 0
+        if ms > n_lines - 1:
+            ms = n_lines - 1
+        return ms
+
     fn clamp_scroll(mut self, view: Rect):
         """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.
 
@@ -6106,17 +6283,14 @@ struct Editor(ImplicitlyCopyable, Movable):
         stay positive and hide leading characters that the user can no
         longer scroll back to. Vertical axis is clamped symmetrically.
         """
-        var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
-        var content_h = view.height()
-        if content_h < 1:
-            content_h = 1
         if self.soft_wrap:
             self.scroll_x = 0
         else:
+            var total_gutter = self._total_gutter()
+            var right_gutter = self._right_gutter()
+            var content_w = view.width() - total_gutter - right_gutter
+            if content_w < 1:
+                content_w = 1
             var max_x = self.longest_line_width() - content_w
             if max_x < 0: max_x = 0
             if self.scroll_x > max_x:
@@ -6128,8 +6302,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             var line = self.buffer.line(self.cursor_row)
             var cell = _utf8_cell_of_byte(line, self.scroll_x)
             self.scroll_x = _utf8_byte_of_cell(line, cell)
-        var max_y = self.buffer.line_count() - content_h
-        if max_y < 0: max_y = 0
+        var max_y = self.max_scroll_y(view)
         if self.scroll_y > max_y:
             self.scroll_y = max_y
         if self.scroll_y < 0:

@@ -121,7 +121,7 @@ from turbokod.lsp import (
 )
 from turbokod.lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
-    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry,
     _parse_completion_result, _parse_diagnostics_array,
 )
 from turbokod.git_changes import (
@@ -7190,10 +7190,12 @@ fn test_editor_set_completions_opens_popup() raises:
     items.append(CompletionItem(
         String("foo_bar"), String("foo_bar"), 6, String(""),
         String("foo_bar"), False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     items.append(CompletionItem(
         String("foo_baz"), String("foo_baz"), 6, String(""),
         String("foo_baz"), False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -7245,6 +7247,7 @@ fn test_editor_cursor_move_inside_word_keeps_popup_alive() raises:
     items.append(CompletionItem(
         String("foobar"), String("foobar"), 6, String(""),
         String("foobar"), False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 0)
     # Left arrow from col 3 → col 2 keeps cursor inside "foo".
@@ -7264,6 +7267,7 @@ fn test_editor_typing_non_word_char_closes_visible_popup() raises:
     items.append(CompletionItem(
         String("foo"), String("foo"), 6, String(""),
         String("foo"), False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
@@ -7356,6 +7360,7 @@ fn _popup_items_one() -> List[CompletionItem]:
     items.append(CompletionItem(
         String("foobar"), String("foobar"), 6, String(""), String("foobar"),
         False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     return items^
 
@@ -7465,6 +7470,7 @@ fn test_editor_accept_completion_replaces_prefix() raises:
     items.append(CompletionItem(
         String("abcdef"), String("abcdef"), 6, String(""),
         String("abcdef"), False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 6)
     var ok = ed.accept_completion()
@@ -7490,6 +7496,7 @@ fn test_editor_accept_completion_overlap_widens_anchor() raises:
         String("reviews/reviews__tags.html"),
         17, String(""), String("reviews/reviews__tags.html"),
         False, 0, 0, 0, 0,  # no textEdit range
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 8)  # word-boundary anchor
     var ok = ed.accept_completion()
@@ -7509,6 +7516,7 @@ fn test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
     items.append(CompletionItem(
         String("bar"), String("bar"), 6, String(""), String("bar"),
         False, 0, 0, 0, 0,
+        List[TextEditEntry](),
     ))
     ed.set_completions(items^, 0, 0)  # word-boundary anchor at start of ``foo``
     var ok = ed.accept_completion()
@@ -7536,6 +7544,7 @@ fn test_editor_accept_completion_uses_text_edit_range() raises:
         String("reviews/reviews__tags.html"),
         17, String(""), String("reviews/reviews__tags.html"),
         True, 0, 0, 0, 10,  # textEdit range covers [0..10)
+        List[TextEditEntry](),
     ))
     # Anchor still arrives as the editor's heuristic (col 8 — after the
     # ``/``), but the item's range should override it.
@@ -7545,6 +7554,69 @@ fn test_editor_accept_completion_uses_text_edit_range() raises:
     assert_equal(ed.buffer.line(0), String("reviews/reviews__tags.html"))
     assert_equal(ed.cursor_col, 26)
     assert_false(ed.completion_popup_visible)
+
+
+fn test_editor_accept_completion_applies_additional_text_edits() raises:
+    """Auto-import case: pyright returns a completion for ``foo_func``
+    plus an ``additionalTextEdits`` entry that inserts an
+    ``import foo_func\\n`` line at the top of the file. Accepting the
+    completion must do BOTH the primary insert and the import line —
+    earlier the import edit was silently dropped, so the user got the
+    name but no import."""
+    var ed = Editor(String("\n\nfoo"))
+    # Cursor lands at end of ``foo`` (row 2, col 3). Primary edit will
+    # replace ``foo`` with ``foo_func``; the auxiliary edit inserts an
+    # ``import foo_func\n`` line at row 0 col 0.
+    ed.move_to(2, 3, False)
+    var aux = List[TextEditEntry]()
+    aux.append(TextEditEntry(0, 0, 0, 0, String("import foo_func\n")))
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("foo_func"), String("foo_func"), 3, String(""),
+        String("foo_func"), False, 0, 0, 0, 0,
+        aux^,
+    ))
+    ed.set_completions(items^, 2, 0)  # word-boundary anchor at start of ``foo``
+    var ok = ed.accept_completion()
+    assert_true(ok)
+    # Buffer gained the import line, so the original row indices shift
+    # down by one. ``foo_func`` lands on what was row 2 → now row 3.
+    assert_equal(ed.buffer.line_count(), 4)
+    assert_equal(ed.buffer.line(0), String("import foo_func"))
+    assert_equal(ed.buffer.line(1), String(""))
+    assert_equal(ed.buffer.line(2), String(""))
+    assert_equal(ed.buffer.line(3), String("foo_func"))
+    # Cursor must follow the shift — it sits at end of the inserted
+    # ``foo_func`` on the post-import row, not on the now-blank row 2.
+    assert_equal(ed.cursor_row, 3)
+    assert_equal(ed.cursor_col, 8)
+    assert_false(ed.completion_popup_visible)
+
+
+fn test_lsp_parse_completion_result_extracts_additional_text_edits() raises:
+    """``additionalTextEdits`` survives parsing as a list of
+    ``TextEditEntry``. Auto-import responses (the canonical user)
+    look like this — primary insert is the bare name, plus one
+    aux edit at line 0 col 0 inserting ``import foo\\n``."""
+    var v = parse_json(String(
+        "[{\"label\":\"foo\",\"kind\":3,"
+        + "\"insertText\":\"foo\","
+        + "\"additionalTextEdits\":["
+        + "{\"newText\":\"import foo\\n\","
+        + "\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":0}}}"
+        + "]}]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(items[0].insert_text, String("foo"))
+    assert_equal(len(items[0].additional_text_edits), 1)
+    var aux = items[0].additional_text_edits[0]
+    assert_equal(aux.start_line, 0)
+    assert_equal(aux.start_char, 0)
+    assert_equal(aux.end_line, 0)
+    assert_equal(aux.end_char, 0)
+    assert_equal(aux.new_text, String("import foo\n"))
 
 
 fn test_lsp_parse_completion_result_extracts_text_edit_range() raises:
@@ -13953,6 +14025,7 @@ fn main() raises:
     test_lsp_parse_completion_result_snippet_falls_back_to_label()
     test_lsp_parse_completion_result_extracts_text_edit_range()
     test_lsp_parse_completion_result_extracts_insert_replace_edit()
+    test_lsp_parse_completion_result_extracts_additional_text_edits()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
     test_editor_typing_word_char_stamps_autotrigger_request()
@@ -13973,6 +14046,7 @@ fn main() raises:
     test_editor_accept_completion_overlap_widens_anchor()
     test_editor_accept_completion_overlap_leaves_disjoint_text_alone()
     test_editor_accept_completion_uses_text_edit_range()
+    test_editor_accept_completion_applies_additional_text_edits()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
     test_editor_minimap_warning_outranks_git_change()

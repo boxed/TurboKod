@@ -1283,15 +1283,25 @@ struct Window(ImplicitlyCopyable, Movable):
 
         Returns a degenerate bar (``bottom < top``) — and therefore
         ``metrics().present == False`` — when the window isn't an
-        editor or is too short for a meaningful bar."""
+        editor or is too short for a meaningful bar.
+
+        ``visible`` is derived from ``editor.max_scroll_y`` so the bar
+        reflects the *effective* scrollable range, not just buffer-row
+        count vs. view height. Soft-wrap turns each buffer line into
+        possibly many visual rows; without this, the bar's max_scroll
+        is too small and wheel/drag get stuck before the wrapped tail
+        scrolls into view.
+        """
         if not self.is_editor or self.rect.width() < 2 or self.rect.height() < 5:
             return VScrollbar(0, 0, -1, 0, 0, 0)
-        var visible = self.rect.height() - 2
+        var total = self.editor.buffer.line_count()
+        var max_y = self.editor.max_scroll_y(self.interior())
+        var visible = total - max_y
+        if visible < 1:
+            visible = 1
         return VScrollbar(
             self.rect.b.x - 1, self.rect.a.y + 1, self.rect.b.y - 2,
-            self.editor.buffer.line_count(),
-            visible,
-            self.editor.scroll_y,
+            total, visible, self.editor.scroll_y,
         )
 
     fn _h_scrollbar(self) -> HScrollbar:
@@ -1355,9 +1365,7 @@ struct Window(ImplicitlyCopyable, Movable):
         """Scroll the editor vertically by ``lines`` (negative = up). Cursor
         does not move; same convention as wheel scrolling."""
         if not self.is_editor: return
-        var view = self.interior()
-        var max_y = self.editor.buffer.line_count() - view.height()
-        if max_y < 0: max_y = 0
+        var max_y = self.editor.max_scroll_y(self.interior())
         var ny = self.editor.scroll_y + lines
         if ny < 0: ny = 0
         if ny > max_y: ny = max_y

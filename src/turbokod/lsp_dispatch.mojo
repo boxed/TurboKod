@@ -104,6 +104,24 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
+struct TextEditEntry(ImplicitlyCopyable, Movable):
+    """One LSP ``TextEdit`` applied at an absolute buffer position.
+
+    Used for ``CompletionItem.additional_text_edits`` — typically the
+    auto-import line that an "import X" completion adds at the top of
+    the file alongside the primary insertion. The range is half-open
+    ``[start, end)`` in 0-based ``(line, character)`` coordinates;
+    ``new_text`` may contain ``\\n`` to introduce new lines. Per the
+    LSP spec these edits must not overlap with each other or with the
+    primary edit, so applying them in descending order of position is
+    safe — earlier positions are unaffected by later applications."""
+    var start_line: Int
+    var start_char: Int
+    var end_line: Int
+    var end_char: Int
+    var new_text: String
+
+
 struct CompletionItem(ImplicitlyCopyable, Movable):
     """One entry in a ``textDocument/completion`` response.
 
@@ -128,6 +146,15 @@ struct CompletionItem(ImplicitlyCopyable, Movable):
     crosses non-word punctuation (e.g. template path completions
     where ``reviews/re`` should be replaced wholesale with
     ``reviews/reviews__tags.html``, not just the trailing ``re``).
+
+    ``additional_text_edits`` carries the LSP ``additionalTextEdits``
+    field — auxiliary edits applied alongside the primary insert. The
+    canonical use is auto-imports: a completion for ``foo_func`` may
+    ship an additional edit that inserts ``from bar import foo_func\\n``
+    at the top of the file. Empty for the common case. The presence of
+    a ``List`` field is what forces a hand-rolled ``__copyinit__`` here
+    (and prevents ``@fieldwise_init`` synthesis) — same trade-off as
+    ``_DiagnosticBucket``.
     """
     var label: String
     var insert_text: String
@@ -139,6 +166,39 @@ struct CompletionItem(ImplicitlyCopyable, Movable):
     var range_start_char: Int
     var range_end_line: Int
     var range_end_char: Int
+    var additional_text_edits: List[TextEditEntry]
+
+    fn __init__(
+        out self, var label: String, var insert_text: String, kind: Int,
+        var detail: String, var sort_text: String, has_range: Bool,
+        range_start_line: Int, range_start_char: Int,
+        range_end_line: Int, range_end_char: Int,
+        var additional_text_edits: List[TextEditEntry],
+    ):
+        self.label = label^
+        self.insert_text = insert_text^
+        self.kind = kind
+        self.detail = detail^
+        self.sort_text = sort_text^
+        self.has_range = has_range
+        self.range_start_line = range_start_line
+        self.range_start_char = range_start_char
+        self.range_end_line = range_end_line
+        self.range_end_char = range_end_char
+        self.additional_text_edits = additional_text_edits^
+
+    fn __copyinit__(out self, copy: Self):
+        self.label = copy.label
+        self.insert_text = copy.insert_text
+        self.kind = copy.kind
+        self.detail = copy.detail
+        self.sort_text = copy.sort_text
+        self.has_range = copy.has_range
+        self.range_start_line = copy.range_start_line
+        self.range_start_char = copy.range_start_char
+        self.range_end_line = copy.range_end_line
+        self.range_end_char = copy.range_end_char
+        self.additional_text_edits = copy.additional_text_edits.copy()
 
 
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
@@ -1375,9 +1435,54 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
         var sort_opt = entry.object_get(String("sortText"))
         if sort_opt and sort_opt.value().is_string():
             sort_text = sort_opt.value().as_str()
+        # ``additionalTextEdits``: array of TextEdits applied alongside
+        # the primary edit. Skip malformed entries (missing range or
+        # newText) silently — losing one auxiliary edit is better than
+        # losing the whole completion entry.
+        var aux_edits = List[TextEditEntry]()
+        var aux_opt = entry.object_get(String("additionalTextEdits"))
+        if aux_opt and aux_opt.value().is_array():
+            var aux_arr = aux_opt.value()
+            var aux_n = aux_arr.array_len()
+            for j in range(aux_n):
+                var aux = aux_arr.array_at(j)
+                if not aux.is_object():
+                    continue
+                var nt_opt = aux.object_get(String("newText"))
+                if not nt_opt or not nt_opt.value().is_string():
+                    continue
+                var aux_new_text = nt_opt.value().as_str()
+                var aux_rng_opt = aux.object_get(String("range"))
+                if not aux_rng_opt or not aux_rng_opt.value().is_object():
+                    continue
+                var aux_rng = aux_rng_opt.value()
+                var as_opt = aux_rng.object_get(String("start"))
+                var ae_opt = aux_rng.object_get(String("end"))
+                if not as_opt or not ae_opt \
+                        or not as_opt.value().is_object() \
+                        or not ae_opt.value().is_object():
+                    continue
+                var asl_opt = as_opt.value().object_get(String("line"))
+                var asc_opt = as_opt.value().object_get(String("character"))
+                var ael_opt = ae_opt.value().object_get(String("line"))
+                var aec_opt = ae_opt.value().object_get(String("character"))
+                if not asl_opt or not asc_opt or not ael_opt or not aec_opt \
+                        or not asl_opt.value().is_int() \
+                        or not asc_opt.value().is_int() \
+                        or not ael_opt.value().is_int() \
+                        or not aec_opt.value().is_int():
+                    continue
+                aux_edits.append(TextEditEntry(
+                    asl_opt.value().as_int(),
+                    asc_opt.value().as_int(),
+                    ael_opt.value().as_int(),
+                    aec_opt.value().as_int(),
+                    aux_new_text,
+                ))
         out.append(CompletionItem(
             label, insert_text, kind, detail, sort_text,
             has_range, rs_line, rs_char, re_line, re_char,
+            aux_edits^,
         ))
     # Stable insertion sort by sort_text — typical completion lists are
     # under ~200 items so quadratic worst-case is fine here.
