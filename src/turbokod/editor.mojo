@@ -922,6 +922,17 @@ struct Editor(Copyable, Movable):
     # sync can wait ``_LSP_DIDCHANGE_DEBOUNCE_MS`` past the last edit
     # before flushing — see the constant's docstring for the rationale.
     var _lsp_dirty_stamp_ms: Int
+    # Buffer line count as of the last ``_mark_hl_dirty`` call.
+    # Compared against the current line count to derive a line-shift
+    # delta on each edit. Per-row LSP diagnostics are then shifted (or
+    # dropped, for rows that were deleted outright) so visible
+    # squiggles stay attached to their original code during the
+    # ~150 ms + server-latency window before publishDiagnostics
+    # overwrites the whole set with fresh truth. Without this the
+    # diagnostics would either blink off (drop-everything) or paint at
+    # stale rows (do-nothing) — neither of which matches what users
+    # expect from an editor that's responsive while typing.
+    var _last_known_line_count: Int
     # Per-window undo history. ``_undo_stack`` grows on every mutating
     # command; ``_redo_stack`` is filled by ``undo`` and emptied by any
     # subsequent edit (the standard "branching breaks redo" model).
@@ -1079,6 +1090,7 @@ struct Editor(Copyable, Movable):
         self._git_changes_dirty = True
         self._lsp_dirty = False
         self._lsp_dirty_stamp_ms = 0
+        self._last_known_line_count = self.buffer.line_count()
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -1160,6 +1172,7 @@ struct Editor(Copyable, Movable):
         self._git_changes_dirty = True
         self._lsp_dirty = False
         self._lsp_dirty_stamp_ms = 0
+        self._last_known_line_count = self.buffer.line_count()
         self._undo_stack = List[EditorSnapshot]()
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
@@ -1269,6 +1282,7 @@ struct Editor(Copyable, Movable):
         self._git_changes_dirty = copy._git_changes_dirty
         self._lsp_dirty = copy._lsp_dirty
         self._lsp_dirty_stamp_ms = copy._lsp_dirty_stamp_ms
+        self._last_known_line_count = copy._last_known_line_count
         self._undo_stack = copy._undo_stack.copy()
         self._redo_stack = copy._redo_stack.copy()
         self._typing_active = copy._typing_active
@@ -1489,6 +1503,79 @@ struct Editor(Copyable, Movable):
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
 
+    def _adjust_diagnostics(mut self, from_row: Int, line_delta: Int):
+        """Speculatively keep per-row LSP diagnostics aligned with the
+        buffer after an edit so visible squiggles stay attached to
+        their original code during the ~150 ms + server-latency window
+        before ``publishDiagnostics`` overwrites the set with fresh
+        truth.
+
+        ``from_row`` is the lowest row the edit could have touched
+        (passed through from ``_mark_hl_dirty``). ``line_delta`` is
+        ``new_line_count - old_line_count``:
+
+        * ``line_delta == 0`` (inline edit): no-op. The edited row's
+          column-level offsets may now be slightly wrong, but the
+          row positions are still correct and the LSP refresh will
+          catch any token-level invalidation. Better than blinking
+          every visible squiggle off on every keystroke.
+        * ``line_delta > 0`` (lines inserted): shift diagnostics with
+          ``start_row >= from_row`` down by ``line_delta`` so they
+          stay on the same code.
+        * ``line_delta < 0`` (lines deleted): drop diagnostics whose
+          ``start_row`` falls in the deleted range
+          ``[from_row, from_row - line_delta]`` (their code is gone),
+          shift the rest below by ``line_delta``. The over-drop on
+          backspace-at-col-0 (which removes one row but also mutates
+          the row above) is intentional — slightly aggressive but the
+          LSP refresh repopulates within 150 ms.
+
+        The earlier "drop everything from the edit row down" approach
+        was correct but visually disruptive: every keystroke blanked
+        all visible squiggles below the cursor, and the LSP roundtrip
+        made that gap obvious. This mirrors what users see in
+        editors with similar latency budgets (VS Code, IntelliJ).
+        """
+        if line_delta == 0:
+            return
+        if len(self.diagnostics) == 0 and len(self.diagnostic_lines) == 0:
+            return
+        var floor = from_row
+        if floor < 0:
+            floor = 0
+        # For deletions, the rows ``[floor, drop_hi]`` were removed
+        # outright; their diagnostics have nowhere to go.
+        var drop_hi = floor - 1
+        if line_delta < 0:
+            drop_hi = floor + (-line_delta) - 1
+        var kept = List[Diagnostic]()
+        for i in range(len(self.diagnostics)):
+            var d = self.diagnostics[i]
+            if d.start_row < floor:
+                kept.append(d)
+                continue
+            if d.start_row <= drop_hi:
+                continue  # row was deleted
+            d.start_row += line_delta
+            d.end_row += line_delta
+            kept.append(d)
+        self.diagnostics = kept^
+        var n_lines = self.buffer.line_count()
+        var per_row = List[Int]()
+        for _ in range(n_lines):
+            per_row.append(0)
+        for i in range(len(self.diagnostics)):
+            var d = self.diagnostics[i]
+            if d.start_row < 0 or d.start_row >= n_lines:
+                continue
+            var sev = d.severity
+            if sev <= 0:
+                continue
+            var prev = per_row[d.start_row]
+            if prev == 0 or sev < prev:
+                per_row[d.start_row] = sev
+        self.diagnostic_lines = per_row^
+
     def consume_lsp_dirty(mut self, now_ms: Int = 0) -> Bool:
         """Return whether the buffer has been edited since the last
         time this was called, and clear the flag. The host drives this
@@ -1544,6 +1631,16 @@ struct Editor(Copyable, Movable):
         self._git_changes_dirty = True
         self._lsp_dirty = True
         self._lsp_dirty_stamp_ms = monotonic_ms()
+        # Speculatively keep per-row diagnostics aligned with the
+        # buffer so visible squiggles stay attached to their code
+        # while we wait for the LSP refresh roundtrip. Inline edits
+        # are a no-op (column-staleness only); line inserts/deletes
+        # shift below-edit diagnostics by the line delta. See
+        # ``_adjust_diagnostics`` for the exact semantics.
+        var current_lines = self.buffer.line_count()
+        var line_delta = current_lines - self._last_known_line_count
+        self._adjust_diagnostics(r, line_delta)
+        self._last_known_line_count = current_lines
 
     def refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
@@ -1613,6 +1710,11 @@ struct Editor(Copyable, Movable):
         # but the marginal cost of a full retokenize on undo is
         # acceptable for now.
         self._mark_hl_dirty(0)
+        # Undo/redo restores wholesale buffer state; speculative
+        # shift can't make sense of the jump, so clear and let the
+        # LSP refresh repopulate from the restored text.
+        self.clear_diagnostics()
+        self._last_known_line_count = self.buffer.line_count()
         # Undo/redo lands on a saved state; the next typing should start a
         # new group rather than extend whatever was running before.
         self._typing_active = False
@@ -2380,6 +2482,11 @@ struct Editor(Copyable, Movable):
             self.disk_baseline = baseline^
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+            # Wholesale buffer swap; speculative shift can't track
+            # arbitrary content changes, so clear and let the LSP
+            # refresh repopulate.
+            self.clear_diagnostics()
+            self._last_known_line_count = self.buffer.line_count()
             self.refresh_highlights()
             self._clamp_cursor_after_reload()
             self.anchor_row = self.cursor_row
@@ -2397,6 +2504,9 @@ struct Editor(Copyable, Movable):
         # Ctrl+Z to back out of the merge if they don't like it.
         self._push_undo()
         self.buffer.lines = merge.lines.copy()
+        # Same reasoning as the clean-reload branch.
+        self.clear_diagnostics()
+        self._last_known_line_count = self.buffer.line_count()
         # Pre-render the previous-on-disk vs. current-on-disk diff
         # *before* we overwrite ``disk_baseline`` so the host can open
         # a diff view that shows what changed externally.

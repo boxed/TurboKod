@@ -1718,6 +1718,11 @@ struct Desktop(Movable):
         # ``settings.dirty`` into the persisted config so user changes
         # survive a restart without an explicit "save settings" step.
         self.settings.paint(canvas, screen)
+        # Status-bar message tooltip — painted last so the popup
+        # z-orders above every dock, modal, and menu. No-op unless the
+        # cursor has been resting on the message rect long enough for
+        # the dwell timer to fire.
+        self.status_bar.paint_tooltip(canvas, screen)
         if self.settings.active and self.settings.dirty:
             self.config.on_save_actions = self.settings.actions.copy()
             self.config.auto_save = self.settings.auto_save
@@ -3210,6 +3215,13 @@ struct Desktop(Movable):
             var fwd = event.kind == EVENT_FOCUS_IN
             for i in range(len(self.terminal_panes)):
                 self.terminal_panes[i].notify_focus_change(fwd)
+        # Track the cursor on the status bar's message rect so the
+        # hover-tooltip dwell timer can fire on a long pause. Done
+        # before any modal short-circuits below so a tooltip that
+        # was already up doesn't go stale just because the user
+        # opened a popup.
+        if event.kind == EVENT_MOUSE:
+            self.status_bar.update_hover(event.pos, screen)
         if self.spell_menu.active:
             # Spell-action popup is the topmost modal: it opens
             # contextually over the cursor, so any other modal
@@ -4589,7 +4601,7 @@ struct Desktop(Movable):
         var prefix = String("LSP[") + self.lsp_languages[lsp_idx] \
             + String("]: ")
         _refresh_status_for(
-            self.status_bar, prefix, self.lsp_managers[lsp_idx],
+            self.status_bar, prefix, self.lsp_managers[lsp_idx], path,
         )
 
     # --- DAP wiring ------------------------------------------------------
@@ -8051,7 +8063,7 @@ def _mojo_include_dirs(root: String) -> List[String]:
 
 
 def _refresh_status_for(
-    mut sb: StatusBar, prefix: String, m: LspManager,
+    mut sb: StatusBar, prefix: String, m: LspManager, focused_path: String,
 ):
     """Free function so the caller can pass ``self.status_bar`` and one
     of ``self.lsp_*`` without tripping Mojo's exclusivity check (a
@@ -8060,7 +8072,15 @@ def _refresh_status_for(
 
     All branches mark the message clickable=True so a click on the
     indicator opens the LSP info dialog regardless of state — useful
-    precisely when the state is FAILED and the user wants to see why."""
+    precisely when the state is FAILED and the user wants to see why.
+
+    ``focused_path`` is the path of the editor whose squiggles the
+    user is looking at right now; used to surface an "analyzing
+    edits…" spinner while the server hasn't yet published fresh
+    diagnostics for the latest didChange. Without that signal a slow
+    type-checker (pyright on a Django settings module, ty on a large
+    Mojo file) just feels broken — the user types, nothing visibly
+    updates, and there's no indication anything is happening."""
     if m.is_failed():
         sb.set_message(
             prefix + m.failure_reason,
@@ -8074,6 +8094,11 @@ def _refresh_status_for(
             Attr(BLACK, LIGHT_GRAY),
             clickable=True,
             spinner=True,
+            tooltip=String(
+                "Language server is starting up. Diagnostics, "
+                "completions, and go-to-definition will be unavailable "
+                "until this finishes."
+            ),
         )
         return
     if m.is_ready():
@@ -8084,8 +8109,42 @@ def _refresh_status_for(
                 Attr(BLACK, LIGHT_GRAY),
                 clickable=True,
                 spinner=True,
+                tooltip=String(
+                    "Waiting for the language server's "
+                    "go-to-definition response for "
+                ) + word + String("."),
             )
             return
+        # Diagnostic refresh in flight: gate on a 200 ms threshold so
+        # fast servers don't flicker the spinner on every keystroke
+        # — the user's eye registers anything shorter as a glitch
+        # rather than a state. Any longer wait gets a visible spinner
+        # plus elapsed seconds so the user can tell the difference
+        # between "server is working" and "server is wedged".
+        if len(focused_path.as_bytes()) > 0:
+            var inflight_ms = m.diagnostics_inflight_ms_for(focused_path)
+            if inflight_ms >= 200:
+                var secs_x10 = inflight_ms // 100
+                var whole = secs_x10 // 10
+                var tenths = secs_x10 % 10
+                var elapsed = String(whole) + String(".") + String(tenths) \
+                    + String("s")
+                sb.set_message(
+                    prefix + String("analyzing edits (") + elapsed
+                        + String(")"),
+                    Attr(BLACK, LIGHT_GRAY),
+                    clickable=True,
+                    spinner=True,
+                    tooltip=String(
+                        "The language server is re-analyzing this file "
+                        "after your recent edits. Diagnostics on screen "
+                        "may be stale until the response arrives — "
+                        "long waits usually mean a slow type-checker "
+                        "(pyright on a large project, ty on a big "
+                        "Mojo file, etc.)."
+                    ),
+                )
+                return
         if m.last_empty():
             sb.set_message(
                 prefix + String("no definition found"),
@@ -8097,6 +8156,10 @@ def _refresh_status_for(
             prefix + String("ready"),
             Attr(BLACK, LIGHT_GRAY),
             clickable=True,
+            tooltip=String(
+                "Language server is ready. Right-click for actions "
+                "(restart, …)."
+            ),
         )
 
 

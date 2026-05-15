@@ -121,8 +121,8 @@ from turbokod.lsp import (
 )
 from turbokod.lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
-    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry,
-    _parse_completion_result, _parse_diagnostics_array,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, LspManager,
+    TextEditEntry, _parse_completion_result, _parse_diagnostics_array,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -7819,6 +7819,135 @@ def test_editor_clear_diagnostics_drops_per_row_index() raises:
     ed.clear_diagnostics()
     assert_equal(len(ed.diagnostics), 0)
     assert_equal(len(ed.diagnostic_lines), 0)
+
+
+def test_editor_diagnostics_unchanged_on_inline_edit() raises:
+    """Typing within a line doesn't move any diagnostic — column-level
+    offsets on the edited row may now be slightly off, but row
+    positions are still correct and the LSP refresh will catch any
+    real invalidation. Avoiding a blink on every keystroke matters
+    more than instant column-accuracy here."""
+    var ed = Editor(String("aaa\nbbb\nccc\nddd\neee"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 3, DIAG_SEVERITY_WARNING, String("w0"), String("t"),
+    ))
+    diags.append(Diagnostic(
+        2, 0, 2, 3, DIAG_SEVERITY_HINT, String("h2"), String("t"),
+    ))
+    diags.append(Diagnostic(
+        3, 0, 3, 3, DIAG_SEVERITY_ERROR, String("e3"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    ed.move_to(2, 1, False)
+    _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
+    assert_equal(len(ed.diagnostics), 3)
+    assert_equal(ed.diagnostic_lines[0], DIAG_SEVERITY_WARNING)
+    assert_equal(ed.diagnostic_lines[2], DIAG_SEVERITY_HINT)
+    assert_equal(ed.diagnostic_lines[3], DIAG_SEVERITY_ERROR)
+
+
+def test_editor_diagnostics_shifted_on_line_insertion() raises:
+    """Pressing Enter at row 2 inserts a new line; diagnostics with
+    ``start_row >= 2`` shift down by one so they stay attached to
+    their original code while the LSP refresh is in flight."""
+    var ed = Editor(String("aaa\nbbb\nccc\nddd\neee"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 3, DIAG_SEVERITY_WARNING, String("w0"), String("t"),
+    ))
+    diags.append(Diagnostic(
+        3, 0, 3, 3, DIAG_SEVERITY_ERROR, String("e3"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    ed.move_to(2, 0, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    assert_equal(len(ed.diagnostics), 2)
+    # Above-edit warning stays at row 0; below-edit error shifts 3 → 4.
+    assert_equal(ed.diagnostics[0].start_row, 0)
+    assert_equal(ed.diagnostics[1].start_row, 4)
+    assert_equal(ed.diagnostics[1].end_row, 4)
+    assert_equal(len(ed.diagnostic_lines), ed.buffer.line_count())
+    assert_equal(ed.diagnostic_lines[4], DIAG_SEVERITY_ERROR)
+
+
+def test_editor_diagnostics_dropped_on_deleted_row_shifted_below() raises:
+    """Backspace at column 0 joins two rows. The diagnostic on the
+    deleted row has nowhere to go and is dropped; diagnostics below
+    shift up by one. The diagnostic on the row that absorbed the
+    join is also dropped (its text changed) — slightly aggressive
+    but the LSP refresh repopulates within ~150 ms."""
+    var ed = Editor(String("aaa\nbbb\nccc\nddd\neee"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 3, DIAG_SEVERITY_WARNING, String("w0"), String("t"),
+    ))
+    diags.append(Diagnostic(
+        2, 0, 2, 3, DIAG_SEVERITY_ERROR, String("e2"), String("t"),
+    ))
+    diags.append(Diagnostic(
+        4, 0, 4, 3, DIAG_SEVERITY_HINT, String("h4"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    # Cursor at start of row 2 → Backspace joins rows 1 and 2.
+    # Row 2 (the one being absorbed) and its diagnostic are gone;
+    # row 4 hint shifts up to row 3.
+    ed.move_to(2, 0, False)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(len(ed.diagnostics), 2)
+    assert_equal(ed.diagnostics[0].start_row, 0)
+    assert_equal(ed.diagnostics[1].start_row, 3)
+    assert_equal(ed.diagnostics[1].severity, DIAG_SEVERITY_HINT)
+    assert_equal(len(ed.diagnostic_lines), ed.buffer.line_count())
+    assert_equal(ed.diagnostic_lines[3], DIAG_SEVERITY_HINT)
+
+
+def test_editor_diagnostics_preserved_above_edit() raises:
+    """An edit never moves diagnostics on rows above it — those rows
+    haven't changed, and shifting them would put squiggles on
+    unrelated code."""
+    var ed = Editor(String("aaa\nbbb\nccc"))
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 0, 0, 3, DIAG_SEVERITY_ERROR, String("e0"), String("t"),
+    ))
+    ed.set_diagnostics(diags^)
+    ed.move_to(2, 0, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    assert_equal(len(ed.diagnostics), 1)
+    assert_equal(ed.diagnostics[0].start_row, 0)
+    assert_equal(ed.diagnostic_lines[0], DIAG_SEVERITY_ERROR)
+
+
+def test_lsp_diagnostics_inflight_tracking() raises:
+    """``LspManager`` exposes the per-path ``analyzing edits…`` signal
+    via ``diagnostics_inflight_ms_for``: positive ms after we mark a
+    didChange in flight, ``-1`` once a matching ``publishDiagnostics``
+    arrives. Drives the status-bar spinner so the user can see when
+    squiggles are stale because the server hasn't caught up yet."""
+    var m = LspManager()
+    var path = String("/tmp/example.py")
+    # No prior didOpen / didChange: nothing in flight.
+    assert_equal(m.diagnostics_inflight_ms_for(path), -1)
+    # Simulate sending a didChange at version 3 — the
+    # ``_send_did_change`` wrapper is the in-flight gate but it also
+    # touches the network; ``_mark_diag_inflight`` is the inner step
+    # we actually want to assert on.
+    m._mark_diag_inflight(path, 3)
+    assert_true(m.diagnostics_inflight_ms_for(path) >= 0)
+    # Stale publishDiagnostics (older version) must NOT clear the
+    # spinner — we're still waiting on a fresh response for v3.
+    m._clear_diag_inflight(path, 2)
+    assert_true(m.diagnostics_inflight_ms_for(path) >= 0)
+    # Matching version clears.
+    m._clear_diag_inflight(path, 3)
+    assert_equal(m.diagnostics_inflight_ms_for(path), -1)
+    # Servers that don't echo a version (``pub_version <= 0``) clear
+    # unconditionally — better to occasionally hide the spinner
+    # early than leave it stuck on those servers.
+    m._mark_diag_inflight(path, 7)
+    m._clear_diag_inflight(path, 0)
+    assert_equal(m.diagnostics_inflight_ms_for(path), -1)
 
 
 def test_lsp_subprocess_round_trip_via_cat() raises:

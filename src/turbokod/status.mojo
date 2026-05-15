@@ -9,7 +9,7 @@ clipped first."""
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
 from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
@@ -74,6 +74,18 @@ struct _TabHit(ImplicitlyCopyable, Movable):
     var index: Int
 
 
+comptime _TOOLTIP_HOVER_MS = 400
+"""Cursor must rest on the message for this many milliseconds before
+the tooltip pops. Long enough that a user briefly crossing the right
+side of the bar doesn't trigger a flash, short enough that hovering
+deliberately feels responsive."""
+
+
+comptime _TOOLTIP_MAX_WIDTH = 56
+"""Hard cap on the tooltip popup width. Wider tooltips wrap; this
+keeps the box from spanning the whole screen on a wide terminal."""
+
+
 struct StatusBar(Movable):
     var items: List[StatusItem]
     var tabs: List[StatusTab]
@@ -82,6 +94,19 @@ struct StatusBar(Movable):
     var message_attr: Attr       # color for the diagnostic; default = subtle
     var message_clickable: Bool  # True when caller marked the message as click-receiving
     var message_spinner: Bool    # True ⇒ animated braille spinner prefixed to the message
+    # Hover tooltip: longer-form description shown when the cursor
+    # rests on the message rect for ``_TOOLTIP_HOVER_MS``. Set
+    # alongside ``message`` via ``set_message(tooltip=...)``; empty
+    # disables the popup. Use this for state the short message can
+    # only hint at — e.g. *why* the LSP is "analyzing edits…".
+    var message_tooltip: String
+    # Wallclock at which the cursor first entered the message rect.
+    # ``-1`` when the cursor isn't on the message; once the dwell
+    # exceeds ``_TOOLTIP_HOVER_MS`` the popup paints. ``_hover_x`` /
+    # ``_hover_y`` anchor the popup just above the cursor cell.
+    var _hover_since_ms: Int
+    var _hover_x: Int
+    var _hover_y: Int
     var _tab_hits: List[_TabHit] # captured by ``paint`` for ``hit_test``
     # Painted bounds of the right-aligned message — captured by ``paint``
     # so a subsequent click can hit-test it without recomputing layout.
@@ -97,6 +122,10 @@ struct StatusBar(Movable):
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
         self.message_clickable = False
         self.message_spinner = False
+        self.message_tooltip = String("")
+        self._hover_since_ms = -1
+        self._hover_x = 0
+        self._hover_y = 0
         self._tab_hits = List[_TabHit]()
         self._msg_a_x = 0
         self._msg_b_x = 0
@@ -106,7 +135,7 @@ struct StatusBar(Movable):
 
     def set_message(
         mut self, var text: String, attr: Attr, clickable: Bool = False,
-        spinner: Bool = False,
+        spinner: Bool = False, var tooltip: String = String(""),
     ):
         """Set the right-aligned status text (LSP state, errors, etc.).
 
@@ -118,11 +147,17 @@ struct StatusBar(Movable):
 
         ``spinner`` opts the message into a one-glyph braille spinner
         rendered just to the left of the text. Used for "we're waiting
-        on the LSP" states (starting up, looking up a symbol)."""
+        on the LSP" states (starting up, looking up a symbol).
+
+        ``tooltip`` is a longer description shown after the cursor
+        dwells on the message for ``_TOOLTIP_HOVER_MS``. Use it for
+        explanation that doesn't fit in the short message — e.g. why
+        the spinner is spinning. Empty disables the tooltip."""
         self.message = text^
         self.message_attr = attr
         self.message_clickable = clickable
         self.message_spinner = spinner
+        self.message_tooltip = tooltip^
 
     def set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,
@@ -206,6 +241,92 @@ struct StatusBar(Movable):
             _ = painter.put_text(canvas, Point(mx, y), rendered, self.message_attr)
             self._msg_a_x = mx
             self._msg_b_x = mx + msg_w
+
+    def update_hover(mut self, pos: Point, screen: Rect):
+        """Track whether the cursor is currently resting on the
+        message rect so ``paint_tooltip`` can decide when the dwell
+        has exceeded ``_TOOLTIP_HOVER_MS``. Call this once per frame
+        from the host's mouse-move dispatcher (or with an
+        out-of-bounds ``pos`` when the pointer leaves the screen).
+
+        The hover only counts if the message has a non-empty
+        ``message_tooltip`` — set_message callers explicitly opt in
+        per state, so we don't pop a tooltip on simple confirmations
+        like "Saved foo.py" that have nothing extra to say.
+        """
+        if pos.y != screen.b.y - 1 \
+                or self._msg_a_x >= self._msg_b_x \
+                or pos.x < self._msg_a_x \
+                or pos.x >= self._msg_b_x \
+                or len(self.message_tooltip.as_bytes()) == 0:
+            self._hover_since_ms = -1
+            return
+        if self._hover_since_ms < 0:
+            self._hover_since_ms = monotonic_ms()
+        # Re-anchor on every refresh so the popup follows the pointer
+        # if the user slides along the message instead of resting
+        # exactly on one cell.
+        self._hover_x = pos.x
+        self._hover_y = pos.y
+
+    def clear_hover(mut self):
+        """Force the tooltip dwell timer back to "no hover", e.g.
+        when a popup or modal opens above the bar and we don't want
+        a stale hover from before the modal to keep ticking."""
+        self._hover_since_ms = -1
+
+    def paint_tooltip(self, mut canvas: Canvas, screen: Rect):
+        """Overlay the message-tooltip popup if the dwell has exceeded
+        the hover threshold. Called by the host after every other
+        widget so the popup z-orders above the windows / menu bar /
+        prompts that share the same screen.
+        """
+        if self._hover_since_ms < 0:
+            return
+        if len(self.message_tooltip.as_bytes()) == 0:
+            return
+        if monotonic_ms() - self._hover_since_ms < _TOOLTIP_HOVER_MS:
+            return
+        var max_box_w = screen.b.x - 2
+        if max_box_w > _TOOLTIP_MAX_WIDTH:
+            max_box_w = _TOOLTIP_MAX_WIDTH
+        if max_box_w < 5:
+            return
+        var size = popup_size_for_text(
+            self.message_tooltip, max_box_w, screen.b.y,
+        )
+        var w = size[0]
+        var h = size[1]
+        if w == 0 or h == 0:
+            return
+        # Anchor just above the cursor so the popup floats over the
+        # hovered message instead of off-screen below the bottom row.
+        # Right-align the box to the message rect when possible so it
+        # visually points at the spinner rather than dangling left.
+        var bx = self._msg_b_x - w
+        if bx < 0:
+            bx = 0
+        if bx + w > screen.b.x:
+            bx = screen.b.x - w
+        var by = self._hover_y - h
+        if by < 0:
+            by = self._hover_y + 1
+            if by + h > screen.b.y:
+                by = screen.b.y - h
+                if by < 0:
+                    by = 0
+        var r = Rect(bx, by, bx + w, by + h)
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        paint_drop_shadow(canvas, r)
+        var tt_painter = Painter(r)
+        tt_painter.fill(canvas, r, String(" "), attr)
+        tt_painter.draw_box(canvas, r, attr, False)
+        var msg_rect = Rect(
+            r.a.x + 2, r.a.y + 1,
+            r.b.x - 2, r.b.y - 1,
+        )
+        if msg_rect.width() > 0 and msg_rect.height() > 0:
+            _ = canvas.put_wrapped_text(msg_rect, self.message_tooltip, attr)
 
     def hit_test_message(self, pos: Point, screen: Rect) -> Bool:
         """True if ``pos`` lands on a click-marked message. Returns False

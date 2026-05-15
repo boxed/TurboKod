@@ -331,6 +331,20 @@ struct LspManager(Copyable, Movable):
     # overwrites the prior bucket's list and resets ``consumed``.
     var _diagnostic_buckets: List[_DiagnosticBucket]
 
+    # In-flight diagnostic refresh tracking, parallel-list per path:
+    # set when ``_send_did_open`` / ``_send_did_change`` fires, cleared
+    # when a matching ``publishDiagnostics`` arrives. Drives the status
+    # bar's "analyzing edits…" spinner so the user can see why
+    # squiggles haven't updated yet — distinguishes "server is slow"
+    # from "no diagnostics for this code". ``_diag_inflight_versions``
+    # holds the version we sent so a stale publishDiagnostics for an
+    # earlier version doesn't clear the flag for a newer in-flight
+    # change. ``_diag_inflight_since_ms`` is the wallclock at send
+    # time so the status bar can render elapsed seconds.
+    var _diag_inflight_paths: List[String]
+    var _diag_inflight_versions: List[Int]
+    var _diag_inflight_since_ms: List[Int]
+
     def __init__(out self):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
@@ -359,6 +373,9 @@ struct LspManager(Copyable, Movable):
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
+        self._diag_inflight_paths = List[String]()
+        self._diag_inflight_versions = List[Int]()
+        self._diag_inflight_since_ms = List[Int]()
         self._stderr_log = String("")
 
     def __copyinit__(mut self, copy: Self):
@@ -396,6 +413,9 @@ struct LspManager(Copyable, Movable):
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
+        self._diag_inflight_paths = List[String]()
+        self._diag_inflight_versions = List[Int]()
+        self._diag_inflight_since_ms = List[Int]()
         self._stderr_log = String("")
 
     def is_active(self) -> Bool:
@@ -1089,9 +1109,10 @@ struct LspManager(Copyable, Movable):
         var path = _uri_to_path(uri_opt.value().as_str())
         if len(path.as_bytes()) == 0:
             return
+        var pub_version = 0  # 0 ⇒ server didn't echo a version
         var version_opt = params.object_get(String("version"))
         if version_opt and version_opt.value().is_int():
-            var pub_version = version_opt.value().as_int()
+            pub_version = version_opt.value().as_int()
             for k in range(len(self._doc_paths)):
                 if self._doc_paths[k] == path:
                     if pub_version < self._doc_versions[k]:
@@ -1103,8 +1124,16 @@ struct LspManager(Copyable, Movable):
                             + String(" latest_version=")
                             + String(self._doc_versions[k]),
                         )
+                        # Stale: don't clear the in-flight flag — the
+                        # newer didChange we already sent is still
+                        # genuinely waiting for an answer.
                         return
                     break
+        # Clear the analyzing-edits spinner now that this path's
+        # diagnostics have been refreshed (or the server publishes
+        # without versions and we have to assume any reply covers the
+        # latest send).
+        self._clear_diag_inflight(path, pub_version)
         var diags = _parse_diagnostics_array(diags_opt.value())
         _lsp_debug_log(
             String("← publishDiagnostics lang=") + self._language_id
@@ -1156,6 +1185,58 @@ struct LspManager(Copyable, Movable):
             self._doc_versions[idx] = version
             self._send_did_change(path, version, text^)
 
+    def diagnostics_inflight_ms_for(self, path: String) -> Int:
+        """Elapsed milliseconds since the most recent didOpen / didChange
+        for ``path`` if we're still waiting for the server to reply
+        with a matching ``publishDiagnostics``; ``-1`` when no refresh
+        is in flight (server already responded, or never sent for this
+        path). Driven by the status bar's "analyzing edits…" spinner
+        so the user can see when squiggles are stale because the
+        server hasn't caught up yet."""
+        for k in range(len(self._diag_inflight_paths)):
+            if self._diag_inflight_paths[k] == path:
+                var elapsed = monotonic_ms() - self._diag_inflight_since_ms[k]
+                if elapsed < 0:
+                    return 0
+                return elapsed
+        return -1
+
+    def _mark_diag_inflight(mut self, path: String, version: Int):
+        """Record that a didOpen / didChange for ``path`` at ``version``
+        is now in flight. Replaces any prior entry for this path so a
+        rapid burst of edits collapses to "the latest send is what
+        we're waiting for"."""
+        var now = monotonic_ms()
+        for k in range(len(self._diag_inflight_paths)):
+            if self._diag_inflight_paths[k] == path:
+                self._diag_inflight_versions[k] = version
+                self._diag_inflight_since_ms[k] = now
+                return
+        self._diag_inflight_paths.append(path)
+        self._diag_inflight_versions.append(version)
+        self._diag_inflight_since_ms.append(now)
+
+    def _clear_diag_inflight(mut self, path: String, pub_version: Int):
+        """Drop the in-flight tracking for ``path`` if the published
+        version covers the latest send. ``pub_version <= 0`` means the
+        server didn't echo a version (older builds, partial impls); we
+        clear unconditionally so the spinner doesn't stick on those
+        servers. With a real version, only clear when the server has
+        caught up to the newest send we made — otherwise a slow server
+        publishing N while we've moved on to N+1 would prematurely
+        hide the spinner."""
+        var k = 0
+        while k < len(self._diag_inflight_paths):
+            if self._diag_inflight_paths[k] == path:
+                if pub_version <= 0 \
+                        or pub_version >= self._diag_inflight_versions[k]:
+                    _ = self._diag_inflight_paths.pop(k)
+                    _ = self._diag_inflight_versions.pop(k)
+                    _ = self._diag_inflight_since_ms.pop(k)
+                    return
+                return
+            k += 1
+
     def _send_did_open(mut self, path: String, var text: String):
         _lsp_debug_log(
             String("→ didOpen lang=") + self._language_id
@@ -1176,6 +1257,7 @@ struct LspManager(Copyable, Movable):
             )
         except:
             pass
+        self._mark_diag_inflight(path, 1)
 
     def _send_did_change(mut self, path: String, version: Int, var text: String):
         _lsp_debug_log(
@@ -1202,6 +1284,7 @@ struct LspManager(Copyable, Movable):
             )
         except:
             pass
+        self._mark_diag_inflight(path, version)
 
 
 # --- response parsing ------------------------------------------------------
