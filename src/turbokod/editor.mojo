@@ -23,7 +23,7 @@ from .clipboard import (
 )
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    LIGHT_RED, LIGHT_YELLOW, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
+    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
 )
 from .diff import MergeResult, diff3_merge, unified_diff
@@ -4074,6 +4074,39 @@ struct Editor(Copyable, Movable):
         # is per-row state these overlays need; selection moved out
         # to a separate pass below.
         var all_carets_paint = self._all_carets_asc()
+        # Match-highlight setup: when a non-trivial single-line
+        # selection is active (and there are no multi-carets in
+        # play), every byte-equal occurrence of the selected text in
+        # the visible rows gets recoloured below — same idea as
+        # VSCode's "highlight matches of selection". Multi-line
+        # selections and very short / all-whitespace selections are
+        # excluded because the noise would outweigh the help.
+        var match_active = False
+        var match_needle = String("")
+        var match_needle_n = 0
+        var match_sel_row = 0
+        var match_sel_byte = 0
+        var match_attr = Attr(LIGHT_GREEN, MAGENTA)
+        if self.has_selection() and not self.has_extra_carets():
+            var sel_norm = self.selection()
+            if sel_norm[0] == sel_norm[2] and sel_norm[3] > sel_norm[1]:
+                var cand = _slice(
+                    self.buffer.line(sel_norm[0]), sel_norm[1], sel_norm[3],
+                )
+                var cand_bytes = cand.as_bytes()
+                var cand_n = len(cand_bytes)
+                var is_blank = True
+                for ci in range(cand_n):
+                    var b = Int(cand_bytes[ci])
+                    if b != 32 and b != 9:
+                        is_blank = False
+                        break
+                if cand_n >= 2 and not is_blank:
+                    match_active = True
+                    match_needle = cand
+                    match_needle_n = cand_n
+                    match_sel_row = sel_norm[0]
+                    match_sel_byte = sel_norm[1]
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row].line_idx
             var start_byte = layout[screen_row].byte_start
@@ -4198,6 +4231,60 @@ struct Editor(Copyable, Movable):
                         # visible on its own.
                         new_attr = new_attr.with_fg(underline_color)
                     painter.set_attr(canvas, sx_d, sy_hl, new_attr)
+            # Match-highlight overlay: byte-equality search of the
+            # selection text within this row's visible segment. Sits
+            # before the selection pass below so the actual selection
+            # still visually dominates; the single occurrence at the
+            # selection's own byte offset is skipped. Search starts
+            # ``needle_n - 1`` bytes before ``start_byte`` so a needle
+            # crossing a soft-wrap boundary still partially highlights
+            # on this side.
+            if match_active:
+                var line_bytes = line.as_bytes()
+                var line_nb = len(line_bytes)
+                var needle_bytes = match_needle.as_bytes()
+                var search_lo = start_byte - (match_needle_n - 1)
+                if search_lo < 0:
+                    search_lo = 0
+                var search_hi = end_byte
+                if search_hi > line_nb - match_needle_n + 1:
+                    search_hi = line_nb - match_needle_n + 1
+                var ii = search_lo
+                while ii < search_hi:
+                    var matched = True
+                    for j in range(match_needle_n):
+                        if line_bytes[ii + j] != needle_bytes[j]:
+                            matched = False
+                            break
+                    if matched:
+                        if not (buf_row == match_sel_row \
+                                and ii == match_sel_byte):
+                            var m_lo = ii
+                            var m_hi = ii + match_needle_n
+                            if m_lo < start_byte:
+                                m_lo = start_byte
+                            if m_hi > end_byte:
+                                m_hi = end_byte
+                            if m_hi > m_lo:
+                                var m_byte_start = m_lo - start_byte
+                                var m_byte_end = m_hi - start_byte
+                                var m_cell_start = \
+                                    visible_cell_map[m_byte_start]
+                                var m_cell_end: Int
+                                if m_byte_end < visible_byte_count:
+                                    m_cell_end = visible_cell_map[m_byte_end]
+                                else:
+                                    m_cell_end = visible_cell_count
+                                for cell_off in range(m_cell_start, m_cell_end):
+                                    var sx_m = seg_x0 + cell_off
+                                    if sx_m >= content_right:
+                                        break
+                                    painter.set_attr(
+                                        canvas, sx_m, sy_hl, match_attr,
+                                    )
+                        ii += match_needle_n
+                    else:
+                        ii += 1
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty

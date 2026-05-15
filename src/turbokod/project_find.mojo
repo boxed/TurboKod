@@ -58,6 +58,12 @@ comptime _MATCH_TEXT_CAP: Int = 1024     # truncate rg's matched-line text
 comptime _ROW_HIGHLIGHT_CAP: Int = 2048  # skip syntax overlay above this
 comptime _CTX_LINE_CAP: Int = 4096       # skip context tokenize above this
 comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
+# Hard cap on the result list. A query like ``a`` over a large tree can
+# yield hundreds of thousands of hits; carrying them all is pointless
+# (no user pages past a few hundred) and the per-row paint cost adds up.
+# We accept one extra match as the "there's more" sentinel — when the
+# (cap + 1)th lands we drop it, mark the result truncated, and kill rg.
+comptime _MAX_MATCHES: Int = 1000
 
 
 struct ProjectFind(Movable):
@@ -95,6 +101,11 @@ struct ProjectFind(Movable):
     # one and starts a new one, so a query that turns out to be too broad
     # never blocks the UI thread. ``close()`` also cancels.
     var _runner: _RgRunner
+    # True when the in-flight (or just-completed) search hit ``_MAX_MATCHES``
+    # and we had to drop trailing hits. The paint pass overlays a notice
+    # on the bottom border so the user knows their result list isn't the
+    # whole picture.
+    var _truncated: Bool
 
     def __init__(out self):
         self.active = False
@@ -123,6 +134,7 @@ struct ProjectFind(Movable):
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
         self._runner = _RgRunner()
+        self._truncated = False
 
     def open(
         mut self,
@@ -168,6 +180,7 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+        self._truncated = False
         self.active = True
         self.submitted = False
 
@@ -192,6 +205,7 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+        self._truncated = False
 
     def _current_options(self) -> SearchOptions:
         return SearchOptions(
@@ -230,6 +244,17 @@ struct ProjectFind(Movable):
                     var was_empty = len(self.matches) == 0
                     for k in range(len(fresh)):
                         self.matches.append(fresh[k])
+                    # Hit the cap: the (_MAX_MATCHES + 1)th match (or
+                    # later — a single ``tick`` can drain many lines at
+                    # once) is the "there's more" sentinel. Drop the
+                    # overflow back to _MAX_MATCHES, mark the result
+                    # truncated, and cancel rg so we don't keep streaming
+                    # hits the user will never see.
+                    if len(self.matches) > _MAX_MATCHES:
+                        while len(self.matches) > _MAX_MATCHES:
+                            _ = self.matches.pop()
+                        self._truncated = True
+                        self._runner.cancel()
                     if was_empty:
                         # First match just landed: seed the context panel
                         # so the user sees something useful immediately
@@ -252,6 +277,7 @@ struct ProjectFind(Movable):
             self.matches = List[ProjectMatch]()
             self.selected = 0
             self.scroll = 0
+        self._truncated = False
         self._query_dirty_at_ms = 1
 
     def _mark_query_dirty(mut self, now_ms: Int):
@@ -270,6 +296,7 @@ struct ProjectFind(Movable):
             self.matches = List[ProjectMatch]()
             self.selected = 0
             self.scroll = 0
+            self._truncated = False
 
     def _run_search(mut self):
         self._last_searched_query = self.query.text
@@ -278,6 +305,7 @@ struct ProjectFind(Movable):
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
+        self._truncated = False
         # Cancel any previous in-flight rg before spawning a new one.
         self._runner.cancel()
         if len(self.query.text.as_bytes()) == 0:
@@ -529,6 +557,27 @@ struct ProjectFind(Movable):
         if hx < screen.a.x + 1:
             hx = screen.a.x + 1
         _ = painter.put_text(canvas, Point(hx, screen.b.y - 1), hint, hint_attr)
+        # Truncation notice — left-aligned on the bottom border so the
+        # user knows the result list is capped and more hits exist
+        # outside it. Painted only when we actually had to drop hits
+        # (``_truncated``); the cap is large enough that most queries
+        # won't trip it.
+        if self._truncated:
+            var warn = String(" More than ") + String(_MAX_MATCHES) \
+                + String(" matches — refine your search ")
+            var warn_attr = Attr(WHITE, RED)
+            var wx = screen.a.x + 2
+            # Clip against the hint so the two strips can't overpaint
+            # each other on narrow windows.
+            if wx + display_columns(warn) >= hx:
+                # No room — drop the leading/trailing spaces and the
+                # explanatory tail to fit. Keep enough that "More: N"
+                # at least signals what happened.
+                warn = String(" >") + String(_MAX_MATCHES) + String(" ")
+            if wx + display_columns(warn) < hx:
+                _ = painter.put_text(
+                    canvas, Point(wx, screen.b.y - 1), warn, warn_attr,
+                )
 
     def _paint_match_row(
         mut self, mut canvas: Canvas, screen: Rect, painter: Painter,
