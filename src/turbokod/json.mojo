@@ -34,13 +34,13 @@ comptime JSON_OBJECT = UInt8(6)
 
 
 @fieldwise_init
-struct JsonMember(ImplicitlyCopyable, Movable):
+struct JsonMember(Copyable, Movable):
     """A single ``(key, value)`` pair inside a JsonValue object."""
     var key: String
     var value: JsonValue
 
 
-struct JsonValue(ImplicitlyCopyable, Movable):
+struct JsonValue(Copyable, Movable):
     """Tagged-union JSON node. Construct via the ``json_*`` factory
     functions and inspect via ``is_*`` predicates + ``as_*`` accessors."""
     var kind: UInt8
@@ -58,7 +58,7 @@ struct JsonValue(ImplicitlyCopyable, Movable):
         self.arr_v = List[JsonValue]()
         self.obj_v = List[JsonMember]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
         self.bool_v = copy.bool_v
         self.int_v = copy.int_v
@@ -86,14 +86,14 @@ struct JsonValue(ImplicitlyCopyable, Movable):
     fn array_at(self, i: Int) -> JsonValue:
         if not self.is_array() or i < 0 or i >= len(self.arr_v):
             return json_null()
-        return self.arr_v[i]
+        return self.arr_v[i].copy()
 
     fn object_get(self, key: String) -> Optional[JsonValue]:
         if not self.is_object():
             return Optional[JsonValue]()
         for i in range(len(self.obj_v)):
             if self.obj_v[i].key == key:
-                return Optional[JsonValue](self.obj_v[i].value)
+                return Optional[JsonValue](self.obj_v[i].value.copy())
         return Optional[JsonValue]()
 
     fn object_has(self, key: String) -> Bool:
@@ -104,16 +104,16 @@ struct JsonValue(ImplicitlyCopyable, Movable):
     fn append(mut self, value: JsonValue):
         if self.kind != JSON_ARRAY:
             return
-        self.arr_v.append(value)
+        self.arr_v.append(value.copy())
 
     fn put(mut self, var key: String, value: JsonValue):
         if self.kind != JSON_OBJECT:
             return
         for i in range(len(self.obj_v)):
             if self.obj_v[i].key == key:
-                self.obj_v[i].value = value
+                self.obj_v[i].value = value.copy()
                 return
-        self.obj_v.append(JsonMember(key^, value))
+        self.obj_v.append(JsonMember(key^, value.copy()))
 
 
 # --- builders --------------------------------------------------------------
@@ -195,7 +195,7 @@ fn json_get_string_array(obj: JsonValue, key: String) -> List[String]:
     var v = obj.object_get(key)
     if not v or not v.value().is_array():
         return out^
-    var arr = v.value()
+    var arr = v.value().copy()
     for i in range(arr.array_len()):
         var item = arr.array_at(i)
         if item.is_string():
@@ -322,7 +322,7 @@ fn parse_json(s: String) raises -> JsonValue:
     var end = _skip_ws(s, parsed[1])
     if end != n:
         raise Error("trailing data after JSON document")
-    return parsed[0]
+    return parsed[0].copy()
 
 
 fn _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:

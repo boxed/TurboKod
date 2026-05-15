@@ -6,7 +6,7 @@ channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
 [dependencies]
-modular = ">=26.1"
+modular = ">=26.3"
 oniguruma = ">=6.9.10,<7"
 
 [tasks]

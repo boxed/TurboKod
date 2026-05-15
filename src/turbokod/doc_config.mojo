@@ -26,7 +26,7 @@ from std.collections.list import List
 comptime DEVDOCS_BASE = String("https://documents.devdocs.io/")
 
 
-struct DocSpec(ImplicitlyCopyable, Movable):
+struct DocSpec(Copyable, Movable):
     """Routing entry: which file extensions belong to this language id,
     plus the DevDocs slug to fetch when the user asks for docs.
 
@@ -52,7 +52,7 @@ struct DocSpec(ImplicitlyCopyable, Movable):
         self.slug = slug^
         self.display = display^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.slug = copy.slug

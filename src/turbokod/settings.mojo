@@ -530,7 +530,7 @@ struct Settings(Movable):
             var idx = self._list_scroll + r
             if idx >= len(self.actions):
                 break
-            var act = self.actions[idx]
+            var act = self.actions[idx].copy()
             var attr = body_attr
             if idx == self.selected_action:
                 attr = (
@@ -730,7 +730,7 @@ struct Settings(Movable):
         var help: String
         if self.selected_language >= 0 \
                 and self.selected_language < len(self.languages_view):
-            var spec = self.languages_view[self.selected_language]
+            var spec = self.languages_view[self.selected_language].copy()
             if _has_override(self.language_overrides, spec.language_id):
                 help = String(
                     "Edit to change priority. Remove restores defaults."
@@ -769,7 +769,7 @@ struct Settings(Movable):
         # there's no built-in "default" to revert to otherwise.
         var remove_enabled = False
         if has_sel:
-            var spec = self.languages_view[self.selected_language]
+            var spec = self.languages_view[self.selected_language].copy()
             remove_enabled = _has_override(
                 self.language_overrides, spec.language_id,
             )
@@ -803,7 +803,7 @@ struct Settings(Movable):
             var idx = self._list_scroll + r
             if idx >= len(self.languages_view):
                 break
-            var spec = self.languages_view[idx]
+            var spec = self.languages_view[idx].copy()
             var attr = body_attr
             if idx == self.selected_language:
                 attr = (
@@ -995,7 +995,7 @@ struct Settings(Movable):
             if self.selected_language >= 0 \
                     and self.selected_language < len(self.languages_view):
                 ordered.append(_FOCUS_LANG_EDIT)
-                var spec = self.languages_view[self.selected_language]
+                var spec = self.languages_view[self.selected_language].copy()
                 if _has_override(
                     self.language_overrides, spec.language_id,
                 ):
@@ -1073,7 +1073,7 @@ struct Settings(Movable):
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
-        var spec = self.languages_view[self.selected_language]
+        var spec = self.languages_view[self.selected_language].copy()
         var argvs = List[String]()
         for i in range(len(spec.candidates)):
             argvs.append(_join_argv(spec.candidates[i].argv))
@@ -1090,12 +1090,12 @@ struct Settings(Movable):
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
-        var spec = self.languages_view[self.selected_language]
+        var spec = self.languages_view[self.selected_language].copy()
         var rebuilt = List[LanguageServerOverride]()
         for i in range(len(self.language_overrides)):
             if self.language_overrides[i].language_id == spec.language_id:
                 continue
-            rebuilt.append(self.language_overrides[i])
+            rebuilt.append(self.language_overrides[i].copy())
         self.language_overrides = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
@@ -1116,12 +1116,12 @@ struct Settings(Movable):
         for i in range(len(self.language_overrides)):
             if self.language_overrides[i].language_id \
                     == entry.language_id:
-                rebuilt.append(entry)
+                rebuilt.append(entry.copy())
                 replaced = True
             else:
-                rebuilt.append(self.language_overrides[i])
+                rebuilt.append(self.language_overrides[i].copy())
         if not replaced:
-            rebuilt.append(entry)
+            rebuilt.append(entry.copy())
         self.language_overrides = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
@@ -1223,7 +1223,7 @@ struct Settings(Movable):
         if self.selected_action < 0 or self.selected_action >= len(self.actions):
             return
         self.editor.open(
-            self.actions[self.selected_action], self.selected_action,
+            self.actions[self.selected_action].copy(), self.selected_action,
         )
 
     fn _remove_selected(mut self):
@@ -1233,7 +1233,7 @@ struct Settings(Movable):
         for i in range(len(self.actions)):
             if i == self.selected_action:
                 continue
-            rebuilt.append(self.actions[i])
+            rebuilt.append(self.actions[i].copy())
         self.actions = rebuilt^
         self.dirty = True
         if len(self.actions) == 0:

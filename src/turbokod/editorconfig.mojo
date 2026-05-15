@@ -112,7 +112,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         self.insert_final_newline = -1
         self.max_line_length = -1
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.indent_style = copy.indent_style
         self.indent_size = copy.indent_size
         self.tab_width = copy.tab_width
@@ -199,7 +199,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
 # --- INI-ish parsing -------------------------------------------------------
 
 
-struct EditorConfigSection(ImplicitlyCopyable, Movable):
+struct EditorConfigSection(Copyable, Movable):
     """One ``[pattern]`` block from a ``.editorconfig`` file."""
     var pattern: String
     # Parallel lists keep this trivially Movable / Copyable without needing
@@ -212,13 +212,13 @@ struct EditorConfigSection(ImplicitlyCopyable, Movable):
         self.keys = List[String]()
         self.values = List[String]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.pattern = copy.pattern
         self.keys = copy.keys.copy()
         self.values = copy.values.copy()
 
 
-struct EditorConfigFile(ImplicitlyCopyable, Movable):
+struct EditorConfigFile(Copyable, Movable):
     """A parsed ``.editorconfig`` file with its source directory."""
     var dir: String
     var is_root: Bool
@@ -229,7 +229,7 @@ struct EditorConfigFile(ImplicitlyCopyable, Movable):
         self.is_root = False
         self.sections = List[EditorConfigSection]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.dir = copy.dir
         self.is_root = copy.is_root
         self.sections = copy.sections.copy()
@@ -621,10 +621,10 @@ fn load_editorconfig_for_path(file_path: String) -> EditorConfig:
     # Apply furthest-from-file first, closest last (so closer wins).
     var i = len(collected) - 1
     while i >= 0:
-        var f = collected[i]
+        var f = collected[i].copy()
         var rel = _relative_path(abs_file, f.dir)
         for s in range(len(f.sections)):
-            var sec = f.sections[s]
+            var sec = f.sections[s].copy()
             if not match_section(sec.pattern, rel):
                 continue
             for kv in range(len(sec.keys)):

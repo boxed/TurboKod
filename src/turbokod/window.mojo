@@ -462,7 +462,7 @@ comptime DOCK_MIN_HEIGHT = 4
 title row, the status row, and at least two body rows on screen."""
 
 
-struct BottomDockedPanel(ImplicitlyCopyable, Movable):
+struct BottomDockedPanel(Copyable, Movable):
     """Chrome state + state-machine for a bottom-docked panel.
 
     Embedded by the debug pane and terminal pane (and any future docked
@@ -514,7 +514,7 @@ struct BottomDockedPanel(ImplicitlyCopyable, Movable):
         self.resizing = False
         self.close_button_id = String("")
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.state = copy.state
         self.preferred_height = copy.preferred_height
         self.commands = copy.commands.copy()
@@ -841,7 +841,7 @@ struct DockedPanelStack(Movable):
     fn __init__(out self):
         self.sections = List[DockedSection]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.sections = copy.sections.copy()
 
     fn add(mut self, var title: String) -> Int:
@@ -1074,7 +1074,7 @@ struct DockedPanelStack(Movable):
         return out^
 
 
-struct Window(ImplicitlyCopyable, Movable):
+struct Window(Copyable, Movable):
     var title: String
     var rect: Rect
     var content: List[String]
@@ -1129,7 +1129,7 @@ struct Window(ImplicitlyCopyable, Movable):
         w.is_editor = True
         return w^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.title = copy.title
         self.rect = copy.rect
         self.content = copy.content.copy()
@@ -1847,7 +1847,7 @@ struct WindowManager(Movable):
             return
         if self._title_hover_idx >= len(self.windows):
             return
-        var win = self.windows[self._title_hover_idx]
+        var win = self.windows[self._title_hover_idx].copy()
         if not win.is_editor:
             return
         var path = win.editor.file_path

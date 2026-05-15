@@ -288,7 +288,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.bp_conditions = List[String]()
         self.bp_enabled = List[Bool]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # Same caveat as ``DapManager.__copyinit__``: a real copy would
         # double-own the connected socket. We declare ``Copyable`` only
         # so the field can live in a ``DapManager`` (which is itself
@@ -569,7 +569,7 @@ struct DapManager(Copyable, Movable):
         self._oneshot_bp_path = String("")
         self._oneshot_bp_line = -1
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # Same caveat as ``LspManager.__copyinit__``: a real copy would
         # duplicate child PID + pipe FD ownership. We declare ``Copyable``
         # only so a manager can live in ``List[DapManager]``; lists are
@@ -757,7 +757,7 @@ struct DapManager(Copyable, Movable):
     fn _pick_argv(self, spec: DebuggerSpec) -> List[String]:
         """Return the first candidate whose argv[0] resolves on $PATH."""
         for i in range(len(spec.candidates)):
-            var c = spec.candidates[i]
+            var c = spec.candidates[i].copy()
             if len(c.argv) == 0:
                 continue
             if len(which(c.argv[0]).as_bytes()) == 0:
@@ -1723,7 +1723,7 @@ struct DapManager(Copyable, Movable):
                 return
             if not maybe:
                 break
-            var msg = maybe.value()
+            var msg = maybe.value().copy()
             if msg.kind == DAP_EVENT:
                 self._handle_event(msg)
             elif msg.kind == DAP_RESPONSE:
@@ -1766,7 +1766,7 @@ struct DapManager(Copyable, Movable):
                 return
             if not maybe:
                 break
-            var msg = maybe.value()
+            var msg = maybe.value().copy()
             self._handle_subprocess_message(msg)
 
     fn _handle_subprocess_message(mut self, msg: DapIncoming):
@@ -1784,7 +1784,7 @@ struct DapManager(Copyable, Movable):
                 # subprocess prints in the same Output panel.
                 if not msg.body or not msg.body.value().is_object():
                     return
-                var b = msg.body.value()
+                var b = msg.body.value().copy()
                 var category = String("console")
                 var text = String("")
                 var c = b.object_get(String("category"))
@@ -2118,7 +2118,7 @@ struct DapManager(Copyable, Movable):
             return
         # Park capabilities. Only the few we actually use.
         if msg.body and msg.body.value().is_object():
-            var b = msg.body.value()
+            var b = msg.body.value().copy()
             var cd = b.object_get(String("supportsConfigurationDoneRequest"))
             if cd and cd.value().is_bool():
                 self._supports_configuration_done = cd.value().as_bool()
@@ -2192,11 +2192,11 @@ struct DapManager(Copyable, Movable):
             sent_lines.append(-1)   # oneshot — no user-visible BP
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value()
+        var b = msg.body.value().copy()
         var arr_opt = b.object_get(String("breakpoints"))
         if not arr_opt or not arr_opt.value().is_array():
             return
-        var arr = arr_opt.value()
+        var arr = arr_opt.value().copy()
         var n = arr.array_len()
         for i in range(n):
             var entry = arr.array_at(i)
@@ -2296,7 +2296,7 @@ struct DapManager(Copyable, Movable):
             else:
                 value = String("<error>")
         elif msg.body and msg.body.value().is_object():
-            var b = msg.body.value()
+            var b = msg.body.value().copy()
             var r = b.object_get(String("result"))
             if r and r.value().is_string():
                 value = r.value().as_str()
@@ -2489,7 +2489,7 @@ struct DapManager(Copyable, Movable):
             else:
                 value = String("evaluation failed")
         elif msg.body and msg.body.value().is_object():
-            var b = msg.body.value()
+            var b = msg.body.value().copy()
             var r = b.object_get(String("result"))
             if r and r.value().is_string():
                 value = r.value().as_str()
@@ -2577,7 +2577,7 @@ struct DapManager(Copyable, Movable):
         var description = String("")
         var all = False
         if msg.body and msg.body.value().is_object():
-            var b = msg.body.value()
+            var b = msg.body.value().copy()
             var t = b.object_get(String("threadId"))
             if t and t.value().is_int():
                 tid = t.value().as_int()
@@ -2611,7 +2611,7 @@ struct DapManager(Copyable, Movable):
     fn _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value()
+        var b = msg.body.value().copy()
         var category = String("console")
         var text = String("")
         var c = b.object_get(String("category"))
@@ -2646,7 +2646,7 @@ struct DapManager(Copyable, Movable):
         """
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value()
+        var b = msg.body.value().copy()
         # Pull out connect.host/port. Anything weirdly-shaped → bail;
         # the subprocess will hang but the parent stays usable.
         var c = b.object_get(String("connect"))
@@ -2655,7 +2655,7 @@ struct DapManager(Copyable, Movable):
                 "debugpyAttach: missing/invalid 'connect' field; ignoring",
             ))
             return
-        var co = c.value()
+        var co = c.value().copy()
         var host = String("127.0.0.1")
         var hv = co.object_get(String("host"))
         if hv and hv.value().is_string():
@@ -2825,13 +2825,13 @@ fn _parse_threads(body_opt: Optional[JsonValue]) -> List[DapThread]:
     var out = List[DapThread]()
     if not body_opt:
         return out^
-    var b = body_opt.value()
+    var b = body_opt.value().copy()
     if not b.is_object():
         return out^
     var arr_opt = b.object_get(String("threads"))
     if not arr_opt or not arr_opt.value().is_array():
         return out^
-    var arr = arr_opt.value()
+    var arr = arr_opt.value().copy()
     for i in range(arr.array_len()):
         var t = arr.array_at(i)
         if not t.is_object():
@@ -2851,13 +2851,13 @@ fn _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
     var out = List[DapStackFrame]()
     if not body_opt:
         return out^
-    var b = body_opt.value()
+    var b = body_opt.value().copy()
     if not b.is_object():
         return out^
     var arr_opt = b.object_get(String("stackFrames"))
     if not arr_opt or not arr_opt.value().is_array():
         return out^
-    var arr = arr_opt.value()
+    var arr = arr_opt.value().copy()
     for i in range(arr.array_len()):
         var f = arr.array_at(i)
         if not f.is_object():
@@ -2887,7 +2887,7 @@ fn _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
         var subtle = False
         var src_opt = f.object_get(String("source"))
         if src_opt and src_opt.value().is_object():
-            var s = src_opt.value()
+            var s = src_opt.value().copy()
             var p = s.object_get(String("path"))
             if p and p.value().is_string():
                 path = p.value().as_str()
@@ -2918,13 +2918,13 @@ fn _parse_scopes(body_opt: Optional[JsonValue]) -> List[DapScope]:
     var out = List[DapScope]()
     if not body_opt:
         return out^
-    var b = body_opt.value()
+    var b = body_opt.value().copy()
     if not b.is_object():
         return out^
     var arr_opt = b.object_get(String("scopes"))
     if not arr_opt or not arr_opt.value().is_array():
         return out^
-    var arr = arr_opt.value()
+    var arr = arr_opt.value().copy()
     for i in range(arr.array_len()):
         var s = arr.array_at(i)
         if not s.is_object():
@@ -2949,13 +2949,13 @@ fn _parse_variables(body_opt: Optional[JsonValue]) -> List[DapVariable]:
     var out = List[DapVariable]()
     if not body_opt:
         return out^
-    var b = body_opt.value()
+    var b = body_opt.value().copy()
     if not b.is_object():
         return out^
     var arr_opt = b.object_get(String("variables"))
     if not arr_opt or not arr_opt.value().is_array():
         return out^
-    var arr = arr_opt.value()
+    var arr = arr_opt.value().copy()
     for i in range(arr.array_len()):
         var v = arr.array_at(i)
         if not v.is_object():

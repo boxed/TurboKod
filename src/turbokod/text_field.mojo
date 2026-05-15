@@ -183,7 +183,7 @@ struct TextField(Copyable, Movable):
         self._dc_anchor_start = 0
         self._dc_anchor_end = 0
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.text = copy.text
         self.cursor = copy.cursor
         self.anchor = copy.anchor
@@ -876,7 +876,7 @@ struct Form(Movable):
         self._fields = List[TextField]()
         self._keys = List[UInt8]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self._fields = copy._fields.copy()
         self._keys = copy._keys.copy()
 

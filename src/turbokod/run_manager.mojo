@@ -153,7 +153,7 @@ struct RunOutput(ImplicitlyCopyable, Movable):
         self.stdout = String("")
         self.stderr = String("")
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.stdout = copy.stdout
         self.stderr = copy.stderr
 

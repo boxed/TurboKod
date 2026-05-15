@@ -58,7 +58,7 @@ or host:port via the launch arguments."""
 # --- structures ----------------------------------------------------------
 
 
-struct AdapterCandidate(ImplicitlyCopyable, Movable):
+struct AdapterCandidate(Copyable, Movable):
     """One concrete way to invoke a DAP adapter for a language.
 
     ``argv`` is the full command. For Python's ``python -m`` style
@@ -72,12 +72,12 @@ struct AdapterCandidate(ImplicitlyCopyable, Movable):
         self.argv = argv^
         self.transport = transport
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.argv = copy.argv.copy()
         self.transport = copy.transport
 
 
-struct DebuggerSpec(ImplicitlyCopyable, Movable):
+struct DebuggerSpec(Copyable, Movable):
     """Per-language debugger config: which adapters can serve it, what
     request kind to default to, and the body of arguments we send with
     that request.
@@ -101,7 +101,7 @@ struct DebuggerSpec(ImplicitlyCopyable, Movable):
         self.request_kind = request_kind
         self.name = name^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.candidates = copy.candidates.copy()
         self.request_kind = copy.request_kind
@@ -211,7 +211,7 @@ fn python_debugger_spec_for_venv(
     """
     if spec.language_id != String("python") \
             or len(venv_dir.as_bytes()) == 0:
-        return spec
+        return spec.copy()
     var bin_dir = join_path(venv_dir, String("bin"))
     var venv_cands = List[AdapterCandidate]()
     var direct = join_path(bin_dir, String("debugpy-adapter"))
@@ -223,10 +223,10 @@ fn python_debugger_spec_for_venv(
     if info_p.ok and not info_p.is_dir():
         venv_cands.append(_argv3(py, String("-m"), String("debugpy.adapter")))
     if len(venv_cands) == 0:
-        return spec
+        return spec.copy()
     var combined = venv_cands^
     for i in range(len(spec.candidates)):
-        combined.append(spec.candidates[i])
+        combined.append(spec.candidates[i].copy())
     return DebuggerSpec(
         spec.language_id, combined^, spec.request_kind, spec.name,
     )

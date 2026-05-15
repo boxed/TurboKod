@@ -62,7 +62,7 @@ treating the event as having landed on the dropdown widget."""
 comptime _MAX_POPUP_ROWS = 8
 
 
-struct Dropdown(ImplicitlyCopyable, Movable):
+struct Dropdown(Copyable, Movable):
     """One inline picker.
 
     ``options`` is the full set of selectable values, in display
@@ -88,7 +88,7 @@ struct Dropdown(ImplicitlyCopyable, Movable):
         self._type_ahead = TypeAhead()
         self._clip_index()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.options = copy.options.copy()
         self.index = copy.index
         self.is_open = copy.is_open

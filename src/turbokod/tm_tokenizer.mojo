@@ -244,7 +244,7 @@ fn _tokenize_line(
             var m_opt = rx.search_at(line, pos, search_options)
             if not m_opt:
                 continue
-            var m = m_opt.value()
+            var m = m_opt.value().copy()
             if best_idx < 0 or m.start < best_match.start:
                 best_idx = ci
                 best_match = m^
@@ -287,7 +287,7 @@ fn _tokenize_line(
             # frame's outer scope, then overlay any ``endCaptures``
             # on top, then pop.
             var top = stack[len(stack) - 1]
-            var pat = grammar.patterns[top.pattern_idx]
+            var pat = grammar.patterns[top.pattern_idx].copy()
             var attr = _attr_for_scopes(top.scope_chain, pat.name)
             out.append(Highlight(row, match_start, match_end, attr))
             _emit_captures(
@@ -298,7 +298,7 @@ fn _tokenize_line(
             pos = match_end
             continue
 
-        var pat = grammar.patterns[cand.pattern_idx]
+        var pat = grammar.patterns[cand.pattern_idx].copy()
         if pat.kind == PATTERN_MATCH:
             var chain = _top_chain(stack)
             var attr = _attr_for_scopes(chain, pat.name)
@@ -362,14 +362,14 @@ fn _tokenize_line(
     var line_nl = line + String("\n") + next_line
     while len(stack) > 0:
         var top = stack[len(stack) - 1]
-        var top_pat = grammar.patterns[top.pattern_idx]
+        var top_pat = grammar.patterns[top.pattern_idx].copy()
         if top_pat.kind != PATTERN_BEGIN_END:
             break
         var end_rx = grammar.regexes[top_pat.end_idx]
         var m_opt = end_rx.search_at(line_nl, n)
         if not m_opt:
             break
-        var m = m_opt.value()
+        var m = m_opt.value().copy()
         if m.start != n:
             break
         var clamp_end = m.end
@@ -439,13 +439,13 @@ fn _process_while_frames(
     # BEGIN_END frames below it — they aren't gated by line starts.
     var idx = 0
     while idx < len(stack):
-        var pat = grammar.patterns[stack[idx].pattern_idx]
+        var pat = grammar.patterns[stack[idx].pattern_idx].copy()
         if pat.kind == PATTERN_BEGIN_WHILE:
             break
         idx += 1
     # Walk upward through consecutive while-frames.
     while idx < len(stack):
-        var pat = grammar.patterns[stack[idx].pattern_idx]
+        var pat = grammar.patterns[stack[idx].pattern_idx].copy()
         if pat.kind != PATTERN_BEGIN_WHILE:
             # Non-while frame between while-frames — leave the rest
             # alone (rare but legal).
@@ -455,7 +455,7 @@ fn _process_while_frames(
         var m_opt = rx.search_at(line, pos)
         var matched = False
         if m_opt:
-            var m = m_opt.value()
+            var m = m_opt.value().copy()
             if m.start == pos:
                 matched = True
                 if m.end > m.start:
@@ -510,7 +510,7 @@ fn _emit_captures(
     if len(match_name.as_bytes()) > 0:
         inner_chain = _join_scope(chain, match_name)
     for ci in range(len(caps)):
-        var cap = caps[ci]
+        var cap = caps[ci].copy()
         if cap.group < 0 or cap.group >= m.group_count():
             continue
         var gs = m.group_starts[cap.group]
@@ -552,7 +552,7 @@ fn _emit_capture_subtokens(
         var best_idx = -1
         var best_match = OnigMatch(-1, -1, List[Int](), List[Int]())
         for ci in range(len(pattern_idxs)):
-            var pat = grammar.patterns[pattern_idxs[ci]]
+            var pat = grammar.patterns[pattern_idxs[ci]].copy()
             if pat.kind != PATTERN_MATCH:
                 # Capture-group ``patterns`` only run a single
                 # tokenization pass; ``begin``/``end`` and INCLUDE
@@ -563,7 +563,7 @@ fn _emit_capture_subtokens(
             var m_opt = rx.search_at(sub, pos)
             if not m_opt:
                 continue
-            var m = m_opt.value()
+            var m = m_opt.value().copy()
             if best_idx < 0 or m.start < best_match.start:
                 best_idx = ci
                 best_match = m^
@@ -573,7 +573,7 @@ fn _emit_capture_subtokens(
         var me = best_match.end
         if me == ms:
             me = ms + 1
-        var pat = grammar.patterns[pattern_idxs[best_idx]]
+        var pat = grammar.patterns[pattern_idxs[best_idx]].copy()
         var attr = _attr_for_scopes(chain, pat.name)
         out.append(Highlight(
             row, sub_start + ms, sub_start + me, attr,
@@ -657,7 +657,7 @@ fn _active_candidates(
     var out = List[_Cand]()
     if len(stack) > 0:
         var top = stack[len(stack) - 1]
-        var top_pat = grammar.patterns[top.pattern_idx]
+        var top_pat = grammar.patterns[top.pattern_idx].copy()
         # ``BEGIN_WHILE`` frames don't have an end-regex candidate —
         # their lifetime is gated by the per-line ``while`` check
         # in ``_process_while_frames``, not an inline match.
@@ -689,7 +689,7 @@ fn _expand_into(
         if seen[s] == pattern_idx:
             return
     seen.append(pattern_idx)
-    var pat = grammar.patterns[pattern_idx]
+    var pat = grammar.patterns[pattern_idx].copy()
     if pat.kind == PATTERN_INCLUDE:
         var t = pat.include_target
         if t == String("$self"):

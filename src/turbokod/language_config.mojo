@@ -34,18 +34,18 @@ from .json import (
 comptime LANGUAGES_JSON_PATH = String("src/turbokod/data/languages.json")
 
 
-struct ServerCandidate(ImplicitlyCopyable, Movable):
+struct ServerCandidate(Copyable, Movable):
     """One concrete binary + argv we can try to spawn for a language."""
     var argv: List[String]
 
     fn __init__(out self, var argv: List[String]):
         self.argv = argv^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.argv = copy.argv.copy()
 
 
-struct LanguageSpec(ImplicitlyCopyable, Movable):
+struct LanguageSpec(Copyable, Movable):
     """Routing entry: which file extensions belong to this language id,
     and the ordered list of server binaries to try (first hit wins).
 
@@ -78,7 +78,7 @@ struct LanguageSpec(ImplicitlyCopyable, Movable):
         self.install_hint = install_hint^
         self.comment_token = comment_token^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.candidates = copy.candidates.copy()
@@ -108,7 +108,7 @@ fn _spec_from_json(v: JsonValue) -> Optional[LanguageSpec]:
     var candidates = List[ServerCandidate]()
     var cands_v = v.object_get(String("candidates"))
     if cands_v and cands_v.value().is_array():
-        var arr = cands_v.value()
+        var arr = cands_v.value().copy()
         for i in range(arr.array_len()):
             candidates.append(_candidate_from_json(arr.array_at(i)))
 
@@ -139,7 +139,7 @@ fn built_in_servers() -> List[LanguageSpec]:
         for i in range(root.array_len()):
             var spec = _spec_from_json(root.array_at(i))
             if spec:
-                out.append(spec.value())
+                out.append(spec.value().copy())
     except:
         pass
     return out^
@@ -212,7 +212,7 @@ fn apply_language_overrides(
     means no LSP gets spawned.
     """
     for i in range(len(overrides)):
-        var ov = overrides[i]
+        var ov = overrides[i].copy()
         if len(ov.language_id.as_bytes()) == 0:
             continue
         var cands = List[ServerCandidate]()

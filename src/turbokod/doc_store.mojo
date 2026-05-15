@@ -89,7 +89,7 @@ struct DocStore(Copyable, Movable):
         self._body_paths = List[String]()
         self._body_html = List[String]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.slug = copy.slug
         self.display = copy.display
         self.loaded = copy.loaded
@@ -119,7 +119,7 @@ struct DocStore(Copyable, Movable):
         var entries_opt = index_json.object_get(String("entries"))
         if not entries_opt or not entries_opt.value().is_array():
             raise Error(String("docs: malformed index at ") + index_path)
-        var entries_v = entries_opt.value()
+        var entries_v = entries_opt.value().copy()
         for i in range(entries_v.array_len()):
             var e = entries_v.array_at(i)
             if not e.is_object():
@@ -150,7 +150,7 @@ struct DocStore(Copyable, Movable):
         # of entries, so building a parallel two-list view is faster than
         # iterating ``object_get`` for every body.
         for i in range(len(db_json.obj_v)):
-            var member = db_json.obj_v[i]
+            var member = db_json.obj_v[i].copy()
             if not member.value.is_string():
                 continue
             self._body_paths.append(member.key)

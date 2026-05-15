@@ -249,9 +249,18 @@ without yielding a complete message, we treat the server as misbehaving
 and reset. 16 MB is far above any plausible LSP payload."""
 
 
-struct LspProcess(Movable):
+struct LspProcess(Copyable, Movable):
     """A spawned child plus its stdin/stdout/stderr pipes and a
-    Content-Length-aware read framer."""
+    Content-Length-aware read framer.
+
+    Honest copying would duplicate child PID + pipe FD ownership, which
+    would leak / double-close. We only declare ``Copyable`` so the
+    containing structs (``LspClient``/``DapClient``/``LspManager``) can
+    in turn satisfy ``Copyable`` — Mojo 1.0 requires every field of a
+    ``Copyable`` struct to itself be ``Copyable``. The ``__copyinit__``
+    here produces a fresh inert sentinel (``pid == -1``, ``alive ==
+    False``) rather than aliasing OS resources; consumers grow these
+    via ``^`` transfer so the branch should not actually fire."""
     var pid: Int32
     var stdin_fd: Int32
     var stdout_fd: Int32
@@ -277,6 +286,17 @@ struct LspProcess(Movable):
     var trace_fd: Int32
 
     fn __init__(out self):
+        self.pid = -1
+        self.stdin_fd = -1
+        self.stdout_fd = -1
+        self.stderr_fd = -1
+        self.alive = False
+        self._read_buffer = List[UInt8]()
+        self._pending_write = List[UInt8]()
+        self._write_overflowed = False
+        self.trace_fd = -1
+
+    fn __copyinit__(mut self, copy: Self):
         self.pid = -1
         self.stdin_fd = -1
         self.stdout_fd = -1
@@ -777,7 +797,7 @@ comptime LSP_REQUEST      = UInt8(2)
 
 
 @fieldwise_init
-struct LspIncoming(ImplicitlyCopyable, Movable):
+struct LspIncoming(Copyable, Movable):
     """A classified message from the server.
 
     * ``kind == LSP_RESPONSE``:     ``id`` is set; one of ``result``/``error``.
@@ -792,13 +812,24 @@ struct LspIncoming(ImplicitlyCopyable, Movable):
     var error: Optional[JsonValue]
 
 
-struct LspClient(Movable):
-    """Adds JSON-RPC envelope handling on top of ``LspProcess``."""
+struct LspClient(Copyable, Movable):
+    """Adds JSON-RPC envelope handling on top of ``LspProcess``.
+
+    ``Copyable`` is declared so containing structs (``LspManager``) can
+    satisfy ``Copyable`` themselves; the manual ``__copyinit__`` produces
+    a fresh inert sentinel rather than aliasing the underlying process /
+    fd ownership — see ``LspProcess.__copyinit__`` for the same pattern.
+    Live managers should never hit this branch because they're grown via
+    ``^`` transfer."""
     var process: LspProcess
     var _next_id: Int
 
     fn __init__(out self, var process: LspProcess):
         self.process = process^
+        self._next_id = 1
+
+    fn __copyinit__(mut self, copy: Self):
+        self.process = LspProcess()
         self._next_id = 1
 
     @staticmethod
@@ -858,13 +889,13 @@ fn classify_message(v: JsonValue) -> LspIncoming:
             method_opt = Optional[String](maybe_method.value().as_str())
         var maybe_params = v.object_get(String("params"))
         if maybe_params:
-            params_opt = Optional[JsonValue](maybe_params.value())
+            params_opt = Optional[JsonValue](maybe_params.value().copy())
         var maybe_result = v.object_get(String("result"))
         if maybe_result:
-            result_opt = Optional[JsonValue](maybe_result.value())
+            result_opt = Optional[JsonValue](maybe_result.value().copy())
         var maybe_error = v.object_get(String("error"))
         if maybe_error:
-            error_opt = Optional[JsonValue](maybe_error.value())
+            error_opt = Optional[JsonValue](maybe_error.value().copy())
     var kind: UInt8
     if Bool(method_opt) and Bool(id_opt):
         kind = LSP_REQUEST
@@ -873,7 +904,7 @@ fn classify_message(v: JsonValue) -> LspIncoming:
     else:
         kind = LSP_RESPONSE
     return LspIncoming(
-        kind, id_opt, method_opt, params_opt, result_opt, error_opt,
+        kind, id_opt, method_opt, params_opt.copy(), result_opt.copy(), error_opt.copy(),
     )
 
 

@@ -1414,7 +1414,7 @@ struct Desktop(Movable):
             var k = len(self.windows.z_order) - 1
             while k >= 0:
                 var i = self.windows.z_order[k]
-                var win = self.windows.windows[i]
+                var win = self.windows.windows[i].copy()
                 if win.rect.contains(pos):
                     if win.is_editor and win.interior().contains(pos):
                         return String("text")
@@ -1966,7 +1966,7 @@ struct Desktop(Movable):
         var spec_idx = find_language_for_extension(self.lsp_specs, ext)
         if spec_idx < 0:
             return
-        var spec = self.lsp_specs[spec_idx]
+        var spec = self.lsp_specs[spec_idx].copy()
         if len(spec.install_hint.as_bytes()) == 0:
             return
         # One nag per language per session, regardless of yes/no.
@@ -1977,7 +1977,7 @@ struct Desktop(Movable):
         # ``_ensure_lsp_for_extension`` only returns -1-with-known-extension
         # when this is true, so this guards against future refactors.
         for c in range(len(spec.candidates)):
-            var cand = spec.candidates[c]
+            var cand = spec.candidates[c].copy()
             if len(cand.argv) > 0 \
                     and len(which(cand.argv[0]).as_bytes()) > 0:
                 return
@@ -2017,7 +2017,7 @@ struct Desktop(Movable):
         var spec_idx = find_downloadable_grammar_for_extension(specs, ext)
         if spec_idx < 0:
             return
-        var spec = specs[spec_idx]
+        var spec = specs[spec_idx].copy()
         if user_grammar_installed(spec.language_id):
             return
         for i in range(len(self._grammar_install_prompted)):
@@ -2050,7 +2050,7 @@ struct Desktop(Movable):
         var spec_idx = find_downloadable_grammar_by_language(specs, lang)
         if spec_idx < 0:
             return
-        var spec = specs[spec_idx]
+        var spec = specs[spec_idx].copy()
         var cmd = grammar_install_command(spec.language_id, spec.url)
         if self.install_runner.is_active():
             self.status_bar.set_message(
@@ -2098,7 +2098,7 @@ struct Desktop(Movable):
             var spec_idx = find_downloadable_grammar_by_language(specs, lang)
             if spec_idx < 0:
                 return
-            var spec = specs[spec_idx]
+            var spec = specs[spec_idx].copy()
             for i in range(len(self.windows.windows)):
                 if not self.windows.windows[i].is_editor:
                     continue
@@ -2240,10 +2240,10 @@ struct Desktop(Movable):
         var argv = List[String]()
         if spec_idx < 0 or spec_idx >= len(self.lsp_specs):
             return argv^
-        var spec = self.lsp_specs[spec_idx]
+        var spec = self.lsp_specs[spec_idx].copy()
         var argv_found = False
         for c in range(len(spec.candidates)):
-            var cand = spec.candidates[c]
+            var cand = spec.candidates[c].copy()
             if len(cand.argv) == 0:
                 continue
             if len(which(cand.argv[0]).as_bytes()) > 0:
@@ -2640,7 +2640,7 @@ struct Desktop(Movable):
                 remap.append(-1)
             else:
                 remap.append(len(kept))
-                kept.append(self.windows.windows[i])
+                kept.append(self.windows.windows[i].copy())
         self.windows.windows = kept^
         var new_z = List[Int]()
         for k in range(len(self.windows.z_order)):
@@ -4532,11 +4532,11 @@ struct Desktop(Movable):
         # tell why ty (or pyright) was selected.
         for i in range(len(self.lsp_specs)):
             if self.lsp_specs[i].language_id == String("python"):
-                var spec = self.lsp_specs[i]
+                var spec = self.lsp_specs[i].copy()
                 lines.append(String(""))
                 lines.append(String("Python LSP candidates:"))
                 for c in range(len(spec.candidates)):
-                    var cand = spec.candidates[c]
+                    var cand = spec.candidates[c].copy()
                     if len(cand.argv) == 0:
                         continue
                     var bin = cand.argv[0]
@@ -5349,7 +5349,7 @@ struct Desktop(Movable):
             return  # mid-handshake, ignore
         # Project has an actionable debug target → use it.
         if self.project and self.targets.has_active():
-            var target = self.targets.targets[self.targets.active]
+            var target = self.targets.targets[self.targets.active].copy()
             if len(target.debug_language.as_bytes()) > 0 \
                     and len(target.program.as_bytes()) > 0:
                 self._target_debug()
@@ -5484,7 +5484,7 @@ struct Desktop(Movable):
                 Attr(BLACK, LIGHT_GRAY),
             )
             return
-        var target = self.targets.targets[self.targets.active]
+        var target = self.targets.targets[self.targets.active].copy()
         if len(target.program.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("run: target '") + target.name
@@ -5558,7 +5558,7 @@ struct Desktop(Movable):
                 Attr(BLACK, LIGHT_GRAY),
             )
             return
-        var target = self.targets.targets[self.targets.active]
+        var target = self.targets.targets[self.targets.active].copy()
         if len(target.debug_language.as_bytes()) == 0:
             self.status_bar.set_message(
                 String("debug: target '") + target.name
@@ -5774,7 +5774,7 @@ struct Desktop(Movable):
         every paint — cheap (one short list)."""
         var tabs = List[StatusTab]()
         for i in range(len(self.targets.targets)):
-            var t = self.targets.targets[i]
+            var t = self.targets.targets[i].copy()
             var running = self.run_session.matches(t.name)
             var debugging = (
                 self.dap.is_active()
@@ -6270,7 +6270,7 @@ struct Desktop(Movable):
         if lang_idx >= 0:
             lang = self.lsp_specs[lang_idx].language_id
         for i in range(len(actions)):
-            var act = actions[i]
+            var act = actions[i].copy()
             if len(act.language_id.as_bytes()) > 0 \
                     and act.language_id != lang:
                 continue
@@ -6592,7 +6592,7 @@ struct Desktop(Movable):
         var spec_idx = find_docset_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return -1
-        var spec = self.doc_specs[spec_idx]
+        var spec = self.doc_specs[spec_idx].copy()
         self.doc_stores.append(DocStore(spec.slug, spec.display))
         self.doc_languages.append(lang)
         return len(self.doc_stores) - 1
@@ -6643,7 +6643,7 @@ struct Desktop(Movable):
         # disk. Earlier specs win — pinned slugs are listed in roughly
         # popularity order in ``built_in_docsets``.
         for i in range(len(self.doc_specs)):
-            var spec = self.doc_specs[i]
+            var spec = self.doc_specs[i].copy()
             var dest = self._doc_dest_dir(spec.slug)
             # Cheap stat-based check before we materialize a store —
             # ``DocStore.is_installed`` only stats the two JSON files,
@@ -6657,7 +6657,7 @@ struct Desktop(Movable):
         # known docset, prompt to install it; otherwise hint that the
         # user needs to focus a recognized file once to bootstrap.
         if ext_spec_idx >= 0:
-            var ext_spec = self.doc_specs[ext_spec_idx]
+            var ext_spec = self.doc_specs[ext_spec_idx].copy()
             self._maybe_prompt_doc_install(ext_spec)
             return
         self.status_bar.set_message(
@@ -6682,7 +6682,7 @@ struct Desktop(Movable):
         var spec_idx = find_docset_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return False
-        var spec = self.doc_specs[spec_idx]
+        var spec = self.doc_specs[spec_idx].copy()
         var dest = self._doc_dest_dir(spec.slug)
         var store_idx = self._ensure_doc_store(spec.language_id)
         if store_idx < 0:
@@ -6714,7 +6714,7 @@ struct Desktop(Movable):
             return
         if not self.windows.windows[win_idx].is_editor:
             return
-        var editor = self.windows.windows[win_idx].editor
+        var editor = self.windows.windows[win_idx].editor.copy()
         var row = editor.cursor_row
         if row < 0 or row >= editor.buffer.line_count():
             return
@@ -6975,7 +6975,7 @@ struct Desktop(Movable):
         var spec_idx = find_docset_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return
-        var spec = self.doc_specs[spec_idx]
+        var spec = self.doc_specs[spec_idx].copy()
         var dest = self._doc_dest_dir(spec.slug)
         var cmd = docs_install_command(spec.slug, dest)
         if self.install_runner.is_active():
@@ -7016,7 +7016,7 @@ struct Desktop(Movable):
             var spec_idx = find_docset_by_language(self.doc_specs, lang)
             if spec_idx < 0:
                 return
-            var spec = self.doc_specs[spec_idx]
+            var spec = self.doc_specs[spec_idx].copy()
             var dest = self._doc_dest_dir(spec.slug)
             try:
                 self.doc_stores[store_idx].load(dest)
@@ -7081,7 +7081,7 @@ struct Desktop(Movable):
         var spec_idx = find_docset_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return False
-        var spec = self.doc_specs[spec_idx]
+        var spec = self.doc_specs[spec_idx].copy()
         var dest = self._doc_dest_dir(spec.slug)
         var store_idx = self._ensure_doc_store(lang)
         if store_idx < 0:

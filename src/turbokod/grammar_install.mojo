@@ -20,7 +20,7 @@ from .file_io import stat_file
 from .posix import getenv_value
 
 
-struct DownloadableGrammar(ImplicitlyCopyable, Movable):
+struct DownloadableGrammar(Copyable, Movable):
     """One downloadable grammar entry. ``url`` points at a raw JSON
     ``.tmLanguage.json`` file (typically a vscode plugin's
     ``syntaxes/...json``); ``language_id`` doubles as the directory
@@ -43,7 +43,7 @@ struct DownloadableGrammar(ImplicitlyCopyable, Movable):
         self.url = url^
         self.display = display^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         self.url = copy.url

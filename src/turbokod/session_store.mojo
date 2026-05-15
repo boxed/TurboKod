@@ -85,7 +85,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.scroll_x = 0
         self.scroll_y = 0
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.path = copy.path
         self.rect_a_x = copy.rect_a_x
         self.rect_a_y = copy.rect_a_y
@@ -118,7 +118,7 @@ struct Session(Movable):
         self.z_order = List[Int]()
         self.focused = -1
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.windows = copy.windows.copy()
         self.z_order = copy.z_order.copy()
         self.focused = copy.focused
@@ -281,7 +281,7 @@ fn load_session(project_root: String) -> Session:
     var arr_v = root.object_get(String("windows"))
     if not arr_v or not arr_v.value().is_array():
         return out^
-    var arr = arr_v.value()
+    var arr = arr_v.value().copy()
     for i in range(arr.array_len()):
         var w = _parse_session_window(arr.array_at(i))
         if len(w.path.as_bytes()) == 0:

@@ -23,19 +23,29 @@ from .lsp import ArgvBuffer, _build_argv_buffer
 from .posix import close_fd, kill_pid, SIGTERM, untrack_child, waitpid_nohang
 
 
-struct PtyProcess(Movable):
+struct PtyProcess(Copyable, Movable):
     """A spawned pty child plus the parent-side master fd.
 
     Bidirectional: read from ``master_fd`` to get the child's combined
     stdout+stderr; write to it to send keystrokes. ``alive`` is the
     same one-shot flag pattern as ``LspProcess`` — set to False once
     we observe the child has exited (via ``waitpid_nohang``) so the
-    drain loop stops trying."""
+    drain loop stops trying.
+
+    ``Copyable`` is declared so the containing ``TerminalPane`` can
+    satisfy ``Copyable`` itself; the manual ``__copyinit__`` produces a
+    fresh inert sentinel rather than aliasing the pid + master fd. Live
+    panes should never hit this branch — they grow via ``^`` transfer."""
     var pid: Int32
     var master_fd: Int32
     var alive: Bool
 
     fn __init__(out self):
+        self.pid = -1
+        self.master_fd = -1
+        self.alive = False
+
+    fn __copyinit__(mut self, copy: Self):
         self.pid = -1
         self.master_fd = -1
         self.alive = False

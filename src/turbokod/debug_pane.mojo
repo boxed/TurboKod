@@ -178,7 +178,7 @@ off the front. The pane only paints the last few anyway, but keeping
 the backlog lets a future ``output:save`` action dump the full log."""
 
 
-struct DebugPane(ImplicitlyCopyable, Movable):
+struct DebugPane(Copyable, Movable):
     var visible: Bool
     var dock: BottomDockedPanel
     """Shared chrome state: window-state machine, preferred-height,
@@ -295,7 +295,7 @@ struct DebugPane(ImplicitlyCopyable, Movable):
         self._output_scrolling = False
         self._output_drag_offset = 0
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
         self.dock = copy.dock
         self.status_text = copy.status_text

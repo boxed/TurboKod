@@ -114,7 +114,7 @@ fn _ansi_color(idx: Int) -> UInt8:
 # --- emulator struct ------------------------------------------------------
 
 
-struct Vt(ImplicitlyCopyable, Movable):
+struct Vt(Copyable, Movable):
     """Pure-data terminal emulator.
 
     Owns a primary screen, an alt screen, a cursor, an SGR-derived
@@ -321,7 +321,7 @@ struct Vt(ImplicitlyCopyable, Movable):
         self.reply_buf = String("")
         self._clipboard_pending = String("")
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # Explicit because ``List[Cell]`` isn't auto-copyable — Mojo's
         # value semantics require the deep copy to be spelled out.
         # The pane composes a Vt and is ImplicitlyCopyable itself

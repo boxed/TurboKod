@@ -49,7 +49,7 @@ struct DownloadableDictionary(ImplicitlyCopyable, Movable):
         self.display = display^
         self.url = url^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.display = copy.display
         self.url = copy.url

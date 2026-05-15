@@ -47,7 +47,7 @@ struct GitignorePattern(ImplicitlyCopyable, Movable):
     var negate: Bool
 
 
-struct GitignoreMatcher(ImplicitlyCopyable, Movable):
+struct GitignoreMatcher(Copyable, Movable):
     """Compiled set of gitignore patterns from a single ``.gitignore`` file.
 
     Match order follows git: later patterns override earlier ones, and a
@@ -58,7 +58,7 @@ struct GitignoreMatcher(ImplicitlyCopyable, Movable):
     fn __init__(out self):
         self.patterns = List[GitignorePattern]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.patterns = copy.patterns.copy()
 
     @staticmethod
@@ -461,7 +461,7 @@ fn _regex_replace_count(
         var m = rx.search_at(text, pos)
         if not m:
             break
-        var mv = m.value()
+        var mv = m.value().copy()
         if mv.start < 0 or mv.end < mv.start:
             break
         if mv.start > seg_start:

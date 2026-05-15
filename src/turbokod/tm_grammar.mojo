@@ -57,7 +57,7 @@ comptime PATTERN_GROUP    = UInt8(4)
 comptime PATTERN_BEGIN_WHILE = UInt8(5)
 
 
-struct Capture(ImplicitlyCopyable, Movable):
+struct Capture(Copyable, Movable):
     """One ``"<group>": { "name": "<scope>" }`` entry from a
     ``captures`` / ``beginCaptures`` / ``endCaptures`` block.
 
@@ -81,13 +81,13 @@ struct Capture(ImplicitlyCopyable, Movable):
         self.scope = scope^
         self.nested = nested^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.group = copy.group
         self.scope = copy.scope
         self.nested = copy.nested.copy()
 
 
-struct Pattern(ImplicitlyCopyable, Movable):
+struct Pattern(Copyable, Movable):
     """Flat representation of one TextMate pattern.
 
     Fields are populated based on ``kind``:
@@ -138,7 +138,7 @@ struct Pattern(ImplicitlyCopyable, Movable):
         self.captures = captures^
         self.end_captures = end_captures^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
         self.name = copy.name
         self.content_name = copy.content_name
@@ -150,7 +150,7 @@ struct Pattern(ImplicitlyCopyable, Movable):
         self.end_captures = copy.end_captures.copy()
 
 
-struct Grammar(ImplicitlyCopyable, Movable):
+struct Grammar(Copyable, Movable):
     """A loaded grammar: scope name + flat pattern/regex tables +
     repository lookup.
 
@@ -202,7 +202,7 @@ struct Grammar(ImplicitlyCopyable, Movable):
         self.external_scopes = external_scopes^
         self.external_roots = external_roots^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # Copy semantics: list-of-list fields deep-copy their
         # spines (we want each ``Grammar`` instance to own its own
         # vectors), but ``OnigRegex`` is itself bitwise-aliasing
@@ -304,7 +304,7 @@ fn _load_grammar_full(
     var scope_v = doc.object_get(String("scopeName"))
     var scope_name = String("")
     if scope_v:
-        var sv = scope_v.value()
+        var sv = scope_v.value().copy()
         if sv.is_string():
             scope_name = sv.as_str()
     if len(scope_name.as_bytes()) > 0:
@@ -321,10 +321,10 @@ fn _load_grammar_full(
     var repo_idxs = List[Int]()
     var repo_v = doc.object_get(String("repository"))
     if repo_v:
-        var ro = repo_v.value()
+        var ro = repo_v.value().copy()
         if ro.is_object():
             for i in range(len(ro.obj_v)):
-                var member = ro.obj_v[i]
+                var member = ro.obj_v[i].copy()
                 var idx = _compile_pattern(
                     member.value, patterns, regexes,
                     external_scopes, external_roots, loaded_scopes,
@@ -337,7 +337,7 @@ fn _load_grammar_full(
     var root_patterns = List[Int]()
     var top_v = doc.object_get(String("patterns"))
     if top_v:
-        var tv = top_v.value()
+        var tv = top_v.value().copy()
         if tv.is_array():
             for i in range(tv.array_len()):
                 var idx = _compile_pattern(
@@ -430,10 +430,10 @@ fn _maybe_load_external(
     var sub_root = List[Int]()
     var sub_repo_v = sub_doc.object_get(String("repository"))
     if sub_repo_v:
-        var sro = sub_repo_v.value()
+        var sro = sub_repo_v.value().copy()
         if sro.is_object():
             for i in range(len(sro.obj_v)):
-                var sm = sro.obj_v[i]
+                var sm = sro.obj_v[i].copy()
                 var sub_idx = _compile_pattern(
                     sm.value, patterns, regexes,
                     external_scopes, external_roots, loaded_scopes,
@@ -444,7 +444,7 @@ fn _maybe_load_external(
                 repo_idxs.append(sub_idx)
     var sub_top_v = sub_doc.object_get(String("patterns"))
     if sub_top_v:
-        var stv = sub_top_v.value()
+        var stv = sub_top_v.value().copy()
         if stv.is_array():
             for i in range(stv.array_len()):
                 var ridx = _compile_pattern(
@@ -516,7 +516,7 @@ fn _compile_pattern(
     # tokenizer can route into the embedded grammar's roots.
     var inc_v = node.object_get(String("include"))
     if inc_v:
-        var sv = inc_v.value()
+        var sv = inc_v.value().copy()
         if sv.is_string():
             var raw = sv.as_str()
             var target = raw
@@ -632,7 +632,7 @@ fn _compile_pattern(
         var nested = List[Int]()
         var nested_v = node.object_get(String("patterns"))
         if nested_v:
-            var nv = nested_v.value()
+            var nv = nested_v.value().copy()
             if nv.is_array():
                 for k in range(nv.array_len()):
                     var ci = _compile_pattern(
@@ -700,7 +700,7 @@ fn _compile_pattern(
     var grp_v = node.object_get(String("patterns"))
     var grp_children = List[Int]()
     if grp_v:
-        var gv = grp_v.value()
+        var gv = grp_v.value().copy()
         if gv.is_array():
             for k in range(gv.array_len()):
                 var ci = _compile_pattern(
@@ -759,17 +759,17 @@ fn _parse_captures(
     var v = node.object_get(key)
     if not v:
         return out^
-    var ov = v.value()
+    var ov = v.value().copy()
     if not ov.is_object():
         return out^
     for i in range(len(ov.obj_v)):
-        var member = ov.obj_v[i]
+        var member = ov.obj_v[i].copy()
         if not member.value.is_object():
             continue
         var name_str = String("")
         var name_v = member.value.object_get(String("name"))
         if name_v:
-            var sv = name_v.value()
+            var sv = name_v.value().copy()
             if sv.is_string():
                 name_str = sv.as_str()
         # Parse a nested ``patterns`` array if present. The patterns
@@ -780,7 +780,7 @@ fn _parse_captures(
         var nested = List[Int]()
         var pats_v = member.value.object_get(String("patterns"))
         if pats_v:
-            var pv = pats_v.value()
+            var pv = pats_v.value().copy()
             if pv.is_array():
                 for k in range(pv.array_len()):
                     var ci = _compile_pattern(
@@ -808,7 +808,7 @@ fn _string_or_empty(node: JsonValue, key: String) -> String:
     var v = node.object_get(key)
     if not v:
         return String("")
-    var sv = v.value()
+    var sv = v.value().copy()
     if not sv.is_string():
         return String("")
     return sv.as_str()

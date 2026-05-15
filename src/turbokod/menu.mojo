@@ -58,7 +58,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         """Build a non-interactive divider for grouping items in a dropdown."""
         return MenuItem(String(""), String(""), True)
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.action = copy.action
         self.is_separator = copy.is_separator
@@ -67,7 +67,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.checked = copy.checked
 
 
-struct Menu(ImplicitlyCopyable, Movable):
+struct Menu(Copyable, Movable):
     var label: String
     var items: List[MenuItem]
     var visible: Bool
@@ -90,7 +90,7 @@ struct Menu(ImplicitlyCopyable, Movable):
         self.right_aligned = right_aligned
         self.is_system = is_system
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.items = copy.items.copy()
         self.visible = copy.visible
@@ -182,7 +182,7 @@ struct MenuBar(Movable):
     fn _first_non_separator(self, menu_idx: Int) -> Int:
         if menu_idx < 0 or menu_idx >= len(self.menus):
             return 0
-        var menu = self.menus[menu_idx]
+        var menu = self.menus[menu_idx].copy()
         for i in range(len(menu.items)):
             if not menu.items[i].is_separator:
                 return i
@@ -249,7 +249,7 @@ struct MenuBar(Movable):
         stay aligned in mixed checkable/non-checkable menus."""
         if menu_idx < 0 or menu_idx >= len(self.menus):
             return False
-        var menu = self.menus[menu_idx]
+        var menu = self.menus[menu_idx].copy()
         for i in range(len(menu.items)):
             if menu.items[i].checkable:
                 return True
@@ -259,7 +259,7 @@ struct MenuBar(Movable):
         if self.open_idx < 0:
             return Rect(0, 0, 0, 0)
         var anchor = self._layout(screen_width)[self.open_idx]
-        var menu = self.menus[self.open_idx]
+        var menu = self.menus[self.open_idx].copy()
         var indent = 2 if self._menu_has_checkable(self.open_idx) else 0
         # Width = max(2 + indent + label + 2, 2 + indent + label + gap + shortcut + 2).
         # The +4 constant covers left padding + right padding; the +6 form adds
@@ -379,7 +379,7 @@ struct MenuBar(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter.draw_box(canvas, rect, attr, False)
-        var menu = self.menus[self.open_idx]
+        var menu = self.menus[self.open_idx].copy()
         # When the dropdown contains any checkable item, every row reserves
         # a 2-cell prefix between the left padding and the label so the
         # ``✓`` glyph slot lines up across the menu — non-checkable items
@@ -494,7 +494,7 @@ struct MenuBar(Movable):
     fn _activate_selected(mut self) -> MenuResult:
         if self.open_idx < 0:
             return MenuResult(Optional[String](), False)
-        var menu = self.menus[self.open_idx]
+        var menu = self.menus[self.open_idx].copy()
         if self.selected_item < 0 or self.selected_item >= len(menu.items):
             return MenuResult(Optional[String](), True)
         var item = menu.items[self.selected_item]
@@ -533,7 +533,7 @@ struct MenuBar(Movable):
         # letters are free to drive an in-dropdown search.
         if event.mods == 0 and is_printable_ascii(k) \
                 and self.open_idx >= 0:
-            var menu = self.menus[self.open_idx]
+            var menu = self.menus[self.open_idx].copy()
             var labels = List[String]()
             for i in range(len(menu.items)):
                 # Separators get an empty label so the helper

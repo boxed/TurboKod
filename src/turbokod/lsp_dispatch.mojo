@@ -126,7 +126,7 @@ struct TextEditEntry(ImplicitlyCopyable, Movable):
     var new_text: String
 
 
-struct CompletionItem(ImplicitlyCopyable, Movable):
+struct CompletionItem(Copyable, Movable):
     """One entry in a ``textDocument/completion`` response.
 
     ``label`` is what we display in the popup; ``insert_text`` is what
@@ -191,7 +191,7 @@ struct CompletionItem(ImplicitlyCopyable, Movable):
         self.range_end_char = range_end_char
         self.additional_text_edits = additional_text_edits^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.label = copy.label
         self.insert_text = copy.insert_text
         self.kind = copy.kind
@@ -257,7 +257,7 @@ struct _DiagnosticBucket(Copyable, Movable):
         self.diags = diags^
         self.consumed = consumed
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.path = copy.path
         self.diags = copy.diags.copy()
         self.consumed = copy.consumed
@@ -361,7 +361,7 @@ struct LspManager(Copyable, Movable):
         self._diagnostic_buckets = List[_DiagnosticBucket]()
         self._stderr_log = String("")
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
         # which leaks. We only declare ``Copyable`` so we can stash
         # managers in ``List[LspManager]``; the list is grown via ``^``
@@ -969,7 +969,7 @@ struct LspManager(Copyable, Movable):
                 return resolved
             if not maybe:
                 return resolved
-            var msg = maybe.value()
+            var msg = maybe.value().copy()
             if msg.kind == LSP_NOTIFICATION:
                 if msg.method and msg.params:
                     var method = msg.method.value()
@@ -1242,11 +1242,11 @@ fn _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
     var path = _uri_to_path(uri)
     if len(path.as_bytes()) == 0:
         return Optional[DefinitionResolved]()
-    var rng = range_opt.value()
+    var rng = range_opt.value().copy()
     var start_opt = rng.object_get(String("start"))
     if not start_opt:
         return Optional[DefinitionResolved]()
-    var start = start_opt.value()
+    var start = start_opt.value().copy()
     var line_opt = start.object_get(String("line"))
     var char_opt = start.object_get(String("character"))
     if not line_opt or not char_opt:
@@ -1313,7 +1313,7 @@ fn _parse_document_symbol(
             sub_container = name
         else:
             sub_container = container + String(" > ") + name
-        var children = children_opt.value()
+        var children = children_opt.value().copy()
         for i in range(children.array_len()):
             _parse_document_symbol(children.array_at(i), sub_container, out)
 
@@ -1364,12 +1364,12 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     var out = List[CompletionItem]()
     var arr: JsonValue
     if v.is_array():
-        arr = v
+        arr = v.copy()
     elif v.is_object():
         var items_opt = v.object_get(String("items"))
         if not items_opt or not items_opt.value().is_array():
             return out^
-        arr = items_opt.value()
+        arr = items_opt.value().copy()
     else:
         return out^
     var n = arr.array_len()
@@ -1408,7 +1408,7 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
             var got_te = False
             var te_opt = entry.object_get(String("textEdit"))
             if te_opt and te_opt.value().is_object():
-                var te = te_opt.value()
+                var te = te_opt.value().copy()
                 var nt_opt = te.object_get(String("newText"))
                 if nt_opt and nt_opt.value().is_string():
                     insert_text = nt_opt.value().as_str()
@@ -1421,17 +1421,17 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
                 if not rng_obj_opt:
                     rng_obj_opt = te.object_get(String("replace"))
                 if rng_obj_opt and rng_obj_opt.value().is_object():
-                    var rng_obj = rng_obj_opt.value()
+                    var rng_obj = rng_obj_opt.value().copy()
                     var s_opt = rng_obj.object_get(String("start"))
                     var e_opt = rng_obj.object_get(String("end"))
-                    if s_opt and e_opt \
+                    if Bool(s_opt) and Bool(e_opt) \
                             and s_opt.value().is_object() \
                             and e_opt.value().is_object():
                         var sl_opt = s_opt.value().object_get(String("line"))
                         var sc_opt = s_opt.value().object_get(String("character"))
                         var el_opt = e_opt.value().object_get(String("line"))
                         var ec_opt = e_opt.value().object_get(String("character"))
-                        if sl_opt and sc_opt and el_opt and ec_opt \
+                        if Bool(sl_opt) and Bool(sc_opt) and Bool(el_opt) and Bool(ec_opt) \
                                 and sl_opt.value().is_int() \
                                 and sc_opt.value().is_int() \
                                 and el_opt.value().is_int() \
@@ -1456,7 +1456,7 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
         var aux_edits = List[TextEditEntry]()
         var aux_opt = entry.object_get(String("additionalTextEdits"))
         if aux_opt and aux_opt.value().is_array():
-            var aux_arr = aux_opt.value()
+            var aux_arr = aux_opt.value().copy()
             var aux_n = aux_arr.array_len()
             for j in range(aux_n):
                 var aux = aux_arr.array_at(j)
@@ -1469,7 +1469,7 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
                 var aux_rng_opt = aux.object_get(String("range"))
                 if not aux_rng_opt or not aux_rng_opt.value().is_object():
                     continue
-                var aux_rng = aux_rng_opt.value()
+                var aux_rng = aux_rng_opt.value().copy()
                 var as_opt = aux_rng.object_get(String("start"))
                 var ae_opt = aux_rng.object_get(String("end"))
                 if not as_opt or not ae_opt \
@@ -1504,9 +1504,9 @@ fn _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     for i in range(1, m):
         var j = i
         while j > 0 and out[j].sort_text < out[j - 1].sort_text:
-            var tmp = out[j]
-            out[j] = out[j - 1]
-            out[j - 1] = tmp
+            var tmp = out[j].copy()
+            out[j] = out[j - 1].copy()
+            out[j - 1] = tmp^
             j -= 1
     return out^
 
@@ -1527,7 +1527,7 @@ fn _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
         var range_opt = entry.object_get(String("range"))
         if not range_opt:
             continue
-        var rng = range_opt.value()
+        var rng = range_opt.value().copy()
         var start_opt = rng.object_get(String("start"))
         var end_opt = rng.object_get(String("end"))
         if not start_opt or not end_opt:
@@ -1570,7 +1570,7 @@ fn _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
     var start_opt = rng.object_get(String("start"))
     if not start_opt:
         return (-1, -1)
-    var start = start_opt.value()
+    var start = start_opt.value().copy()
     var line_opt = start.object_get(String("line"))
     var char_opt = start.object_get(String("character"))
     if not line_opt or not char_opt:

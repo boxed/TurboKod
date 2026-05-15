@@ -164,7 +164,7 @@ fn load_view_states(project_root: String) -> List[StoredViewState]:
     var arr_v = root.object_get(String("views"))
     if not arr_v or not arr_v.value().is_array():
         return out^
-    var arr = arr_v.value()
+    var arr = arr_v.value().copy()
     for i in range(arr.array_len()):
         var node = arr.array_at(i)
         if not node.is_object():

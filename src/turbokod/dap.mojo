@@ -46,7 +46,7 @@ comptime DAP_REQUEST      = UInt8(2)
 
 
 @fieldwise_init
-struct DapIncoming(ImplicitlyCopyable, Movable):
+struct DapIncoming(Copyable, Movable):
     """A classified message from the adapter.
 
     * ``DAP_RESPONSE``: ``request_seq``, ``success``, ``command``, optional
@@ -66,17 +66,27 @@ struct DapIncoming(ImplicitlyCopyable, Movable):
     var arguments: Optional[JsonValue]  # for reverse requests
 
 
-struct DapClient(Movable):
+struct DapClient(Copyable, Movable):
     """Adds DAP envelope handling on top of ``LspProcess``.
 
     Outgoing seq numbers start at 1 and increment monotonically.
     Responses are matched by ``request_seq`` against the seq we issued.
+
+    ``Copyable`` is declared so the containing ``DapManager`` /
+    ``SubprocessAttach`` can satisfy ``Copyable`` themselves; the manual
+    ``__copyinit__`` produces a fresh inert sentinel rather than aliasing
+    the underlying process / fd ownership — see
+    ``LspProcess.__copyinit__`` for the same pattern.
     """
     var process: LspProcess
     var _next_seq: Int
 
     fn __init__(out self, var process: LspProcess):
         self.process = process^
+        self._next_seq = 1
+
+    fn __copyinit__(mut self, copy: Self):
+        self.process = LspProcess()
         self._next_seq = 1
 
     @staticmethod
@@ -174,10 +184,10 @@ fn classify_dap_message(v: JsonValue) -> DapIncoming:
             message_opt = Optional[String](maybe_msg.value().as_str())
         var maybe_body = v.object_get(String("body"))
         if maybe_body:
-            body_opt = Optional[JsonValue](maybe_body.value())
+            body_opt = Optional[JsonValue](maybe_body.value().copy())
         var maybe_args = v.object_get(String("arguments"))
         if maybe_args:
-            arguments_opt = Optional[JsonValue](maybe_args.value())
+            arguments_opt = Optional[JsonValue](maybe_args.value().copy())
     var kind: UInt8
     if type_str == String("event"):
         kind = DAP_EVENT
@@ -190,7 +200,7 @@ fn classify_dap_message(v: JsonValue) -> DapIncoming:
         kind = DAP_RESPONSE
     return DapIncoming(
         kind, seq, request_seq_opt, command_opt, event_opt,
-        success_opt, message_opt, body_opt, arguments_opt,
+        success_opt, message_opt, body_opt.copy(), arguments_opt.copy(),
     )
 
 

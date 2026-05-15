@@ -206,7 +206,7 @@ struct GrammarRegistry(Movable):
         return -1
 
 
-struct HighlightCache(Movable):
+struct HighlightCache(Copyable, Movable):
     """Per-``Editor`` incremental tokenizer state.
 
     Holds the most recently produced highlights and the per-line
@@ -228,6 +228,16 @@ struct HighlightCache(Movable):
         self.ext = String("")
         self.highlights = List[Highlight]()
         self.post_stacks = List[List[Frame]]()
+
+    fn __copyinit__(mut self, copy: Self):
+        # Deep-copy the cached state. Editor's ``Copyable`` declaration
+        # exists for snapshotting; in the live path editors are grown via
+        # ``^`` transfer so this branch is rare.
+        self.ext = copy.ext
+        self.highlights = copy.highlights.copy()
+        self.post_stacks = List[List[Frame]]()
+        for i in range(len(copy.post_stacks)):
+            self.post_stacks.append(copy.post_stacks[i].copy())
 
     fn invalidate(mut self):
         """Drop the per-line state — used when the line count or
@@ -657,7 +667,7 @@ comptime _HL_IN_BLOCK_COMMENT = 5
 # out from control flow. Per-language; filled in by the spec.
 
 
-struct LangSpec(ImplicitlyCopyable, Movable):
+struct LangSpec(Copyable, Movable):
     """Per-language config for the generic tokenizer.
 
     All fields are byte-strings — the tokenizer compares them with
@@ -683,7 +693,7 @@ struct LangSpec(ImplicitlyCopyable, Movable):
         self.block_close = block_close^
         self.quotes = quotes^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.keywords = copy.keywords.copy()
         self.line_comment = copy.line_comment
         self.block_open = copy.block_open

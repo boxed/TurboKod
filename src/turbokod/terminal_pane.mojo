@@ -77,7 +77,7 @@ the click and remove the pane from its list — the pane can't pop
 itself off a container it doesn't know about."""
 
 
-struct TerminalPane(ImplicitlyCopyable, Movable):
+struct TerminalPane(Copyable, Movable):
     """Single bottom-docked terminal. Owns one pty child, a ``Vt``
     emulator, and a tiny grid selection state. The shared chrome
     lives in ``dock``."""
@@ -155,7 +155,7 @@ struct TerminalPane(ImplicitlyCopyable, Movable):
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
         self.dock = copy.dock
         self.focused = copy.focused

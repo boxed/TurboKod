@@ -456,7 +456,7 @@ fn _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
 # --- TextBuffer -------------------------------------------------------------
 
 
-struct TextBuffer(ImplicitlyCopyable, Movable):
+struct TextBuffer(Copyable, Movable):
     """Line-oriented buffer. Always has at least one (possibly empty) line."""
     var lines: List[String]
 
@@ -491,7 +491,7 @@ struct TextBuffer(ImplicitlyCopyable, Movable):
             end -= 1
         self.lines.append(_slice(text, line_start, end))
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
 
     fn line_count(self) -> Int:
@@ -679,7 +679,7 @@ struct BreakpointMenuRequest(ImplicitlyCopyable, Movable):
     var anchor_y: Int
 
 
-struct EditorSnapshot(ImplicitlyCopyable, Movable):
+struct EditorSnapshot(Copyable, Movable):
     """One reversible step. Captures everything ``undo`` needs to restore:
     the buffer contents and the caret/selection. Scroll position is excluded
     on purpose — undoing shouldn't yank the viewport around if the user has
@@ -710,7 +710,7 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
         self.anchor_col = anchor_col
         self.extra_carets = extra_carets^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.cursor_row = copy.cursor_row
         self.cursor_col = copy.cursor_col
@@ -722,7 +722,7 @@ struct EditorSnapshot(ImplicitlyCopyable, Movable):
 # --- Editor widget ----------------------------------------------------------
 
 
-struct Editor(ImplicitlyCopyable, Movable):
+struct Editor(Copyable, Movable):
     """Pure-Mojo text editor widget.
 
     Cursor model: a *primary* cursor at ``(cursor_row, cursor_col)`` plus an
@@ -1221,7 +1221,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         # ``ed.flush_highlights(local_registry)`` directly.
         return ed^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.buffer = copy.buffer
         self.cursor_row = copy.cursor_row
         self.cursor_col = copy.cursor_col
@@ -1587,7 +1587,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 len(self._undo_stack) - _UNDO_STACK_LIMIT,
                 len(self._undo_stack),
             ):
-                trimmed.append(self._undo_stack[i])
+                trimmed.append(self._undo_stack[i].copy())
             self._undo_stack = trimmed^
         self._redo_stack = List[EditorSnapshot]()
         # Pushing a snapshot ends any typing run that was in flight. The
@@ -2101,7 +2101,7 @@ struct Editor(ImplicitlyCopyable, Movable):
         if self.completion_anchor_row != self.cursor_row:
             self.close_completion_popup()
             return False
-        var item = self.completion_items[self.completion_highlight]
+        var item = self.completion_items[self.completion_highlight].copy()
         var pre = self.cursor_row
         var line = self.buffer.line(self.cursor_row)
         var ln = len(line.as_bytes())
@@ -2681,7 +2681,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                 var m = rx.search_at(line, pos)
                 if not m:
                     break
-                var mv = m.value()
+                var mv = m.value().copy()
                 if mv.start < 0 or mv.end < mv.start:
                     break
                 if mv.start > seg_start:
@@ -3613,7 +3613,7 @@ struct Editor(ImplicitlyCopyable, Movable):
             if idx >= n_items:
                 break
             var ty = rect.a.y + r
-            var item = self.completion_items[idx]
+            var item = self.completion_items[idx].copy()
             var is_hl = (idx == self.completion_highlight)
             var row_attr = sel_attr if is_hl else attr
             if is_hl:
@@ -5472,7 +5472,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     continue
                 var m = rx.search_at(line, first_col)
                 if m:
-                    var mv = m.value()
+                    var mv = m.value().copy()
                     if mv.start < 0 or mv.end <= mv.start:
                         continue
                     self.move_to(r, mv.start, False)
@@ -5584,7 +5584,7 @@ struct Editor(ImplicitlyCopyable, Movable):
                     var m = rx.search_at(line, pos)
                     if not m:
                         break
-                    var mv = m.value()
+                    var mv = m.value().copy()
                     if mv.start < 0 or mv.end < mv.start:
                         break
                     if mv.start >= upper:

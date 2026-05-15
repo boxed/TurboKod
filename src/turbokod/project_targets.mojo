@@ -58,7 +58,7 @@ comptime TURBOKOD_DIR    = String(".turbokod")
 comptime TARGETS_FILE    = String("targets.json")
 
 
-struct RunTarget(ImplicitlyCopyable, Movable):
+struct RunTarget(Copyable, Movable):
     """One named build/run/debug target.
 
     ``name`` doubles as the identity key — list lookups and the
@@ -82,7 +82,7 @@ struct RunTarget(ImplicitlyCopyable, Movable):
         self.cwd = String("")
         self.debug_language = String("")
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.name = copy.name
         self.program = copy.program
         self.args = copy.args.copy()
@@ -104,7 +104,7 @@ struct ProjectTargets(Movable):
         self.targets = List[RunTarget]()
         self.active = -1
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.targets = copy.targets.copy()
         self.active = copy.active
 
@@ -243,7 +243,7 @@ fn load_project_targets(project_root: String) -> ProjectTargets:
     var arr_v = root.object_get(String("targets"))
     if not arr_v or not arr_v.value().is_array():
         return out^
-    var arr = arr_v.value()
+    var arr = arr_v.value().copy()
     for i in range(arr.array_len()):
         var t = _parse_target(arr.array_at(i))
         if len(t.name.as_bytes()) == 0:

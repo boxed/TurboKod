@@ -68,7 +68,7 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
         self.buf = String("")
         self.last_ms = 0
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.buf = copy.buf
         self.last_ms = copy.last_ms
 

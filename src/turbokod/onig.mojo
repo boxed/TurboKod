@@ -106,7 +106,7 @@ fn onig_global_end():
     _ = external_call["onig_end", Int]()
 
 
-struct OnigMatch(ImplicitlyCopyable, Movable):
+struct OnigMatch(Copyable, Movable):
     """Half-open ``[start, end)`` byte offsets of a regex match
     plus per-group bounds.
 
@@ -134,7 +134,7 @@ struct OnigMatch(ImplicitlyCopyable, Movable):
         self.group_starts = group_starts^
         self.group_ends = group_ends^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.start = copy.start
         self.end = copy.end
         self.group_starts = copy.group_starts.copy()
@@ -187,7 +187,7 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
     var _reg: Int       # OnigRegex (regex_t*) value
     var _region: Int    # OnigRegion* scratch, allocated once
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self._reg = copy._reg
         self._region = copy._region
 

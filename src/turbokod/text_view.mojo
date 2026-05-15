@@ -392,7 +392,7 @@ fn paint_selection_overlay(
 # --- text log: append-only, soft-wrapped, selectable, scrollable ----------
 
 
-struct TextLog(ImplicitlyCopyable, Movable):
+struct TextLog(Copyable, Movable):
     """A read-only text view with soft-wrap, mouse-drag selection,
     scroll, and clipboard copy. Composed by views like the DebugPane
     output panel — caller appends lines, calls ``paint`` and forwards
@@ -461,7 +461,7 @@ struct TextLog(ImplicitlyCopyable, Movable):
         self.last_visible_count = 0
         self._layout_w = -1
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.line_attrs = copy.line_attrs.copy()
         self.default_attr = copy.default_attr

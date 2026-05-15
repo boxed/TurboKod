@@ -268,7 +268,7 @@ struct ActionEditor(Movable):
         # returning. Edits during the dialog's life live on the
         # TextFields; ``entry`` is the host-facing record, populated
         # only on ``value()`` (and read by Save).
-        var out = self.entry
+        var out = self.entry.copy()
         out.program = self.form.text(_FOCUS_PROGRAM)
         out.cwd = self.form.text(_FOCUS_CWD)
         out.args = _split_args(self.form.text(_FOCUS_ARGS))

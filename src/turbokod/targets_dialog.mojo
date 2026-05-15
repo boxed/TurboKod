@@ -408,7 +408,7 @@ struct TargetsDialog(Movable):
         for i in range(len(self.entries)):
             if i == self.selected:
                 continue
-            rebuilt.append(self.entries[i])
+            rebuilt.append(self.entries[i].copy())
         # If the removed entry was the active one, fall back to the
         # row that takes its place (or clear when the list goes empty).
         var was_active = (
@@ -435,7 +435,7 @@ struct TargetsDialog(Movable):
     fn _selected_target(self) -> RunTarget:
         if self.selected < 0 or self.selected >= len(self.entries):
             return RunTarget()
-        return self.entries[self.selected]
+        return self.entries[self.selected].copy()
 
     fn _put_selected(mut self, var t: RunTarget):
         """Write ``t`` back to the selected slot. Mojo can't mutate a
@@ -459,7 +459,7 @@ struct TargetsDialog(Movable):
             self.cwd_tf = TextField()
             self.lang_dropdown = _build_lang_dropdown(String(""))
             return
-        var t = self.entries[self.selected]
+        var t = self.entries[self.selected].copy()
         self.name_tf = TextField()
         self.name_tf.set_text(t.name)
         self.program_tf = TextField()
@@ -477,7 +477,7 @@ struct TargetsDialog(Movable):
         what the user typed."""
         if self.selected < 0 or self.selected >= len(self.entries):
             return
-        var t = self.entries[self.selected]
+        var t = self.entries[self.selected].copy()
         t.name = self.name_tf.text
         t.program = self.program_tf.text
         t.args = _split_args(self.args_tf.text)

@@ -59,7 +59,7 @@ fn _ensure_dir(path: String):
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
-struct LanguageServerOverride(ImplicitlyCopyable, Movable):
+struct LanguageServerOverride(Copyable, Movable):
     """User override for one language's LSP routing.
 
     ``argvs`` replaces the candidate list verbatim — order is priority
@@ -90,7 +90,7 @@ struct LanguageServerOverride(ImplicitlyCopyable, Movable):
         self.file_types = file_types^
         self.argvs = argvs^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.file_types = copy.file_types.copy()
         var argvs = List[List[String]]()
@@ -99,7 +99,7 @@ struct LanguageServerOverride(ImplicitlyCopyable, Movable):
         self.argvs = argvs^
 
 
-struct OnSaveAction(ImplicitlyCopyable, Movable):
+struct OnSaveAction(Copyable, Movable):
     """One configured "after a successful save, run this" action.
 
     ``language_id`` empty matches every save; otherwise the action only
@@ -132,7 +132,7 @@ struct OnSaveAction(ImplicitlyCopyable, Movable):
         self.args = args^
         self.cwd = cwd^
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.language_id = copy.language_id
         self.program = copy.program
         self.args = copy.args.copy()
@@ -140,7 +140,7 @@ struct OnSaveAction(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
-struct TurbokodConfig(ImplicitlyCopyable, Movable):
+struct TurbokodConfig(Copyable, Movable):
     """Global preferences. Defaults match the pre-config behavior."""
     var line_numbers: Bool
     var soft_wrap: Bool
@@ -188,7 +188,7 @@ struct TurbokodConfig(ImplicitlyCopyable, Movable):
         self.on_save_actions = List[OnSaveAction]()
         self.language_servers = List[LanguageServerOverride]()
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         # ``List[String]`` isn't implicitly copyable, so the synthesized
         # copy constructor refuses — spell it out using ``List.copy``.
         self.line_numbers = copy.line_numbers
@@ -249,15 +249,15 @@ fn load_config() -> TurbokodConfig:
     var cfg = TurbokodConfig()
     var path = _config_path()
     if len(path.as_bytes()) == 0:
-        return cfg
+        return cfg^
     var info = stat_file(path)
     if not info.ok:
-        return cfg
+        return cfg^
     try:
         var text = read_file(path)
         var root = parse_json(text)
         if not root.is_object():
-            return cfg
+            return cfg^
         cfg.line_numbers = json_get_bool(
             root, String("line_numbers"), cfg.line_numbers,
         )
@@ -280,7 +280,7 @@ fn load_config() -> TurbokodConfig:
         )
         var osa = root.object_get(String("on_save_actions"))
         if osa and osa.value().is_array():
-            var arr = osa.value()
+            var arr = osa.value().copy()
             for i in range(arr.array_len()):
                 var item = arr.array_at(i)
                 if not item.is_object():
@@ -293,7 +293,7 @@ fn load_config() -> TurbokodConfig:
                 cfg.on_save_actions.append(act^)
         var lsv = root.object_get(String("language_servers"))
         if lsv and lsv.value().is_array():
-            var arr = lsv.value()
+            var arr = lsv.value().copy()
             for i in range(arr.array_len()):
                 var item = arr.array_at(i)
                 if not item.is_object():
@@ -307,7 +307,7 @@ fn load_config() -> TurbokodConfig:
                 )
                 var argvs_v = item.object_get(String("argvs"))
                 if argvs_v and argvs_v.value().is_array():
-                    var aa = argvs_v.value()
+                    var aa = argvs_v.value().copy()
                     for k in range(aa.array_len()):
                         var inner = aa.array_at(k)
                         if not inner.is_array():
@@ -322,7 +322,7 @@ fn load_config() -> TurbokodConfig:
                 cfg.language_servers.append(ov^)
     except:
         pass
-    return cfg
+    return cfg^
 
 
 fn save_config(config: TurbokodConfig) -> Bool:
@@ -353,7 +353,7 @@ fn save_config(config: TurbokodConfig) -> Bool:
     root.put(String("recent_files"), rf^)
     var osa = json_array()
     for i in range(len(config.on_save_actions)):
-        var act = config.on_save_actions[i]
+        var act = config.on_save_actions[i].copy()
         var obj = json_object()
         obj.put(String("language_id"), json_str(act.language_id))
         obj.put(String("program"), json_str(act.program))
@@ -366,7 +366,7 @@ fn save_config(config: TurbokodConfig) -> Bool:
     root.put(String("on_save_actions"), osa^)
     var lsv = json_array()
     for i in range(len(config.language_servers)):
-        var ov = config.language_servers[i]
+        var ov = config.language_servers[i].copy()
         var obj = json_object()
         obj.put(String("language_id"), json_str(ov.language_id))
         var ft = json_array()

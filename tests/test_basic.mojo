@@ -2707,7 +2707,7 @@ fn test_desktop_window_menu_lists_open_windows() raises:
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))
     d.windows.add(Window(String("beta"),  Rect(0, 1, 20, 5), List[String]()))
     d._rebuild_window_menu()
-    var menu = d.menu_bar.menus[d._window_menu_idx]
+    var menu = d.menu_bar.menus[d._window_menu_idx].copy()
     # 2 window items + separator + Maximize all + Restore all = 5 items.
     assert_equal(len(menu.items), 5)
     assert_equal(menu.items[0].label, String("alpha"))
@@ -2722,7 +2722,7 @@ fn test_desktop_window_menu_lists_open_windows() raises:
 fn test_desktop_window_menu_when_empty() raises:
     var d = Desktop()
     d._rebuild_window_menu()
-    var menu = d.menu_bar.menus[d._window_menu_idx]
+    var menu = d.menu_bar.menus[d._window_menu_idx].copy()
     # No windows: skip the separator, just show the bulk actions.
     assert_equal(len(menu.items), 2)
     assert_equal(menu.items[0].label, String("Maximize all"))
@@ -3098,7 +3098,7 @@ fn test_window_menu_items_show_ctrl_n_shortcut() raises:
     d.windows.add(Window(String("b"), Rect(0, 1, 20, 5), List[String]()))
     d._rebuild_window_menu()
     d._refresh_shortcuts()
-    var menu = d.menu_bar.menus[d._window_menu_idx]
+    var menu = d.menu_bar.menus[d._window_menu_idx].copy()
     assert_equal(menu.items[0].label, String("a"))
     assert_equal(menu.items[0].shortcut, String("Ctrl+1"))
     assert_equal(menu.items[1].label, String("b"))
@@ -3152,7 +3152,7 @@ fn test_menu_items_get_shortcut_text_after_refresh() raises:
             file_idx = i
             break
     assert_true(file_idx >= 0)
-    var fm = d.menu_bar.menus[file_idx]
+    var fm = d.menu_bar.menus[file_idx].copy()
     assert_equal(fm.items[0].shortcut, String("Cmd+S"))
     assert_equal(fm.items[1].shortcut, String("Cmd+Q"))
     assert_equal(fm.items[2].shortcut, String("Cmd+W"))
@@ -3743,7 +3743,7 @@ fn test_on_save_action_copy_preserves_args() raises:
     var a = OnSaveAction(
         String("python"), String("/usr/bin/black"), args^, String(""),
     )
-    var b = a
+    var b = a.copy()
     assert_equal(len(b.args), 2)
     assert_equal(b.args[0], String("--quiet"))
     assert_equal(b.args[1], String("$FILE"))
@@ -6928,7 +6928,7 @@ fn test_json_round_trip_lsp_envelope() raises:
     var reparsed = parse_json(encoded)
     assert_true(reparsed.is_object())
     assert_equal(reparsed.object_get(String("id")).value().as_int(), 1)
-    var p = reparsed.object_get(String("params")).value()
+    var p = reparsed.object_get(String("params")).value().copy()
     assert_true(p.object_get(String("rootUri")).value().is_null())
     assert_true(p.object_get(String("capabilities")).value().is_object())
 
@@ -7987,13 +7987,13 @@ fn test_lsp_initialize_against_mojo_lsp_server() raises:
     for _ in range(100):
         var maybe = client.poll(Int32(50))
         if maybe:
-            got = maybe
+            got = maybe.copy()
             break
     if not got:
         var err = client.process.drain_stderr()
         client.terminate()
         raise Error(String("no LSP response; stderr=") + err)
-    var msg = got.value()
+    var msg = got.value().copy()
     assert_equal(Int(msg.kind), Int(LSP_RESPONSE))
     assert_equal(msg.id.value(), req_id)
     assert_true(Bool(msg.result))
@@ -8107,7 +8107,7 @@ fn test_dap_parse_threads() raises:
         "{\"threads\":[{\"id\":1,\"name\":\"main\"},"
         + "{\"id\":2,\"name\":\"worker\"}]}"
     ))
-    var threads = _parse_threads(Optional[JsonValue](body))
+    var threads = _parse_threads(Optional[JsonValue](body.copy()))
     assert_equal(len(threads), 2)
     assert_equal(threads[0].id, 1)
     assert_equal(threads[0].name, String("main"))
@@ -8124,7 +8124,7 @@ fn test_dap_parse_stack_trace_zero_based() raises:
         + "\"line\":10,\"column\":1,"
         + "\"source\":{\"path\":\"/tmp/foo.py\"}}]}"
     ))
-    var frames = _parse_stack_trace(Optional[JsonValue](body))
+    var frames = _parse_stack_trace(Optional[JsonValue](body.copy()))
     assert_equal(len(frames), 1)
     assert_equal(frames[0].id, 42)
     assert_equal(frames[0].name, String("main"))
@@ -8138,7 +8138,7 @@ fn test_dap_parse_scopes_and_variables() raises:
         "{\"scopes\":[{\"name\":\"Locals\",\"variablesReference\":7,"
         + "\"expensive\":false}]}"
     ))
-    var scopes = _parse_scopes(Optional[JsonValue](scopes_body))
+    var scopes = _parse_scopes(Optional[JsonValue](scopes_body.copy()))
     assert_equal(len(scopes), 1)
     assert_equal(scopes[0].name, String("Locals"))
     assert_equal(scopes[0].variables_reference, 7)
@@ -8149,7 +8149,7 @@ fn test_dap_parse_scopes_and_variables() raises:
         + "{\"name\":\"obj\",\"value\":\"<Foo>\",\"type\":\"Foo\","
         + "\"variablesReference\":11}]}"
     ))
-    var variables = _parse_variables(Optional[JsonValue](vars_body))
+    var variables = _parse_variables(Optional[JsonValue](vars_body.copy()))
     assert_equal(len(variables), 2)
     assert_equal(variables[0].name, String("x"))
     assert_equal(variables[0].value, String("42"))
@@ -8715,7 +8715,7 @@ fn test_python_debugger_spec_for_venv_prepends_venv_python() raises:
     var specs = built_in_debuggers()
     var py_idx = find_debugger_for_language(specs, String("python"))
     assert_true(py_idx >= 0)
-    var py_spec = specs[py_idx]
+    var py_spec = specs[py_idx].copy()
     var orig_count = len(py_spec.candidates)
     # Empty venv → identity.
     var same = python_debugger_spec_for_venv(py_spec, String(""))
@@ -10406,7 +10406,7 @@ fn test_desktop_restores_session_from_disk() raises:
     d._pending_restore = False
     d._restore_session(screen)
     assert_equal(len(d.windows.windows), 1)
-    var w0 = d.windows.windows[0]
+    var w0 = d.windows.windows[0].copy()
     assert_true(w0.is_editor)
     assert_equal(w0.rect.a.x, 4)
     assert_equal(w0.rect.a.y, 2)
@@ -10541,7 +10541,7 @@ fn test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
     d._pending_restore = False
     d._restore_session(Rect(0, 0, 100, 30))
     assert_equal(len(d.windows.windows), 1)
-    var w0 = d.windows.windows[0]
+    var w0 = d.windows.windows[0].copy()
     assert_equal(w0.rect.a.x, 20)
     assert_equal(w0.rect.a.y, 8)
     assert_equal(w0.rect.b.x, 80)
@@ -10726,7 +10726,7 @@ fn test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raises
     d._pending_restore = False
     d._restore_session(screen)
     assert_equal(len(d.windows.windows), 1)
-    var w = d.windows.windows[0]
+    var w = d.windows.windows[0].copy()
     assert_true(w.is_maximized)
     # _restore_rect must reflect the saved un-maximized layout.
     assert_equal(w._restore_rect.a.x, 8)
@@ -12246,14 +12246,17 @@ fn test_speller_normalizes_unicode_for_lookup() raises:
     assert_true(s.check_word(String("Övrigt")))
     # NFC mixed case in the middle.
     assert_true(s.check_word(String("öVrigt")))
-    # NFD: O + combining diaeresis (U+004F U+0308 = ``0x4F 0xCC 0x88``).
-    var nfd_uppercase = String("\x4F\xCC\x88vrigt")
+    # NFD: O + combining diaeresis (U+004F U+0308).
+    # Mojo 1.0 string escapes interpret ``\xCC`` as codepoint U+00CC, not
+    # as the raw byte 0xCC — so we build the combining mark via ``chr``
+    # to get the intended UTF-8 byte sequence ``CC 88``.
+    var nfd_uppercase = String("O") + chr(0x308) + String("vrigt")
     assert_true(s.check_word(nfd_uppercase))
     # NFD lowercase: o + combining diaeresis.
-    var nfd_lowercase = String("\x6F\xCC\x88vrigt")
+    var nfd_lowercase = String("o") + chr(0x308) + String("vrigt")
     assert_true(s.check_word(nfd_lowercase))
     # And acute (U+0301) on e: ``café`` decomposes to e + U+0301.
-    var cafe_nfd = String("cafe\xCC\x81")
+    var cafe_nfd = String("cafe") + chr(0x301)
     assert_true(s.check_word(cafe_nfd))
 
 
@@ -13614,28 +13617,8 @@ fn test_vt_ris_clears_mode_flags() raises:
     assert_false(vt.app_cursor_keys)
 
 
-fn main() raises:
-    # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
-    # (which writes to ``~/.config/turbokod/config.json`` via
-    # ``_set_project`` → ``save_config``) can't clobber the developer's
-    # real config. Same goes for grammar installs and dir-browser HOME
-    # lookups.
-    var test_home = String("/tmp/turbokod_test_home")
-    var c_home_dir = test_home + String("\0")
-    _ = external_call["mkdir", Int32](c_home_dir.unsafe_ptr(), Int32(0o755))
-    var c_name = String("HOME\0")
-    var c_value = test_home + String("\0")
-    _ = external_call["setenv", Int32](
-        c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
-    )
-    # Bypass the system clipboard so cut/copy tests don't stomp the
-    # developer's real pbcopy/xclip contents with test fixtures.
-    var c_fake = String("TURBOKOD_FAKE_CLIPBOARD\0")
-    var c_one = String("1\0")
-    _ = external_call["setenv", Int32](
-        c_fake.unsafe_ptr(), c_one.unsafe_ptr(), Int32(1),
-    )
 
+fn _run_chunk_00() raises:
     test_claude_detect_empty_buffer_returns_none()
     test_claude_detect_plain_shell_output_returns_none()
     test_claude_detect_spinner_row_returns_working()
@@ -13736,6 +13719,9 @@ fn main() raises:
     test_editor_cmd_arrow_line_navigation()
     test_editor_typing_replaces_selection()
     test_editor_backspace_deletes_selection()
+
+
+fn _run_chunk_01() raises:
     test_editor_mouse_click_sets_cursor()
     test_editor_mouse_drag_extends_selection()
     test_editor_mouse_click_clamps_to_line()
@@ -13836,6 +13822,9 @@ fn main() raises:
     test_on_save_action_default_is_empty()
     test_on_save_action_copy_preserves_args()
     test_settings_open_seeds_state()
+
+
+fn _run_chunk_02() raises:
     test_settings_open_empty_parks_selection_at_minus_one()
     test_settings_remove_marks_dirty()
     test_settings_editor_submit_appends_new_entry()
@@ -13936,6 +13925,9 @@ fn main() raises:
     test_cmd_o_bubbles_file_open()
     test_cmd_shift_o_opens_quick_open_when_project_active()
     test_cmd_shift_o_bubbles_when_no_project()
+
+
+fn _run_chunk_03() raises:
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
@@ -14036,6 +14028,9 @@ fn main() raises:
     test_editor_mouse_click_lands_on_codepoint_boundary()
     test_window_v_scrollbar_hit_arrows_and_thumb()
     test_window_v_scroll_by_clamps()
+
+
+fn _run_chunk_04() raises:
     test_window_v_scrollbar_track_click_centers_target()
     test_window_v_scroll_drag_to_end()
     test_json_round_trip_lsp_envelope()
@@ -14136,6 +14131,9 @@ fn main() raises:
     test_debug_pane_click_on_traceback_link_sets_pending_open()
     test_text_view_wrap_lines_breaks_at_width()
     test_text_view_wrap_lines_word_aware_with_indent()
+
+
+fn _run_chunk_05() raises:
     test_text_view_selection_extracts_text()
     test_string_utils_slice_codepoints_handles_multibyte()
     test_debug_pane_long_output_line_soft_wraps()
@@ -14186,7 +14184,6 @@ fn main() raises:
     test_spell_menu_enter_on_project_disabled_stays_open()
     test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
     test_spell_menu_esc_dismisses()
-    find_misspelled_runs_filters_identifiers_and_short_words()
     test_has_spell_noinspection_directive_parses_intellij_forms()
     test_editor_spell_noinspection_suppresses_next_line()
     test_editor_spell_underlines_misspelled_word_in_comment()
@@ -14223,4 +14220,33 @@ fn main() raises:
     test_text_field_ctrl_letter_does_not_insert()
     test_text_field_paints_visible_window_after_scroll()
     test_vt_osc_52_decodes_base64_to_clipboard()
+
+fn main() raises:
+    # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
+    # (which writes to ``~/.config/turbokod/config.json`` via
+    # ``_set_project`` → ``save_config``) can't clobber the developer's
+    # real config. Same goes for grammar installs and dir-browser HOME
+    # lookups.
+    var test_home = String("/tmp/turbokod_test_home")
+    var c_home_dir = test_home + String("\0")
+    _ = external_call["mkdir", Int32](c_home_dir.unsafe_ptr(), Int32(0o755))
+    var c_name = String("HOME\0")
+    var c_value = test_home + String("\0")
+    _ = external_call["setenv", Int32](
+        c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
+    )
+    # Bypass the system clipboard so cut/copy tests don't stomp the
+    # developer's real pbcopy/xclip contents with test fixtures.
+    var c_fake = String("TURBOKOD_FAKE_CLIPBOARD\0")
+    var c_one = String("1\0")
+    _ = external_call["setenv", Int32](
+        c_fake.unsafe_ptr(), c_one.unsafe_ptr(), Int32(1),
+    )
+
+    _run_chunk_00()
+    _run_chunk_01()
+    _run_chunk_02()
+    _run_chunk_03()
+    _run_chunk_04()
+    _run_chunk_05()
     print("all tests passed")

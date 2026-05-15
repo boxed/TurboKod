@@ -56,7 +56,7 @@ struct GitRevertBlock(Copyable, Movable):
     var buf_end_excl: Int
     var head_lines: List[String]
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.buf_start = copy.buf_start
         self.buf_end_excl = copy.buf_end_excl
         self.head_lines = copy.head_lines.copy()

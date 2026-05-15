@@ -34,7 +34,7 @@ struct SearchOptions(ImplicitlyCopyable, Movable):
         self.whole_word = whole_word
         self.regex = regex
 
-    fn __copyinit__(out self, copy: Self):
+    fn __copyinit__(mut self, copy: Self):
         self.case_sensitive = copy.case_sensitive
         self.whole_word = copy.whole_word
         self.regex = copy.regex
