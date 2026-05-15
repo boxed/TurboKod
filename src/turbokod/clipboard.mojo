@@ -74,6 +74,31 @@ fn _paste_command() -> String:
         return String("xclip -selection clipboard -o 2>/dev/null")
 
 
+fn _strip_macos_malloc_debug_env():
+    """Remove the macOS malloc-debug env vars from our environment.
+
+    The native wrapper sets ``MallocScribble=1`` on the Mojo backend as
+    a workaround for a libsystem_malloc heap-corruption canary (see
+    app/src/main.rs). Without stripping, ``popen`` forks ``/bin/sh -c
+    …``; the shell's *own* libsystem_malloc reads MallocScribble at
+    process init and prints "MallocScribble: enabling scribbling to
+    detect mods to free blocks" on stderr — which lands on the TTY
+    behind our raw-mode UI and corrupts the visible display.
+
+    Doing this in the parent right before ``popen`` works because our
+    own libmalloc initialized at our dyld load time and won't re-check
+    the var — the scribbling workaround stays active for us. The Rust
+    pty shim does the equivalent for pty-spawned shells; this is the
+    same fix for the popen path.
+    """
+    var s = String("MallocScribble\0")
+    var ps = String("MallocPreScribble\0")
+    var ge = String("MallocGuardEdges\0")
+    _ = external_call["unsetenv", Int32](s.unsafe_ptr())
+    _ = external_call["unsetenv", Int32](ps.unsafe_ptr())
+    _ = external_call["unsetenv", Int32](ge.unsafe_ptr())
+
+
 fn clipboard_copy(text: String):
     """Push ``text`` to the system clipboard. Silent failure on error.
 
@@ -83,6 +108,7 @@ fn clipboard_copy(text: String):
     """
     if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
         return
+    _strip_macos_malloc_debug_env()
     var cmd = _copy_command() + String("\0")
     var mode = String("w\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())
@@ -100,6 +126,7 @@ fn clipboard_paste() -> String:
     """Read the system clipboard. Returns empty string on error."""
     if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
         return String("")
+    _strip_macos_malloc_debug_env()
     var cmd = _paste_command() + String("\0")
     var mode = String("r\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())
