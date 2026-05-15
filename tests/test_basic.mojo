@@ -12,7 +12,7 @@ from std.testing import assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas, wrap_to_width
 from turbokod.claude_detect import (
     CLAUDE_ACTIVE, CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
-    ClaudeStateTracker, claude_state_label, detect_claude_state,
+    claude_state_label, detect_claude_state,
 )
 from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
@@ -13548,10 +13548,6 @@ fn main() raises:
     test_claude_detect_generic_marker_returns_active()
     test_claude_detect_marker_outside_tail_window_is_ignored()
     test_claude_detect_finds_marker_inside_ansi_wrapped_line()
-    test_claude_state_tracker_passes_through_when_no_working_seen()
-    test_claude_state_tracker_sticks_working_during_grace()
-    test_claude_state_tracker_releases_after_grace_expires()
-    test_claude_state_tracker_grace_refreshes_on_new_working()
     test_claude_state_label_round_trip()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
