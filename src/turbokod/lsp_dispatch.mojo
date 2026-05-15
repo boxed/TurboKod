@@ -28,7 +28,7 @@ from .json import (
     JsonValue, encode_json, json_array, json_int, json_object, json_str,
     parse_json,
 )
-from .file_io import basename, read_file, stat_file, write_file
+from .file_io import basename, stat_file
 from .lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     json_null_v, lsp_initialize_params,
@@ -42,31 +42,35 @@ fn _lsp_debug_log(line: String):
     No-op otherwise — ``touch /tmp/turbokod-lsp.log`` to enable, delete
     the file to disable.
 
-    Read-modify-write — same trade-off as ``spell._append_to_file``. Opt-in
-    debug aid only; not on the hot path unless the trigger is flipped.
+    Opens with ``O_APPEND`` and writes one line per call so cost stays
+    O(line) regardless of how large the log has grown. The previous
+    read-modify-write was O(N) per call, i.e. O(N²) over a session —
+    enabling debug logging on a busy LSP session would itself add
+    multi-second latency to completion responses.
     """
     var path = String("/tmp/turbokod-lsp.log")
     var info = stat_file(path)
     if not info.ok \
             and len(getenv_value(String("TURBOKOD_LSP_LOG")).as_bytes()) == 0:
         return
-    var existing = String("")
-    if info.ok:
-        try:
-            existing = read_file(path)
-        except:
-            existing = String("")
-    if len(existing.as_bytes()) > 0:
-        var eb = existing.as_bytes()
-        if eb[len(eb) - 1] != 0x0A:
-            existing = existing + String("\n")
     # Prefix each line with monotonic ms so the gap between
     # ``→ request_completion`` and ``← completion response`` is
     # readable by eye. The clock's absolute value is unspecified — only
     # differences are meaningful — but that's exactly what we want for
     # latency analysis.
     var stamp = String("[") + String(monotonic_ms()) + String("] ")
-    _ = write_file(path, existing + stamp + line + String("\n"))
+    var full = stamp + line + String("\n")
+    var path_nul = path + String("\0")
+    var fd = external_call["tk_debug_log_open", Int32](
+        path_nul.unsafe_ptr(),
+    )
+    if fd < 0:
+        return
+    var bytes = full.as_bytes()
+    _ = external_call["write", Int](
+        Int(fd), bytes.unsafe_ptr(), UInt(len(bytes)),
+    )
+    _ = external_call["close", Int32](fd)
 
 
 # --- State -----------------------------------------------------------------
@@ -945,8 +949,18 @@ struct LspManager(Copyable, Movable):
             )
             return Optional[DefinitionResolved]()
         var resolved = Optional[DefinitionResolved]()
+        # Drain every framed message currently sitting in the kernel
+        # pipe buffer. The previous cap of 16 was too low for the
+        # diagnostics-fanout case (a large project may publish
+        # diagnostics for dozens of files at startup) and for very
+        # large completion responses that split across multiple
+        # ``read(2)`` calls. ``poll_message`` itself now reads
+        # non-blocking until the pipe is empty, so each iteration is
+        # bounded by "one framed message"; the safety cap stays as a
+        # belt-and-braces guard against a runaway server, but well
+        # above the realistic worst case.
         var i = 0
-        while i < 16:
+        while i < 256:
             i += 1
             var maybe: Optional[LspIncoming]
             try:

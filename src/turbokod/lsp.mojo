@@ -504,8 +504,16 @@ struct LspProcess(Movable):
         """Try to return one complete framed payload.
 
         ``timeout_ms`` is the budget for waiting on stdout when the buffer
-        is empty. Already-buffered data is checked first regardless. None
-        return means no full message is framed yet — call again later.
+        is empty — only spent on the first read of the call. Subsequent
+        reads in the same call are non-blocking: we keep draining as long
+        as the kernel has bytes ready, so a large response that spans
+        multiple ``read(2)`` calls lands in one ``poll_message`` instead
+        of getting smeared across several 50 ms editor ticks. None return
+        means no full message is framed yet — call again later.
+
+        Scratch buffer is 64 KB to match the typical pipe-buffer size on
+        macOS / Linux — a single ``read(2)`` drains a fully-buffered
+        pipe in one shot, instead of needing 16 syscalls.
         """
         # Drain anything already in the buffer first.
         var prefab = self._extract_one_message()
@@ -521,37 +529,49 @@ struct LspProcess(Movable):
                     String("< ") + String(len(pb)) + String("B ") + preview,
                 )
             return prefab
-        if not poll_stdin(self.stdout_fd, timeout_ms):
-            return Optional[String]()
-        var scratch = alloc_zero_buffer(4096)
-        var n = read_into(self.stdout_fd, scratch, 4096)
-        if n <= 0:
-            if self.trace_fd >= 0 and n == 0:
-                self.trace(String("< EOF on stdout"))
-            return Optional[String]()
-        for i in range(n):
-            self._read_buffer.append(scratch[i])
-        if self.trace_fd >= 0:
-            self.trace(
-                String("< raw ") + String(n) + String("B (buffer now ")
-                + String(len(self._read_buffer)) + String("B)"),
-            )
-        if len(self._read_buffer) > _BUF_CAP_GUARD:
-            self._read_buffer = List[UInt8]()
-            return Optional[String]()
-        var extracted = self._extract_one_message()
-        if extracted and self.trace_fd >= 0:
-            var eb = extracted.value().as_bytes()
-            var preview = extracted.value()
-            if len(eb) > 400:
-                preview = String(StringSlice(
-                    ptr=eb.unsafe_ptr(), length=400,
-                )) + String("…")
-            self.trace(
-                String("< extracted ") + String(len(eb)) + String("B ")
-                + preview,
-            )
-        return extracted
+        var scratch = alloc_zero_buffer(65536)
+        var first = True
+        while True:
+            var poll_budget: Int32
+            if first:
+                poll_budget = timeout_ms
+                first = False
+            else:
+                poll_budget = Int32(0)
+            if not poll_stdin(self.stdout_fd, poll_budget):
+                return Optional[String]()
+            var n = read_into(self.stdout_fd, scratch, 65536)
+            if n <= 0:
+                if self.trace_fd >= 0 and n == 0:
+                    self.trace(String("< EOF on stdout"))
+                return Optional[String]()
+            for i in range(n):
+                self._read_buffer.append(scratch[i])
+            if self.trace_fd >= 0:
+                self.trace(
+                    String("< raw ") + String(n) + String("B (buffer now ")
+                    + String(len(self._read_buffer)) + String("B)"),
+                )
+            if len(self._read_buffer) > _BUF_CAP_GUARD:
+                self._read_buffer = List[UInt8]()
+                return Optional[String]()
+            var extracted = self._extract_one_message()
+            if extracted:
+                if self.trace_fd >= 0:
+                    var eb = extracted.value().as_bytes()
+                    var preview = extracted.value()
+                    if len(eb) > 400:
+                        preview = String(StringSlice(
+                            ptr=eb.unsafe_ptr(), length=400,
+                        )) + String("…")
+                    self.trace(
+                        String("< extracted ") + String(len(eb)) + String("B ")
+                        + preview,
+                    )
+                return extracted
+            # No complete message yet — keep draining while bytes are
+            # available. ``poll_stdin(0)`` on the next iteration exits
+            # the loop when the pipe is empty.
 
     fn _extract_one_message(mut self) -> Optional[String]:
         """Scan ``_read_buffer`` for a complete framed payload; if one is

@@ -207,81 +207,102 @@ fn json_get_string_array(obj: JsonValue, key: String) -> List[String]:
 
 
 fn encode_json(value: JsonValue) -> String:
-    var out = String("")
-    _encode(value, out)
-    return out^
+    """Encode ``value`` as a single-line JSON document.
+
+    Accumulates into a ``List[UInt8]`` rather than ``out = out + ...`` —
+    Mojo's ``String + String`` allocates a fresh String and copies on
+    every step, so the obvious encoder is O(N²) and a single large LSP
+    payload (didOpen of a long file, an initialize-capabilities
+    response, the inbound ``encode_json`` echo used for definition /
+    error logging) would dominate the wall clock. Mirror of the same
+    trick already used in ``_parse_string``.
+    """
+    var buf = List[UInt8]()
+    _encode(value, buf)
+    return String(StringSlice(
+        ptr=buf.unsafe_ptr(), length=len(buf),
+    ))
 
 
-fn _encode(value: JsonValue, mut out: String):
+fn _encode(value: JsonValue, mut buf: List[UInt8]):
     if value.is_null():
-        out = out + String("null")
+        _append_bytes(buf, String("null"))
         return
     if value.is_bool():
-        out = out + (String("true") if value.as_bool() else String("false"))
+        _append_bytes(
+            buf, String("true") if value.as_bool() else String("false"),
+        )
         return
     if value.is_int():
-        out = out + String(value.as_int())
+        _append_bytes(buf, String(value.as_int()))
         return
     if value.is_float():
         # Float was preserved verbatim from parse; round-trip the text.
-        out = out + value.as_str()
+        _append_bytes(buf, value.as_str())
         return
     if value.is_string():
-        _encode_string(value.as_str(), out)
+        _encode_string(value.as_str(), buf)
         return
     if value.is_array():
-        out = out + String("[")
+        buf.append(UInt8(0x5B))  # '['
         for i in range(value.array_len()):
             if i > 0:
-                out = out + String(",")
-            _encode(value.array_at(i), out)
-        out = out + String("]")
+                buf.append(UInt8(0x2C))  # ','
+            _encode(value.array_at(i), buf)
+        buf.append(UInt8(0x5D))  # ']'
         return
     if value.is_object():
-        out = out + String("{")
+        buf.append(UInt8(0x7B))  # '{'
         for i in range(len(value.obj_v)):
             if i > 0:
-                out = out + String(",")
-            _encode_string(value.obj_v[i].key, out)
-            out = out + String(":")
-            _encode(value.obj_v[i].value, out)
-        out = out + String("}")
+                buf.append(UInt8(0x2C))  # ','
+            _encode_string(value.obj_v[i].key, buf)
+            buf.append(UInt8(0x3A))  # ':'
+            _encode(value.obj_v[i].value, buf)
+        buf.append(UInt8(0x7D))  # '}'
         return
-    out = out + String("null")
+    _append_bytes(buf, String("null"))
 
 
-fn _encode_string(s: String, mut out: String):
-    out = out + String("\"")
+fn _encode_string(s: String, mut buf: List[UInt8]):
+    buf.append(UInt8(0x22))  # '"'
     var b = s.as_bytes()
     for i in range(len(b)):
         var c = Int(b[i])
         if c == 0x22:
-            out = out + String("\\\"")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x22))
         elif c == 0x5C:
-            out = out + String("\\\\")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x5C))
         elif c == 0x08:
-            out = out + String("\\b")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x62))
         elif c == 0x0C:
-            out = out + String("\\f")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x66))
         elif c == 0x0A:
-            out = out + String("\\n")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x6E))
         elif c == 0x0D:
-            out = out + String("\\r")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x72))
         elif c == 0x09:
-            out = out + String("\\t")
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x74))
         elif c < 0x20:
-            out = out + String("\\u00")
-            out = out + _hex_nibble((c >> 4) & 0xF)
-            out = out + _hex_nibble(c & 0xF)
+            buf.append(UInt8(0x5C)); buf.append(UInt8(0x75))
+            buf.append(UInt8(0x30)); buf.append(UInt8(0x30))
+            buf.append(UInt8(_hex_nibble_byte((c >> 4) & 0xF)))
+            buf.append(UInt8(_hex_nibble_byte(c & 0xF)))
         else:
-            out = out + chr(c)
-    out = out + String("\"")
+            buf.append(UInt8(c))
+    buf.append(UInt8(0x22))
 
 
-fn _hex_nibble(n: Int) -> String:
+fn _hex_nibble_byte(n: Int) -> Int:
     if n < 10:
-        return chr(0x30 + n)
-    return chr(0x61 + (n - 10))
+        return 0x30 + n
+    return 0x61 + (n - 10)
+
+
+fn _append_bytes(mut buf: List[UInt8], s: String):
+    var src = s.as_bytes()
+    for i in range(len(src)):
+        buf.append(src[i])
 
 
 # --- parser ----------------------------------------------------------------
