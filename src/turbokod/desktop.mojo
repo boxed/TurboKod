@@ -66,7 +66,10 @@ from .lsp import LspProcess
 from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
-from .posix import close_fd, debug_log, realpath, untrack_child, waitpid_blocking
+from .posix import (
+    alloc_zero_buffer, close_fd, debug_log, poll_stdin, read_into, realpath,
+    untrack_child, waitpid_nohang,
+)
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
@@ -483,6 +486,26 @@ fn format_hotkey(key: UInt32, mods: UInt8) -> String:
     return prefix + String("?")
 
 
+@fieldwise_init
+struct PendingSaveAction(ImplicitlyCopyable, Movable):
+    """One in-flight on-save action. Reaped non-blocking by
+    ``Desktop.save_actions_tick`` so a slow or hung formatter can't
+    freeze the UI — the previous implementation called
+    ``waitpid_blocking`` straight from ``_do_save`` and a misbehaving
+    child would pin the main thread until killed externally.
+
+    ``stdout_fd`` / ``stderr_fd`` stay open while the child runs so the
+    tick can drain them and avoid the chatty-child write-side stall
+    when the pipe buffer fills; ``stdin_fd`` is closed at spawn time
+    because on-save actions don't read from stdin.
+    """
+    var pid: Int32
+    var stdout_fd: Int32
+    var stderr_fd: Int32
+    var label: String
+    var saved_path: String
+
+
 struct Desktop(Movable):
     var menu_bar: MenuBar
     var windows: WindowManager
@@ -635,6 +658,11 @@ struct Desktop(Movable):
     # in-flight install at a time; subsequent prompts fall back to the
     # clipboard-only path while ``install_runner`` is busy.
     var install_runner: InstallRunner
+    # In-flight user-configured on-save actions (one per save × matching
+    # ``OnSaveAction``). Drained non-blocking by ``save_actions_tick`` so
+    # a slow or hung formatter can't freeze the UI. New saves append;
+    # completion reloads the buffer + flashes a status-bar message.
+    var pending_save_actions: List[PendingSaveAction]
     # Language id of the install currently in flight. We remember it so
     # that on success we can re-attempt to start the LSP for any open
     # editor windows of that language without the user having to close
@@ -874,6 +902,7 @@ struct Desktop(Movable):
         self._pending_dap_venv_dir = String("")
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
+        self.pending_save_actions = List[PendingSaveAction]()
         self._install_lang = String("")
         self._grammar_install_prompted = List[String]()
         self._pending_grammar_prompt_ext = String("")
@@ -941,6 +970,12 @@ struct Desktop(Movable):
         # shortcut binds to MOD_META alone.
         self._hotkeys.append(Hotkey(
             UInt32(ord("q")), MOD_META, APP_QUIT_ACTION,
+        ))
+        # Cmd+, — open Settings. Matches the macOS-wide Preferences
+        # binding; routed through ``APP_SETTINGS`` so the menu, the
+        # hamburger entry, and this hotkey share one dispatch path.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord(",")), MOD_META, APP_SETTINGS,
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("w")), MOD_META, WINDOW_CLOSE,
@@ -3676,10 +3711,17 @@ struct Desktop(Movable):
             self._open_targets_config()
             return Optional[String]()
         if action == APP_SETTINGS:
+            var cur_ext = String("")
+            var fidx_settings = self._focused_editor_idx()
+            if fidx_settings >= 0:
+                cur_ext = extension_of(
+                    self.windows.windows[fidx_settings].editor.file_path,
+                )
             self.settings.open(
                 self.config.on_save_actions.copy(),
                 self.config.auto_save,
                 self.config.language_servers.copy(),
+                cur_ext,
             )
             return Optional[String]()
         if action == EDITOR_NEW:
@@ -6195,8 +6237,9 @@ struct Desktop(Movable):
                 # cache so the next paint re-queries git for this file.
                 self.windows.windows[idx].editor.invalidate_git_changes()
                 # Fire any user-configured on-save actions whose language
-                # matches this file. Each runs synchronously and reports
-                # via the status bar — the editor blocks until they exit.
+                # matches this file. Spawn-only — completion is reaped
+                # asynchronously by ``save_actions_tick`` so a slow or
+                # hung formatter can't freeze the UI.
                 self._run_on_save_actions(saved_path)
             except:
                 pass
@@ -6208,12 +6251,15 @@ struct Desktop(Movable):
         """Walk ``self.config.on_save_actions`` and spawn each entry
         whose ``language_id`` matches the saved file's language (empty
         ``language_id`` matches every file). Each runs as a one-shot
-        ``program + args`` subprocess; we wait for the exit and report
-        the outcome on the status bar.
+        ``program + args`` subprocess; reaping happens asynchronously
+        in ``save_actions_tick`` so a slow or hung action can't freeze
+        the UI (the previous synchronous ``waitpid_blocking`` could
+        pin the main thread indefinitely).
 
         Failures don't escalate — the save itself succeeded; an
         on-save action that exits non-zero just gets a status-bar
-        warning. Spawn errors (program missing, etc.) likewise.
+        warning when its reap lands. Spawn errors (program missing,
+        etc.) are reported synchronously here.
         """
         if len(self.config.on_save_actions) == 0:
             return
@@ -6223,7 +6269,6 @@ struct Desktop(Movable):
         var lang = String("")
         if lang_idx >= 0:
             lang = self.lsp_specs[lang_idx].language_id
-        var ran_any = False
         for i in range(len(actions)):
             var act = actions[i]
             if len(act.language_id.as_bytes()) > 0 \
@@ -6232,13 +6277,6 @@ struct Desktop(Movable):
             if len(act.program.as_bytes()) == 0:
                 continue
             self._spawn_on_save_action(act, saved_path)
-            ran_any = True
-        # Formatters typically rewrite the saved file in place; pick up
-        # the new bytes so the buffer doesn't drift from disk. The
-        # buffer is clean (just saved + the action ran synchronously),
-        # so this hits the clean-reload path — no merge needed.
-        if ran_any:
-            self._reload_after_on_save(saved_path)
 
     fn _reload_after_on_save(mut self, saved_path: String):
         """Re-stat the editor backing ``saved_path`` and adopt any new
@@ -6258,7 +6296,8 @@ struct Desktop(Movable):
         mut self, act: OnSaveAction, saved_path: String,
     ):
         """Fork+exec ``act.program act.args...`` with the configured
-        cwd (or the project root when blank), wait for it, and report.
+        cwd (or the project root when blank) and register the child
+        in ``pending_save_actions`` for ``save_actions_tick`` to reap.
 
         Uses ``LspProcess.spawn`` for the fork+exec wiring so the env
         (``HOME``, ``PATH``, etc.) matches everything else we run. We
@@ -6292,28 +6331,87 @@ struct Desktop(Movable):
             label = String(StringSlice(unsafe_from_utf8=b[slash + 1:]))
         try:
             var proc = LspProcess.spawn(argv)
-            var status = waitpid_blocking(proc.pid)
-            untrack_child(proc.pid)
-            if proc.stdin_fd  >= 0: _ = close_fd(proc.stdin_fd)
-            if proc.stdout_fd >= 0: _ = close_fd(proc.stdout_fd)
-            if proc.stderr_fd >= 0: _ = close_fd(proc.stderr_fd)
-            var exit_code = (Int(status) >> 8) & 0xFF
-            if exit_code == 0:
-                self.status_bar.set_message(
-                    String("on-save: ") + label + String(" ok"),
-                    Attr(BLACK, LIGHT_GRAY),
+            # On-save actions don't read from stdin — close it now so
+            # the child sees EOF immediately instead of waiting for
+            # input (a formatter that accidentally reads stdin would
+            # otherwise sit forever).
+            if proc.stdin_fd >= 0:
+                _ = close_fd(proc.stdin_fd)
+            self.pending_save_actions.append(
+                PendingSaveAction(
+                    proc.pid, proc.stdout_fd, proc.stderr_fd,
+                    label, saved_path,
                 )
-            else:
-                self.status_bar.set_message(
-                    String("on-save: ") + label + String(" exit ")
-                        + String(exit_code),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
-                )
+            )
         except:
             self.status_bar.set_message(
                 String("on-save: failed to spawn ") + label,
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
+
+    fn save_actions_tick(mut self):
+        """Per-frame reap of ``pending_save_actions``.
+
+        For each pending child:
+          * drain stdout / stderr so the child can't backpressure on a
+            full pipe buffer (we discard the bytes — on-save actions
+            report success via exit code, not stdout);
+          * non-blocking ``waitpid``; on exit, close the pipes, flash a
+            status-bar message, and reload the saved file so the buffer
+            adopts any in-place rewrites the formatter made.
+
+        Reload runs once per completing action even when several target
+        the same file — ``check_for_external_change`` no-ops when the
+        on-disk bytes haven't moved, so duplicate reloads are cheap.
+        """
+        if len(self.pending_save_actions) == 0:
+            return
+        var still_pending = List[PendingSaveAction]()
+        for i in range(len(self.pending_save_actions)):
+            var pa = self.pending_save_actions[i]
+            self._drain_save_action_fd(pa.stdout_fd)
+            self._drain_save_action_fd(pa.stderr_fd)
+            var pair = waitpid_nohang(pa.pid)
+            if Int(pair[0]) != Int(pa.pid):
+                still_pending.append(pa^)
+                continue
+            untrack_child(pa.pid)
+            # Drain once more so a final write between the previous
+            # drain and EOF doesn't get lost (same shape as
+            # ``InstallRunner.tick``).
+            self._drain_save_action_fd(pa.stdout_fd)
+            self._drain_save_action_fd(pa.stderr_fd)
+            if pa.stdout_fd >= 0: _ = close_fd(pa.stdout_fd)
+            if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
+            var exit_code = (Int(pair[1]) >> 8) & 0xFF
+            if exit_code == 0:
+                self.status_bar.set_message(
+                    String("on-save: ") + pa.label + String(" ok"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+            else:
+                self.status_bar.set_message(
+                    String("on-save: ") + pa.label + String(" exit ")
+                        + String(exit_code),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+            self._reload_after_on_save(pa.saved_path)
+        self.pending_save_actions = still_pending^
+
+    fn _drain_save_action_fd(mut self, fd: Int32):
+        """Read and discard everything currently available on ``fd``.
+        Keeps a chatty on-save child from filling its pipe and stalling
+        on its own ``write(2)``. Bounded per call so one runaway child
+        can't pin the tick."""
+        if fd < 0:
+            return
+        var scratch = alloc_zero_buffer(4096)
+        var total = 0
+        while poll_stdin(fd, Int32(0)) and total < 65536:
+            var n = read_into(fd, scratch, 4096)
+            if n <= 0:
+                break
+            total += n
 
     fn _maybe_reload_targets(mut self, saved_path: String):
         if not self.project:

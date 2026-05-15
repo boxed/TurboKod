@@ -151,7 +151,7 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
-from turbokod.posix import getenv_value
+from turbokod.posix import getenv_value, monotonic_ms
 from turbokod.spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
     has_spell_noinspection_directive,
@@ -3989,6 +3989,27 @@ fn test_settings_languages_section_seeded() raises:
     assert_true(found)
 
 
+fn test_settings_open_selects_current_language() raises:
+    """When ``open`` receives the focused editor's extension, the
+    Languages section must pre-select the matching row so the user
+    lands on the language they're editing — and the scroll-snap in
+    ``_paint_languages_list`` brings that row into view."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False, List[LanguageServerOverride](),
+           String("py"))
+    var selected_id = s.languages_view[s.selected_language].language_id
+    assert_equal(selected_id, String("python"))
+
+
+fn test_settings_open_unknown_extension_falls_back_to_first() raises:
+    """An unrecognized extension shouldn't strand the selection on
+    -1 — the user can still navigate the list. Fall back to row 0."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False, List[LanguageServerOverride](),
+           String("zzzunknownext"))
+    assert_equal(s.selected_language, 0)
+
+
 fn test_settings_remove_language_override_marks_dirty() raises:
     """Removing the override for a custom language drops it from
     ``language_overrides``, marks ``dirty``, and rebuilds the view so
@@ -4533,6 +4554,15 @@ fn test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
     ))
     var maybe = d.dispatch_action(EDITOR_SAVE, _SCREEN)
     assert_false(Bool(maybe))
+    # On-save actions are reaped asynchronously by ``save_actions_tick``
+    # so a slow / hung formatter can't freeze the UI. The test drives
+    # the tick in a loop until the pending child reaps; the deadline
+    # is generous (3 s) so a slow CI host with a sluggish ``sh`` spawn
+    # doesn't flake.
+    var deadline = monotonic_ms() + 3000
+    while len(d.pending_save_actions) > 0 and monotonic_ms() < deadline:
+        d.save_actions_tick()
+    assert_equal(len(d.pending_save_actions), 0)
     # Disk reflects the action's output.
     assert_equal(read_file(path), String("world"))
     # And the buffer was reloaded — without the post-action reload the
@@ -13817,6 +13847,8 @@ fn main() raises:
     test_apply_language_overrides_replaces_candidates()
     test_apply_language_overrides_adds_new_language()
     test_settings_languages_section_seeded()
+    test_settings_open_selects_current_language()
+    test_settings_open_unknown_extension_falls_back_to_first()
     test_settings_remove_language_override_marks_dirty()
     test_language_editor_save_emits_override()
     test_list_box_paint_never_overflows_bounds()

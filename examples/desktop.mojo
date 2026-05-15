@@ -381,6 +381,7 @@ fn main() raises:
                 desktop.lsp_tick(app.screen())
                 desktop.dap_tick(app.screen())
                 desktop.terminal_tick()
+                desktop.save_actions_tick()
                 if not maybe_ev:
                     continue
                 var ev = maybe_ev.value()

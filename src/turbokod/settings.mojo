@@ -48,7 +48,7 @@ from .dictionary_install import (
 )
 from .language_config import (
     LanguageSpec, ServerCandidate, apply_language_overrides,
-    built_in_servers, find_language_by_id,
+    built_in_servers, find_language_by_id, find_language_for_extension,
 )
 from .language_editor import LanguageEditor
 from .dropdown import (
@@ -283,6 +283,7 @@ struct Settings(Movable):
     fn open(
         mut self, var actions: List[OnSaveAction], auto_save: Bool,
         var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
+        current_language_ext: String = String(""),
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -304,9 +305,18 @@ struct Settings(Movable):
         self.pending_dict_remove_lang = String("")
         self.language_overrides = language_overrides^
         self._rebuild_languages_view()
-        self.selected_language = (
-            0 if len(self.languages_view) > 0 else -1
-        )
+        # Pre-select the focused editor's language so the Languages
+        # section opens on the row the user is most likely to care
+        # about — the scroll-snap in _paint_languages_list brings it
+        # into view on the next paint.
+        var lang_idx = -1
+        if len(current_language_ext.as_bytes()) > 0:
+            lang_idx = find_language_for_extension(
+                self.languages_view, current_language_ext,
+            )
+        if lang_idx < 0:
+            lang_idx = 0 if len(self.languages_view) > 0 else -1
+        self.selected_language = lang_idx
 
     fn _rebuild_languages_view(mut self):
         self.languages_view = apply_language_overrides(
