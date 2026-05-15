@@ -7975,6 +7975,7 @@ fn _refresh_status_for(
             prefix + String("starting..."),
             Attr(BLACK, LIGHT_GRAY),
             clickable=True,
+            spinner=True,
         )
         return
     if m.is_ready():
@@ -7984,6 +7985,7 @@ fn _refresh_status_for(
                 prefix + String("looking up ") + word + String("..."),
                 Attr(BLACK, LIGHT_GRAY),
                 clickable=True,
+                spinner=True,
             )
             return
         if m.last_empty():

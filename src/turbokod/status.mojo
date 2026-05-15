@@ -16,7 +16,35 @@ from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .posix import monotonic_ms
 from .string_utils import display_columns
+
+
+# Braille spinner frames. ~80 ms per frame ⇒ one full rotation per 800 ms,
+# fast enough to read as "working" without flicker. The status bar paints
+# once per app frame (≈20 fps), so each cycle through this list takes
+# 10 paints — well above the user-perceptible threshold.
+fn _spinner_glyph_now() -> String:
+    var idx = (monotonic_ms() // 80) % 10
+    if idx == 0:
+        return String("⠋")
+    if idx == 1:
+        return String("⠙")
+    if idx == 2:
+        return String("⠹")
+    if idx == 3:
+        return String("⠸")
+    if idx == 4:
+        return String("⠼")
+    if idx == 5:
+        return String("⠴")
+    if idx == 6:
+        return String("⠦")
+    if idx == 7:
+        return String("⠧")
+    if idx == 8:
+        return String("⠇")
+    return String("⠏")
 
 
 @fieldwise_init
@@ -53,6 +81,7 @@ struct StatusBar(Movable):
     var message: String          # right-aligned diagnostic / status text
     var message_attr: Attr       # color for the diagnostic; default = subtle
     var message_clickable: Bool  # True when caller marked the message as click-receiving
+    var message_spinner: Bool    # True ⇒ animated braille spinner prefixed to the message
     var _tab_hits: List[_TabHit] # captured by ``paint`` for ``hit_test``
     # Painted bounds of the right-aligned message — captured by ``paint``
     # so a subsequent click can hit-test it without recomputing layout.
@@ -67,6 +96,7 @@ struct StatusBar(Movable):
         self.message = String("")
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
         self.message_clickable = False
+        self.message_spinner = False
         self._tab_hits = List[_TabHit]()
         self._msg_a_x = 0
         self._msg_b_x = 0
@@ -76,6 +106,7 @@ struct StatusBar(Movable):
 
     fn set_message(
         mut self, var text: String, attr: Attr, clickable: Bool = False,
+        spinner: Bool = False,
     ):
         """Set the right-aligned status text (LSP state, errors, etc.).
 
@@ -83,10 +114,15 @@ struct StatusBar(Movable):
         the painted message rect are reported via ``hit_test_message``.
         Defaults to False so casual status updates (find/replace counts,
         DAP state, etc.) don't accidentally pick up a click handler when
-        the LSP indicator was the previous tenant of this slot."""
+        the LSP indicator was the previous tenant of this slot.
+
+        ``spinner`` opts the message into a one-glyph braille spinner
+        rendered just to the left of the text. Used for "we're waiting
+        on the LSP" states (starting up, looking up a symbol)."""
         self.message = text^
         self.message_attr = attr
         self.message_clickable = clickable
+        self.message_spinner = spinner
 
     fn set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,
@@ -153,15 +189,21 @@ struct StatusBar(Movable):
                 self._tab_hits.append(_TabHit(x, x + w, i))
                 x += w + 1
         # Right-aligned status message — clamped so it never collides with
-        # the F-key list on narrow terminals (left side wins).
+        # the F-key list on narrow terminals (left side wins). When the
+        # caller flagged ``message_spinner``, prepend an animated braille
+        # glyph (and a separating space) inside the same painted rect so
+        # the click target naturally covers the spinner too.
         self._msg_a_x = 0
         self._msg_b_x = 0
         if len(self.message.as_bytes()) > 0:
-            var msg_w = display_columns(self.message)
+            var rendered = self.message
+            if self.message_spinner:
+                rendered = _spinner_glyph_now() + String(" ") + self.message
+            var msg_w = display_columns(rendered)
             var mx = screen.b.x - msg_w - 1
             if mx < x + 1:
                 return
-            _ = painter.put_text(canvas, Point(mx, y), self.message, self.message_attr)
+            _ = painter.put_text(canvas, Point(mx, y), rendered, self.message_attr)
             self._msg_a_x = mx
             self._msg_b_x = mx + msg_w
 
