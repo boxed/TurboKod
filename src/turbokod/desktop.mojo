@@ -62,6 +62,9 @@ from .git_gutter_menu import (
     GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
     GitGutterMenu,
 )
+from .diagnostic_menu import (
+    DIAG_MENU_ACTION_COPY, DiagnosticMenu,
+)
 from .lsp import LspProcess
 from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
@@ -607,6 +610,12 @@ struct Desktop(Movable):
     # action; surfaced from ``Editor.consume_git_revert_request`` after
     # mouse dispatch and routed input-first like ``spell_menu``.
     var git_gutter_menu: GitGutterMenu
+    # Popup that opens when the user right-clicks a diagnostic squiggle
+    # in the editor text area. Single ``Copy message`` action pushes
+    # the LSP message onto the system clipboard. Surfaced from
+    # ``Editor.consume_diagnostic_menu_request`` and routed input-first
+    # like ``git_gutter_menu``.
+    var diagnostic_menu: DiagnosticMenu
     # Right-click on the LSP indicator on the right of the status bar →
     # contextual menu with a single ``Restart LSP`` action. Same
     # input-first routing pattern as ``git_gutter_menu``.
@@ -889,6 +898,7 @@ struct Desktop(Movable):
         self.speller = Speller()
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
+        self.diagnostic_menu = DiagnosticMenu()
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -1706,6 +1716,7 @@ struct Desktop(Movable):
         # routinely opens above already-rendered widgets).
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
+        self.diagnostic_menu.paint(canvas, screen)
         self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
         # Wait-for dropdown popup overlays the rest of the breakpoint
@@ -3264,6 +3275,16 @@ struct Desktop(Movable):
             if self.git_gutter_menu.submitted:
                 self._on_git_gutter_menu_submit()
             return Optional[String]()
+        if self.diagnostic_menu.active:
+            # Right-click on a diagnostic squiggle opens this single-row
+            # menu; same input-first routing as ``git_gutter_menu``.
+            if event.kind == EVENT_KEY:
+                _ = self.diagnostic_menu.handle_key(event)
+            else:
+                _ = self.diagnostic_menu.handle_mouse(event, screen)
+            if self.diagnostic_menu.submitted:
+                self._on_diagnostic_menu_submit()
+            return Optional[String]()
         if self.lsp_status_menu.active:
             # Right-click on the LSP indicator opens this single-row
             # menu; same input-first routing as ``git_gutter_menu``.
@@ -3557,6 +3578,10 @@ struct Desktop(Movable):
         # ``pending_git_revert`` on the focused editor — surface the popup
         # before the next paint so it lands on this same frame.
         self._maybe_open_git_gutter_menu()
+        # Right-click on a diagnostic squiggle stamps a pending menu
+        # request on the focused editor — surface the popup before the
+        # next paint so it lands on this same frame.
+        self._maybe_open_diagnostic_menu()
         # Right-click on a BP dot stamps a pending menu request on the
         # editor — surface the dialog before the next paint so the
         # user-visible delay is one frame max.
@@ -7216,6 +7241,43 @@ struct Desktop(Movable):
         var block = block_opt.value().copy()
         self.windows.windows[idx].editor.apply_revert_block(block^)
         self.windows.windows[idx].editor.invalidate_git_changes()
+
+    def _maybe_open_diagnostic_menu(mut self):
+        """Drain ``Editor.consume_diagnostic_menu_request`` on the
+        focused window. The request carries the screen cell of the
+        right-click so the popup opens right under it, plus the
+        diagnostic message captured at click time — the menu doesn't
+        need to re-resolve which diagnostic the user clicked when the
+        user picks Copy."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx] \
+            .editor.consume_diagnostic_menu_request()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        self.diagnostic_menu.open(
+            req.message, Point(req.anchor_x, req.anchor_y),
+        )
+
+    def _on_diagnostic_menu_submit(mut self):
+        """Resolve the diagnostic context menu: on Copy, push the
+        captured message to the system clipboard and surface a status
+        hint so the user gets visible feedback for a clipboard write
+        they can't otherwise see."""
+        var act = self.diagnostic_menu.action
+        var msg = self.diagnostic_menu.message
+        self.diagnostic_menu.close()
+        if act != DIAG_MENU_ACTION_COPY:
+            return
+        if len(msg.as_bytes()) == 0:
+            return
+        clipboard_copy(msg)
+        self.status_bar.set_message(
+            String("Copied diagnostic message"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action

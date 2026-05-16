@@ -26,6 +26,7 @@ from .colors import (
     LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
 )
+from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeResult, diff3_merge, unified_diff
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -851,6 +852,13 @@ struct Editor(Copyable, Movable):
     # the click, and on confirmation calls ``apply_revert_block`` with a
     # block computed from the cached HEAD baseline.
     var pending_git_revert: Optional[GitRevertRequest]
+    # Set by ``handle_mouse`` when the user right-clicks a diagnostic
+    # squiggle in the text area. The host polls
+    # ``consume_diagnostic_menu_request`` and opens the diagnostic
+    # context menu anchored at the click; the menu's only action
+    # copies the captured message to the system clipboard so the user
+    # can paste it into a search engine, chat, or bug tracker.
+    var pending_diagnostic_menu: Optional[DiagnosticMenuRequest]
     # Set by ``check_for_external_change`` when a 3-way merge against a
     # changed-on-disk file produces conflicts. Holds a pre-rendered
     # unified diff (previous on-disk content vs. current on-disk
@@ -1075,6 +1083,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
+        self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
@@ -1157,6 +1166,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
+        self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.soft_wrap = False
@@ -1267,6 +1277,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
         self.pending_git_revert = copy.pending_git_revert
+        self.pending_diagnostic_menu = copy.pending_diagnostic_menu
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
         self.soft_wrap = copy.soft_wrap
@@ -2396,6 +2407,16 @@ struct Editor(Copyable, Movable):
         self.pending_git_revert = Optional[GitRevertRequest]()
         return req
 
+    def consume_diagnostic_menu_request(
+        mut self,
+    ) -> Optional[DiagnosticMenuRequest]:
+        """Return any pending diagnostic-context-menu request and clear
+        the slot. Set by ``handle_mouse`` when the user right-clicks a
+        diagnostic squiggle in the text area."""
+        var req = self.pending_diagnostic_menu
+        self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
+        return req
+
     def apply_revert_block(mut self, var block: GitRevertBlock):
         """Replace ``buffer.lines[buf_start:buf_end_excl]`` with
         ``block.head_lines``. Used by the git-gutter revert popup;
@@ -3401,6 +3422,43 @@ struct Editor(Copyable, Movable):
                 self.buffer.line(row), sh.col_start, sh.col_end,
             )
             return
+
+    def _maybe_request_diagnostic_menu(
+        mut self, pos: Point, view: Rect,
+    ):
+        """Hit-test ``pos`` against diagnostic ranges in the text area
+        and, if it lands on one, stash a ``DiagnosticMenuRequest`` so
+        the host can open the copy-message context menu.
+
+        Same hit logic as the hover-tooltip path: pick the lowest
+        numeric severity (most severe) match on the cell so an error
+        squiggle isn't masked by an info hint that happens to overlap
+        it. ``[source]`` prefix matches the tooltip label so the menu
+        copies the same string the user just read."""
+        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        if not resolved:
+            return
+        var rc = resolved.value()
+        var row = rc[0]
+        var byte_col = rc[1]
+        var best_idx = -1
+        var best_sev = 0
+        for d in range(len(self.diagnostics)):
+            var diag = self.diagnostics[d]
+            if not _diag_covers_cell(diag, row, byte_col):
+                continue
+            if best_idx < 0 or diag.severity < best_sev:
+                best_idx = d
+                best_sev = diag.severity
+        if best_idx < 0:
+            return
+        var diag = self.diagnostics[best_idx]
+        var label = diag.message
+        if len(diag.source.as_bytes()) > 0:
+            label = String("[") + diag.source + String("] ") + label
+        self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest](
+            DiagnosticMenuRequest(label^, pos.x, pos.y),
+        )
 
     def _set_text_hover_anchor(
         mut self, row: Int, span_start: Int,
@@ -6009,9 +6067,10 @@ struct Editor(Copyable, Movable):
         # Right-click in the debugger gutter on a row that has a
         # breakpoint opens the BP context dialog. We resolve which row
         # the click landed on by replaying the same layout the paint
-        # path uses, then check ``breakpoint_lines`` for that row. Any
-        # other right-click is ignored (no generic editor context menu
-        # yet).
+        # path uses, then check ``breakpoint_lines`` for that row. In
+        # the text area, a right-click that lands on a diagnostic
+        # squiggle opens a "Copy message" context menu. Other
+        # right-clicks are ignored.
         if event.button == MOUSE_BUTTON_RIGHT:
             if event.pressed and not event.motion:
                 var total_g = self._total_gutter()
@@ -6036,6 +6095,8 @@ struct Editor(Copyable, Movable):
                                         ),
                                     )
                                 break
+                else:
+                    self._maybe_request_diagnostic_menu(event.pos, view)
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False
