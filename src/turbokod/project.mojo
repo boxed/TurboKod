@@ -224,7 +224,9 @@ def load_project_gitignore(root: String) -> GitignoreMatcher:
 
 
 def walk_project_files(
-    root: String, respect_gitignore: Bool = True,
+    root: String,
+    respect_gitignore: Bool = True,
+    include_ignored_files: Bool = False,
 ) -> List[String]:
     """Iterative DFS — absolute paths of every regular file under ``root``.
 
@@ -234,6 +236,13 @@ def walk_project_files(
     are included. With ``respect_gitignore=True`` (the default) the
     project's ``.gitignore`` is parsed and any path that matches is
     excluded; an ignored *directory* skips its entire subtree.
+
+    ``include_ignored_files=True`` keeps the directory-pruning behavior
+    but stops filtering individual files — useful for the file picker,
+    where user-customized configs like ``settings_local.py`` or ``.env``
+    are exactly the files you want to be able to open. Ignored *dirs*
+    are still pruned so the result doesn't balloon with ``node_modules``
+    / ``__pycache__`` / ``venv`` content.
     """
     var matcher = load_project_gitignore(root) if respect_gitignore \
         else GitignoreMatcher()
@@ -256,11 +265,14 @@ def walk_project_files(
             var info = stat_file(full)
             if not info.ok:
                 continue
-            if matcher.ignored(rel, info.is_dir()):
-                continue
             if info.is_dir():
+                if matcher.ignored(rel, True):
+                    continue
                 rel_dirs.append(rel)
             else:
+                if not include_ignored_files \
+                        and matcher.ignored(rel, False):
+                    continue
                 out.append(full)
     return out^
 

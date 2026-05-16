@@ -3655,6 +3655,78 @@ def test_walk_project_files_respects_gitignore() raises:
     assert_true(any_tvision)
 
 
+def test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs() raises:
+    """``include_ignored_files=True`` is the QuickOpen mode: a gitignored
+    *file* like ``settings_local.py`` must appear (so users can open it),
+    while a gitignored *directory* like ``node_modules`` must still be
+    pruned (so its contents don't flood the picker)."""
+    var root = _temp_path(String("_walk_ignored_files"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var nm = join_path(root, String("node_modules"))
+    _ = external_call["mkdir", Int32](
+        (nm + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(
+        join_path(root, String(".gitignore")),
+        String("settings_local.py\nnode_modules\n"),
+    ))
+    assert_true(write_file(
+        join_path(root, String("settings.py")), String("# main\n"),
+    ))
+    assert_true(write_file(
+        join_path(root, String("settings_local.py")), String("# local\n"),
+    ))
+    assert_true(write_file(
+        join_path(nm, String("dep.js")), String("// noise\n"),
+    ))
+
+    # Default strict mode: ignored file is hidden, ignored dir is pruned.
+    var strict = walk_project_files(root)
+    var strict_saw_local = False
+    var strict_saw_node = False
+    for i in range(len(strict)):
+        if _contains(strict[i], String("settings_local.py")):
+            strict_saw_local = True
+        if _contains(strict[i], String("/node_modules/")):
+            strict_saw_node = True
+    assert_false(strict_saw_local)
+    assert_false(strict_saw_node)
+
+    # Picker mode: ignored file shows up; ignored dir still pruned.
+    var picker = walk_project_files(root, include_ignored_files=True)
+    var picker_saw_local = False
+    var picker_saw_main = False
+    var picker_saw_node = False
+    for i in range(len(picker)):
+        if _contains(picker[i], String("settings_local.py")):
+            picker_saw_local = True
+        if _contains(picker[i], String("/settings.py")):
+            picker_saw_main = True
+        if _contains(picker[i], String("/node_modules/")):
+            picker_saw_node = True
+    assert_true(picker_saw_local)
+    assert_true(picker_saw_main)
+    assert_false(picker_saw_node)
+
+    _ = external_call["unlink", Int32](
+        (join_path(nm, String("dep.js")) + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["rmdir", Int32]((nm + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32](
+        (join_path(root, String("settings_local.py")) + String("\0"))
+        .unsafe_ptr(),
+    )
+    _ = external_call["unlink", Int32](
+        (join_path(root, String("settings.py")) + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["unlink", Int32](
+        (join_path(root, String(".gitignore")) + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
 def _hl_lines(*texts: String) -> List[String]:
     var out = List[String]()
     for t in texts:
@@ -13944,6 +14016,7 @@ def _run_chunk_01() raises:
     test_gitignore_matches_directory_pattern()
     test_gitignore_matches_glob_and_negate()
     test_walk_project_files_respects_gitignore()
+    test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs()
     test_downloadable_grammar_registry_has_elm()
     test_downloadable_grammar_registry_misses_unknown()
     test_grammar_install_command_targets_user_config()

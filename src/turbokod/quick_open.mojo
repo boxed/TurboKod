@@ -6,9 +6,11 @@ Enter submits the selected entry; Esc cancels. ``submitted`` /
 ``selected_path`` mirror ``FileDialog`` so the desktop owner can either
 inspect them or rely on ``Desktop`` to dispatch into ``open_file``.
 
-The candidate set comes from ``walk_project_files(root)`` — gitignore-
-respected by default, so ``tvision/`` style large vendored trees stay out
-of the picker.
+The candidate set comes from ``walk_project_files(root,
+include_ignored_files=True)`` — ignored *directories* (``node_modules``,
+``venv``, ``__pycache__``, vendored trees like ``tvision/``) are still
+pruned so the list stays usable, but individual gitignored files like
+``settings_local.py`` or ``.env`` are kept so the user can open them.
 """
 
 from std.collections.list import List
@@ -116,7 +118,7 @@ struct QuickOpen(Movable):
         # root prefix so the picker shows the project-relative form.
         self.entries = List[String]()
         self.entries_abs = List[String]()
-        var paths = walk_project_files(self.root)
+        var paths = walk_project_files(self.root, include_ignored_files=True)
         var rb = self.root.as_bytes()
         for i in range(len(paths)):
             var fb = paths[i].as_bytes()
