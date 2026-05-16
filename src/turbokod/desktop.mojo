@@ -551,6 +551,7 @@ struct Desktop(Movable):
     var _pending_arg: String         # accumulator for two-step prompts
     var _last_search: String         # last Find needle, repeated by Ctrl+G
     var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
+    var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
     var _hotkeys: List[Hotkey]       # global key bindings, scanned in order
@@ -880,6 +881,7 @@ struct Desktop(Movable):
         self._pending_arg = String("")
         self._last_search = String("")
         self._last_search_opts = SearchOptions()
+        self._last_goto_line = String("")
         self._open_count = 0
         self._untitled_count = 0
         self._hotkeys = List[Hotkey]()
@@ -3841,7 +3843,10 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_GOTO:
             self._pending_action = EDITOR_GOTO
-            self.prompt.open(String("Go to line: "))
+            self.prompt.open(
+                String("Go to line: "), self._last_goto_line,
+                select_prefill=True,
+            )
             return Optional[String]()
         if action == EDITOR_GOTO_SYMBOL:
             self._open_symbol_pick()
@@ -7790,6 +7795,7 @@ struct Desktop(Movable):
             self._clear_pending_dap_start()
             return Optional[String]()
         if pa == EDITOR_GOTO:
+            self._last_goto_line = text
             var idx = self._focused_editor_idx()
             if idx >= 0:
                 var n = 0
@@ -7799,6 +7805,10 @@ struct Desktop(Movable):
                     except:
                         n = 0
                 self.windows.windows[idx].editor.goto_line(n)
+                self.windows.windows[idx].editor.reveal_cursor(
+                    self.windows.windows[idx].interior(),
+                    margin_below=10, margin_above=10,
+                )
             return Optional[String]()
         if pa == _PA_REPLACE_FIND:
             self._pending_arg = text
