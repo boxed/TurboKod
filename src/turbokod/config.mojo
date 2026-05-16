@@ -152,9 +152,11 @@ struct TurbokodConfig(Copyable, Movable):
     # (currently: git change lines), so flipping it on outside a repo
     # is a silent no-op.
     var minimap: Bool
-    # Settings ▸ Editor ▸ Save behavior. ``False`` (default) is the
-    # legacy "save on Ctrl+S only" behavior; ``True`` autosaves on the
-    # focus / lifecycle hooks the editor already exposes.
+    # Settings ▸ Editor ▸ Save behavior. ``True`` (default) saves every
+    # dirty file-backed buffer on focus loss — whether the wrapper
+    # window loses focus or the user switches between editor windows
+    # inside the app. ``False`` opts out, leaving Ctrl+S as the only
+    # write path.
     var auto_save: Bool
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
@@ -182,7 +184,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.git_changes = False
         self.tab_bar = False
         self.minimap = True
-        self.auto_save = False
+        self.auto_save = True
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()

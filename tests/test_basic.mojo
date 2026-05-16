@@ -54,7 +54,7 @@ from turbokod.desktop import (
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
     PROJECT_OPEN_RECENT, PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
-    WINDOW_CLOSE,
+    WINDOW_CLOSE, WINDOW_FOCUS_PREFIX,
     _expand_save_placeholders,
     _find_doc_entry_for_word,
     ctrl_key, format_hotkey,
@@ -2530,6 +2530,172 @@ def test_desktop_dispatch_editor_save_writes_focused_editor() raises:
     assert_false(d.windows.windows[0].editor.dirty)
     assert_equal(read_file(path), String("hello!\n"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_window_focus_change_saves_prior_window() raises:
+    """Switching focus from window A to window B saves A's dirty
+    buffer — the per-window counterpart of ``EVENT_FOCUS_OUT``'s
+    app-wide save. Exercises the default (``config.auto_save`` is
+    ``True`` out of the box)."""
+    var path_a = _temp_path(String("_wfc_a.txt"))
+    var path_b = _temp_path(String("_wfc_b.txt"))
+    assert_true(write_file(path_a, String("aaa\n")))
+    assert_true(write_file(path_b, String("bbb\n")))
+    var d = Desktop()
+    var canvas = Canvas(_SCREEN.width(), _SCREEN.height())
+    d.windows.add(Window.from_file(String("a"), Rect(0, 1, 40, 12), path_a))
+    d.windows.add(Window.from_file(String("b"), Rect(40, 1, 80, 12), path_b))
+    # Seed the focus tracker with the current focused editor.
+    d.paint(canvas, _SCREEN)
+    # Make A dirty.
+    d.windows.focus_by_index(0)
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    assert_true(d.windows.windows[0].editor.dirty)
+    # Run a paint to update the tracker against A.
+    d.paint(canvas, _SCREEN)
+    # Switch focus to B — next paint should save A.
+    d.windows.focus_by_index(1)
+    d.paint(canvas, _SCREEN)
+    assert_false(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path_a), String("aaa!\n"))
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+def test_window_focus_change_via_dispatch_action_saves() raises:
+    """The tab bar click path lands at ``dispatch_action(WINDOW_FOCUS_PREFIX
+    + idx)``. After the next paint that route must have saved the
+    previously focused dirty editor — same as direct ``focus_by_index``."""
+    var path_a = _temp_path(String("_wfc_disp_a.txt"))
+    var path_b = _temp_path(String("_wfc_disp_b.txt"))
+    assert_true(write_file(path_a, String("aaa\n")))
+    assert_true(write_file(path_b, String("bbb\n")))
+    var d = Desktop()
+    var canvas = Canvas(_SCREEN.width(), _SCREEN.height())
+    d.windows.add(Window.from_file(String("a"), Rect(0, 1, 40, 12), path_a))
+    d.windows.add(Window.from_file(String("b"), Rect(40, 1, 80, 12), path_b))
+    d.paint(canvas, _SCREEN)
+    # Focus A and dirty it.
+    _ = d.dispatch_action(WINDOW_FOCUS_PREFIX + String(0), _SCREEN)
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    assert_true(d.windows.windows[0].editor.dirty)
+    d.paint(canvas, _SCREEN)
+    # Now dispatch the tab-bar route to focus B.
+    _ = d.dispatch_action(WINDOW_FOCUS_PREFIX + String(1), _SCREEN)
+    d.paint(canvas, _SCREEN)
+    assert_false(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path_a), String("aaa!\n"))
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+def test_app_focus_out_saves_all_dirty_windows_by_default() raises:
+    """``EVENT_FOCUS_OUT`` from the host terminal flushes every dirty
+    editor when ``config.auto_save`` is on — and that's the default,
+    so a fresh ``Desktop()`` saves on wrapper-window focus loss
+    without the user opting in."""
+    var path_a = _temp_path(String("_app_fo_a.txt"))
+    var path_b = _temp_path(String("_app_fo_b.txt"))
+    assert_true(write_file(path_a, String("aaa\n")))
+    assert_true(write_file(path_b, String("bbb\n")))
+    var d = Desktop()
+    # Sanity-check the default is on.
+    assert_true(d.config.auto_save)
+    d.windows.add(Window.from_file(String("a"), Rect(0, 1, 40, 12), path_a))
+    d.windows.add(Window.from_file(String("b"), Rect(40, 1, 80, 12), path_b))
+    # Make both dirty.
+    for i in range(2):
+        _ = d.windows.windows[i].editor.handle_key(
+            Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+        )
+        _ = d.windows.windows[i].editor.handle_key(
+            Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+        )
+        assert_true(d.windows.windows[i].editor.dirty)
+    _ = d.handle_event(Event.focus_event(False), _SCREEN)
+    assert_false(d.windows.windows[0].editor.dirty)
+    assert_false(d.windows.windows[1].editor.dirty)
+    assert_equal(read_file(path_a), String("aaa!\n"))
+    assert_equal(read_file(path_b), String("bbb!\n"))
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+def test_focus_loss_save_opt_out_when_auto_save_off() raises:
+    """Setting ``config.auto_save = False`` (the Manual choice in
+    Settings ▸ Editor ▸ Save behavior) suppresses both the
+    window-to-window and the app-wide focus-loss saves — Ctrl+S
+    becomes the only write path."""
+    var path_a = _temp_path(String("_optout_a.txt"))
+    var path_b = _temp_path(String("_optout_b.txt"))
+    assert_true(write_file(path_a, String("aaa\n")))
+    assert_true(write_file(path_b, String("bbb\n")))
+    var d = Desktop()
+    d.config.auto_save = False
+    var canvas = Canvas(_SCREEN.width(), _SCREEN.height())
+    d.windows.add(Window.from_file(String("a"), Rect(0, 1, 40, 12), path_a))
+    d.windows.add(Window.from_file(String("b"), Rect(40, 1, 80, 12), path_b))
+    d.paint(canvas, _SCREEN)
+    # Dirty A.
+    d.windows.focus_by_index(0)
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    d.paint(canvas, _SCREEN)
+    # Window-to-window focus switch — Manual: must NOT save.
+    d.windows.focus_by_index(1)
+    d.paint(canvas, _SCREEN)
+    assert_true(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path_a), String("aaa\n"))
+    # App-level focus-out — Manual: must NOT save either.
+    _ = d.handle_event(Event.focus_event(False), _SCREEN)
+    assert_true(d.windows.windows[0].editor.dirty)
+    assert_equal(read_file(path_a), String("aaa\n"))
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+def test_window_focus_change_skips_untitled_buffer() raises:
+    """An untitled (no backing path) editor losing focus must not be
+    saved — same skip rule as ``_autosave_all_dirty``."""
+    var path_b = _temp_path(String("_wfc_unt_b.txt"))
+    assert_true(write_file(path_b, String("bbb\n")))
+    var d = Desktop()
+    var canvas = Canvas(_SCREEN.width(), _SCREEN.height())
+    # Window 0 is an untitled in-memory buffer (no file_path).
+    d.windows.add(Window.editor_window(
+        String("untitled"), Rect(0, 1, 40, 12), String("scratch\n"),
+    ))
+    d.windows.add(Window.from_file(String("b"), Rect(40, 1, 80, 12), path_b))
+    d.paint(canvas, _SCREEN)
+    d.windows.focus_by_index(0)
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(KEY_END), Rect(0, 1, 40, 12),
+    )
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    assert_true(d.windows.windows[0].editor.dirty)
+    d.paint(canvas, _SCREEN)
+    d.windows.focus_by_index(1)
+    # Should not raise (untitled has no path; tracker skips it).
+    d.paint(canvas, _SCREEN)
+    # Still dirty — untitled buffers are never auto-saved.
+    assert_true(d.windows.windows[0].editor.dirty)
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
 def test_desktop_replace_chains_two_prompts() raises:
@@ -14133,6 +14299,11 @@ def _run_chunk_03() raises:
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
+    test_window_focus_change_saves_prior_window()
+    test_window_focus_change_via_dispatch_action_saves()
+    test_app_focus_out_saves_all_dirty_windows_by_default()
+    test_focus_loss_save_opt_out_when_auto_save_off()
+    test_window_focus_change_skips_untitled_buffer()
     test_desktop_replace_chains_two_prompts()
     test_desktop_open_file_uses_80_percent_size()
     test_desktop_open_file_cascades_by_one()

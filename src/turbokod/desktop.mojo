@@ -851,6 +851,15 @@ struct Desktop(Movable):
     # yet", so the first observation only seeds the cache.
     var _git_state_mtimes: GitStateMtimes
     var _last_git_state_check_ms: Int
+    # Last-seen focused editor's ``file_path`` for the per-window
+    # save-on-focus-loss path. Updated every frame in ``paint``; when
+    # it changes and ``config.auto_save`` is on, the editor for the
+    # previously focused path is saved (mirrors the app-wide
+    # ``EVENT_FOCUS_OUT`` save, but for window-to-window switches
+    # inside the app). Untitled / file-less buffers are tracked as
+    # the empty string and skipped on save — same rule as
+    # ``_autosave_all_dirty``.
+    var _last_focused_editor_path: String
 
     def __init__(out self):
         self.menu_bar = MenuBar()
@@ -958,6 +967,7 @@ struct Desktop(Movable):
         self._nav_pos = -1
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
         self._last_git_state_check_ms = 0
+        self._last_focused_editor_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -1595,6 +1605,13 @@ struct Desktop(Movable):
         # on idle frames; promotes a path to the front exactly once
         # whenever focus actually moves.
         self._track_recent_focus()
+        # Per-window save on focus change. Compares the currently
+        # focused editor's path against the one we observed last
+        # frame and, when ``config.auto_save`` is on, saves the
+        # editor that just lost focus. Idle frames are a no-op
+        # (paths match); untitled / read-only / clean buffers are
+        # skipped inside the helper.
+        self._autosave_on_window_focus_change()
         # Same hook for the cross-file navigation history — record a
         # nav point whenever the focused cursor has moved far enough
         # from the last recorded one (or to a different file). Cheap:
@@ -3214,11 +3231,12 @@ struct Desktop(Movable):
         if event.kind == EVENT_RESIZE and self._pending_restore_refit:
             self._reapply_session_rects(screen)
             self._pending_restore_refit = Optional[Session]()
-        # Focus-out from the host terminal triggers autosave when the
-        # user enabled it in Settings ▸ Editor. We don't claim the
-        # event — modal dialogs and the regular dispatch below ignore
-        # it — but the side effect of saving every dirty file-backed
-        # editor happens here, before any caller-routed handling.
+        # Focus-out from the host terminal flushes every dirty
+        # file-backed editor to disk when ``config.auto_save`` is on
+        # (the default — Settings ▸ Editor ▸ Save behavior can opt
+        # out). We don't claim the event — modal dialogs and the
+        # regular dispatch below ignore it — but the side effect of
+        # saving happens here, before any caller-routed handling.
         if event.kind == EVENT_FOCUS_OUT and self.config.auto_save:
             self._autosave_all_dirty()
         # Host focus-in/out also forwards to every docked terminal —
@@ -6231,7 +6249,9 @@ struct Desktop(Movable):
 
     def _autosave_all_dirty(mut self):
         """Save every dirty editor that has a backing path. Called on
-        ``EVENT_FOCUS_OUT`` when ``config.auto_save`` is on.
+        ``EVENT_FOCUS_OUT`` when ``config.auto_save`` is on — the
+        default. Flushing on app-level focus loss is what keeps the
+        on-disk copy current when the user Cmd-Tabs away.
 
         Untitled buffers (no path) are skipped — escalating to Save As
         on focus-out would steal focus away from the app the user just
@@ -6258,6 +6278,54 @@ struct Desktop(Movable):
                     self._run_on_save_actions(saved_path)
             except:
                 pass
+
+    def _autosave_on_window_focus_change(mut self):
+        """Per-frame check: when keyboard focus has moved from one
+        editor to another and ``config.auto_save`` is on, save the
+        editor that just lost focus.
+
+        Mirrors the app-wide ``EVENT_FOCUS_OUT`` save but for
+        window-to-window switches inside the app — clicking a
+        different file's tab, Ctrl+digit, or rotating through windows
+        all funnel through this hook. Untitled buffers (no path) and
+        read-only views are skipped — same rules as
+        ``_autosave_all_dirty``.
+
+        ``_last_focused_editor_path`` is kept in sync even when
+        ``auto_save`` is off so flipping the toggle on later doesn't
+        immediately fire a save against whatever editor happened to
+        be focused before the user enabled it.
+        """
+        var cur_idx = self._focused_editor_idx()
+        var cur_path = String("")
+        if cur_idx >= 0:
+            cur_path = self.windows.windows[cur_idx].editor.file_path
+        if not self.config.auto_save:
+            self._last_focused_editor_path = cur_path
+            return
+        var prev = self._last_focused_editor_path
+        if cur_path == prev:
+            return
+        self._last_focused_editor_path = cur_path
+        if len(prev.as_bytes()) == 0:
+            return
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            if self.windows.windows[i].editor.file_path != prev:
+                continue
+            if self.windows.windows[i].editor.read_only:
+                return
+            if not self.windows.windows[i].editor.dirty:
+                return
+            try:
+                if self.windows.windows[i].editor.save():
+                    self._maybe_reload_targets(prev)
+                    self.windows.windows[i].editor.invalidate_git_changes()
+                    self._run_on_save_actions(prev)
+            except:
+                pass
+            return
 
     def _do_save(mut self):
         var idx = self._focused_editor_idx()
