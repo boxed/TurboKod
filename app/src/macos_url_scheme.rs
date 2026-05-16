@@ -384,16 +384,29 @@ unsafe extern "C" fn application_open_urls(
         let sel_count = sel_registerName(c"count".as_ptr());
         let sel_obj_at_index = sel_registerName(c"objectAtIndex:".as_ptr());
         let sel_path = sel_registerName(c"path".as_ptr());
+        let sel_scheme = sel_registerName(c"scheme".as_ptr());
+        let sel_absolute_string = sel_registerName(c"absoluteString".as_ptr());
         let sel_utf8 = sel_registerName(c"UTF8String".as_ptr());
 
         let count_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> usize =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         let obj_at_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel, usize) -> *mut ObjcId =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-        let url_path_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *mut ObjcId =
+        let url_str_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *mut ObjcId =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         let utf8_fn: unsafe extern "C" fn(*mut ObjcId, *mut ObjcSel) -> *const c_char =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+        let nsstring_to_str = |ns: *mut ObjcId| -> Option<String> {
+            if ns.is_null() {
+                return None;
+            }
+            let utf8 = utf8_fn(ns, sel_utf8);
+            if utf8.is_null() {
+                return None;
+            }
+            CStr::from_ptr(utf8).to_str().ok().map(|s| s.to_owned())
+        };
 
         let count = count_fn(urls, sel_count);
         dlog(&format!("application:openURLs: count={}", count));
@@ -404,19 +417,28 @@ unsafe extern "C" fn application_open_urls(
             if url.is_null() {
                 continue;
             }
-            let ns_path = url_path_fn(url, sel_path);
-            if ns_path.is_null() {
-                continue;
-            }
-            let utf8 = utf8_fn(ns_path, sel_utf8);
-            if utf8.is_null() {
-                continue;
-            }
-            let raw = match CStr::from_ptr(utf8).to_str() {
-                Ok(s) => s,
-                Err(_) => continue,
+            // ``-[NSURL path]`` returns only the URL's path component
+            // and silently discards the query string, so for a custom
+            // scheme like ``turbokod://open?file=/X&line=42`` it would
+            // hand us just ``/open`` and the file/line params would be
+            // lost before ``parse_turbokod_url`` ever ran. For our own
+            // scheme we route the full absoluteString through the
+            // shared translator instead; for ``file://`` (and anything
+            // else with a usable POSIX path) we keep the old behavior.
+            let scheme = nsstring_to_str(url_str_fn(url, sel_scheme))
+                .unwrap_or_default();
+            let raw = if scheme.eq_ignore_ascii_case("turbokod") {
+                match nsstring_to_str(url_str_fn(url, sel_absolute_string)) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            } else {
+                match nsstring_to_str(url_str_fn(url, sel_path)) {
+                    Some(s) => s,
+                    None => continue,
+                }
             };
-            if let Some(t) = translate_open_arg(raw, &cwd) {
+            if let Some(t) = translate_open_arg(&raw, &cwd) {
                 paths.push(t);
             }
         }
