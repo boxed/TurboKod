@@ -45,7 +45,7 @@ from .git_changes import (
 )
 from .highlight import (
     CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
-    HighlightCache, extension_of, highlight_comment_attr,
+    HighlightCache, HoverRequest, extension_of, highlight_comment_attr,
     highlight_for_extension, highlight_incremental, highlight_string_attr,
     line_comment_for_extension, word_at,
 )
@@ -613,6 +613,18 @@ produces a single request per word fragment. Manual (Ctrl+Space)
 requests bypass this — the user is explicitly waiting on results."""
 
 
+comptime _HOVER_DWELL_MS = 400
+"""How long the mouse must rest on the same word before a
+``textDocument/hover`` request fires. Short enough to feel responsive,
+long enough that a swipe across the code doesn't spam the server with
+requests it'll only cancel."""
+
+
+comptime _HOVER_POPUP_WIDTH_MAX = 70
+"""Maximum width of the LSP hover popup (cells). Longer lines wrap to
+the next line; the popup grows vertically up to the view height."""
+
+
 comptime _LSP_DIDCHANGE_DEBOUNCE_MS = 150
 """How long the per-frame didChange sync waits for typing to settle
 before flushing the buffer to the LSP server. Without this every
@@ -1049,6 +1061,31 @@ struct Editor(Copyable, Movable):
     # still in flight so a late response doesn't pop the popup back open
     # after the user dismissed it (Esc / cursor-out-of-word / accept).
     var _completion_cancel_pending: Bool
+    # --- LSP hover (mouse-dwell over an identifier) ----------------------
+    # ``_hover_candidate_row``/``_col`` track the buffer position the
+    # mouse currently sits on (in the text area, on a word) and
+    # ``_hover_candidate_since_ms`` is the wallclock when the candidate
+    # was first stamped. ``consume_hover_request`` returns Some once the
+    # candidate has stayed put for ``_HOVER_DWELL_MS``; emitting clears
+    # ``_hover_candidate_emitted`` so the same dwell only fires once.
+    # ``_hover_candidate_anchor_x/y`` are the screen coords for placing
+    # the popup at the bottom of the hovered word.
+    var _hover_candidate_row: Int
+    var _hover_candidate_col: Int
+    var _hover_candidate_since_ms: Int
+    var _hover_candidate_anchor_x: Int
+    var _hover_candidate_anchor_y: Int
+    var _hover_candidate_emitted: Bool
+    # Parked hover response: ``_hover_result_text`` is the rendered text
+    # (empty when nothing is shown); ``_hover_result_row``/``_col`` is
+    # the position that produced it so we can keep displaying as long as
+    # the mouse remains on the same word. ``_hover_result_anchor_x/y``
+    # is the screen anchor (bottom-left of the popup).
+    var _hover_result_text: String
+    var _hover_result_row: Int
+    var _hover_result_col: Int
+    var _hover_result_anchor_x: Int
+    var _hover_result_anchor_y: Int
 
     def __init__(out self):
         self.buffer = TextBuffer()
@@ -1132,6 +1169,17 @@ struct Editor(Copyable, Movable):
         self.completion_is_message = False
         self._completion_request_stamp_ms = 0
         self._completion_cancel_pending = False
+        self._hover_candidate_row = -1
+        self._hover_candidate_col = -1
+        self._hover_candidate_since_ms = 0
+        self._hover_candidate_anchor_x = 0
+        self._hover_candidate_anchor_y = 0
+        self._hover_candidate_emitted = False
+        self._hover_result_text = String("")
+        self._hover_result_row = -1
+        self._hover_result_col = -1
+        self._hover_result_anchor_x = 0
+        self._hover_result_anchor_y = 0
 
     def __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -1215,6 +1263,17 @@ struct Editor(Copyable, Movable):
         self.completion_is_message = False
         self._completion_request_stamp_ms = 0
         self._completion_cancel_pending = False
+        self._hover_candidate_row = -1
+        self._hover_candidate_col = -1
+        self._hover_candidate_since_ms = 0
+        self._hover_candidate_anchor_x = 0
+        self._hover_candidate_anchor_y = 0
+        self._hover_candidate_emitted = False
+        self._hover_result_text = String("")
+        self._hover_result_row = -1
+        self._hover_result_col = -1
+        self._hover_result_anchor_x = 0
+        self._hover_result_anchor_y = 0
 
     @staticmethod
     def from_file(var path: String) raises -> Self:
@@ -1331,6 +1390,17 @@ struct Editor(Copyable, Movable):
         self.completion_is_message = copy.completion_is_message
         self._completion_request_stamp_ms = copy._completion_request_stamp_ms
         self._completion_cancel_pending = copy._completion_cancel_pending
+        self._hover_candidate_row = copy._hover_candidate_row
+        self._hover_candidate_col = copy._hover_candidate_col
+        self._hover_candidate_since_ms = copy._hover_candidate_since_ms
+        self._hover_candidate_anchor_x = copy._hover_candidate_anchor_x
+        self._hover_candidate_anchor_y = copy._hover_candidate_anchor_y
+        self._hover_candidate_emitted = copy._hover_candidate_emitted
+        self._hover_result_text = copy._hover_result_text
+        self._hover_result_row = copy._hover_result_row
+        self._hover_result_col = copy._hover_result_col
+        self._hover_result_anchor_x = copy._hover_result_anchor_x
+        self._hover_result_anchor_y = copy._hover_result_anchor_y
 
     def flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
@@ -1965,6 +2035,68 @@ struct Editor(Copyable, Movable):
                 return Optional[CompletionRequest]()
         self.pending_completion_request = Optional[CompletionRequest]()
         return Optional[CompletionRequest](req)
+
+    def consume_hover_request(
+        mut self, now_ms: Int = 0,
+    ) -> Optional[HoverRequest]:
+        """Return a ``HoverRequest`` once the mouse has dwelled on the
+        same word for ``_HOVER_DWELL_MS``. Idempotent per dwell — once
+        emitted, subsequent calls return None until the candidate
+        position changes (mouse moves to a different word). The host
+        forwards to its LSP manager and routes the response back via
+        ``set_hover_result``.
+
+        ``now_ms == 0`` is the test escape hatch: tests don't carry
+        monotonic time and the dwell check is unrelated to what they
+        verify.
+        """
+        if self._hover_candidate_row < 0 or self._hover_candidate_emitted:
+            return Optional[HoverRequest]()
+        if now_ms != 0 \
+                and now_ms - self._hover_candidate_since_ms < _HOVER_DWELL_MS:
+            return Optional[HoverRequest]()
+        self._hover_candidate_emitted = True
+        return Optional[HoverRequest](HoverRequest(
+            self._hover_candidate_row, self._hover_candidate_col,
+        ))
+
+    def set_hover_result(
+        mut self, row: Int, col: Int, var text: String,
+    ):
+        """Park an LSP hover response for the next paint pass. Only
+        applied when the candidate the host requested for matches the
+        word the mouse is currently dwelling on — a late response that
+        arrived after the user already moved to a different identifier
+        is dropped so it doesn't pop up under the wrong place.
+
+        Empty ``text`` clears any existing result (servers reply with
+        ``contents: null`` for symbols they don't recognize).
+        """
+        if self._hover_candidate_row != row \
+                or self._hover_candidate_col != col:
+            return
+        if len(text.as_bytes()) == 0:
+            self._hover_result_text = String("")
+            self._hover_result_row = -1
+            self._hover_result_col = -1
+            return
+        self._hover_result_text = text^
+        self._hover_result_row = row
+        self._hover_result_col = col
+        self._hover_result_anchor_x = self._hover_candidate_anchor_x
+        self._hover_result_anchor_y = self._hover_candidate_anchor_y
+
+    def clear_hover_state(mut self):
+        """Drop both the dwell candidate and any displayed result. Called
+        when the editor loses focus, on key events, or when the mouse
+        leaves the text area — anywhere a stale hover popup would feel
+        wrong (e.g. floating over no longer relevant code)."""
+        self._hover_candidate_row = -1
+        self._hover_candidate_col = -1
+        self._hover_candidate_emitted = False
+        self._hover_result_text = String("")
+        self._hover_result_row = -1
+        self._hover_result_col = -1
 
     def consume_completion_cancel(mut self) -> Bool:
         """Return and clear the cancel-pending latch.
@@ -3320,12 +3452,19 @@ struct Editor(Copyable, Movable):
 
         Anything else (gutters, blank space past EOL, plain text) clears
         the hover state. The tooltip-paint code reads these fields in
-        both cases, so the user gets one consistent visual."""
+        both cases, so the user gets one consistent visual.
+
+        Also stamps the LSP-hover dwell candidate when the mouse is
+        resting on a word in the text area, so ``consume_hover_request``
+        can emit a ``textDocument/hover`` request once the dwell
+        elapses."""
         self.clear_minimap_hover()
         if self._is_minimap_hit(pos, view):
+            self._clear_hover_candidate()
             self._update_minimap_hover_from_minimap(pos, view)
             return
         self._update_minimap_hover_from_text_area(pos, view)
+        self._update_hover_candidate(pos, view)
 
     def _update_minimap_hover_from_minimap(
         mut self, pos: Point, view: Rect,
@@ -3422,6 +3561,93 @@ struct Editor(Copyable, Movable):
                 self.buffer.line(row), sh.col_start, sh.col_end,
             )
             return
+
+    def _update_hover_candidate(mut self, pos: Point, view: Rect):
+        """Refresh the LSP-hover dwell candidate from a mouse position.
+
+        The candidate is the word the mouse is currently resting on. We
+        only re-stamp ``_hover_candidate_since_ms`` when the *word*
+        changes — sliding the mouse around inside the same identifier
+        keeps the dwell timer running so a small jitter doesn't reset
+        the countdown. Whitespace, punctuation, gutters, blank space
+        past EOL all clear the candidate (and any displayed result), so
+        the popup disappears as soon as the mouse leaves the word.
+
+        The anchor (where the popup will be placed) is the screen cell
+        of the word's first byte, anchored one row below the word. We
+        use the word start (not the live mouse position) so the popup
+        doesn't drift sideways as the cursor wanders inside the
+        identifier."""
+        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        if not resolved:
+            self._clear_hover_candidate()
+            return
+        var rc = resolved.value()
+        var row = rc[0]
+        var byte_col = rc[1]
+        var seg_byte_start = rc[2]
+        var seg_byte_end = rc[3]
+        var seg_x0 = rc[4]
+        var line = self.buffer.line(row)
+        var rng = _word_range_at(line, byte_col)
+        var word_start = rng[0]
+        var word_end = rng[1]
+        if word_end <= word_start:
+            self._clear_hover_candidate()
+            return
+        # Skip non-identifier runs (whitespace clusters, punctuation
+        # clusters). Hover only makes sense for an actual symbol the
+        # server can resolve.
+        var first_cp = codepoint_at(line, word_start)
+        if not is_word_codepoint(first_cp[0]):
+            self._clear_hover_candidate()
+            return
+        if self._hover_candidate_row == row \
+                and self._hover_candidate_col == word_start:
+            # Same word as before — keep the dwell timer ticking and the
+            # currently-displayed result (if any) in place.
+            return
+        # New word: clear any prior result and stamp the dwell timer.
+        # Anchor at the word's first cell on this visible segment; clamp
+        # to the segment's left edge when the word wraps in from above.
+        var line_n = len(line.as_bytes())
+        var byte_in_seg: Int
+        if word_start < seg_byte_start:
+            byte_in_seg = 0
+        else:
+            byte_in_seg = word_start - seg_byte_start
+        var visible: String
+        if seg_byte_start >= line_n:
+            visible = String("")
+        else:
+            var clip_end = seg_byte_end
+            if clip_end > line_n:
+                clip_end = line_n
+            visible = _slice(line, seg_byte_start, clip_end)
+        var cell_off = _utf8_cell_of_byte(visible, byte_in_seg)
+        self._hover_candidate_row = row
+        self._hover_candidate_col = word_start
+        self._hover_candidate_since_ms = monotonic_ms()
+        self._hover_candidate_anchor_x = seg_x0 + cell_off
+        self._hover_candidate_anchor_y = pos.y
+        self._hover_candidate_emitted = False
+        self._hover_result_text = String("")
+        self._hover_result_row = -1
+        self._hover_result_col = -1
+
+    def _clear_hover_candidate(mut self):
+        """Drop the dwell candidate and any displayed result. Used when
+        the mouse leaves the text area (gutters, minimap, blank space)
+        so the popup doesn't stick after the pointer wanders off."""
+        if self._hover_candidate_row < 0 \
+                and len(self._hover_result_text.as_bytes()) == 0:
+            return
+        self._hover_candidate_row = -1
+        self._hover_candidate_col = -1
+        self._hover_candidate_emitted = False
+        self._hover_result_text = String("")
+        self._hover_result_row = -1
+        self._hover_result_col = -1
 
     def _maybe_request_diagnostic_menu(
         mut self, pos: Point, view: Rect,
@@ -3919,6 +4145,52 @@ struct Editor(Copyable, Movable):
         # 1-cell padding ring. ``put_wrapped_text`` wraps to the
         # interior width and clips to its rect, so the message can't
         # overflow the popup.
+        paint_drop_shadow(canvas, r)
+        var tt_painter = Painter(r)
+        tt_painter.fill(canvas, r, String(" "), attr)
+        tt_painter.draw_box(canvas, r, attr, False)
+        var msg_rect = Rect(
+            r.a.x + 2, r.a.y + 1,
+            r.b.x - 2, r.b.y - 1,
+        )
+        if msg_rect.width() > 0 and msg_rect.height() > 0:
+            _ = canvas.put_wrapped_text(msg_rect, label, attr)
+
+    def paint_hover_popup(self, mut canvas: Canvas, view: Rect):
+        """Render the LSP-hover popup if a result is parked. Suppressed
+        while a minimap / diagnostic / spell tooltip is up — those
+        anchor to the same cells and stacking them would be confusing.
+
+        Anchored just below the hovered word; flips above when there's
+        no room below. Soft-wrapped to ``_HOVER_POPUP_WIDTH_MAX``."""
+        if self._minimap_hover_kind != 0:
+            return
+        if len(self._hover_result_text.as_bytes()) == 0:
+            return
+        var max_box_w = view.width() - 2
+        if max_box_w > _HOVER_POPUP_WIDTH_MAX:
+            max_box_w = _HOVER_POPUP_WIDTH_MAX
+        if max_box_w < 5:
+            max_box_w = view.width()
+        var label = self._hover_result_text
+        var size = popup_size_for_text(label, max_box_w, view.height())
+        var w = size[0]
+        var h = size[1]
+        if w == 0 or h == 0:
+            return
+        # Prefer below the hovered word; flip above if there's no room.
+        var bx = self._hover_result_anchor_x
+        var by = self._hover_result_anchor_y + 1
+        if by + h > view.b.y:
+            by = self._hover_result_anchor_y - h
+        if by < view.a.y:
+            by = view.a.y
+        if bx + w > view.b.x:
+            bx = view.b.x - w
+        if bx < view.a.x:
+            bx = view.a.x
+        var r = Rect(bx, by, bx + w, by + h)
+        var attr = Attr(BLACK, LIGHT_GRAY)
         paint_drop_shadow(canvas, r)
         var tt_painter = Painter(r)
         tt_painter.fill(canvas, r, String(" "), attr)
@@ -4489,6 +4761,11 @@ struct Editor(Copyable, Movable):
         # by ``_update_minimap_hover`` on bare-hover events; when no
         # mark is hovered this is a no-op.
         self.paint_minimap_tooltip(canvas, view)
+        # LSP hover popup (mouse-dwell type info). Painted right after
+        # the minimap tooltip so it overlays the same way; the popup
+        # suppresses itself when a minimap tooltip is up so the two
+        # don't stack on top of each other.
+        self.paint_hover_popup(canvas, view)
         # Completion popup: floats just below (or above) the column
         # where the in-progress identifier starts. Painted last so it
         # overlays both the text and the minimap tooltip. ``focused``
@@ -5072,6 +5349,10 @@ struct Editor(Copyable, Movable):
     def handle_key(mut self, event: Event, view: Rect) -> Bool:
         if event.kind != EVENT_KEY:
             return False
+        # Any keystroke means the user has shifted attention away from
+        # the hovered identifier — drop the dwell candidate and any
+        # popup so it doesn't float over edits we're about to make.
+        self.clear_hover_state()
         # LSP completion-popup intercept. While the popup is visible
         # the navigation keys steer it rather than the cursor;
         # Enter/Tab accept; Esc dismisses. Typing / backspace / arrow
@@ -6044,6 +6325,10 @@ struct Editor(Copyable, Movable):
         # is a fresh caret intent, so abandon the rewind history.
         self._typing_active = False
         self._smart_select_stack = List[Caret]()
+        # Clicks / drags / wheel scrolls all invalidate any in-flight
+        # hover popup: the absolute screen anchor would be stale after
+        # a scroll, and a click means the user is acting, not dwelling.
+        self.clear_hover_state()
         # A click on the minimap column is a "scroll-to-here" gesture,
         # not a text-area interaction — short-circuit before the gutter /
         # text-area branches below try to interpret it as a caret move.

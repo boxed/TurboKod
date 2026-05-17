@@ -123,6 +123,7 @@ from turbokod.lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, LspManager,
     TextEditEntry, _parse_completion_result, _parse_diagnostics_array,
+    _parse_hover_result,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -2866,6 +2867,33 @@ def test_desktop_dispatch_editor_new_opens_window() raises:
     assert_equal(len(d.windows.windows), 1)
     assert_true(d.windows.windows[0].is_editor)
     assert_equal(d.windows.windows[0].editor.file_path, String(""))
+
+
+def test_desktop_save_as_updates_window_title() raises:
+    """After Save As succeeds, the window's title bar reflects the
+    just-chosen filename — both when an Untitled buffer is being given
+    a name for the first time and when an existing file is saved under
+    a new name. Without this the tab strip + title border keep showing
+    the pre-save name even though ``editor.file_path`` is already the
+    new path."""
+    var path_a = _temp_path(String("_saveas_untitled.txt"))
+    var path_b = _temp_path(String("_saveas_renamed.txt"))
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    assert_equal(d.windows.windows[0].title, String("Untitled"))
+    # Untitled → first save under ``path_a``. Seed and submit the
+    # dialog directly — same control flow ``EDITOR_SAVE_AS`` triggers.
+    d.save_as_dialog.open(path_a)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.file_path, path_a)
+    assert_equal(d.windows.windows[0].title, basename(path_a))
+    # Already-named buffer → save under a different name.
+    d.save_as_dialog.open(path_b)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.file_path, path_b)
+    assert_equal(d.windows.windows[0].title, basename(path_b))
+    _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
 def test_desktop_window_menu_lists_open_windows() raises:
@@ -7437,6 +7465,105 @@ def test_lsp_parse_completion_result_snippet_falls_back_to_label() raises:
     assert_equal(len(items), 1)
     assert_equal(items[0].label, String("print"))
     assert_equal(items[0].insert_text, String("print"))
+
+
+def test_lsp_parse_hover_result_string_contents() raises:
+    """The legacy plain-string form (``{contents: "..."}``) parses to
+    the string verbatim."""
+    var v = parse_json(String(
+        "{\"contents\":\"int — a built-in scalar\"}"
+    ))
+    var text = _parse_hover_result(v)
+    assert_equal(text, String("int — a built-in scalar"))
+
+
+def test_lsp_parse_hover_result_markup_content() raises:
+    """``MarkupContent`` (``{kind, value}``) — the modern shape pyright /
+    ty / rust-analyzer use — returns the ``value`` field."""
+    var v = parse_json(String(
+        "{\"contents\":{\"kind\":\"markdown\",\"value\":\"```py\\nfoo: int\\n```\"}}"
+    ))
+    var text = _parse_hover_result(v)
+    assert_equal(text, String("```py\nfoo: int\n```"))
+
+
+def test_lsp_parse_hover_result_array_joins_with_newlines() raises:
+    """``MarkedString[]`` joins each entry with a newline so a hover
+    answer split across several blocks reads as one popup body. Mix of
+    plain string and ``{language, value}`` is allowed by the spec."""
+    var v = parse_json(String(
+        "{\"contents\":["
+        + "{\"language\":\"python\",\"value\":\"def foo() -> int\"},"
+        + "\"Return the answer.\""
+        + "]}"
+    ))
+    var text = _parse_hover_result(v)
+    assert_equal(text, String("def foo() -> int\nReturn the answer."))
+
+
+def test_lsp_parse_hover_result_empty_when_no_contents() raises:
+    """Servers reply with ``null`` (or ``{contents: null}``) for symbols
+    they don't recognize — surface as the empty string so the host
+    treats it as 'nothing to show' rather than popping a blank box."""
+    var v_null = parse_json(String("null"))
+    assert_equal(_parse_hover_result(v_null), String(""))
+    var v_empty = parse_json(String("{\"contents\":null}"))
+    assert_equal(_parse_hover_result(v_empty), String(""))
+
+
+def test_editor_hover_dwell_emits_request_for_word_under_mouse() raises:
+    """Bare hover over an identifier stamps a hover candidate;
+    ``consume_hover_request`` then returns the (row, col) at the word's
+    first byte once the dwell elapses. Hovering inside the same word
+    doesn't re-stamp the timer, and hovering over whitespace clears the
+    candidate so no request fires."""
+    var ed = Editor(String("foo bar_baz\n"))
+    var view = Rect(0, 0, 40, 5)
+    # Hover at column 6 (inside "bar_baz"). Bare hover: button=NONE.
+    var hover_mid = Event.mouse_event(
+        Point(6, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover_mid, view)
+    # ``now_ms == 0`` is the test escape hatch (bypass dwell gate).
+    var req_opt = ed.consume_hover_request(0)
+    assert_true(req_opt.__bool__())
+    var req = req_opt.value()
+    assert_equal(req.row, 0)
+    # Word "bar_baz" starts at byte 4.
+    assert_equal(req.col, 4)
+    # Calling consume again after emit: no re-fire while dwelling on
+    # the same word.
+    assert_true(not ed.consume_hover_request(0).__bool__())
+    # Hover on whitespace — candidate clears, no request.
+    var hover_space = Event.mouse_event(
+        Point(3, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover_space, view)
+    assert_true(not ed.consume_hover_request(0).__bool__())
+
+
+def test_editor_set_hover_result_displays_only_for_current_word() raises:
+    """A late hover response that doesn't match the word the mouse is
+    currently dwelling on is dropped: the popup must not pop up at the
+    wrong place after the user has moved to a different identifier."""
+    var ed = Editor(String("foo bar\n"))
+    var view = Rect(0, 0, 40, 5)
+    var hover = Event.mouse_event(
+        Point(1, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover, view)
+    # Response matching the current candidate (word "foo" starts at 0)
+    # is accepted.
+    ed.set_hover_result(0, 0, String("int"))
+    assert_equal(ed._hover_result_text, String("int"))
+    # A response for a different position is silently dropped — would
+    # otherwise float over the wrong identifier.
+    ed.set_hover_result(0, 4, String("str"))
+    assert_equal(ed._hover_result_text, String("int"))
+    # Typing clears the popup so it doesn't float over fresh edits.
+    var key = Event.key_event(KEY_RIGHT, MOD_NONE)
+    _ = ed.handle_key(key, view)
+    assert_equal(ed._hover_result_text, String(""))
 
 
 def test_editor_completion_prefix_start_walks_back_through_word() raises:
@@ -14311,6 +14438,7 @@ def _run_chunk_03() raises:
     test_desktop_open_file_inherits_maximize_state()
     test_desktop_new_file_creates_untitled_editor_window()
     test_desktop_dispatch_editor_new_opens_window()
+    test_desktop_save_as_updates_window_title()
     test_desktop_window_menu_lists_open_windows()
     test_desktop_window_menu_when_empty()
     test_desktop_window_focus_action_focuses_window()
@@ -14423,6 +14551,12 @@ def _run_chunk_04() raises:
     test_lsp_parse_completion_result_list_shape()
     test_lsp_parse_completion_result_honors_sort_text()
     test_lsp_parse_completion_result_snippet_falls_back_to_label()
+    test_lsp_parse_hover_result_string_contents()
+    test_lsp_parse_hover_result_markup_content()
+    test_lsp_parse_hover_result_array_joins_with_newlines()
+    test_lsp_parse_hover_result_empty_when_no_contents()
+    test_editor_hover_dwell_emits_request_for_word_under_mouse()
+    test_editor_set_hover_result_displays_only_for_current_word()
     test_lsp_parse_completion_result_extracts_text_edit_range()
     test_lsp_parse_completion_result_extracts_insert_replace_edit()
     test_lsp_parse_completion_result_extracts_additional_text_edits()

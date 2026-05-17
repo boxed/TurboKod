@@ -306,6 +306,18 @@ struct LspManager(Copyable, Movable):
     var _completion_manual: Bool
     var _resolved_completions: List[CompletionItem]
     var _has_resolved_completions: Bool
+    # Pending ``textDocument/hover`` request state. Same idea as the
+    # completion fields: ``_hover_path``/``_hover_row``/``_hover_col``
+    # are echoed via ``pending_hover_*`` so the host can drop a stale
+    # response when the cursor has moved off the symbol. ``_resolved_hover``
+    # is the rendered hover text (already joined into a single string) and
+    # ``_has_resolved_hover`` is the parked-and-waiting-for-consumption flag.
+    var _inflight_hover_id: Int
+    var _hover_path: String
+    var _hover_row: Int
+    var _hover_col: Int
+    var _resolved_hover: String
+    var _has_resolved_hover: Bool
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
@@ -365,6 +377,12 @@ struct LspManager(Copyable, Movable):
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
+        self._inflight_hover_id = 0
+        self._hover_path = String("")
+        self._hover_row = 0
+        self._hover_col = 0
+        self._resolved_hover = String("")
+        self._has_resolved_hover = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -405,6 +423,12 @@ struct LspManager(Copyable, Movable):
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
+        self._inflight_hover_id = 0
+        self._hover_path = String("")
+        self._hover_row = 0
+        self._hover_col = 0
+        self._resolved_hover = String("")
+        self._has_resolved_hover = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -905,6 +929,82 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_completions = False
         return out^
 
+    def request_hover(
+        mut self, path: String, line: Int, character: Int,
+        var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/hover`` at ``(line, character)``.
+
+        Pre-flights with didOpen/didChange so the server's view matches
+        the buffer at request time, then issues the hover request. A fresh
+        request shadows any in-flight hover id — there's no concurrent
+        hover model. Returns False when the server isn't ready (caller
+        can simply skip — a hover that arrives after the mouse has moved
+        elsewhere is not useful).
+
+        The request coordinates are echoed back via ``pending_hover_*``
+        so the host can drop a stale response when the cursor has moved
+        on by the time the response arrives.
+        """
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        var doc = json_object()
+        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        params.put(String("textDocument"), doc)
+        var pos = json_object()
+        pos.put(String("line"), json_int(line))
+        pos.put(String("character"), json_int(character))
+        params.put(String("position"), pos)
+        # Cancel any prior in-flight hover so the server doesn't keep
+        # working on a stale position. Mirrors ``request_completion``.
+        if self._inflight_hover_id != 0:
+            var cancel_params = json_object()
+            cancel_params.put(
+                String("id"), json_int(self._inflight_hover_id),
+            )
+            try:
+                self.client.send_notification(
+                    String("$/cancelRequest"), cancel_params,
+                )
+            except:
+                pass
+        try:
+            self._inflight_hover_id = self.client.send_request(
+                String("textDocument/hover"), params,
+            )
+        except:
+            self._inflight_hover_id = 0
+            return False
+        self._hover_path = path
+        self._hover_row = line
+        self._hover_col = character
+        self._resolved_hover = String("")
+        self._has_resolved_hover = False
+        return True
+
+    def has_pending_hover(self) -> Bool:
+        """True iff a parsed hover response is parked for ``take``."""
+        return self._has_resolved_hover
+
+    def pending_hover_path(self) -> String:
+        return self._hover_path
+
+    def pending_hover_row(self) -> Int:
+        return self._hover_row
+
+    def pending_hover_col(self) -> Int:
+        return self._hover_col
+
+    def take_hover_text(mut self) -> String:
+        """Move the parked hover text out of the manager. Pair with
+        ``has_pending_hover()`` — the flag is cleared either way."""
+        var out = self._resolved_hover^
+        self._resolved_hover = String("")
+        self._has_resolved_hover = False
+        return out^
+
     # --- frame-tick driver -------------------------------------------------
 
     def tick(mut self) -> Optional[DefinitionResolved]:
@@ -1056,6 +1156,18 @@ struct LspManager(Copyable, Movable):
                 self._resolved_completions = comps^
                 self._has_resolved_completions = True
                 self._inflight_completion_id = 0
+            if id == self._inflight_hover_id:
+                var hover_text = String("")
+                if msg.result:
+                    hover_text = _parse_hover_result(msg.result.value())
+                _lsp_debug_log(
+                    String("← hover response id=") + String(id)
+                    + String(" lang=") + self._language_id
+                    + String(" len=") + String(len(hover_text.as_bytes())),
+                )
+                self._resolved_hover = hover_text^
+                self._has_resolved_hover = True
+                self._inflight_hover_id = 0
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -1592,6 +1704,50 @@ def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
             out[j - 1] = tmp^
             j -= 1
     return out^
+
+
+def _parse_hover_result(v: JsonValue) -> String:
+    """Extract a single human-readable string from a ``textDocument/hover``
+    response. The response is ``{ contents: MarkupContent | MarkedString |
+    MarkedString[] }`` where ``MarkupContent`` is ``{ kind, value }``,
+    ``MarkedString`` is either a plain string or ``{ language, value }``,
+    and the array form is a list of those. We accept all of them and
+    return the joined ``value`` strings (newline-separated). Returns the
+    empty string when the result has no usable text — the host treats
+    that as 'nothing to show'."""
+    if not v.is_object():
+        return String("")
+    var contents_opt = v.object_get(String("contents"))
+    if not contents_opt:
+        return String("")
+    var contents = contents_opt.value().copy()
+    return _hover_contents_to_string(contents)
+
+
+def _hover_contents_to_string(v: JsonValue) -> String:
+    """Recursive helper for ``_parse_hover_result``: walks the polymorphic
+    ``contents`` shape and concatenates the text segments."""
+    if v.is_string():
+        return v.as_str()
+    if v.is_object():
+        # MarkupContent ({kind, value}) or MarkedString ({language, value}).
+        var value_opt = v.object_get(String("value"))
+        if value_opt and value_opt.value().is_string():
+            return value_opt.value().as_str()
+        return String("")
+    if v.is_array():
+        var parts = List[String]()
+        for i in range(v.array_len()):
+            var piece = _hover_contents_to_string(v.array_at(i))
+            if len(piece.as_bytes()) > 0:
+                parts.append(piece^)
+        if len(parts) == 0:
+            return String("")
+        var out = parts[0]
+        for i in range(1, len(parts)):
+            out = out + String("\n") + parts[i]
+        return out^
+    return String("")
 
 
 def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:

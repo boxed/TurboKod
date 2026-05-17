@@ -76,7 +76,7 @@ from .posix import (
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
-    CompletionRequest, DefinitionRequest, GrammarRegistry,
+    CompletionRequest, DefinitionRequest, GrammarRegistry, HoverRequest,
     embedded_language_extensions, extension_of, word_at,
 )
 from .spell import Speller
@@ -3342,7 +3342,14 @@ struct Desktop(Movable):
                 var idx = self._focused_editor_idx()
                 if idx >= 0:
                     try:
-                        _ = self.windows.windows[idx].editor.save_as(path)
+                        if self.windows.windows[idx].editor.save_as(path):
+                            # Adopt the new filename as the window's title so the
+                            # title bar / tab strip reflect the just-written
+                            # path instead of the stale ``Untitled`` (or the
+                            # previous backing file's basename).
+                            self.windows.windows[idx].title = basename(
+                                self.windows.windows[idx].editor.file_path,
+                            )
                     except:
                         pass
             return Optional[String]()
@@ -4249,6 +4256,10 @@ struct Desktop(Movable):
                 .consume_completion_request(monotonic_ms())
             if comp_opt:
                 self._dispatch_completion_request(idx, comp_opt.value())
+            var hover_opt = self.windows.windows[idx].editor \
+                .consume_hover_request(monotonic_ms())
+            if hover_opt:
+                self._dispatch_hover_request(idx, hover_opt.value())
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
         # focused.
@@ -4334,6 +4345,21 @@ struct Desktop(Movable):
                         self.windows.windows[fidx].editor.set_completions(
                             items^, cur_row, start_col,
                         )
+            if self.lsp_managers[i].has_pending_hover():
+                var fidx = self._focused_editor_idx()
+                var hover_path = self.lsp_managers[i].pending_hover_path()
+                var hover_row = self.lsp_managers[i].pending_hover_row()
+                var hover_col = self.lsp_managers[i].pending_hover_col()
+                var hover_text = self.lsp_managers[i].take_hover_text()
+                if fidx >= 0 \
+                        and self.windows.windows[fidx].editor.file_path == hover_path:
+                    # ``set_hover_result`` itself drops the response when
+                    # the mouse has moved off the word since the request
+                    # fired, so a late reply never lands on a stale
+                    # anchor.
+                    self.windows.windows[fidx].editor.set_hover_result(
+                        hover_row, hover_col, hover_text^,
+                    )
         # Per-editor LSP sync: walk every editor window once and (a) push
         # a didChange to the matching server when the buffer has been
         # edited since the last sync, and (b) pull any freshly-published
@@ -4479,6 +4505,30 @@ struct Desktop(Movable):
         _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
         _ = self.lsp_managers[lsp_idx].request_completion(
             path, req.row, req.col, text^, req.manual,
+        )
+
+    def _dispatch_hover_request(
+        mut self, win_idx: Int, req: HoverRequest,
+    ):
+        """Forward a mouse-dwell hover request to the right server.
+
+        Quiet on failure: unstarted / mid-init / no-server-for-file all
+        just drop the request — the user can dwell again to retry.
+        """
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0:
+            return
+        if not self.lsp_managers[lsp_idx].is_ready():
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        # ``request_hover`` pre-flights with didOpen/didChange; skip the
+        # bulk sync this tick so we don't double-send.
+        _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
+        _ = self.lsp_managers[lsp_idx].request_hover(
+            path, req.row, req.col, text^,
         )
 
     def _dispatch_definition_request(
@@ -6671,6 +6721,9 @@ struct Desktop(Movable):
         if len(seed.as_bytes()) == 0 and self.project:
             seed = self.project.value()
         self.save_as_dialog.open(seed^)
+        # Forward the active project so the listing's jump-button row
+        # grows a ``Project`` entry pointing at the project root.
+        self.save_as_dialog.set_project(self.project)
 
     # --- documentation lookup -------------------------------------------
 

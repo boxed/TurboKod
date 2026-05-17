@@ -20,10 +20,14 @@ On submit, ``submitted=True`` and ``selected_path`` holds the joined
 
 from std.collections.optional import Optional
 
+from .buttons import (
+    BUTTON_FIRED, BUTTON_NONE,
+    ShadowButton, paint_shadow_button,
+)
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -57,6 +61,13 @@ def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
     return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
+comptime _SAVE_BUTTON_LABEL = String(" Save ")
+comptime _SAVE_BUTTON_FACE_W = 6
+"""Width of ``_SAVE_BUTTON_LABEL`` in cells. Hard-coded so
+``_build_layout`` can size the input strip at compile time without
+spinning up a temporary ``ShadowButton`` to ask its ``face_width``."""
+
+
 @fieldwise_init
 struct _Layout(ImplicitlyCopyable, Movable):
     """Pre-computed rects + row anchors for the save-as dialog.
@@ -69,6 +80,11 @@ struct _Layout(ImplicitlyCopyable, Movable):
     """
     var label_pt: Point
     var input_rect: Rect
+    var save_button_pt: Point
+    """Top-left of the ``Save`` button, anchored to the right edge
+    of the input row. Shadow extends one column right and one row
+    down — the down row is the blank gap before ``current_dir_y``,
+    so the shadow doesn't collide with anything."""
     var current_dir_y: Int
     var list_rect: Rect
     var buttons_rect: Rect
@@ -82,11 +98,19 @@ def _build_layout(rect: Rect) -> _Layout:
     var left = rect.a.x + 2
     var right = rect.b.x - 1
     var buttons_y = rect.b.y - 3
+    # Save button sits on the input row, right-aligned to ``right``
+    # with one column of breathing room before the right border —
+    # matches how ``FileDialog`` places its " Open Project " button.
+    var save_x = right - _SAVE_BUTTON_FACE_W - 1
+    # Input strip stops one column before the Save button so the
+    # field's right edge has visible separation from the green face.
+    var input_right = save_x - 1
     return _Layout(
         Point(left, input_y),
         # Input strip starts after the 5-char "File:" label plus one
         # column of breathing room.
-        Rect(rect.a.x + 8, input_y, right, input_y + 1),
+        Rect(rect.a.x + 8, input_y, input_right, input_y + 1),
+        Point(save_x, input_y),
         current_dir_y,
         # List sits one row below the current-dir line (it's the
         # content of that header — no gap).
@@ -110,6 +134,10 @@ struct SaveAsDialog(Movable):
     var _drag: Optional[Point]
     """Cursor offset within the dialog at drag-start; ``None`` means
     not currently dragging."""
+    var _save_button: ShadowButton
+    """Persistent " Save " button on the input row. Press-latch state
+    lives here so the button can't drop a captured press between
+    paints — repositioned each paint via ``move_to``."""
 
     def __init__(out self):
         self.active = False
@@ -120,6 +148,7 @@ struct SaveAsDialog(Movable):
         self.browser = DirBrowser(True)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+        self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
 
     def open(mut self, var start_path: String):
         """Seed the dialog from a path. ``start_path`` may be empty (a
@@ -142,6 +171,15 @@ struct SaveAsDialog(Movable):
         self.browser.open(dir^)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+        self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
+
+    def set_project(mut self, project: Optional[String]):
+        """Tell the dialog about the active project so the listing's
+        jump-button row gets a ``Project`` entry pointing to its
+        root. Pass ``Optional[String]()`` to clear it. The host calls
+        this after ``open`` to reflect whatever project the editor
+        currently owns."""
+        self.browser.set_project(project)
 
     def close(mut self):
         self.active = False
@@ -152,6 +190,7 @@ struct SaveAsDialog(Movable):
         self.browser = DirBrowser(True)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
+        self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
 
     # --- painting ----------------------------------------------------------
 
@@ -178,6 +217,17 @@ struct SaveAsDialog(Movable):
         _ = painter.put_text(canvas, layout.label_pt, String("File:"), bg)
         self.filename.paint(
             canvas, layout.input_rect, self.focus == _FOCUS_INPUT,
+        )
+        # Save button right of the input. Same green chrome as the
+        # listing's jump buttons so the dialog reads as a coherent
+        # button family. ``max_x`` is the dialog's right border so a
+        # narrow dialog can't spill the shadow past the frame.
+        var save_face = Attr(BLACK, GREEN)
+        self._save_button.move_to(
+            layout.save_button_pt.x, layout.save_button_pt.y,
+        )
+        paint_shadow_button(
+            canvas, self._save_button, save_face, LIGHT_GRAY, rect.b.x - 1,
         )
         # Current-directory line above the listing.
         _ = painter.put_text(
@@ -328,6 +378,22 @@ struct SaveAsDialog(Movable):
             self._drag = Optional[Point](Point(
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
+            return True
+        # Save button — same press/drag/release state machine as the
+        # jump buttons. Routed before the input-strip click handler
+        # so a press landing on the green face captures cleanly
+        # instead of leaking into a (non-overlapping) field handler.
+        # ``handle_mouse`` returns ``BUTTON_NONE`` for events outside
+        # the hit rect when no capture is held, so the fall-through
+        # path stays intact.
+        self._save_button.move_to(
+            layout.save_button_pt.x, layout.save_button_pt.y,
+        )
+        var save_status = self._save_button.handle_mouse(event)
+        if save_status == BUTTON_FIRED:
+            self._submit()
+            return True
+        if save_status != BUTTON_NONE:
             return True
         # Click in the filename strip steals focus and routes the
         # event to the field so the cursor lands at the click point

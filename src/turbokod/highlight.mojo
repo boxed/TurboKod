@@ -645,6 +645,16 @@ struct CompletionRequest(ImplicitlyCopyable, Movable):
     var manual: Bool
 
 
+@fieldwise_init
+struct HoverRequest(ImplicitlyCopyable, Movable):
+    """Payload emitted by the editor when the user dwell-hovers over an
+    identifier. Hosts poll ``Editor.consume_hover_request()`` and forward
+    to ``LspManager.request_hover`` for the matching language; the
+    response is routed back via ``Editor.set_hover_result``."""
+    var row: Int
+    var col: Int
+
+
 # --- generic registry-driven tokenizer ------------------------------------
 #
 # Pragmatic stand-in for a TextMate / tree-sitter integration: a tiny
