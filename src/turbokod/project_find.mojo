@@ -144,18 +144,39 @@ struct ProjectFind(Movable):
     ):
         """Open the Find-in-Project dialog.
 
-        ``prefill`` seeds the query field. With ``select_prefill=True``
-        the seeded text is left fully selected so the next typed key
-        replaces it — mirrors the basic Find prompt and lets the user
-        either keep the seeded term (Enter) or overwrite it (type).
+        State (query, results, selection, scroll, context) is preserved
+        across opens — closing and reopening lands the user back where
+        they left off. A non-empty ``prefill`` (typically the editor's
+        current selection) overrides the saved query and kicks off a
+        fresh search; an empty prefill against the same project root
+        restores prior state and leaves the saved query fully selected
+        so the next typed key replaces it.
 
-        A non-empty prefill also kicks off a search on the next tick
-        so results appear immediately without a keystroke.
+        ``select_prefill=True`` leaves the seeded text fully selected
+        so the next typed key replaces it — mirrors the basic Find
+        prompt and lets the user either keep the seeded term (Enter)
+        or overwrite it (type).
         """
         self._runner.cancel()
+        var has_prefill = len(prefill.as_bytes()) > 0
+        var same_root = root == self.root
+        var have_saved = len(self.query.text.as_bytes()) > 0
+        # Resume path: no new prefill, same project, and we have a
+        # prior query — keep everything (query / matches / scroll /
+        # selected / context) and just re-select the query text so a
+        # type-over still replaces it.
+        if not has_prefill and same_root and have_saved:
+            self.root = root^
+            self.query.select_all()
+            self._query_dirty_at_ms = 0
+            self.toggle_case.hovered = False
+            self.toggle_word.hovered = False
+            self.toggle_regex.hovered = False
+            self.active = True
+            self.submitted = False
+            return
         self.root = root^
         self.query = TextField()
-        var has_prefill = len(prefill.as_bytes()) > 0
         if has_prefill:
             self.query.set_text(prefill^)
             if select_prefill:
@@ -185,27 +206,20 @@ struct ProjectFind(Movable):
         self.submitted = False
 
     def close(mut self):
+        """Hide the dialog and stop any in-flight ``rg`` child, but
+        keep query / results / selection / scroll so the next ``open()``
+        can resume where the user left off."""
         self._runner.cancel()
         self.active = False
         self.submitted = False
-        self.root = String("")
-        self.query = TextField()
-        self._input_rect = Rect(0, 0, 0, 0)
-        self._last_searched_query = String("")
-        self._last_searched_opts = SearchOptions()
+        # Any pending debounce belongs to the just-closed session;
+        # the next open decides whether to fire a fresh search.
         self._query_dirty_at_ms = 0
-        self.matches = List[ProjectMatch]()
-        self.selected = 0
-        self.scroll = 0
-        self.selected_path = String("")
-        self.selected_line = 0
+        # Hover state is a paint-frame artifact — drop it so reopening
+        # doesn't paint a stale tooltip.
         self.toggle_case.hovered = False
         self.toggle_word.hovered = False
         self.toggle_regex.hovered = False
-        self._context_path = String("")
-        self._context_lines = List[String]()
-        self._context_highlights = List[Highlight]()
-        self._truncated = False
 
     def _current_options(self) -> SearchOptions:
         return SearchOptions(
