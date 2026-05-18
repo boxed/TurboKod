@@ -2738,11 +2738,16 @@ struct LocalChanges(Movable):
                 String("Another git operation is still running."), False,
             )
             return
+        var spawned: Bool
         try:
             self.git_runner.start_argv(label.copy(), argv^, title_prefix^)
+            spawned = True
+        except:
+            spawned = False
+        if spawned:
             self._git_op = op
             self._git_op_label = label^
-        except:
+        else:
             self._show_status(
                 String("Failed to start ") + label, False,
             )

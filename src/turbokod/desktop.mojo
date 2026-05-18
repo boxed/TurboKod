@@ -157,6 +157,7 @@ from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
+from .reference_pick import ReferencePick
 from .find_symbol import FindSymbol, FindSymbolMatch
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
@@ -520,6 +521,7 @@ struct Desktop(Movable):
     var quick_open: QuickOpen
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
+    var reference_pick: ReferencePick
     var find_symbol: FindSymbol
     # Indices of LSP managers we've sent a workspace/symbol request
     # to as part of the Find Symbol submit flow but haven't yet
@@ -879,6 +881,7 @@ struct Desktop(Movable):
         self.quick_open = QuickOpen()
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
+        self.reference_pick = ReferencePick()
         self.find_symbol = FindSymbol()
         self._find_symbol_pending_lsps = List[Int]()
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
@@ -1400,6 +1403,8 @@ struct Desktop(Movable):
             if self.symbol_pick.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.reference_pick.active:
+            return String("default")
         if self.find_symbol.active:
             if self.find_symbol.is_input_at(pos, screen):
                 return String("text")
@@ -1733,6 +1738,7 @@ struct Desktop(Movable):
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
+        self.reference_pick.paint(canvas, screen)
         self.find_symbol.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen, self.grammar_registry)
@@ -2029,7 +2035,8 @@ struct Desktop(Movable):
         # unsupported language while still modal doesn't bump it.
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.find_symbol.active \
+                or self.symbol_pick.active or self.reference_pick.active \
+                or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -2068,7 +2075,8 @@ struct Desktop(Movable):
                 return
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.find_symbol.active \
+                or self.symbol_pick.active or self.reference_pick.active \
+                or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -3397,6 +3405,20 @@ struct Desktop(Movable):
                     DefinitionResolved(path, line, character), screen,
                 )
             return Optional[String]()
+        if self.reference_pick.active:
+            if event.kind == EVENT_KEY:
+                _ = self.reference_pick.handle_key(event)
+            else:
+                _ = self.reference_pick.handle_mouse(event, screen)
+            if self.reference_pick.submitted:
+                var path = self.reference_pick.selected_path
+                var line = self.reference_pick.selected_line
+                var character = self.reference_pick.selected_character
+                self.reference_pick.close()
+                self._jump_to(
+                    DefinitionResolved(path, line, character), screen,
+                )
+            return Optional[String]()
         if self.find_symbol.active:
             if event.kind == EVENT_KEY:
                 _ = self.find_symbol.handle_key(event)
@@ -4275,7 +4297,16 @@ struct Desktop(Movable):
         for i in range(len(self.lsp_managers)):
             var resolved = self.lsp_managers[i].tick()
             if resolved:
-                self._jump_to(resolved.value(), screen)
+                # If the resolved location *equals* the click origin
+                # (same path, same line, click column inside the def
+                # token's span), the user cmd+clicked at the definition
+                # site itself — chain a references lookup instead of
+                # jumping to where they already are. Otherwise it's the
+                # usual "jump to definition" behavior.
+                if self._click_landed_at_definition(i, resolved.value()):
+                    self._fire_references_after_def(i)
+                else:
+                    self._jump_to(resolved.value(), screen)
             else:
                 # Standard docs fallback: stdlib symbols (the common
                 # case for this branch) live in DevDocs even when the
@@ -4317,6 +4348,13 @@ struct Desktop(Movable):
                 self.symbol_pick.set_entries(
                     self.lsp_managers[i].take_symbols(),
                 )
+            # ``textDocument/references`` response: 0 → status message,
+            # 1 → jump directly, ≥2 → open the references picker so the
+            # user can choose which usage site to navigate to.
+            if self.lsp_managers[i].has_pending_references():
+                var word = self.lsp_managers[i].references_word()
+                var refs = self.lsp_managers[i].take_references()
+                self._on_references_resolved(refs^, word, screen)
             # Route completion responses back to the focused editor —
             # but only if the request's file matches what's currently
             # focused. The user may have switched buffers between
@@ -5924,6 +5962,87 @@ struct Desktop(Movable):
             self.windows.windows[existing].interior(),
         )
 
+    def _click_landed_at_definition(
+        self, lsp_idx: Int, target: DefinitionResolved,
+    ) -> Bool:
+        """True iff the cmd+click that produced ``target`` was already at
+        the definition site (same file, same line, click column inside
+        the resolved token's span). Used to convert a "click on the
+        definition" into a references lookup so the user can navigate to
+        usage sites instead of bouncing in place."""
+        var origin_path = self.lsp_managers[lsp_idx].definition_origin_path()
+        if len(origin_path.as_bytes()) == 0:
+            return False
+        var origin_line = self.lsp_managers[lsp_idx].definition_origin_line()
+        var origin_char = self.lsp_managers[lsp_idx].definition_origin_char()
+        var origin_word = self.lsp_managers[lsp_idx].definition_origin_word()
+        if origin_line != target.line:
+            return False
+        # Path match: the manager stores the path the editor knows the
+        # file under; the response may use a different absolute form
+        # (symlinks, etc). ``realpath`` normalizes both sides.
+        if origin_path != target.path:
+            var op = realpath(origin_path)
+            var tp = realpath(target.path)
+            if len(op.as_bytes()) == 0 or op != tp:
+                return False
+        # Column inside the resolved token's span [target.character,
+        # target.character + len(word)). The LSP returns the start of
+        # the def's identifier; the user can have clicked anywhere
+        # inside it.
+        var span = len(origin_word.as_bytes())
+        if span <= 0:
+            span = 1
+        return origin_char >= target.character \
+            and origin_char < target.character + span
+
+    def _fire_references_after_def(mut self, lsp_idx: Int):
+        """Chain a ``textDocument/references`` request at the same
+        click origin we just resolved. Quiet on failure — the worst
+        case is the click does nothing (which is no worse than the
+        bouncy "jump in place" we'd otherwise see)."""
+        var origin_path = self.lsp_managers[lsp_idx].definition_origin_path()
+        var origin_line = self.lsp_managers[lsp_idx].definition_origin_line()
+        var origin_char = self.lsp_managers[lsp_idx].definition_origin_char()
+        var origin_word = self.lsp_managers[lsp_idx].definition_origin_word()
+        if len(origin_path.as_bytes()) == 0:
+            return
+        var win_idx = self._find_window_for_path(origin_path)
+        var text: String
+        if win_idx >= 0 and self.windows.windows[win_idx].is_editor:
+            text = self.windows.windows[win_idx].editor.text_snapshot()
+        else:
+            return
+        _ = self.lsp_managers[lsp_idx].request_references(
+            origin_path, origin_line, origin_char, origin_word^, text^,
+        )
+        self.status_bar.set_message(
+            String("Finding references…"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
+    def _on_references_resolved(
+        mut self, var refs: List[DefinitionResolved],
+        word: String, screen: Rect,
+    ):
+        """Route a ``textDocument/references`` response: 0 → status bar
+        "no references" notice, 1 → jump directly to the single hit,
+        ≥2 → open the references picker so the user can choose."""
+        if len(refs) == 0:
+            var msg = String("No references")
+            if len(word.as_bytes()) > 0:
+                msg = msg + String(" for '") + word + String("'")
+            self.status_bar.set_message(msg^, Attr(RED, LIGHT_GRAY))
+            return
+        if len(refs) == 1:
+            var only = refs[0]
+            self._jump_to(only, screen)
+            return
+        var root = String("")
+        if self.project:
+            root = self.project.value()
+        self.reference_pick.open(refs^, word, root^)
+
     def _compute_subdued_windows(self) -> List[Bool]:
         """One flag per window: True means "paint with dim chrome."
 
@@ -7012,7 +7131,8 @@ struct Desktop(Movable):
                 return
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.find_symbol.active \
+                or self.symbol_pick.active or self.reference_pick.active \
+                or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
@@ -7056,7 +7176,8 @@ struct Desktop(Movable):
             return False
         if self.prompt.active or self.confirm_dialog.active \
                 or self.quick_open.active \
-                or self.symbol_pick.active or self.find_symbol.active \
+                or self.symbol_pick.active or self.reference_pick.active \
+                or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active \
                 or self.save_as_dialog.active or self.doc_pick.active:

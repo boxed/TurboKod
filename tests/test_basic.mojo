@@ -121,9 +121,10 @@ from turbokod.lsp import (
 )
 from turbokod.lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
-    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, LspManager,
+    DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
+    DefinitionResolved, LspManager,
     TextEditEntry, _parse_completion_result, _parse_diagnostics_array,
-    _parse_hover_result,
+    _parse_hover_result, _parse_references_result,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -7511,6 +7512,37 @@ def test_lsp_parse_hover_result_empty_when_no_contents() raises:
     assert_equal(_parse_hover_result(v_empty), String(""))
 
 
+def test_lsp_parse_references_result_list_of_locations() raises:
+    """``textDocument/references`` always returns ``Location[]`` (or
+    null). Each entry has uri+range; parse one ``DefinitionResolved``
+    per entry, anchored at the range start. Malformed entries (missing
+    uri or range) are skipped, not crashed on."""
+    var v = parse_json(String(
+        "["
+        + "{\"uri\":\"file:///a.py\",\"range\":{\"start\":{\"line\":3,\"character\":4},\"end\":{\"line\":3,\"character\":7}}},"
+        + "{\"uri\":\"file:///b.py\",\"range\":{\"start\":{\"line\":10,\"character\":0},\"end\":{\"line\":10,\"character\":3}}},"
+        + "{\"uri\":\"file:///c.py\"}"  # missing range — dropped
+        + "]"
+    ))
+    var refs = _parse_references_result(v)
+    assert_equal(len(refs), 2)
+    assert_equal(refs[0].path, String("/a.py"))
+    assert_equal(refs[0].line, 3)
+    assert_equal(refs[0].character, 4)
+    assert_equal(refs[1].path, String("/b.py"))
+    assert_equal(refs[1].line, 10)
+    assert_equal(refs[1].character, 0)
+
+
+def test_lsp_parse_references_result_null_is_empty() raises:
+    """``null`` (the spec-allowed "no references" form) parses to an
+    empty list — same as an empty array."""
+    var v_null = parse_json(String("null"))
+    assert_equal(len(_parse_references_result(v_null)), 0)
+    var v_empty = parse_json(String("[]"))
+    assert_equal(len(_parse_references_result(v_empty)), 0)
+
+
 def test_editor_hover_dwell_emits_request_for_word_under_mouse() raises:
     """Bare hover over an identifier stamps a hover candidate;
     ``consume_hover_request`` then returns the (row, col) at the word's
@@ -14670,6 +14702,8 @@ def _run_chunk_04() raises:
     test_lsp_parse_hover_result_markup_content()
     test_lsp_parse_hover_result_array_joins_with_newlines()
     test_lsp_parse_hover_result_empty_when_no_contents()
+    test_lsp_parse_references_result_list_of_locations()
+    test_lsp_parse_references_result_null_is_empty()
     test_editor_hover_dwell_emits_request_for_word_under_mouse()
     test_editor_set_hover_result_displays_only_for_current_word()
     test_lsp_parse_completion_result_extracts_text_edit_range()

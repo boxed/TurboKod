@@ -25,8 +25,8 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .json import (
-    JsonValue, encode_json, json_array, json_int, json_object, json_str,
-    parse_json,
+    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
+    json_str, parse_json,
 )
 from .file_io import basename, stat_file
 from .lsp import (
@@ -302,6 +302,24 @@ struct LspManager(Copyable, Movable):
     # ``_last_empty`` flag, which persists across frames so the status
     # bar can keep showing "no definition found" until the next request.
     var _empty_word: String
+    # Origin of the most recently completed definition request — the
+    # (path, line, character) the user actually clicked on, plus the word
+    # under that click. Surfaced via ``definition_origin_*`` so the host
+    # can compare against the resolved location: when they overlap, the
+    # click landed on the definition site itself and the host can chain a
+    # references lookup instead of jumping to where the user already is.
+    var _def_origin_path: String
+    var _def_origin_line: Int
+    var _def_origin_char: Int
+    var _def_origin_word: String
+    # ``textDocument/references`` — list-of-locations form of definition.
+    # Parked as ``DefinitionResolved`` rows (same shape, different list).
+    # ``_has_resolved_references`` distinguishes "no response yet" from
+    # "empty list".
+    var _inflight_ref_id: Int
+    var _ref_word: String
+    var _resolved_references: List[DefinitionResolved]
+    var _has_resolved_references: Bool
     var _inflight_symbol_id: Int
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
@@ -387,6 +405,14 @@ struct LspManager(Copyable, Movable):
         self._inflight_word = String("")
         self._last_empty = False
         self._empty_word = String("")
+        self._def_origin_path = String("")
+        self._def_origin_line = 0
+        self._def_origin_char = 0
+        self._def_origin_word = String("")
+        self._inflight_ref_id = 0
+        self._ref_word = String("")
+        self._resolved_references = List[DefinitionResolved]()
+        self._has_resolved_references = False
         self._inflight_symbol_id = 0
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
@@ -436,6 +462,14 @@ struct LspManager(Copyable, Movable):
         self._inflight_word = String("")
         self._last_empty = False
         self._empty_word = String("")
+        self._def_origin_path = String("")
+        self._def_origin_line = 0
+        self._def_origin_char = 0
+        self._def_origin_word = String("")
+        self._inflight_ref_id = 0
+        self._ref_word = String("")
+        self._resolved_references = List[DefinitionResolved]()
+        self._has_resolved_references = False
         self._inflight_symbol_id = 0
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
@@ -764,9 +798,90 @@ struct LspManager(Copyable, Movable):
         except:
             self._inflight_def_id = 0
             return False
+        self._def_origin_path = path
+        self._def_origin_line = line
+        self._def_origin_char = character
+        self._def_origin_word = word.copy()
         self._inflight_word = word^
         self._last_empty = False
         return True
+
+    def definition_origin_path(self) -> String:
+        return self._def_origin_path
+
+    def definition_origin_line(self) -> Int:
+        return self._def_origin_line
+
+    def definition_origin_char(self) -> Int:
+        return self._def_origin_char
+
+    def definition_origin_word(self) -> String:
+        return self._def_origin_word
+
+    def request_references(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/references`` at
+        ``(line, character)``.
+
+        Mirrors ``request_definition`` — pre-flights with didOpen/didChange
+        and parks an inflight id for the tick loop to drain. Asks the
+        server to include the declaration in the result set: when the user
+        cmd+clicks at the definition site we want every site (including
+        the definition itself, which the user is presumably about to leave)
+        so the picker can offer all of them.
+        """
+        if self.state != _STATE_READY:
+            return False
+        _lsp_debug_log(
+            String("→ request_references lang=") + self._language_id
+            + String(" path=") + path
+            + String(" line=") + String(line)
+            + String(" character=") + String(character)
+            + String(" word=") + word,
+        )
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        var doc = json_object()
+        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        params.put(String("textDocument"), doc)
+        var pos = json_object()
+        pos.put(String("line"), json_int(line))
+        pos.put(String("character"), json_int(character))
+        params.put(String("position"), pos)
+        var ctx = json_object()
+        ctx.put(String("includeDeclaration"), json_bool(True))
+        params.put(String("context"), ctx^)
+        try:
+            self._inflight_ref_id = self.client.send_request(
+                String("textDocument/references"), params,
+            )
+        except:
+            self._inflight_ref_id = 0
+            return False
+        self._ref_word = word^
+        self._has_resolved_references = False
+        self._resolved_references = List[DefinitionResolved]()
+        return True
+
+    def has_pending_references(self) -> Bool:
+        """True iff a parsed references response is parked for ``take``."""
+        return self._has_resolved_references
+
+    def take_references(mut self) -> List[DefinitionResolved]:
+        """Move the parked references list out of the manager. Pair with
+        ``has_pending_references()`` — the flag is cleared either way."""
+        var out = self._resolved_references^
+        self._resolved_references = List[DefinitionResolved]()
+        self._has_resolved_references = False
+        return out^
+
+    def references_word(self) -> String:
+        """Word the most recent references request was about. Kept until
+        the next request; lets the host build a status-bar message that
+        names the symbol after the response has been taken."""
+        return self._ref_word
 
     def request_document_symbols(
         mut self, path: String, var text: String,
@@ -1209,6 +1324,19 @@ struct LspManager(Copyable, Movable):
                 self._inflight_def_id = 0
                 self._inflight_word = String("")
                 continue
+            if id == self._inflight_ref_id:
+                var refs = List[DefinitionResolved]()
+                if msg.result:
+                    refs = _parse_references_result(msg.result.value())
+                _lsp_debug_log(
+                    String("← references response id=") + String(id)
+                    + String(" lang=") + self._language_id
+                    + String(" count=") + String(len(refs)),
+                )
+                self._resolved_references = refs^
+                self._has_resolved_references = True
+                self._inflight_ref_id = 0
+                continue
             if id == self._inflight_symbol_id:
                 var items = List[SymbolItem]()
                 if msg.result:
@@ -1533,6 +1661,21 @@ def _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
     return Optional[DefinitionResolved](DefinitionResolved(
         path, line_opt.value().as_int(), char_opt.value().as_int(),
     ))
+
+
+def _parse_references_result(v: JsonValue) -> List[DefinitionResolved]:
+    """``textDocument/references`` returns ``Location[] | null``. Each
+    entry has the same shape ``_parse_one_definition`` accepts (uri +
+    range, no LocationLink variant in the spec), so we reuse that
+    parser per element and skip malformed entries silently."""
+    var out = List[DefinitionResolved]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var one = _parse_one_definition(v.array_at(i))
+        if one:
+            out.append(one.value())
+    return out^
 
 
 # --- symbol parsing --------------------------------------------------------
