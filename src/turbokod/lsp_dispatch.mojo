@@ -108,6 +108,21 @@ struct SymbolItem(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
+struct WorkspaceSymbolItem(ImplicitlyCopyable, Movable):
+    """One entry in a ``workspace/symbol`` response. Unlike
+    ``SymbolItem`` (used for ``textDocument/documentSymbol``), each
+    item carries its own ``path`` because the response can span
+    every file in the workspace. ``line`` / ``character`` are
+    0-based to match the LSP wire form."""
+    var name: String
+    var kind: Int
+    var container: String
+    var path: String
+    var line: Int
+    var character: Int
+
+
+@fieldwise_init
 struct TextEditEntry(ImplicitlyCopyable, Movable):
     """One LSP ``TextEdit`` applied at an absolute buffer position.
 
@@ -291,6 +306,12 @@ struct LspManager(Copyable, Movable):
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
     var _symbols_empty: Bool                 # latched when the last response was empty
+    # ``workspace/symbol`` — parallel to the document-symbol fields but
+    # scoped to a workspace-wide query rather than a single document.
+    # Used by the Find Symbol picker to disambiguate same-named symbols.
+    var _inflight_ws_symbol_id: Int
+    var _resolved_ws_symbols: List[WorkspaceSymbolItem]
+    var _has_resolved_ws_symbols: Bool
     # Pending ``textDocument/completion`` request state. ``_completion_path``
     # / ``_completion_row`` / ``_completion_col`` are echoed back via
     # ``pending_completion_*`` accessors so the host can drop a stale
@@ -370,6 +391,9 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_ws_symbol_id = 0
+        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_ws_symbols = False
         self._inflight_completion_id = 0
         self._completion_path = String("")
         self._completion_row = 0
@@ -416,6 +440,9 @@ struct LspManager(Copyable, Movable):
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
+        self._inflight_ws_symbol_id = 0
+        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_ws_symbols = False
         self._inflight_completion_id = 0
         self._completion_path = String("")
         self._completion_row = 0
@@ -787,6 +814,52 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_symbols = False
         return out^
 
+    def request_workspace_symbols(
+        mut self, query: String,
+    ) -> Bool:
+        """Ask the server for ``workspace/symbol`` matching ``query``.
+
+        Unlike ``request_document_symbols``, this scans the entire
+        workspace and the response items each carry their own
+        location — so we don't need a didOpen pre-flight (the server
+        already has its full project view from initialization).
+        Returns False if the server isn't ready or the send fails.
+        A fresh request shadows any earlier in-flight workspace
+        symbol id — there's no concurrent lookup model.
+        """
+        if self.state != _STATE_READY:
+            return False
+        var params = json_object()
+        params.put(String("query"), json_str(query))
+        try:
+            self._inflight_ws_symbol_id = self.client.send_request(
+                String("workspace/symbol"), params,
+            )
+        except:
+            self._inflight_ws_symbol_id = 0
+            return False
+        self._has_resolved_ws_symbols = False
+        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
+        return True
+
+    def inflight_workspace_symbols(self) -> Bool:
+        return self._inflight_ws_symbol_id != 0
+
+    def has_pending_workspace_symbols(self) -> Bool:
+        """True iff a parsed workspace-symbol response is parked."""
+        return self._has_resolved_ws_symbols
+
+    def take_workspace_symbols(
+        mut self,
+    ) -> List[WorkspaceSymbolItem]:
+        """Move the parked workspace-symbol list out of the manager.
+        Pair with ``has_pending_workspace_symbols()`` to distinguish
+        "no response yet" from "empty list"."""
+        var out = self._resolved_ws_symbols^
+        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
+        self._has_resolved_ws_symbols = False
+        return out^
+
     def request_completion(
         mut self, path: String, line: Int, character: Int,
         var text: String, manual: Bool = False,
@@ -1144,6 +1217,15 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_symbols = True
                 self._symbols_empty = (len(self._resolved_symbols) == 0)
                 self._inflight_symbol_id = 0
+            if id == self._inflight_ws_symbol_id:
+                var ws_items = List[WorkspaceSymbolItem]()
+                if msg.result:
+                    ws_items = _parse_workspace_symbols_result(
+                        msg.result.value(),
+                    )
+                self._resolved_ws_symbols = ws_items^
+                self._has_resolved_ws_symbols = True
+                self._inflight_ws_symbol_id = 0
             if id == self._inflight_completion_id:
                 var comps = List[CompletionItem]()
                 if msg.result:
@@ -1538,6 +1620,65 @@ def _parse_symbol_information(v: JsonValue, mut out: List[SymbolItem]):
     if pos[0] < 0:
         return
     out.append(SymbolItem(name, kind, container, pos[0], pos[1]))
+
+
+def _parse_workspace_symbols_result(
+    v: JsonValue,
+) -> List[WorkspaceSymbolItem]:
+    """``workspace/symbol`` returns ``SymbolInformation[]`` (legacy
+    form, every entry has ``location``) or ``WorkspaceSymbol[]``
+    (newer 3.17 form, where the location may be a ``{uri}``-only
+    stub the server resolves lazily via ``workspaceSymbol/resolve``).
+
+    We treat them uniformly: every entry must surface a ``location``
+    with at least a ``uri``. Stubs without a ``range`` land at the
+    file's first line — fine for "jump to definition" since the
+    user can navigate within the file once it opens. Anything else
+    malformed is silently dropped (servers occasionally emit half-
+    populated entries; surfacing them as zeroed rows would be worse)."""
+    var out = List[WorkspaceSymbolItem]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        _parse_workspace_symbol(v.array_at(i), out)
+    return out^
+
+
+def _parse_workspace_symbol(
+    v: JsonValue, mut out: List[WorkspaceSymbolItem],
+):
+    if not v.is_object():
+        return
+    var name_opt = v.object_get(String("name"))
+    if not name_opt or not name_opt.value().is_string():
+        return
+    var name = name_opt.value().as_str()
+    var kind = 0
+    var kind_opt = v.object_get(String("kind"))
+    if kind_opt and kind_opt.value().is_int():
+        kind = kind_opt.value().as_int()
+    var container = String("")
+    var cont_opt = v.object_get(String("containerName"))
+    if cont_opt and cont_opt.value().is_string():
+        container = cont_opt.value().as_str()
+    var loc_opt = v.object_get(String("location"))
+    if not loc_opt or not loc_opt.value().is_object():
+        return
+    var uri_opt = loc_opt.value().object_get(String("uri"))
+    if not uri_opt or not uri_opt.value().is_string():
+        return
+    var path = _uri_to_path(uri_opt.value().as_str())
+    var line = 0
+    var character = 0
+    var range_opt = loc_opt.value().object_get(String("range"))
+    if range_opt:
+        var pos = _start_pos_of(range_opt.value())
+        if pos[0] >= 0:
+            line = pos[0]
+            character = pos[1]
+    out.append(
+        WorkspaceSymbolItem(name, kind, container, path, line, character),
+    )
 
 
 def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:

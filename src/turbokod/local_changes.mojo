@@ -72,9 +72,9 @@ from .git_changes import (
     fetch_blob_text, fetch_branch_log, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
     parse_unified_diff_files,
-    git_amend_no_edit, git_commit, git_pull, git_push, git_revert_file,
     stage_file, unstage_file,
 )
+from .install_runner import InstallRunner
 from .string_utils import display_columns, split_lines_no_trailing, starts_with
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
@@ -111,6 +111,17 @@ comptime _OVERLAY_COMMIT:         Int = 1   # type a commit message
 comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
+
+# In-flight async git ops. Tracked so that on completion we know which
+# op finished (for the success message + which refresh to run) and so
+# the user-facing popup title reads naturally ("Pushing", "Pulling", …).
+# Stored on ``LocalChanges._git_op`` while ``git_runner`` is active.
+comptime _GITOP_NONE:    Int = 0
+comptime _GITOP_COMMIT:  Int = 1
+comptime _GITOP_AMEND:   Int = 2
+comptime _GITOP_PULL:    Int = 3
+comptime _GITOP_PUSH:    Int = 4
+comptime _GITOP_REVERT:  Int = 5
 
 # Hard caps on the inputs we'll feed to the TextMate tokenizer for the
 # diff side panels. Above either bound we skip syntax highlighting and
@@ -330,6 +341,35 @@ def build_minimal_patch(
             continue
         _append_line(out, lk)
     return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def _first_useful_line(text: String) -> String:
+    """Return the *last* non-empty line of ``text``, trimmed of trailing
+    whitespace. Git's structured ops (``commit`` / ``push`` / ``pull`` /
+    ``checkout``) write their headline result on the last meaningful
+    line — ``[main abc1234] subject``, ``abc1234..def5678 main -> main``,
+    ``Already up to date.`` — so the bottom line is the most useful
+    one-row summary. Falls back to the empty string when ``text`` is
+    all blank."""
+    var b = text.as_bytes()
+    var end = len(b)
+    # Trim trailing whitespace (newlines, CR, spaces, tabs).
+    while end > 0 and (b[end - 1] == 0x0A or b[end - 1] == 0x0D
+            or b[end - 1] == 0x20 or b[end - 1] == 0x09):
+        end -= 1
+    if end == 0:
+        return String("")
+    # Walk back to the start of this line.
+    var start = end
+    while start > 0 and b[start - 1] != 0x0A and b[start - 1] != 0x0D:
+        start -= 1
+    # Strip leading whitespace inside the line so the message reads
+    # cleanly when git indents progress dots (``  remote: ...``).
+    while start < end and (b[start] == 0x20 or b[start] == 0x09):
+        start += 1
+    if start >= end:
+        return String("")
+    return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
 def _byte_to_string(b: UInt8) -> String:
@@ -910,6 +950,19 @@ struct LocalChanges(Movable):
     # Commits — wiring the Files pane would silently steal those
     # action shortcuts from active git workflows.
     var _type_ahead: TypeAhead
+    # Async runner for the slow git ops (commit / push / pull / amend /
+    # revert). The UI used to call ``git_commit`` / ``git_push`` etc.
+    # synchronously, which froze the modal — and the whole desktop — for
+    # the duration of a push to a slow remote. The runner spawns each
+    # op as a child process, drains stdout/stderr per frame, and surfaces
+    # a non-modal popup with a spinner + tail of the live output. On
+    # exit, ``tick`` reaps the result, refreshes the affected panels,
+    # and flashes the usual one-line status overlay.
+    var git_runner: InstallRunner
+    var _git_op: Int            # one of the _GITOP_* values; _NONE when idle
+    var _git_op_label: String   # short label flashed in the success status
+    var _git_revert_path: String  # path being reverted (for _GITOP_REVERT)
+    var _git_revert_untracked: Bool
 
     def __init__(out self):
         self.active = False
@@ -949,6 +1002,11 @@ struct LocalChanges(Movable):
         _ = self.sidebar_dock.add(String("Branches"))
         _ = self.sidebar_dock.add(String("Commits"))
         self._type_ahead = TypeAhead()
+        self.git_runner = InstallRunner()
+        self._git_op = _GITOP_NONE
+        self._git_op_label = String("")
+        self._git_revert_path = String("")
+        self._git_revert_untracked = False
 
     def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -984,6 +1042,10 @@ struct LocalChanges(Movable):
         self.overlay_ok = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
+        self._git_op = _GITOP_NONE
+        self._git_op_label = String("")
+        self._git_revert_path = String("")
+        self._git_revert_untracked = False
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1058,6 +1120,10 @@ struct LocalChanges(Movable):
         self.overlay_ok = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
+        self._git_op = _GITOP_NONE
+        self._git_op_label = String("")
+        self._git_revert_path = String("")
+        self._git_revert_untracked = False
 
     # --- geometry ---------------------------------------------------------
 
@@ -1500,6 +1566,11 @@ struct LocalChanges(Movable):
         # Overlay last so it sits on top of everything else.
         if self.overlay != _OVERLAY_NONE:
             self._paint_overlay(canvas, bounds)
+        # Async git-op popup (spinner + streaming output tail). Painted
+        # after the overlay so the spinner survives a transient status
+        # flash sitting on top of the modal — and so the popup is the
+        # last thing the user sees while a slow commit/push grinds.
+        self.git_runner.paint(canvas, bounds)
 
     def _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
         """Render the active overlay (commit prompt / confirmation /
@@ -2312,6 +2383,16 @@ struct LocalChanges(Movable):
         var bounds = self._panel_rect(screen)
         var k = event.key
         if k == KEY_ESC:
+            # Refuse to close while a git op is in flight — the spinner
+            # popup is the only feedback the user has and dropping the
+            # modal would orphan the live child without surfacing its
+            # result.
+            if self._is_git_busy():
+                self._show_status(
+                    String("Git operation in progress — please wait."),
+                    False,
+                )
+                return True
             self.close()
             return True
         # File-pane git operations: c / A / d / p / P. These are
@@ -2570,6 +2651,11 @@ struct LocalChanges(Movable):
     def _open_commit_prompt(mut self):
         """Pop the commit-message input. Pre-checks that *something* is
         actually staged so we don't pop a prompt that git will refuse."""
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
         var have_staged = False
         for i in range(len(self.files)):
             if Int(self.files[i].staged) != 0x20 \
@@ -2587,12 +2673,22 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
 
     def _open_amend_confirm(mut self):
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
         self.overlay = _OVERLAY_AMEND_CONFIRM
         self.overlay_input = TextField()
         self.overlay_message = \
             String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
 
     def _open_revert_confirm(mut self):
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._show_status(String("No file selected."), False)
             return
@@ -2621,43 +2717,179 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_ok = False
 
+    def _is_git_busy(self) -> Bool:
+        """True iff an async git op is currently in flight via
+        ``git_runner``. Callers should refuse to start a second op while
+        this is set — the runner is single-slot and the user-facing
+        popup only renders one at a time."""
+        return self._git_op != _GITOP_NONE or self.git_runner.is_active()
+
+    def _start_git_op(
+        mut self, op: Int, var label: String, var argv: List[String],
+        var title_prefix: String,
+    ):
+        """Spawn an async git child via ``git_runner``. Records the op
+        type so ``tick`` knows which refresh to run when the child
+        reaps. Flashes a one-line status on spawn failure rather than
+        raising — these are user-visible operations and a hung modal is
+        worse than an inline error."""
+        if self._is_git_busy():
+            self._show_status(
+                String("Another git operation is still running."), False,
+            )
+            return
+        try:
+            self.git_runner.start_argv(label.copy(), argv^, title_prefix^)
+            self._git_op = op
+            self._git_op_label = label^
+        except:
+            self._show_status(
+                String("Failed to start ") + label, False,
+            )
+
     def _run_pull(mut self):
-        var r = git_pull(self.root)
-        if r.ok:
-            self._refresh_full()
-        self._show_status(r.message, r.ok)
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("pull"))
+        self._start_git_op(
+            _GITOP_PULL, String("git pull"), argv^, String("Running "),
+        )
 
     def _run_push(mut self):
-        var r = git_push(self.root)
-        if r.ok:
-            self._refresh_full()
-        self._show_status(r.message, r.ok)
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("push"))
+        self._start_git_op(
+            _GITOP_PUSH, String("git push"), argv^, String("Running "),
+        )
 
     def _submit_commit(mut self):
         var msg = self.overlay_input.text
         if len(msg.as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
             return
-        var r = git_commit(self.root, msg)
-        if r.ok:
-            self._refresh_full()
-        self._show_status(r.message, r.ok)
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("commit"))
+        argv.append(String("-m"))
+        argv.append(msg)
+        # Close the commit-message overlay first so the spinner popup
+        # isn't drawn behind the modal box. ``_start_git_op`` will flash
+        # an inline status overlay on failure.
+        self._close_overlay()
+        self._start_git_op(
+            _GITOP_COMMIT, String("git commit"), argv^, String("Running "),
+        )
 
     def _confirm_amend(mut self):
-        var r = git_amend_no_edit(self.root)
-        if r.ok:
-            self._refresh_full()
-        self._show_status(r.message, r.ok)
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("commit"))
+        argv.append(String("--amend"))
+        argv.append(String("--no-edit"))
+        self._close_overlay()
+        self._start_git_op(
+            _GITOP_AMEND, String("git amend"), argv^, String("Running "),
+        )
 
     def _confirm_revert(mut self):
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._close_overlay()
             return
         var fe = self.files[self.sel_file]
-        var r = git_revert_file(self.root, fe.path, fe.staged, fe.worktree)
-        if r.ok:
+        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        if untracked:
+            argv.append(String("clean"))
+            argv.append(String("-f"))
+            argv.append(String("--"))
+            argv.append(fe.path)
+        else:
+            argv.append(String("checkout"))
+            argv.append(String("HEAD"))
+            argv.append(String("--"))
+            argv.append(fe.path)
+        self._git_revert_path = fe.path
+        self._git_revert_untracked = untracked
+        self._close_overlay()
+        self._start_git_op(
+            _GITOP_REVERT, String("git revert"), argv^, String("Running "),
+        )
+
+    def tick(mut self):
+        """Drain the in-flight git child (if any). When it reaps, refresh
+        the affected panels and flash a status line with the summary —
+        the same shape as the previous synchronous ``_run_*`` calls had,
+        but driven off the per-frame loop instead of blocking it.
+
+        Safe to call every frame regardless of whether anything's in
+        flight; returns immediately when idle. We deliberately *don't*
+        gate on ``self.active`` — if the modal got closed while a child
+        was still running (e.g. the user Enter'd a file to open it), we
+        still need to drain the pipes and reap the pid here so the
+        child doesn't get orphaned with a full kernel pipe buffer."""
+        if self._git_op == _GITOP_NONE:
+            return
+        var maybe = self.git_runner.tick()
+        if not maybe:
+            return
+        var r = maybe.value()
+        var op = self._git_op
+        self._git_op = _GITOP_NONE
+        # Modal closed mid-op: reap and drop. Nothing to flash and
+        # ``_refresh_full`` would re-fetch state we no longer display.
+        if not self.active:
+            self._git_op_label = String("")
+            self._git_revert_path = String("")
+            self._git_revert_untracked = False
+            return
+        var ok = r.ok()
+        # Push/pull report progress + the final summary on stderr; the
+        # rest report success on stdout and the error on stderr. We
+        # collapse the captured output to a single trimmed line for the
+        # status flash and prefer stdout on success / stderr on failure.
+        var summary = _first_useful_line(r.output)
+        var fallback: String
+        if op == _GITOP_COMMIT:
+            fallback = String("commit ok") if ok else String("commit failed")
+        elif op == _GITOP_AMEND:
+            fallback = String("amend ok") if ok else String("amend failed")
+        elif op == _GITOP_PULL:
+            fallback = String("pull ok") if ok else String("pull failed")
+        elif op == _GITOP_PUSH:
+            fallback = String("push ok") if ok else String("push failed")
+        elif op == _GITOP_REVERT:
+            if ok and self._git_revert_untracked:
+                fallback = String("removed untracked file")
+            elif ok:
+                fallback = String("reverted ") + self._git_revert_path
+            else:
+                fallback = String("revert failed")
+        else:
+            fallback = String("done") if ok else String("failed")
+        var msg: String
+        if len(summary.as_bytes()) > 0:
+            msg = summary^
+        else:
+            msg = fallback^
+        if ok:
             self._refresh_full()
-        self._show_status(r.message, r.ok)
+        self._show_status(msg^, ok)
+        self._git_op_label = String("")
+        if op == _GITOP_REVERT:
+            self._git_revert_path = String("")
+            self._git_revert_untracked = False
 
     def _handle_overlay_key(mut self, event: Event) -> Bool:
         """Route key events while an overlay is active. Returns True to

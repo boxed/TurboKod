@@ -941,6 +941,13 @@ def lsp_initialize_params(
     var capabilities = json_object()
     var workspace_caps = json_object()
     workspace_caps.put(String("workspaceFolders"), json_bool(True))
+    # Advertise workspace/symbol so the host's Find Symbol picker can
+    # ask the server for all workspace symbols matching a name. Some
+    # servers (e.g. pyright) treat the request as off when the client
+    # never declared it.
+    var symbol_caps = json_object()
+    symbol_caps.put(String("dynamicRegistration"), json_bool(False))
+    workspace_caps.put(String("symbol"), symbol_caps^)
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise textDocument/completion so servers know to honor our
     # requests. ``snippetSupport: False`` keeps responses to plain-text

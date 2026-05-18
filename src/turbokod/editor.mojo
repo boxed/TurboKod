@@ -23,8 +23,8 @@ from .clipboard import (
 )
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
-    WHITE, YELLOW,
+    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
+    STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeResult, diff3_merge, unified_diff
@@ -4329,6 +4329,163 @@ struct Editor(Copyable, Movable):
         else:
             painter.set(canvas, sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
 
+    def _paint_attr_at(
+        self, mut canvas: Canvas, painter: Painter, view: Rect,
+        layout: List[VisualLine],
+        text_x0: Int, content_right: Int, content_bottom: Int,
+        row: Int, col: Int, attr: Attr,
+    ):
+        """Overlay ``attr`` on the cell at buffer position ``(row, col)``.
+        Same byte→cell map as the caret block; used by the bracket-match
+        overlay so the highlighted brackets land on the right column even
+        when earlier glyphs on the row are multi-byte."""
+        var sr = self._screen_row_for(layout, row, col)
+        if sr < 0:
+            return
+        var seg_start = layout[sr].byte_start
+        var seg_end = layout[sr].byte_end
+        var indent = layout[sr].indent_cells
+        var seg_x0 = text_x0 + indent
+        var line = self.buffer.line(row)
+        var line_byte_count = len(line.as_bytes())
+        if col >= line_byte_count:
+            return
+        var visible_str: String
+        if seg_start >= line_byte_count:
+            visible_str = String("")
+        else:
+            visible_str = _slice(line, seg_start, seg_end)
+        var cell_map = utf8_byte_to_cell(visible_str)
+        var visible_byte_count = len(visible_str.as_bytes())
+        var byte_off = col - seg_start
+        if byte_off < 0 or byte_off >= visible_byte_count:
+            return
+        var cell_offset = cell_map[byte_off]
+        var sx = seg_x0 + cell_offset
+        var sy = view.a.y + sr
+        if not (seg_x0 <= sx and sx < content_right
+                and view.a.y <= sy and sy < content_bottom):
+            return
+        painter.set_attr(canvas, sx, sy, attr)
+
+    def _bracket_in_skip_scope(self, row: Int, col: Int) -> Bool:
+        """True if byte ``(row, col)`` falls inside a string or comment
+        highlight span — bracket matching ignores those bytes so a
+        ``(`` inside ``"foo("`` doesn't fool the scan. Identifying via
+        the attr (rather than a stored scope kind) works because
+        ``_scope_attr`` only assigns the string / comment attrs to
+        scopes that start with ``string`` / ``comment``; the generic
+        fallback tokenizer in ``highlight.mojo`` does the same."""
+        var s_attr = highlight_string_attr()
+        var c_attr = highlight_comment_attr()
+        for i in range(len(self.highlights)):
+            var h = self.highlights[i]
+            if h.row != row:
+                continue
+            if not (h.col_start <= col and col < h.col_end):
+                continue
+            if h.attr == s_attr or h.attr == c_attr:
+                return True
+        return False
+
+    def _find_bracket_match_at_cursor(
+        self,
+    ) -> Optional[Tuple[Int, Int, Int, Int]]:
+        """If the cursor is on or directly after a bracket, return
+        ``(src_row, src_col, match_row, match_col)`` for the pair.
+        Bracket bytes inside string / comment scopes are ignored on
+        both sides — the source skips if it's in a string, and the
+        scan skips other brackets in strings while looking for the
+        partner. Falls back to plain byte scan when no highlights are
+        available (unhighlighted buffer / unsupported language).
+
+        Preference order matches the typical editor convention: the
+        bracket *at* the cursor wins over the one immediately behind, so
+        ``foo(|)`` (cursor on ``)``) matches the leading ``(``."""
+        var row = self.cursor_row
+        var col = self.cursor_col
+        if row < 0 or row >= self.buffer.line_count():
+            return Optional[Tuple[Int, Int, Int, Int]]()
+        var line = self.buffer.line(row)
+        var bytes = line.as_bytes()
+        var n = len(bytes)
+        var src_col = -1
+        if col < n:
+            var b = Int(bytes[col])
+            if (_is_open_bracket(b) or _is_close_bracket(b)) \
+                    and not self._bracket_in_skip_scope(row, col):
+                src_col = col
+        if src_col < 0 and col > 0 and col <= n:
+            var b = Int(bytes[col - 1])
+            if (_is_open_bracket(b) or _is_close_bracket(b)) \
+                    and not self._bracket_in_skip_scope(row, col - 1):
+                src_col = col - 1
+        if src_col < 0:
+            return Optional[Tuple[Int, Int, Int, Int]]()
+        var src_b = Int(bytes[src_col])
+        if _is_open_bracket(src_b):
+            var close_b = _matching_closer(src_b)
+            var depth = 1
+            var r = row
+            var c = src_col + 1
+            var n_lines = self.buffer.line_count()
+            while r < n_lines:
+                var l = self.buffer.line(r)
+                var lb = l.as_bytes()
+                var ln = len(lb)
+                while c < ln:
+                    var b = Int(lb[c])
+                    if (b == src_b or b == close_b) \
+                            and self._bracket_in_skip_scope(r, c):
+                        c += 1
+                        continue
+                    if b == src_b:
+                        depth += 1
+                    elif b == close_b:
+                        depth -= 1
+                        if depth == 0:
+                            return Optional[Tuple[Int, Int, Int, Int]](
+                                (row, src_col, r, c),
+                            )
+                    c += 1
+                r += 1
+                c = 0
+            return Optional[Tuple[Int, Int, Int, Int]]()
+        # Closer: scan backwards.
+        var open_b = _matching_opener(src_b)
+        var depth = 1
+        var r = row
+        var c = src_col - 1
+        while r >= 0:
+            if c < 0:
+                r -= 1
+                if r < 0: break
+                c = self.buffer.line_length(r) - 1
+                continue
+            var l = self.buffer.line(r)
+            var lb = l.as_bytes()
+            if c >= len(lb):
+                c = len(lb) - 1
+            while c >= 0:
+                var b = Int(lb[c])
+                if (b == src_b or b == open_b) \
+                        and self._bracket_in_skip_scope(r, c):
+                    c -= 1
+                    continue
+                if b == src_b:
+                    depth += 1
+                elif b == open_b:
+                    depth -= 1
+                    if depth == 0:
+                        return Optional[Tuple[Int, Int, Int, Int]](
+                            (row, src_col, r, c),
+                        )
+                c -= 1
+            r -= 1
+            if r < 0: break
+            c = self.buffer.line_length(r) - 1
+        return Optional[Tuple[Int, Int, Int, Int]]()
+
     def _screen_row_for(
         self, layout: List[VisualLine],
         row: Int, col: Int,
@@ -4743,6 +4900,35 @@ struct Editor(Copyable, Movable):
                 0, len(layout), caret_sel, sel_attr,
                 extend_past_eol=True,
             )
+        # Bracket-match overlay: when the primary caret sits on / right
+        # after a bracket and the matching one exists, recolour both
+        # with ``bracket_attr``. White-on-magenta + bold is distinct
+        # from the cursor (BLUE on YELLOW), selection (LIGHT_GREEN on
+        # CYAN), and search-match (LIGHT_GREEN on MAGENTA — same bg
+        # but the fg differs and bracket-match is single-cell so
+        # confusion is low). Skipped during selection / multi-cursor
+        # because the visual would compete with the selection overlay
+        # and add no navigation value. The cursor block below repaints
+        # the source-side cell with BLUE-on-YELLOW so the cursor stays
+        # readable when it sits *on* the source bracket.
+        if focused and not self.has_extra_carets() \
+                and not self.has_selection():
+            var pair = self._find_bracket_match_at_cursor()
+            if pair:
+                var p = pair.value()
+                var bracket_attr = Attr(
+                    WHITE, MAGENTA, STYLE_BOLD,
+                )
+                self._paint_attr_at(
+                    canvas, painter, view, layout, text_x0,
+                    content_right, content_bottom,
+                    p[0], p[1], bracket_attr,
+                )
+                self._paint_attr_at(
+                    canvas, painter, view, layout, text_x0,
+                    content_right, content_bottom,
+                    p[2], p[3], bracket_attr,
+                )
         # Cursor block: a reverse-video cell on every caret position
         # when the editor is focused. The primary and any extras paint
         # identically — the user reads "this line is the focus" from
@@ -7172,6 +7358,15 @@ def _matching_closer(opener: Int) -> Int:
     if opener == 0x28: return 0x29  # ( )
     if opener == 0x5B: return 0x5D  # [ ]
     if opener == 0x7B: return 0x7D  # { }
+    return 0
+
+
+def _matching_opener(closer: Int) -> Int:
+    """Opening-bracket byte for a closer byte. Returns ``0`` for
+    non-bracket inputs so callers can guard with a nonzero check."""
+    if closer == 0x29: return 0x28  # ) (
+    if closer == 0x5D: return 0x5B  # ] [
+    if closer == 0x7D: return 0x7B  # } {
     return 0
 
 

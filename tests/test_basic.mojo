@@ -13814,6 +13814,121 @@ def test_text_log_incremental_layout_handles_trim() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
 
 
+def test_editor_bracket_match_finds_pair_under_cursor() raises:
+    """Cursor sitting on an opener returns the matching closer; same
+    for a cursor sitting on a closer (scans backward)."""
+    var ed = Editor(String("foo(bar)"))
+    ed.cursor_row = 0
+    ed.cursor_col = 3  # on '('
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    var p = m.value()
+    assert_equal(p[0], 0); assert_equal(p[1], 3)
+    assert_equal(p[2], 0); assert_equal(p[3], 7)
+    ed.cursor_col = 7  # on ')'
+    var m2 = ed._find_bracket_match_at_cursor()
+    assert_true(m2)
+    var p2 = m2.value()
+    assert_equal(p2[0], 0); assert_equal(p2[1], 7)
+    assert_equal(p2[2], 0); assert_equal(p2[3], 3)
+
+
+def test_editor_bracket_match_uses_char_just_behind_cursor() raises:
+    """Cursor sitting *after* a bracket (typical caret-between-glyphs
+    position) still matches the bracket immediately to its left."""
+    var ed = Editor(String("foo(bar)"))
+    ed.cursor_row = 0
+    ed.cursor_col = 8  # one past the ')'
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    var p = m.value()
+    assert_equal(p[1], 7)  # source = ')'
+    assert_equal(p[3], 3)  # match = '('
+
+
+def test_editor_bracket_match_respects_nesting() raises:
+    """Inner pairs don't fool the outer scan and vice versa."""
+    var ed = Editor(String("a(b(c)d)e"))
+    ed.cursor_row = 0
+    ed.cursor_col = 1  # outer '('
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    var p = m.value()
+    assert_equal(p[3], 7)  # outer ')'
+    ed.cursor_col = 3  # inner '('
+    var m2 = ed._find_bracket_match_at_cursor()
+    assert_true(m2)
+    var p2 = m2.value()
+    assert_equal(p2[3], 5)  # inner ')'
+
+
+def test_editor_bracket_match_across_lines() raises:
+    """Forward and backward scans cross row boundaries cleanly."""
+    var ed = Editor(String("if (\n    foo,\n    bar,\n)"))
+    ed.cursor_row = 0
+    ed.cursor_col = 3  # '(' on row 0
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    var p = m.value()
+    assert_equal(p[2], 3)  # ')' on row 3
+    assert_equal(p[3], 0)
+
+
+def test_editor_bracket_match_unbalanced_returns_none() raises:
+    """Missing partner gives ``None`` — no false matches."""
+    var ed = Editor(String("foo(bar"))
+    ed.cursor_row = 0
+    ed.cursor_col = 3  # unmatched '('
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(not m)
+
+
+def test_editor_bracket_match_no_bracket_at_cursor() raises:
+    """Cursor away from any bracket returns ``None``."""
+    var ed = Editor(String("foo(bar)"))
+    ed.cursor_row = 0
+    ed.cursor_col = 1  # on 'o'
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(not m)
+
+
+def test_editor_bracket_match_skips_brackets_in_strings() raises:
+    """A ``(`` that lives inside a string highlight must be ignored
+    by the matcher, so the outer ``(`` correctly pairs with the outer
+    ``)``. We synthesize the string-scope highlights directly rather
+    than running the tokenizer — keeps the test independent of which
+    grammars are bundled."""
+    # Source:    f("(", "z")
+    # Cols:      0 1 2 3 4 5 6 7 8 9 10
+    # The two '(' bytes inside the string literal at cols 3 sit
+    # inside a string span; the outer '(' at col 1 must match ')' at
+    # col 10, not the inner one.
+    var ed = Editor(String("f(\"(\", \"z\")"))
+    # Mark both string literals as string-attr highlights.
+    ed.highlights.append(Highlight(0, 2, 5, highlight_string_attr()))
+    ed.highlights.append(Highlight(0, 7, 10, highlight_string_attr()))
+    ed.cursor_row = 0
+    ed.cursor_col = 1  # outer '('
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    var p = m.value()
+    assert_equal(p[1], 1)
+    assert_equal(p[3], 10)
+
+
+def test_editor_bracket_match_source_inside_string_returns_none() raises:
+    """If the source bracket itself sits inside a string scope, the
+    matcher returns nothing — we don't want to confuse the user by
+    matching across a literal."""
+    var ed = Editor(String("f(\"(\", \"z\")"))
+    ed.highlights.append(Highlight(0, 2, 5, highlight_string_attr()))
+    ed.highlights.append(Highlight(0, 7, 10, highlight_string_attr()))
+    ed.cursor_row = 0
+    ed.cursor_col = 3  # '(' inside the string literal
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(not m)
+
+
 def test_editor_paint_collapsed_view_is_cheap() raises:
     """Maximizing the debug pane collapses the workspace to height 0,
     which gives editor windows a negative-height ``interior``. Without
@@ -14715,6 +14830,14 @@ def _run_chunk_05() raises:
     test_text_log_incremental_layout_matches_full_rewrap()
     test_text_log_incremental_layout_handles_trim()
     test_text_log_full_rewrap_on_width_change()
+    test_editor_bracket_match_finds_pair_under_cursor()
+    test_editor_bracket_match_uses_char_just_behind_cursor()
+    test_editor_bracket_match_respects_nesting()
+    test_editor_bracket_match_across_lines()
+    test_editor_bracket_match_unbalanced_returns_none()
+    test_editor_bracket_match_no_bracket_at_cursor()
+    test_editor_bracket_match_skips_brackets_in_strings()
+    test_editor_bracket_match_source_inside_string_returns_none()
     test_editor_paint_collapsed_view_is_cheap()
     test_editor_cmd_letter_does_not_insert()
     test_editor_cmd_a_selects_all()

@@ -73,7 +73,8 @@ struct InstallResult(ImplicitlyCopyable, Movable):
 struct InstallRunner(Movable):
     var active: Bool
     var label: String           # short label shown in the popup ("rust LSP")
-    var command: String         # the shell command we're running
+    var command: String         # the shell command we're running (display only)
+    var title_prefix: String    # popup title prefix ("Installing ", "Running ", …)
     var process: LspProcess     # owns pid + stdin/stdout/stderr fds
     var output: String          # rolling capture (capped at _OUTPUT_CAP)
     var _spinner_anchor_ms: Int
@@ -82,6 +83,7 @@ struct InstallRunner(Movable):
         self.active = False
         self.label = String("")
         self.command = String("")
+        self.title_prefix = String("Installing ")
         self.process = LspProcess()
         self.output = String("")
         self._spinner_anchor_ms = 0
@@ -101,6 +103,36 @@ struct InstallRunner(Movable):
         self.process = LspProcess.spawn(argv)
         self.label = label^
         self.command = command^
+        self.title_prefix = String("Installing ")
+        self.output = String("")
+        self._spinner_anchor_ms = monotonic_ms()
+        self.active = True
+
+    def start_argv(
+        mut self, var label: String, var argv: List[String],
+        var title_prefix: String,
+    ) raises:
+        """Spawn ``argv`` directly (no shell wrap) and start tracking it.
+        Use this for commands whose arguments must not go through shell
+        quoting — e.g. ``git commit -m <user-supplied message>``.
+
+        ``title_prefix`` is the popup title verb ("Running ", "Pushing ",
+        …) — concatenated with ``label`` for the title row."""
+        if self.active:
+            raise Error("install runner already active")
+        if len(argv) == 0:
+            raise Error("argv must not be empty")
+        self.process = LspProcess.spawn(argv)
+        # Display ``command`` as a shell-y rendering of argv; only used
+        # as the ``$ <command>`` header if a failure window gets opened.
+        var rendered = String("")
+        for i in range(len(argv)):
+            if i > 0:
+                rendered = rendered + String(" ")
+            rendered = rendered + argv[i]
+        self.label = label^
+        self.command = rendered^
+        self.title_prefix = title_prefix^
         self.output = String("")
         self._spinner_anchor_ms = monotonic_ms()
         self.active = True
@@ -170,6 +202,7 @@ struct InstallRunner(Movable):
         self.active = False
         self.label = String("")
         self.command = String("")
+        self.title_prefix = String("Installing ")
         self.output = String("")
         self._spinner_anchor_ms = 0
         self.process = LspProcess()
@@ -210,7 +243,7 @@ struct InstallRunner(Movable):
         # framework helper (left-aligned variant) since the spinner needs
         # the right end of the row.
         var spin = self._spinner_glyph()
-        var title = String(" Installing ") + self.label + String(" ")
+        var title = String(" ") + self.title_prefix + self.label + String(" ")
         var tx = rect.a.x + 1
         paint_window_title_at(canvas, Point(tx, rect.a.y), title, bg, bg)
         var sx = rect.b.x - 3

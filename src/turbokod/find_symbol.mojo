@@ -37,11 +37,14 @@ from .events import (
     KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
+from .file_io import ci_less
 from .geometry import Point, Rect
 from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, poll_stdin, read_into
+from .string_utils import starts_with
 from .text_field import TextField
+from .type_ahead import starts_with_ci
 from .view import RowCursor
 from .window import paint_window_title
 
@@ -268,6 +271,20 @@ struct FindSymbol(Movable):
     var state: UInt8
     var status_message: String
     var runner: _FindSymbolRunner
+    # True once the user has actively navigated (arrow keys, page,
+    # home/end, or click-to-select). Drives whether streaming inserts
+    # follow the user's chosen entry by name (preserve selection) or
+    # pin the selection to the top of the ranked list (best match).
+    var _user_navigated: Bool
+    # True when ``entries`` was supplied externally (via ``set_choices``)
+    # as a static list of resolved locations — i.e. the second step of
+    # the workspace/symbol disambiguation flow. In chooser mode the rg
+    # runner is silent, the query field freezes, and the rank/alpha
+    # reorder is skipped so the host's curated order is preserved.
+    var _chooser_mode: Bool
+    # The name the user picked in the first step. Shown in the input
+    # row so they can see what they're disambiguating; empty otherwise.
+    var _chooser_name: String
 
     def __init__(out self):
         self.active = False
@@ -286,6 +303,9 @@ struct FindSymbol(Movable):
         self.status_message = String("")
         self.runner = _FindSymbolRunner()
         self._input_rect = Rect(0, 0, 0, 0)
+        self._user_navigated = False
+        self._chooser_mode = False
+        self._chooser_name = String("")
 
     def open(mut self, var root: String):
         self.active = True
@@ -304,6 +324,9 @@ struct FindSymbol(Movable):
         self.status_message = String("")
         self.runner.cancel()
         self._input_rect = Rect(0, 0, 0, 0)
+        self._user_navigated = False
+        self._chooser_mode = False
+        self._chooser_name = String("")
 
     def close(mut self):
         self.active = False
@@ -318,6 +341,9 @@ struct FindSymbol(Movable):
         self.status_message = String("")
         self.runner.cancel()
         self._input_rect = Rect(0, 0, 0, 0)
+        self._user_navigated = False
+        self._chooser_mode = False
+        self._chooser_name = String("")
 
     def set_pending(mut self, var msg: String):
         self.state = _STATE_PENDING
@@ -332,6 +358,35 @@ struct FindSymbol(Movable):
         self.submitted = False
         return s
 
+    def is_choosing(self) -> Bool:
+        """True iff the picker is in location-chooser mode — i.e. the
+        host has populated ``entries`` with workspace/symbol results
+        and Enter should jump directly rather than firing another LSP
+        request."""
+        return self._chooser_mode
+
+    def set_choices(
+        mut self,
+        var name: String,
+        var choices: List[FindSymbolMatch],
+    ):
+        """Switch the picker into chooser mode with ``choices`` as the
+        static entry list. Used after a workspace/symbol response
+        returns multiple locations for ``name`` — the host hands us the
+        candidates and we let the user pick one. Locking the input
+        field keeps the chosen name visible without offering a second
+        round of rg streaming inside the chooser."""
+        self.runner.cancel()
+        self.entries = choices^
+        self.seen_names = List[String]()
+        self.selected = 0
+        self.scroll = 0
+        self._user_navigated = False
+        self._chooser_mode = True
+        self._chooser_name = name^
+        self.state = _STATE_IDLE
+        self.status_message = String("")
+
     # --- background pump --------------------------------------------------
 
     def tick(mut self):
@@ -342,13 +397,14 @@ struct FindSymbol(Movable):
         if not self.active or not self.runner.is_active():
             return
         var rows = self.runner.tick()
+        var added = False
         for i in range(len(rows)):
             if len(self.entries) >= _ENTRIES_CAP:
                 # Hit the cap — stop draining and silence the runner
                 # so we don't keep paying for parse work the user
                 # will never see.
                 self.runner.cancel()
-                return
+                break
             var row = rows[i]
             var path = row[0]
             var line_no = row[1]
@@ -361,6 +417,27 @@ struct FindSymbol(Movable):
                 continue
             self.seen_names.append(name)
             self.entries.append(FindSymbolMatch(name, path, line_no, col))
+            added = True
+        if not added:
+            return
+        # Remember which entry the user is sitting on so the rank/alpha
+        # reorder below doesn't yank their selection out from under
+        # them mid-stream. If they haven't actively navigated yet, the
+        # selection sticks to the top (the best-ranked entry).
+        var prev_selected_name = String("")
+        if self._user_navigated \
+                and 0 <= self.selected \
+                and self.selected < len(self.entries):
+            prev_selected_name = self.entries[self.selected].name
+        _sort_entries_ranked(self.entries, self.query.text)
+        if len(prev_selected_name.as_bytes()) > 0:
+            for i in range(len(self.entries)):
+                if self.entries[i].name == prev_selected_name:
+                    self.selected = i
+                    self._scroll_to_selection()
+                    return
+        self.selected = 0
+        self.scroll = 0
 
     def restart_runner(mut self):
         """Cancel any in-flight rg and start a fresh search for
@@ -374,6 +451,7 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.selected = 0
         self.scroll = 0
+        self._user_navigated = False
         self.runner.cancel()
         if len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
             return
@@ -413,14 +491,40 @@ struct FindSymbol(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
         painter.draw_box(canvas, rect, bg, False)
-        paint_window_title(canvas, rect, String(" Find Symbol "), bg, bg)
+        # Title switches to the chooser variant once the user has
+        # picked a name and the LSP has handed back >1 location, so
+        # the second-step purpose is obvious without an extra label
+        # row eating from the list height.
+        var title: String
+        if self._chooser_mode:
+            title = String(" Find Symbol — choose location for ") \
+                + self._chooser_name + String(" ")
+        else:
+            title = String(" Find Symbol ")
+        paint_window_title(canvas, rect, title, bg, bg)
         _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
         self._input_rect = layout.input_rect
-        self.query.paint(canvas, layout.input_rect, True)
+        if self._chooser_mode:
+            # Locked label in place of the editable input — the query
+            # is the name they already picked, retyping isn't useful
+            # here, and a non-blinking row reads as "frozen".
+            painter.fill(
+                canvas, layout.input_rect, String(" "), bg,
+            )
+            _ = painter.put_text(
+                canvas, Point(layout.input_rect.a.x, layout.input_rect.a.y),
+                self._chooser_name, bg,
+            )
+        else:
+            self.query.paint(canvas, layout.input_rect, True)
         var top = layout.list_top
         var h = layout.list_height
-        # Status / placeholder.
-        if self.state == _STATE_PENDING:
+        # Status / placeholder. Chooser mode skips this whole branch:
+        # entries are pre-populated by the host, so neither the query-
+        # too-short hint nor the "searching…" copy applies.
+        if self._chooser_mode:
+            pass
+        elif self.state == _STATE_PENDING:
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, top),
                 self.status_message, hint_attr,
@@ -447,6 +551,14 @@ struct FindSymbol(Movable):
             )
         # Listing — paints regardless of state so a leftover error
         # message above the list doesn't hide already-collected hits.
+        # In the initial (picker) mode each row is a unique symbol
+        # name with a single rg-derived ``entry.path`` (the first
+        # textual occurrence); the path adds noise without
+        # disambiguation power, so the row is just the name. In
+        # chooser mode the *name is identical on every row* (that's
+        # the whole point of the chooser), so we drop the name and
+        # render the relative ``path:line`` instead — that's the
+        # only thing that distinguishes candidates.
         for i in range(h):
             var idx = self.scroll + i
             if idx >= len(self.entries):
@@ -458,15 +570,25 @@ struct FindSymbol(Movable):
                 canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), row_attr,
             )
+            var name_x = rect.a.x + 2
+            if not self._chooser_mode:
+                _ = painter.put_text(
+                    canvas, Point(name_x, top + i), entry.name, row_attr,
+                )
+                continue
+            # Chooser row: ``relative-path:line``. Show just the path,
+            # not the symbol name (every row in this list shares the
+            # name we're disambiguating, so repeating it eats space
+            # and reads like noise).
+            var rel = _relativize(entry.path, self.root)
+            var label = rel + String(":") + String(entry.line)
+            var avail = rect.b.x - 1 - name_x
+            if avail < 1:
+                continue
+            var display = _truncate_path_to(label, avail)
             _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top + i),
-                entry.name, row_attr,
+                canvas, Point(name_x, top + i), display, row_attr,
             )
-            # Intentionally no path column: ``entry.path`` is the
-            # location of the *first textual occurrence* (a usage,
-            # almost always), not the definition the LSP will
-            # eventually take us to. Showing it would mislead the
-            # user about where the symbol actually lives.
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.hint_y),
@@ -501,7 +623,14 @@ struct FindSymbol(Movable):
             self.submitted = True
             return True
         if picker_nav_key(k, len(self.entries), self.selected):
+            self._user_navigated = True
             self._scroll_to_selection()
+            return True
+        # In chooser mode the entry list is locked, so any further
+        # typing in the input field is swallowed. Letting the field
+        # capture keys would scramble the visible chosen name without
+        # any effect on the static list — confusing, never useful.
+        if self._chooser_mode:
             return True
         var prev_query = self.query.text
         var r = self.query.handle_key(event)
@@ -530,7 +659,10 @@ struct FindSymbol(Movable):
             return True
         var rect = self._rect(screen)
         var layout = _build_layout(rect)
-        if self._input_rect.width() > 0 \
+        # Skip text-field mouse routing in chooser mode — the input is
+        # frozen and the field isn't visibly painted, so capturing
+        # clicks there would just move an invisible cursor.
+        if not self._chooser_mode and self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):
             return True
         if event.pressed and not event.motion:
@@ -560,6 +692,7 @@ struct FindSymbol(Movable):
             self.submitted = True
             return True
         self.selected = idx
+        self._user_navigated = True
         return True
 
     def _scroll_to_selection(mut self):
@@ -571,6 +704,175 @@ struct FindSymbol(Movable):
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _eq_ci(a: String, b: String) -> Bool:
+    """ASCII case-insensitive string equality. Used for the ``rank 0``
+    (exact match) test in the picker's ordering — identifiers are
+    ASCII per the rg regex, and rg's ``--smart-case`` is itself
+    case-insensitive on all-lowercase queries, so a case-sensitive
+    equality here would inconsistently exclude obvious matches."""
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    if len(ab) != len(bb):
+        return False
+    for i in range(len(ab)):
+        var ca = Int(ab[i])
+        var cb = Int(bb[i])
+        if 0x41 <= ca and ca <= 0x5A: ca += 0x20
+        if 0x41 <= cb and cb <= 0x5A: cb += 0x20
+        if ca != cb:
+            return False
+    return True
+
+
+def _query_has_upper(q: String) -> Bool:
+    """True iff ``q`` contains any ASCII uppercase byte. Gates the
+    smart-case promotion in ``_rank``: a capitalized query treats
+    case-different hits as a second-tier bucket so 'Project'
+    doesn't surface 'project' at the top of the list."""
+    var b = q.as_bytes()
+    for i in range(len(b)):
+        var c = Int(b[i])
+        if 0x41 <= c and c <= 0x5A:
+            return True
+    return False
+
+
+def _rank(name: String, query: String) -> Int:
+    """Picker-row sort priority. Lower wins.
+
+    Smart-case promotion: when ``query`` contains any uppercase byte
+    we treat it as case-sensitive, so a same-case hit beats a
+    case-different one. All-lowercase queries skip the case-sensitive
+    bucket pair and fall back to the plain case-insensitive ranking —
+    same idiom rg's ``--smart-case`` uses on the underlying search.
+
+    Ranks (lowest first):
+    0 — case-sensitive exact (uppercase queries only)
+    1 — case-sensitive startswith (uppercase queries only)
+    2 — case-insensitive exact
+    3 — case-insensitive startswith
+    4 — case-insensitive substring (the rg regex floor)
+    """
+    if _query_has_upper(query):
+        if name == query:
+            return 0
+        if starts_with(name, query):
+            return 1
+    if _eq_ci(name, query):
+        return 2
+    if starts_with_ci(name, query):
+        return 3
+    return 4
+
+
+def _sort_entries_ranked(
+    mut entries: List[FindSymbolMatch], query: String,
+):
+    """Reorder ``entries`` so exact matches lead, then startswith,
+    then plain substring. Within each rank bucket, entries land in
+    case-insensitive alphabetical order so the user sees a stable
+    sweep regardless of which file rg happened to scan first.
+
+    Two-pass: bucket-split (preserves insertion order), then a
+    case-insensitive insertion sort inside each bucket. Bucket sizes
+    are bounded by ``_ENTRIES_CAP`` (500), so the O(N²) insertion
+    sort is comfortably under the per-frame budget.
+    """
+    var b0 = List[FindSymbolMatch]()
+    var b1 = List[FindSymbolMatch]()
+    var b2 = List[FindSymbolMatch]()
+    var b3 = List[FindSymbolMatch]()
+    var b4 = List[FindSymbolMatch]()
+    for i in range(len(entries)):
+        var r = _rank(entries[i].name, query)
+        if r == 0:
+            b0.append(entries[i])
+        elif r == 1:
+            b1.append(entries[i])
+        elif r == 2:
+            b2.append(entries[i])
+        elif r == 3:
+            b3.append(entries[i])
+        else:
+            b4.append(entries[i])
+    _sort_bucket_alpha(b0)
+    _sort_bucket_alpha(b1)
+    _sort_bucket_alpha(b2)
+    _sort_bucket_alpha(b3)
+    _sort_bucket_alpha(b4)
+    # Write back in place — reassigning ``entries`` would only rebind
+    # the local parameter and the caller's list would stay unsorted.
+    var w = 0
+    for i in range(len(b0)):
+        entries[w] = b0[i]
+        w += 1
+    for i in range(len(b1)):
+        entries[w] = b1[i]
+        w += 1
+    for i in range(len(b2)):
+        entries[w] = b2[i]
+        w += 1
+    for i in range(len(b3)):
+        entries[w] = b3[i]
+        w += 1
+    for i in range(len(b4)):
+        entries[w] = b4[i]
+        w += 1
+
+
+def _relativize(path: String, root: String) -> String:
+    """If ``path`` lives under ``root``, return the suffix after the
+    root + ``/`` separator. Otherwise return ``path`` unchanged.
+
+    Used to format chooser-row labels: ``/Users/x/proj/foo/bar.py``
+    becomes ``foo/bar.py`` so the dialog isn't dominated by the
+    leading workspace prefix that's the same for every row anyway."""
+    var rb = root.as_bytes()
+    var pb = path.as_bytes()
+    if len(rb) == 0 or len(pb) < len(rb):
+        return path
+    for i in range(len(rb)):
+        if pb[i] != rb[i]:
+            return path
+    if len(pb) == len(rb):
+        return path
+    if pb[len(rb)] != 0x2F:   # '/'
+        return path
+    return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:len(pb)]))
+
+
+def _truncate_path_to(s: String, max_cols: Int) -> String:
+    """Truncate ``s`` to at most ``max_cols`` cells, dropping bytes
+    from the *front* and marking elision with a leading ``…``. Paths
+    are most informative at their tail (the filename), so a head-
+    elide keeps the meaningful end visible.
+
+    Byte-length is used in place of ``display_columns`` because
+    paths are almost always ASCII; a non-ASCII char will at worst
+    over-advance by a cell, which is fine for a display label."""
+    if max_cols <= 0:
+        return String("")
+    var b = s.as_bytes()
+    if len(b) <= max_cols:
+        return s
+    if max_cols == 1:
+        return String("…")
+    var start = len(b) - max_cols + 1
+    return String("…") \
+        + String(StringSlice(unsafe_from_utf8=b[start:len(b)]))
+
+
+def _sort_bucket_alpha(mut bucket: List[FindSymbolMatch]):
+    """In-place case-insensitive insertion sort on entry name."""
+    for i in range(1, len(bucket)):
+        var j = i
+        while j > 0 and ci_less(bucket[j].name, bucket[j - 1].name):
+            var tmp = bucket[j]
+            bucket[j] = bucket[j - 1]
+            bucket[j - 1] = tmp
+            j -= 1
 
 
 def _list_contains(haystack: List[String], needle: String) -> Bool:

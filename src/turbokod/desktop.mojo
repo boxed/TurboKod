@@ -107,7 +107,7 @@ from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
     dependency_dirs_for_language_id, find_language_for_extension,
 )
-from .lsp_dispatch import DefinitionResolved, LspManager
+from .lsp_dispatch import DefinitionResolved, LspManager, WorkspaceSymbolItem
 from .dap_dispatch import (
     DapConditionException, DapManager, DapStackFrame, DapTestEvaluation,
     DapVariable,
@@ -157,7 +157,7 @@ from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
-from .find_symbol import FindSymbol
+from .find_symbol import FindSymbol, FindSymbolMatch
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .window import (
@@ -521,15 +521,22 @@ struct Desktop(Movable):
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
     var find_symbol: FindSymbol
-    # Tracks which LSP manager owns the find-symbol-driven definition
-    # request. Lets the tick consumer distinguish "this response is
-    # for FindSymbol — close the picker" from a stray Cmd+click
-    # response. ``-1`` means no FindSymbol request is in flight.
-    var _find_symbol_lsp_idx: Int
+    # Indices of LSP managers we've sent a workspace/symbol request
+    # to as part of the Find Symbol submit flow but haven't yet
+    # received a response from. We send to every ready manager so a
+    # multi-language project (e.g. Python + Elm) surfaces matches
+    # from every server, then aggregate them into one chooser once
+    # the last response lands. Empty list means "no Find Symbol
+    # request in flight".
+    var _find_symbol_pending_lsps: List[Int]
+    # Items accumulated from already-responded LSPs while we still
+    # wait on the rest of ``_find_symbol_pending_lsps``. Drained
+    # into ``_resolve_find_symbol_workspace`` once the pending list
+    # empties.
+    var _find_symbol_collected: List[WorkspaceSymbolItem]
     # The rg hit that produced the in-flight LSP request, captured so
-    # the tick consumer can fall back to it when the LSP comes back
-    # empty (e.g. position is in a comment / string). Empty path means
-    # "no pending hit".
+    # the tick consumer can fall back to it when no LSP returns
+    # results. Empty path means "no pending hit".
     var _find_symbol_hit_path: String
     var _find_symbol_hit_line: Int
     var _find_symbol_hit_column: Int
@@ -873,7 +880,8 @@ struct Desktop(Movable):
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
         self.find_symbol = FindSymbol()
-        self._find_symbol_lsp_idx = -1
+        self._find_symbol_pending_lsps = List[Int]()
+        self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
         self._find_symbol_hit_line = 0
         self._find_symbol_hit_column = 0
@@ -3395,10 +3403,11 @@ struct Desktop(Movable):
             else:
                 _ = self.find_symbol.handle_mouse(event, screen)
             if not self.find_symbol.active:
-                # ESC inside handle_key — drop any in-flight LSP id and
-                # cached rg hit so a late response doesn't surprise-jump
-                # after close.
-                self._find_symbol_lsp_idx = -1
+                # ESC inside handle_key — drop any in-flight LSP
+                # bookkeeping and cached rg hit so a late response
+                # doesn't surprise-jump after close.
+                self._find_symbol_pending_lsps = List[Int]()
+                self._find_symbol_collected = List[WorkspaceSymbolItem]()
                 self._find_symbol_hit_path = String("")
                 return Optional[String]()
             if self.find_symbol.take_submitted():
@@ -4265,39 +4274,9 @@ struct Desktop(Movable):
         # focused.
         for i in range(len(self.lsp_managers)):
             var resolved = self.lsp_managers[i].tick()
-            var owns_find = (
-                self.find_symbol.active and i == self._find_symbol_lsp_idx
-            )
             if resolved:
-                if owns_find:
-                    # FindSymbol's request resolved — close the picker
-                    # and discard the cached rg hit (we have a real
-                    # def location now).
-                    self.find_symbol.close()
-                    self._find_symbol_lsp_idx = -1
-                    self._find_symbol_hit_path = String("")
                 self._jump_to(resolved.value(), screen)
             else:
-                # Empty response just landed: no source location.
-                # FindSymbol owns this case — instead of the docs
-                # fallback, jump to the rg hit we stashed on submit.
-                # Consume the empty-word latch so docs fallback below
-                # doesn't also fire.
-                if owns_find and self.lsp_managers[i].last_empty():
-                    _ = self.lsp_managers[i].take_empty_word()
-                    self.lsp_managers[i].clear_empty()
-                    var hit_path = self._find_symbol_hit_path
-                    var hit_line = self._find_symbol_hit_line
-                    var hit_col = self._find_symbol_hit_column
-                    self.find_symbol.close()
-                    self._find_symbol_lsp_idx = -1
-                    self._find_symbol_hit_path = String("")
-                    if len(hit_path.as_bytes()) > 0:
-                        self._jump_to(
-                            DefinitionResolved(hit_path, hit_line, hit_col),
-                            screen,
-                        )
-                    continue
                 # Standard docs fallback: stdlib symbols (the common
                 # case for this branch) live in DevDocs even when the
                 # LSP can't see source for them.
@@ -4310,6 +4289,29 @@ struct Desktop(Movable):
                         # with the stale "no definition found" one on
                         # the next tick.
                         self.lsp_managers[i].clear_empty()
+            # Workspace symbol response routes the second step of the
+            # Find Symbol picker. We sent the request to every ready
+            # LSP at submit time, so each manager response drains
+            # into ``_find_symbol_collected``; once the last pending
+            # LSP has responded we hand the aggregate to the resolver
+            # (0 → rg hit fallback, 1 → jump, ≥2 → chooser).
+            if self.find_symbol.active \
+                    and not self.find_symbol.is_choosing() \
+                    and _list_contains_int(
+                        self._find_symbol_pending_lsps, i,
+                    ) \
+                    and self.lsp_managers[i].has_pending_workspace_symbols():
+                var ws_items = self.lsp_managers[i].take_workspace_symbols()
+                for k in range(len(ws_items)):
+                    self._find_symbol_collected.append(ws_items[k])
+                _list_remove_int(self._find_symbol_pending_lsps, i)
+                if len(self._find_symbol_pending_lsps) == 0:
+                    var all_items = self._find_symbol_collected^
+                    self._find_symbol_collected = \
+                        List[WorkspaceSymbolItem]()
+                    self._resolve_find_symbol_workspace(
+                        all_items^, screen,
+                    )
             if self.symbol_pick.active and self.symbol_pick.loading \
                     and self.lsp_managers[i].has_pending_symbols():
                 self.symbol_pick.set_entries(
@@ -4401,6 +4403,10 @@ struct Desktop(Movable):
         var maybe_install = self.install_runner.tick()
         if maybe_install:
             self._on_install_complete(maybe_install.value(), screen)
+        # Drive the LocalChanges async git runner (commit / push / pull /
+        # amend / revert) the same way. ``tick`` is a no-op when the
+        # modal is closed or idle.
+        self.local_changes.tick()
         self._refresh_lsp_status()
 
     def _on_install_complete(
@@ -6635,20 +6641,34 @@ struct Desktop(Movable):
                 Attr(RED, LIGHT_GRAY),
             )
             return
-        self._find_symbol_lsp_idx = -1
+        self._find_symbol_pending_lsps = List[Int]()
+        self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
         self.find_symbol.open(self.project.value())
 
     def _submit_find_symbol(mut self, screen: Rect):
-        """Take the picker's selected entry and resolve it via LSP.
+        """Resolve the picker's selected entry through the LSP's
+        workspace symbol index.
 
-        The entry's ``(path, line, column)`` is the *first textual
-        occurrence* of the chosen symbol name, so it's almost always
-        a usage rather than the definition. We read that file and
-        send ``textDocument/definition`` at the entry's position;
-        the LSP follows the usage back to the def. Falls back to
-        jumping directly to the entry on no-LSP / send-failure
-        paths so the user always lands somewhere useful.
+        Two-step flow: step one is the rg-derived name list, step two
+        is the LSP's location chooser. Which step we're in is decided
+        by ``find_symbol.is_choosing()``.
+
+        Step one (name pick) sends ``workspace/symbol(name)`` on
+        *every* ready LSP — a multi-language project (Python + Elm,
+        say) typically has one definition per language, and asking
+        only the LSP that owns the rg hit would silently drop the
+        other language's match. Responses stream back through the
+        tick loop into ``_find_symbol_collected``; once every
+        pending LSP has reported, the resolver picks 0 → rg hit
+        fallback, 1 → direct jump, ≥2 → chooser.
+
+        Step two (chooser pick) takes the selected location and jumps
+        directly — no further LSP roundtrip, since the workspace
+        symbol entry already carries the definition site.
+
+        Every error path falls back to the rg hit so the user always
+        lands somewhere useful.
         """
         if not self.find_symbol.active:
             return
@@ -6659,38 +6679,124 @@ struct Desktop(Movable):
         if len(path.as_bytes()) == 0:
             self.find_symbol.set_error(String("No selection."))
             return
-        var lsp_idx = self._lsp_for_path(path)
-        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
-            # No usable LSP — direct jump.
+        if self.find_symbol.is_choosing():
+            # Chooser pick: the workspace symbol entry is already the
+            # definition site, so jump straight there.
             self.find_symbol.close()
-            self._find_symbol_lsp_idx = -1
+            self._find_symbol_pending_lsps = List[Int]()
+            self._find_symbol_collected = List[WorkspaceSymbolItem]()
+            self._find_symbol_hit_path = String("")
             self._jump_to(
                 DefinitionResolved(path, line, col), screen,
             )
             return
-        var text = self._snapshot_or_read(path)
-        if not text:
-            self.find_symbol.set_error(
-                String("Could not read ") + path,
-            )
-            return
-        var ok = self.lsp_managers[lsp_idx].request_definition(
-            path, line, col, name, text.value(),
-        )
-        if not ok:
+        # Spray workspace/symbol across every ready LSP. A failed
+        # send (server crashed mid-session, e.g.) just doesn't get
+        # added to the pending list — we'll resolve with whatever
+        # the other servers return.
+        var pending = List[Int]()
+        for li in range(len(self.lsp_managers)):
+            if not self.lsp_managers[li].is_ready():
+                continue
+            if self.lsp_managers[li].request_workspace_symbols(name):
+                pending.append(li)
+        if len(pending) == 0:
+            # No LSP available — fall back to the rg hit so the user
+            # at least lands at a usage site.
             self.find_symbol.close()
-            self._find_symbol_lsp_idx = -1
+            self._find_symbol_pending_lsps = List[Int]()
             self._jump_to(
                 DefinitionResolved(path, line, col), screen,
             )
             return
-        self._find_symbol_lsp_idx = lsp_idx
+        self._find_symbol_pending_lsps = pending^
+        self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = path
         self._find_symbol_hit_line = line
         self._find_symbol_hit_column = col
         self.find_symbol.set_pending(
             String("Resolving ") + name + String(" via LSP…"),
         )
+
+    def _resolve_find_symbol_workspace(
+        mut self,
+        var items: List[WorkspaceSymbolItem],
+        screen: Rect,
+    ):
+        """Resolve the aggregated workspace/symbol responses for the
+        Find Symbol picker. Called from the LSP tick loop once every
+        manager in ``_find_symbol_pending_lsps`` has reported.
+
+        Filters to entries whose name matches the picked name
+        case-sensitively — if the user typed ``Project`` we don't
+        want ``project`` showing up in the chooser even when a
+        server's fuzzy match returned it.
+
+        Three outcomes:
+        - **0 items**: no server returned a definition under the
+          exact name. Fall back to the rg textual hit so the user
+          still lands inside source — same fallback the rg-only
+          flow used to do.
+        - **1 item**: skip the chooser, jump directly. The common
+          "one definition, no ambiguity" case (functions,
+          single-class modules).
+        - **≥2 items**: hand the candidates to the chooser. The
+          picker stays open with the locked name on top and the
+          locations listed below; the second Enter jumps.
+        """
+        var name = self.find_symbol.selected_name
+        var hit_path = self._find_symbol_hit_path
+        var hit_line = self._find_symbol_hit_line
+        var hit_col = self._find_symbol_hit_column
+        var filtered = List[WorkspaceSymbolItem]()
+        for k in range(len(items)):
+            if items[k].name == name:
+                filtered.append(items[k])
+        # Dedupe by (path, line): multiple LSPs in the same project
+        # occasionally see the same file (e.g. an LSP-friendly
+        # toolchain proxy) and would otherwise produce duplicate rows.
+        var deduped = List[WorkspaceSymbolItem]()
+        for k in range(len(filtered)):
+            var dup = False
+            for j in range(len(deduped)):
+                if deduped[j].path == filtered[k].path \
+                        and deduped[j].line == filtered[k].line:
+                    dup = True
+                    break
+            if not dup:
+                deduped.append(filtered[k])
+        if len(deduped) == 0:
+            self.find_symbol.close()
+            self._find_symbol_pending_lsps = List[Int]()
+            self._find_symbol_hit_path = String("")
+            if len(hit_path.as_bytes()) > 0:
+                self._jump_to(
+                    DefinitionResolved(hit_path, hit_line, hit_col),
+                    screen,
+                )
+            return
+        if len(deduped) == 1:
+            var it = deduped[0]
+            self.find_symbol.close()
+            self._find_symbol_pending_lsps = List[Int]()
+            self._find_symbol_hit_path = String("")
+            self._jump_to(
+                DefinitionResolved(it.path, it.line, it.character), screen,
+            )
+            return
+        var choices = List[FindSymbolMatch]()
+        for k in range(len(deduped)):
+            # FindSymbolMatch holds 1-based (line, column) like rg's
+            # output; workspace symbols arrive 0-based. The chooser's
+            # submit handler subtracts 1 before passing to _jump_to.
+            choices.append(FindSymbolMatch(
+                deduped[k].name,
+                deduped[k].path,
+                deduped[k].line + 1,
+                deduped[k].character + 1,
+            ))
+        self.find_symbol.set_choices(name, choices^)
+        self._find_symbol_pending_lsps = List[Int]()
 
     def _snapshot_or_read(self, path: String) -> Optional[String]:
         """Return the editor's live buffer text for ``path`` if any
@@ -8354,6 +8460,25 @@ def _refresh_status_for(
                 "(restart, …)."
             ),
         )
+
+
+def _list_contains_int(haystack: List[Int], needle: Int) -> Bool:
+    """Linear membership check for ``List[Int]``. Used by the Find
+    Symbol pending-LSP tracking — the list is bounded by the number
+    of running LSPs (typically 1–3), so the O(N) cost is negligible."""
+    for i in range(len(haystack)):
+        if haystack[i] == needle:
+            return True
+    return False
+
+
+def _list_remove_int(mut haystack: List[Int], needle: Int):
+    """Remove the first occurrence of ``needle`` from ``haystack``,
+    preserving order. No-op when not present."""
+    for i in range(len(haystack)):
+        if haystack[i] == needle:
+            _ = haystack.pop(i)
+            return
 
 
 def _rg_missing_window() -> Window:
