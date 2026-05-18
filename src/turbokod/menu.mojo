@@ -619,12 +619,15 @@ struct MenuBar(Movable):
                     self.tracking = True
                 return MenuResult(Optional[String](), True)
             if self.open_idx >= 0:
-                # In sticky mode, pressing on a dropdown item triggers it.
+                # Press on a dropdown item: highlight + start tracking,
+                # but DON'T fire — like a button, actions only run on
+                # release. A press-release that starts and ends on the
+                # same item still fires (the release branch handles it).
                 var item_hit = self._item_at(event.pos, screen_width)
                 if item_hit >= 0:
-                    var action = self.menus[self.open_idx].items[item_hit].action
-                    self.open_menu(-1)
-                    return MenuResult(Optional[String](action), True)
+                    self.selected_item = item_hit
+                    self.tracking = True
+                    return MenuResult(Optional[String](), True)
                 # Press on a dropdown separator or border: eat it, stay open.
                 var dr = self._dropdown_rect(screen_width)
                 if dr.contains(event.pos):

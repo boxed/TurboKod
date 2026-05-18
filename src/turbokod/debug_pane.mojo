@@ -501,6 +501,13 @@ struct DebugPane(Copyable, Movable):
         self.clear()
         self.output.clear()
 
+    def clear_output(mut self):
+        """Wipe just the Output log (scrollback). Inspect state
+        (stack / locals / watches) is left alone — the user clicks
+        Clear to drop noisy backlog, not to lose a paused debugger's
+        context."""
+        self.output.clear()
+
     # --- pending-intent accessors ----------------------------------------
 
     def consume_frame_click(mut self) -> Tuple[Int, Int]:

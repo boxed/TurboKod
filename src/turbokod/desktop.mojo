@@ -298,6 +298,7 @@ comptime DEBUG_PAUSE             = String("debug:pause")
 comptime DEBUG_ADD_WATCH         = String("debug:add_watch")
 comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
+comptime DEBUG_CLEAR_OUTPUT      = String("debug:clear_output")
 # Project-target run/debug actions. ``TARGET_RUN`` (Cmd+R) launches
 # the active target's ``run_command`` as a captured subprocess;
 # ``TARGET_DEBUG`` (Cmd+D) launches the same target under DAP. Each
@@ -4211,6 +4212,9 @@ struct Desktop(Movable):
             # other dock drops focus in the same call.
             self._focus_dock(DOCK_DEBUG_PANE)
             return Optional[String]()
+        if action == DEBUG_CLEAR_OUTPUT:
+            self.debug_pane.clear_output()
+            return Optional[String]()
         if action == FILE_TREE_FOCUS:
             self._focus_dock(DOCK_FILE_TREE)
             return Optional[String]()
@@ -5234,6 +5238,11 @@ struct Desktop(Movable):
             out.append(TitleCommand(
                 String("[↻ Restart]"), DEBUG_START_OR_CONTINUE,
             ))
+        # Clear button is always available — the user can wipe stale
+        # backlog whether or not a session is currently running.
+        out.append(TitleCommand(
+            String("[⌫ Clear]"), DEBUG_CLEAR_OUTPUT,
+        ))
         return out^
 
     def _mark_subtle_frames(

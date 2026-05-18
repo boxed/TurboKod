@@ -67,6 +67,12 @@ struct DiagnosticMenu(Movable):
     var anchor_x: Int
     var anchor_y: Int
     var selected: Int
+    var tracking: Bool
+    """True between a captured left-press inside the menu and its
+    matching release. Like a button, the action only fires on
+    release; a release that arrives without a prior tracked press
+    is ignored so the release of the right-click that opened the
+    menu can never auto-trigger an action."""
 
     def __init__(out self):
         self.active = False
@@ -76,6 +82,7 @@ struct DiagnosticMenu(Movable):
         self.anchor_x = 0
         self.anchor_y = 0
         self.selected = 0
+        self.tracking = False
 
     def open(mut self, var message: String, anchor: Point):
         self.message = message^
@@ -85,12 +92,14 @@ struct DiagnosticMenu(Movable):
         self.submitted = False
         self.action = DIAG_MENU_ACTION_NONE
         self.selected = 0
+        self.tracking = False
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.action = DIAG_MENU_ACTION_NONE
         self.message = String("")
+        self.tracking = False
 
     def _row_count(self) -> Int:
         return 1
@@ -153,21 +162,41 @@ struct DiagnosticMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+        """Button-like press / release model. A press inside an
+        actionable row arms tracking and highlights; the action only
+        fires when the matching release lands inside the menu (drag
+        off-and-release cancels, like ``ShadowButton``). Press outside
+        dismisses immediately. Releases without a prior tracked press
+        are non-events — that's what stops the right-click that opened
+        the menu from auto-firing on its trailing release."""
         if not self.active:
             return DIAG_MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
             return DIAG_MENU_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
+        if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return DIAG_MENU_HIT_NONE
         var rect = self._rect(screen)
-        if not rect.contains(event.pos):
+        var inside = rect.contains(event.pos)
+        if event.pressed:
+            if not inside:
+                self._resolve(DIAG_MENU_ACTION_NONE)
+                return DIAG_MENU_HIT_OUTSIDE
+            var row = event.pos.y - _row_y(rect)
+            if row < 0 or row >= self._row_count():
+                return DIAG_MENU_HIT_INSIDE
+            self.selected = row
+            self.tracking = True
+            return DIAG_MENU_HIT_INSIDE
+        # Release.
+        if not self.tracking:
+            return DIAG_MENU_HIT_NONE
+        self.tracking = False
+        if not inside:
             self._resolve(DIAG_MENU_ACTION_NONE)
             return DIAG_MENU_HIT_OUTSIDE
         var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
             return DIAG_MENU_HIT_INSIDE
-        self.selected = row
         if row == 0:
             self._resolve(DIAG_MENU_ACTION_COPY)
         return DIAG_MENU_HIT_INSIDE

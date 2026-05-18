@@ -52,6 +52,10 @@ struct LspStatusMenu(Movable):
     var anchor_x: Int
     var anchor_y: Int
     var selected: Int
+    var tracking: Bool
+    """True between a captured left-press inside the menu and its
+    matching release. Like a button, the action only fires on
+    release; a release without a prior tracked press is a non-event."""
 
     def __init__(out self):
         self.active = False
@@ -60,6 +64,7 @@ struct LspStatusMenu(Movable):
         self.anchor_x = 0
         self.anchor_y = 0
         self.selected = 0
+        self.tracking = False
 
     def open(mut self, anchor: Point):
         self.anchor_x = anchor.x
@@ -68,11 +73,13 @@ struct LspStatusMenu(Movable):
         self.submitted = False
         self.action = LSP_MENU_ACTION_NONE
         self.selected = 0
+        self.tracking = False
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.action = LSP_MENU_ACTION_NONE
+        self.tracking = False
 
     def _row_count(self) -> Int:
         return 1
@@ -139,21 +146,38 @@ struct LspStatusMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+        """Button-like press / release model. Press inside arms
+        tracking + highlights; release inside fires the action.
+        Releases without a prior tracked press are non-events so the
+        right-click release that opened the menu can't auto-trigger."""
         if not self.active:
             return LSP_MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
             return LSP_MENU_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
+        if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return LSP_MENU_HIT_NONE
         var rect = self._rect(screen)
-        if not rect.contains(event.pos):
+        var inside = rect.contains(event.pos)
+        if event.pressed:
+            if not inside:
+                self._resolve(LSP_MENU_ACTION_NONE)
+                return LSP_MENU_HIT_OUTSIDE
+            var row = event.pos.y - _row_y(rect)
+            if row < 0 or row >= self._row_count():
+                return LSP_MENU_HIT_INSIDE
+            self.selected = row
+            self.tracking = True
+            return LSP_MENU_HIT_INSIDE
+        # Release.
+        if not self.tracking:
+            return LSP_MENU_HIT_NONE
+        self.tracking = False
+        if not inside:
             self._resolve(LSP_MENU_ACTION_NONE)
             return LSP_MENU_HIT_OUTSIDE
         var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
             return LSP_MENU_HIT_INSIDE
-        self.selected = row
         if row == 0:
             self._resolve(LSP_MENU_ACTION_RESTART)
         return LSP_MENU_HIT_INSIDE

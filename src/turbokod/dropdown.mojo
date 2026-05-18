@@ -78,6 +78,11 @@ struct Dropdown(Copyable, Movable):
     var _type_ahead: TypeAhead
     """Type-to-search buffer (shared with file lists). Reset on
     ``open`` / ``close``."""
+    var _tracking: Bool
+    """True between a captured left-press on a popup option row and
+    its matching release. Like a button, commit only fires on
+    release; a release without a tracked press is a non-event so
+    the body-toggle's trailing release can't commit by accident."""
 
     def __init__(out self, var options: List[String], index: Int = 0):
         self.options = options^
@@ -86,6 +91,7 @@ struct Dropdown(Copyable, Movable):
         self.highlight = 0
         self._scroll = 0
         self._type_ahead = TypeAhead()
+        self._tracking = False
         self._clip_index()
 
     def __copyinit__(mut self, copy: Self):
@@ -95,6 +101,7 @@ struct Dropdown(Copyable, Movable):
         self.highlight = copy.highlight
         self._scroll = copy._scroll
         self._type_ahead = copy._type_ahead
+        self._tracking = copy._tracking
 
     def _clip_index(mut self):
         var n = len(self.options)
@@ -151,10 +158,12 @@ struct Dropdown(Copyable, Movable):
         self.highlight = self.index if self.index >= 0 else 0
         self._scroll_to_highlight()
         self._type_ahead.reset()
+        self._tracking = False
 
     def close(mut self):
         self.is_open = False
         self._type_ahead.reset()
+        self._tracking = False
 
     def type_to_search(mut self, ch: String) -> Bool:
         """Extend the prefix buffer with ``ch`` and jump the highlight
@@ -362,17 +371,23 @@ struct Dropdown(Copyable, Movable):
         """Treat ``event`` as a candidate click on the dropdown.
 
         Returns one of the ``DROPDOWN_HIT_*`` codes:
-        * ``BODY`` — click on the collapsed strip; the dropdown has
+        * ``BODY`` — press on the collapsed strip; the dropdown has
           been toggled. Caller should also set focus to this widget.
-        * ``POPUP`` — click landed inside the open popup. The
-          dropdown handled the click (selection commit, scroll, etc.).
-        * ``OUTSIDE`` — click landed outside both anchor and popup
+        * ``POPUP`` — event landed inside the open popup (option
+          highlight on press, commit on release, scroll wheel). The
+          dropdown handled the event.
+        * ``OUTSIDE`` — press landed outside both anchor and popup
           while open. The dropdown auto-closed; the caller should
           treat the event as falling through to its own dispatch.
         * ``NONE`` — neither the strip nor the popup were touched
           and the dropdown didn't change state.
-        Drag-motion and release events return ``NONE``.
-        """
+        Drag-motion events return ``NONE``.
+
+        Button-like commit: pressing a popup option highlights it and
+        arms tracking; the option only commits when the matching
+        release lands inside the popup (drag off-and-release cancels).
+        Releases without a prior tracked press are non-events so the
+        body-toggle's own release can't accidentally commit a row."""
         if event.kind != EVENT_MOUSE:
             return DROPDOWN_HIT_NONE
         # Wheel inside an open popup scrolls the highlight.
@@ -384,26 +399,44 @@ struct Dropdown(Copyable, Movable):
             if event.button == MOUSE_WHEEL_DOWN and pr.contains(event.pos):
                 self._step(1)
                 return DROPDOWN_HIT_POPUP
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
+        if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return DROPDOWN_HIT_NONE
-        if anchor.contains(event.pos):
-            self.toggle()
-            return DROPDOWN_HIT_BODY
-        if self.is_open:
-            var pr = self.popup_rect(anchor, screen)
-            if pr.contains(event.pos):
-                # Pick the option under the cursor and commit.
-                var row = event.pos.y - (pr.a.y + 1)
-                var idx = self._scroll + row
-                if 0 <= idx and idx < len(self.options):
-                    self.highlight = idx
-                    self.index = idx
-                    self.close()
-                return DROPDOWN_HIT_POPUP
-            # Click landed elsewhere with the popup open: close and
-            # let the caller route the event to whatever it really
-            # belongs to.
+        if event.pressed:
+            if anchor.contains(event.pos):
+                self.toggle()
+                return DROPDOWN_HIT_BODY
+            if self.is_open:
+                var pr = self.popup_rect(anchor, screen)
+                if pr.contains(event.pos):
+                    # Highlight the row under the cursor + arm
+                    # tracking; commit happens on release.
+                    var row = event.pos.y - (pr.a.y + 1)
+                    var idx = self._scroll + row
+                    if 0 <= idx and idx < len(self.options):
+                        self.highlight = idx
+                        self._tracking = True
+                    return DROPDOWN_HIT_POPUP
+                # Press elsewhere with the popup open: close and
+                # let the caller route the event to whatever it
+                # really belongs to.
+                self.close()
+                return DROPDOWN_HIT_OUTSIDE
+            return DROPDOWN_HIT_NONE
+        # Release. Only meaningful while we hold a tracked press.
+        if not self._tracking:
+            return DROPDOWN_HIT_NONE
+        self._tracking = False
+        if not self.is_open:
+            return DROPDOWN_HIT_NONE
+        var pr = self.popup_rect(anchor, screen)
+        if not pr.contains(event.pos):
+            # Drag-off-and-release cancels the commit, like a button.
+            # The popup stays open so the user can keep navigating.
+            return DROPDOWN_HIT_POPUP
+        var row = event.pos.y - (pr.a.y + 1)
+        var idx = self._scroll + row
+        if 0 <= idx and idx < len(self.options):
+            self.highlight = idx
+            self.index = idx
             self.close()
-            return DROPDOWN_HIT_OUTSIDE
-        return DROPDOWN_HIT_NONE
+        return DROPDOWN_HIT_POPUP

@@ -623,6 +623,17 @@ struct TextLog(Copyable, Movable):
         if first < 0:
             first = 0
         self.last_first_visual = first
+        # Keep ``self.scroll`` (= last visible row) in sync with the
+        # actual painted ``first``. Without this, autoscroll lets
+        # ``self.scroll`` go stale while new lines arrive, and the
+        # next ``scroll_by`` from the user jumps relative to that
+        # stale value — wheel-up by 1 from the bottom would warp the
+        # view far above the last seen rows instead of just nudging
+        # one row up.
+        if visible > 0:
+            self.scroll = first + visible - 1
+        else:
+            self.scroll = first
         paint_text_segments(
             canvas, view, self.lines, self.last_visual,
             first, visible, self.line_attrs, self.default_attr,

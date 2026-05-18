@@ -6610,8 +6610,9 @@ def test_menu_drag_release_outside_closes() raises:
 
 def test_menu_click_then_click_flow() raises:
     """Sticky/Mac-style flow: a click that lands on File and releases there
-    leaves the menu open in non-tracking mode; a separate later click on a
-    dropdown item then triggers it."""
+    leaves the menu open in non-tracking mode; a separate later press +
+    release on a dropdown item then triggers it (release fires, like a
+    button)."""
     var bar = MenuBar()
     var items = List[MenuItem]()
     items.append(MenuItem(String("Save"), EDITOR_SAVE))
@@ -6629,11 +6630,19 @@ def test_menu_click_then_click_flow() raises:
     )
     assert_equal(bar.open_idx, 0)
     assert_false(bar.tracking)
-    # Second click: press on dropdown item triggers it (no drag needed).
+    # Second click: press on the dropdown item highlights + re-arms tracking
+    # but does NOT fire; the release is what runs the action.
     var dr = bar._dropdown_rect(80)
     var item_y = dr.a.y + 1
-    var r = bar.handle_event(
+    var press = bar.handle_event(
         Event.mouse_event(Point(dr.a.x + 2, item_y), MOUSE_BUTTON_LEFT, True, False),
+        80,
+    )
+    assert_false(press.action)
+    assert_true(bar.tracking)
+    assert_true(bar.is_open())
+    var r = bar.handle_event(
+        Event.mouse_event(Point(dr.a.x + 2, item_y), MOUSE_BUTTON_LEFT, False, False),
         80,
     )
     assert_true(r.action)
@@ -9916,6 +9925,23 @@ def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
         Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, False, False),
         panel,
     )
+
+
+def test_debug_pane_clear_output_wipes_log() raises:
+    """``clear_output`` empties the output backlog but leaves inspect
+    state alone — the Clear button on the pane is meant to drop
+    noisy backlog without disturbing a paused debugger's locals."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    for i in range(5):
+        pane.append_output(String("noise ") + String(i))
+    assert_equal(len(pane.output.lines), 5)
+    pane.clear_output()
+    assert_equal(len(pane.output.lines), 0)
+    # Autoscroll should be re-armed so the next batch of output pins
+    # to the bottom from a clean slate.
+    assert_true(pane.output.autoscroll)
 
 
 def test_debug_pane_long_output_line_soft_wraps() raises:
@@ -14008,6 +14034,55 @@ def test_text_log_full_rewrap_on_width_change() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
     # Sanity: the wider layout has fewer rows than the narrow one.
     assert_true(len(log.last_visual) < len(first_pass))
+
+
+def test_text_log_autoscroll_pins_to_bottom_on_append() raises:
+    """While ``autoscroll`` is True, new lines arriving must keep the
+    last row visible — ``last_first_visual`` shifts as content grows
+    so the bottom of the log stays at the bottom of the view."""
+    var log = TextLog(default_attr())
+    var canvas = Canvas(40, 12)
+    var view = Rect(0, 0, 20, 5)
+    for i in range(8):
+        log.append(String("row ") + String(i))
+    log.paint(canvas, view)
+    var before = log.last_first_visual
+    # Append more lines and re-paint. With autoscroll on, the visible
+    # window must slide down so the bottom row is still at the
+    # bottom — ``last_first_visual`` increases by exactly the row
+    # count we added.
+    log.append(String("row 8"))
+    log.append(String("row 9"))
+    log.paint(canvas, view)
+    assert_true(log.autoscroll)
+    assert_equal(log.last_first_visual, before + 2)
+    # And the actual painted bottom row matches the freshest line.
+    assert_equal(canvas.get(0, 4).glyph, String("r"))   # 'row 9'
+    assert_equal(canvas.get(4, 4).glyph, String("9"))
+
+
+def test_text_log_scroll_stays_in_sync_during_autoscroll() raises:
+    """``self.scroll`` must track the painted bottom row while
+    autoscroll is on. Without this, a wheel-up from the bottom after
+    fresh output would warp the view back to a stale row instead of
+    nudging one row up from the actually-visible bottom."""
+    var log = TextLog(default_attr())
+    var canvas = Canvas(40, 12)
+    var view = Rect(0, 0, 20, 5)
+    for i in range(20):
+        log.append(String("line ") + String(i))
+    log.paint(canvas, view)
+    # 20 visual rows (each line is short, fits in one row); visible=5.
+    # Last visible row = 19, first = 15.
+    assert_true(log.autoscroll)
+    assert_equal(log.scroll, 19)
+    assert_equal(log.last_first_visual, 15)
+    # Wheel up one row — should disengage autoscroll and shift the
+    # window by exactly one row, not jump to row 0.
+    log.scroll_by(-1)
+    assert_false(log.autoscroll)
+    log.paint(canvas, view)
+    assert_equal(log.last_first_visual, 14)
 
 
 def test_text_field_scrolls_to_keep_cursor_visible() raises:

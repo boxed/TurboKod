@@ -63,6 +63,10 @@ struct GitGutterMenu(Movable):
     var anchor_x: Int
     var anchor_y: Int
     var selected: Int
+    var tracking: Bool
+    """True between a captured left-press inside the menu and its
+    matching release. Like a button, the action only fires on
+    release; a release without a prior tracked press is a non-event."""
 
     def __init__(out self):
         self.active = False
@@ -72,6 +76,7 @@ struct GitGutterMenu(Movable):
         self.anchor_x = 0
         self.anchor_y = 0
         self.selected = 0
+        self.tracking = False
 
     def open(mut self, row: Int, anchor: Point):
         self.row = row
@@ -81,12 +86,14 @@ struct GitGutterMenu(Movable):
         self.submitted = False
         self.action = GUTTER_ACTION_NONE
         self.selected = 0
+        self.tracking = False
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.action = GUTTER_ACTION_NONE
         self.row = -1
+        self.tracking = False
 
     def _row_count(self) -> Int:
         return 1
@@ -151,21 +158,37 @@ struct GitGutterMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+        """Button-like press / release model. Press inside arms
+        tracking + highlights; release inside fires the action.
+        Releases without a prior tracked press are non-events."""
         if not self.active:
             return GUTTER_HIT_NONE
         if event.kind != EVENT_MOUSE:
             return GUTTER_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
+        if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return GUTTER_HIT_NONE
         var rect = self._rect(screen)
-        if not rect.contains(event.pos):
+        var inside = rect.contains(event.pos)
+        if event.pressed:
+            if not inside:
+                self._resolve(GUTTER_ACTION_NONE)
+                return GUTTER_HIT_OUTSIDE
+            var row = event.pos.y - _row_y(rect)
+            if row < 0 or row >= self._row_count():
+                return GUTTER_HIT_INSIDE
+            self.selected = row
+            self.tracking = True
+            return GUTTER_HIT_INSIDE
+        # Release.
+        if not self.tracking:
+            return GUTTER_HIT_NONE
+        self.tracking = False
+        if not inside:
             self._resolve(GUTTER_ACTION_NONE)
             return GUTTER_HIT_OUTSIDE
         var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
             return GUTTER_HIT_INSIDE
-        self.selected = row
         if row == 0:
             self._resolve(GUTTER_ACTION_REVERT)
         return GUTTER_HIT_INSIDE

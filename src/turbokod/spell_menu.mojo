@@ -100,6 +100,11 @@ struct SpellMenu(Movable):
     it falls through to ``SPELL_ACTION_NONE``. The label still appears
     so the user gets a hint about why it's there."""
 
+    var tracking: Bool
+    """True between a captured left-press inside the menu and its
+    matching release. Like a button, the action only fires on
+    release; a release without a prior tracked press is a non-event."""
+
     def __init__(out self):
         self.active = False
         self.submitted = False
@@ -109,6 +114,7 @@ struct SpellMenu(Movable):
         self.anchor_y = 0
         self.selected = 0
         self.has_project = False
+        self.tracking = False
 
     def open(
         mut self, var word: String, anchor: Point, has_project: Bool,
@@ -128,12 +134,14 @@ struct SpellMenu(Movable):
         self.submitted = False
         self.action = SPELL_ACTION_NONE
         self.selected = 0
+        self.tracking = False
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.action = SPELL_ACTION_NONE
         self.word = String("")
+        self.tracking = False
 
     def _row_count(self) -> Int:
         # Always show both rows; project is greyed when ``not has_project``.
@@ -256,21 +264,38 @@ struct SpellMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+        """Button-like press / release model. Press inside a row arms
+        tracking + highlights; the action only fires when the matching
+        release lands inside (drag off-and-release cancels). Releases
+        without a prior tracked press are non-events."""
         if not self.active:
             return SPELL_HIT_NONE
         if event.kind != EVENT_MOUSE:
             return SPELL_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
+        if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return SPELL_HIT_NONE
         var rect = self._rect(screen)
-        if not rect.contains(event.pos):
+        var inside = rect.contains(event.pos)
+        if event.pressed:
+            if not inside:
+                self._resolve(SPELL_ACTION_NONE)
+                return SPELL_HIT_OUTSIDE
+            var row = event.pos.y - _rows_top(rect)
+            if row < 0 or row >= self._row_count():
+                return SPELL_HIT_INSIDE
+            self.selected = row
+            self.tracking = True
+            return SPELL_HIT_INSIDE
+        # Release.
+        if not self.tracking:
+            return SPELL_HIT_NONE
+        self.tracking = False
+        if not inside:
             self._resolve(SPELL_ACTION_NONE)
             return SPELL_HIT_OUTSIDE
         var row = event.pos.y - _rows_top(rect)
         if row < 0 or row >= self._row_count():
             return SPELL_HIT_INSIDE
-        self.selected = row
         if row == 0:
             self._resolve(SPELL_ACTION_ADD_USER)
         elif row == 1 and self.has_project:
