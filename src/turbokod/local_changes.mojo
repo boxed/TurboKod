@@ -963,6 +963,12 @@ struct LocalChanges(Movable):
     var _git_op_label: String   # short label flashed in the success status
     var _git_revert_path: String  # path being reverted (for _GITOP_REVERT)
     var _git_revert_untracked: Bool
+    # Last submitted commit message that hasn't yet succeeded. Saved in
+    # ``_submit_commit`` before the overlay closes; cleared in ``tick``
+    # when the commit op reaps ok. Used to pre-fill the commit prompt
+    # so a hook failure (or other rejection) doesn't force the user to
+    # retype the message. Persists across modal close/reopen.
+    var _pending_commit_message: String
 
     def __init__(out self):
         self.active = False
@@ -1007,6 +1013,7 @@ struct LocalChanges(Movable):
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
+        self._pending_commit_message = String("")
 
     def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -2670,6 +2677,8 @@ struct LocalChanges(Movable):
             return
         self.overlay = _OVERLAY_COMMIT
         self.overlay_input = TextField()
+        if len(self._pending_commit_message.as_bytes()) > 0:
+            self.overlay_input.set_text(self._pending_commit_message.copy())
         self.overlay_message = String("")
 
     def _open_amend_confirm(mut self):
@@ -2784,6 +2793,10 @@ struct LocalChanges(Movable):
         argv.append(String("commit"))
         argv.append(String("-m"))
         argv.append(msg)
+        # Remember the message so a hook rejection / other failure can
+        # repopulate the prompt next time — ``tick`` clears this on a
+        # successful reap.
+        self._pending_commit_message = msg.copy()
         # Close the commit-message overlay first so the spinner popup
         # isn't drawn behind the modal box. ``_start_git_op`` will flash
         # an inline status overlay on failure.
@@ -2890,6 +2903,8 @@ struct LocalChanges(Movable):
             msg = fallback^
         if ok:
             self._refresh_full()
+        if op == _GITOP_COMMIT and ok:
+            self._pending_commit_message = String("")
         self._show_status(msg^, ok)
         self._git_op_label = String("")
         if op == _GITOP_REVERT:
