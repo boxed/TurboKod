@@ -1,11 +1,13 @@
-"""Per-project window session, persisted in
-``<project>/.turbokod/session.json``.
+"""Per-user window session, persisted in
+``<project>/.turbokod/per_user/<username>/session.json``.
 
 Captures the list of file-backed editor windows currently open, their
 geometry (rect + maximized state + restore rect), per-buffer view state
 (cursor row/col, scroll), the z-order, and which window is focused.
 Restored when the project is opened with no current windows so the user
-lands back where they left off.
+lands back where they left off. The ``per_user/<username>`` segment
+mirrors ``view_state_store`` / ``breakpoint_store`` so an accidental
+``git add .turbokod`` doesn't clobber a teammate's open-window set.
 
 Format on disk::
 
@@ -39,10 +41,12 @@ from .json import (
     json_str, parse_json,
     json_get_bool, json_get_int, json_get_string,
 )
+from .posix import getenv_value
 
 
-comptime SESSION_DIR  = String(".turbokod")
-comptime SESSION_FILE = String("session.json")
+comptime SESSION_DIR_PROJECT  = String(".turbokod")
+comptime SESSION_DIR_PER_USER = String("per_user")
+comptime SESSION_FILE         = String("session.json")
 
 
 struct SessionWindow(ImplicitlyCopyable, Movable):
@@ -124,10 +128,26 @@ struct Session(Movable):
         self.focused = copy.focused
 
 
+def _current_username() -> String:
+    """Best-effort username for the per-user directory. Tries ``$USER``
+    then ``$LOGNAME`` — both POSIX-standard. Falls back to ``"default"``
+    so we still produce a valid path on a machine with an empty
+    environment."""
+    var user = getenv_value(String("USER"))
+    if len(user.as_bytes()) > 0:
+        return user^
+    var logname = getenv_value(String("LOGNAME"))
+    if len(logname.as_bytes()) > 0:
+        return logname^
+    return String("default")
+
+
 def _session_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
-    return join_path(project_root, SESSION_DIR)
+    var d = join_path(project_root, SESSION_DIR_PROJECT)
+    d = join_path(d, SESSION_DIR_PER_USER)
+    return join_path(d, _current_username())
 
 
 def _session_path(project_root: String) -> String:
@@ -142,6 +162,19 @@ def _ensure_dir(path: String):
         return
     var c_path = path + String("\0")
     _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
+
+
+def _ensure_dirs(project_root: String):
+    """``mkdir`` only creates one level, so walk the parents top-down to
+    handle the ``per_user/<username>`` nesting on first use."""
+    if len(project_root.as_bytes()) == 0:
+        return
+    var top = join_path(project_root, SESSION_DIR_PROJECT)
+    _ensure_dir(top)
+    var per_user = join_path(top, SESSION_DIR_PER_USER)
+    _ensure_dir(per_user)
+    var user_dir = join_path(per_user, _current_username())
+    _ensure_dir(user_dir)
 
 
 def _has_prefix(s: String, prefix: String) -> Bool:
@@ -256,9 +289,10 @@ def _parse_session_window(node: JsonValue) -> SessionWindow:
 
 
 def load_session(project_root: String) -> Session:
-    """Parse ``<project>/.turbokod/session.json``. Any failure (missing
-    file, malformed JSON, missing keys) yields an empty session — the
-    caller distinguishes by checking ``len(session.windows)``."""
+    """Parse ``<project>/.turbokod/per_user/<username>/session.json``.
+    Any failure (missing file, malformed JSON, missing keys) yields an
+    empty session — the caller distinguishes by checking
+    ``len(session.windows)``."""
     var out = Session()
     var path = _session_path(project_root)
     if len(path.as_bytes()) == 0:
@@ -352,12 +386,12 @@ def encode_session(session: Session) -> String:
 
 
 def save_session(project_root: String, session: Session) -> Bool:
-    """Rewrite ``<project>/.turbokod/session.json`` from ``session``.
-    Creates the ``.turbokod`` directory if missing. Returns the
-    underlying ``write_file`` success bool — the Desktop ignores
+    """Rewrite ``<project>/.turbokod/per_user/<username>/session.json``
+    from ``session``. Creates the directory chain if missing. Returns
+    the underlying ``write_file`` success bool — the Desktop ignores
     failures (the user can keep editing; we'll just retry next paint)."""
     var path = _session_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dir(_session_dir(project_root))
+    _ensure_dirs(project_root)
     return write_file(path, encode_session(session))

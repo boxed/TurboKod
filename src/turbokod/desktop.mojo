@@ -798,8 +798,9 @@ struct Desktop(Movable):
     # happened. Cleared when a new run/debug starts, the project
     # closes, or the user dismisses the pane (ESC while focused).
     var _run_output_held: Bool
-    # Per-project window session, persisted in
-    # ``<project>/.turbokod/session.json``. ``_pending_restore`` is
+    # Per-user window session, persisted in
+    # ``<project>/.turbokod/per_user/<username>/session.json``.
+    # ``_pending_restore`` is
     # raised when a project is opened (or auto-detected) so the next
     # ``paint`` performs the restore — needs ``screen`` for window
     # placement, which only ``paint`` has handy. ``_last_session_json``
@@ -815,9 +816,9 @@ struct Desktop(Movable):
     var _pending_restore_refit: Optional[Session]
     # Per-user breakpoint persistence. Mirrors the session-store pattern
     # — re-encode after every dap_tick and write only when the encoding
-    # differs. Lives next to ``session.json`` but under
-    # ``per_user/<username>/`` so accidentally committing ``.turbokod``
-    # doesn't clobber a teammate's set.
+    # differs. Stored under ``per_user/<username>/`` alongside the
+    # session so accidentally committing ``.turbokod`` doesn't clobber
+    # a teammate's set.
     var _last_breakpoints_json: String
     # Per-user, per-file view-state persistence (scroll + cursor),
     # separate from ``session.json``. Survives window close: a session
@@ -2636,8 +2637,8 @@ struct Desktop(Movable):
         self._last_view_states_json = String("")
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
-        # guard and leaves the on-disk session.json intact. Reopening
-        # the project then restores exactly these files.
+        # guard and leaves the on-disk session intact. Reopening the
+        # project then restores exactly these files.
         self._close_all_editor_windows()
 
     def _reset_no_project_menu(mut self):
@@ -3011,7 +3012,8 @@ struct Desktop(Movable):
             self._last_session_json = encoded
 
     def _restore_session(mut self, screen: Rect):
-        """Recreate windows from ``<project>/.turbokod/session.json``.
+        """Recreate windows from
+        ``<project>/.turbokod/per_user/<username>/session.json``.
 
         Files already open are left in place (so calling this from the
         ``open_file`` flow doesn't duplicate the user's freshly-opened

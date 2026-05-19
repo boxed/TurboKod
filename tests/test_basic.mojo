@@ -36,7 +36,7 @@ from turbokod.save_as_dialog import SaveAsDialog
 from turbokod.scrollbar import HScrollbar, VScrollbar
 from turbokod.session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
-    encode_session, load_session, save_session,
+    _session_path, encode_session, load_session, save_session,
 )
 from turbokod.breakpoint_store import (
     StoredBreakpoint, encode_breakpoints, load_breakpoints, save_breakpoints,
@@ -153,7 +153,7 @@ from turbokod.highlight import (
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
     word_at,
 )
-from turbokod.posix import getenv_value, monotonic_ms
+from turbokod.posix import getenv_value, monotonic_ms, which
 from turbokod.spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
     has_spell_noinspection_directive,
@@ -8551,6 +8551,218 @@ def test_lsp_initialize_against_mojo_lsp_server() raises:
         client.terminate()
 
 
+def test_ty_offers_quickfix_for_missing_any_import() raises:
+    """Spawn ``ty server``, open a Python file that uses ``Any`` without
+    importing it, and ask for ``textDocument/codeAction`` on the resulting
+    ``unresolved-reference`` diagnostic. Assert ty returns at least one
+    ``quickfix`` whose ``WorkspaceEdit`` inserts ``from typing import Any``.
+
+    This pins ty's auto-fix-for-missing-imports behavior — the question
+    that motivated the test was whether ty actually offers an import
+    quickfix here (it does, as of ty 0.0.34). When our diagnostic menu
+    grows a "Quick fix" option, this test guards against ty silently
+    dropping the feature out from under us. Skipped silently if ``ty``
+    isn't on ``$PATH`` so the suite still passes on dev machines that
+    haven't installed it.
+    """
+    if len(which(String("ty")).as_bytes()) == 0:
+        assert_true(True)
+        return
+    # Workspace dir that ty will treat as its project root. Files outside
+    # any workspace get partial analysis from ty, so we set one up
+    # explicitly and point ``rootUri`` at it.
+    var dir = String("/tmp/turbokod_ty_quickfix_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var py_path = dir + String("/probe.py")
+    assert_true(write_file(py_path, String("def f(x: Any) -> Any:\n    return x\n")))
+    var root_uri = String("file://") + dir
+    var doc_uri = String("file://") + py_path
+
+    var argv = List[String]()
+    argv.append(String("ty"))
+    argv.append(String("server"))
+    var client = LspClient.spawn(argv, dir)
+
+    # initialize — advertise codeAction client capability with a
+    # ``codeActionLiteralSupport`` valueSet that includes ``quickfix``,
+    # otherwise some servers return only command objects (or nothing).
+    var params = json_object()
+    params.put(String("processId"), json_int(0))
+    params.put(String("rootUri"), json_str(root_uri))
+    var folders = json_array()
+    var folder = json_object()
+    folder.put(String("uri"), json_str(root_uri))
+    folder.put(String("name"), json_str(String("ty_quickfix")))
+    folders.append(folder^)
+    params.put(String("workspaceFolders"), folders^)
+    var caps = json_object()
+    var text_doc_caps = json_object()
+    var ca_caps = json_object()
+    var ca_literal = json_object()
+    var ca_kind = json_object()
+    var kind_values = json_array()
+    kind_values.append(json_str(String("")))
+    kind_values.append(json_str(String("quickfix")))
+    ca_kind.put(String("valueSet"), kind_values^)
+    ca_literal.put(String("codeActionKind"), ca_kind^)
+    ca_caps.put(String("codeActionLiteralSupport"), ca_literal^)
+    text_doc_caps.put(String("codeAction"), ca_caps^)
+    caps.put(String("textDocument"), text_doc_caps^)
+    params.put(String("capabilities"), caps^)
+    var init_id = client.send_request(String("initialize"), params^)
+
+    var saw_init = False
+    for _ in range(200):
+        var maybe = client.poll(Int32(50))
+        if maybe and Bool(maybe.value().id) \
+                and maybe.value().id.value() == init_id:
+            saw_init = True
+            break
+    if not saw_init:
+        var err = client.process.drain_stderr()
+        client.terminate()
+        raise Error(String("ty: no initialize response; stderr=") + err)
+    client.send_notification(String("initialized"), json_object())
+
+    # didOpen with the offending source — triggers ty's diagnostics.
+    var did_open = json_object()
+    var doc = json_object()
+    doc.put(String("uri"), json_str(doc_uri))
+    doc.put(String("languageId"), json_str(String("python")))
+    doc.put(String("version"), json_int(1))
+    doc.put(String("text"), json_str(
+        String("def f(x: Any) -> Any:\n    return x\n")
+    ))
+    did_open.put(String("textDocument"), doc^)
+    client.send_notification(String("textDocument/didOpen"), did_open^)
+
+    # Drain notifications until publishDiagnostics for our URI arrives
+    # with a non-empty diagnostic list. ty emits one publishDiagnostics
+    # immediately on didOpen, so a few hundred ms is plenty.
+    var diag_params: Optional[JsonValue] = Optional[JsonValue]()
+    for _ in range(200):
+        var maybe = client.poll(Int32(50))
+        if not maybe:
+            continue
+        var msg = maybe.value().copy()
+        if Int(msg.kind) != Int(LSP_NOTIFICATION):
+            continue
+        if not Bool(msg.method) \
+                or msg.method.value() != String("textDocument/publishDiagnostics"):
+            continue
+        if not Bool(msg.params):
+            continue
+        var pv = msg.params.value().copy()
+        var uri_v = pv.object_get(String("uri"))
+        if not uri_v or uri_v.value().as_str() != doc_uri:
+            continue
+        var diags_v = pv.object_get(String("diagnostics"))
+        if not diags_v or not diags_v.value().is_array():
+            continue
+        if diags_v.value().array_len() == 0:
+            continue
+        diag_params = Optional[JsonValue](pv^)
+        break
+    if not diag_params:
+        var err = client.process.drain_stderr()
+        client.terminate()
+        raise Error(String("ty: no diagnostics published; stderr=") + err)
+
+    var pv = diag_params.value().copy()
+    var diags = pv.object_get(String("diagnostics")).value().copy()
+    var first_diag = diags.array_at(0)
+    var range_v = first_diag.object_get(String("range")).value().copy()
+
+    # textDocument/codeAction with the diagnostic carried in ``context``.
+    var ca_params = json_object()
+    var ca_doc = json_object()
+    ca_doc.put(String("uri"), json_str(doc_uri))
+    ca_params.put(String("textDocument"), ca_doc^)
+    ca_params.put(String("range"), range_v.copy())
+    var ctx = json_object()
+    var ctx_diags = json_array()
+    ctx_diags.append(first_diag.copy())
+    ctx.put(String("diagnostics"), ctx_diags^)
+    ca_params.put(String("context"), ctx^)
+    var ca_id = client.send_request(String("textDocument/codeAction"), ca_params^)
+
+    var ca_result: Optional[JsonValue] = Optional[JsonValue]()
+    for _ in range(200):
+        var maybe = client.poll(Int32(50))
+        if not maybe:
+            continue
+        var msg = maybe.value().copy()
+        if Int(msg.kind) != Int(LSP_RESPONSE):
+            continue
+        if not Bool(msg.id) or msg.id.value() != ca_id:
+            continue
+        if Bool(msg.result):
+            ca_result = Optional[JsonValue](msg.result.value().copy())
+        break
+    if not ca_result:
+        var err = client.process.drain_stderr()
+        client.terminate()
+        raise Error(String("ty: no codeAction response; stderr=") + err)
+
+    # The result must be a non-empty array; at least one entry must be a
+    # ``quickfix`` whose WorkspaceEdit inserts ``from typing import Any``.
+    var actions = ca_result.value().copy()
+    assert_true(actions.is_array())
+    assert_true(actions.array_len() > 0)
+    var found_typing_any = False
+    for i in range(actions.array_len()):
+        var action = actions.array_at(i)
+        if not action.is_object():
+            continue
+        var kind_v = action.object_get(String("kind"))
+        if not kind_v or kind_v.value().as_str() != String("quickfix"):
+            continue
+        var edit_v = action.object_get(String("edit"))
+        if not edit_v or not edit_v.value().is_object():
+            continue
+        var changes_v = edit_v.value().object_get(String("changes"))
+        if not changes_v or not changes_v.value().is_object():
+            continue
+        var file_edits_v = changes_v.value().object_get(doc_uri)
+        if not file_edits_v or not file_edits_v.value().is_array():
+            continue
+        var file_edits = file_edits_v.value().copy()
+        for j in range(file_edits.array_len()):
+            var te = file_edits.array_at(j)
+            var new_text_v = te.object_get(String("newText"))
+            if not new_text_v:
+                continue
+            var nt = new_text_v.value().as_str()
+            if nt.find(String("from typing import Any")) >= 0:
+                found_typing_any = True
+                break
+        if found_typing_any:
+            break
+    assert_true(found_typing_any)
+
+    # Best-effort shutdown so we don't leak a ty subprocess.
+    var shutdown_id = client.send_request(String("shutdown"), json_null())
+    for _ in range(40):
+        var maybe = client.poll(Int32(50))
+        if maybe and Bool(maybe.value().id) \
+                and maybe.value().id.value() == shutdown_id:
+            break
+    client.send_notification(String("exit"), json_null())
+    var exited = False
+    for _ in range(20):
+        if client.process.try_reap():
+            exited = True
+            break
+    if not exited:
+        client.terminate()
+    _ = external_call["unlink", Int32]((py_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
 def test_dap_classify_response() raises:
     var resp = parse_json(String(
         "{\"seq\":3,\"type\":\"response\",\"request_seq\":1,"
@@ -10659,7 +10871,7 @@ def test_session_round_trip() raises:
     """A persisted session should decode to the same fields it was
     encoded from. Covers the full ``encode_session`` → ``parse_json``
     → ``load_session`` path against a temp project root so the test
-    doesn't touch the repo's own ``.turbokod/session.json``."""
+    doesn't touch the repo's own per-user session file."""
     var root = String("/tmp/turbokod_session_test_round_trip")
     # Clean up any prior run so a stale ``.turbokod/`` doesn't shadow
     # the empty-state assertion below.
@@ -10727,9 +10939,46 @@ def test_session_round_trip() raises:
     )
 
 
+def test_session_per_user_path() raises:
+    """The on-disk session file lives under ``per_user/<USER>/`` next
+    to breakpoints.json / view_states.json — keeps each developer's
+    open-window set separate, so an accidental ``git add .turbokod``
+    doesn't restore a teammate's layout on this checkout."""
+    var root = String("/tmp/turbokod_session_per_user_test")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var user_env = String("USER=carol_test\0")
+    _ = external_call["putenv", Int32](user_env.unsafe_ptr())
+    var s = Session()
+    var w = SessionWindow()
+    w.path = String("main.py")
+    w.rect_a_x = 0
+    w.rect_a_y = 1
+    w.rect_b_x = 40
+    w.rect_b_y = 20
+    w.restore_a_x = 0
+    w.restore_a_y = 1
+    w.restore_b_x = 40
+    w.restore_b_y = 20
+    s.windows.append(w^)
+    s.focused = 0
+    assert_true(save_session(root, s))
+    var expected = root + String(
+        "/.turbokod/per_user/carol_test/session.json"
+    )
+    assert_true(stat_file(expected).ok)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
 def test_session_load_missing_returns_empty() raises:
-    """A project root with no ``.turbokod/session.json`` should yield
-    an empty session — that's the signal ``_restore_session`` uses to
+    """A project root with no persisted session file should yield an
+    empty session — that's the signal ``_restore_session`` uses to
     skip the restore path entirely."""
     var s = load_session(String("/tmp/turbokod_session_does_not_exist_abcxyz"))
     assert_equal(len(s.windows), 0)
@@ -11319,7 +11568,7 @@ def test_desktop_save_then_restore_round_trip_through_paint() raises:
     d1.windows.windows[1].is_maximized = False
     d1.windows.focused = 1
     d1.paint(canvas, screen)
-    var session_path = root + String("/.turbokod/session.json")
+    var session_path = _session_path(root)
     assert_true(stat_file(session_path).ok)
 
     # --- session 2: fresh Desktop, restore via paint ---------------------
@@ -14814,6 +15063,7 @@ def _run_chunk_04() raises:
     test_lsp_write_message_queues_bytes_when_fd_is_unavailable()
     test_lsp_write_overflow_resets_queue_and_latches_flag()
     test_lsp_initialize_against_mojo_lsp_server()
+    test_ty_offers_quickfix_for_missing_any_import()
     test_dap_classify_response()
     test_dap_classify_event()
     test_dap_classify_reverse_request()
@@ -14881,6 +15131,7 @@ def _run_chunk_05() raises:
     test_targets_dialog_esc_discards_edits()
     test_run_session_lifecycle()
     test_session_round_trip()
+    test_session_per_user_path()
     test_session_load_missing_returns_empty()
     test_breakpoint_store_round_trip()
     test_breakpoint_store_load_missing_returns_empty()

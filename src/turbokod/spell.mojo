@@ -52,7 +52,8 @@ def user_dict_path() -> String:
 
 def project_dict_path(project_root: String) -> String:
     """``<project>/.turbokod/dictionary.txt``, or ``""`` when no project
-    is open. Sits beside ``targets.json`` / ``session.json`` so it gets
+    is open. Sits beside ``targets.json`` (and the ``per_user/`` subtree
+    that holds per-developer session/view/breakpoint state) so it gets
     picked up by the same ``.turbokod/`` directory the user already has
     in version control (or .gitignore)."""
     if len(project_root.as_bytes()) == 0:
