@@ -312,6 +312,10 @@ comptime TARGET_DEBUG            = String("target:debug")
 # target — the language guess is enough to pick a sensible default
 # (``python -m pytest`` for Python projects).
 comptime TARGET_TEST             = String("target:test")
+# ``TARGET_TEST_DEBUG`` (Cmd+Shift+D) runs the same test command as
+# ``TARGET_TEST`` but launches it under the DAP adapter for the
+# project's language, so breakpoints fire inside the test suite.
+comptime TARGET_TEST_DEBUG       = String("target:test_debug")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
 # the active tab to that index. The dispatch parser walks the
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
@@ -1193,6 +1197,10 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("t")), MOD_META, TARGET_TEST,
+        ))
+        # Cmd+Shift+D — run the test suite under the DAP debugger.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("d")), MOD_META | MOD_SHIFT, TARGET_TEST_DEBUG,
         ))
         # Cmd+` / Cmd+Shift+` — cycle through windows forward / backward
         # in stable insertion order. Shift+` produces ``~`` on US
@@ -3592,18 +3600,30 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 TARGET_SELECT_PREFIX + String(tab_idx), screen,
             )
-        # Click on the right-aligned LSP indicator opens an info window
-        # listing all running language servers, their argv, and state.
-        # Right-click on the same rect opens a contextual menu with a
-        # single ``Restart LSP`` action.
+        # Click on the right-aligned status indicator opens an info
+        # window for whichever subsystem currently owns the message
+        # slot. The slot is shared between LSP and DAP, so we route
+        # by the owner tag the producer stamped on the message —
+        # without that, clicking on a "DAP: failed — …" indicator
+        # would land in the LSP dialog. Right-click on an LSP-owned
+        # indicator opens its contextual menu (``Restart LSP``).
         if event.kind == EVENT_MOUSE \
                 and event.pressed and not event.motion \
                 and self.status_bar.hit_test_message(event.pos, screen):
+            var owner = self.status_bar.message_owner
             if event.button == MOUSE_BUTTON_LEFT:
-                self._open_lsp_info_window(screen)
+                if owner == String("dap"):
+                    self._open_dap_info_window(screen)
+                else:
+                    self._open_lsp_info_window(screen)
                 return Optional[String]()
             if event.button == MOUSE_BUTTON_RIGHT:
-                self.lsp_status_menu.open(event.pos)
+                if owner == String("dap"):
+                    # No DAP-side menu yet; left-click info dialog covers
+                    # the "what happened" use case.
+                    self._open_dap_info_window(screen)
+                else:
+                    self.lsp_status_menu.open(event.pos)
                 return Optional[String]()
         # Window tab bar (one row above status bar). Same rationale as
         # the status-bar tabs: route the click to the named window
@@ -4249,6 +4269,9 @@ struct Desktop(Movable):
         if action == TARGET_TEST:
             self._target_test()
             return Optional[String]()
+        if action == TARGET_TEST_DEBUG:
+            self._target_test_debug()
+            return Optional[String]()
         if starts_with(action, TARGET_SELECT_PREFIX):
             var idx = parse_int_prefix(
                 action, len(TARGET_SELECT_PREFIX.as_bytes()),
@@ -4725,6 +4748,94 @@ struct Desktop(Movable):
         var was_max = self._frontmost_maximized()
         self.windows.add(Window.editor_window(
             String("Language servers"), rect, body^,
+        ))
+        self._open_count += 1
+        if was_max:
+            var idx = len(self.windows.windows) - 1
+            self.windows.windows[idx].toggle_maximize(workspace)
+
+    def _open_dap_info_window(mut self, screen: Rect):
+        """Open a window summarizing the current DAP session — adapter
+        name, command line, resolved binary path, state, full failure
+        reason, captured stderr, and trace-log location. Triggered by
+        clicking the DAP indicator on the right of the status bar, which
+        is the user's recovery path for ``DAP: failed — initialize
+        rejected`` and similar messages whose status-bar form is too
+        short to be actionable."""
+        var lines = List[String]()
+        var state: String
+        if self.dap.is_failed():
+            state = String("FAILED — ") + self.dap.failure_reason
+        elif self.dap.is_terminated():
+            state = String("terminated")
+        elif self.dap.is_active():
+            if self.dap.is_stopped():
+                state = String("stopped")
+            else:
+                state = String("running")
+        else:
+            state = String("not started")
+        var adapter = self.dap.adapter_name
+        if len(adapter.as_bytes()) == 0:
+            adapter = String("(none)")
+        var language = self.dap.language_id
+        if len(language.as_bytes()) == 0:
+            language = String("(unknown)")
+        lines.append(String("adapter:  ") + adapter)
+        lines.append(String("language: ") + language)
+        lines.append(String("state:    ") + state)
+        var argv = self.dap.spawn_argv.copy()
+        if len(argv) > 0:
+            var cmd = String("")
+            for k in range(len(argv)):
+                if k > 0:
+                    cmd += String(" ")
+                cmd += argv[k]
+            var resolved = which(argv[0])
+            if len(resolved.as_bytes()) == 0:
+                resolved = String("(not on PATH)")
+            lines.append(String("command:  ") + cmd)
+            lines.append(String("path:     ") + resolved)
+        else:
+            lines.append(String("command:  (not spawned)"))
+        # The streaming trace lives at a fixed path opened in ``start``.
+        # Surfacing it here turns "click for details" into the gateway
+        # to the full handshake transcript when the captured-stderr
+        # snapshot below isn't enough.
+        lines.append(String("trace:    /tmp/turbokod-dap.log"))
+        # Captured stderr — the user-visible smoking gun when an
+        # adapter dies mid-handshake. ``drain_stderr`` is destructive
+        # at the OS level but ``DapManager`` keeps a 16 KB rolling
+        # buffer so we can show it after the fact.
+        var err = self.dap.captured_stderr()
+        if len(err.as_bytes()) > 0:
+            lines.append(String(""))
+            lines.append(String("stderr:"))
+            var start = 0
+            var eb = err.as_bytes()
+            for k in range(len(eb)):
+                if eb[k] == 0x0A:
+                    var seg = String(StringSlice(
+                        ptr=eb.unsafe_ptr() + start, length=k - start,
+                    ))
+                    lines.append(String("  ") + seg)
+                    start = k + 1
+            if start < len(eb):
+                var tail = String(StringSlice(
+                    ptr=eb.unsafe_ptr() + start,
+                    length=len(eb) - start,
+                ))
+                lines.append(String("  ") + tail)
+        var body = String("")
+        for i in range(len(lines)):
+            if i > 0:
+                body += String("\n")
+            body += lines[i]
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        self.windows.add(Window.editor_window(
+            String("Debugger session"), rect, body^,
         ))
         self._open_count += 1
         if was_max:
@@ -5404,14 +5515,34 @@ struct Desktop(Movable):
         side of the status bar (sharing space with the LSP indicator —
         whichever was set most recently wins, which is fine since both
         are ambient state and they never matter at exactly the same
-        instant)."""
+        instant).
+
+        The message is marked clickable with ``owner="dap"`` so a click
+        opens the DAP info window — invaluable when the status reads
+        "DAP: failed — …" and the user wants the adapter argv, full
+        failure reason, and captured stderr."""
         if self.dap.is_active() or self.dap.is_failed():
             var attr = Attr(BLACK, LIGHT_GRAY)
             if self.dap.is_failed():
                 attr = Attr(LIGHT_RED, LIGHT_GRAY)
             elif self.dap.is_stopped():
                 attr = Attr(BLACK, LIGHT_GRAY)
-            self.status_bar.set_message(self.dap.status_summary(), attr)
+            var tooltip: String
+            if self.dap.is_failed():
+                tooltip = String(
+                    "Debugger failed to start. Click for adapter "
+                    "command line, full failure reason, and the "
+                    "stderr the adapter printed before exiting."
+                )
+            else:
+                tooltip = String(
+                    "Debugger session details. Click for the adapter "
+                    "command line and recent stderr."
+                )
+            self.status_bar.set_message(
+                self.dap.status_summary(), attr,
+                clickable=True, tooltip=tooltip, owner=String("dap"),
+            )
 
     def _debug_open_condition_prompt(mut self):
         """Shift+F9: prompt for a breakpoint condition on the focused
@@ -5883,6 +6014,91 @@ struct Desktop(Movable):
                 String("test: spawn failed — ") + String(e),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
+
+    def _target_test_debug(mut self):
+        """Cmd+Shift+D: run the project's test suite under the DAP
+        debugger, so breakpoints fire inside the tests.
+
+        Mirrors ``_target_test`` for picking the runner (currently
+        ``python -m pytest`` in the project root, swapping ``python``
+        for the project venv's interpreter when one exists) and
+        ``_target_debug`` for adapter setup, debugpy install gating,
+        and the run/debug single-slot teardown.
+        """
+        if not self.project:
+            self.status_bar.set_message(
+                String("test (debug): open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        var project_root = self.project.value()
+        var language = String("")
+        if self.targets.has_active():
+            language = self.targets.targets[self.targets.active].debug_language
+        if len(language.as_bytes()) == 0:
+            language = detect_project_language(project_root)
+        if language != String("python"):
+            var hint: String
+            if len(language.as_bytes()) == 0:
+                hint = String(
+                    "test (debug): couldn't detect project language —"
+                    " no pyproject.toml / setup.py / *.py at root"
+                )
+            else:
+                hint = String("test (debug): no test runner configured for '") \
+                    + language + String("'")
+            self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
+            return
+        var deb_idx = find_debugger_for_language(self.dap_specs, language)
+        if deb_idx < 0:
+            self.status_bar.set_message(
+                String("test (debug): no adapter for language '")
+                    + language + String("'"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var program_seed = resolve_python_interpreter(
+            project_root, String("python"),
+        )
+        var program = resolved_program(
+            project_root, String(""), program_seed,
+        )
+        var args = List[String]()
+        args.append(String("-m"))
+        args.append(String("pytest"))
+        var venv_dir = python_venv_dir(project_root)
+        var spec = python_debugger_spec_for_venv(
+            self.dap_specs[deb_idx], venv_dir,
+        )
+        # Same prompt-before-start gating as ``_target_debug``: if
+        # debugpy isn't installed in the venv, surface the install
+        # prompt instead of failing the spawn.
+        if self._maybe_prompt_debugpy_install(
+            language, venv_dir, program, project_root, args.copy(),
+        ):
+            return
+        self._maybe_install_python_lsp_in_venv(language, venv_dir)
+        # Stop any prior run / debug — the debug pane is single-slot.
+        self.run_session.terminate()
+        self._run_output_held = False
+        if self.dap.is_active():
+            self.dap.shutdown()
+        if self.dap.is_failed() or self.dap.is_terminated():
+            self.dap.reset_for_restart()
+        self.dap.start(spec, program, project_root, args^)
+        self.debug_pane.clear_all()
+        if len(self.dap.spawn_argv) > 0:
+            var line = String("$ ")
+            for k in range(len(self.dap.spawn_argv)):
+                if k > 0:
+                    line = line + String(" ")
+                line = line + self.dap.spawn_argv[k]
+            self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
+        self.debug_pane.visible = True
+        self.status_bar.set_message(
+            String("debugging tests…"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
 
     def target_tick(mut self):
         """Drain the run session's output into the debug pane and
@@ -8517,6 +8733,7 @@ def _refresh_status_for(
             prefix + m.failure_reason,
             Attr(LIGHT_RED, LIGHT_GRAY),
             clickable=True,
+            owner=String("lsp"),
         )
         return
     if m.is_initializing():
@@ -8530,6 +8747,7 @@ def _refresh_status_for(
                 "completions, and go-to-definition will be unavailable "
                 "until this finishes."
             ),
+            owner=String("lsp"),
         )
         return
     if m.is_ready():
@@ -8544,6 +8762,7 @@ def _refresh_status_for(
                     "Waiting for the language server's "
                     "go-to-definition response for "
                 ) + word + String("."),
+                owner=String("lsp"),
             )
             return
         # Diagnostic refresh in flight: gate on a 200 ms threshold so
@@ -8574,6 +8793,7 @@ def _refresh_status_for(
                         "(pyright on a large project, ty on a big "
                         "Mojo file, etc.)."
                     ),
+                    owner=String("lsp"),
                 )
                 return
         if m.last_empty():
@@ -8581,6 +8801,7 @@ def _refresh_status_for(
                 prefix + String("no definition found"),
                 Attr(LIGHT_RED, LIGHT_GRAY),
                 clickable=True,
+                owner=String("lsp"),
             )
             return
         sb.set_message(
@@ -8591,6 +8812,7 @@ def _refresh_status_for(
                 "Language server is ready. Right-click for actions "
                 "(restart, …)."
             ),
+            owner=String("lsp"),
         )
 
 

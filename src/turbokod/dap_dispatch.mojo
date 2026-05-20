@@ -458,6 +458,13 @@ struct DapManager(Copyable, Movable):
     # ``python -m debugpy.adapter``. Resolved via ``which``, so it's
     # the absolute path the kernel actually executed.
     var spawn_argv: List[String]
+    # Rolling capture of the adapter's stderr. ``drain_stderr`` appends
+    # each chunk it returns here, so the info window can show what the
+    # adapter printed even though ``drain_stderr`` itself is destructive
+    # (each call empties the OS pipe). Capped at 16 KB so a runaway
+    # adapter can't grow this buffer unbounded — we keep the *tail*,
+    # since the latest output is what tells us why a session just died.
+    var _stderr_log: String
     # Wall-clock timestamp (ms) when we entered the current state.
     # Read by the watchdog in ``tick`` to fail a session that's been
     # ``INITIALIZING`` / ``LAUNCHING`` for too long without forward
@@ -560,6 +567,7 @@ struct DapManager(Copyable, Movable):
         self._pending_vars_ready = False
         self._pending_launch_args = JsonValue()
         self.spawn_argv = List[String]()
+        self._stderr_log = String("")
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
@@ -629,6 +637,7 @@ struct DapManager(Copyable, Movable):
         self._pending_vars_ready = False
         self._pending_launch_args = JsonValue()
         self.spawn_argv = List[String]()
+        self._stderr_log = String("")
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
@@ -743,6 +752,9 @@ struct DapManager(Copyable, Movable):
         except e:
             self.state = _STATE_FAILED
             self.failure_reason = String("initialize failed: ") + String(e)
+            self.client.process.trace(
+                String("FAIL: ") + self.failure_reason
+            )
             return
         # Stash the launch arguments to send on the initialize response.
         # We keep them as a JsonValue rather than re-deriving from spec
@@ -781,7 +793,24 @@ struct DapManager(Copyable, Movable):
             self.client.process.trace(
                 String("stderr: ") + _trim_trailing_newline(text),
             )
+            # Keep a persistent copy so the info window can show what
+            # the adapter said even though this call has already drained
+            # the OS pipe. Cap the buffer at 16 KB, keeping the tail —
+            # the most recent output is what tells us why a session died.
+            self._stderr_log = self._stderr_log + text
+            var bs = self._stderr_log.as_bytes()
+            if len(bs) > 16384:
+                var start = len(bs) - 16384
+                self._stderr_log = String(StringSlice(
+                    ptr=bs.unsafe_ptr() + start, length=len(bs) - start,
+                ))
         return text^
+
+    def captured_stderr(self) -> String:
+        """Everything ``drain_stderr`` has read from the adapter so far,
+        capped at 16 KB. Surfaced in the DAP info window so the user can
+        see what the adapter printed before the handshake failed."""
+        return self._stderr_log
 
 
     def shutdown(mut self):
@@ -1827,7 +1856,10 @@ struct DapManager(Copyable, Movable):
             var rseq = msg.request_seq.value()
             if rseq == self._subprocess.inflight_initialize:
                 self._subprocess.inflight_initialize = 0
-                if msg.success and not msg.success.value():
+                var sub_init_ok = True
+                if msg.success:
+                    sub_init_ok = msg.success.value()
+                if not sub_init_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
                     return
@@ -1848,13 +1880,19 @@ struct DapManager(Copyable, Movable):
                 return
             if rseq == self._subprocess.inflight_attach:
                 self._subprocess.inflight_attach = 0
-                if msg.success and not msg.success.value():
+                var sub_att_ok = True
+                if msg.success:
+                    sub_att_ok = msg.success.value()
+                if not sub_att_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
                 return
             if rseq == self._subprocess.inflight_config_done:
                 self._subprocess.inflight_config_done = 0
-                if msg.success and not msg.success.value():
+                var sub_cfg_ok = True
+                if msg.success:
+                    sub_cfg_ok = msg.success.value()
+                if not sub_cfg_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
                     return
@@ -2109,12 +2147,37 @@ struct DapManager(Copyable, Movable):
             pass
 
     def _on_initialize_response(mut self, msg: DapIncoming):
-        if msg.success and not msg.success.value():
+        # Entry trace: when a session goes FAILED here, the only previous
+        # signal in the log is the silence after a ``< response`` line.
+        # Stamping the parsed success/message at the head of the handler
+        # turns "no follow-up" into "we saw success=X" so the cause is
+        # legible without re-deriving from the raw bytes.
+        var succ_str: String
+        if msg.success:
+            succ_str = String("True") if msg.success.value() else String("False")
+        else:
+            succ_str = String("(missing)")
+        var msg_str = msg.message.value() if msg.message else String("")
+        self.client.process.trace(
+            String("initialize response success=") + succ_str
+            + String(" message=\"") + msg_str + String("\"")
+        )
+        # ``if msg.success and not msg.success.value():`` looks right
+        # but evaluates to True when ``.value()`` is True under this
+        # Mojo build — observed in a /tmp/turbokod-dap.log where the
+        # entry-trace printed ``success=True`` and the next line was
+        # ``FAIL: initialize rejected``. Split into two statements so
+        # the boolean check is unambiguous.
+        var success_ok = True
+        if msg.success:
+            success_ok = msg.success.value()
+        if not success_ok:
             self.state = _STATE_FAILED
             var why = String("initialize rejected")
             if msg.message:
                 why = why + String(": ") + msg.message.value()
             self.failure_reason = why
+            self.client.process.trace(String("FAIL: ") + why)
             return
         # Park capabilities. Only the few we actually use.
         if msg.body and msg.body.value().is_object():
@@ -2138,6 +2201,9 @@ struct DapManager(Copyable, Movable):
         except e:
             self.state = _STATE_FAILED
             self.failure_reason = String("launch failed: ") + String(e)
+            self.client.process.trace(
+                String("FAIL: ") + self.failure_reason
+            )
             return
         self.state = _STATE_LAUNCHING
         self._state_entered_ms = monotonic_ms()
@@ -2287,7 +2353,10 @@ struct DapManager(Copyable, Movable):
         both surface identically to the host."""
         var value = String("")
         var type_name = String("")
-        if msg.success and not msg.success.value():
+        var eval_ok = True
+        if msg.success:
+            eval_ok = msg.success.value()
+        if not eval_ok:
             # Error response — surface the message as the value so the
             # watch row reads ``len(items) = <error>`` rather than
             # going stale or vanishing.
@@ -2482,7 +2551,10 @@ struct DapManager(Copyable, Movable):
     ):
         var value = String("")
         var is_error = False
-        if msg.success and not msg.success.value():
+        var test_eval_ok = True
+        if msg.success:
+            test_eval_ok = msg.success.value()
+        if not test_eval_ok:
             is_error = True
             if msg.message:
                 value = msg.message.value()
@@ -2540,6 +2612,9 @@ struct DapManager(Copyable, Movable):
             except e:
                 self.state = _STATE_FAILED
                 self.failure_reason = String("configurationDone failed: ") + String(e)
+                self.client.process.trace(
+                    String("FAIL: ") + self.failure_reason
+                )
                 return
             self.state = _STATE_CONFIGURING
             self.client.process.trace(String("state -> configuring"))
@@ -2554,17 +2629,27 @@ struct DapManager(Copyable, Movable):
         # Spec lets the launch response arrive at any point — even after
         # the program has stopped on entry. We only fail the session if
         # success=false; otherwise the response is informational.
-        if msg.success and not msg.success.value():
+        var launch_ok = True
+        if msg.success:
+            launch_ok = msg.success.value()
+        if not launch_ok:
             self.state = _STATE_FAILED
             var why = String("launch rejected")
             if msg.message:
                 why = why + String(": ") + msg.message.value()
             self.failure_reason = why
+            self.client.process.trace(String("FAIL: ") + why)
 
     def _on_config_done_response(mut self, msg: DapIncoming):
-        if msg.success and not msg.success.value():
+        var cfg_ok = True
+        if msg.success:
+            cfg_ok = msg.success.value()
+        if not cfg_ok:
             self.state = _STATE_FAILED
             self.failure_reason = String("configurationDone rejected")
+            self.client.process.trace(
+                String("FAIL: ") + self.failure_reason
+            )
             return
         if self.state == _STATE_CONFIGURING:
             self.state = _STATE_RUNNING

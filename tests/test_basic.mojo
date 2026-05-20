@@ -117,13 +117,15 @@ from turbokod.type_ahead import (
 from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
     _drop_prefix, _find_double_crlf, _parse_content_length, capture_command,
-    classify_message,
+    classify_message, lsp_initialize_params,
 )
 from turbokod.lsp_dispatch import (
+    CodeAction, CodeActionFileEdit,
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
     DefinitionResolved, LspManager,
-    TextEditEntry, _parse_completion_result, _parse_diagnostics_array,
+    TextEditEntry, _parse_code_action_result, _parse_completion_result,
+    _parse_diagnostics_array,
     _parse_hover_result, _parse_references_result,
 )
 from turbokod.git_changes import (
@@ -7398,6 +7400,103 @@ def test_lsp_parse_diagnostics_array_full_fields() raises:
     assert_equal(diags[1].source, String("ruff"))
     assert_equal(diags[2].severity, DIAG_SEVERITY_INFO)
     assert_equal(diags[3].severity, DIAG_SEVERITY_HINT)
+
+
+def test_lsp_parse_code_action_result_quickfix_with_workspace_edit() raises:
+    """Canonical ``CodeAction[]`` shape: one ``quickfix`` carrying a
+    ``WorkspaceEdit.changes`` map. Verifies title / kind / isPreferred
+    survive parsing and the file-edit group flattens correctly with the
+    insertion range + ``newText`` preserved."""
+    var v = parse_json(String(
+        "["
+        + "{\"title\":\"import typing.Any\",\"kind\":\"quickfix\","
+        + "\"isPreferred\":true,"
+        + "\"edit\":{\"changes\":{"
+        + "\"file:///tmp/x.py\":["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":0}},"
+        + "\"newText\":\"from typing import Any\\n\"}"
+        + "]}}}"
+        + "]"
+    ))
+    var actions = _parse_code_action_result(v)
+    assert_equal(len(actions), 1)
+    assert_equal(actions[0].title, String("import typing.Any"))
+    assert_equal(actions[0].kind, String("quickfix"))
+    assert_true(actions[0].is_preferred)
+    assert_equal(len(actions[0].file_edits), 1)
+    assert_equal(actions[0].file_edits[0].uri, String("file:///tmp/x.py"))
+    assert_equal(len(actions[0].file_edits[0].edits), 1)
+    var te = actions[0].file_edits[0].edits[0]
+    assert_equal(te.start_line, 0)
+    assert_equal(te.start_char, 0)
+    assert_equal(te.end_line, 0)
+    assert_equal(te.end_char, 0)
+    assert_equal(te.new_text, String("from typing import Any\n"))
+
+
+def test_lsp_parse_code_action_result_skips_bare_commands() raises:
+    """Entries without a ``title`` aren't valid CodeActions, and bare
+    ``Command`` entries (no inline ``edit``) are silently skipped so the
+    quickfix popup doesn't show actions we have no way to apply yet."""
+    var v = parse_json(String(
+        "["
+        + "{\"command\":\"server.fix\",\"arguments\":[1]},"
+        + "{\"title\":\"Run code fix\",\"command\":\"server.fix\"},"
+        + "{\"title\":\"Import X\",\"kind\":\"quickfix\","
+        + "\"edit\":{\"changes\":{"
+        + "\"file:///a.py\":["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":0}},"
+        + "\"newText\":\"import X\\n\"}"
+        + "]}}}"
+        + "]"
+    ))
+    var actions = _parse_code_action_result(v)
+    # The bare command (no title) is dropped; the command-only action
+    # (title but no edit) is kept with an empty file_edits list so the
+    # caller can detect + skip; the literal CodeAction is fully parsed.
+    assert_equal(len(actions), 2)
+    assert_equal(actions[0].title, String("Run code fix"))
+    assert_equal(len(actions[0].file_edits), 0)
+    assert_equal(actions[1].title, String("Import X"))
+    assert_equal(len(actions[1].file_edits), 1)
+
+
+def test_lsp_parse_code_action_result_null_or_non_array_is_empty() raises:
+    """``textDocument/codeAction`` may legally respond ``null`` (no
+    actions available) — the parser must hand back an empty list rather
+    than raise. Same for unexpected shapes (object instead of array)."""
+    var nv = parse_json(String("null"))
+    assert_equal(len(_parse_code_action_result(nv)), 0)
+    var ov = parse_json(String("{\"unexpected\":true}"))
+    assert_equal(len(_parse_code_action_result(ov)), 0)
+
+
+def test_lsp_initialize_params_advertise_code_action_literal_support() raises:
+    """The initialize payload must declare ``codeActionLiteralSupport``
+    so servers like ty / pyright return ``CodeAction`` literals (with
+    inline ``WorkspaceEdit``) rather than opaque ``Command`` entries.
+    Without this declaration, ty 0.0.34 returns no actionable fixes."""
+    var p = lsp_initialize_params(
+        String("file:///tmp/proj"), String("proj"),
+    )
+    var caps = p.object_get(String("capabilities")).value().copy()
+    var text_doc = caps.object_get(String("textDocument")).value().copy()
+    var ca = text_doc.object_get(String("codeAction")).value().copy()
+    assert_true(ca.object_has(String("codeActionLiteralSupport")))
+    var literal = ca.object_get(
+        String("codeActionLiteralSupport"),
+    ).value().copy()
+    var kind = literal.object_get(String("codeActionKind")).value().copy()
+    var values = kind.object_get(String("valueSet")).value().copy()
+    assert_true(values.is_array())
+    var found_quickfix = False
+    for i in range(values.array_len()):
+        if values.array_at(i).as_str() == String("quickfix"):
+            found_quickfix = True
+            break
+    assert_true(found_quickfix)
 
 
 def test_lsp_parse_completion_result_array_shape() raises:
@@ -15018,6 +15117,10 @@ def _run_chunk_04() raises:
     test_lsp_parse_diagnostics_array_minimum_fields()
     test_lsp_parse_diagnostics_array_full_fields()
     test_lsp_parse_diagnostics_skips_malformed_entries()
+    test_lsp_parse_code_action_result_quickfix_with_workspace_edit()
+    test_lsp_parse_code_action_result_skips_bare_commands()
+    test_lsp_parse_code_action_result_null_or_non_array_is_empty()
+    test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()
     test_lsp_parse_completion_result_list_shape()
     test_lsp_parse_completion_result_honors_sort_text()

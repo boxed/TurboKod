@@ -93,6 +93,14 @@ struct StatusBar(Movable):
     var message: String          # right-aligned diagnostic / status text
     var message_attr: Attr       # color for the diagnostic; default = subtle
     var message_clickable: Bool  # True when caller marked the message as click-receiving
+    # Tag identifying which subsystem owns the current message
+    # (``"lsp"``, ``"dap"``, …). Empty for messages set without an
+    # owner. The host's click handler reads this to route a click on
+    # the message rect to the right info dialog — the message slot is
+    # shared between LSP and DAP status, so we can't infer ownership
+    # from state alone (e.g. an LSP message can sit there while DAP is
+    # also active).
+    var message_owner: String
     var message_spinner: Bool    # True ⇒ animated braille spinner prefixed to the message
     # Hover tooltip: longer-form description shown when the cursor
     # rests on the message rect for ``_TOOLTIP_HOVER_MS``. Set
@@ -121,6 +129,7 @@ struct StatusBar(Movable):
         self.message = String("")
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
         self.message_clickable = False
+        self.message_owner = String("")
         self.message_spinner = False
         self.message_tooltip = String("")
         self._hover_since_ms = -1
@@ -136,6 +145,7 @@ struct StatusBar(Movable):
     def set_message(
         mut self, var text: String, attr: Attr, clickable: Bool = False,
         spinner: Bool = False, var tooltip: String = String(""),
+        var owner: String = String(""),
     ):
         """Set the right-aligned status text (LSP state, errors, etc.).
 
@@ -152,12 +162,19 @@ struct StatusBar(Movable):
         ``tooltip`` is a longer description shown after the cursor
         dwells on the message for ``_TOOLTIP_HOVER_MS``. Use it for
         explanation that doesn't fit in the short message — e.g. why
-        the spinner is spinning. Empty disables the tooltip."""
+        the spinner is spinning. Empty disables the tooltip.
+
+        ``owner`` tags which subsystem put this message in the slot
+        (``"lsp"``, ``"dap"``, …). The host's click handler reads it
+        to route the click to the matching info dialog — without this,
+        a click on a DAP message would land in the LSP dialog because
+        the message slot is shared between subsystems."""
         self.message = text^
         self.message_attr = attr
         self.message_clickable = clickable
         self.message_spinner = spinner
         self.message_tooltip = tooltip^
+        self.message_owner = owner^
 
     def set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,

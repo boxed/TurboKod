@@ -960,6 +960,26 @@ def lsp_initialize_params(
     completion_item_caps.put(String("snippetSupport"), json_bool(False))
     completion_caps.put(String("completionItem"), completion_item_caps^)
     text_doc_caps.put(String("completion"), completion_caps^)
+    # Advertise codeAction with ``codeActionLiteralSupport``. Without this,
+    # servers like ty / pyright return only opaque ``Command`` entries
+    # (or nothing) — we need the literal ``CodeAction`` form so we can
+    # apply the carried ``WorkspaceEdit`` locally without a follow-up
+    # ``workspace/executeCommand`` round-trip we don't model yet. The
+    # valueSet is the set of kinds we render; ``""`` lets a server send
+    # an unkinded action.
+    var code_action_caps = json_object()
+    var code_action_literal = json_object()
+    var code_action_kind = json_object()
+    var code_action_kinds = json_array()
+    code_action_kinds.append(json_str(String("")))
+    code_action_kinds.append(json_str(String("quickfix")))
+    code_action_kind.put(String("valueSet"), code_action_kinds^)
+    code_action_literal.put(String("codeActionKind"), code_action_kind^)
+    code_action_caps.put(
+        String("codeActionLiteralSupport"), code_action_literal^,
+    )
+    code_action_caps.put(String("isPreferredSupport"), json_bool(True))
+    text_doc_caps.put(String("codeAction"), code_action_caps^)
     capabilities.put(String("textDocument"), text_doc_caps^)
     params.put(String("capabilities"), capabilities^)
     return params^

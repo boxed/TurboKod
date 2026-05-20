@@ -278,6 +278,69 @@ struct _DiagnosticBucket(Copyable, Movable):
         self.consumed = copy.consumed
 
 
+struct CodeActionFileEdit(Copyable, Movable):
+    """One file's worth of edits inside a ``CodeAction``'s WorkspaceEdit.
+
+    LSP's WorkspaceEdit groups edits per URI via the ``changes`` map
+    (``{uri: TextEdit[]}``). We normalize that into a flat list of
+    ``CodeActionFileEdit`` — one per file — so the host can iterate
+    without re-walking the JSON. Hand-rolled ``__copyinit__`` because
+    the nested ``List`` blocks ``ImplicitlyCopyable``.
+    """
+    var uri: String
+    var edits: List[TextEditEntry]
+
+    def __init__(out self, var uri: String, var edits: List[TextEditEntry]):
+        self.uri = uri^
+        self.edits = edits^
+
+    def __copyinit__(mut self, copy: Self):
+        self.uri = copy.uri
+        self.edits = copy.edits.copy()
+
+
+struct CodeAction(Copyable, Movable):
+    """One entry in a ``textDocument/codeAction`` response.
+
+    The LSP spec allows the server to return either ``Command``s (an
+    opaque server-side action) or ``CodeAction`` literals carrying an
+    inline ``WorkspaceEdit``. We only model the literal form — that's
+    what every server we care about (ty, pyright, ruff, rust-analyzer)
+    returns when the client advertises ``codeActionLiteralSupport``,
+    and it's what lets us apply the fix locally without a round-trip.
+
+    ``title`` is the label to render in the quick-fix popup.
+    ``kind`` is the LSP ``CodeActionKind`` string ("quickfix",
+    "refactor", "source.organizeImports", …) — kept as raw text so
+    future server kinds don't get silently dropped. ``is_preferred``
+    flags the entry as the recommended fix, which is what we'll bind
+    to "press Enter to accept" once UI lands. ``file_edits`` carries
+    the per-file edit groups extracted from the ``WorkspaceEdit.changes``
+    map; an empty list means the action carried only a ``Command`` or
+    a more advanced ``documentChanges`` form we don't parse yet, and
+    the host should skip / ignore the entry.
+    """
+    var title: String
+    var kind: String
+    var is_preferred: Bool
+    var file_edits: List[CodeActionFileEdit]
+
+    def __init__(
+        out self, var title: String, var kind: String, is_preferred: Bool,
+        var file_edits: List[CodeActionFileEdit],
+    ):
+        self.title = title^
+        self.kind = kind^
+        self.is_preferred = is_preferred
+        self.file_edits = file_edits^
+
+    def __copyinit__(mut self, copy: Self):
+        self.title = copy.title
+        self.kind = copy.kind
+        self.is_preferred = copy.is_preferred
+        self.file_edits = copy.file_edits.copy()
+
+
 struct LspManager(Copyable, Movable):
     """One LSP server's worth of state plus the transport (``LspClient``).
 
@@ -357,6 +420,16 @@ struct LspManager(Copyable, Movable):
     var _hover_col: Int
     var _resolved_hover: String
     var _has_resolved_hover: Bool
+    # Pending ``textDocument/codeAction`` request state. Pattern matches
+    # the other request kinds: ``_inflight_code_action_id`` is 0 when no
+    # request is outstanding; ``_resolved_code_actions`` parks the parsed
+    # action list until ``take_code_actions`` consumes it. ``_code_action_path``
+    # is echoed via ``pending_code_action_path`` so the host can tell when
+    # the response is for a stale diagnostic menu (the user moved on).
+    var _inflight_code_action_id: Int
+    var _code_action_path: String
+    var _resolved_code_actions: List[CodeAction]
+    var _has_resolved_code_actions: Bool
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
@@ -433,6 +506,10 @@ struct LspManager(Copyable, Movable):
         self._hover_col = 0
         self._resolved_hover = String("")
         self._has_resolved_hover = False
+        self._inflight_code_action_id = 0
+        self._code_action_path = String("")
+        self._resolved_code_actions = List[CodeAction]()
+        self._has_resolved_code_actions = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -490,6 +567,10 @@ struct LspManager(Copyable, Movable):
         self._hover_col = 0
         self._resolved_hover = String("")
         self._has_resolved_hover = False
+        self._inflight_code_action_id = 0
+        self._code_action_path = String("")
+        self._resolved_code_actions = List[CodeAction]()
+        self._has_resolved_code_actions = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -1193,6 +1274,101 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_hover = False
         return out^
 
+    def request_code_actions(
+        mut self, path: String, diag: Diagnostic, var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/codeAction`` covering
+        ``diag``'s range, with ``diag`` echoed back in the request
+        ``context.diagnostics`` array.
+
+        The ``context.diagnostics`` echo is what unlocks "quickfix for
+        this specific diagnostic" responses from ty / pyright / ruff —
+        they key their fix lookups off the diagnostic that was at the
+        position, not just the position itself. Pre-flights with
+        didOpen/didChange so the server's view matches the buffer at
+        request time. A fresh request shadows any in-flight code-action
+        id — there's no concurrent code-action model (the diagnostic
+        menu is modal).
+        """
+        if self.state != _STATE_READY:
+            return False
+        _lsp_debug_log(
+            String("→ request_code_actions lang=") + self._language_id
+            + String(" path=") + path
+            + String(" range=(") + String(diag.start_row)
+            + String(",") + String(diag.start_col)
+            + String(")-(") + String(diag.end_row)
+            + String(",") + String(diag.end_col) + String(")"),
+        )
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        var doc = json_object()
+        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        params.put(String("textDocument"), doc)
+        var rng = json_object()
+        var start = json_object()
+        start.put(String("line"), json_int(diag.start_row))
+        start.put(String("character"), json_int(diag.start_col))
+        var end = json_object()
+        end.put(String("line"), json_int(diag.end_row))
+        end.put(String("character"), json_int(diag.end_col))
+        rng.put(String("start"), start^)
+        rng.put(String("end"), end^)
+        params.put(String("range"), rng^)
+        var ctx = json_object()
+        var diag_obj = json_object()
+        var d_rng = json_object()
+        var d_start = json_object()
+        d_start.put(String("line"), json_int(diag.start_row))
+        d_start.put(String("character"), json_int(diag.start_col))
+        var d_end = json_object()
+        d_end.put(String("line"), json_int(diag.end_row))
+        d_end.put(String("character"), json_int(diag.end_col))
+        d_rng.put(String("start"), d_start^)
+        d_rng.put(String("end"), d_end^)
+        diag_obj.put(String("range"), d_rng^)
+        diag_obj.put(String("severity"), json_int(diag.severity))
+        if len(diag.message.as_bytes()) > 0:
+            diag_obj.put(String("message"), json_str(diag.message))
+        if len(diag.source.as_bytes()) > 0:
+            diag_obj.put(String("source"), json_str(diag.source))
+        var diags_arr = json_array()
+        diags_arr.append(diag_obj^)
+        ctx.put(String("diagnostics"), diags_arr^)
+        params.put(String("context"), ctx^)
+        try:
+            self._inflight_code_action_id = self.client.send_request(
+                String("textDocument/codeAction"), params,
+            )
+        except:
+            self._inflight_code_action_id = 0
+            return False
+        self._code_action_path = path
+        self._resolved_code_actions = List[CodeAction]()
+        self._has_resolved_code_actions = False
+        return True
+
+    def has_pending_code_actions(self) -> Bool:
+        """True iff a parsed code-action response is parked for ``take``.
+        Pair with ``pending_code_action_path()`` to distinguish "still
+        waiting" from "empty list for this file"."""
+        return self._has_resolved_code_actions
+
+    def pending_code_action_path(self) -> String:
+        """Path the most recent code-action request was issued for. Lets
+        the host drop a stale response when the user has dismissed the
+        diagnostic menu before the server replied."""
+        return self._code_action_path
+
+    def take_code_actions(mut self) -> List[CodeAction]:
+        """Move the parked code-action list out of the manager. Pair
+        with ``has_pending_code_actions()`` — the flag is cleared either
+        way so a follow-up call returns empty."""
+        var out = self._resolved_code_actions^
+        self._resolved_code_actions = List[CodeAction]()
+        self._has_resolved_code_actions = False
+        return out^
+
     # --- frame-tick driver -------------------------------------------------
 
     def tick(mut self) -> Optional[DefinitionResolved]:
@@ -1378,6 +1554,18 @@ struct LspManager(Copyable, Movable):
                 self._resolved_hover = hover_text^
                 self._has_resolved_hover = True
                 self._inflight_hover_id = 0
+            if id == self._inflight_code_action_id:
+                var actions = List[CodeAction]()
+                if msg.result:
+                    actions = _parse_code_action_result(msg.result.value())
+                _lsp_debug_log(
+                    String("← codeAction response id=") + String(id)
+                    + String(" lang=") + self._language_id
+                    + String(" count=") + String(len(actions)),
+                )
+                self._resolved_code_actions = actions^
+                self._has_resolved_code_actions = True
+                self._inflight_code_action_id = 0
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -2032,6 +2220,101 @@ def _hover_contents_to_string(v: JsonValue) -> String:
             out = out + String("\n") + parts[i]
         return out^
     return String("")
+
+
+def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
+    """Parse the result of ``textDocument/codeAction``.
+
+    The result is ``(Command | CodeAction)[] | null``. ``Command``
+    entries (no ``edit`` field — the action is opaquely server-side)
+    are skipped: we have no way to apply them without a follow-up
+    ``workspace/executeCommand`` round-trip we don't model yet.
+    ``CodeAction`` literals are accepted; their ``edit.changes`` map
+    is normalized into ``CodeActionFileEdit`` groups. ``documentChanges``
+    (the LSP 3.13+ form that carries text-document versions and supports
+    ``CreateFile`` / ``RenameFile`` / ``DeleteFile``) is not parsed yet —
+    actions that only carry ``documentChanges`` come through with an
+    empty ``file_edits`` list so the caller can detect and skip them.
+    """
+    var out = List[CodeAction]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var entry = v.array_at(i)
+        if not entry.is_object():
+            continue
+        # Skip raw ``Command`` entries: spec-wise they have a ``command``
+        # field at top level and no ``edit``. A ``CodeAction`` literal
+        # may also carry a ``command`` *plus* an edit; we accept those
+        # by checking for ``edit`` or ``kind``/``title`` shape.
+        var title_opt = entry.object_get(String("title"))
+        if not title_opt or not title_opt.value().is_string():
+            continue
+        var title = title_opt.value().as_str()
+        var kind_str = String("")
+        var kind_opt = entry.object_get(String("kind"))
+        if kind_opt and kind_opt.value().is_string():
+            kind_str = kind_opt.value().as_str()
+        var is_preferred = False
+        var pref_opt = entry.object_get(String("isPreferred"))
+        if pref_opt and pref_opt.value().is_bool():
+            is_preferred = pref_opt.value().as_bool()
+        var file_edits = List[CodeActionFileEdit]()
+        var edit_opt = entry.object_get(String("edit"))
+        if edit_opt and edit_opt.value().is_object():
+            var edit = edit_opt.value().copy()
+            var changes_opt = edit.object_get(String("changes"))
+            if changes_opt and changes_opt.value().is_object():
+                var changes = changes_opt.value().copy()
+                # ``changes`` is an object keyed by URI; the JsonValue
+                # exposes its members through obj_v. We don't have a
+                # public iterator yet, but we can walk obj_v directly
+                # since this module already knows the internals.
+                for k in range(len(changes.obj_v)):
+                    var uri = changes.obj_v[k].key
+                    var edits_val = changes.obj_v[k].value.copy()
+                    if not edits_val.is_array():
+                        continue
+                    var edits = List[TextEditEntry]()
+                    for j in range(edits_val.array_len()):
+                        var te = edits_val.array_at(j)
+                        if not te.is_object():
+                            continue
+                        var nt_opt = te.object_get(String("newText"))
+                        if not nt_opt or not nt_opt.value().is_string():
+                            continue
+                        var nt = nt_opt.value().as_str()
+                        var rng_opt = te.object_get(String("range"))
+                        if not rng_opt or not rng_opt.value().is_object():
+                            continue
+                        var rng = rng_opt.value().copy()
+                        var s_opt = rng.object_get(String("start"))
+                        var e_opt = rng.object_get(String("end"))
+                        if not s_opt or not e_opt \
+                                or not s_opt.value().is_object() \
+                                or not e_opt.value().is_object():
+                            continue
+                        var sl_opt = s_opt.value().object_get(String("line"))
+                        var sc_opt = s_opt.value().object_get(String("character"))
+                        var el_opt = e_opt.value().object_get(String("line"))
+                        var ec_opt = e_opt.value().object_get(String("character"))
+                        if not sl_opt or not sc_opt or not el_opt or not ec_opt \
+                                or not sl_opt.value().is_int() \
+                                or not sc_opt.value().is_int() \
+                                or not el_opt.value().is_int() \
+                                or not ec_opt.value().is_int():
+                            continue
+                        edits.append(TextEditEntry(
+                            sl_opt.value().as_int(),
+                            sc_opt.value().as_int(),
+                            el_opt.value().as_int(),
+                            ec_opt.value().as_int(),
+                            nt,
+                        ))
+                    if len(edits) > 0:
+                        file_edits.append(CodeActionFileEdit(uri, edits^))
+        out.append(CodeAction(title, kind_str, is_preferred, file_edits^))
+    return out^
 
 
 def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
