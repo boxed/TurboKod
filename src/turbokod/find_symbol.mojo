@@ -307,10 +307,29 @@ struct FindSymbol(Movable):
         self._chooser_mode = False
         self._chooser_name = String("")
 
-    def open(mut self, var root: String):
+    def open(
+        mut self,
+        var root: String,
+        var prefill: String = String(""),
+        select_prefill: Bool = False,
+    ):
+        """Open the Find Symbol picker.
+
+        A non-empty ``prefill`` (typically the editor's current
+        selection) seeds the query field; it's run through
+        ``sanitize_symbol_query`` first so the same identifier-only
+        constraint as typed input applies. ``select_prefill=True``
+        leaves the seeded text fully selected so the next typed key
+        replaces it — mirrors the Find-in-Project prompt.
+        """
         self.active = True
         self.query = TextField()
         self.root = root^
+        var sanitized = sanitize_symbol_query(prefill^)
+        if len(sanitized.as_bytes()) > 0:
+            self.query.set_text(sanitized)
+            if select_prefill:
+                self.query.select_all()
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
         self.selected = 0
@@ -327,6 +346,9 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
+        if len(self.query.text.as_bytes()) >= _MIN_QUERY_LEN \
+                and len(self.root.as_bytes()) > 0:
+            _ = self.runner.start(self.query.text, self.root)
 
     def close(mut self):
         self.active = False

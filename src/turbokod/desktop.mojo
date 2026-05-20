@@ -6990,7 +6990,22 @@ struct Desktop(Movable):
         self._find_symbol_pending_lsps = List[Int]()
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
-        self.find_symbol.open(self.project.value())
+        var prefill = String("")
+        var idx = self._focused_editor_idx()
+        if idx >= 0:
+            var sel = self.windows.windows[idx].editor.selection_text()
+            var sb = sel.as_bytes()
+            var has_newline = False
+            for i in range(len(sb)):
+                if sb[i] == 0x0A or sb[i] == 0x0D:
+                    has_newline = True
+                    break
+            if not has_newline:
+                prefill = sel
+        self.find_symbol.open(
+            self.project.value(), prefill,
+            select_prefill=True,
+        )
 
     def _submit_find_symbol(mut self, screen: Rect):
         """Resolve the picker's selected entry through the LSP's
