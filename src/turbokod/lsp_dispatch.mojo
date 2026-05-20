@@ -228,7 +228,6 @@ comptime DIAG_SEVERITY_INFO    = Int(3)
 comptime DIAG_SEVERITY_HINT    = Int(4)
 
 
-@fieldwise_init
 struct Diagnostic(ImplicitlyCopyable, Movable):
     """One ``textDocument/publishDiagnostics`` entry, normalized to
     buffer-relative coordinates the editor can paint directly.
@@ -239,6 +238,16 @@ struct Diagnostic(ImplicitlyCopyable, Movable):
     int so unknown future severities don't get silently dropped.
     ``source`` is the diagnostic-producing tool ("pyright", "rustc",
     "ruff", …) or empty when the server didn't supply one.
+    ``code`` is the rule identifier ("unresolved-reference",
+    "unused-import", ...) — kept as a String because LSP allows it to
+    be either a string or an integer, and we just round-trip whatever
+    came in. Echoed back in ``textDocument/codeAction`` requests:
+    ty/ruff/pyright key fix lookups off this field, and a request
+    without it gets ``result: null`` instead of the matching quickfix.
+    Empty when the server didn't supply one — the 7-arg ``__init__``
+    is the legacy form many tests still use and defaults ``code`` to
+    empty since code-actions aren't exercised against synthetic
+    diagnostics.
     """
     var start_row: Int
     var start_col: Int
@@ -247,6 +256,34 @@ struct Diagnostic(ImplicitlyCopyable, Movable):
     var severity: Int
     var message: String
     var source: String
+    var code: String
+
+    def __init__(
+        out self, start_row: Int, start_col: Int, end_row: Int, end_col: Int,
+        severity: Int, var message: String, var source: String,
+    ):
+        self.start_row = start_row
+        self.start_col = start_col
+        self.end_row = end_row
+        self.end_col = end_col
+        self.severity = severity
+        self.message = message^
+        self.source = source^
+        self.code = String("")
+
+    def __init__(
+        out self, start_row: Int, start_col: Int, end_row: Int, end_col: Int,
+        severity: Int, var message: String, var source: String,
+        var code: String,
+    ):
+        self.start_row = start_row
+        self.start_col = start_col
+        self.end_row = end_row
+        self.end_col = end_col
+        self.severity = severity
+        self.message = message^
+        self.source = source^
+        self.code = code^
 
 
 struct _DiagnosticBucket(Copyable, Movable):
@@ -1332,6 +1369,11 @@ struct LspManager(Copyable, Movable):
             diag_obj.put(String("message"), json_str(diag.message))
         if len(diag.source.as_bytes()) > 0:
             diag_obj.put(String("source"), json_str(diag.source))
+        # The ``code`` echo is what makes ty / ruff / pyright return
+        # actual fixes — they match quickfix rules by diagnostic code.
+        # Sending the request without it gets ``result: null``.
+        if len(diag.code.as_bytes()) > 0:
+            diag_obj.put(String("code"), json_str(diag.code))
         var diags_arr = json_array()
         diags_arr.append(diag_obj^)
         ctx.put(String("diagnostics"), diags_arr^)
@@ -2360,10 +2402,21 @@ def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
         var src_opt = entry.object_get(String("source"))
         if src_opt and src_opt.value().is_string():
             source = src_opt.value().as_str()
+        # ``code`` is required for code-action lookups (servers match
+        # quickfix rules by code) — preserve whatever the server sent.
+        # The spec allows either a string or an integer; we coerce to
+        # string and echo back as-is.
+        var code = String("")
+        var code_opt = entry.object_get(String("code"))
+        if code_opt:
+            if code_opt.value().is_string():
+                code = code_opt.value().as_str()
+            elif code_opt.value().is_int():
+                code = String(code_opt.value().as_int())
         out.append(Diagnostic(
             sl_opt.value().as_int(), sc_opt.value().as_int(),
             el_opt.value().as_int(), ec_opt.value().as_int(),
-            severity, message^, source^,
+            severity, message^, source^, code^,
         ))
     return out^
 

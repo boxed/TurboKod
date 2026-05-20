@@ -7402,6 +7402,31 @@ def test_lsp_parse_diagnostics_array_full_fields() raises:
     assert_equal(diags[3].severity, DIAG_SEVERITY_HINT)
 
 
+def test_lsp_parse_diagnostics_preserves_code_field() raises:
+    """The diagnostic ``code`` field (rule identifier — "unresolved-
+    reference", "unused-import", …) must round-trip through the parser
+    so the host can echo it back in ``textDocument/codeAction`` requests.
+    Without it, ty / ruff / pyright return ``result: null`` instead of
+    the matching quickfix. Both string and integer codes are accepted
+    (the LSP spec allows either)."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":4},"
+        + "\"end\":{\"line\":0,\"character\":13}},"
+        + "\"severity\":1,\"code\":\"unresolved-reference\","
+        + "\"message\":\"Name x used when not defined\"},"
+        + "{\"range\":{\"start\":{\"line\":1,\"character\":0},"
+        + "\"end\":{\"line\":1,\"character\":4}},"
+        + "\"severity\":2,\"code\":42,\"message\":\"warn\"}"
+        + "]"
+    ))
+    var diags = _parse_diagnostics_array(v)
+    assert_equal(len(diags), 2)
+    assert_equal(diags[0].code, String("unresolved-reference"))
+    # Integer codes are coerced to their decimal string form.
+    assert_equal(diags[1].code, String("42"))
+
+
 def test_lsp_parse_code_action_result_quickfix_with_workspace_edit() raises:
     """Canonical ``CodeAction[]`` shape: one ``quickfix`` carrying a
     ``WorkspaceEdit.changes`` map. Verifies title / kind / isPreferred
@@ -8220,6 +8245,112 @@ def test_lsp_parse_diagnostics_skips_malformed_entries() raises:
     assert_equal(diags[1].message, String("third"))
 
 
+def test_editor_diagnostic_at_cursor_picks_most_severe() raises:
+    """``Editor.diagnostic_at_cursor`` returns the lowest-numbered (most
+    severe) diagnostic whose range covers the cursor. With an error and
+    a hint stacked on the same cell, error must win — same rule as the
+    right-click hit logic in ``_maybe_request_diagnostic_menu``."""
+    var ed = Editor(String("def f(x: timedelta) -> None: pass"))
+    ed.cursor_row = 0
+    ed.cursor_col = 10  # inside "timedelta"
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 9, 0, 18, DIAG_SEVERITY_HINT,
+        String("unused import"), String("ty"),
+    ))
+    diags.append(Diagnostic(
+        0, 9, 0, 18, DIAG_SEVERITY_ERROR,
+        String("Name `timedelta` used when not defined"),
+        String("ty"),
+    ))
+    ed.set_diagnostics(diags^)
+    var picked = ed.diagnostic_at_cursor()
+    assert_true(Bool(picked))
+    assert_equal(picked.value().severity, DIAG_SEVERITY_ERROR)
+    # Cursor outside any diagnostic range → None.
+    ed.cursor_col = 0
+    assert_false(Bool(ed.diagnostic_at_cursor()))
+
+
+def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
+    """Alt+Enter while the cursor sits on a diagnostic must stash a
+    ``DiagnosticMenuRequest`` so the host can open the diagnostic menu
+    (which then asks the LSP for quickfix code actions). Falls back to
+    the spell-action path when both apply — spell is checked first
+    because it's the more specific signal.
+
+    A buffer that has *no* diagnostic and *no* misspelled word at the
+    cursor must leave the request slot empty and let Alt+Enter pass
+    through as an unbound hotkey (return value False)."""
+    var ed = Editor(String("x = timedelta()"))
+    ed.cursor_row = 0
+    ed.cursor_col = 5  # inside "timedelta"
+    var diags = List[Diagnostic]()
+    diags.append(Diagnostic(
+        0, 4, 0, 13, DIAG_SEVERITY_ERROR,
+        String("Name `timedelta` used when not defined"),
+        String("ty"),
+    ))
+    ed.set_diagnostics(diags^)
+    var view = Rect(0, 0, 80, 24)
+    var ev = Event.key_event(KEY_ENTER, MOD_ALT)
+    var consumed = ed.handle_key(ev, view)
+    assert_true(consumed)
+    var req_opt = ed.consume_diagnostic_menu_request()
+    assert_true(Bool(req_opt))
+    var req = req_opt.value()
+    # Source-prefixed label is what the menu copies on the Copy row.
+    assert_true(req.message.find(String("[ty]")) >= 0)
+    assert_true(
+        req.message.find(String("timedelta")) >= 0,
+    )
+    # Underlying diagnostic is carried through so the host can echo it
+    # in the codeAction request's ``context.diagnostics``.
+    assert_equal(req.diag.severity, DIAG_SEVERITY_ERROR)
+    assert_equal(req.diag.start_col, 4)
+    # No diagnostic and no spell run → Alt+Enter falls through.
+    var ed2 = Editor(String("plain"))
+    ed2.cursor_row = 0
+    ed2.cursor_col = 2
+    var consumed2 = ed2.handle_key(ev, view)
+    assert_false(consumed2)
+
+
+def test_editor_apply_code_action_edits_inserts_typing_import() raises:
+    """``Editor.apply_code_action_edits`` should apply the WorkspaceEdit
+    a LSP quickfix carried for *this* editor's file. The canonical
+    case: ty's ``import typing.Any`` quickfix inserts
+    ``from typing import Any\\n`` at line 0, col 0. After apply, line 0
+    holds the import line and the original code is shifted down by one
+    row. Edits keyed to a different URI are ignored."""
+    var ed = Editor(String("def f(x: Any) -> Any:\n    return x\n"))
+    ed.file_path = _temp_path(String("_quickfix.py"))
+    var my_uri = String("file://") + ed.file_path
+    var edits = List[TextEditEntry]()
+    edits.append(TextEditEntry(
+        0, 0, 0, 0, String("from typing import Any\n"),
+    ))
+    var file_edits = List[CodeActionFileEdit]()
+    file_edits.append(CodeActionFileEdit(my_uri, edits^))
+    # Add an edit for a foreign URI to confirm it's silently dropped.
+    var foreign = List[TextEditEntry]()
+    foreign.append(TextEditEntry(
+        0, 0, 0, 0, String("# do not apply me\n"),
+    ))
+    file_edits.append(CodeActionFileEdit(
+        String("file:///not/this/file.py"), foreign^,
+    ))
+    var ok = ed.apply_code_action_edits(file_edits^)
+    assert_true(ok)
+    assert_equal(
+        ed.buffer.line(0), String("from typing import Any"),
+    )
+    assert_equal(
+        ed.buffer.line(1), String("def f(x: Any) -> Any:"),
+    )
+    assert_true(ed.dirty)
+
+
 def test_editor_set_diagnostics_builds_per_row_severity_index() raises:
     """``Editor.set_diagnostics`` populates ``diagnostic_lines`` so
     that each row carries the *winning* (lowest-numbered) severity.
@@ -8776,7 +8907,27 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     var first_diag = diags.array_at(0)
     var range_v = first_diag.object_get(String("range")).value().copy()
 
-    # textDocument/codeAction with the diagnostic carried in ``context``.
+    # textDocument/codeAction with a *minimal* echoed diagnostic — only
+    # range + severity + message + source + code, matching exactly what
+    # ``LspManager.request_code_actions`` reconstructs from the parsed
+    # ``Diagnostic`` struct. We deliberately rebuild the echoed diag
+    # rather than re-forwarding ty's original to guard against the
+    # regression that motivated this test: when ``code`` is missing,
+    # ty 0.0.34 returns ``result: null`` instead of the import quickfix.
+    var min_diag = json_object()
+    min_diag.put(String("range"), range_v.copy())
+    var sev_v = first_diag.object_get(String("severity"))
+    if sev_v and sev_v.value().is_int():
+        min_diag.put(String("severity"), json_int(sev_v.value().as_int()))
+    var msg_v = first_diag.object_get(String("message"))
+    if msg_v and msg_v.value().is_string():
+        min_diag.put(String("message"), json_str(msg_v.value().as_str()))
+    var src_v = first_diag.object_get(String("source"))
+    if src_v and src_v.value().is_string():
+        min_diag.put(String("source"), json_str(src_v.value().as_str()))
+    var code_v = first_diag.object_get(String("code"))
+    if code_v and code_v.value().is_string():
+        min_diag.put(String("code"), json_str(code_v.value().as_str()))
     var ca_params = json_object()
     var ca_doc = json_object()
     ca_doc.put(String("uri"), json_str(doc_uri))
@@ -8784,7 +8935,7 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     ca_params.put(String("range"), range_v.copy())
     var ctx = json_object()
     var ctx_diags = json_array()
-    ctx_diags.append(first_diag.copy())
+    ctx_diags.append(min_diag^)
     ctx.put(String("diagnostics"), ctx_diags^)
     ca_params.put(String("context"), ctx^)
     var ca_id = client.send_request(String("textDocument/codeAction"), ca_params^)
@@ -15117,6 +15268,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_diagnostics_array_minimum_fields()
     test_lsp_parse_diagnostics_array_full_fields()
     test_lsp_parse_diagnostics_skips_malformed_entries()
+    test_lsp_parse_diagnostics_preserves_code_field()
     test_lsp_parse_code_action_result_quickfix_with_workspace_edit()
     test_lsp_parse_code_action_result_skips_bare_commands()
     test_lsp_parse_code_action_result_null_or_non_array_is_empty()
@@ -15157,6 +15309,9 @@ def _run_chunk_04() raises:
     test_editor_accept_completion_overlap_leaves_disjoint_text_alone()
     test_editor_accept_completion_uses_text_edit_range()
     test_editor_accept_completion_applies_additional_text_edits()
+    test_editor_diagnostic_at_cursor_picks_most_severe()
+    test_editor_alt_enter_on_diagnostic_stamps_menu_request()
+    test_editor_apply_code_action_edits_inserts_typing_import()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
     test_editor_minimap_warning_outranks_git_change()

@@ -50,8 +50,10 @@ from .highlight import (
     line_comment_for_extension, word_at,
 )
 from .lsp_dispatch import (
+    CodeAction, CodeActionFileEdit,
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry,
+    _path_to_uri,
 )
 from .spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
@@ -2514,6 +2516,90 @@ struct Editor(Copyable, Movable):
                 )
         return Optional[SpellActionRequest]()
 
+    def diagnostic_at_cursor(self) -> Optional[Diagnostic]:
+        """Return the most-severe diagnostic whose range covers the
+        current cursor position, or ``None`` if the cursor isn't inside
+        one. Same hit logic as the right-click squiggle path
+        (``_maybe_request_diagnostic_menu``) so Alt+Enter and right-click
+        agree on which diagnostic they pick when several overlap on the
+        same cell. ``severity`` is the LSP integer (1=Error, …, 4=Hint)
+        — lowest wins so an error squiggle isn't masked by an info hint
+        that happens to overlap it."""
+        var best_idx = -1
+        var best_sev = 0
+        for d in range(len(self.diagnostics)):
+            var diag = self.diagnostics[d]
+            if not _diag_covers_cell(diag, self.cursor_row, self.cursor_col):
+                continue
+            if best_idx < 0 or diag.severity < best_sev:
+                best_idx = d
+                best_sev = diag.severity
+        if best_idx < 0:
+            return Optional[Diagnostic]()
+        return Optional[Diagnostic](self.diagnostics[best_idx])
+
+    def apply_code_action_edits(
+        mut self, var file_edits: List[CodeActionFileEdit],
+    ) -> Bool:
+        """Apply the subset of a LSP ``CodeAction``'s WorkspaceEdit that
+        targets *this* editor's file. Returns True iff at least one edit
+        was applied.
+
+        Multi-file actions are partially supported: edits for files that
+        aren't this editor are silently skipped (the host opens the
+        affected files separately and replays this method on each). For
+        this file, edits are sorted descending by start position so an
+        earlier edit doesn't shift positions of later ones — mirrors the
+        ``additionalTextEdits`` path in ``accept_completion``. Cursor is
+        nudged for line-count deltas above it so it doesn't float into
+        the wrong row when the action inserts e.g. an import line at
+        the top of the file."""
+        if self.read_only:
+            return False
+        var my_uri = _path_to_uri(self.file_path)
+        var edits = List[TextEditEntry]()
+        for k in range(len(file_edits)):
+            if file_edits[k].uri == my_uri:
+                for j in range(len(file_edits[k].edits)):
+                    edits.append(file_edits[k].edits[j])
+        if len(edits) == 0:
+            return False
+        # Descending sort by (start_line, start_char) so we apply later
+        # edits first — earlier-position edits are then still at their
+        # original coordinates when we get to them.
+        var m = len(edits)
+        if m > 1:
+            for ii in range(1, m):
+                var jj = ii
+                while jj > 0 and (
+                    edits[jj].start_line > edits[jj - 1].start_line
+                    or (
+                        edits[jj].start_line == edits[jj - 1].start_line
+                        and edits[jj].start_char > edits[jj - 1].start_char
+                    )
+                ):
+                    var tmp = edits[jj]
+                    edits[jj] = edits[jj - 1]
+                    edits[jj - 1] = tmp
+                    jj -= 1
+        self._push_undo()
+        self._typing_active = False
+        var hl_low = self.cursor_row
+        for k in range(m):
+            var ed = edits[k]
+            var delta = self._apply_buffer_edit_raw(
+                ed.start_line, ed.start_char,
+                ed.end_line, ed.end_char, ed.new_text,
+            )
+            if ed.end_line < self.cursor_row and delta != 0:
+                self.cursor_row += delta
+                self.anchor_row += delta
+            if ed.start_line < hl_low:
+                hl_low = ed.start_line
+        self.dirty = True
+        self._mark_hl_dirty(hl_low)
+        return True
+
     def consume_breakpoint_toggle(mut self) -> Optional[Int]:
         """Return any pending gutter-click row and clear the slot."""
         var row = self.pending_breakpoint_toggle
@@ -3683,7 +3769,7 @@ struct Editor(Copyable, Movable):
         if len(diag.source.as_bytes()) > 0:
             label = String("[") + diag.source + String("] ") + label
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest](
-            DiagnosticMenuRequest(label^, pos.x, pos.y),
+            DiagnosticMenuRequest(label^, pos.x, pos.y, diag),
         )
 
     def _set_text_hover_anchor(
@@ -5793,8 +5879,31 @@ struct Editor(Copyable, Movable):
                 if sa:
                     self.pending_spell_action = sa
                     return True
-                # Alt+Enter outside any misspelling: leave the event
-                # for the caller to bind to a hotkey of their own.
+                # Diagnostic at the cursor? Open the diagnostic menu
+                # anchored at the squiggle's start so the user can pick
+                # a quickfix (e.g. "import typing.Any") — same code path
+                # as right-clicking the squiggle. The byte→screen
+                # mapping is approximate (mirrors the spell-menu anchor
+                # path) and the menu's ``_rect`` clamps to screen.
+                var dn = self.diagnostic_at_cursor()
+                if dn:
+                    var diag = dn.value()
+                    var ax = view.a.x + (diag.start_col - self.scroll_x)
+                    var ay = view.a.y + (diag.start_row - self.scroll_y)
+                    if ax < view.a.x:
+                        ax = view.a.x
+                    if ay < view.a.y:
+                        ay = view.a.y
+                    var label = diag.message
+                    if len(diag.source.as_bytes()) > 0:
+                        label = String("[") + diag.source + String("] ") \
+                            + label
+                    self.pending_diagnostic_menu = Optional[
+                        DiagnosticMenuRequest
+                    ](DiagnosticMenuRequest(label^, ax, ay, diag))
+                    return True
+                # Alt+Enter outside any misspelling / diagnostic: leave
+                # the event for the caller to bind to a hotkey of its own.
                 return False
             if self.read_only:
                 return True

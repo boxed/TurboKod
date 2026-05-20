@@ -63,7 +63,7 @@ from .git_gutter_menu import (
     GitGutterMenu,
 )
 from .diagnostic_menu import (
-    DIAG_MENU_ACTION_COPY, DiagnosticMenu,
+    DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
 )
 from .lsp import LspProcess
 from .lsp_status_menu import (
@@ -107,7 +107,9 @@ from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
     dependency_dirs_for_language_id, find_language_for_extension,
 )
-from .lsp_dispatch import DefinitionResolved, LspManager, WorkspaceSymbolItem
+from .lsp_dispatch import (
+    CodeAction, DefinitionResolved, LspManager, WorkspaceSymbolItem,
+)
 from .dap_dispatch import (
     DapConditionException, DapManager, DapStackFrame, DapTestEvaluation,
     DapVariable,
@@ -631,6 +633,15 @@ struct Desktop(Movable):
     # ``Editor.consume_diagnostic_menu_request`` and routed input-first
     # like ``git_gutter_menu``.
     var diagnostic_menu: DiagnosticMenu
+    # Editor that opened ``diagnostic_menu`` (index into ``windows``).
+    # ``-1`` when the menu is closed. Held separately from the menu so
+    # the menu type doesn't need to know about the WindowManager: the
+    # host carries the routing, the menu carries the UI state.
+    var _diag_menu_editor_idx: Int
+    # Code-action list parked alongside the open diagnostic menu so the
+    # submit handler can find the chosen action's edits by
+    # ``selected_fix_index``. Sized to match the menu's ``fix_titles``.
+    var _diag_menu_actions: List[CodeAction]
     # Right-click on the LSP indicator on the right of the status bar →
     # contextual menu with a single ``Restart LSP`` action. Same
     # input-first routing pattern as ``git_gutter_menu``.
@@ -927,6 +938,8 @@ struct Desktop(Movable):
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
         self.diagnostic_menu = DiagnosticMenu()
+        self._diag_menu_editor_idx = -1
+        self._diag_menu_actions = List[CodeAction]()
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -3776,6 +3789,11 @@ struct Desktop(Movable):
         # before the next paint so it renders on the same frame the
         # user pressed the key.
         self._maybe_open_spell_menu()
+        # Same idea for the diagnostic menu — Alt+Enter on a diagnostic
+        # stamps a pending request, but it only got drained from
+        # ``_handle_mouse`` (right-click path) before. Without this call
+        # the menu would never open from the keyboard.
+        self._maybe_open_diagnostic_menu()
         return Optional[String]()
 
     def _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
@@ -4429,6 +4447,13 @@ struct Desktop(Movable):
                     self.windows.windows[fidx].editor.set_hover_result(
                         hover_row, hover_col, hover_text^,
                     )
+        # Route a freshly-arrived code-action response into the open
+        # diagnostic menu so the user sees the quickfix rows appear
+        # without having to close + re-open. Decoupled from the per-
+        # manager loop above because the menu only cares about *one*
+        # path (the one it opened over), and the routing logic is
+        # cleaner as a single helper than a clause repeated per manager.
+        self._drain_diagnostic_code_actions()
         # Per-editor LSP sync: walk every editor window once and (a) push
         # a didChange to the matching server when the buffer has been
         # edited since the last sync, and (b) pull any freshly-published
@@ -7840,10 +7865,17 @@ struct Desktop(Movable):
     def _maybe_open_diagnostic_menu(mut self):
         """Drain ``Editor.consume_diagnostic_menu_request`` on the
         focused window. The request carries the screen cell of the
-        right-click so the popup opens right under it, plus the
-        diagnostic message captured at click time — the menu doesn't
-        need to re-resolve which diagnostic the user clicked when the
-        user picks Copy."""
+        right-click (or Alt+Enter cursor anchor) so the popup opens
+        right under it, plus the diagnostic message captured at open
+        time — the menu doesn't need to re-resolve which diagnostic
+        the user clicked when they pick Copy.
+
+        Also fires a ``textDocument/codeAction`` request against the
+        LSP server (when one is ready) so the menu can grow rows for
+        quickfixes like "import typing.Any" when the response lands.
+        While the request is in flight the menu shows a disabled
+        ``Loading fixes…`` row; ``_drain_diagnostic_code_actions`` (run
+        each tick) replaces it with the actual action rows."""
         if not self.windows.focused_is_editor():
             return
         var idx = self.windows.focused
@@ -7855,24 +7887,107 @@ struct Desktop(Movable):
         self.diagnostic_menu.open(
             req.message, Point(req.anchor_x, req.anchor_y),
         )
+        # Track which editor opened the menu so the response handler
+        # knows where to apply the fix.
+        self._diag_menu_editor_idx = idx
+        # Fire the LSP code-action request. Only attempt when a server
+        # is actually ready — otherwise we just leave the menu with
+        # only the Copy row, no spinner.
+        var path = self.windows.windows[idx].editor.file_path
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready():
+            return
+        var text = self.windows.windows[idx].editor.text_snapshot()
+        var ok = self.lsp_managers[li].request_code_actions(
+            path, req.diag, text^,
+        )
+        if ok:
+            self.diagnostic_menu.set_loading_fixes(True)
+
+    def _drain_diagnostic_code_actions(mut self):
+        """Each frame, check whether any LSP manager parked a code-action
+        response and, if so, hand the action list to the diagnostic menu.
+
+        Called from the main tick alongside the other LSP poll paths.
+        Only the manager whose ``pending_code_action_path`` matches the
+        editor that opened the menu is consulted — a stale response from
+        a closed/replaced server is silently dropped."""
+        if not self.diagnostic_menu.active:
+            return
+        if self._diag_menu_editor_idx < 0 \
+                or self._diag_menu_editor_idx >= len(self.windows.windows):
+            return
+        var path = self.windows.windows[
+            self._diag_menu_editor_idx
+        ].editor.file_path
+        var li = self._lsp_for_path(path)
+        if li < 0:
+            return
+        if not self.lsp_managers[li].has_pending_code_actions():
+            return
+        if self.lsp_managers[li].pending_code_action_path() != path:
+            # Response is for a different editor's request; let that
+            # editor's open menu (if any) consume it.
+            return
+        var actions = self.lsp_managers[li].take_code_actions()
+        var titles = List[String]()
+        for k in range(len(actions)):
+            # Skip actions with no applicable file edits — we have no
+            # way to apply ``Command``-only actions yet.
+            if len(actions[k].file_edits) == 0:
+                continue
+            titles.append(actions[k].title)
+        self.diagnostic_menu.set_actions(titles^)
+        # Stash the full action list (after the same filter) so the
+        # submit handler can find the matching edits by selected index.
+        var keep = List[CodeAction]()
+        for k in range(len(actions)):
+            if len(actions[k].file_edits) > 0:
+                keep.append(actions[k].copy())
+        self._diag_menu_actions = keep^
 
     def _on_diagnostic_menu_submit(mut self):
-        """Resolve the diagnostic context menu: on Copy, push the
-        captured message to the system clipboard and surface a status
-        hint so the user gets visible feedback for a clipboard write
-        they can't otherwise see."""
+        """Resolve the diagnostic context menu. Copy pushes the captured
+        message to the system clipboard; Apply-Fix routes the chosen
+        action's WorkspaceEdit through ``Editor.apply_code_action_edits``
+        on the editor that opened the menu."""
         var act = self.diagnostic_menu.action
         var msg = self.diagnostic_menu.message
+        var fix_idx = self.diagnostic_menu.selected_fix_index
+        var editor_idx = self._diag_menu_editor_idx
+        var actions = self._diag_menu_actions.copy()
         self.diagnostic_menu.close()
-        if act != DIAG_MENU_ACTION_COPY:
+        self._diag_menu_editor_idx = -1
+        self._diag_menu_actions = List[CodeAction]()
+        if act == DIAG_MENU_ACTION_COPY:
+            if len(msg.as_bytes()) == 0:
+                return
+            clipboard_copy(msg)
+            self.status_bar.set_message(
+                String("Copied diagnostic message"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
             return
-        if len(msg.as_bytes()) == 0:
+        if act == DIAG_MENU_ACTION_APPLY_FIX:
+            if fix_idx < 0 or fix_idx >= len(actions):
+                return
+            if editor_idx < 0 or editor_idx >= len(self.windows.windows):
+                return
+            var action = actions[fix_idx].copy()
+            var ok = self.windows.windows[
+                editor_idx
+            ].editor.apply_code_action_edits(action.file_edits.copy())
+            if ok:
+                self.status_bar.set_message(
+                    String("Applied fix: ") + action.title,
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+            else:
+                self.status_bar.set_message(
+                    String("Fix had no edits for this file"),
+                    Attr(BLACK, LIGHT_GRAY),
+                )
             return
-        clipboard_copy(msg)
-        self.status_bar.set_message(
-            String("Copied diagnostic message"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action
