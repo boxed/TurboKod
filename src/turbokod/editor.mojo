@@ -6134,11 +6134,15 @@ struct Editor(Copyable, Movable):
             return
         if len(text.as_bytes()) == 0 and not self.has_selection():
             return
+        var pre_dirty_row = self.cursor_row
+        if self.has_selection() and self.anchor_row < pre_dirty_row:
+            pre_dirty_row = self.anchor_row
         self._push_undo()
         if self.has_selection():
             self._delete_selection()
         self._insert_text(text)
         self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
 
     def copy_to_clipboard(self):
         """Copy the current selection to the system clipboard. With no
@@ -6218,6 +6222,7 @@ struct Editor(Copyable, Movable):
             return
         if len(text.as_bytes()) == 0:
             return
+        var pre_dirty_row = self.cursor_row
         self._push_undo()
         var orig_col = self.cursor_col
         self.move_to(self.cursor_row, 0, False)
@@ -6230,6 +6235,7 @@ struct Editor(Copyable, Movable):
             col = line_n
         self.move_to(self.cursor_row, col, False)
         self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
 
     # --- turbo-style editor commands --------------------------------------
 
