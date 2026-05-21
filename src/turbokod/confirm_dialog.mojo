@@ -25,8 +25,10 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB,
+    MOUSE_BUTTON_LEFT,
 )
-from .geometry import Rect
+from .geometry import Point, Rect
+from .window import hit_close_button, paint_close_button
 
 
 comptime _DEFAULT_WIDTH = 60
@@ -123,6 +125,10 @@ struct ConfirmDialog(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter.draw_box(canvas, rect, attr, False)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / Cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         # Reserve the bottom-most three rows for the button row + its
@@ -186,6 +192,15 @@ struct ConfirmDialog(Movable):
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
+            return True
+        # Standard ``[■]`` close button — equivalent to ESC / Cancel.
+        # Checked before button routing so a click on the chrome glyph
+        # always resolves the dialog as not-confirmed.
+        var rect = self._layout(screen)
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self._resolve(False)
             return True
         var s = self._yes_button.handle_mouse(event)
         if s != BUTTON_NONE:

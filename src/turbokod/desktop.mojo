@@ -115,7 +115,8 @@ from .dap_dispatch import (
     DapVariable,
 )
 from .debug_pane import (
-    DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
+    DEBUG_PANE_CLOSE, DebugPane,
+    PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
 )
 from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
@@ -124,7 +125,7 @@ from .debugger_config import (
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, which
 from .project import replace_in_project
-from .search_options import SearchOptions
+from .search_options import SearchOptions, build_search_regex
 from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
@@ -139,7 +140,10 @@ from .breakpoint_dialog import (
     BreakpointConditionErrorDialog, BreakpointMenu,
 )
 from .confirm_dialog import ConfirmDialog
-from .prompt import Prompt
+from .prompt import (
+    Prompt,
+    SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
+)
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
@@ -392,10 +396,10 @@ comptime APP_QUIT_ACTION      = String("quit")
 comptime _SHOW_TREE_LABEL = String("Show file tree")
 comptime _HIDE_TREE_LABEL = String("Hide file tree")
 
-# Internal pending-action values for two-step prompts (find → replace).
-comptime _PA_REPLACE_FIND        = String("__pa_replace_find")
+# Internal pending-action values for the Replace prompt. The prompt
+# itself now carries two input rows (find + replace), so this is just
+# a tag distinguishing in-buffer replace from project-wide replace.
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
-comptime _PA_PROJECT_REPLACE_FIND = String("__pa_project_replace_find")
 comptime _PA_PROJECT_REPLACE_DO  = String("__pa_project_replace_do")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
@@ -1053,11 +1057,10 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("f")), MOD_META, EDITOR_FIND,
         ))
-        # Cmd+H for replace (matches VS Code). Ctrl+R is the
-        # run-target shortcut below, so the old Ctrl+R-for-replace
-        # binding had to move; H is the de-facto cross-editor default.
+        # Cmd+R for replace. Run-target lives on Ctrl+R below, freeing
+        # Cmd+R for the in-buffer replace prompt.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("h")), MOD_META, EDITOR_REPLACE,
+            UInt32(ord("r")), MOD_META, EDITOR_REPLACE,
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("g")), MOD_META, EDITOR_FIND_NEXT,
@@ -1199,14 +1202,14 @@ struct Desktop(Movable):
         # works; arrow keys then scroll the stack list while the
         # pane is focused.
         self._hotkeys.append(Hotkey(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE))
-        # Cmd+R / Cmd+D / Cmd+T — run / debug / test the active project
+        # Ctrl+R / Ctrl+D / Cmd+T — run / debug / test the active project
         # target. Registered after the EDITOR_GOTO_SYMBOL Cmd+T above so
         # the newest-first lookup picks TARGET_TEST.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("r")), MOD_META, TARGET_RUN,
+            ctrl_key("r"), MOD_CTRL, TARGET_RUN,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("d")), MOD_META, TARGET_DEBUG,
+            ctrl_key("d"), MOD_CTRL, TARGET_DEBUG,
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("t")), MOD_META, TARGET_TEST,
@@ -3358,10 +3361,14 @@ struct Desktop(Movable):
         if self.prompt.active:
             if event.kind == EVENT_KEY:
                 _ = self.prompt.handle_key(event)
-                if self.prompt.submitted:
-                    return self._on_prompt_submit()
             else:
                 _ = self.prompt.handle_mouse(event, screen)
+            if self.prompt.submitted:
+                # Either Enter or a click on one of the Replace
+                # dialog's action buttons (Find next / Replace /
+                # Replace all) — both paths land here so the submit
+                # handler runs once and reads ``submit_kind``.
+                return self._on_prompt_submit()
             return Optional[String]()
         if self.confirm_dialog.active:
             if event.kind == EVENT_KEY:
@@ -3932,11 +3939,7 @@ struct Desktop(Movable):
                     )
             return Optional[String]()
         if action == EDITOR_REPLACE:
-            self._pending_action = _PA_REPLACE_FIND
-            self.prompt.open(
-                String("Replace — find: "), show_options=True,
-            )
-            self.prompt.set_search_options(self._last_search_opts)
+            self._open_replace_prompt()
             return Optional[String]()
         if action == EDITOR_GOTO:
             self._pending_action = EDITOR_GOTO
@@ -4162,12 +4165,7 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_REPLACE:
             if self.project:
-                self._pending_action = _PA_PROJECT_REPLACE_FIND
-                self.prompt.open(
-                    String("Replace in project — find: "),
-                    show_options=True,
-                )
-                self.prompt.set_search_options(self._last_search_opts)
+                self._open_project_replace_prompt()
             return Optional[String]()
         if action == WINDOW_MAXIMIZE_ALL:
             self.windows.maximize_all(self.workspace_rect(screen))
@@ -4254,6 +4252,20 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == DEBUG_CLEAR_OUTPUT:
             self.debug_pane.clear_output()
+            return Optional[String]()
+        if action == DEBUG_PANE_CLOSE:
+            # Standard [■] close button on the run/debug pane: equivalent
+            # to ESC / cancel. Kill any active DAP or run-session,
+            # release the post-run hold, drop focus off the pane, and
+            # let dap_tick's next pass hide the pane on its own (the
+            # visibility expression is fully driven by these flags).
+            self.dap.shutdown()
+            self._dap_exec_path = String("")
+            self._dap_exec_line = -1
+            self.run_session.terminate()
+            self._run_output_held = False
+            if self.debug_pane.focused:
+                self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == FILE_TREE_FOCUS:
             self._focus_dock(DOCK_FILE_TREE)
@@ -6656,23 +6668,49 @@ struct Desktop(Movable):
         Restores the Cc / W / .* toggles to whatever the user had on
         for the previous Find so the flags persist across opens."""
         self._pending_action = EDITOR_FIND
-        var prefill = String("")
-        var idx = self._focused_editor_idx()
-        if idx >= 0:
-            var sel = self.windows.windows[idx].editor.selection_text()
-            var sb = sel.as_bytes()
-            var has_newline = False
-            for i in range(len(sb)):
-                if sb[i] == 0x0A or sb[i] == 0x0D:
-                    has_newline = True
-                    break
-            if not has_newline:
-                prefill = sel
         self.prompt.open(
-            String("Find: "), prefill,
+            String("Find: "), self._selection_seed_for_search(),
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
+
+    def _open_replace_prompt(mut self):
+        """Open the in-buffer Replace prompt with two input rows —
+        Find and Replace — seeded from the editor's selection the same
+        way ``_open_find_prompt`` does. Submitting Enter from either
+        row runs the replace in one shot."""
+        self._pending_action = _PA_REPLACE_DO
+        self.prompt.open_replace(
+            String("Find: "), String("Replace: "),
+            self._selection_seed_for_search(),
+            select_prefill=True, show_options=True,
+        )
+        self.prompt.set_search_options(self._last_search_opts)
+
+    def _open_project_replace_prompt(mut self):
+        """Project-wide Replace counterpart to ``_open_replace_prompt``
+        — same two-field layout, different submit handler."""
+        self._pending_action = _PA_PROJECT_REPLACE_DO
+        self.prompt.open_replace(
+            String("Find: "), String("Replace: "),
+            self._selection_seed_for_search(),
+            select_prefill=True, show_options=True,
+        )
+        self.prompt.set_search_options(self._last_search_opts)
+
+    def _selection_seed_for_search(self) -> String:
+        """Return the focused editor's current selection if it's
+        single-line, else the empty string. Used by Find / Replace to
+        prefill the find field with whatever the user just highlighted."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return String("")
+        var sel = self.windows.windows[idx].editor.selection_text()
+        var sb = sel.as_bytes()
+        for i in range(len(sb)):
+            if sb[i] == 0x0A or sb[i] == 0x0D:
+                return String("")
+        return sel
 
     def _autosave_all_dirty(mut self):
         """Save every dirty editor that has a backing path. Called on
@@ -8475,12 +8513,29 @@ struct Desktop(Movable):
 
     def _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input.text
-        self.prompt.close()
+        var second_text = self.prompt.second_input.text
+        var submit_kind = self.prompt.submit_kind
+        var opts = self.prompt.search_options()
         var pa = self._pending_action
-        self._pending_action = String("")
+        # Two-field Replace stays open across Find Next / Replace so
+        # the user can step through matches without re-summoning the
+        # dialog. Replace All and every single-field flow close as
+        # before. Reset ``submitted``/``submit_kind`` either way so a
+        # second submission triggers a fresh handler call.
+        var keep_open = False
+        if pa == _PA_REPLACE_DO:
+            if submit_kind == SUBMIT_FIND_NEXT \
+                    or submit_kind == SUBMIT_REPLACE:
+                keep_open = True
+        if keep_open:
+            self.prompt.submitted = False
+            self.prompt.submit_kind = SUBMIT_DEFAULT
+        else:
+            self.prompt.close()
+            self._pending_action = String("")
         if pa == EDITOR_FIND:
             self._last_search = text
-            self._last_search_opts = self.prompt.search_options()
+            self._last_search_opts = opts
             var idx = self._focused_editor_idx()
             if idx >= 0:
                 if self.windows.windows[idx].editor.find_next(
@@ -8515,43 +8570,62 @@ struct Desktop(Movable):
                     margin_below=10, margin_above=10,
                 )
             return Optional[String]()
-        if pa == _PA_REPLACE_FIND:
-            self._pending_arg = text
-            # Capture the toggle state on the way through — the replace
-            # value prompt that follows doesn't show toggles, so this
-            # is our last chance to read what the user picked.
-            self._last_search_opts = self.prompt.search_options()
-            self._pending_action = _PA_REPLACE_DO
-            self.prompt.open(String("Replace with: "))
-            return Optional[String]()
         if pa == _PA_REPLACE_DO:
-            var find = self._pending_arg
-            self._pending_arg = String("")
+            # Three actions sit on the dialog's button row plus an
+            # Enter-as-find-next shortcut. The prompt stays open for
+            # Find Next / Replace so the user can step through matches;
+            # Replace All finishes the operation and closes (handled
+            # by ``keep_open`` above).
+            var find = text
+            var replacement = second_text
             self._last_search = find
+            self._last_search_opts = opts
             var idx = self._focused_editor_idx()
-            if idx >= 0:
+            if idx < 0:
+                return Optional[String]()
+            if submit_kind == SUBMIT_REPLACE_ALL:
                 _ = self.windows.windows[idx].editor.replace_all(
-                    find, text, self._last_search_opts,
+                    find, replacement, opts,
+                )
+                return Optional[String]()
+            if submit_kind == SUBMIT_REPLACE:
+                # Replace the current match (if the selection is one)
+                # then step forward. When the selection isn't a match,
+                # this just advances — same UX as VS Code / JetBrains.
+                if _selection_is_match(
+                    self.windows.windows[idx].editor.selection_text(),
+                    find, opts,
+                ):
+                    self.windows.windows[idx].editor.paste_text(replacement)
+                if self.windows.windows[idx].editor.find_next(find, opts):
+                    self.windows.windows[idx].editor.reveal_cursor(
+                        self.windows.windows[idx].interior(),
+                        margin_below=10, margin_above=10,
+                    )
+                return Optional[String]()
+            # SUBMIT_FIND_NEXT (Enter / Find next button) — just walk.
+            if self.windows.windows[idx].editor.find_next(find, opts):
+                self.windows.windows[idx].editor.reveal_cursor(
+                    self.windows.windows[idx].interior(),
+                    margin_below=10, margin_above=10,
                 )
             return Optional[String]()
-        if pa == _PA_PROJECT_REPLACE_FIND:
-            self._pending_arg = text
-            self._last_search_opts = self.prompt.search_options()
-            self._pending_action = _PA_PROJECT_REPLACE_DO
-            self.prompt.open(String("Replace in project with: "))
-            return Optional[String]()
         if pa == _PA_PROJECT_REPLACE_DO:
-            var find = self._pending_arg
-            self._pending_arg = String("")
+            var find = text
+            var replacement = second_text
             self._last_search = find
+            self._last_search_opts = opts
+            # Project replace is intrinsically a "replace all" — the
+            # Find Next / Replace per-match flow doesn't apply across
+            # multiple files. Every button on the dialog runs the same
+            # project-wide swap and surfaces the summary window.
             if self.project:
                 try:
                     var summary = replace_in_project(
-                        self.project.value(), find, text,
-                        self._last_search_opts,
+                        self.project.value(), find, replacement, opts,
                     )
                     self.windows.add(_summary_window(
-                        find, text, summary[0], summary[1],
+                        find, replacement, summary[0], summary[1],
                     ))
                 except:
                     pass
@@ -8590,6 +8664,30 @@ struct Desktop(Movable):
 
 
 # --- Small helpers ----------------------------------------------------------
+
+
+def _selection_is_match(sel: String, find: String, opts: SearchOptions) -> Bool:
+    """True when ``sel`` would match ``find`` under ``opts`` if it were
+    a standalone candidate — i.e. the user's currently-selected text is
+    a hit for the search term. Drives the Replace button: if the active
+    selection is a match, replacing it is the right thing to do; if it
+    isn't, the button instead just walks forward to the first match.
+
+    Non-regex / non-case-insensitive / non-whole-word: simple byte
+    equality. Anything else: compile the same regex ``find_next`` uses
+    and check it against the selection text, anchored at start, with
+    the match consuming the entire selection.
+    """
+    if len(sel.as_bytes()) == 0 or len(find.as_bytes()) == 0:
+        return False
+    var rx_opt = build_search_regex(find, opts)
+    if rx_opt:
+        var m_opt = rx_opt.value().search_at(sel, 0)
+        if m_opt:
+            var m = m_opt.value().copy()
+            return m.start == 0 and m.end == len(sel.as_bytes())
+        return False
+    return sel == find
 
 
 def _find_doc_entry_for_word(

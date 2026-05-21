@@ -25,7 +25,7 @@ from .geometry import Point, Rect
 from .lsp_dispatch import DefinitionResolved
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .string_utils import display_columns, starts_with
-from .window import paint_window_title
+from .window import hit_close_button, paint_close_button, paint_window_title
 
 
 struct ReferencePick(Movable):
@@ -136,6 +136,10 @@ struct ReferencePick(Movable):
             title = title + String(": ") + self.word
         title = title + String(" ")
         paint_window_title(canvas, rect, title^, bg, bg)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         for i in range(h):
@@ -204,6 +208,14 @@ struct ReferencePick(Movable):
         var rect = self._rect(screen)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
+        # Standard ``[■]`` close button — equivalent to ESC. Checked
+        # before list routing so a click on the chrome glyph always
+        # dismisses the dialog.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.close()
+            return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(event.button, self.scroll, len(self.entries), h):
                 return True

@@ -46,7 +46,7 @@ from .string_utils import starts_with
 from .text_field import TextField
 from .type_ahead import starts_with_ci
 from .view import RowCursor
-from .window import paint_window_title
+from .window import hit_close_button, paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")

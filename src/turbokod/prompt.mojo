@@ -14,21 +14,33 @@ dialog instead of bleeding across the workspace.
 The input strip is a full ``TextField`` — arrow keys, word jumps,
 Home/End, selection (shift+arrow), Cmd+A select-all, and mouse
 positioning all behave the same as in any editor field.
+
+``open_replace(label, second_label)`` switches the dialog into its
+two-field Find / Replace mode: two input rows separated by a blank
+spacer, with a button row underneath carrying [ Find next ],
+[ Replace ], [ Replace all ]. Tab cycles between the two text fields;
+Enter is wired to Find Next. The caller reads ``submit_kind`` to learn
+which button fired and decides whether to keep the dialog open between
+submissions (the host typically keeps it open through Find Next and
+Replace, and closes it on Replace All).
 """
 
 from .buttons import (
-    BUTTON_FIRED, OptionToggle, paint_option_toggle,
+    BUTTON_FIRED, OptionToggle, ShadowButton,
+    paint_option_toggle, paint_shadow_button,
 )
 from .canvas import Canvas, paint_drop_shadow, utf8_codepoint_count, wrap_to_width
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE, YELLOW
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB,
+    MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
+from .window import hit_close_button, paint_close_button
 
 
 comptime _DEFAULT_WIDTH = 60
@@ -37,17 +49,52 @@ comptime _MIN_INLINE_INPUT = 10
 Below this we drop the input onto its own line so the user always has a
 visible place to type."""
 
+# ``submit_kind`` values — set by the prompt when the host should run
+# the corresponding action. ``SUBMIT_DEFAULT`` is the Enter-key path
+# (host decides what Enter means for the current prompt — for the
+# two-field Replace dialog it's wired to "find next" so repeated Enter
+# walks matches). Button clicks set the explicit kinds. The host reads
+# ``submit_kind`` in its prompt-submit handler and decides whether to
+# leave the dialog open afterwards.
+comptime SUBMIT_DEFAULT     = UInt8(0)
+comptime SUBMIT_FIND_NEXT   = UInt8(1)
+comptime SUBMIT_REPLACE     = UInt8(2)
+comptime SUBMIT_REPLACE_ALL = UInt8(3)
+
 
 struct Prompt(Movable):
     var label: String
     var input: TextField
     var active: Bool
     var submitted: Bool
+    # Distinguishes the trigger that set ``submitted=True`` so the host
+    # can run the right action. Defaults to ``SUBMIT_DEFAULT`` (Enter).
+    # Two-field Replace also produces ``SUBMIT_FIND_NEXT`` /
+    # ``SUBMIT_REPLACE`` / ``SUBMIT_REPLACE_ALL`` from its button row.
+    var submit_kind: UInt8
+    # Optional second input strip — used by Replace to put the
+    # "find" and "replace with" fields in the same dialog. When
+    # ``has_second`` is False the dialog renders as before with just
+    # ``input``. Tab cycles focus between the two fields; ``_active``
+    # tracks which one currently owns the cursor (0 = ``input``,
+    # 1 = ``second_input``).
+    var has_second: Bool
+    var second_label: String
+    var second_input: TextField
+    var _active: Int
+    # Action buttons painted on the two-field Replace dialog. Each
+    # one carries its own ``ShadowButton.handle_mouse`` press latch
+    # so it survives across paint cycles — re-instantiating per
+    # frame would drop the latch mid-press.
+    var _btn_find_next: ShadowButton
+    var _btn_replace: ShadowButton
+    var _btn_replace_all: ShadowButton
     # Cached rect for the input strip, captured on the most recent
     # ``paint`` so ``handle_mouse`` can route clicks back to the
     # field without re-running the layout. Negative width means "no
     # paint yet" — mouse handling falls back to a no-op.
     var _input_rect: Rect
+    var _second_input_rect: Rect
     # Search-mode toggles. The three flags persist across ``open()``
     # calls so the user's "Cc"/"W"/".*" choice carries from one Find
     # to the next; ``show_options`` decides whether they actually
@@ -66,7 +113,13 @@ struct Prompt(Movable):
         self.input = TextField()
         self.active = False
         self.submitted = False
+        self.submit_kind = SUBMIT_DEFAULT
+        self.has_second = False
+        self.second_label = String("")
+        self.second_input = TextField()
+        self._active = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = False
         self.toggle_case = OptionToggle(
             String("Cc"), String("Match case"),
@@ -76,6 +129,15 @@ struct Prompt(Movable):
         )
         self.toggle_regex = OptionToggle(
             String(".*"), String("Regular expression"),
+        )
+        self._btn_find_next = ShadowButton(
+            String(" Find next "), 0, 0,
+        )
+        self._btn_replace = ShadowButton(
+            String(" Replace "), 0, 0,
+        )
+        self._btn_replace_all = ShadowButton(
+            String(" Replace all "), 0, 0,
         )
 
     def open(
@@ -104,21 +166,85 @@ struct Prompt(Movable):
             self.input.select_all()
         self.active = True
         self.submitted = False
+        self.submit_kind = SUBMIT_DEFAULT
+        self.has_second = False
+        self.second_label = String("")
+        self.second_input = TextField()
+        self._active = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._second_input_rect = Rect(0, 0, 0, 0)
+        self.show_options = show_options
+
+    def open_replace(
+        mut self,
+        var label: String,
+        var second_label: String,
+        var prefill: String = String(""),
+        var second_prefill: String = String(""),
+        select_prefill: Bool = False,
+        show_options: Bool = False,
+    ):
+        """Open the prompt with two input rows — a Find / Replace pair.
+
+        The first row carries ``label`` + ``prefill``; the second row
+        carries ``second_label`` + ``second_prefill``. Tab cycles focus
+        between them. Enter submits both at once — the caller reads
+        ``input.text`` and ``second_input.text`` and then calls
+        ``close()``.
+
+        When ``prefill`` is non-empty the cursor starts on the second
+        field — the common case for "I selected what I want to replace,
+        now tell me what to replace it with." Otherwise focus starts on
+        the first field. ``select_prefill`` still applies to the
+        first-field prefill the same way the single-field ``open`` does.
+        """
+        var has_prefill = len(prefill.as_bytes()) > 0
+        self.label = label^
+        self.second_label = second_label^
+        self.input = TextField()
+        self.input.set_text(prefill^)
+        if select_prefill:
+            self.input.select_all()
+        self.second_input = TextField()
+        self.second_input.set_text(second_prefill^)
+        self.has_second = True
+        if has_prefill:
+            self._active = 1
+        else:
+            self._active = 0
+        self.active = True
+        self.submitted = False
+        self.submit_kind = SUBMIT_DEFAULT
+        self._input_rect = Rect(0, 0, 0, 0)
+        self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = show_options
 
     def close(mut self):
         self.active = False
         self.submitted = False
+        self.submit_kind = SUBMIT_DEFAULT
         self.label = String("")
         self.input = TextField()
+        self.has_second = False
+        self.second_label = String("")
+        self.second_input = TextField()
+        self._active = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = False
         # Drop hover state so a stale tooltip doesn't pop the next time
         # the prompt opens before the cursor has moved.
         self.toggle_case.hovered = False
         self.toggle_word.hovered = False
         self.toggle_regex.hovered = False
+        # Reset button press latches so a stale "pressed" state from
+        # the previous open can't bleed into the next dialog.
+        self._btn_find_next.pressed = False
+        self._btn_find_next.pressed_inside = False
+        self._btn_replace.pressed = False
+        self._btn_replace.pressed_inside = False
+        self._btn_replace_all.pressed = False
+        self._btn_replace_all.pressed_inside = False
 
     def search_options(self) -> SearchOptions:
         """Read back the toggle states as a ``SearchOptions``. Caller
@@ -173,7 +299,15 @@ struct Prompt(Movable):
             if lines < 1:
                 lines = 1
             height = 2 + lines + 1   # top border + label rows + input row + bottom
-        if self.show_options:
+        if self.has_second:
+            # Two-field Replace dialog: row 1 = Find input,
+            # row 2 = spacer (doubles as tooltip strip when a toggle
+            # is hovered), row 3 = Replace input, row 4 = spacer,
+            # row 5 = button row, row 6 = button shadow row. Plus the
+            # single input row the single-field path already counted
+            # = 5 extra rows.
+            height += 5
+        elif self.show_options:
             height += 1   # toggle-tooltip row under the input
         if height > screen.b.y - 4:
             height = screen.b.y - 4
@@ -196,11 +330,18 @@ struct Prompt(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter.draw_box(canvas, rect, attr, False)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         var text_w = rect.width() - 4
         if text_w < 1:
             text_w = 1
+        if self.has_second:
+            self._paint_two_field(canvas, rect, attr, painter, content_x, clip_x, text_w)
+            return
         var label_lines = wrap_to_width(self.label, text_w)
         var inline = False
         var last_label_w = 0
@@ -290,6 +431,102 @@ struct Prompt(Movable):
                         canvas, Point(content_x, tip_y), tip, attr,
                     )
 
+    def _paint_two_field(
+        mut self, mut canvas: Canvas, rect: Rect, attr: Attr,
+        painter: Painter, content_x: Int, clip_x: Int, text_w: Int,
+    ):
+        """Paint the two-field Find / Replace layout.
+
+        Row breakdown inside the dialog interior (rect.a.y+1 .. rect.b.y-1):
+        ``Find`` row, spacer (doubles as the tooltip strip when a toggle
+        is hovered), ``Replace`` row, spacer, button row, button shadow
+        row. Both inputs share a starting x derived from the wider of
+        the two labels so the input columns line up.
+        """
+        var label_w_1 = utf8_codepoint_count(self.label)
+        var label_w_2 = utf8_codepoint_count(self.second_label)
+        var label_col = label_w_1
+        if label_w_2 > label_col:
+            label_col = label_w_2
+        if label_col + _MIN_INLINE_INPUT > text_w:
+            label_col = text_w - _MIN_INLINE_INPUT
+            if label_col < 0:
+                label_col = 0
+        var find_y = rect.a.y + 1
+        var tip_y = rect.a.y + 2
+        var replace_y = rect.a.y + 3
+        var button_y = rect.a.y + 5
+        _ = painter.put_text(
+            canvas, Point(content_x, find_y), self.label, attr,
+        )
+        _ = painter.put_text(
+            canvas, Point(content_x, replace_y), self.second_label, attr,
+        )
+        var input_x = content_x + label_col
+        var input_right = clip_x
+        if self.show_options:
+            var gap = 1
+            var total_w = self.toggle_case.width() \
+                + gap + self.toggle_word.width() \
+                + gap + self.toggle_regex.width()
+            var tx = clip_x - total_w
+            self.toggle_case.move_to(tx, find_y)
+            tx += self.toggle_case.width() + gap
+            self.toggle_word.move_to(tx, find_y)
+            tx += self.toggle_word.width() + gap
+            self.toggle_regex.move_to(tx, find_y)
+            input_right = self.toggle_case.x - 1
+            if input_right < input_x + 1:
+                input_right = input_x + 1
+        var ir1 = Rect(input_x, find_y, input_right, find_y + 1)
+        var ir2 = Rect(input_x, replace_y, clip_x, replace_y + 1)
+        self._input_rect = ir1
+        self._second_input_rect = ir2
+        self.input.paint(canvas, ir1, self._active == 0)
+        self.second_input.paint(canvas, ir2, self._active == 1)
+        if self.show_options:
+            var off_attr = attr
+            var on_attr  = Attr(BLACK, YELLOW)
+            paint_option_toggle(canvas, self.toggle_case, off_attr, on_attr, clip_x)
+            paint_option_toggle(canvas, self.toggle_word, off_attr, on_attr, clip_x)
+            paint_option_toggle(canvas, self.toggle_regex, off_attr, on_attr, clip_x)
+            var tip = String("")
+            if self.toggle_case.hovered:
+                tip = self.toggle_case.tooltip
+            elif self.toggle_word.hovered:
+                tip = self.toggle_word.tooltip
+            elif self.toggle_regex.hovered:
+                tip = self.toggle_regex.tooltip
+            painter.fill(
+                canvas, Rect(content_x, tip_y, clip_x, tip_y + 1),
+                String(" "), attr,
+            )
+            if len(tip.as_bytes()) > 0:
+                _ = painter.put_text(
+                    canvas, Point(content_x, tip_y), tip, attr,
+                )
+        # Center the three buttons on ``button_y``. The button row
+        # claims its own y plus the row below for the drop shadow,
+        # which is why ``_layout`` reserves an extra row above the
+        # bottom border.
+        var b1_w = self._btn_find_next.total_width()
+        var b2_w = self._btn_replace.total_width()
+        var b3_w = self._btn_replace_all.total_width()
+        var bgap = 2
+        var btotal = b1_w + bgap + b2_w + bgap + b3_w
+        var bx = rect.a.x + (rect.width() - btotal) // 2
+        if bx < rect.a.x + 2:
+            bx = rect.a.x + 2
+        self._btn_find_next.move_to(bx, button_y)
+        bx += b1_w + bgap
+        self._btn_replace.move_to(bx, button_y)
+        bx += b2_w + bgap
+        self._btn_replace_all.move_to(bx, button_y)
+        var face = Attr(BLACK, GREEN)
+        paint_shadow_button(canvas, self._btn_find_next, face, LIGHT_GRAY, clip_x)
+        paint_shadow_button(canvas, self._btn_replace, face, LIGHT_GRAY, clip_x)
+        paint_shadow_button(canvas, self._btn_replace_all, face, LIGHT_GRAY, clip_x)
+
     def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""
         if not self.active:
@@ -299,9 +536,29 @@ struct Prompt(Movable):
         var k = event.key
         if k == KEY_ENTER:
             self.submitted = True
+            # Two-field Replace dialog: Enter walks matches the same way
+            # repeatedly hitting Find Next would. The dedicated buttons
+            # are how the user triggers Replace / Replace All.
+            if self.has_second:
+                self.submit_kind = SUBMIT_FIND_NEXT
+            else:
+                self.submit_kind = SUBMIT_DEFAULT
             return True
         if k == KEY_ESC:
             self.close()
+            return True
+        if self.has_second and k == KEY_TAB:
+            # Cycle between the two input strips so the user can edit
+            # either field without grabbing the mouse.
+            if self._active == 0:
+                self._active = 1
+            else:
+                self._active = 0
+            return True
+        if self.has_second and self._active == 1:
+            var r = self.second_input.handle_key(event)
+            if r.consumed:
+                return True
             return True
         var r = self.input.handle_key(event)
         if r.consumed:
@@ -312,6 +569,18 @@ struct Prompt(Movable):
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
+            return True
+        # Standard ``[■]`` close button — equivalent to ESC / cancel.
+        # Checked before any other routing so a click on the chrome
+        # glyph always dismisses the modal regardless of which field
+        # currently owns focus.
+        var dlg_rect = self._layout(screen)
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(
+                    Point(dlg_rect.a.x, dlg_rect.a.y), event.pos,
+                ):
+            self.close()
             return True
         if self.show_options:
             # Route through the toggles first so a click on a chip
@@ -336,6 +605,56 @@ struct Prompt(Movable):
             if self.toggle_case.pressed or self.toggle_word.pressed \
                     or self.toggle_regex.pressed:
                 return True
+        if self.has_second:
+            # Route through the three action buttons first. Each one
+            # owns its own press/move/release state machine (see
+            # ``ShadowButton.handle_mouse``), and a captured press
+            # must keep getting events through to release — gate on
+            # ``pressed`` so a drag off the button still routes here
+            # rather than landing in an input.
+            var rfn = self._btn_find_next.handle_mouse(event)
+            if rfn == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_FIND_NEXT
+                return True
+            if self._btn_find_next.pressed:
+                return True
+            var rrp = self._btn_replace.handle_mouse(event)
+            if rrp == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_REPLACE
+                return True
+            if self._btn_replace.pressed:
+                return True
+            var rra = self._btn_replace_all.handle_mouse(event)
+            if rra == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_REPLACE_ALL
+                return True
+            if self._btn_replace_all.pressed:
+                return True
+            # Route a click to whichever input's row it fell in, and
+            # promote that field to active so subsequent keystrokes land
+            # there. Drags inside an already-active field still need to
+            # reach the field's mouse handler — TextField tracks its own
+            # press state — so don't gate on the active field, just on
+            # the rect.
+            var my = event.pos.y
+            if self._second_input_rect.width() > 0 \
+                    and my == self._second_input_rect.a.y:
+                self._active = 1
+                _ = self.second_input.handle_mouse(
+                    event, self._second_input_rect,
+                )
+                return True
+            if self._input_rect.width() > 0 \
+                    and my == self._input_rect.a.y:
+                self._active = 0
+                _ = self.input.handle_mouse(event, self._input_rect)
+                return True
+            # Click landed outside either input row — still swallow it
+            # so the modal stays modal, but don't move the cursor.
+            return True
         if self._input_rect.width() <= 0:
             return True
         _ = self.input.handle_mouse(event, self._input_rect)

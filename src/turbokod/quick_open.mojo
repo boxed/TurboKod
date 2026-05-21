@@ -29,7 +29,7 @@ from .picker_input import picker_nav_key, picker_wheel_scroll
 from .project import walk_project_files
 from .text_field import TextField
 from .view import RowCursor
-from .window import paint_window_title
+from .window import hit_close_button, paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -229,6 +229,10 @@ struct QuickOpen(Movable):
         painter.fill(canvas, rect, String(" "), bg)
         painter.draw_box(canvas, rect, bg, False)
         paint_window_title(canvas, rect, self.title, bg, bg)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         # Search line: ``Find: <query>_``
         _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
         self._input_rect = layout.input_rect
@@ -291,6 +295,14 @@ struct QuickOpen(Movable):
             return True
         var rect = self._rect(screen)
         var layout = _build_layout(rect)
+        # Standard ``[■]`` close button — equivalent to ESC. Checked
+        # before the input/list routing so a click on the chrome glyph
+        # always dismisses the dialog.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.close()
+            return True
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):
             return True

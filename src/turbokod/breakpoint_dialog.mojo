@@ -45,6 +45,7 @@ from .geometry import Point, Rect
 from .string_utils import display_columns
 from .text_field import TextField, text_field_bg
 from .view import RowCursor
+from .window import hit_close_button, paint_close_button
 
 
 comptime _DLG_WIDTH = 64
@@ -259,6 +260,10 @@ struct BreakpointMenu(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter = painter.draw_box_inner(canvas, rect, attr, False)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / Cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
         # Title — show file:line.
         var title = String(" Breakpoint at ")
         var loc = self.path + String(":") + String(self.line + 1)
@@ -446,6 +451,14 @@ struct BreakpointMenu(Movable):
         var rect = self._layout(screen)
         var layout = _build_menu_layout(rect)
         self._position_checkbox(layout, rect)
+        # Standard ``[■]`` close button — equivalent to ESC / Cancel.
+        # Checked before any other routing so a click on the chrome
+        # glyph always dismisses the dialog without applying changes.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self._resolve(False)
+            return True
         # Run the dropdown first when its popup is open: the popup
         # overlays everything else, so a click that lands on it must
         # not also flip checkbox / text-field focus underneath.
@@ -687,6 +700,10 @@ struct BreakpointConditionErrorDialog(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
         painter = painter.draw_box_inner(canvas, rect, attr, False)
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / Cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
         var title = String(" Bad breakpoint condition — ")
         # Title bytes != cols (the em-dash is 3 bytes / 1 col); trim
         # budget has to be in display columns, not bytes.
@@ -827,6 +844,15 @@ struct BreakpointConditionErrorDialog(Movable):
             return True
         var rect = self._layout(screen)
         var layout = _build_error_layout(rect)
+        # Standard ``[■]`` close button — equivalent to ESC / Cancel.
+        # Checked before any other routing so a click on the chrome
+        # glyph always cancels the dialog without applying changes.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+            self.action = BP_ERR_CANCEL
+            self.submitted = True
+            return True
         if event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
             if layout.condition_rect.contains(event.pos):

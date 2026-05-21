@@ -112,6 +112,13 @@ comptime PANE_MODE_DEBUG     = UInt8(0)
 comptime PANE_MODE_RUN       = UInt8(1)
 
 
+# Command id for the pane's standard ``[■]`` close button. Routed back
+# to the host through ``BottomDockedPanel.pending_command_id`` so the
+# host can terminate any active DAP / run session and hide the pane —
+# same dispatch slot the title-command strip already uses.
+comptime DEBUG_PANE_CLOSE    = String("debug:pane_close")
+
+
 # --- pane window state ---------------------------------------------------
 # Uses the shared framework state machine: ``PANEL_STATE_NORMAL``
 # (default — the pane sits at ``preferred_height`` and the user can
@@ -266,6 +273,11 @@ struct DebugPane(Copyable, Movable):
     def __init__(out self):
         self.visible = False
         self.dock = BottomDockedPanel(preferred_height=14)
+        # Window-style ``[■]`` close button at the top-LEFT — same chrome
+        # as the editor windows, terminal pane, and dialogs. Routes back
+        # to the host through ``pending_command_id`` so the host can
+        # terminate the active session(s) and hide the pane.
+        self.dock.close_button_id = DEBUG_PANE_CLOSE
         self.status_text = String("")
         self.mode = PANE_MODE_DEBUG
         self.rows = List[PaneRow]()

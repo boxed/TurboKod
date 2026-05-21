@@ -45,7 +45,7 @@ from .project import ProjectMatch
 from .search_options import SearchOptions
 from .string_utils import display_columns, split_lines
 from .text_field import TextField
-from .window import paint_window_title
+from .window import hit_close_button, paint_close_button, paint_window_title
 
 
 comptime _DEBOUNCE_MS: Int = 200
@@ -450,6 +450,10 @@ struct ProjectFind(Movable):
         paint_window_title(
             canvas, screen, String(" Find in Project "), title_attr, bg,
         )
+        # Standard ``[■]`` close button at the top-LEFT — equivalent to
+        # ESC / cancel. Same chrome the editor windows and other dialogs
+        # use, painted via the shared ``paint_close_button`` helper.
+        paint_close_button(canvas, Point(screen.a.x, screen.a.y), border)
         # Input row: ``Search: <query>_   Cc  W  .*``.
         var input_y = self._input_y(screen)
         var label = String(" Search: ")
@@ -810,6 +814,14 @@ struct ProjectFind(Movable):
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
+            return True
+        # Standard ``[■]`` close button — equivalent to ESC. Checked
+        # before toggle / input / list routing so a click on the chrome
+        # glyph always dismisses the dialog.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion \
+                and hit_close_button(Point(screen.a.x, screen.a.y), event.pos):
+            self.close()
             return True
         # Toggles run first so a click on a chip doesn't slip through
         # to the input field and reposition the cursor; the same call

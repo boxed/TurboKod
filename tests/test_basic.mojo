@@ -85,7 +85,7 @@ from turbokod.buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit,
 )
 from turbokod.debug_pane import (
-    DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN,
+    DEBUG_PANE_CLOSE, DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN,
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
@@ -198,7 +198,9 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
-from turbokod.prompt import Prompt
+from turbokod.prompt import (
+    Prompt, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
+)
 from turbokod.terminal import parse_input
 from turbokod import Vt
 from turbokod.view import Fill, Frame, Label, centered
@@ -2702,25 +2704,83 @@ def test_window_focus_change_skips_untitled_buffer() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
-def test_desktop_replace_chains_two_prompts() raises:
+def test_desktop_replace_all_button_runs_global_replace() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
     ))
-    # Click "Replace..." → first prompt opens for "find".
+    # Click "Replace..." — the prompt opens with two input strips.
     _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
     assert_true(d.prompt.active)
-    # Submit "foo" — Desktop should immediately re-open the prompt for "replace".
+    assert_true(d.prompt.has_second)
+    # Fill both fields and fire the Replace All button. Replace All
+    # closes the dialog after running.
     d.prompt.input.set_text(String("foo"))
+    d.prompt.second_input.set_text(String("BAR"))
     d.prompt.submitted = True
-    _ = d._on_prompt_submit()
-    assert_true(d.prompt.active)   # second prompt is open
-    # Submit "BAR" — the replacement actually happens now.
-    d.prompt.input.set_text(String("BAR"))
-    d.prompt.submitted = True
+    d.prompt.submit_kind = SUBMIT_REPLACE_ALL
     _ = d._on_prompt_submit()
     assert_false(d.prompt.active)
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar BAR"))
+
+
+def test_desktop_replace_button_replaces_current_match_then_advances() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
+    ))
+    # Select the first "foo" so it counts as the current match.
+    d.windows.windows[0].editor.move_to(0, 0, False)
+    d.windows.windows[0].editor.move_to(0, 3, True)
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
+    d.prompt.input.set_text(String("foo"))
+    d.prompt.second_input.set_text(String("BAR"))
+    d.prompt.submitted = True
+    d.prompt.submit_kind = SUBMIT_REPLACE
+    _ = d._on_prompt_submit()
+    # First "foo" replaced; cursor advanced to the second "foo" (now
+    # selected as the next match) and the dialog is still open so the
+    # user can keep stepping.
+    assert_true(d.prompt.active)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("BAR bar foo"))
+    assert_equal(d.windows.windows[0].editor.selection_text(), String("foo"))
+
+
+def test_desktop_find_next_button_just_advances() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar foo\n"),
+    ))
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
+    d.prompt.input.set_text(String("foo"))
+    d.prompt.second_input.set_text(String("BAR"))
+    d.prompt.submitted = True
+    d.prompt.submit_kind = SUBMIT_FIND_NEXT
+    _ = d._on_prompt_submit()
+    # Buffer untouched; cursor parked on the first "foo"; dialog open.
+    assert_true(d.prompt.active)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("foo bar foo"))
+    assert_equal(d.windows.windows[0].editor.selection_text(), String("foo"))
+
+
+def test_desktop_replace_seeds_find_from_selection() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("foo bar baz\n"),
+    ))
+    # Select "bar" in the editor.
+    d.windows.windows[0].editor.move_to(0, 4, False)
+    d.windows.windows[0].editor.move_to(0, 7, True)
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
+    assert_true(d.prompt.active)
+    assert_true(d.prompt.has_second)
+    # Find prefilled with the selection, fully selected; cursor jumps
+    # to the empty Replace field so the next keystroke types the
+    # replacement rather than overwriting the seed.
+    assert_equal(d.prompt.input.text, String("bar"))
+    assert_true(d.prompt.input.has_selection())
+    assert_equal(d.prompt.second_input.text, String(""))
+    assert_equal(d.prompt._active, 1)
 
 
 def test_desktop_find_seeds_from_editor_selection() raises:
@@ -9930,28 +9990,37 @@ def test_paint_drop_shadow_targets_right_and_bottom() raises:
 
 def test_debug_pane_default_title_is_debug() raises:
     """``DebugPane`` defaults to DEBUG mode — the pane's top border
-    paints ``Debug`` so existing callers see no behavioural change."""
+    paints ``Debug`` so existing callers see no behavioural change.
+
+    The pane also paints a standard ``[■]`` close button at the
+    top-LEFT (cells 1..3); the title's leading space therefore lands
+    at col 5 and the first letter at col 6 in a panel rooted at x=0.
+    """
     var pane = DebugPane()
     pane.visible = True
     var c = Canvas(40, 10)
     pane.paint(c, Rect(0, 0, 40, 10))
-    assert_equal(c.get(2, 0).glyph, String(" "))
-    assert_equal(c.get(3, 0).glyph, String("D"))
-    assert_equal(c.get(4, 0).glyph, String("e"))
-    assert_equal(c.get(5, 0).glyph, String("b"))
+    assert_equal(c.get(1, 0).glyph, String("["))
+    assert_equal(c.get(2, 0).glyph, String("■"))
+    assert_equal(c.get(3, 0).glyph, String("]"))
+    assert_equal(c.get(5, 0).glyph, String(" "))
+    assert_equal(c.get(6, 0).glyph, String("D"))
+    assert_equal(c.get(7, 0).glyph, String("e"))
+    assert_equal(c.get(8, 0).glyph, String("b"))
 
 
 def test_debug_pane_run_mode_swaps_title() raises:
     """RUN mode flips the title to ``Run`` — the pane's the same
-    code path, just a different label."""
+    code path, just a different label. Title starts at col 6
+    (after the ``[■]`` close button + leading space)."""
     var pane = DebugPane()
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     var c = Canvas(40, 10)
     pane.paint(c, Rect(0, 0, 40, 10))
-    assert_equal(c.get(3, 0).glyph, String("R"))
-    assert_equal(c.get(4, 0).glyph, String("u"))
-    assert_equal(c.get(5, 0).glyph, String("n"))
+    assert_equal(c.get(6, 0).glyph, String("R"))
+    assert_equal(c.get(7, 0).glyph, String("u"))
+    assert_equal(c.get(8, 0).glyph, String("n"))
 
 
 def test_debug_pane_run_mode_hides_inspect_divider() raises:
@@ -10387,6 +10456,26 @@ def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
         Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, False, False),
         panel,
     )
+
+
+def test_debug_pane_close_button_dispatches() raises:
+    """Clicking the standard ``[■]`` close button on the run/debug pane
+    latches ``DEBUG_PANE_CLOSE`` in the dock's pending-command slot, the
+    same channel the title-strip buttons use. The host consumes that
+    id and routes it through ``dispatch_action`` to terminate the
+    session(s) and hide the pane."""
+    var pane = DebugPane()
+    pane.visible = True
+    var panel = Rect(0, 0, 40, 10)
+    var c = Canvas(40, 10)
+    pane.paint(c, panel)
+    # The close button paints at cells (1,0)..(3,0); a click anywhere
+    # in that span should latch ``DEBUG_PANE_CLOSE``.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(2, 0), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    assert_equal(pane.consume_command_id(), DEBUG_PANE_CLOSE)
 
 
 def test_debug_pane_clear_output_wipes_log() raises:
@@ -15152,7 +15241,10 @@ def _run_chunk_03() raises:
     test_app_focus_out_saves_all_dirty_windows_by_default()
     test_focus_loss_save_opt_out_when_auto_save_off()
     test_window_focus_change_skips_untitled_buffer()
-    test_desktop_replace_chains_two_prompts()
+    test_desktop_replace_all_button_runs_global_replace()
+    test_desktop_replace_button_replaces_current_match_then_advances()
+    test_desktop_find_next_button_just_advances()
+    test_desktop_replace_seeds_find_from_selection()
     test_desktop_open_file_uses_80_percent_size()
     test_desktop_open_file_cascades_by_one()
     test_desktop_open_file_focuses_existing()
@@ -15375,6 +15467,7 @@ def _run_chunk_04() raises:
 def _run_chunk_05() raises:
     test_text_view_selection_extracts_text()
     test_string_utils_slice_codepoints_handles_multibyte()
+    test_debug_pane_close_button_dispatches()
     test_debug_pane_long_output_line_soft_wraps()
     test_debug_pane_run_log_paints_scrollbar_when_overflowing()
     test_debug_pane_run_log_no_scrollbar_when_content_fits()
