@@ -44,22 +44,22 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .text_field import TextField, text_field_bg
-from .view import RowCursor
+from .view import FocusGroup, RowCursor
 from .window import hit_close_button, paint_close_button
 
 
 comptime _DLG_WIDTH = 64
 comptime _MIN_WIDTH = 32
 
-# Focus tokens — small UInt8 enum walked by Tab. We model focus
-# explicitly because the dialog has heterogeneous focusable elements
-# (a checkbox, a dropdown, a text field, two buttons) and
-# ``ShadowButton`` alone doesn't carry focus state for a tab chain.
-comptime _FOCUS_ENABLED   = UInt8(0)
-comptime _FOCUS_WAIT_FOR  = UInt8(1)
-comptime _FOCUS_CONDITION = UInt8(2)
-comptime _FOCUS_OK        = UInt8(3)
-comptime _FOCUS_CANCEL    = UInt8(4)
+# Tab order = slot order. The dialog has heterogeneous focusable
+# elements (checkbox, dropdown, text field, two buttons); the
+# FocusGroup pre-allocates a fixed slot per widget and the dialog
+# refreshes each slot's rect + visitability per paint.
+comptime _SLOT_ENABLED   = 0
+comptime _SLOT_WAIT_FOR  = 1
+comptime _SLOT_CONDITION = 2
+comptime _SLOT_OK        = 3
+comptime _SLOT_CANCEL    = 4
 
 # Sentinel option in the wait-for dropdown that means "no dependency"
 # — distinct from the empty-string fallback because the empty string
@@ -149,7 +149,7 @@ struct BreakpointMenu(Movable):
     The selected key is what gets pushed into ``_bp_wait_for`` — the
     sentinel resolves to an empty string."""
     var condition: TextField
-    var _focus: UInt8
+    var _focus: FocusGroup
     var _ok: ShadowButton
     var _cancel: ShadowButton
     var _confirmed: Bool
@@ -167,7 +167,8 @@ struct BreakpointMenu(Movable):
             List[String](), String(""),
         )
         self.condition = TextField()
-        self._focus = _FOCUS_CONDITION
+        self._focus = FocusGroup(5)
+        self._focus.focus_force(_SLOT_CONDITION)
         self._ok = ShadowButton(String(" OK "), 0, 0)
         self._cancel = ShadowButton(String(" Cancel "), 0, 0)
         self._confirmed = False
@@ -193,7 +194,7 @@ struct BreakpointMenu(Movable):
         )
         self.condition = TextField()
         self.condition.set_text(condition^)
-        self._focus = _FOCUS_CONDITION
+        self._focus.focus_force(_SLOT_CONDITION)
         self._ok.pressed = False
         self._ok.pressed_inside = False
         self._cancel.pressed = False
@@ -290,10 +291,16 @@ struct BreakpointMenu(Movable):
         # chip so the click target reads as wider than just the 3-cell
         # ``[x]`` glyph.
         self._position_checkbox(layout, rect)
+        # Refresh focus slot rects. Checkbox + dropdown + condition
+        # come straight from the layout; OK / Cancel get rects computed
+        # below once buttons are positioned.
+        self._focus.update(_SLOT_ENABLED, self.enabled.hit_rect(), True)
+        self._focus.update(_SLOT_WAIT_FOR, layout.wait_for_rect, True)
+        self._focus.update(_SLOT_CONDITION, layout.condition_rect, True)
         paint_checkbox(
             canvas, self.enabled,
             Attr(BLACK, CYAN), Attr(BLACK, GREEN),
-            self._focus == _FOCUS_ENABLED,
+            self._focus.is_focused(_SLOT_ENABLED),
             rect.b.x - 1,
         )
         # Wait-for label + dropdown.
@@ -302,7 +309,8 @@ struct BreakpointMenu(Movable):
             String("Enable after another breakpoint is hit:"), attr,
         )
         self.wait_for.paint(
-            canvas, layout.wait_for_rect, self._focus == _FOCUS_WAIT_FOR,
+            canvas, layout.wait_for_rect,
+            self._focus.is_focused(_SLOT_WAIT_FOR),
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
             _WAIT_FOR_NONE,
         )
@@ -312,7 +320,8 @@ struct BreakpointMenu(Movable):
             String("Condition:"), attr,
         )
         self.condition.paint(
-            canvas, layout.condition_rect, self._focus == _FOCUS_CONDITION,
+            canvas, layout.condition_rect,
+            self._focus.is_focused(_SLOT_CONDITION),
         )
         # Button row — bottom of dialog, two cells above the bottom
         # border to leave room for the shadow.
@@ -326,12 +335,24 @@ struct BreakpointMenu(Movable):
             bx = rect.a.x + 2
         self._ok.move_to(bx, by)
         self._cancel.move_to(bx + ok_w + gap, by)
+        # Now that the buttons have their final positions, refresh the
+        # focus slot rects so the FocusGroup's hit-test sees the same
+        # geometry the user can click on.
+        self._focus.update(
+            _SLOT_OK,
+            Rect(bx, by, bx + self._ok.face_width(), by + 1),
+        )
+        self._focus.update(
+            _SLOT_CANCEL,
+            Rect(bx + ok_w + gap, by,
+                 bx + ok_w + gap + self._cancel.face_width(), by + 1),
+        )
         var ok_face: Attr
         var cancel_face: Attr
-        if self._focus == _FOCUS_OK:
+        if self._focus.is_focused(_SLOT_OK):
             ok_face = Attr(WHITE, BLUE)
             cancel_face = Attr(BLACK, GREEN)
-        elif self._focus == _FOCUS_CANCEL:
+        elif self._focus.is_focused(_SLOT_CANCEL):
             ok_face = Attr(BLACK, GREEN)
             cancel_face = Attr(WHITE, BLUE)
         else:
@@ -358,33 +379,13 @@ struct BreakpointMenu(Movable):
         self.enabled.toggle()
 
     def _focus_next(mut self, backward: Bool = False):
-        # 5 stops: Enabled → Wait-for → Condition → OK → Cancel → wrap.
-        # Tabbing away from the wait-for dropdown also closes its popup
-        # so a half-open menu doesn't bleed past focus changes.
-        if self._focus == _FOCUS_WAIT_FOR:
+        # Slot order = tab order: Enabled → Wait-for → Condition → OK
+        # → Cancel → wrap. Tabbing away from the wait-for dropdown
+        # also closes its popup so a half-open menu doesn't bleed
+        # past focus changes.
+        if self._focus.is_focused(_SLOT_WAIT_FOR):
             self.wait_for.close()
-        if backward:
-            if self._focus == _FOCUS_ENABLED:
-                self._focus = _FOCUS_CANCEL
-            elif self._focus == _FOCUS_WAIT_FOR:
-                self._focus = _FOCUS_ENABLED
-            elif self._focus == _FOCUS_CONDITION:
-                self._focus = _FOCUS_WAIT_FOR
-            elif self._focus == _FOCUS_OK:
-                self._focus = _FOCUS_CONDITION
-            else:
-                self._focus = _FOCUS_OK
-            return
-        if self._focus == _FOCUS_ENABLED:
-            self._focus = _FOCUS_WAIT_FOR
-        elif self._focus == _FOCUS_WAIT_FOR:
-            self._focus = _FOCUS_CONDITION
-        elif self._focus == _FOCUS_CONDITION:
-            self._focus = _FOCUS_OK
-        elif self._focus == _FOCUS_OK:
-            self._focus = _FOCUS_CANCEL
-        else:
-            self._focus = _FOCUS_ENABLED
+        self._focus.cycle(backward)
 
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
@@ -396,7 +397,7 @@ struct BreakpointMenu(Movable):
         # so Up/Down/Enter navigate options instead of leaking to the
         # dialog focus walk. Esc closes the popup without dismissing
         # the dialog.
-        if self._focus == _FOCUS_WAIT_FOR and self.wait_for.is_open:
+        if self._focus.is_focused(_SLOT_WAIT_FOR) and self.wait_for.is_open:
             if k == KEY_ESC:
                 self.wait_for.close()
                 return True
@@ -412,29 +413,29 @@ struct BreakpointMenu(Movable):
         if k == KEY_ENTER:
             # Enter on Enabled toggles; on Wait-for opens the popup;
             # otherwise commits OK (Cancel is explicit Esc / button).
-            if self._focus == _FOCUS_ENABLED:
+            if self._focus.is_focused(_SLOT_ENABLED):
                 self._toggle_enabled()
                 return True
-            if self._focus == _FOCUS_WAIT_FOR:
+            if self._focus.is_focused(_SLOT_WAIT_FOR):
                 _ = self.wait_for.handle_key(event)
                 return True
-            if self._focus == _FOCUS_CANCEL:
+            if self._focus.is_focused(_SLOT_CANCEL):
                 self._resolve(False)
                 return True
             self._resolve(True)
             return True
-        if self._focus == _FOCUS_ENABLED:
+        if self._focus.is_focused(_SLOT_ENABLED):
             if k == KEY_SPACE:
                 self._toggle_enabled()
                 return True
             return True
-        if self._focus == _FOCUS_WAIT_FOR:
+        if self._focus.is_focused(_SLOT_WAIT_FOR):
             # Down arrow opens the popup (matching the closed-state
             # behavior of ``Dropdown``). Other keys are swallowed.
             if self.wait_for.handle_key(event):
                 return True
             return True
-        if self._focus == _FOCUS_CONDITION:
+        if self._focus.is_focused(_SLOT_CONDITION):
             var r = self.condition.handle_key(event)
             if r.consumed:
                 return True
@@ -467,7 +468,7 @@ struct BreakpointMenu(Movable):
                 layout.wait_for_rect, screen, event,
             )
             if hit == DROPDOWN_HIT_BODY or hit == DROPDOWN_HIT_POPUP:
-                self._focus = _FOCUS_WAIT_FOR
+                self._focus.focus_force(_SLOT_WAIT_FOR)
                 return True
             if hit == DROPDOWN_HIT_OUTSIDE:
                 # Popup auto-closed — let the click fall through to the
@@ -475,34 +476,36 @@ struct BreakpointMenu(Movable):
                 # popup is open both closes the popup and presses the
                 # button.
                 pass
+        # Refresh focus slot rects (paint hasn't run since the dialog
+        # was last touched; geometry may have moved on a window
+        # resize) and let FocusGroup move focus on a real click.
+        # Hover never moves focus — that's the FocusGroup's contract.
+        self._focus.update(_SLOT_ENABLED, self.enabled.hit_rect(), True)
+        self._focus.update(_SLOT_WAIT_FOR, layout.wait_for_rect, True)
+        self._focus.update(_SLOT_CONDITION, layout.condition_rect, True)
+        self._focus.update(_SLOT_OK, self._ok.hit_rect(), True)
+        self._focus.update(_SLOT_CANCEL, self._cancel.hit_rect(), True)
+        _ = self._focus.handle_click(event)
         # Run the Enabled chip first — it captures mouse on press, so
         # a press inside the chip is consumed even if the focus shift
-        # to text-field below would otherwise grab it.
+        # to text-field below would otherwise grab it. The checkbox's
+        # own toggle fires on FIRED status; focus has already moved.
         var cb_status = self.enabled.handle_mouse(event)
         if cb_status != BUTTON_NONE:
             if cb_status == BUTTON_FIRED:
-                self._focus = _FOCUS_ENABLED
                 self.enabled.toggle()
-            elif cb_status == BUTTON_CAPTURED \
-                    and event.pressed and not event.motion:
-                self._focus = _FOCUS_ENABLED
             return True
-        # Closed-dropdown click on the strip toggles it open and grabs
-        # focus. Done after the checkbox check because the checkbox
-        # captures mouse and would otherwise win on overlapping rows.
+        # Closed-dropdown click on the strip toggles it open. Done
+        # after the checkbox check because the checkbox captures mouse
+        # and would otherwise win on overlapping rows.
         if not self.wait_for.is_open:
             var hit2 = self.wait_for.handle_mouse(
                 layout.wait_for_rect, screen, event,
             )
             if hit2 == DROPDOWN_HIT_BODY:
-                self._focus = _FOCUS_WAIT_FOR
                 return True
-        if event.button == MOUSE_BUTTON_LEFT \
-                and event.pressed and not event.motion:
-            if layout.condition_rect.contains(event.pos):
-                self._focus = _FOCUS_CONDITION
         # Forward to the text field while focused.
-        if self._focus == _FOCUS_CONDITION:
+        if self._focus.is_focused(_SLOT_CONDITION):
             if self.condition.handle_mouse(event, layout.condition_rect):
                 return True
         # Then to buttons.
@@ -522,10 +525,10 @@ struct BreakpointMenu(Movable):
 # --- BreakpointConditionErrorDialog --------------------------------------
 
 
-comptime _ERR_FOCUS_CONDITION = UInt8(0)
-comptime _ERR_FOCUS_TRY       = UInt8(1)
-comptime _ERR_FOCUS_DISABLE   = UInt8(2)
-comptime _ERR_FOCUS_CANCEL    = UInt8(3)
+comptime _ERR_SLOT_CONDITION = 0
+comptime _ERR_SLOT_TRY       = 1
+comptime _ERR_SLOT_DISABLE   = 2
+comptime _ERR_SLOT_CANCEL    = 3
 
 
 @fieldwise_init
@@ -605,7 +608,7 @@ struct BreakpointConditionErrorDialog(Movable):
     """``name = value`` strings, capped to a few lines so a huge frame
     doesn't blow the dialog past the screen."""
     var condition: TextField
-    var _focus: UInt8
+    var _focus: FocusGroup
     var _try: ShadowButton
     var _disable: ShadowButton
     var _cancel: ShadowButton
@@ -619,7 +622,8 @@ struct BreakpointConditionErrorDialog(Movable):
         self.error = String("")
         self.locals_ = List[String]()
         self.condition = TextField()
-        self._focus = _ERR_FOCUS_CONDITION
+        self._focus = FocusGroup(4)
+        self._focus.focus_force(_ERR_SLOT_CONDITION)
         self._try = ShadowButton(String(" Try again "), 0, 0)
         self._disable = ShadowButton(
             String(" Disable & Continue "), 0, 0,
@@ -640,7 +644,7 @@ struct BreakpointConditionErrorDialog(Movable):
         self.locals_ = locals_^
         self.condition = TextField()
         self.condition.set_text(condition^)
-        self._focus = _ERR_FOCUS_CONDITION
+        self._focus.focus_force(_ERR_SLOT_CONDITION)
         self._try.pressed = False
         self._try.pressed_inside = False
         self._disable.pressed = False
@@ -665,7 +669,7 @@ struct BreakpointConditionErrorDialog(Movable):
         self.submitted = False
         self.action = BP_ERR_NONE
         # Refocus the condition so the user can keep typing.
-        self._focus = _ERR_FOCUS_CONDITION
+        self._focus.focus_force(_ERR_SLOT_CONDITION)
 
     def _layout(self, screen: Rect) -> Rect:
         var width = _DLG_WIDTH + 8
@@ -757,9 +761,10 @@ struct BreakpointConditionErrorDialog(Movable):
             canvas, Point(rect.a.x + 2, layout.condition_label_y),
             String("Condition:"), attr,
         )
+        self._focus.update(_ERR_SLOT_CONDITION, layout.condition_rect, True)
         self.condition.paint(
             canvas, layout.condition_rect,
-            self._focus == _ERR_FOCUS_CONDITION,
+            self._focus.is_focused(_ERR_SLOT_CONDITION),
         )
         # Buttons.
         var by = layout.buttons_y
@@ -774,38 +779,38 @@ struct BreakpointConditionErrorDialog(Movable):
         self._try.move_to(bx, by)
         self._disable.move_to(bx + tw + gap, by)
         self._cancel.move_to(bx + tw + gap + dw + gap, by)
+        # Refresh focus slot rects from final button positions.
+        self._focus.update(
+            _ERR_SLOT_TRY,
+            Rect(bx, by, bx + self._try.face_width(), by + 1),
+        )
+        self._focus.update(
+            _ERR_SLOT_DISABLE,
+            Rect(bx + tw + gap, by,
+                 bx + tw + gap + self._disable.face_width(), by + 1),
+        )
+        self._focus.update(
+            _ERR_SLOT_CANCEL,
+            Rect(bx + tw + gap + dw + gap, by,
+                 bx + tw + gap + dw + gap + self._cancel.face_width(),
+                 by + 1),
+        )
         var try_face = Attr(BLACK, GREEN)
         var dis_face = Attr(BLACK, GREEN)
         var can_face = Attr(BLACK, GREEN)
-        if self._focus == _ERR_FOCUS_TRY:
+        if self._focus.is_focused(_ERR_SLOT_TRY):
             try_face = Attr(WHITE, BLUE)
-        elif self._focus == _ERR_FOCUS_DISABLE:
+        elif self._focus.is_focused(_ERR_SLOT_DISABLE):
             dis_face = Attr(WHITE, BLUE)
-        elif self._focus == _ERR_FOCUS_CANCEL:
+        elif self._focus.is_focused(_ERR_SLOT_CANCEL):
             can_face = Attr(WHITE, BLUE)
         paint_shadow_button(canvas, self._try, try_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._disable, dis_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._cancel, can_face, LIGHT_GRAY)
 
     def _focus_next(mut self, backward: Bool = False):
-        if backward:
-            if self._focus == _ERR_FOCUS_CONDITION:
-                self._focus = _ERR_FOCUS_CANCEL
-            elif self._focus == _ERR_FOCUS_TRY:
-                self._focus = _ERR_FOCUS_CONDITION
-            elif self._focus == _ERR_FOCUS_DISABLE:
-                self._focus = _ERR_FOCUS_TRY
-            else:
-                self._focus = _ERR_FOCUS_DISABLE
-            return
-        if self._focus == _ERR_FOCUS_CONDITION:
-            self._focus = _ERR_FOCUS_TRY
-        elif self._focus == _ERR_FOCUS_TRY:
-            self._focus = _ERR_FOCUS_DISABLE
-        elif self._focus == _ERR_FOCUS_DISABLE:
-            self._focus = _ERR_FOCUS_CANCEL
-        else:
-            self._focus = _ERR_FOCUS_CONDITION
+        # Slot order = tab order: Condition → Try → Disable → Cancel.
+        self._focus.cycle(backward)
 
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
@@ -822,15 +827,15 @@ struct BreakpointConditionErrorDialog(Movable):
             self._focus_next(backward)
             return True
         if k == KEY_ENTER:
-            if self._focus == _ERR_FOCUS_DISABLE:
+            if self._focus.is_focused(_ERR_SLOT_DISABLE):
                 self.action = BP_ERR_DISABLE
-            elif self._focus == _ERR_FOCUS_CANCEL:
+            elif self._focus.is_focused(_ERR_SLOT_CANCEL):
                 self.action = BP_ERR_CANCEL
             else:
                 self.action = BP_ERR_TRY
             self.submitted = True
             return True
-        if self._focus == _ERR_FOCUS_CONDITION:
+        if self._focus.is_focused(_ERR_SLOT_CONDITION):
             var r = self.condition.handle_key(event)
             if r.consumed:
                 return True
@@ -853,11 +858,14 @@ struct BreakpointConditionErrorDialog(Movable):
             self.action = BP_ERR_CANCEL
             self.submitted = True
             return True
-        if event.button == MOUSE_BUTTON_LEFT \
-                and event.pressed and not event.motion:
-            if layout.condition_rect.contains(event.pos):
-                self._focus = _ERR_FOCUS_CONDITION
-        if self._focus == _ERR_FOCUS_CONDITION:
+        # Refresh slot rects + move focus on a real click. Hover does
+        # not change focus — same FocusGroup contract every dialog uses.
+        self._focus.update(_ERR_SLOT_CONDITION, layout.condition_rect, True)
+        self._focus.update(_ERR_SLOT_TRY, self._try.hit_rect(), True)
+        self._focus.update(_ERR_SLOT_DISABLE, self._disable.hit_rect(), True)
+        self._focus.update(_ERR_SLOT_CANCEL, self._cancel.hit_rect(), True)
+        _ = self._focus.handle_click(event)
+        if self._focus.is_focused(_ERR_SLOT_CONDITION):
             if self.condition.handle_mouse(event, layout.condition_rect):
                 return True
         var s = self._try.handle_mouse(event)

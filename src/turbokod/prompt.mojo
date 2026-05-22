@@ -40,7 +40,16 @@ from .events import (
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
+from .view import FocusGroup
 from .window import hit_close_button, paint_close_button
+
+
+# Stable slot indices for the two-field Replace dialog. Single-field
+# Find / Go-to-Line prompts use only ``_SLOT_INPUT``; ``_SLOT_SECOND``
+# is registered with ``visitable=False`` in that mode so Tab / clicks
+# don't see it.
+comptime _SLOT_INPUT  = 0
+comptime _SLOT_SECOND = 1
 
 
 comptime _DEFAULT_WIDTH = 60
@@ -75,13 +84,14 @@ struct Prompt(Movable):
     # Optional second input strip — used by Replace to put the
     # "find" and "replace with" fields in the same dialog. When
     # ``has_second`` is False the dialog renders as before with just
-    # ``input``. Tab cycles focus between the two fields; ``_active``
-    # tracks which one currently owns the cursor (0 = ``input``,
-    # 1 = ``second_input``).
+    # ``input``. Tab cycles focus between the two fields via
+    # ``_focus`` (the framework focus manager); the slot for
+    # ``second_input`` is registered with ``visitable=False`` in
+    # single-field mode so Tab and clicks skip it.
     var has_second: Bool
     var second_label: String
     var second_input: TextField
-    var _active: Int
+    var _focus: FocusGroup
     # Action buttons painted on the two-field Replace dialog. Each
     # one carries its own ``ShadowButton.handle_mouse`` press latch
     # so it survives across paint cycles — re-instantiating per
@@ -117,7 +127,8 @@ struct Prompt(Movable):
         self.has_second = False
         self.second_label = String("")
         self.second_input = TextField()
-        self._active = 0
+        self._focus = FocusGroup(2)
+        self._focus.focus_force(_SLOT_INPUT)
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = False
@@ -170,7 +181,7 @@ struct Prompt(Movable):
         self.has_second = False
         self.second_label = String("")
         self.second_input = TextField()
-        self._active = 0
+        self._focus.focus_force(_SLOT_INPUT)
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = show_options
@@ -209,9 +220,9 @@ struct Prompt(Movable):
         self.second_input.set_text(second_prefill^)
         self.has_second = True
         if has_prefill:
-            self._active = 1
+            self._focus.focus_force(_SLOT_SECOND)
         else:
-            self._active = 0
+            self._focus.focus_force(_SLOT_INPUT)
         self.active = True
         self.submitted = False
         self.submit_kind = SUBMIT_DEFAULT
@@ -228,7 +239,7 @@ struct Prompt(Movable):
         self.has_second = False
         self.second_label = String("")
         self.second_input = TextField()
-        self._active = 0
+        self._focus.focus_force(_SLOT_INPUT)
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = False
@@ -397,6 +408,11 @@ struct Prompt(Movable):
                 input_right = input_x + 1
         var ir = Rect(input_x, input_y, input_right, input_y + 1)
         self._input_rect = ir
+        # Single-field mode: only ``_SLOT_INPUT`` participates in
+        # focus. Mark ``_SLOT_SECOND`` non-visitable so Tab and clicks
+        # ignore the (unpainted) second field.
+        self._focus.update(_SLOT_INPUT, ir, True)
+        self._focus.update(_SLOT_SECOND, Rect(0, 0, 0, 0), False)
         self.input.paint(canvas, ir, True)
         if self.show_options:
             # Toggles paint after the input so any cursor on the
@@ -482,8 +498,10 @@ struct Prompt(Movable):
         var ir2 = Rect(input_x, replace_y, clip_x, replace_y + 1)
         self._input_rect = ir1
         self._second_input_rect = ir2
-        self.input.paint(canvas, ir1, self._active == 0)
-        self.second_input.paint(canvas, ir2, self._active == 1)
+        self._focus.update(_SLOT_INPUT, ir1, True)
+        self._focus.update(_SLOT_SECOND, ir2, True)
+        self.input.paint(canvas, ir1, self._focus.is_focused(_SLOT_INPUT))
+        self.second_input.paint(canvas, ir2, self._focus.is_focused(_SLOT_SECOND))
         if self.show_options:
             var off_attr = attr
             var on_attr  = Attr(BLACK, YELLOW)
@@ -548,14 +566,12 @@ struct Prompt(Movable):
             self.close()
             return True
         if self.has_second and k == KEY_TAB:
-            # Cycle between the two input strips so the user can edit
-            # either field without grabbing the mouse.
-            if self._active == 0:
-                self._active = 1
-            else:
-                self._active = 0
+            # Tab cycles focus across the registered visitable slots —
+            # the framework owns the order, the dialog just registers
+            # widgets in declaration order.
+            self._focus.cycle()
             return True
-        if self.has_second and self._active == 1:
+        if self.has_second and self._focus.is_focused(_SLOT_SECOND):
             var r = self.second_input.handle_key(event)
             if r.consumed:
                 return True
@@ -633,27 +649,20 @@ struct Prompt(Movable):
                 return True
             if self._btn_replace_all.pressed:
                 return True
-            # Route a click to whichever input's row it fell in, and
-            # promote that field to active so subsequent keystrokes land
-            # there. Drags inside an already-active field still need to
-            # reach the field's mouse handler — TextField tracks its own
-            # press state — so don't gate on the active field, just on
-            # the rect.
-            var my = event.pos.y
-            if self._second_input_rect.width() > 0 \
-                    and my == self._second_input_rect.a.y:
-                self._active = 1
+            # Focus follows a *click* (press-and-not-motion); hover and
+            # drag-motion never shift focus. The framework's FocusGroup
+            # encapsulates that policy so this dialog (and every other)
+            # stops reinventing it. After the focus possibly shifts,
+            # forward the event to whichever field now owns focus so
+            # the cursor lands at the press point and drag-extends
+            # subsequent motion events.
+            _ = self._focus.handle_click(event)
+            if self._focus.is_focused(_SLOT_SECOND):
                 _ = self.second_input.handle_mouse(
                     event, self._second_input_rect,
                 )
                 return True
-            if self._input_rect.width() > 0 \
-                    and my == self._input_rect.a.y:
-                self._active = 0
-                _ = self.input.handle_mouse(event, self._input_rect)
-                return True
-            # Click landed outside either input row — still swallow it
-            # so the modal stays modal, but don't move the cursor.
+            _ = self.input.handle_mouse(event, self._input_rect)
             return True
         if self._input_rect.width() <= 0:
             return True

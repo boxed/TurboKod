@@ -28,7 +28,12 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .view import FocusGroup
 from .window import hit_close_button, paint_close_button
+
+
+comptime _SLOT_YES = 0
+comptime _SLOT_NO  = 1
 
 
 comptime _DEFAULT_WIDTH = 60
@@ -56,9 +61,10 @@ struct ConfirmDialog(Movable):
     var message: String
     var _yes_button: ShadowButton
     var _no_button: ShadowButton
-    var _focus_yes: Bool
-    """Which button Enter activates. Defaults to No (safer choice for
-    install / download prompts)."""
+    var _focus: FocusGroup
+    """Focus state for the Yes / No buttons (slots 0 and 1). Default
+    seeded by ``open(default_yes=…)`` — No is safer for install /
+    download prompts so it's the typical default."""
 
     def __init__(out self):
         self.active = False
@@ -67,14 +73,14 @@ struct ConfirmDialog(Movable):
         self.message = String("")
         self._yes_button = ShadowButton(_YES_LABEL, 0, 0)
         self._no_button = ShadowButton(_NO_LABEL, 0, 0)
-        self._focus_yes = False
+        self._focus = FocusGroup(2)
 
     def open(mut self, var message: String, default_yes: Bool = False):
         self.message = message^
         self.active = True
         self.submitted = False
         self.confirmed = False
-        self._focus_yes = default_yes
+        self._focus.focus_force(_SLOT_YES if default_yes else _SLOT_NO)
         self._yes_button.pressed = False
         self._yes_button.pressed_inside = False
         self._no_button.pressed = False
@@ -85,7 +91,7 @@ struct ConfirmDialog(Movable):
         self.submitted = False
         self.confirmed = False
         self.message = String("")
-        self._focus_yes = False
+        self._focus.focus_force(_SLOT_NO)
         self._yes_button.pressed = False
         self._yes_button.pressed_inside = False
         self._no_button.pressed = False
@@ -149,9 +155,21 @@ struct ConfirmDialog(Movable):
             bx = rect.a.x + 2
         self._yes_button.move_to(bx, by)
         self._no_button.move_to(bx + yes_w + gap, by)
+        # Refresh focus slot rects to match the buttons' current
+        # positions. The face_width — not the total_width — bounds the
+        # clickable area; the drop-shadow column isn't a click target.
+        self._focus.update(
+            _SLOT_YES,
+            Rect(bx, by, bx + self._yes_button.face_width(), by + 1),
+        )
+        self._focus.update(
+            _SLOT_NO,
+            Rect(bx + yes_w + gap, by,
+                 bx + yes_w + gap + self._no_button.face_width(), by + 1),
+        )
         var yes_face: Attr
         var no_face: Attr
-        if self._focus_yes:
+        if self._focus.is_focused(_SLOT_YES):
             yes_face = Attr(WHITE, BLUE)
             no_face = Attr(BLACK, GREEN)
         else:
@@ -175,10 +193,14 @@ struct ConfirmDialog(Movable):
             self._resolve(False)
             return True
         if k == KEY_ENTER:
-            self._resolve(self._focus_yes)
+            self._resolve(self._focus.is_focused(_SLOT_YES))
             return True
         if k == KEY_TAB or k == KEY_LEFT or k == KEY_RIGHT:
-            self._focus_yes = not self._focus_yes
+            # All three keys cycle between the two buttons. The focus
+            # group walks in registration order; with only two slots
+            # that's equivalent to "flip", and Shift-Tab / Left don't
+            # need their own special case.
+            self._focus.cycle()
             return True
         if k == UInt32(0x59) or k == UInt32(0x79):
             self._resolve(True)
@@ -202,6 +224,11 @@ struct ConfirmDialog(Movable):
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
             self._resolve(False)
             return True
+        # Click on a button face moves focus there (used when the user
+        # picks one button with the mouse but might then tab away).
+        # Hovering does NOT shift focus — the FocusGroup's hit-test
+        # only fires on press-and-not-motion.
+        _ = self._focus.handle_click(event)
         var s = self._yes_button.handle_mouse(event)
         if s != BUTTON_NONE:
             if s == BUTTON_FIRED:

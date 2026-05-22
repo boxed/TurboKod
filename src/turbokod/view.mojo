@@ -12,10 +12,14 @@ into Canvas) gives you immediate-mode drawing if you don't want to build
 state-bearing widget structs.
 """
 
+from std.collections.list import List
+
 from .canvas import Canvas
 from .painter import Painter
 from .colors import Attr, default_attr, WHITE, BLUE, BLACK, LIGHT_GRAY
-from .events import Event
+from .events import (
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+)
 from .geometry import Point, Rect
 from .string_utils import display_columns
 
@@ -168,3 +172,172 @@ struct RowCursor(Copyable, Movable):
 
     def skip(mut self, rows: Int):
         self.y = self.y + rows
+
+
+# --- Focus management ------------------------------------------------------
+
+
+@fieldwise_init
+struct FocusableSlot(ImplicitlyCopyable, Movable):
+    """One focusable widget's screen rect + whether it currently
+    participates in the tab walk / click hit-test.
+
+    ``rect`` is refreshed every paint (and every event dispatch) so the
+    hit-test never lags the actual geometry. ``visitable`` lets dialogs
+    register all possible slots up front and toggle inclusion based on
+    runtime state (e.g. a "Remove" button that's only enabled when the
+    target list is non-empty); a non-visitable slot is skipped by both
+    Tab cycling and click hit-testing.
+    """
+    var rect: Rect
+    var visitable: Bool
+
+
+struct FocusGroup(Movable):
+    """Framework-level focus manager — one per dialog or panel.
+
+    Owns the ordered list of focusable widgets, the currently-focused
+    slot index, and the policies for moving focus (Tab/Shift-Tab cycle,
+    click → focus on press-and-not-motion). Dialogs no longer hand-roll
+    their own ``_focus`` int + ``_next_focus`` walk + click-routing
+    block; they register slots in declaration order, refresh rects each
+    paint, and let the group eat Tab and clicks.
+
+    Tab order = registration order. Slot indices are stable across the
+    dialog's lifetime — fields are allocated once in ``__init__`` (a
+    fixed-size list), then their rect + ``visitable`` are updated each
+    paint via ``update``. The focused index survives paints; if it
+    points to a slot that becomes non-visitable, call ``reconcile`` to
+    advance to the next visitable one.
+
+    The group does NOT forward events to widgets — that's still the
+    dialog's job, because widget handlers have heterogeneous
+    signatures (some need a rect argument, some return rich result
+    types). The group's contract is narrow on purpose: "who has focus,
+    and how does focus move."
+    """
+    var slots: List[FocusableSlot]
+    var focused: Int
+
+    def __init__(out self, slot_count: Int):
+        """Pre-allocate ``slot_count`` slots. The dialog ``update``s each
+        one per paint with the current rect + visitability. Slots
+        default to ``visitable=True`` so a freshly-opened dialog can
+        cycle focus before its first paint runs — conditional slots
+        (e.g. the second input in the find/replace prompt when
+        ``has_second`` is False) opt out by passing ``visitable=False``
+        in their ``update`` call. Rects default to (0,0,0,0) so a click
+        before first paint can't accidentally land on a slot — the
+        empty rect contains no point."""
+        self.slots = List[FocusableSlot]()
+        for _ in range(slot_count):
+            self.slots.append(FocusableSlot(Rect(0, 0, 0, 0), True))
+        self.focused = -1
+
+    def update(mut self, idx: Int, rect: Rect, visitable: Bool = True):
+        """Refresh slot ``idx``'s rect + visitability. Called from the
+        dialog's paint (and from handle_mouse just before hit-testing)
+        so geometry never lags the screen."""
+        if 0 <= idx and idx < len(self.slots):
+            self.slots[idx] = FocusableSlot(rect, visitable)
+
+    def is_focused(self, idx: Int) -> Bool:
+        return idx == self.focused
+
+    def focus(mut self, idx: Int):
+        """Seed focus on slot ``idx``. Does nothing if the slot isn't
+        visitable yet — open() callers that focus a slot whose
+        visitability depends on first paint should call ``reconcile``
+        afterward, or just pass a slot that's always visitable."""
+        if 0 <= idx and idx < len(self.slots) and self.slots[idx].visitable:
+            self.focused = idx
+
+    def focus_force(mut self, idx: Int):
+        """Set focus without consulting visitability. For seeding focus
+        before the first paint (when all slots are still non-visitable
+        by default) or for hosts that know what they're doing."""
+        if 0 <= idx and idx < len(self.slots):
+            self.focused = idx
+
+    def slot_count(self) -> Int:
+        return len(self.slots)
+
+    def is_visitable(self, idx: Int) -> Bool:
+        if idx < 0 or idx >= len(self.slots):
+            return False
+        return self.slots[idx].visitable
+
+    def cycle(mut self, backward: Bool = False):
+        """Advance focus to the next/previous visitable slot. Wraps
+        around. If no slot is visitable, focus becomes -1."""
+        var n = len(self.slots)
+        if n == 0:
+            self.focused = -1
+            return
+        var cur = self.focused
+        if cur < 0:
+            # Bias the seed so the first forward step lands on slot 0
+            # and the first backward step lands on slot n-1.
+            cur = -1 if not backward else n
+        for _ in range(n):
+            if backward:
+                cur = (cur - 1 + n) % n
+            else:
+                cur = (cur + 1) % n
+            if self.slots[cur].visitable:
+                self.focused = cur
+                return
+        self.focused = -1
+
+    def handle_tab(mut self, event: Event) -> Bool:
+        """Eat Tab / Shift+Tab and cycle focus. Returns True iff the
+        event was consumed."""
+        if event.kind != EVENT_KEY:
+            return False
+        if event.key != KEY_TAB:
+            return False
+        var backward = (event.mods & MOD_SHIFT) != 0
+        self.cycle(backward)
+        return True
+
+    def hit_test(self, event: Event) -> Int:
+        """If ``event`` is a left-press (press-and-not-motion, i.e. a
+        real click rather than a hover or drag), return the index of
+        the visitable slot whose rect contains the point, or -1. Hover
+        events and drag-motion events return -1 — focus must NOT shift
+        as the mouse passes over a widget."""
+        if event.kind != EVENT_MOUSE:
+            return -1
+        if event.button != MOUSE_BUTTON_LEFT:
+            return -1
+        if not event.pressed or event.motion:
+            return -1
+        for i in range(len(self.slots)):
+            if not self.slots[i].visitable:
+                continue
+            if self.slots[i].rect.contains(event.pos):
+                return i
+        return -1
+
+    def handle_click(mut self, event: Event) -> Int:
+        """If ``event`` is a real click inside a visitable slot, move
+        focus there and return that slot index. Otherwise return -1.
+
+        Hover and drag-motion never trigger a focus change — that's
+        the whole point: previously each dialog reinvented this and
+        some of them got it wrong (mere hover moved focus).
+        """
+        var hit = self.hit_test(event)
+        if hit < 0:
+            return -1
+        self.focused = hit
+        return hit
+
+    def reconcile(mut self):
+        """If the currently-focused slot is no longer visitable, advance
+        to the next visitable one. Call after a layout pass that has
+        toggled a slot's ``visitable`` flag (e.g. a button row whose
+        Remove button just became disabled because the list emptied)."""
+        if self.focused < 0 or self.focused >= len(self.slots) \
+                or not self.slots[self.focused].visitable:
+            self.cycle()

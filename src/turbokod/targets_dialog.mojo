@@ -25,12 +25,15 @@ back to the host (``submitted=True``); ``Cancel`` / ESC discard the
 copy. Every list operation (add / remove / select) and every input
 edit is immediate-feedback — no per-field "commit" step.
 
-Focus model: a single ``UInt8`` discriminant (``_FOCUS_*`` constants)
-selects which widget receives keystrokes. Tab cycles forward, Shift-
-Tab backward; mouse clicks set focus to whatever was clicked. The
-right-side input fields are simple String slots with cursor-at-end
-editing — same shape as ``Prompt`` — since multi-line / mid-line
-caret movement isn't worth the complexity for one-shot config.
+Focus is owned by a ``FocusGroup`` (see ``view.mojo``): one slot per
+focusable widget (list / Name / Program / Args / Cwd / Lang / Add /
+Remove / Save / Cancel), in tab order. The group eats Tab/Shift-Tab
+and click-to-focus uniformly; per-paint the dialog flags slots as
+non-visitable when their underlying state isn't editable (list /
+Remove with no entries, right-side fields with no selection). The
+right-side input fields are simple TextFields — same shape as
+``Prompt`` — since multi-line / mid-line caret movement isn't worth
+the complexity for one-shot config.
 """
 
 from std.collections.list import List
@@ -60,27 +63,28 @@ from .geometry import Point, Rect, compute_dialog_rect
 from .language_config import built_in_servers
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import TextField
-from .view import RowCursor
+from .view import FocusGroup, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
 
 
-# --- focus discriminants --------------------------------------------------
-# One slot per focusable widget. Tab cycles in this declaration order;
-# the same ints index ``_focus_order_next`` for fast Shift-Tab dispatch.
+# --- focus slot indices --------------------------------------------------
+# One slot per focusable widget. Tab cycles in declaration order; the
+# FocusGroup walks indices and skips non-visitable slots (set by the
+# dialog each paint based on selected / entries state).
 
-comptime _FOCUS_LIST     = UInt8(0)
-comptime _FOCUS_NAME     = UInt8(1)
-comptime _FOCUS_PROGRAM  = UInt8(2)
-comptime _FOCUS_ARGS     = UInt8(3)
-comptime _FOCUS_CWD      = UInt8(4)
-comptime _FOCUS_LANG     = UInt8(5)
-comptime _FOCUS_ADD      = UInt8(6)
-comptime _FOCUS_REMOVE   = UInt8(7)
-comptime _FOCUS_SAVE     = UInt8(8)
-comptime _FOCUS_CANCEL   = UInt8(9)
-comptime _FOCUS_COUNT    = 10
+comptime _SLOT_LIST     = 0
+comptime _SLOT_NAME     = 1
+comptime _SLOT_PROGRAM  = 2
+comptime _SLOT_ARGS     = 3
+comptime _SLOT_CWD      = 4
+comptime _SLOT_LANG     = 5
+comptime _SLOT_ADD      = 6
+comptime _SLOT_REMOVE   = 7
+comptime _SLOT_SAVE     = 8
+comptime _SLOT_CANCEL   = 9
+comptime _SLOT_COUNT    = 10
 
 
 # --- layout ---------------------------------------------------------------
@@ -159,26 +163,27 @@ def _build_layout(rect: Rect) -> _Layout:
     )
 
 
-def _input_rect_for(layout: _Layout, focus: UInt8) -> Rect:
-    if focus == _FOCUS_NAME:    return layout.name_rect
-    if focus == _FOCUS_PROGRAM: return layout.program_rect
-    if focus == _FOCUS_ARGS:    return layout.args_rect
-    if focus == _FOCUS_CWD:     return layout.cwd_rect
-    if focus == _FOCUS_LANG:    return layout.lang_rect
+def _input_rect_for(layout: _Layout, slot: Int) -> Rect:
+    if slot == _SLOT_NAME:    return layout.name_rect
+    if slot == _SLOT_PROGRAM: return layout.program_rect
+    if slot == _SLOT_ARGS:    return layout.args_rect
+    if slot == _SLOT_CWD:     return layout.cwd_rect
+    if slot == _SLOT_LANG:    return layout.lang_rect
     return Rect(0, 0, 0, 0)
 
 
-def _label_pt_for(layout: _Layout, focus: UInt8) -> Point:
-    return Point(layout.label_x, _input_rect_for(layout, focus).a.y)
+def _label_pt_for(layout: _Layout, slot: Int) -> Point:
+    return Point(layout.label_x, _input_rect_for(layout, slot).a.y)
 
 
 @fieldwise_init
 struct _PlacedButton(ImplicitlyCopyable, Movable):
     """One button captured at paint time so mouse routing can hit
-    exactly the cells we drew on. ``focus`` is the field's discriminant,
-    ``enabled`` lets disabled buttons stay visible but un-clickable."""
+    exactly the cells we drew on. ``slot`` is the field's focus slot
+    index, ``enabled`` lets disabled buttons stay visible but un-
+    clickable."""
     var button: ShadowButton
-    var focus: UInt8
+    var slot: Int
     var enabled: Bool
 
 
@@ -235,7 +240,7 @@ struct TargetsDialog(Movable):
     """Name of the target the host treats as active. Preserved
     verbatim through edits so renaming the active target keeps it
     selected on save."""
-    var focus: UInt8
+    var _focus: FocusGroup
     var pos: Optional[Point]
     var _drag: Optional[Point]
     var _list_scroll: Int
@@ -271,7 +276,8 @@ struct TargetsDialog(Movable):
         self.entries = List[RunTarget]()
         self.selected = -1
         self.active_name = String("")
-        self.focus = _FOCUS_LIST
+        self._focus = FocusGroup(_SLOT_COUNT)
+        self._focus.focus_force(_SLOT_LIST)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
@@ -286,16 +292,16 @@ struct TargetsDialog(Movable):
         # latch on each ShadowButton has to survive across paints.
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
-            ShadowButton(String(" + Add "), 0, 0), _FOCUS_ADD, True,
+            ShadowButton(String(" + Add "), 0, 0), _SLOT_ADD, True,
         ))
         self._buttons.append(_PlacedButton(
-            ShadowButton(String(" - Remove "), 0, 0), _FOCUS_REMOVE, True,
+            ShadowButton(String(" - Remove "), 0, 0), _SLOT_REMOVE, True,
         ))
         self._buttons.append(_PlacedButton(
-            ShadowButton(String(" Save "), 0, 0), _FOCUS_SAVE, True,
+            ShadowButton(String(" Save "), 0, 0), _SLOT_SAVE, True,
         ))
         self._buttons.append(_PlacedButton(
-            ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
+            ShadowButton(String(" Cancel "), 0, 0), _SLOT_CANCEL, True,
         ))
 
     def open(mut self, var targets: ProjectTargets):
@@ -311,7 +317,9 @@ struct TargetsDialog(Movable):
             self.active_name = String("")
         self.active = True
         self.submitted = False
-        self.focus = _FOCUS_LIST if len(self.entries) > 0 else _FOCUS_ADD
+        self._focus.focus_force(
+            _SLOT_LIST if len(self.entries) > 0 else _SLOT_ADD
+        )
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
@@ -324,7 +332,7 @@ struct TargetsDialog(Movable):
         self.entries = List[RunTarget]()
         self.selected = -1
         self.active_name = String("")
-        self.focus = _FOCUS_LIST
+        self._focus.focus_force(_SLOT_LIST)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
         self._list_scroll = 0
@@ -369,7 +377,7 @@ struct TargetsDialog(Movable):
         t.name = self._unique_name(String("new"))
         self.entries.append(t^)
         self.selected = len(self.entries) - 1
-        self.focus = _FOCUS_NAME
+        self._focus.focus_force(_SLOT_NAME)
         self._scroll_selection_into_view()
         self._load_fields_from_selected()
 
@@ -419,11 +427,11 @@ struct TargetsDialog(Movable):
         self.entries = rebuilt^
         if len(self.entries) == 0:
             self.selected = -1
-            self.focus = _FOCUS_ADD
+            self._focus.focus_force(_SLOT_ADD)
         else:
             if self.selected >= len(self.entries):
                 self.selected = len(self.entries) - 1
-            self.focus = _FOCUS_LIST
+            self._focus.focus_force(_SLOT_LIST)
         if was_active:
             self.active_name = (
                 self.entries[self.selected].name
@@ -486,32 +494,35 @@ struct TargetsDialog(Movable):
 
     # --- focus walk -------------------------------------------------
 
-    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
-        """Cycle to the next/previous focusable widget, skipping the
-        Remove button when the list is empty (no row to remove) and
-        all the right-side fields when no row is selected."""
-        var n = _FOCUS_COUNT
-        var idx = Int(current)
-        for _ in range(n):
-            if backward:
-                idx = (idx - 1 + n) % n
-            else:
-                idx = (idx + 1) % n
-            var f = UInt8(idx)
-            if self._focus_visitable(f):
-                return f
-        return current
+    def _refresh_focus_visitability(mut self, layout: _Layout):
+        """Push the current ``entries`` / ``selected`` state into the
+        FocusGroup as per-slot ``visitable`` flags + rect updates.
 
-    def _focus_visitable(self, focus: UInt8) -> Bool:
-        if focus == _FOCUS_LIST:
-            return len(self.entries) > 0
-        if focus == _FOCUS_REMOVE:
-            return len(self.entries) > 0
-        if focus == _FOCUS_NAME or focus == _FOCUS_PROGRAM \
-                or focus == _FOCUS_ARGS or focus == _FOCUS_CWD \
-                or focus == _FOCUS_LANG:
-            return self.selected >= 0
-        return True
+        The list and Remove button are only visitable when there's at
+        least one entry; the right-side fields require a selected row.
+        Save / Cancel / Add are always visitable. The slot rects come
+        from ``layout`` so a focus hit-test never lags the painted
+        geometry. Button rects are filled in by ``_paint_buttons``
+        after final positioning; this pass leaves them as last-set.
+        """
+        var has_entries = len(self.entries) > 0
+        var has_sel = self.selected >= 0
+        self._focus.update(_SLOT_LIST, layout.list_rect, has_entries)
+        self._focus.update(_SLOT_NAME, layout.name_rect, has_sel)
+        self._focus.update(_SLOT_PROGRAM, layout.program_rect, has_sel)
+        self._focus.update(_SLOT_ARGS, layout.args_rect, has_sel)
+        self._focus.update(_SLOT_CWD, layout.cwd_rect, has_sel)
+        self._focus.update(_SLOT_LANG, layout.lang_rect, has_sel)
+        # Remove also gates on has_entries; Add / Save / Cancel are
+        # always visitable. The button hit_rects haven't been computed
+        # yet — ``_paint_buttons`` updates those slot rects with final
+        # geometry. We still set ``visitable`` here so reconcile() can
+        # immediately advance off a slot that just became non-visitable.
+        self._focus.slots[_SLOT_REMOVE].visitable = has_entries
+        self._focus.slots[_SLOT_ADD].visitable = True
+        self._focus.slots[_SLOT_SAVE].visitable = True
+        self._focus.slots[_SLOT_CANCEL].visitable = True
+        self._focus.reconcile()
 
     # --- painting ---------------------------------------------------
 
@@ -522,6 +533,10 @@ struct TargetsDialog(Movable):
         var border = Attr(WHITE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)
+        # Push current geometry + visitability into the focus group up
+        # front so any reconcile (e.g. the focused slot just became
+        # non-visitable because the list emptied) lands before paint.
+        self._refresh_focus_visitability(layout)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -592,7 +607,7 @@ struct TargetsDialog(Movable):
             var attr = body_attr
             if idx == self.selected:
                 attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_LIST
+                    Attr(WHITE, BLUE) if self._focus.is_focused(_SLOT_LIST)
                     else Attr(BLACK, GREEN)
                 )
                 # Fill the row so the highlight reaches the right edge,
@@ -626,16 +641,16 @@ struct TargetsDialog(Movable):
             )
             return
         _ = painter.put_text(
-            canvas, _label_pt_for(layout, _FOCUS_NAME), String("Name:"), bg,
+            canvas, _label_pt_for(layout, _SLOT_NAME), String("Name:"), bg,
         )
         _ = painter.put_text(
-            canvas, _label_pt_for(layout, _FOCUS_PROGRAM), String("Program:"), bg,
+            canvas, _label_pt_for(layout, _SLOT_PROGRAM), String("Program:"), bg,
         )
         _ = painter.put_text(
-            canvas, _label_pt_for(layout, _FOCUS_ARGS), String("Args:"), bg,
+            canvas, _label_pt_for(layout, _SLOT_ARGS), String("Args:"), bg,
         )
         _ = painter.put_text(
-            canvas, _label_pt_for(layout, _FOCUS_CWD), String("Working dir:"), bg,
+            canvas, _label_pt_for(layout, _SLOT_CWD), String("Working dir:"), bg,
         )
         # Helper line under the cwd input — same column as the input
         # so the connection reads at a glance.
@@ -645,7 +660,7 @@ struct TargetsDialog(Movable):
             hint_attr,
         )
         _ = painter.put_text(
-            canvas, _label_pt_for(layout, _FOCUS_LANG),
+            canvas, _label_pt_for(layout, _SLOT_LANG),
             String("Debug language:"), bg,
         )
         # Paint each field's ``TextField`` directly — ``TextField.paint``
@@ -655,12 +670,18 @@ struct TargetsDialog(Movable):
         # ``TextField`` caches its own input_rect internally for
         # ``consume_pending_drag``, so the dialog no longer needs to
         # stash per-field rects.
-        self.name_tf.paint(canvas, layout.name_rect, self.focus == _FOCUS_NAME)
-        self.program_tf.paint(
-            canvas, layout.program_rect, self.focus == _FOCUS_PROGRAM,
+        self.name_tf.paint(
+            canvas, layout.name_rect, self._focus.is_focused(_SLOT_NAME),
         )
-        self.args_tf.paint(canvas, layout.args_rect, self.focus == _FOCUS_ARGS)
-        self.cwd_tf.paint(canvas, layout.cwd_rect, self.focus == _FOCUS_CWD)
+        self.program_tf.paint(
+            canvas, layout.program_rect, self._focus.is_focused(_SLOT_PROGRAM),
+        )
+        self.args_tf.paint(
+            canvas, layout.args_rect, self._focus.is_focused(_SLOT_ARGS),
+        )
+        self.cwd_tf.paint(
+            canvas, layout.cwd_rect, self._focus.is_focused(_SLOT_CWD),
+        )
         self._paint_lang_dropdown(canvas, layout)
 
     def _paint_lang_dropdown(self, mut canvas: Canvas, layout: _Layout):
@@ -669,7 +690,7 @@ struct TargetsDialog(Movable):
         row of editable strips. Reads from the persistent
         ``lang_dropdown`` so its open / scroll / highlight state
         survives across paints."""
-        var has_focus = self.focus == _FOCUS_LANG
+        var has_focus = self._focus.is_focused(_SLOT_LANG)
         self.lang_dropdown.paint(
             canvas, layout.lang_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
@@ -706,7 +727,13 @@ struct TargetsDialog(Movable):
         self._buttons[2].button.move_to(save_x, y)
         self._buttons[3].button.move_to(cancel_x, y)
         self._buttons[1].enabled = len(self.entries) > 0
+        # Push the final button positions into the focus group so a
+        # click on the face moves focus correctly. ``enabled`` already
+        # encodes visitability (Remove follows ``len(entries) > 0``,
+        # the others are always enabled).
         for i in range(len(self._buttons)):
+            var btn = self._buttons[i]
+            self._focus.update(btn.slot, btn.button.hit_rect(), btn.enabled)
             self._paint_button(canvas, i)
 
     def _paint_button(mut self, mut canvas: Canvas, idx: Int):
@@ -717,7 +744,7 @@ struct TargetsDialog(Movable):
             # signals "not actionable right now" without dropping
             # the visual weight of the button entirely.
             face = Attr(LIGHT_GRAY, GREEN)
-        elif self.focus == pb.focus:
+        elif self._focus.is_focused(pb.slot):
             # Focused: blue face. Matches the focus colour used for
             # input strips so the eye groups them as "where typing
             # / Enter goes next".
@@ -742,7 +769,7 @@ struct TargetsDialog(Movable):
         # dialog's own handlers: arrow keys navigate inside the popup,
         # Esc closes just the popup (not the whole dialog), and Enter
         # commits.
-        if self.focus == _FOCUS_LANG and self.lang_dropdown.is_open:
+        if self._focus.is_focused(_SLOT_LANG) and self.lang_dropdown.is_open:
             if k == KEY_ESC:
                 self.lang_dropdown.close()
                 return True
@@ -754,55 +781,56 @@ struct TargetsDialog(Movable):
             return True
         if k == KEY_TAB:
             var backward = (event.mods & MOD_SHIFT) != 0
-            self.focus = self._next_focus(self.focus, backward)
+            self._focus.cycle(backward)
             return True
         if k == KEY_ENTER:
             # Enter on the closed lang dropdown opens the popup —
             # cheaper to discover than left/right cycling. Once open,
             # the branch above takes over.
-            if self.focus == _FOCUS_LANG:
+            if self._focus.is_focused(_SLOT_LANG):
                 self.lang_dropdown.open()
                 return True
             return self._activate_focus()
         if k == KEY_UP:
-            if self.focus == _FOCUS_LIST:
+            if self._focus.is_focused(_SLOT_LIST):
                 self._move_selection(-1)
                 return True
             return True
         if k == KEY_DOWN:
-            if self.focus == _FOCUS_LIST:
+            if self._focus.is_focused(_SLOT_LIST):
                 self._move_selection(1)
                 return True
             # Down on the closed lang dropdown opens it (matches the
             # convention of every native picker).
-            if self.focus == _FOCUS_LANG:
+            if self._focus.is_focused(_SLOT_LANG):
                 self.lang_dropdown.open()
                 return True
             return True
         # Lang dropdown left/right cycles options without opening the
         # popup; for editable inputs we let the field handle them
         # (cursor movement, selection).
-        if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
+        if (k == KEY_LEFT or k == KEY_RIGHT) \
+                and self._focus.is_focused(_SLOT_LANG):
             self._cycle_lang(event)
             return True
         # Route to the focused editable strip. Save / Cancel / Add /
         # Remove / List have no field, so we fall through.
-        if self.focus == _FOCUS_NAME:
+        if self._focus.is_focused(_SLOT_NAME):
             var r = self.name_tf.handle_key(event)
             if r.consumed:
                 self._commit_fields_to_selected()
                 return True
-        elif self.focus == _FOCUS_PROGRAM:
+        elif self._focus.is_focused(_SLOT_PROGRAM):
             var r = self.program_tf.handle_key(event)
             if r.consumed:
                 self._commit_fields_to_selected()
                 return True
-        elif self.focus == _FOCUS_ARGS:
+        elif self._focus.is_focused(_SLOT_ARGS):
             var r = self.args_tf.handle_key(event)
             if r.consumed:
                 self._commit_fields_to_selected()
                 return True
-        elif self.focus == _FOCUS_CWD:
+        elif self._focus.is_focused(_SLOT_CWD):
             var r = self.cwd_tf.handle_key(event)
             if r.consumed:
                 self._commit_fields_to_selected()
@@ -830,21 +858,21 @@ struct TargetsDialog(Movable):
         self._put_selected(t^)
 
     def _activate_focus(mut self) -> Bool:
-        if self.focus == _FOCUS_ADD:
+        if self._focus.is_focused(_SLOT_ADD):
             self._add_new()
             return True
-        if self.focus == _FOCUS_REMOVE:
+        if self._focus.is_focused(_SLOT_REMOVE):
             self._remove_selected()
             return True
-        if self.focus == _FOCUS_SAVE:
+        if self._focus.is_focused(_SLOT_SAVE):
             self.submitted = True
             return True
-        if self.focus == _FOCUS_CANCEL:
+        if self._focus.is_focused(_SLOT_CANCEL):
             self.close()
             return True
         # Enter on an input/list moves to the next field — mimics the
         # form-traversal behavior of every IDE settings dialog.
-        self.focus = self._next_focus(self.focus, False)
+        self._focus.cycle()
         return True
 
     def _move_selection(mut self, delta: Int):
@@ -890,7 +918,7 @@ struct TargetsDialog(Movable):
             if status == BUTTON_NONE:
                 continue
             if status == BUTTON_FIRED and self._buttons[i].enabled:
-                self.focus = self._buttons[i].focus
+                self._focus.focus_force(self._buttons[i].slot)
                 _ = self._activate_focus()
             return True
         return False
@@ -917,6 +945,11 @@ struct TargetsDialog(Movable):
             return True
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)
+        # Keep the focus group's slot geometry in sync with the layout
+        # we're about to hit-test against. Paint will refresh again,
+        # but mouse events that arrive between paints still need
+        # correct rects for FocusGroup.handle_click.
+        self._refresh_focus_visitability(layout)
         # Open dropdown popup gets first dibs on the click — same as the
         # keyboard branch. ``handle_mouse`` toggles open on body click,
         # commits + closes on a popup-row click, and closes on an
@@ -927,7 +960,7 @@ struct TargetsDialog(Movable):
             )
             if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
                 self._commit_lang_dropdown()
-                self.focus = _FOCUS_LANG
+                self._focus.focus_force(_SLOT_LANG)
                 return True
             # On OUTSIDE the popup auto-closed; let the click fall
             # through to whatever it was actually targeting.
@@ -976,27 +1009,25 @@ struct TargetsDialog(Movable):
                 and layout.list_rect.contains(event.pos):
             self._list_scroll += 1
             return True
+        # FocusGroup decides which slot a real click lands on (and
+        # ignores hovers — the central policy that fixes the
+        # hover-changes-focus bug uniformly across every dialog). The
+        # text fields still get the event below so their own press-
+        # state machine can position the cursor + start a drag.
+        _ = self._focus.handle_click(event)
         # Every mouse event goes through every text field. Each
         # field consumes only when a press lands inside its strip or
         # when it's mid-drag — at most one claims any given event.
-        # Drag tracking, click counting, focus-on-press, and
-        # motion / release dispatch all live inside ``TextField``.
         # Gated on ``self.selected >= 0`` because the fields aren't
-        # painted in the empty-state (no selected row), and clicking
-        # phantom geometry shouldn't position a cursor that's not
-        # visible.
+        # painted in the empty-state (no selected row).
         if self.selected >= 0:
             if self.name_tf.handle_mouse(event, layout.name_rect):
-                self.focus = _FOCUS_NAME
                 return True
             if self.program_tf.handle_mouse(event, layout.program_rect):
-                self.focus = _FOCUS_PROGRAM
                 return True
             if self.args_tf.handle_mouse(event, layout.args_rect):
-                self.focus = _FOCUS_ARGS
                 return True
             if self.cwd_tf.handle_mouse(event, layout.cwd_rect):
-                self.focus = _FOCUS_CWD
                 return True
         # Remaining widgets are press-only (the candidate list and
         # the lang dropdown have no drag semantics here).
@@ -1016,10 +1047,10 @@ struct TargetsDialog(Movable):
                 self._load_fields_from_selected()
             elif 0 <= idx and idx < len(self.entries):
                 self.selected = idx
-            self.focus = _FOCUS_LIST
+            self._focus.focus_force(_SLOT_LIST)
             return True
         if self.selected >= 0 and layout.lang_rect.contains(event.pos):
-            self.focus = _FOCUS_LANG
+            self._focus.focus_force(_SLOT_LANG)
             self._click_lang(layout.lang_rect, screen, event)
             return True
         return True

@@ -2780,7 +2780,7 @@ def test_desktop_replace_seeds_find_from_selection() raises:
     assert_equal(d.prompt.input.text, String("bar"))
     assert_true(d.prompt.input.has_selection())
     assert_equal(d.prompt.second_input.text, String(""))
-    assert_equal(d.prompt._active, 1)
+    assert_true(d.prompt._focus.is_focused(1))
 
 
 def test_desktop_find_seeds_from_editor_selection() raises:
@@ -10682,14 +10682,14 @@ def test_targets_dialog_add_and_remove() raises:
     var dlg = TargetsDialog()
     dlg.open(src^)
     # _activate_focus on Add — focus is on the list initially, walk
-    # there via mouse-style direct manipulation.
-    dlg.focus = 6   # _FOCUS_ADD
+    # there via direct slot manipulation. Slot 6 = Add, 7 = Remove.
+    dlg._focus.focus_force(6)
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
     assert_equal(len(dlg.entries), 2)
     assert_equal(dlg.selected, 1)
     # Selected is now the new "new" target. Switch focus to Remove
     # and activate.
-    dlg.focus = 7   # _FOCUS_REMOVE
+    dlg._focus.focus_force(7)
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
     assert_equal(len(dlg.entries), 1)
     assert_equal(dlg.entries[0].name, String("only"))
@@ -10703,7 +10703,7 @@ def test_targets_dialog_save_button_submits() raises:
     src.active = 0
     var dlg = TargetsDialog()
     dlg.open(src^)
-    dlg.focus = 8   # _FOCUS_SAVE
+    dlg._focus.focus_force(8)  # Save slot
     _ = dlg.handle_key(Event.key_event(KEY_ENTER))
     assert_true(dlg.submitted)
 

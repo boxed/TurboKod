@@ -38,7 +38,7 @@ from .events import (
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect, compute_dialog_rect
 from .text_field import TextField
-from .view import RowCursor
+from .view import FocusGroup, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -51,10 +51,10 @@ comptime _LIST_HEIGHT = _DIALOG_H - 9
 1 top border + 1 padding + 1 input + 1 padding + 1 current-dir +
 1 trailing gap + 1 buttons face + 1 buttons shadow + 1 hint/bottom."""
 
-# Focus modes — kept as small ints since Mojo enums aren't widely used in
-# this codebase yet.
-comptime _FOCUS_INPUT   = UInt8(0)
-comptime _FOCUS_LISTING = UInt8(1)
+# Stable focus slot indices. Two focusable areas: the filename input
+# and the directory listing. Slot order is the Tab order.
+comptime _SLOT_INPUT   = 0
+comptime _SLOT_LISTING = 1
 
 
 def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
@@ -125,7 +125,7 @@ struct SaveAsDialog(Movable):
     var submitted: Bool
     var filename: TextField       # editable input text + cursor
     var selected_path: String     # populated on submit
-    var focus: UInt8              # _FOCUS_INPUT or _FOCUS_LISTING
+    var _focus: FocusGroup        # 2 slots: input + listing
     var browser: DirBrowser       # dirs-only listing
     var pos: Optional[Point]
     """Top-left of the dialog after a title-bar drag, or ``None`` to
@@ -144,7 +144,8 @@ struct SaveAsDialog(Movable):
         self.submitted = False
         self.filename = TextField()
         self.selected_path = String("")
-        self.focus = _FOCUS_INPUT
+        self._focus = FocusGroup(2)
+        self._focus.focus_force(_SLOT_INPUT)
         self.browser = DirBrowser(True)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
@@ -167,7 +168,7 @@ struct SaveAsDialog(Movable):
         self.filename = TextField()
         self.filename.set_text(name^)
         self.selected_path = String("")
-        self.focus = _FOCUS_INPUT
+        self._focus.focus_force(_SLOT_INPUT)
         self.browser.open(dir^)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
@@ -186,7 +187,7 @@ struct SaveAsDialog(Movable):
         self.submitted = False
         self.filename = TextField()
         self.selected_path = String("")
-        self.focus = _FOCUS_INPUT
+        self._focus.focus_force(_SLOT_INPUT)
         self.browser = DirBrowser(True)
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
@@ -215,8 +216,10 @@ struct SaveAsDialog(Movable):
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), border)
         # Filename label + editable strip.
         _ = painter.put_text(canvas, layout.label_pt, String("File:"), bg)
+        self._focus.update(_SLOT_INPUT, layout.input_rect, True)
+        self._focus.update(_SLOT_LISTING, layout.list_rect, True)
         self.filename.paint(
-            canvas, layout.input_rect, self.focus == _FOCUS_INPUT,
+            canvas, layout.input_rect, self._focus.is_focused(_SLOT_INPUT),
         )
         # Save button right of the input. Same green chrome as the
         # listing's jump buttons so the dialog reads as a coherent
@@ -236,14 +239,14 @@ struct SaveAsDialog(Movable):
         )
         # Listing.
         self.browser.paint(
-            canvas, layout.list_rect, self.focus == _FOCUS_LISTING,
+            canvas, layout.list_rect, self._focus.is_focused(_SLOT_LISTING),
         )
         # Desktop / Home / Root quick-jump strip just above the hint.
         self.browser.paint_jump_buttons(canvas, layout.buttons_rect)
         # Hint at the bottom — varies with focus to nudge the user toward
         # the right key for the thing they're trying to do.
         var hint: String
-        if self.focus == _FOCUS_INPUT:
+        if self._focus.is_focused(_SLOT_INPUT):
             hint = String(" Enter: save  Tab: pick folder  ESC: cancel ")
         else:
             hint = String(" Enter: open  ⌫: parent  Tab: edit name  ESC: cancel ")
@@ -264,10 +267,7 @@ struct SaveAsDialog(Movable):
             self.close()
             return True
         if k == KEY_TAB:
-            if self.focus == _FOCUS_INPUT:
-                self.focus = _FOCUS_LISTING
-            else:
-                self.focus = _FOCUS_INPUT
+            self._focus.cycle()
             return True
         # Navigation keys always move the listing — they don't have a
         # natural meaning inside a single-line input, and giving the
@@ -285,7 +285,7 @@ struct SaveAsDialog(Movable):
             self.browser.move_by(10, list_h)
             return True
         if k == KEY_ENTER:
-            if self.focus == _FOCUS_LISTING:
+            if self._focus.is_focused(_SLOT_LISTING):
                 # Descend / ascend; never submits from listing focus —
                 # users explicitly Tab back to the input to confirm.
                 var name = self.browser.current_name()
@@ -296,17 +296,17 @@ struct SaveAsDialog(Movable):
                 return True
             self._submit()
             return True
-        if self.focus == _FOCUS_INPUT:
+        if self._focus.is_focused(_SLOT_INPUT):
             # Field gets full cursor / clipboard / selection handling.
             var r = self.filename.handle_key(event)
             if r.consumed:
                 return True
         # Backspace on the listing ascends to the parent directory.
-        if k == KEY_BACKSPACE and self.focus == _FOCUS_LISTING:
+        if k == KEY_BACKSPACE and self._focus.is_focused(_SLOT_LISTING):
             self.browser.ascend()
             return True
         if UInt32(0x20) <= k and k < UInt32(0x7F):
-            if self.focus == _FOCUS_LISTING:
+            if self._focus.is_focused(_SLOT_LISTING):
                 # Type-to-search: jump the directory selection to the
                 # first folder whose name starts with the accumulated
                 # buffer (case-insensitive). 800ms after the last
@@ -324,7 +324,7 @@ struct SaveAsDialog(Movable):
         is friendlier than producing an obviously-broken target.
         """
         if len(self.filename.text.as_bytes()) == 0:
-            self.focus = _FOCUS_INPUT
+            self._focus.focus_force(_SLOT_INPUT)
             return
         self.selected_path = join_path(self.browser.dir, self.filename.text)
         self.submitted = True
@@ -395,21 +395,28 @@ struct SaveAsDialog(Movable):
             return True
         if save_status != BUTTON_NONE:
             return True
-        # Click in the filename strip steals focus and routes the
-        # event to the field so the cursor lands at the click point
-        # (with drag-extend selection if the user keeps holding).
+        # Refresh focus slot rects so the FocusGroup's hit-test sees
+        # current geometry, then let it shift focus on a real click
+        # (press-and-not-motion). Hover never moves focus.
+        self._focus.update(_SLOT_INPUT, layout.input_rect, True)
+        self._focus.update(_SLOT_LISTING, layout.list_rect, True)
+        _ = self._focus.handle_click(event)
+        # Click in the filename strip routes the event to the field so
+        # the cursor lands at the click point (with drag-extend
+        # selection if the user keeps holding). Focus was already
+        # updated above.
         if event.button == MOUSE_BUTTON_LEFT \
                 and layout.input_rect.contains(event.pos):
-            if event.pressed and not event.motion:
-                self.focus = _FOCUS_INPUT
-            if self.focus == _FOCUS_INPUT \
+            if self._focus.is_focused(_SLOT_INPUT) \
                     and self.filename.handle_mouse(event, layout.input_rect):
                 return True
         # Quick-jump strip lives between the listing and the hint —
         # check it before the listing's mouse handler so the jump
-        # buttons' row doesn't get swallowed as out-of-list.
+        # buttons' row doesn't get swallowed as out-of-list. A click on
+        # a jump button pulls focus to the listing so subsequent
+        # arrows / typing navigate the directory.
         if self.browser.handle_jump_click(event, layout.buttons_rect):
-            self.focus = _FOCUS_LISTING
+            self._focus.focus_force(_SLOT_LISTING)
             return True
         var idx = self.browser.handle_list_mouse(event, layout.list_rect)
         if idx == -2:
@@ -417,10 +424,6 @@ struct SaveAsDialog(Movable):
         if idx < 0:
             # Click is outside the list; swallow if inside the modal.
             return True
-        # Any click on a listing row also pulls focus to the listing —
-        # otherwise typing right after a click would unexpectedly land
-        # in the filename input.
-        self.focus = _FOCUS_LISTING
         if self.browser.entries[idx] == String(".."):
             self.browser.ascend()
             return True
