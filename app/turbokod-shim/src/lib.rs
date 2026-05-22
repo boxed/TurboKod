@@ -337,14 +337,71 @@ pub extern "C" fn tk_pty_set_winsize(fd: c_int, cols: c_int, rows: c_int) -> c_i
 
 // --- Debug log open -------------------------------------------------------
 
+/// Hard cap on the size of any file opened via ``tk_debug_log_open``.
+/// Sessions had been observed growing the log into the gigabytes.
+const DEBUG_LOG_MAX_BYTES: i64 = 5 * 1024 * 1024;
+/// When the cap is hit, keep this much of the tail so recent context
+/// survives the rotation. Half-cap gives ~2.5MB of headroom before the
+/// next rotation fires.
+const DEBUG_LOG_KEEP_BYTES: i64 = DEBUG_LOG_MAX_BYTES / 2;
+
+/// If ``path`` exceeds the cap, rewrite it in place to its last
+/// ``DEBUG_LOG_KEEP_BYTES``. Best-effort: any libc failure aborts the
+/// rotation silently and leaves the file as-is, because the caller is
+/// the diagnostics path and must not fail noisily.
+unsafe fn debug_log_rotate(path: *const c_char, size: i64) {
+    let rfd = libc::open(path, libc::O_RDONLY);
+    if rfd < 0 {
+        return;
+    }
+    let offset = size - DEBUG_LOG_KEEP_BYTES;
+    if libc::lseek(rfd, offset as libc::off_t, libc::SEEK_SET) < 0 {
+        libc::close(rfd);
+        return;
+    }
+    let mut buf = vec![0u8; DEBUG_LOG_KEEP_BYTES as usize];
+    let mut total: usize = 0;
+    while total < buf.len() {
+        let n = libc::read(
+            rfd,
+            buf.as_mut_ptr().add(total) as *mut c_void,
+            buf.len() - total,
+        );
+        if n <= 0 {
+            break;
+        }
+        total += n as usize;
+    }
+    libc::close(rfd);
+    if total == 0 {
+        return;
+    }
+    let wfd = libc::open(path, libc::O_WRONLY | libc::O_TRUNC, 0o644);
+    if wfd < 0 {
+        return;
+    }
+    let _ = libc::write(wfd, buf.as_ptr() as *const c_void, total);
+    libc::close(wfd);
+}
+
 /// Open ``path`` for write+append, creating it if absent. Used by the
 /// Mojo ``debug_log`` helper. Wrapped here because Mojo's FFI rejects
 /// a second binding of plain ``open`` with three arguments (the
 /// codebase has an existing two-arg binding).
+///
+/// Before opening, the file is trimmed to its last
+/// ``DEBUG_LOG_KEEP_BYTES`` if it has exceeded ``DEBUG_LOG_MAX_BYTES``,
+/// so the log can never grow without bound across a long session.
 #[no_mangle]
 pub unsafe extern "C" fn tk_debug_log_open(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
+    }
+    let mut st: libc::stat = std::mem::zeroed();
+    if libc::stat(path, &mut st) == 0
+        && (st.st_size as i64) >= DEBUG_LOG_MAX_BYTES
+    {
+        debug_log_rotate(path, st.st_size as i64);
     }
     // Direct libc call — std::fs::OpenOptions has been observed to
     // crash in the bundle launch context, presumably because the

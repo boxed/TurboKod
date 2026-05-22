@@ -23,8 +23,10 @@ from .colors import (
 from .grammar_install import (
     built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
+    user_grammar_path,
     user_grammar_path_for_ext,
 )
+from .project_grammars import GrammarOverride
 from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
@@ -110,12 +112,71 @@ def highlight_for_extension(
     return hls^
 
 
+def _bundled_grammar_path_for_language(lang: String) -> String:
+    """Return the bundled grammar JSON path for ``language_id``
+    (``"python"``, ``"rust"``, ``"django-html"``, …), or ``""`` when
+    no grammar with that id is shipped in-tree. Same source of truth
+    as ``_grammar_path_for_ext``; the two functions exist because the
+    bundled map is keyed by *extension* (one language can own
+    several) while overrides resolve by *language_id*.
+    """
+    if lang == String("python"):
+        return String("src/turbokod/grammars/python.tmLanguage.json")
+    if lang == String("mojo"):
+        return String("src/turbokod/grammars/mojo.tmLanguage.json")
+    if lang == String("rust"):
+        return String("src/turbokod/grammars/rust.tmLanguage.json")
+    if lang == String("json"):
+        return String("src/turbokod/grammars/json.tmLanguage.json")
+    if lang == String("go"):
+        return String("src/turbokod/grammars/go.tmLanguage.json")
+    if lang == String("typescript"):
+        return String("src/turbokod/grammars/typescript.tmLanguage.json")
+    if lang == String("javascript"):
+        return String("src/turbokod/grammars/javascript.tmLanguage.json")
+    if lang == String("ruby"):
+        return String("src/turbokod/grammars/ruby.tmLanguage.json")
+    if lang == String("cpp"):
+        return String("src/turbokod/grammars/cpp.tmLanguage.json")
+    if lang == String("shell"):
+        return String("src/turbokod/grammars/shell.tmLanguage.json")
+    if lang == String("sql"):
+        return String("src/turbokod/grammars/sql.tmLanguage.json")
+    if lang == String("yaml"):
+        return String("src/turbokod/grammars/yaml.tmLanguage.json")
+    if lang == String("html"):
+        return String("src/turbokod/grammars/html.tmLanguage.json")
+    if lang == String("css"):
+        return String("src/turbokod/grammars/css.tmLanguage.json")
+    if lang == String("diff"):
+        return String("src/turbokod/grammars/diff.tmLanguage.json")
+    if lang == String("markdown"):
+        return String("src/turbokod/grammars/markdown.tmLanguage.json")
+    return String("")
+
+
+def _grammar_path_for_language(lang: String) -> String:
+    """Resolve a ``language_id`` to an on-disk grammar JSON path:
+    bundled first, then a user-installed grammar at
+    ``~/.config/turbokod/languages/<lang>/<lang>.tmLanguage.json``.
+    Empty string when the language is not known anywhere."""
+    var bundled = _bundled_grammar_path_for_language(lang)
+    if len(bundled.as_bytes()) > 0:
+        return bundled
+    var user = user_grammar_path(lang)
+    if len(user.as_bytes()) == 0:
+        return String("")
+    return user
+
+
 def _grammar_path_for_ext(ext: String) -> String:
     """Map extension → grammar JSON path, relative to project root.
 
     Empty string means "no grammar for this extension." Adding a
     new grammar is one entry here plus the JSON file under
-    ``src/turbokod/grammars/``.
+    ``src/turbokod/grammars/``. The companion
+    ``_bundled_grammar_path_for_language`` resolves by ``language_id``
+    for the project-override path; keep the two in sync.
     """
     if ext == String("py") or ext == String("pyi") or ext == String("pyw"):
         return String("src/turbokod/grammars/python.tmLanguage.json")
@@ -167,6 +228,33 @@ def _grammar_path_for_ext(ext: String) -> String:
     return user_grammar_path_for_ext(ext)
 
 
+@fieldwise_init
+struct _ResolvedGrammar(Copyable, Movable):
+    """Output of ``_resolve_grammar_path``: the JSON path to load and
+    the registry key the resulting ``Grammar`` should be cached under.
+    Empty ``path`` means no grammar is available for the extension.
+    ``cache_key`` is the override's language_id when an override
+    fires, the bare extension otherwise — distinct keys so an
+    override-bound editor doesn't share a compiled grammar with one
+    that wasn't.
+    """
+    var path: String
+    var cache_key: String
+
+
+def _resolve_grammar_path(
+    ext: String, registry: GrammarRegistry,
+) -> _ResolvedGrammar:
+    """Pick the grammar JSON path for ``ext``, honouring per-project
+    overrides held on ``registry``."""
+    var lang = registry.lookup_override(ext)
+    if len(lang.as_bytes()) > 0:
+        var p = _grammar_path_for_language(lang)
+        if len(p.as_bytes()) > 0:
+            return _ResolvedGrammar(p, lang)
+    return _ResolvedGrammar(_grammar_path_for_ext(ext), ext)
+
+
 struct GrammarRegistry(Movable):
     """Process-wide loaded-grammar cache.
 
@@ -190,10 +278,12 @@ struct GrammarRegistry(Movable):
     """
     var keys: List[String]
     var grammars: List[Grammar]
+    var overrides: List[GrammarOverride]
 
     def __init__(out self):
         self.keys = List[String]()
         self.grammars = List[Grammar]()
+        self.overrides = List[GrammarOverride]()
 
     def lookup_idx(self, key: String) -> Int:
         """Index of the cached grammar for ``key``, or -1.
@@ -204,6 +294,28 @@ struct GrammarRegistry(Movable):
             if self.keys[i] == key:
                 return i
         return -1
+
+    def lookup_override(self, ext: String) -> String:
+        """Return the configured ``language_id`` for ``ext``, or the
+        empty string when no per-project override applies. Used by
+        ``_resolve_grammar_path`` to swap the default grammar for the
+        one named in ``.turbokod/grammars.json``.
+        """
+        for i in range(len(self.overrides)):
+            if self.overrides[i].ext == ext:
+                return self.overrides[i].language_id
+        return String("")
+
+    def set_overrides(mut self, var overrides: List[GrammarOverride]):
+        """Replace the per-project override map and drop the grammar
+        cache so the next paint reloads against the new mapping.
+
+        Clearing the whole cache (rather than surgically evicting just
+        the entries whose extension changed) is fine because this only
+        runs on project open / close, not on every keystroke."""
+        self.overrides = overrides^
+        self.keys = List[String]()
+        self.grammars = List[Grammar]()
 
 
 struct HighlightCache(Copyable, Movable):
@@ -283,22 +395,27 @@ def highlight_incremental(
     is 0. Falls through to the generic tokenizer when there's no
     bundled grammar for the extension.
     """
-    var path = _grammar_path_for_ext(ext)
+    var resolved = _resolve_grammar_path(ext, registry)
+    var path = resolved.path
+    var cache_key = resolved.cache_key
     if len(path.as_bytes()) == 0:
         var fb = _fallback_for_extension(ext, lines)
         _apply_intellij_injections(lines, fb, registry)
         return fb^
 
-    # Grammar load — registry hit if the extension is already known,
+    # Grammar load — registry hit if the cache_key is already known,
     # else cold load + register. The registry is process-shared so
     # the next ``Editor`` for the same language reuses the same
     # ``Grammar`` instance instead of re-parsing the JSON and
-    # re-allocating libonig handles.
-    var grammar_idx = registry.lookup_idx(ext)
+    # re-allocating libonig handles. ``cache_key`` is the language_id
+    # when an override fires, the bare extension otherwise — keeping
+    # them distinct prevents an override-bound editor from sharing a
+    # grammar with one that wasn't.
+    var grammar_idx = registry.lookup_idx(cache_key)
     if grammar_idx < 0:
         try:
             var g = load_grammar_from_file(path)
-            registry.keys.append(ext)
+            registry.keys.append(cache_key)
             registry.grammars.append(g^)
             grammar_idx = len(registry.keys) - 1
         except:
@@ -306,10 +423,11 @@ def highlight_incremental(
             _apply_intellij_injections(lines, fb, registry)
             return fb^
 
-    # Per-Editor state: invalidate when the extension changes.
-    if cache.ext != ext:
+    # Per-Editor state: invalidate when the cache key changes (either
+    # the extension itself moved or the project's override map did).
+    if cache.ext != cache_key:
         cache.invalidate()
-        cache.ext = ext
+        cache.ext = cache_key
 
     # Decide whether we can incrementalize. Conditions for "yes":
     #   * cache is warm: we already tokenized this extension before
@@ -1490,14 +1608,16 @@ def _inject_grammar(
     var ext = _ext_for_language(lang)
     if len(ext.as_bytes()) == 0:
         return
-    var path = _grammar_path_for_ext(ext)
+    var resolved = _resolve_grammar_path(ext, registry)
+    var path = resolved.path
+    var cache_key = resolved.cache_key
     if len(path.as_bytes()) == 0:
         return
-    var grammar_idx = registry.lookup_idx(ext)
+    var grammar_idx = registry.lookup_idx(cache_key)
     if grammar_idx < 0:
         try:
             var g = load_grammar_from_file(path)
-            registry.keys.append(ext)
+            registry.keys.append(cache_key)
             registry.grammars.append(g^)
             grammar_idx = len(registry.keys) - 1
         except:

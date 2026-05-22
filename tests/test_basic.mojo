@@ -171,6 +171,9 @@ from turbokod.grammar_install import (
     find_downloadable_grammar_for_extension,
     grammar_install_command, user_grammar_path, user_grammar_path_for_ext,
 )
+from turbokod.project_grammars import (
+    GrammarOverride, load_project_grammar_overrides,
+)
 from turbokod.action_editor import ActionEditor
 from turbokod.config import LanguageServerOverride, OnSaveAction
 from turbokod.dropdown import Dropdown
@@ -4030,6 +4033,173 @@ def test_grammar_install_command_targets_user_config() raises:
     assert_true(_contains(cmd, String("curl ")))
     if len(dest.as_bytes()) > 0:
         assert_true(_contains(cmd, dest))
+
+
+def test_django_grammar_is_in_downloadable_catalog() raises:
+    """The Django HTML grammar is shipped as a downloadable, not as an
+    auto-binding for ``.html`` — its ``file_types`` list is empty so a
+    Django-less project's ``.html`` files don't get hijacked. Users opt
+    in per-project via ``.turbokod/grammars.json``."""
+    var specs = built_in_downloadable_grammars()
+    var idx = find_downloadable_grammar_by_language(
+        specs, String("django-html"),
+    )
+    assert_true(idx >= 0)
+    assert_equal(specs[idx].language_id, String("django-html"))
+    assert_equal(len(specs[idx].file_types), 0)
+    # No ext should resolve to this grammar via the auto-binding lookup.
+    assert_equal(
+        find_downloadable_grammar_for_extension(specs, String("html")),
+        -1,
+    )
+
+
+def test_load_project_grammar_overrides_missing_file_is_empty() raises:
+    """No project root, or a project root with no ``.turbokod/grammars.json``,
+    yields an empty override list — the editor stays usable when the
+    user hasn't opted any project into custom grammars."""
+    assert_equal(len(load_project_grammar_overrides(String(""))), 0)
+    var dir = _temp_path(String("_grammar_noconf"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_equal(len(load_project_grammar_overrides(dir)), 0)
+
+
+def test_load_project_grammar_overrides_parses_extensions_map() raises:
+    """A well-formed ``grammars.json`` produces one ``GrammarOverride``
+    per entry in the ``extensions`` map. Order doesn't matter, but the
+    ext → language_id pairing must round-trip exactly."""
+    var dir = _temp_path(String("_grammar_ok"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var sub = dir + String("/.turbokod")
+    _ = external_call["mkdir", Int32](
+        (sub + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(
+        sub + String("/grammars.json"),
+        String(
+            "{\"extensions\": {\"html\": \"django-html\","
+            " \"txt\": \"plain-text\"}}"
+        ),
+    ))
+    var overrides = load_project_grammar_overrides(dir)
+    assert_equal(len(overrides), 2)
+    var html_lang = String("")
+    var txt_lang = String("")
+    for i in range(len(overrides)):
+        if overrides[i].ext == String("html"):
+            html_lang = overrides[i].language_id
+        elif overrides[i].ext == String("txt"):
+            txt_lang = overrides[i].language_id
+    assert_equal(html_lang, String("django-html"))
+    assert_equal(txt_lang, String("plain-text"))
+
+
+def test_load_project_grammar_overrides_malformed_is_empty() raises:
+    """Malformed JSON, the wrong top-level shape, or non-string values
+    all degrade to "no overrides" — the highlighter falls back to the
+    default extension map rather than crashing the load."""
+    var dir = _temp_path(String("_grammar_bad"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var sub = dir + String("/.turbokod")
+    _ = external_call["mkdir", Int32](
+        (sub + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var path = sub + String("/grammars.json")
+    assert_true(write_file(path, String("not valid json {")))
+    assert_equal(len(load_project_grammar_overrides(dir)), 0)
+    # Wrong top-level shape (array, not object).
+    assert_true(write_file(path, String("[\"html\", \"django-html\"]")))
+    assert_equal(len(load_project_grammar_overrides(dir)), 0)
+    # Non-string values get skipped silently.
+    assert_true(write_file(
+        path,
+        String("{\"extensions\": {\"html\": 42, \"py\": \"python\"}}"),
+    ))
+    var overrides = load_project_grammar_overrides(dir)
+    assert_equal(len(overrides), 1)
+    assert_equal(overrides[0].ext, String("py"))
+    assert_equal(overrides[0].language_id, String("python"))
+
+
+def test_grammar_registry_override_routes_to_alternate_grammar() raises:
+    """End-to-end: with an override mapping ``.html`` → ``python``, a
+    buffer of Python source opened as ``.html`` tokenizes through the
+    Python grammar — i.e. the override actually changes which grammar
+    runs, not just which path string we hand back.
+
+    Comparing against the same buffer tokenized as ``.py`` makes the
+    intent explicit: the two highlight lists must match span-for-span.
+    """
+    var lines = List[String]()
+    lines.append(String("def greet(name):"))
+    lines.append(String("    return name"))
+
+    # Baseline: tokenize as Python directly.
+    var py_registry = GrammarRegistry()
+    var py_cache = HighlightCache()
+    var py_hls = highlight_incremental(
+        String("py"), lines, 0, py_registry, py_cache,
+    )
+    assert_true(len(py_hls) > 0)
+
+    # Same buffer, opened as ``.html`` but with the override pointing
+    # ``html`` at the python grammar.
+    var overrides = List[GrammarOverride]()
+    overrides.append(GrammarOverride(String("html"), String("python")))
+    var html_registry = GrammarRegistry()
+    html_registry.set_overrides(overrides^)
+    var html_cache = HighlightCache()
+    var html_hls = highlight_incremental(
+        String("html"), lines, 0, html_registry, html_cache,
+    )
+    assert_equal(len(html_hls), len(py_hls))
+    for i in range(len(html_hls)):
+        assert_equal(html_hls[i].row, py_hls[i].row)
+        assert_equal(html_hls[i].col_start, py_hls[i].col_start)
+        assert_equal(html_hls[i].col_end, py_hls[i].col_end)
+
+    # Sanity check: without the override, ``.html`` should *not* match
+    # the python highlights (the html grammar produces a very different
+    # token shape, or none at all, for this input).
+    var plain_html_registry = GrammarRegistry()
+    var plain_html_cache = HighlightCache()
+    var plain_html_hls = highlight_incremental(
+        String("html"), lines, 0, plain_html_registry, plain_html_cache,
+    )
+    var matches_python = False
+    if len(plain_html_hls) == len(py_hls):
+        matches_python = True
+        for i in range(len(plain_html_hls)):
+            if (plain_html_hls[i].row != py_hls[i].row
+                    or plain_html_hls[i].col_start != py_hls[i].col_start
+                    or plain_html_hls[i].col_end != py_hls[i].col_end):
+                matches_python = False
+                break
+    assert_false(matches_python)
+
+
+def test_grammar_registry_set_overrides_clears_grammar_cache() raises:
+    """``set_overrides`` drops the cached compiled grammars so the next
+    paint reloads against the new map. Without that eviction, a buffer
+    whose extension's override changed mid-session would keep showing
+    the previous grammar's colors until the editor was reopened."""
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var lines = List[String]()
+    lines.append(String("def f(): pass"))
+    var _ = highlight_incremental(
+        String("py"), lines, 0, registry, cache,
+    )
+    assert_true(len(registry.keys) > 0)
+    registry.set_overrides(List[GrammarOverride]())
+    assert_equal(len(registry.keys), 0)
+    assert_equal(len(registry.grammars), 0)
 
 
 def test_user_grammar_path_for_ext_misses_when_not_installed() raises:
@@ -15123,6 +15293,12 @@ def _run_chunk_01() raises:
     test_downloadable_grammar_registry_has_elm()
     test_downloadable_grammar_registry_misses_unknown()
     test_grammar_install_command_targets_user_config()
+    test_django_grammar_is_in_downloadable_catalog()
+    test_load_project_grammar_overrides_missing_file_is_empty()
+    test_load_project_grammar_overrides_parses_extensions_map()
+    test_load_project_grammar_overrides_malformed_is_empty()
+    test_grammar_registry_override_routes_to_alternate_grammar()
+    test_grammar_registry_set_overrides_clears_grammar_cache()
     test_user_grammar_path_for_ext_misses_when_not_installed()
     test_on_save_action_default_is_empty()
     test_on_save_action_copy_preserves_args()

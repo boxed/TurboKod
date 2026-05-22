@@ -135,6 +135,9 @@ from .project_targets import (
     save_project_targets,
     write_all_targets,
 )
+from .project_grammars import (
+    GrammarOverride, load_project_grammar_overrides,
+)
 from .breakpoint_dialog import (
     BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY,
     BreakpointConditionErrorDialog, BreakpointMenu,
@@ -2641,6 +2644,11 @@ struct Desktop(Movable):
         self.run_session.terminate()
         self._run_output_held = False
         self.targets = ProjectTargets()
+        # Drop any per-project grammar overrides loaded from this
+        # project's ``.turbokod/grammars.json`` so a buffer opened
+        # outside any project doesn't inherit the previous project's
+        # mapping (e.g. a ``.html`` file still rendering as django-html).
+        self.grammar_registry.set_overrides(List[GrammarOverride]())
         # Forget the cached session signature so the next project's
         # restore-then-save cycle starts from a clean slate (and so a
         # later switch back to this project can re-read the on-disk
@@ -2776,6 +2784,17 @@ struct Desktop(Movable):
         # silently no-op until the user authors ``.turbokod/targets.json``.
         self.targets = load_project_targets(canonical)
         debug_log(String("[_set_project] after load_project_targets"))
+        # Per-project grammar overrides — ``.turbokod/grammars.json``
+        # lets a project say "use the django-html grammar for .html"
+        # without changing the bundled extension map. Empty / missing
+        # / malformed file means no overrides, same as a project with
+        # no special needs.
+        self.grammar_registry.set_overrides(
+            load_project_grammar_overrides(canonical),
+        )
+        debug_log(
+            String("[_set_project] after load_project_grammar_overrides"),
+        )
         # Swap the speller's per-project bucket to this project's
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.

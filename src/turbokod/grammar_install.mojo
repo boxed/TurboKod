@@ -78,6 +78,21 @@ def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
         ),
         String("Elm"),
     ))
+    # Django HTML templates. ``file_types`` is empty because Django
+    # templates use the bare ``.html`` extension — auto-binding would
+    # steal vanilla HTML files everywhere. Users opt in per-project
+    # via ``.turbokod/grammars.json`` (``{"extensions": {"html":
+    # "django-html"}}``) once they've installed the grammar.
+    out.append(DownloadableGrammar(
+        String("django-html"),
+        List[String](),
+        String(
+            "https://raw.githubusercontent.com/"
+            "batisteo/vscode-django/"
+            "master/syntaxes/django-html.tmLanguage.json"
+        ),
+        String("Django HTML templates"),
+    ))
     return out^
 
 

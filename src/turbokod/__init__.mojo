@@ -101,6 +101,9 @@ from .highlight import (
     highlight_comment_attr, highlight_decorator_attr, highlight_keyword_attr,
     highlight_number_attr, highlight_string_attr, word_at,
 )
+from .project_grammars import (
+    GrammarOverride, load_project_grammar_overrides,
+)
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_null,
     json_object, json_str, parse_json,
