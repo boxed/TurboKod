@@ -26,10 +26,10 @@ def _set_caret(mut ed: Editor, row: Int, col: Int):
 
 def _selection(ed: Editor) -> Tuple[Int, Int, Int, Int]:
     """Normalize selection to (start_row, start_col, end_row, end_col)."""
-    var sr = ed.anchor_row
-    var sc = ed.anchor_col
-    var er = ed.cursor_row
-    var ec = ed.cursor_col
+    var sr = ed.selections[0].anchor_row
+    var sc = ed.selections[0].anchor_col
+    var er = ed.selections[0].row
+    var ec = ed.selections[0].col
     if (sr > er) or (sr == er and sc > ec):
         return (er, ec, sr, sc)
     return (sr, sc, er, ec)
@@ -131,7 +131,7 @@ def test_cmd_down_rewinds_through_history() raises:
     assert_equal(word[1], 0); assert_equal(word[3], 5)
     _ = ed.handle_key(_key(KEY_DOWN, MOD_META), _VIEW)  # back to caret
     assert_false(ed.has_selection())
-    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.selections[0].col, 2)
 
 
 def test_other_key_resets_smart_select_history() raises:
@@ -142,16 +142,16 @@ def test_other_key_resets_smart_select_history() raises:
     # Pressing Right collapses the selection and breaks the smart-select run.
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     # Cmd+Down should now be a no-op rather than rewinding back.
-    var before_col = ed.cursor_col
+    var before_col = ed.selections[0].col
     _ = ed.handle_key(_key(KEY_DOWN, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, before_col)
+    assert_equal(ed.selections[0].col, before_col)
 
 
 def test_cmd_down_with_empty_history_is_noop() raises:
     var ed = Editor(String("abc"))
     _set_caret(ed, 0, 1)
     _ = ed.handle_key(_key(KEY_DOWN, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.selections[0].col, 1)
     assert_false(ed.has_selection())
 
 

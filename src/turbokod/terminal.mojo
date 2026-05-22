@@ -857,6 +857,19 @@ def _parse_csi(data: String) -> Tuple[Event, Int]:
                 return (Event.key_event(named, mods), consumed)
             var nk = _normalize_ctrl_letter(num1, mods)
             return (Event.key_event(nk[0], nk[1]), consumed)
+        if final == 0x7A:
+            # ``CSI <mod-id> ; <state> z`` — turbokod-private bare-modifier
+            # transition. Emitted by the native wrapper on every press /
+            # release of a lone modifier key. Real terminals never emit
+            # this so the parser silently degrades when running under
+            # one. ``params[1]`` is interpreted as the raw state byte
+            # (1 = press, 0 = release) — not mod-aware like the other
+            # two-param finals, so we use the unparsed ``params[1]``
+            # rather than the ``mods`` derived at the top of the block.
+            return (
+                Event.mod_key_event(UInt32(num1), params[1] != 0),
+                consumed,
+            )
         return (Event(), consumed)
 
     if len(params) == 1 and final == 0x75:
@@ -915,9 +928,14 @@ def _parse_sgr_mouse(data: String) -> Tuple[Event, Int]:
             var pressed = (b == 0x4D)
             var motion = (raw & 32) != 0
             var mods: UInt8 = MOD_NONE
-            if (raw & 4) != 0:  mods = mods | MOD_SHIFT
-            if (raw & 8) != 0:  mods = mods | MOD_ALT
-            if (raw & 16) != 0: mods = mods | MOD_CTRL
+            if (raw & 4) != 0:   mods = mods | MOD_SHIFT
+            if (raw & 8) != 0:   mods = mods | MOD_ALT
+            if (raw & 16) != 0:  mods = mods | MOD_CTRL
+            # Bit 128 is a turbokod-wrapper extension carrying the macOS
+            # Cmd (super) state. xterm SGR mouse has no meta bit; the
+            # wrapper sets this so we can route Cmd+click separately
+            # from Alt+click. Real terminals never set bit 128.
+            if (raw & 128) != 0: mods = mods | MOD_META
             var button: UInt8
             if (raw & 64) != 0:
                 if (raw & 1) != 0:

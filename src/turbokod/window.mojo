@@ -1154,6 +1154,11 @@ struct Window(Copyable, Movable):
             return False
         return self.editor.handle_key(event, self.interior())
 
+    def handle_mod_key(mut self, event: Event) -> Bool:
+        if not self.is_editor:
+            return False
+        return self.editor.handle_mod_key(event)
+
     def handle_mouse_in_body(mut self, event: Event) -> Bool:
         """Editor mouse handling for clicks/drags inside the window body."""
         if not self.is_editor:
@@ -1310,8 +1315,8 @@ struct Window(Copyable, Movable):
         if not self.is_editor or self.editor.soft_wrap \
                 or self.rect.width() < 14 or self.rect.height() < 2:
             return HScrollbar(0, 0, -1, 0, 0, 0)
-        var pos_text = String(self.editor.cursor_row + 1) \
-            + String(":") + String(self.editor.cursor_col + 1)
+        var pos_text = String(self.editor.selections[0].row + 1) \
+            + String(":") + String(self.editor.selections[0].col + 1)
         var pos_x = self.rect.a.x + 4
         var pos_len = display_columns(pos_text)
         var sb_left = pos_x + pos_len + 1
@@ -1342,8 +1347,8 @@ struct Window(Copyable, Movable):
         if self.rect.width() < 14 or self.rect.height() < 2:
             return
         var y = self.rect.b.y - 1
-        var pos_text = String(self.editor.cursor_row + 1) \
-            + String(":") + String(self.editor.cursor_col + 1)
+        var pos_text = String(self.editor.selections[0].row + 1) \
+            + String(":") + String(self.editor.selections[0].col + 1)
         var pos_x = self.rect.a.x + 4
         _ = painter.put_text(canvas, Point(pos_x, y), pos_text, border)
         self._h_scrollbar().paint(canvas, painter, border)
@@ -1892,6 +1897,14 @@ struct WindowManager(Movable):
         """Forward a key event to the focused window's editor (if it has one)."""
         if 0 <= self.focused and self.focused < len(self.windows):
             return self.windows[self.focused].handle_key(event)
+        return False
+
+    def handle_mod_key(mut self, event: Event) -> Bool:
+        """Forward a bare-modifier transition (``EVENT_MOD_KEY``) to the
+        focused editor. The editor uses this to drive its Alt-tap and
+        column-mode state machines; non-editor windows ignore it."""
+        if 0 <= self.focused and self.focused < len(self.windows):
+            return self.windows[self.focused].handle_mod_key(event)
         return False
 
     def handle_mouse(mut self, event: Event, workspace: Rect) -> Bool:

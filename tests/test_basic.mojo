@@ -832,49 +832,49 @@ def test_text_buffer_split_and_join() raises:
 
 def test_editor_typing_and_arrows() raises:
     var ed = Editor(String("hello"))
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.cursor_col, 5)
+    assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(UInt32(ord("!"))), _VIEW)
     assert_equal(ed.buffer.line(0), String("hello!"))
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
     _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
-    assert_equal(ed.cursor_col, 5)
+    assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(KEY_HOME), _VIEW)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_word_movement() raises:
     var ed = Editor(String("hello world foo"))
     # Ctrl+Right from start: lands at start of "world" (col 6).
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
     # Again: start of "foo" (col 12).
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 12)
+    assert_equal(ed.selections[0].col, 12)
     # Again: end of buffer (col 15) — no further word.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 15)
+    assert_equal(ed.selections[0].col, 15)
     # Ctrl+Left walks back to start of each word.
     _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 12)
+    assert_equal(ed.selections[0].col, 12)
     _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
     _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_word_movement_across_lines() raises:
     var ed = Editor(String("abc\ndef"))
     # Ctrl+Right from start: end of "abc" on line 0.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].row, 0); assert_equal(ed.selections[0].col, 3)
     # Again: jumps to start of next line.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 1); assert_equal(ed.selections[0].col, 0)
     # Ctrl+Left from (1,0): end of previous line.
     _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
-    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].row, 0); assert_equal(ed.selections[0].col, 3)
 
 
 def test_editor_shift_arrow_extends_selection() raises:
@@ -882,13 +882,13 @@ def test_editor_shift_arrow_extends_selection() raises:
     assert_false(ed.has_selection())
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
     assert_true(ed.has_selection())
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 1)
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 2)
     # Plain arrow collapses selection.
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     assert_false(ed.has_selection())
-    assert_equal(ed.cursor_col, 3); assert_equal(ed.anchor_col, 3)
+    assert_equal(ed.selections[0].col, 3); assert_equal(ed.selections[0].anchor_col, 3)
 
 
 def test_editor_shift_ctrl_arrow_composes() raises:
@@ -898,12 +898,12 @@ def test_editor_shift_ctrl_arrow_composes() raises:
     var both: UInt8 = MOD_SHIFT | MOD_CTRL
     _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
     assert_true(ed.has_selection())
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 6)
     _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 12)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 12)
     # Now Shift+Ctrl+Left walks the cursor back through words; anchor stays.
     _ = ed.handle_key(_key(KEY_LEFT, both), _VIEW)
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 6)
 
 
 def test_editor_cmd_arrow_line_navigation() raises:
@@ -912,30 +912,30 @@ def test_editor_cmd_arrow_line_navigation() raises:
     var ed = Editor(String("    hello world"))
     # Cmd+Right from col 0: end of line.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, 15)
+    assert_equal(ed.selections[0].col, 15)
     assert_false(ed.has_selection())
     # Cmd+Left from end: lands at first non-space (col 4).
     _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].col, 4)
     # Cmd+Left again: now at first non-space, falls to col 0.
     _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
     # Cmd+Left at col 0 stays at col 0.
     _ = ed.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
     # Cmd+Shift+Right selects to end of line.
     var meta_shift: UInt8 = MOD_META | MOD_SHIFT
     _ = ed.handle_key(_key(KEY_RIGHT, meta_shift), _VIEW)
     assert_true(ed.has_selection())
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 15)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 15)
     # Cmd+Shift+Left from end of line extends back to first non-space.
     _ = ed.handle_key(_key(KEY_LEFT, meta_shift), _VIEW)
-    assert_equal(ed.anchor_col, 0); assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 4)
     # No leading whitespace: Cmd+Left from end goes straight to col 0.
     var ed2 = Editor(String("hello"))
     _ = ed2.handle_key(_key(KEY_END), _VIEW)
     _ = ed2.handle_key(_key(KEY_LEFT, MOD_META), _VIEW)
-    assert_equal(ed2.cursor_col, 0)
+    assert_equal(ed2.selections[0].col, 0)
 
 
 def test_editor_cmd_letter_does_not_insert() raises:
@@ -958,10 +958,10 @@ def test_editor_cmd_a_selects_all() raises:
     var consumed = ed.handle_key(_key(UInt32(ord("a")), MOD_META), _VIEW)
     assert_true(consumed)
     assert_true(ed.has_selection())
-    assert_equal(ed.anchor_row, 0)
-    assert_equal(ed.anchor_col, 0)
-    assert_equal(ed.cursor_row, 1)
-    assert_equal(ed.cursor_col, 8)
+    assert_equal(ed.selections[0].anchor_row, 0)
+    assert_equal(ed.selections[0].anchor_col, 0)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 8)
 
 
 def test_editor_typing_replaces_selection() raises:
@@ -969,11 +969,11 @@ def test_editor_typing_replaces_selection() raises:
     # Select first 4 chars
     for _ in range(4):
         _ = ed.handle_key(_key(KEY_RIGHT, MOD_SHIFT), _VIEW)
-    assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].col, 4)
     _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
     assert_equal(ed.buffer.line(0), String("Xo"))
     assert_false(ed.has_selection())
-    assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.selections[0].col, 1)
 
 
 def test_editor_backspace_deletes_selection() raises:
@@ -993,7 +993,7 @@ def test_editor_mouse_click_sets_cursor() raises:
         Event.mouse_event(Point(3, 0), MOUSE_BUTTON_LEFT, True, False),
         _VIEW,
     )
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].col, 3)
     assert_false(ed.has_selection())
 
 
@@ -1003,13 +1003,13 @@ def test_editor_mouse_drag_extends_selection() raises:
         Event.mouse_event(Point(1, 0), MOUSE_BUTTON_LEFT, True, False),
         _VIEW,
     )
-    assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.selections[0].col, 1)
     _ = ed.handle_mouse(
         Event.mouse_event(Point(7, 0), MOUSE_BUTTON_LEFT, True, True),
         _VIEW,
     )
     assert_true(ed.has_selection())
-    assert_equal(ed.anchor_col, 1); assert_equal(ed.cursor_col, 7)
+    assert_equal(ed.selections[0].anchor_col, 1); assert_equal(ed.selections[0].col, 7)
 
 
 def test_editor_mouse_click_clamps_to_line() raises:
@@ -1019,7 +1019,7 @@ def test_editor_mouse_click_clamps_to_line() raises:
         _VIEW,
     )
     # Past EOL → clamped to line length.
-    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.selections[0].col, 2)
 
 
 def test_editor_double_click_selects_word() raises:
@@ -1147,7 +1147,7 @@ def test_editor_cut_whole_line_when_no_selection() raises:
     assert_equal(ed.buffer.line_count(), 2)
     assert_equal(ed.buffer.line(0), String("first"))
     assert_equal(ed.buffer.line(1), String("third"))
-    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 1); assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_cut_whole_line_only_line() raises:
@@ -1156,7 +1156,7 @@ def test_editor_cut_whole_line_only_line() raises:
     ed.cut_to_clipboard()
     assert_equal(ed.buffer.line_count(), 1)
     assert_equal(ed.buffer.line(0), String(""))
-    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 0); assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_smart_indent_mirrors_previous_line() raises:
@@ -1165,7 +1165,7 @@ def test_editor_smart_indent_mirrors_previous_line() raises:
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
     assert_equal(ed.buffer.line_count(), 2)
     assert_equal(ed.buffer.line(1), String("    "))
-    assert_equal(ed.cursor_row, 1); assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].row, 1); assert_equal(ed.selections[0].col, 4)
 
 
 def test_editor_smart_indent_after_open_brace() raises:
@@ -1173,7 +1173,7 @@ def test_editor_smart_indent_after_open_brace() raises:
     ed.move_to(0, 8, False)
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
     assert_equal(ed.buffer.line(1), String("    "))
-    assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].col, 4)
 
 
 def test_editor_smart_indent_after_colon() raises:
@@ -1181,7 +1181,7 @@ def test_editor_smart_indent_after_colon() raises:
     ed.move_to(0, 14, False)
     _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
     assert_equal(ed.buffer.line(1), String("        "))
-    assert_equal(ed.cursor_col, 8)
+    assert_equal(ed.selections[0].col, 8)
 
 
 def test_terminal_parses_modified_arrows() raises:
@@ -1213,6 +1213,28 @@ def test_terminal_parses_modified_arrows() raises:
     assert_true(both_right[0].key == KEY_RIGHT)
     assert_true((both_right[0].mods & MOD_SHIFT) != 0)
     assert_true((both_right[0].mods & MOD_CTRL) != 0)
+
+
+def test_terminal_parses_bare_modifier_transition() raises:
+    """``CSI <mod-id> ; <state> z`` — turbokod-private bare-modifier
+    transition emitted by the native wrapper on every press / release
+    of a lone modifier key. The two-param 'z' final shares the same
+    parse branch as the modifier-arrow forms, so this is the regression
+    test that protects it from being shadowed."""
+    from turbokod.events import EVENT_MOD_KEY, MOD_KEY_ALT, MOD_KEY_META
+    var alt_press = parse_input(String("\x1b[2;1z"))
+    assert_true(alt_press[0].kind == EVENT_MOD_KEY)
+    assert_equal(alt_press[0].key, MOD_KEY_ALT)
+    assert_true(alt_press[0].pressed)
+    assert_equal(alt_press[1], 6)
+    var alt_release = parse_input(String("\x1b[2;0z"))
+    assert_true(alt_release[0].kind == EVENT_MOD_KEY)
+    assert_equal(alt_release[0].key, MOD_KEY_ALT)
+    assert_false(alt_release[0].pressed)
+    var super_press = parse_input(String("\x1b[4;1z"))
+    assert_true(super_press[0].kind == EVENT_MOD_KEY)
+    assert_equal(super_press[0].key, MOD_KEY_META)
+    assert_true(super_press[0].pressed)
 
 
 def test_terminal_parses_shift_tab() raises:
@@ -1253,7 +1275,7 @@ def test_editor_paste_text_single_line() raises:
     ed.move_to(0, 5, False)
     ed.paste_text(String(" world"))
     assert_equal(ed.buffer.line(0), String("hello world"))
-    assert_equal(ed.cursor_col, 11)
+    assert_equal(ed.selections[0].col, 11)
 
 
 def test_editor_paste_text_multiline() raises:
@@ -1264,8 +1286,8 @@ def test_editor_paste_text_multiline() raises:
     assert_equal(ed.buffer.line(0), String("hello"))
     assert_equal(ed.buffer.line(1), String("world"))
     assert_equal(ed.buffer.line(2), String("foo"))
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 3)
 
 
 def test_editor_paste_replaces_selection() raises:
@@ -1288,13 +1310,13 @@ def test_editor_selection_text_multiline() raises:
 def test_editor_goto_line() raises:
     var ed = Editor(String("a\nb\nc\nd\ne"))
     ed.goto_line(3)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 0)
     # Out-of-range clamps.
     ed.goto_line(99)
-    assert_equal(ed.cursor_row, 4)
+    assert_equal(ed.selections[0].row, 4)
     ed.goto_line(0)
-    assert_equal(ed.cursor_row, 0)
+    assert_equal(ed.selections[0].row, 0)
 
 
 def test_editor_find_next() raises:
@@ -1304,13 +1326,13 @@ def test_editor_find_next() raises:
     # First hit at col 0 — but find_next searches *after* the cursor; with
     # cursor initially at (0,0) the implementation skips one column. So the
     # first hit is at col 8 ("foo baz").
-    assert_equal(ed.cursor_row, 0); assert_equal(ed.cursor_col, 11)
+    assert_equal(ed.selections[0].row, 0); assert_equal(ed.selections[0].col, 11)
     assert_true(ed.has_selection())
     assert_equal(ed.selection_text(), String("foo"))
     # Wrap to the earlier match.
     var hit2 = ed.find_next(String("foo"))
     assert_true(hit2)
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].col, 3)
 
 
 def test_editor_find_next_case_insensitive() raises:
@@ -1340,7 +1362,7 @@ def test_editor_find_next_whole_word() raises:
     assert_true(hit)
     # The substring at col 0 ("foobar") is not a whole word; the
     # whole-word "foo" sits at col 7.
-    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.selections[0].col, 10)
 
 
 def test_editor_find_next_regex() raises:
@@ -1528,11 +1550,11 @@ def test_editor_alt_arrow_word_jump() raises:
     """MOD_ALT triggers word movement (macOS convention)."""
     var ed = Editor(String("hello world foo"))
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.cursor_col, 12)
+    assert_equal(ed.selections[0].col, 12)
     _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
 
 
 def test_editor_word_jump_traverses_unicode_letters() raises:
@@ -1545,10 +1567,10 @@ def test_editor_word_jump_traverses_unicode_letters() raises:
     var ed = Editor(String("Godkänn foo"))
     # First Alt+Right jumps past "Godkänn" + the trailing space → byte 9.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.cursor_col, 9)
+    assert_equal(ed.selections[0].col, 9)
     # Alt+Left from inside "foo" lands back at the start of "foo".
     _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].col, 0)
 
 
 def test_path_helpers() raises:
@@ -2122,7 +2144,7 @@ def test_editor_external_change_conflict_inserts_markers() raises:
     for i in range(ed.buffer.line_count()):
         if ed.buffer.line(i).find(String("<<<<<<<")) >= 0:
             found_open = True
-            assert_equal(ed.cursor_row, i)
+            assert_equal(ed.selections[0].row, i)
             break
     assert_true(found_open)
     # Both versions appear in the buffer.
@@ -2274,8 +2296,8 @@ def test_editor_shift_tab_dedents_selected_lines() raises:
     assert_equal(ed.buffer.line(1), String("beta"))
     assert_equal(ed.buffer.line(2), String("gamma"))
     # Cursor was at col 4 on row 0; 4 spaces removed → col 0.
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
@@ -2285,7 +2307,7 @@ def test_editor_shift_tab_dedents_cursor_line_without_selection() raises:
     _ = ed.handle_key(_key(KEY_TAB, MOD_SHIFT), _VIEW)
     assert_equal(ed.buffer.line(0), String("    alpha"))
     assert_equal(ed.buffer.line(1), String("beta"))
-    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.selections[0].col, 2)
 
 
 def test_editor_shift_tab_no_indent_is_noop() raises:
@@ -6100,13 +6122,14 @@ def test_editor_paint_overlays_highlight_attr() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-def test_editor_alt_click_emits_definition_request() raises:
-    # Cmd+click in iTerm2 is delivered to the app as Left+Alt — the editor
-    # treats Alt+left-click as the goto-definition trigger.
+def test_editor_meta_click_emits_definition_request() raises:
+    # The native turbokod wrapper sends a custom meta bit (MOD_META) on
+    # Cmd+click; the editor treats Cmd+left-click as the goto-definition
+    # trigger. (Plain Alt+click adds an extra caret instead.)
     var ed = Editor(String("foo bar baz"))
     var ev = Event.mouse_event(
         Point(4, 0), MOUSE_BUTTON_LEFT,
-        pressed=True, motion=False, mods=MOD_ALT,
+        pressed=True, motion=False, mods=MOD_META,
     )
     _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
     var req = ed.consume_definition_request()
@@ -6115,21 +6138,37 @@ def test_editor_alt_click_emits_definition_request() raises:
     assert_equal(dr.row, 0)
     assert_equal(dr.col, 4)
     assert_equal(dr.word, String("bar"))
-    # The cursor must NOT have moved (Alt+click is non-mutating).
-    assert_equal(ed.cursor_col, 0)
+    # The cursor must NOT have moved (Cmd+click is non-mutating).
+    assert_equal(ed.selections[0].col, 0)
     # And the slot is consumed: a second poll returns empty.
     var req2 = ed.consume_definition_request()
     assert_false(Bool(req2))
 
 
-def test_editor_alt_click_outside_identifier_is_silent() raises:
+def test_editor_meta_click_outside_identifier_is_silent() raises:
     var ed = Editor(String("foo  bar"))
     # Click on the space between words.
     var ev = Event.mouse_event(
         Point(3, 0), MOUSE_BUTTON_LEFT,
+        pressed=True, motion=False, mods=MOD_META,
+    )
+    _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    var req = ed.consume_definition_request()
+    assert_false(Bool(req))
+
+
+def test_editor_alt_click_adds_extra_caret() raises:
+    # Alt+left-click stamps an extra caret at the click point without
+    # disturbing the primary or moving the cursor away from where it was.
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    assert_equal(ed.caret_count(), 1)
+    var ev = Event.mouse_event(
+        Point(2, 1), MOUSE_BUTTON_LEFT,
         pressed=True, motion=False, mods=MOD_ALT,
     )
     _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
+    assert_equal(ed.caret_count(), 2)
+    # No goto-definition was requested.
     var req = ed.consume_definition_request()
     assert_false(Bool(req))
 
@@ -6148,8 +6187,8 @@ def test_editor_gutter_click_emits_breakpoint_toggle() raises:
     var req = ed.consume_breakpoint_toggle()
     assert_true(Bool(req))
     assert_equal(req.value(), 1)
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 0)
     # Slot is one-shot.
     assert_false(Bool(ed.consume_breakpoint_toggle()))
 
@@ -6164,7 +6203,7 @@ def test_editor_text_click_does_not_toggle_breakpoint() raises:
     )
     _ = ed.handle_mouse(ev, Rect(0, 0, 40, 5))
     assert_false(Bool(ed.consume_breakpoint_toggle()))
-    assert_equal(ed.cursor_row, 1)
+    assert_equal(ed.selections[0].row, 1)
 
 
 def test_editor_gutter_click_below_eof_is_ignored() raises:
@@ -7107,19 +7146,19 @@ def test_editor_sticky_col_down_through_short_line() raises:
     one returns the cursor to the original column."""
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 11)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 11)
+    assert_equal(ed.selections[0].desired_col, 11)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     # Line 1 ("ab") is 2 chars: cursor clamps but desired_col is preserved.
-    assert_equal(ed.cursor_row, 1)
-    assert_equal(ed.cursor_col, 2)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 2)
+    assert_equal(ed.selections[0].desired_col, 11)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     # Line 2 is 10 chars: cursor lands at min(11, 10) = 10. Desired untouched.
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 11)
 
 
 def test_editor_sticky_col_up_through_short_line() raises:
@@ -7127,31 +7166,31 @@ def test_editor_sticky_col_up_through_short_line() raises:
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 10)
     _ = ed.handle_key(_key(KEY_UP), _VIEW)
-    assert_equal(ed.cursor_row, 1)
-    assert_equal(ed.cursor_col, 2)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 2)
+    assert_equal(ed.selections[0].desired_col, 10)
     _ = ed.handle_key(_key(KEY_UP), _VIEW)
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 10)
 
 
 def test_editor_sticky_col_reset_by_left_arrow() raises:
     var ed = Editor(String("hello world\nab\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].desired_col, 11)
     _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
     # Horizontal move resets the remembered column to wherever we end up.
-    assert_equal(ed.cursor_col, 1)
-    assert_equal(ed.desired_col, 1)
+    assert_equal(ed.selections[0].col, 1)
+    assert_equal(ed.selections[0].desired_col, 1)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 1)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 1)
 
 
 def test_editor_sticky_col_reset_by_right_arrow() raises:
@@ -7160,32 +7199,32 @@ def test_editor_sticky_col_reset_by_right_arrow() raises:
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     # cursor (1, 2), desired 11. Right at end of line moves to start of next.
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 0)
-    assert_equal(ed.desired_col, 0)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 0)
+    assert_equal(ed.selections[0].desired_col, 0)
 
 
 def test_editor_sticky_col_reset_by_typing() raises:
     var ed = Editor(String("hello world\nab"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].desired_col, 11)
     _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
-    assert_equal(ed.cursor_col, 3)
-    assert_equal(ed.desired_col, 3)
+    assert_equal(ed.selections[0].col, 3)
+    assert_equal(ed.selections[0].desired_col, 3)
 
 
 def test_editor_sticky_col_reset_by_click() raises:
     var ed = Editor(String("hello world\nabcdefghij"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].desired_col, 11)
     var view = Rect(0, 0, 40, 10)
     _ = ed.handle_mouse(
         Event.mouse_event(Point(3, 0), MOUSE_BUTTON_LEFT, True, False),
         view,
     )
-    assert_equal(ed.cursor_col, 3)
-    assert_equal(ed.desired_col, 3)
+    assert_equal(ed.selections[0].col, 3)
+    assert_equal(ed.selections[0].desired_col, 3)
 
 
 def test_editor_sticky_col_reset_by_home_end() raises:
@@ -7193,11 +7232,11 @@ def test_editor_sticky_col_reset_by_home_end() raises:
     _ = ed.handle_key(_key(KEY_END), _VIEW)        # desired=11
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)       # row 1, col 2, desired 11
     _ = ed.handle_key(_key(KEY_HOME), _VIEW)
-    assert_equal(ed.cursor_col, 0)
-    assert_equal(ed.desired_col, 0)
+    assert_equal(ed.selections[0].col, 0)
+    assert_equal(ed.selections[0].desired_col, 0)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 0)
 
 
 def test_editor_sticky_col_pageup_pagedown() raises:
@@ -7205,23 +7244,23 @@ def test_editor_sticky_col_pageup_pagedown() raises:
         String("0123456789\n0123456789\nab\n0123456789\n0123456789\n0123456789")
     )
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.cursor_col, 10)
+    assert_equal(ed.selections[0].col, 10)
     var small_view = Rect(0, 0, 80, 3)
     _ = ed.handle_key(_key(KEY_PAGEDOWN), small_view)
     # PageDown jumps view-height (3) rows; the destination line is 10 chars long.
-    assert_equal(ed.cursor_row, 3)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 3)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 10)
     # Step back through the short line; sticky column survives.
     _ = ed.handle_key(_key(KEY_UP), small_view)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 2)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 2)
+    assert_equal(ed.selections[0].desired_col, 10)
     _ = ed.handle_key(_key(KEY_PAGEUP), small_view)
     # PageUp from row 2 jumps to row 0 (clamped at 0).
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 10)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 10)
 
 
 def test_editor_sticky_col_shift_down_keeps_anchor() raises:
@@ -7230,15 +7269,15 @@ def test_editor_sticky_col_shift_down_keeps_anchor() raises:
     _ = ed.handle_key(_key(KEY_END), _VIEW)
     _ = ed.handle_key(_key(KEY_DOWN, MOD_SHIFT), _VIEW)
     assert_true(ed.has_selection())
-    assert_equal(ed.cursor_row, 1)
-    assert_equal(ed.cursor_col, 2)
-    assert_equal(ed.anchor_row, 0)
-    assert_equal(ed.anchor_col, 11)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 2)
+    assert_equal(ed.selections[0].anchor_row, 0)
+    assert_equal(ed.selections[0].anchor_col, 11)
+    assert_equal(ed.selections[0].desired_col, 11)
     _ = ed.handle_key(_key(KEY_DOWN, MOD_SHIFT), _VIEW)
-    assert_equal(ed.cursor_row, 2)
-    assert_equal(ed.cursor_col, 10)
-    assert_equal(ed.desired_col, 11)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 10)
+    assert_equal(ed.selections[0].desired_col, 11)
 
 
 def test_editor_left_right_steps_over_multibyte_codepoint() raises:
@@ -7249,23 +7288,23 @@ def test_editor_left_right_steps_over_multibyte_codepoint() raises:
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
-    assert_equal(ed.cursor_col, 3)        # at start of é
+    assert_equal(ed.selections[0].col, 3)        # at start of é
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
-    assert_equal(ed.cursor_col, 5)        # past é, end of line (skipped 2 bytes)
+    assert_equal(ed.selections[0].col, 5)        # past é, end of line (skipped 2 bytes)
     _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
-    assert_equal(ed.cursor_col, 3)        # back over the whole codepoint
+    assert_equal(ed.selections[0].col, 3)        # back over the whole codepoint
     _ = ed.handle_key(_key(KEY_LEFT), _VIEW)
-    assert_equal(ed.cursor_col, 2)        # ASCII step works as before
+    assert_equal(ed.selections[0].col, 2)        # ASCII step works as before
 
 
 def test_editor_backspace_removes_whole_codepoint() raises:
     """Backspace at the end of a line containing é must remove all of é."""
     var ed = Editor(String("café"))
     _ = ed.handle_key(_key(KEY_END), _VIEW)
-    assert_equal(ed.cursor_col, 5)
+    assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
     assert_equal(ed.buffer.line(0), String("caf"))
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].col, 3)
 
 
 def test_editor_delete_key_removes_whole_codepoint() raises:
@@ -7275,10 +7314,10 @@ def test_editor_delete_key_removes_whole_codepoint() raises:
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].col, 3)
     _ = ed.handle_key(_key(KEY_DELETE), _VIEW)
     assert_equal(ed.buffer.line(0), String("caf"))
-    assert_equal(ed.cursor_col, 3)
+    assert_equal(ed.selections[0].col, 3)
 
 
 def test_editor_vertical_movement_uses_cell_column() raises:
@@ -7289,16 +7328,16 @@ def test_editor_vertical_movement_uses_cell_column() raises:
     var ed = Editor(String("abcdef\néééxyz"))
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)
     _ = ed.handle_key(_key(KEY_RIGHT), _VIEW)        # cursor on 'c'
-    assert_equal(ed.cursor_col, 2)
-    assert_equal(ed.desired_col, 2)
+    assert_equal(ed.selections[0].col, 2)
+    assert_equal(ed.selections[0].desired_col, 2)
     _ = ed.handle_key(_key(KEY_DOWN), _VIEW)
     # Cell 2 on "éééxyz" is the third é → byte 4, a codepoint boundary.
-    assert_equal(ed.cursor_row, 1)
-    assert_equal(ed.cursor_col, 4)
-    assert_equal(ed.desired_col, 2)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 4)
+    assert_equal(ed.selections[0].desired_col, 2)
     _ = ed.handle_key(_key(KEY_UP), _VIEW)
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 2)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 2)
 
 
 def test_editor_mouse_click_lands_on_codepoint_boundary() raises:
@@ -7311,14 +7350,14 @@ def test_editor_mouse_click_lands_on_codepoint_boundary() raises:
         Event.mouse_event(Point(2, 0), MOUSE_BUTTON_LEFT, True, False),
         view,
     )
-    assert_equal(ed.cursor_row, 0)
-    assert_equal(ed.cursor_col, 4)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 4)
     # Far past EOL clamps to line end (a boundary).
     _ = ed.handle_mouse(
         Event.mouse_event(Point(20, 0), MOUSE_BUTTON_LEFT, True, False),
         view,
     )
-    assert_equal(ed.cursor_col, 6)
+    assert_equal(ed.selections[0].col, 6)
 
 
 def test_window_v_scrollbar_hit_arrows_and_thumb() raises:
@@ -8266,7 +8305,7 @@ def test_editor_accept_completion_replaces_prefix() raises:
     var ok = ed.accept_completion()
     assert_true(ok)
     assert_equal(ed.buffer.line(0), String("foo + abcdef"))
-    assert_equal(ed.cursor_col, 12)
+    assert_equal(ed.selections[0].col, 12)
     assert_false(ed.completion_popup_visible)
 
 
@@ -8292,7 +8331,7 @@ def test_editor_accept_completion_overlap_widens_anchor() raises:
     var ok = ed.accept_completion()
     assert_true(ok)
     assert_equal(ed.buffer.line(0), String("reviews/reviews__tags.html"))
-    assert_equal(ed.cursor_col, 26)
+    assert_equal(ed.selections[0].col, 26)
 
 
 def test_editor_accept_completion_overlap_leaves_disjoint_text_alone() raises:
@@ -8342,7 +8381,7 @@ def test_editor_accept_completion_uses_text_edit_range() raises:
     var ok = ed.accept_completion()
     assert_true(ok)
     assert_equal(ed.buffer.line(0), String("reviews/reviews__tags.html"))
-    assert_equal(ed.cursor_col, 26)
+    assert_equal(ed.selections[0].col, 26)
     assert_false(ed.completion_popup_visible)
 
 
@@ -8378,8 +8417,8 @@ def test_editor_accept_completion_applies_additional_text_edits() raises:
     assert_equal(ed.buffer.line(3), String("foo_func"))
     # Cursor must follow the shift — it sits at end of the inserted
     # ``foo_func`` on the post-import row, not on the now-blank row 2.
-    assert_equal(ed.cursor_row, 3)
-    assert_equal(ed.cursor_col, 8)
+    assert_equal(ed.selections[0].row, 3)
+    assert_equal(ed.selections[0].col, 8)
     assert_false(ed.completion_popup_visible)
 
 
@@ -8481,8 +8520,8 @@ def test_editor_diagnostic_at_cursor_picks_most_severe() raises:
     a hint stacked on the same cell, error must win — same rule as the
     right-click hit logic in ``_maybe_request_diagnostic_menu``."""
     var ed = Editor(String("def f(x: timedelta) -> None: pass"))
-    ed.cursor_row = 0
-    ed.cursor_col = 10  # inside "timedelta"
+    ed.selections[0].row = 0
+    ed.selections[0].col = 10  # inside "timedelta"
     var diags = List[Diagnostic]()
     diags.append(Diagnostic(
         0, 9, 0, 18, DIAG_SEVERITY_HINT,
@@ -8498,7 +8537,7 @@ def test_editor_diagnostic_at_cursor_picks_most_severe() raises:
     assert_true(Bool(picked))
     assert_equal(picked.value().severity, DIAG_SEVERITY_ERROR)
     # Cursor outside any diagnostic range → None.
-    ed.cursor_col = 0
+    ed.selections[0].col = 0
     assert_false(Bool(ed.diagnostic_at_cursor()))
 
 
@@ -8513,8 +8552,8 @@ def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
     cursor must leave the request slot empty and let Alt+Enter pass
     through as an unbound hotkey (return value False)."""
     var ed = Editor(String("x = timedelta()"))
-    ed.cursor_row = 0
-    ed.cursor_col = 5  # inside "timedelta"
+    ed.selections[0].row = 0
+    ed.selections[0].col = 5  # inside "timedelta"
     var diags = List[Diagnostic]()
     diags.append(Diagnostic(
         0, 4, 0, 13, DIAG_SEVERITY_ERROR,
@@ -8540,8 +8579,8 @@ def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
     assert_equal(req.diag.start_col, 4)
     # No diagnostic and no spell run → Alt+Enter falls through.
     var ed2 = Editor(String("plain"))
-    ed2.cursor_row = 0
-    ed2.cursor_col = 2
+    ed2.selections[0].row = 0
+    ed2.selections[0].col = 2
     var consumed2 = ed2.handle_key(ev, view)
     assert_false(consumed2)
 
@@ -11722,8 +11761,8 @@ def test_desktop_restores_session_from_disk() raises:
     assert_equal(w0.rect.a.y, 2)
     assert_equal(w0.rect.b.x, 50)
     assert_equal(w0.rect.b.y, 18)
-    assert_equal(w0.editor.cursor_row, 2)
-    assert_equal(w0.editor.cursor_col, 3)
+    assert_equal(w0.editor.selections[0].row, 2)
+    assert_equal(w0.editor.selections[0].col, 3)
     assert_equal(d.windows.focused, 0)
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
@@ -11994,8 +12033,8 @@ def test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     assert_equal(d.windows.windows[bar_idx].rect.a.y, 5)
     assert_equal(d.windows.windows[bar_idx].rect.b.x, 75)
     assert_equal(d.windows.windows[bar_idx].rect.b.y, 25)
-    assert_equal(d.windows.windows[bar_idx].editor.cursor_row, 1)
-    assert_equal(d.windows.windows[bar_idx].editor.cursor_col, 2)
+    assert_equal(d.windows.windows[bar_idx].editor.selections[0].row, 1)
+    assert_equal(d.windows.windows[bar_idx].editor.selections[0].col, 2)
     assert_equal(d.windows.focused, bar_idx)
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
@@ -13689,8 +13728,8 @@ def test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
     ed.flush_highlights(registry, speller)
     assert_equal(len(ed.spell_highlights), 1)
     # Park the cursor in the middle of "helo".
-    ed.cursor_row = 0
-    ed.cursor_col = 3
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3
     var line_count_before = ed.buffer.line_count()
     var alt_enter = Event.key_event(KEY_ENTER, MOD_ALT)
     var consumed = ed.handle_key(alt_enter, Rect(0, 0, 40, 5))
@@ -13937,8 +13976,8 @@ def test_editor_minimap_click_scrolls_to_marked_line() raises:
     )
     _ = ed.handle_mouse(click, view)
     # Cursor lands on the marked buffer row, scroll_y centers it.
-    assert_equal(ed.cursor_row, 10)
-    assert_equal(ed.cursor_col, 0)
+    assert_equal(ed.selections[0].row, 10)
+    assert_equal(ed.selections[0].col, 0)
     # 5-row view, target = 10 - 2 = 8
     assert_equal(ed.scroll_y, 8)
 
@@ -14634,14 +14673,14 @@ def test_editor_bracket_match_finds_pair_under_cursor() raises:
     """Cursor sitting on an opener returns the matching closer; same
     for a cursor sitting on a closer (scans backward)."""
     var ed = Editor(String("foo(bar)"))
-    ed.cursor_row = 0
-    ed.cursor_col = 3  # on '('
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3  # on '('
     var m = ed._find_bracket_match_at_cursor()
     assert_true(m)
     var p = m.value()
     assert_equal(p[0], 0); assert_equal(p[1], 3)
     assert_equal(p[2], 0); assert_equal(p[3], 7)
-    ed.cursor_col = 7  # on ')'
+    ed.selections[0].col = 7  # on ')'
     var m2 = ed._find_bracket_match_at_cursor()
     assert_true(m2)
     var p2 = m2.value()
@@ -14653,8 +14692,8 @@ def test_editor_bracket_match_uses_char_just_behind_cursor() raises:
     """Cursor sitting *after* a bracket (typical caret-between-glyphs
     position) still matches the bracket immediately to its left."""
     var ed = Editor(String("foo(bar)"))
-    ed.cursor_row = 0
-    ed.cursor_col = 8  # one past the ')'
+    ed.selections[0].row = 0
+    ed.selections[0].col = 8  # one past the ')'
     var m = ed._find_bracket_match_at_cursor()
     assert_true(m)
     var p = m.value()
@@ -14665,13 +14704,13 @@ def test_editor_bracket_match_uses_char_just_behind_cursor() raises:
 def test_editor_bracket_match_respects_nesting() raises:
     """Inner pairs don't fool the outer scan and vice versa."""
     var ed = Editor(String("a(b(c)d)e"))
-    ed.cursor_row = 0
-    ed.cursor_col = 1  # outer '('
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1  # outer '('
     var m = ed._find_bracket_match_at_cursor()
     assert_true(m)
     var p = m.value()
     assert_equal(p[3], 7)  # outer ')'
-    ed.cursor_col = 3  # inner '('
+    ed.selections[0].col = 3  # inner '('
     var m2 = ed._find_bracket_match_at_cursor()
     assert_true(m2)
     var p2 = m2.value()
@@ -14681,8 +14720,8 @@ def test_editor_bracket_match_respects_nesting() raises:
 def test_editor_bracket_match_across_lines() raises:
     """Forward and backward scans cross row boundaries cleanly."""
     var ed = Editor(String("if (\n    foo,\n    bar,\n)"))
-    ed.cursor_row = 0
-    ed.cursor_col = 3  # '(' on row 0
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3  # '(' on row 0
     var m = ed._find_bracket_match_at_cursor()
     assert_true(m)
     var p = m.value()
@@ -14693,8 +14732,8 @@ def test_editor_bracket_match_across_lines() raises:
 def test_editor_bracket_match_unbalanced_returns_none() raises:
     """Missing partner gives ``None`` — no false matches."""
     var ed = Editor(String("foo(bar"))
-    ed.cursor_row = 0
-    ed.cursor_col = 3  # unmatched '('
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3  # unmatched '('
     var m = ed._find_bracket_match_at_cursor()
     assert_true(not m)
 
@@ -14702,8 +14741,8 @@ def test_editor_bracket_match_unbalanced_returns_none() raises:
 def test_editor_bracket_match_no_bracket_at_cursor() raises:
     """Cursor away from any bracket returns ``None``."""
     var ed = Editor(String("foo(bar)"))
-    ed.cursor_row = 0
-    ed.cursor_col = 1  # on 'o'
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1  # on 'o'
     var m = ed._find_bracket_match_at_cursor()
     assert_true(not m)
 
@@ -14723,8 +14762,8 @@ def test_editor_bracket_match_skips_brackets_in_strings() raises:
     # Mark both string literals as string-attr highlights.
     ed.highlights.append(Highlight(0, 2, 5, highlight_string_attr()))
     ed.highlights.append(Highlight(0, 7, 10, highlight_string_attr()))
-    ed.cursor_row = 0
-    ed.cursor_col = 1  # outer '('
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1  # outer '('
     var m = ed._find_bracket_match_at_cursor()
     assert_true(m)
     var p = m.value()
@@ -14739,8 +14778,8 @@ def test_editor_bracket_match_source_inside_string_returns_none() raises:
     var ed = Editor(String("f(\"(\", \"z\")"))
     ed.highlights.append(Highlight(0, 2, 5, highlight_string_attr()))
     ed.highlights.append(Highlight(0, 7, 10, highlight_string_attr()))
-    ed.cursor_row = 0
-    ed.cursor_col = 3  # '(' inside the string literal
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3  # '(' inside the string literal
     var m = ed._find_bracket_match_at_cursor()
     assert_true(not m)
 
@@ -15212,6 +15251,7 @@ def _run_chunk_01() raises:
     test_editor_smart_indent_after_open_brace()
     test_editor_smart_indent_after_colon()
     test_terminal_parses_modified_arrows()
+    test_terminal_parses_bare_modifier_transition()
     test_editor_selection_text()
     test_editor_cut_selection()
     test_editor_paste_text_single_line()
@@ -15376,8 +15416,9 @@ def _run_chunk_02() raises:
     test_embedded_language_extensions_skips_unknown_languages()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
-    test_editor_alt_click_emits_definition_request()
-    test_editor_alt_click_outside_identifier_is_silent()
+    test_editor_meta_click_emits_definition_request()
+    test_editor_meta_click_outside_identifier_is_silent()
+    test_editor_alt_click_adds_extra_caret()
     test_editor_gutter_click_emits_breakpoint_toggle()
     test_editor_text_click_does_not_toggle_breakpoint()
     test_editor_gutter_click_below_eof_is_ignored()

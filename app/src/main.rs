@@ -1026,7 +1026,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(new_size) => self.on_resize(new_size),
             WindowEvent::Moved(_) => self.save_window_state(),
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                let new_state = mods.state();
+                self.on_modifiers_changed(new_state);
+                self.modifiers = new_state;
             }
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_button(state, button),
@@ -1386,6 +1388,32 @@ impl App {
         }
     }
 
+    // Emit a turbokod-private CSI sequence whenever a bare modifier key
+    // transitions. Format: ``ESC [ <mod-id> ; <state> z`` where mod-id
+    // is 1=Shift, 2=Alt, 3=Ctrl, 4=Super and state is 1 for press, 0
+    // for release. Used by the editor to detect Alt taps (block-edit
+    // mode) and tap-then-hold gestures (column mode). winit collapses
+    // every "modifier transitioned" event into a single ModifiersChanged
+    // dispatch, so we diff against the previous state here.
+    fn on_modifiers_changed(&mut self, new_state: ModifiersState) {
+        // Only Alt and Super are reported — the editor's Alt-tap / column-
+        // mode state machine is the sole consumer. Shift and Ctrl
+        // transition on virtually every character (e.g. Shift+letter for
+        // capitals) and we'd be spamming the Mojo side for no reason.
+        let old = self.modifiers;
+        let changes: [(u8, bool, bool); 2] = [
+            (2, old.alt_key(),   new_state.alt_key()),
+            (4, old.super_key(), new_state.super_key()),
+        ];
+        for (mod_id, was, now) in changes {
+            if was != now {
+                let state = if now { 1u8 } else { 0u8 };
+                let seq = format!("\x1b[{};{}z", mod_id, state);
+                self.notifier.notify(seq.into_bytes());
+            }
+        }
+    }
+
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
         let btn_idx: u8 = match button {
             MouseButton::Left => 0,
@@ -1441,16 +1469,20 @@ impl App {
         if mods.shift_key() {
             b |= 4;
         }
-        // Fold Cmd (super) onto the alt bit. The xterm SGR mouse encoding has
-        // no Cmd bit, and Mojo's editor treats Alt+left-click as the goto-
-        // definition gesture (matching what iTerm2 sends for Option+click);
-        // folding super here makes Cmd+click — the natural macOS gesture —
-        // trigger the same path through the native app.
-        if mods.alt_key() || mods.super_key() {
+        // xterm SGR mouse encoding only defines bits for shift/alt/ctrl.
+        // turbokod wants Alt+click (caret stamp) distinct from Cmd+click
+        // (go-to-definition), so we use bit 128 as a custom meta channel
+        // for super_key — the Mojo terminal parser decodes it back into
+        // MOD_META. Real xterm-protocol mice never set bit 128, so the
+        // private use is safe.
+        if mods.alt_key() {
             b |= 8;
         }
         if mods.control_key() {
             b |= 16;
+        }
+        if mods.super_key() {
+            b |= 128;
         }
         let mode = *self.term.lock().mode();
         // SGR encoding (1006). Coordinates are 1-indexed.

@@ -33,7 +33,8 @@ from .colors import (
     Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
 )
 from .events import (
-    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE, EVENT_RESIZE,
+    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOD_KEY,
+    EVENT_MOUSE, EVENT_RESIZE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
@@ -1908,10 +1909,11 @@ struct Desktop(Movable):
                 cr = 0
             if line_count > 0 and cr >= line_count:
                 cr = line_count - 1
-            w.editor.cursor_row = cr
-            w.editor.anchor_row = cr
-            w.editor.cursor_col = self._view_states[vs_idx].cursor_col
-            w.editor.anchor_col = self._view_states[vs_idx].cursor_col
+            var cc = self._view_states[vs_idx].cursor_col
+            w.editor.selections[0].row = cr
+            w.editor.selections[0].anchor_row = cr
+            w.editor.selections[0].col = cc
+            w.editor.selections[0].anchor_col = cc
             w.editor.scroll_x = self._view_states[vs_idx].scroll_x
             w.editor.scroll_y = self._view_states[vs_idx].scroll_y
         self.windows.add(w^)
@@ -2890,8 +2892,8 @@ struct Desktop(Movable):
             sw.restore_a_y = self.windows.windows[i]._restore_rect.a.y
             sw.restore_b_x = self.windows.windows[i]._restore_rect.b.x
             sw.restore_b_y = self.windows.windows[i]._restore_rect.b.y
-            sw.cursor_row = self.windows.windows[i].editor.cursor_row
-            sw.cursor_col = self.windows.windows[i].editor.cursor_col
+            sw.cursor_row = self.windows.windows[i].editor.selections[0].row
+            sw.cursor_col = self.windows.windows[i].editor.selections[0].col
             sw.scroll_x = self.windows.windows[i].editor.scroll_x
             sw.scroll_y = self.windows.windows[i].editor.scroll_y
             session.windows.append(sw^)
@@ -2972,9 +2974,9 @@ struct Desktop(Movable):
         var vs_idx = self._find_view_state(fp)
         if vs_idx >= 0:
             self._view_states[vs_idx].cursor_row = \
-                self.windows.windows[idx].editor.cursor_row
+                self.windows.windows[idx].editor.selections[0].row
             self._view_states[vs_idx].cursor_col = \
-                self.windows.windows[idx].editor.cursor_col
+                self.windows.windows[idx].editor.selections[0].col
             self._view_states[vs_idx].scroll_x = \
                 self.windows.windows[idx].editor.scroll_x
             self._view_states[vs_idx].scroll_y = \
@@ -2982,8 +2984,8 @@ struct Desktop(Movable):
         else:
             self._view_states.append(StoredViewState(
                 fp,
-                self.windows.windows[idx].editor.cursor_row,
-                self.windows.windows[idx].editor.cursor_col,
+                self.windows.windows[idx].editor.selections[0].row,
+                self.windows.windows[idx].editor.selections[0].col,
                 self.windows.windows[idx].editor.scroll_x,
                 self.windows.windows[idx].editor.scroll_y,
             ))
@@ -3004,9 +3006,9 @@ struct Desktop(Movable):
             var idx = self._find_view_state(fp)
             if idx >= 0:
                 self._view_states[idx].cursor_row = \
-                    self.windows.windows[i].editor.cursor_row
+                    self.windows.windows[i].editor.selections[0].row
                 self._view_states[idx].cursor_col = \
-                    self.windows.windows[i].editor.cursor_col
+                    self.windows.windows[i].editor.selections[0].col
                 self._view_states[idx].scroll_x = \
                     self.windows.windows[i].editor.scroll_x
                 self._view_states[idx].scroll_y = \
@@ -3014,8 +3016,8 @@ struct Desktop(Movable):
             else:
                 self._view_states.append(StoredViewState(
                     fp,
-                    self.windows.windows[i].editor.cursor_row,
-                    self.windows.windows[i].editor.cursor_col,
+                    self.windows.windows[i].editor.selections[0].row,
+                    self.windows.windows[i].editor.selections[0].col,
                     self.windows.windows[i].editor.scroll_x,
                     self.windows.windows[i].editor.scroll_y,
                 ))
@@ -3128,10 +3130,10 @@ struct Desktop(Movable):
                     self.windows.windows[existing].rect = rect
                 self.windows.windows[existing].is_maximized = sw.is_maximized
                 self.windows.windows[existing]._restore_rect = restore
-                self.windows.windows[existing].editor.cursor_row = sw.cursor_row
-                self.windows.windows[existing].editor.anchor_row = sw.cursor_row
-                self.windows.windows[existing].editor.cursor_col = sw.cursor_col
-                self.windows.windows[existing].editor.anchor_col = sw.cursor_col
+                self.windows.windows[existing].editor.selections[0].row = sw.cursor_row
+                self.windows.windows[existing].editor.selections[0].anchor_row = sw.cursor_row
+                self.windows.windows[existing].editor.selections[0].col = sw.cursor_col
+                self.windows.windows[existing].editor.selections[0].anchor_col = sw.cursor_col
                 self.windows.windows[existing].editor.scroll_x = sw.scroll_x
                 self.windows.windows[existing].editor.scroll_y = sw.scroll_y
                 session_to_window.append(existing)
@@ -3155,10 +3157,10 @@ struct Desktop(Movable):
                     cr = 0
                 if line_count > 0 and cr >= line_count:
                     cr = line_count - 1
-                w.editor.cursor_row = cr
-                w.editor.anchor_row = cr
-                w.editor.cursor_col = sw.cursor_col
-                w.editor.anchor_col = sw.cursor_col
+                w.editor.selections[0].row = cr
+                w.editor.selections[0].anchor_row = cr
+                w.editor.selections[0].col = sw.cursor_col
+                w.editor.selections[0].anchor_col = sw.cursor_col
                 w.editor.scroll_x = sw.scroll_x
                 w.editor.scroll_y = sw.scroll_y
                 self.windows.add(w^)
@@ -3315,6 +3317,14 @@ struct Desktop(Movable):
         # opened a popup.
         if event.kind == EVENT_MOUSE:
             self.status_bar.update_hover(event.pos, screen)
+        # Bare modifier-key transitions go directly to the focused editor
+        # — modals don't care about them, and routing them through the
+        # modal stack would force every popup to implement a no-op
+        # handler. The editor uses these to drive Alt-tap (block-edit)
+        # and tap-then-hold (column mode) gestures.
+        if event.kind == EVENT_MOD_KEY:
+            _ = self.windows.handle_mod_key(event)
+            return Optional[String]()
         if self.spell_menu.active:
             # Spell-action popup is the topmost modal: it opens
             # contextually over the cursor, so any other modal
@@ -3984,7 +3994,8 @@ struct Desktop(Movable):
                 var start_col = ed.completion_prefix_start()
                 ed.pending_completion_request = Optional[CompletionRequest](
                     CompletionRequest(
-                        ed.cursor_row, ed.cursor_col, start_col, True,
+                        ed.selections[0].row, ed.selections[0].col,
+                        start_col, True,
                     ),
                 )
             return Optional[String]()
@@ -4450,7 +4461,7 @@ struct Desktop(Movable):
                     # should replace what the user already typed.
                     var start_col = self.windows.windows[fidx] \
                         .editor.completion_prefix_start()
-                    var cur_row = self.windows.windows[fidx].editor.cursor_row
+                    var cur_row = self.windows.windows[fidx].editor.selections[0].row
                     if len(items) == 0 and was_manual:
                         # User explicitly asked for completions and the
                         # server had none — show "<no completion found>"
@@ -5616,7 +5627,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var line = self.windows.windows[idx].editor.cursor_row
+        var line = self.windows.windows[idx].editor.selections[0].row
         self._pending_arg = path + String("|") + String(line)
         self._pending_action = _PA_BP_CONDITION
         var existing = self.dap.breakpoint_condition(path, line)
@@ -5659,7 +5670,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var line = self.windows.windows[idx].editor.cursor_row
+        var line = self.windows.windows[idx].editor.selections[0].row
         self.dap.toggle_breakpoint(path, line)
 
     def _debug_run_to_cursor(mut self):
@@ -5676,7 +5687,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var line = self.windows.windows[idx].editor.cursor_row
+        var line = self.windows.windows[idx].editor.selections[0].row
         _ = self.dap.run_to_cursor(path, line)
 
     def _debug_start_or_continue(mut self):
@@ -6457,8 +6468,8 @@ struct Desktop(Movable):
             # entirely. The stack stays valid for whatever file-backed
             # editors exist.
             return
-        var row = self.windows.windows[idx].editor.cursor_row
-        var col = self.windows.windows[idx].editor.cursor_col
+        var row = self.windows.windows[idx].editor.selections[0].row
+        var col = self.windows.windows[idx].editor.selections[0].col
         if self._nav_pos < 0:
             self._push_nav_point(NavPoint(path, row, col))
             return
@@ -7427,11 +7438,11 @@ struct Desktop(Movable):
         if not self.windows.windows[win_idx].is_editor:
             return
         var editor = self.windows.windows[win_idx].editor.copy()
-        var row = editor.cursor_row
+        var row = editor.selections[0].row
         if row < 0 or row >= editor.buffer.line_count():
             return
         var line = editor.buffer.line(row)
-        var word = word_at(line, editor.cursor_col)
+        var word = word_at(line, editor.selections[0].col)
         if len(word.as_bytes()) == 0:
             return
         self.doc_pick.query.set_text(word^)

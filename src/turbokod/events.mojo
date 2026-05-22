@@ -35,6 +35,21 @@ comptime EVENT_OPEN_PATH = UInt8(6)
 # modified state if they want to.
 comptime EVENT_FOCUS_IN  = UInt8(7)
 comptime EVENT_FOCUS_OUT = UInt8(8)
+# Bare modifier-key transition. Emitted by the native wrapper (via the
+# private ``ESC [ <mod-id> ; <state> z`` CSI sequence) whenever a single
+# modifier key is pressed or released with no other key. Used by the
+# editor to detect Alt taps (which convert a multi-line selection into
+# one caret per line) and tap-then-hold gestures (column mode). The
+# ``key`` field carries the modifier id (1=Shift, 2=Alt, 3=Ctrl,
+# 4=Meta/Super) and ``pressed`` carries the new state. Real terminals
+# don't emit this — feature degrades to "no Alt-tap detection" gracefully.
+comptime EVENT_MOD_KEY   = UInt8(9)
+
+# Modifier IDs carried in ``EVENT_MOD_KEY`` events' ``key`` field.
+comptime MOD_KEY_SHIFT = UInt32(1)
+comptime MOD_KEY_ALT   = UInt32(2)
+comptime MOD_KEY_CTRL  = UInt32(3)
+comptime MOD_KEY_META  = UInt32(4)
 
 
 # --- Modifiers (bitmask) -----------------------------------------------------
@@ -192,6 +207,17 @@ struct Event(ImplicitlyCopyable, Movable):
     def focus_event(focused: Bool) -> Event:
         var e = Event()
         e.kind = EVENT_FOCUS_IN if focused else EVENT_FOCUS_OUT
+        return e
+
+    @staticmethod
+    def mod_key_event(mod_id: UInt32, pressed: Bool) -> Event:
+        """A bare modifier key transition. ``mod_id`` is one of the
+        ``MOD_KEY_*`` constants; ``pressed`` is True for press, False
+        for release."""
+        var e = Event()
+        e.kind = EVENT_MOD_KEY
+        e.key = mod_id
+        e.pressed = pressed
         return e
 
     @staticmethod
