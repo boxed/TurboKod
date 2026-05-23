@@ -9282,6 +9282,94 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
+def test_taplo_publishes_diagnostics_after_workspace_configuration_probe() raises:
+    """Regression: taplo issues a ``workspace/configuration`` request to
+    the client right after ``didOpen`` and blocks *all* publishDiagnostics
+    until that probe is answered. Before the LSP_REQUEST handler landed
+    we silently dropped the request, leaving the "analyzing edits…"
+    spinner stuck on every TOML buffer indefinitely.
+
+    The check: spawn taplo via ``LspManager``, notify_opened a small
+    pyproject.toml, pump ``tick`` until ``diagnostics_inflight_ms_for``
+    clears (= a matching publishDiagnostics has arrived). Skipped
+    silently when taplo isn't on PATH so the suite still passes on dev
+    machines that don't have it.
+    """
+    if len(which(String("taplo")).as_bytes()) == 0:
+        assert_true(True)
+        return
+    # ``/private/tmp`` to dodge the macOS symlink: ``/tmp`` → ``/private/tmp``
+    # makes URIs that taplo canonicalizes back to the resolved path
+    # not match the ``/tmp/...`` we stored in ``_diag_inflight_paths``.
+    # Real-world buffer paths under a user's project root don't hit
+    # this since there's no symlink in the way.
+    var dir = String("/private/tmp/turbokod_taplo_probe_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var toml_path = dir + String("/pyproject.toml")
+    assert_true(write_file(
+        toml_path,
+        String("[tool.black]\nline-length = 100\n"),
+    ))
+
+    var m = LspManager()
+    var argv = List[String]()
+    argv.append(String("taplo"))
+    argv.append(String("lsp"))
+    argv.append(String("stdio"))
+    m.start_with(String("toml"), argv, dir)
+    if m.is_failed():
+        _ = external_call["unlink", Int32](
+            (toml_path + String("\0")).unsafe_ptr(),
+        )
+        _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+        raise Error(String("taplo: spawn failed: ") + m.failure_reason)
+
+    # Drive tick() until the handshake completes and the configuration
+    # probe arrives + is answered. 200 × 25 ms = 5 s should be plenty.
+    for _ in range(200):
+        _ = m.tick()
+        if m.is_ready():
+            break
+        _ = external_call["usleep", Int32](UInt32(25_000))
+    if not m.is_ready():
+        m.shutdown()
+        _ = external_call["unlink", Int32](
+            (toml_path + String("\0")).unsafe_ptr(),
+        )
+        _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+        raise Error(String("taplo: never reached READY state"))
+
+    m.notify_opened(toml_path, String("[tool.black]\nline-length = 100\n"))
+    # Now pump until the spinner clears. If we drop server-to-client
+    # requests, taplo never publishes — so the loop times out and the
+    # final assertion fails. With the handler wired, the configuration
+    # round-trip + publishDiagnostics arrives in ~10 ms in practice;
+    # 5 s of polling is the generous belt-and-braces budget.
+    var cleared = False
+    for _ in range(200):
+        _ = m.tick()
+        if m.diagnostics_inflight_ms_for(toml_path) < 0:
+            cleared = True
+            break
+        _ = external_call["usleep", Int32](UInt32(25_000))
+
+    var stderr_tail = m.captured_stderr()
+    m.shutdown()
+    _ = external_call["unlink", Int32](
+        (toml_path + String("\0")).unsafe_ptr(),
+    )
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+    if not cleared:
+        raise Error(
+            String("taplo: publishDiagnostics never arrived within 5s; ")
+            + String("inflight handler likely broken. stderr=") + stderr_tail
+        )
+
+
 def test_dap_classify_response() raises:
     var resp = parse_json(String(
         "{\"seq\":3,\"type\":\"response\",\"request_seq\":1,"
@@ -15631,6 +15719,7 @@ def _run_chunk_04() raises:
     test_lsp_write_overflow_resets_queue_and_latches_flag()
     test_lsp_initialize_against_mojo_lsp_server()
     test_ty_offers_quickfix_for_missing_any_import()
+    test_taplo_publishes_diagnostics_after_workspace_configuration_probe()
     test_dap_classify_response()
     test_dap_classify_event()
     test_dap_classify_reverse_request()

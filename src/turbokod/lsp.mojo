@@ -861,6 +861,35 @@ struct LspClient(Copyable, Movable):
         envelope.put(String("params"), params)
         self.process.write_message(encode_json(envelope))
 
+    def send_response(
+        mut self, id: Int, result: JsonValue,
+    ) raises:
+        """Reply to a server-issued request. Required for servers that
+        gate work on a client-side probe (taplo blocks all
+        ``publishDiagnostics`` until ``workspace/configuration`` is
+        answered)."""
+        var envelope = json_object()
+        envelope.put(String("jsonrpc"), json_str(String("2.0")))
+        envelope.put(String("id"), json_int(id))
+        envelope.put(String("result"), result)
+        self.process.write_message(encode_json(envelope))
+
+    def send_error(
+        mut self, id: Int, code: Int, message: String,
+    ) raises:
+        """Reply to a server-issued request with a JSON-RPC error
+        envelope. Use ``-32601`` (MethodNotFound) for requests we don't
+        recognize so the server stops waiting and falls back rather
+        than blocking on our (absent) response."""
+        var envelope = json_object()
+        envelope.put(String("jsonrpc"), json_str(String("2.0")))
+        envelope.put(String("id"), json_int(id))
+        var err = json_object()
+        err.put(String("code"), json_int(code))
+        err.put(String("message"), json_str(message))
+        envelope.put(String("error"), err^)
+        self.process.write_message(encode_json(envelope))
+
     def poll(mut self, timeout_ms: Int32) raises -> Optional[LspIncoming]:
         var maybe = self.process.poll_message(timeout_ms)
         if not maybe:
@@ -948,6 +977,13 @@ def lsp_initialize_params(
     var symbol_caps = json_object()
     symbol_caps.put(String("dynamicRegistration"), json_bool(False))
     workspace_caps.put(String("symbol"), symbol_caps^)
+    # Advertise workspace/configuration so servers know they can ask
+    # us for per-section settings. The ``tick`` request handler replies
+    # with ``null`` per item (= "use server defaults"). Servers like
+    # taplo block all publishDiagnostics until this probe is answered,
+    # so omitting the responder makes TOML buffers appear to analyze
+    # forever.
+    workspace_caps.put(String("configuration"), json_bool(True))
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise textDocument/completion so servers know to honor our
     # requests. ``snippetSupport: False`` keeps responses to plain-text

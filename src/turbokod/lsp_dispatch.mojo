@@ -30,8 +30,8 @@ from .json import (
 )
 from .file_io import basename, stat_file
 from .lsp import (
-    LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
-    json_null_v, lsp_initialize_params,
+    LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
+    LspProcess, json_null_v, lsp_initialize_params,
 )
 from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
 
@@ -1502,6 +1502,9 @@ struct LspManager(Copyable, Movable):
                     if method == String("textDocument/publishDiagnostics"):
                         self._on_publish_diagnostics(msg.params.value())
                 continue
+            if msg.kind == LSP_REQUEST:
+                self._handle_server_request(msg)
+                continue
             if msg.kind != LSP_RESPONSE:
                 continue
             if not msg.id:
@@ -1701,6 +1704,83 @@ struct LspManager(Copyable, Movable):
         self._diagnostic_buckets.append(
             _DiagnosticBucket(path, diags^, False),
         )
+
+    def _handle_server_request(mut self, msg: LspIncoming):
+        """Reply to a server-issued request.
+
+        Most LSP servers occasionally issue requests *to* the client
+        (workspace/configuration, client/registerCapability, …) and
+        block on the response. Without a reply taplo never publishes
+        diagnostics for any TOML buffer — the "analyzing edits…"
+        spinner spins indefinitely. We keep the handler small: answer
+        the common probes with a benign default, and reject anything
+        unknown with MethodNotFound so the server falls back instead
+        of waiting for an answer we'll never send.
+        """
+        if not msg.id or not msg.method:
+            return
+        var id = msg.id.value()
+        var method = msg.method.value()
+        try:
+            if method == String("workspace/configuration"):
+                # Reply with an array of nulls — one per requested
+                # item — meaning "no overrides, use defaults". The
+                # array length must match ``params.items`` so the
+                # server can pair entries by index.
+                var n = 0
+                if msg.params and msg.params.value().is_object():
+                    var items = msg.params.value().object_get(
+                        String("items"),
+                    )
+                    if items and items.value().is_array():
+                        n = items.value().array_len()
+                var result = json_array()
+                for _ in range(n):
+                    result.append(json_null_v())
+                _lsp_debug_log(
+                    String("← server request workspace/configuration id=")
+                    + String(id) + String(" items=") + String(n),
+                )
+                self.client.send_response(id, result^)
+                return
+            if method == String("client/registerCapability") \
+                    or method == String("client/unregisterCapability") \
+                    or method == String("window/workDoneProgress/create"):
+                # Acknowledge with success. We don't actually act on
+                # dynamic registrations — file watchers, etc. — but
+                # accepting matches what vscode does and lets servers
+                # proceed instead of stalling on the probe.
+                _lsp_debug_log(
+                    String("← server request ") + method
+                    + String(" id=") + String(id) + String(" (acked)"),
+                )
+                self.client.send_response(id, json_null_v())
+                return
+            if method == String("workspace/applyEdit"):
+                # We don't model server-driven edits yet. Reply with
+                # ``applied: false`` so the server's response shape
+                # matches the spec.
+                var resp = json_object()
+                resp.put(String("applied"), json_bool(False))
+                _lsp_debug_log(
+                    String("← server request workspace/applyEdit id=")
+                    + String(id) + String(" (refused)"),
+                )
+                self.client.send_response(id, resp^)
+                return
+            # Unknown method: MethodNotFound (-32601) so the server
+            # stops waiting.
+            _lsp_debug_log(
+                String("← server request ") + method
+                + String(" id=") + String(id)
+                + String(" (MethodNotFound)"),
+            )
+            self.client.send_error(
+                id, -32601,
+                String("method not implemented by turbokod: ") + method,
+            )
+        except:
+            pass
 
     def _on_initialize_response(mut self, msg: LspIncoming):
         # Spec: send the ``initialized`` notification before any other request,
