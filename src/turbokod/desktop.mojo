@@ -144,6 +144,7 @@ from .breakpoint_dialog import (
     BreakpointConditionErrorDialog, BreakpointMenu,
 )
 from .confirm_dialog import ConfirmDialog
+from .fill_dialog import FillDialog
 from .prompt import (
     Prompt,
     SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
@@ -270,6 +271,11 @@ comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
 comptime EDITOR_UNDO          = String("edit:undo")
 comptime EDITOR_REDO          = String("edit:redo")
+# Multi-cursor "Fill..." dialog: lets the user insert either a fixed
+# text or a numeric sequence at every active caret. Only meaningful
+# when the focused editor has more than one caret; the host adds the
+# corresponding menu item conditionally on that.
+comptime EDITOR_FILL          = String("edit:fill")
 # "Compare selection with clipboard" — opens a read-only diff view between
 # the current selection (or the whole buffer when nothing is selected) and
 # the system clipboard's contents.
@@ -664,6 +670,11 @@ struct Desktop(Movable):
     # ``verified=false`` + a parse-error message). The user sees the
     # error, edits the condition, and clicks Try / Disable / Cancel.
     var breakpoint_error: BreakpointConditionErrorDialog
+    # Multi-cursor "Fill..." dialog. Opened from the Edit menu when the
+    # focused editor has more than one caret. On submit the host
+    # generates one string per caret (a fixed text, or a numeric
+    # sequence) and routes it through ``Editor.apply_fill_strings``.
+    var fill_dialog: FillDialog
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -951,6 +962,7 @@ struct Desktop(Movable):
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
+        self.fill_dialog = FillDialog()
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
         self._debugpy_install_prompted = List[String]()
@@ -1787,6 +1799,10 @@ struct Desktop(Movable):
         # top — same pattern as ``Settings`` / ``ActionEditor``.
         self.breakpoint_menu.paint_popup(canvas, screen)
         self.breakpoint_error.paint(canvas, screen)
+        self.fill_dialog.paint(canvas, screen)
+        # Mode / format dropdown popups overlay the rest of the Fill
+        # dialog. Same z-order pattern as ``breakpoint_menu``.
+        self.fill_dialog.paint_popup(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -3357,6 +3373,14 @@ struct Desktop(Movable):
             if self.breakpoint_menu.submitted:
                 self._on_breakpoint_menu_submit()
             return Optional[String]()
+        if self.fill_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.fill_dialog.handle_key(event)
+            else:
+                _ = self.fill_dialog.handle_mouse(event, screen)
+            if self.fill_dialog.submitted:
+                self._on_fill_dialog_submit()
+            return Optional[String]()
         if self.git_gutter_menu.active:
             # Same modality story as ``spell_menu`` — opens contextually
             # over the gutter, eats every event until resolved.
@@ -4152,6 +4176,14 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_COMPARE_CLIPBOARD:
             self._open_compare_with_clipboard(screen)
+            return Optional[String]()
+        if action == EDITOR_FILL:
+            if self.windows.focused >= 0 \
+                    and self.windows.windows[self.windows.focused].is_editor:
+                var idx = self.windows.focused
+                var n = self.windows.windows[idx].editor.caret_count()
+                if n > 1:
+                    self.fill_dialog.open(n)
             return Optional[String]()
         if action == EDITOR_UNDO:
             if self.windows.focused >= 0 \
@@ -6687,6 +6719,16 @@ struct Desktop(Movable):
             return -1
         return self.windows.focused
 
+    def focused_editor_has_extra_carets(self) -> Bool:
+        """True iff the focused window is an editor with more than one
+        caret. Exposed for hosts that want to gate menu items (e.g.
+        the "Fill..." entry) on whether multi-cursor edits would have
+        anything to do."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return False
+        return self.windows.windows[idx].editor.has_extra_carets()
+
     def _open_find_prompt(mut self):
         """Open the Find prompt, seeded from the focused editor's
         selection when it's a single-line span. The seeded text is
@@ -8130,6 +8172,36 @@ struct Desktop(Movable):
                 continue
             out.append(p + String(":") + String(l + 1))
         return out^
+
+    def _on_fill_dialog_submit(mut self):
+        """Resolve the multi-cursor Fill dialog. Generate one string
+        per caret and route to ``Editor.apply_fill_strings``; close
+        the dialog regardless of whether the user confirmed (Esc /
+        Cancel just drop the strings and leave the buffer alone).
+
+        The caret count baked into the dialog at ``open`` time is used
+        as the source of truth — if the user managed to add or remove
+        a caret while the dialog was modal (they can't in practice,
+        but defend against it) we drop the apply rather than
+        silently misaligning the values to the wrong carets."""
+        var confirmed = self.fill_dialog.confirmed()
+        var expected_n = self.fill_dialog.caret_count
+        var texts = self.fill_dialog.generate(expected_n) \
+            if confirmed else List[String]()
+        self.fill_dialog.close()
+        if not confirmed:
+            return
+        if self.windows.focused < 0:
+            return
+        var idx = self.windows.focused
+        if not self.windows.windows[idx].is_editor:
+            return
+        if self.windows.windows[idx].editor.caret_count() != expected_n:
+            return
+        if self.windows.windows[idx].editor.apply_fill_strings(texts^):
+            self.windows.windows[idx].editor.reveal_cursor(
+                self.windows.windows[idx].interior(),
+            )
 
     def _on_breakpoint_menu_submit(mut self):
         """Apply the right-click dialog's result, then close. The user

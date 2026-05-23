@@ -5249,6 +5249,70 @@ struct Editor(Copyable, Movable):
             row_shift += n_text - (actual_ec - actual_sc)
         self._install_carets(new_carets^)
 
+    def apply_fill_strings(mut self, texts: List[String]) -> Bool:
+        """Insert one string per caret, in canonical (ascending) caret
+        order. Same row-shift accounting as ``_multi_edit_inline`` so
+        multiple carets on the same row stay aligned to their original
+        bytes. Any caret with a selection has the selection replaced.
+
+        Returns True on success, False when ``texts`` doesn't match the
+        caret count or the editor is read-only. Cross-row selections
+        force a no-op (False) — the caller is expected to collapse such
+        selections first or skip the operation.
+        """
+        if self.read_only:
+            return False
+        var carets_check = self._all_carets_asc()
+        if len(carets_check) != len(texts):
+            return False
+        for i in range(len(carets_check)):
+            if carets_check[i].row != carets_check[i].anchor_row:
+                return False
+        var pre_dirty_row = carets_check[0].row
+        self._push_undo()
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        var prev_row = -1
+        var row_shift = 0
+        for i in range(len(carets)):
+            var c = carets[i]
+            if c.row != prev_row:
+                row_shift = 0
+                prev_row = c.row
+            var text = texts[i]
+            var n_text = len(text.as_bytes())
+            var actual_cur = c.col + row_shift
+            var actual_anc = c.anchor_col + row_shift
+            var has_sel = c.col != c.anchor_col
+            var actual_sc: Int
+            var actual_ec: Int
+            if has_sel:
+                if actual_cur < actual_anc:
+                    actual_sc = actual_cur
+                    actual_ec = actual_anc
+                else:
+                    actual_sc = actual_anc
+                    actual_ec = actual_cur
+            else:
+                actual_sc = actual_cur
+                actual_ec = actual_cur
+            var line = self.buffer.line(c.row)
+            var line_n = len(line.as_bytes())
+            self.buffer.lines[c.row] = _slice(line, 0, actual_sc) \
+                + text + _slice(line, actual_ec, line_n)
+            var new_col = actual_sc + n_text
+            var new_desired = _utf8_cell_of_byte(
+                self.buffer.line(c.row), new_col,
+            )
+            new_carets.append(
+                Caret(c.row, new_col, new_desired, c.row, new_col),
+            )
+            row_shift += n_text - (actual_ec - actual_sc)
+        self._install_carets(new_carets^)
+        self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
+        return True
+
     # --- smart-select (Cmd+Up / Cmd+Down) ---------------------------------
     #
     # Cmd+Up grows the selection to the next-larger syntactic scope and

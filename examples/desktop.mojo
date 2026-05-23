@@ -46,7 +46,7 @@ from turbokod import (
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     Desktop, FileDialog, Menu, MenuItem, Rect,
     EDITOR_COMPARE_CLIPBOARD,
-    EDITOR_COPY, EDITOR_CUT, EDITOR_FIND, EDITOR_FIND_NEXT,
+    EDITOR_COPY, EDITOR_CUT, EDITOR_FILL, EDITOR_FIND, EDITOR_FIND_NEXT,
     EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS,
     EDITOR_NEW, EDITOR_OPEN, EDITOR_OPEN_RECENT,
@@ -74,6 +74,54 @@ def _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
     for it in items:
         list.append(MenuItem(it[0], it[1]))
     return Menu(label^, list^)
+
+
+def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
+    """Edit-menu items. ``has_extra_carets`` injects a ``Fill...``
+    entry under Paste — only meaningful when the focused editor has
+    more than one caret, so the host rebuilds this list every paint
+    and the row appears / disappears as the user adds / removes
+    carets."""
+    var edit_items = List[MenuItem]()
+    edit_items.append(MenuItem(String("Undo"),  EDITOR_UNDO))
+    edit_items.append(MenuItem(String("Redo"),  EDITOR_REDO))
+    edit_items.append(MenuItem.separator())
+    edit_items.append(MenuItem(String("Cut"),   EDITOR_CUT))
+    edit_items.append(MenuItem(String("Copy"),  EDITOR_COPY))
+    edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
+    edit_items.append(MenuItem(
+        String("Compare selection with clipboard"),
+        EDITOR_COMPARE_CLIPBOARD,
+    ))
+    if has_extra_carets:
+        edit_items.append(MenuItem(String("Fill..."), EDITOR_FILL))
+    edit_items.append(MenuItem.separator())
+    edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
+    edit_items.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
+    edit_items.append(MenuItem(String("Find Previous"),         EDITOR_FIND_PREV))
+    edit_items.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
+    edit_items.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
+    edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
+    edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
+    edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+    edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
+    edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
+    edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
+    return edit_items^
+
+
+def _refresh_edit_menu_items(mut desktop: Desktop):
+    """Rebuild the Edit menu's items in place to reflect the current
+    multi-cursor state of the focused editor. Skipped while any menu
+    is open so the user doesn't see the dropdown's rows shift under
+    their cursor mid-interaction."""
+    if desktop.menu_bar.is_open():
+        return
+    var has_extras = desktop.focused_editor_has_extra_carets()
+    for i in range(len(desktop.menu_bar.menus)):
+        if desktop.menu_bar.menus[i].label == String("Edit"):
+            desktop.menu_bar.menus[i].items = _build_edit_items(has_extras)
+            return
 
 
 def _split_open_arg_path(arg: String) -> String:
@@ -144,31 +192,13 @@ def main() raises:
             (String("Save"), EDITOR_SAVE),
             (String("Save as..."), EDITOR_SAVE_AS),
         ))
-        # Edit menu — built by hand so the separators land where they should.
-        var edit_items = List[MenuItem]()
-        edit_items.append(MenuItem(String("Undo"),  EDITOR_UNDO))
-        edit_items.append(MenuItem(String("Redo"),  EDITOR_REDO))
-        edit_items.append(MenuItem.separator())
-        edit_items.append(MenuItem(String("Cut"),   EDITOR_CUT))
-        edit_items.append(MenuItem(String("Copy"),  EDITOR_COPY))
-        edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
-        edit_items.append(MenuItem(
-            String("Compare selection with clipboard"),
-            EDITOR_COMPARE_CLIPBOARD,
+        # Edit menu — built via ``_build_edit_items`` so the per-frame
+        # refresh below can swap rows in/out without duplicating the
+        # row list at every call site. ``Fill...`` lands here when the
+        # focused editor has more than one caret.
+        desktop.menu_bar.add(Menu(
+            String("Edit"), _build_edit_items(False),
         ))
-        edit_items.append(MenuItem.separator())
-        edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
-        edit_items.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
-        edit_items.append(MenuItem(String("Find Previous"),         EDITOR_FIND_PREV))
-        edit_items.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
-        edit_items.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
-        edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
-        edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
-        edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
-        edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
-        edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
-        edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
-        desktop.menu_bar.add(Menu(String("Edit"), edit_items^))
         # View menu items are checkable toggles — the host's _mk_menu
         # helper produces non-checkable items, so build this menu
         # explicitly so each item carries ``checkable=True``. Desktop
@@ -281,6 +311,12 @@ def main() raises:
                 desktop.menu_bar.set_visible_by_label(
                     String("View"), desktop.windows.focused_is_editor(),
                 )
+                # Toggle the ``Fill...`` row in/out of the Edit menu
+                # based on whether the focused editor has multiple
+                # carets — Fill is only meaningful then. Skipped while
+                # a menu is open so rows don't shift under the user's
+                # cursor mid-interaction.
+                _refresh_edit_menu_items(desktop)
                 # Git menu: visible while an editor is focused (Toggle
                 # Blame applies to it) or whenever a project is set
                 # (Show diff viewer is project-scoped and shouldn't
