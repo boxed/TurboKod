@@ -245,6 +245,60 @@ fn discover_bundle_launch_info() -> BundleLaunchInfo {
     info
 }
 
+// macOS hands Dock/Finder/launchd-launched apps a stripped-down
+// ``PATH`` (``/usr/bin:/bin:/usr/sbin:/sbin``) that has none of the
+// per-user entries a login shell sets up (``~/.cargo/bin``, homebrew,
+// pixi, pyenv, …). The Mojo backend forwards its own ``PATH`` to every
+// tool it ``posix_spawnp``s (LSP servers, ``rg``, ``git``), so a
+// Dock launch leaves it unable to find e.g. ``ty-semantic`` even though
+// it's plainly on the user's interactive ``PATH``. Recover the real
+// ``PATH`` the way VS Code / exec-path-from-shell do: run the user's
+// login shell and read back the environment it produces.
+//
+// Shell-agnostic on purpose: rather than ``echo $PATH`` (fish joins its
+// list var with spaces, not colons), we exec ``/usr/bin/env`` inside the
+// login+interactive shell and parse the ``PATH=`` line — by then PATH is
+// a normal colon-joined exported string regardless of shell. A hard
+// timeout guards against an interactive rc-file that blocks on input.
+fn login_shell_path() -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // ``-l`` (login) sources profile files; ``-i`` (interactive) sources
+    // the rc files where many users actually mutate PATH. ``-c`` keeps it
+    // from waiting for stdin once the command finishes.
+    let mut child = Command::new(&shell)
+        .args(["-l", "-i", "-c", "/usr/bin/env"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    out.lines()
+        .find_map(|l| l.strip_prefix("PATH=").map(str::to_owned))
+        .filter(|p| !p.is_empty())
+}
+
 // ``turbokod://open?file=<path>&line=<n>`` — handler for the project's
 // URL scheme. The single supported command for now is ``open``; ``file``
 // (or its alias ``path``) is the target, ``line`` is an optional 1-based
@@ -1951,6 +2005,15 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    if bundle.mojo_program.is_some() {
+        // Running as the installed ``.app``: a Dock/launchd launch gave us
+        // a stripped PATH. Recover the user's real login-shell PATH so the
+        // Mojo backend (and the LSP servers / CLI tools it spawns) can find
+        // binaries like ``ty-semantic`` that live under ``~/.cargo/bin`` etc.
+        if let Some(path) = login_shell_path() {
+            env.insert("PATH".to_string(), path);
+        }
+    }
     if shell.is_some() {
         if let Some(fallback) = &bundle.dyld_fallback {
             // Merge with any inherited fallback path the user already
