@@ -1215,19 +1215,21 @@ struct Window(Copyable, Movable):
             paint_window_title(
                 canvas, self.rect, title_padded, border, body_bg,
             )
-        # Close button [■] at top-LEFT (TV convention) — focused only.
-        # Drawing is delegated to ``paint_close_button`` so dialogs
-        # can reuse the same chrome without copy-pasting the glyphs.
-        if focused and self.rect.width() >= 8:
+        # Close button [■] at top-LEFT (TV convention). Drawn whether or
+        # not the window is focused. Drawing is delegated to
+        # ``paint_close_button`` so dialogs can reuse the same chrome
+        # without copy-pasting the glyphs.
+        if self.rect.width() >= 8:
             paint_close_button(
                 canvas, Point(self.rect.a.x, self.rect.a.y), border,
             )
-        # Window number (and, when focused, a maximize/restore button) at top-RIGHT.
-        # Format: ``<num>=[▲]`` while normal, ``<num>=[▼]`` while
-        # maximized. Unfocused windows show only the bare number.
+        # Window number plus a maximize/restore button at top-RIGHT, drawn
+        # whether or not the window is focused. Format: ``<num>=[▲]`` while
+        # normal, ``<num>=[▼]`` while maximized. The bare-number fallback is
+        # only used on windows too narrow to fit the indicator.
         var num_str = String(number)
         var num_len = display_columns(num_str)
-        if focused and self.rect.width() >= num_len + 9:
+        if self.rect.width() >= num_len + 9:
             var arrow: String
             if self.is_maximized:
                 arrow = String("▼")
