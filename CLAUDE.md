@@ -11,7 +11,24 @@ A port of Turbo Vision to Mojo. Two distinct trees:
 
 `examples/` and `tests/` are Mojo. `pixi.toml` and `run.sh` drive the toolchain.
 
+## Two frontends — both must always work
+
+The Mojo core (`src/turbokod/`) is the model; it has **two supported frontends** sitting on top of it, and both are first-class — neither may be broken by changes to the core:
+
+1. **Terminal** — `./run.sh <entry>.mojo` builds a standalone Mojo binary that drives the user's terminal in raw mode via `terminal.mojo` (ANSI output, escape-sequence input). This is the simplest path and what `examples/` and ad-hoc demos use.
+2. **Native macOS (Swift)** — `./run_swift.sh [project]` builds the Mojo core as a shared library (`libturbokod.dylib`) exposing the C ABI in `native_api.mojo`, and runs it under a Swift/AppKit host (`app/swift/TurboKod.swift`) that owns the window, menu bar, font rendering (Px437 bitmap, 8×16 cells), and input. This is the shipped desktop app (`TurboKod.app`).
+
+Both consume the same `Desktop` / `Canvas` / `Event` machinery. New core features should reach both surfaces — terminal-only or Swift-only changes to anything below the frontend boundary are a smell. Concretely: if you touch `desktop.mojo`, `editor.mojo`, anything in `src/turbokod/` other than `terminal.mojo` or `native_api.mojo`, verify both paths still build and run.
+
+Frontend-specific code lives only in:
+- **Terminal**: `src/turbokod/terminal.mojo` (raw mode, ANSI, Python interop for `termios`/`select`) and `src/turbokod/app.mojo` (the loop).
+- **Native macOS**: `src/turbokod/native_api.mojo` (`@export`-ed C ABI), `app/swift/TurboKod.swift` (AppKit host), and `app/turbokod-shim/` (Rust shim for pty / onig handle registry / listdir).
+
+Everything else — widgets, Editor, Desktop, syntax highlighting, LSP/DAP, file tree, dialogs — is shared and must stay frontend-agnostic.
+
 ## Running the Mojo code
+
+Terminal path:
 
 ```sh
 ./run.sh examples/hello.mojo     # demo: windowed greeting
@@ -19,27 +36,48 @@ A port of Turbo Vision to Mojo. Two distinct trees:
 ./run.sh tests/test_basic.mojo   # pure-data tests, no TTY required
 ```
 
+Native macOS path:
+
+```sh
+./run_swift.sh                       # restore previous session
+./run_swift.sh /path/to/project      # open a project
+./run_swift.sh path/to/file.mojo     # open a single file
+TK_CAPTURE=/tmp/shot.png ./run_swift.sh   # headless render then quit
+```
+
 `run.sh` does `mojo build -I src` and runs the resulting native binary. We use `mojo build` (not `mojo run`) because `mojo run` is JIT-only and silently ignores `-Xlinker` — the build step is what makes linking C deps (e.g. libonig for TextMate-grammar highlighting) actually work. Built binaries are cached under `.build/` keyed by source path; the script skips the build when no `.mojo` file in `src/` (or the entry point itself) is newer than the cached binary, so repeat runs are essentially free. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) all route through `run.sh`.
+
+`run_swift.sh` does three builds in dependency order, each cached by mtime: the Rust shim (`app/turbokod-shim/`), the Mojo shared library (`.build/libturbokod.dylib` from `native_api.mojo`), and the Swift binary (linked against the dylib + AppKit). It then assembles `.build/TurboKod.app` (with `Info.plist`, icon, grammars, data, and the bundled Px437 TTF in `Resources/`) and `exec`s it. The app `chdir`s to `Resources/` on launch so the Mojo side's relative paths for grammars/data resolve regardless of launcher.
 
 First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 
-`tests/test_basic.mojo` exercises everything that doesn't need a TTY — run it via `./run.sh tests/test_basic.mojo` to verify package changes.
+`tests/test_basic.mojo` exercises everything that doesn't need a TTY — run it via `./run.sh tests/test_basic.mojo` to verify package changes. It does **not** exercise the Swift frontend; for that, smoke-test with `TK_CAPTURE=/tmp/shot.png ./run_swift.sh` (renders one frame to PNG and quits).
 
 ## Mojo port architecture
 
-Single-pass dataflow per frame: widgets paint into the back `Canvas` → `Terminal.present` diffs against the front canvas → only changed cells are written as ANSI sequences. This is the same idea as TurboVision's `TDisplayBuffer` but expressed as plain `List[Cell]` rather than a packed 16-bit attribute buffer.
+Single-pass dataflow per frame: widgets paint into the back `Canvas` → the frontend presents it. For the terminal frontend, `Terminal.present` diffs against the front canvas and writes only changed cells as ANSI sequences. For the Swift frontend, `tk_desktop_layout` packs the back canvas into a `[codepoint, fg|bg<<8|style<<16, underline]` buffer that Swift rasterizes with Core Text. Either way, the source of truth is the same `Canvas`.
 
 Layer boundaries (lower depends on upper, never the reverse):
 
 ```
-app.py        Application: owns Terminal + back Canvas, runs the loop
-  └─ terminal.mojo   Raw-mode + ANSI output + escape parser (Python interop)
-       └─ canvas.mojo    2D Cell grid + draw primitives (pure Mojo)
-            └─ cell.mojo, colors.mojo, geometry.mojo, events.mojo
-view.mojo     Drawable trait + Label/Frame/Fill widgets — sits beside app
+Terminal frontend                Native macOS frontend
+─────────────────                ────────────────────
+app.mojo                         TurboKod.swift (AppKit host)
+ └─ terminal.mojo                 └─ native_api.mojo (@export C ABI)
+                                       │
+                ┌──────────────────────┘
+                ▼
+         desktop.mojo  (Desktop: windows, editors, LSP/DAP, menus)
+              │
+              ▼
+         canvas.mojo  (2D Cell grid + draw primitives, pure Mojo)
+              │
+              ▼
+         cell.mojo, colors.mojo, geometry.mojo, events.mojo
+view.mojo   Drawable trait + Label/Frame/Fill widgets — sits beside app/desktop
 ```
 
-Pure-data modules (everything except `terminal.mojo` and `app.mojo`) are TTY-free and unit-testable directly.
+Pure-data modules (everything except `terminal.mojo`, `app.mojo`, `native_api.mojo`, and the Swift host) are TTY-free *and* AppKit-free and unit-testable directly. The frontend boundary is `Canvas` going out and `Event` coming in — nothing below it should know whether it's running under a terminal or under AppKit.
 
 ## Syntax highlighting
 
