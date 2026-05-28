@@ -86,9 +86,14 @@ def _build_envp_from_parent() -> ArgvBuffer:
     # invoked as ``python -m debugpy.adapter`` may locate ``python`` but
     # not ``debugpy`` and silently stall on import resolution.
     names.append(String("PYTHONPATH"))
-    names.append(String("PYTHONHOME"))
     names.append(String("PYTHONUSERBASE"))
     names.append(String("PYTHONUNBUFFERED"))
+    # NB: we deliberately do NOT forward PYTHONHOME. Our process may have it
+    # set to the pixi/Mojo python; forwarding it overrides the *child*'s own
+    # stdlib root, so a self-contained LSP (uv/pyenv tool with its own python
+    # — ty, ruff, iommi_lsp, …) would load our stdlib instead of its own and
+    # fail with e.g. ``ModuleNotFoundError: No module named '_socket'``.
+    # PYTHONHOME redirects sys.prefix; the child must keep its own.
     var pairs = List[String]()
     for i in range(len(names)):
         var v = getenv_value(names[i])
