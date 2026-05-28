@@ -29,6 +29,9 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.menu import Menu, MenuItem
+from turbokod.posix import (
+    getenv_value, recover_user_path_for_gui_launch, setenv_value,
+)
 from turbokod.string_utils import codepoint_at
 from turbokod.desktop import (
     Desktop,
@@ -190,10 +193,45 @@ fn _action_code(action: Optional[String]) -> Int32:
 
 # --- C ABI ------------------------------------------------------------------
 
+# Process-local "did we already repair PATH?" flag. Mojo has no module-level
+# mutable globals, so we stash the flag in our own environment via setenv —
+# cheap, persists across @export calls in the same process, and the
+# allowlisted-envp builder in lsp.mojo doesn't forward this name to children
+# (it carries no leading-underscore allowlist hit), so LSP servers don't see
+# our internal bookkeeping.
+comptime _PATH_RECOVERY_MARKER = String("__TURBOKOD_PATH_RECOVERED")
+
+
+fn _recover_path_once():
+    """Run GUI-launch PATH recovery on the first call; no-op afterward.
+
+    Called from ``tk_desktop_new`` so the repair is in place before any
+    Desktop method that might ``posix_spawnp`` a child (LSP servers,
+    ``rg``, ``git``) — and so the Swift host doesn't have to know it
+    exists. Swallows exceptions: a failed recovery just means children
+    inherit the launch-time PATH, which is the same fallback we'd have
+    without this function at all."""
+    var marker = getenv_value(_PATH_RECOVERY_MARKER)
+    if len(marker.as_bytes()) > 0:
+        return
+    try:
+        recover_user_path_for_gui_launch()
+        _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
+    except:
+        pass
+
+
 @export
 fn tk_desktop_new() -> Int:
     """Create a Desktop on the heap, load config + standard menus, return the
     opaque handle."""
+    # macOS Dock/launchd launches give us a stripped ``PATH`` that lacks
+    # per-user dirs (``~/.cargo/bin``, ``~/.pyenv/shims``, …) — the LSP
+    # spawn path forwards our PATH verbatim to children, so a Dock launch
+    # otherwise can't find ``ty-semantic`` / ``pyright`` even though
+    # they're on the user's interactive PATH. Idempotent + once-guarded,
+    # so multi-window callers don't re-run the login shell each time.
+    _recover_path_once()
     var addr = external_call["malloc", Int](size_of[Desktop]())
     if addr == 0:
         return 0

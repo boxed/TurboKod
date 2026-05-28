@@ -9,7 +9,7 @@ The project has two layers:
 1. **A TUI toolkit** in the spirit of Turbo Vision: cell-based double-buffered canvas, raw-mode terminal driver, tagged-union events, a `Drawable` trait with widgets, windows, menus, dialogs, scroll bars, dropdowns, status bar, and a desktop window manager.
 2. **A code editor / IDE** built on top of that toolkit: multi-cursor editor, syntax highlighting via TextMate grammars, LSP and DAP integrations, spell checking, project-wide find/replace, file tree, git blame and gutter, run/debug targets, editorconfig support, undo/redo, soft wrap, minimap, tab bar.
 
-The editor runs in any terminal, but ships with an optional native macOS `.app` wrapper (Rust + `alacritty_terminal` + `winit` + `softbuffer` + `fontdue`) that gives it a real window, system clipboard, font fallback for emoji/CJK, dock icon, and `turbokod://` URL handling — so files and projects can be opened from the Finder, `open -a turbokod ...`, or other apps.
+The editor runs in any terminal, but ships with an optional native macOS `.app` wrapper (Swift / AppKit front-end loading the Mojo backend as a dylib) that gives it a real window, system clipboard, font fallback for emoji/CJK, and dock icon.
 
 ## Status
 
@@ -39,19 +39,15 @@ pixi run test
 
 ### macOS app bundle
 
-To build the native wrapper and register it with LaunchServices:
+To build the native wrapper:
 
 ```sh
-make build
+./run_swift.sh                    # restore last session
+./run_swift.sh /path/to/project   # open a project
+./run_swift.sh path/to/file.py    # open a file
 ```
 
-This wraps `./build.sh`, which builds the Mojo backend, the Rust frontend, assembles `app/target/release/turbokod.app` around them, bundles `libonig.dylib`, ad-hoc-signs the bundle, and re-registers it via `lsregister -f` (so `Info.plist` changes take effect immediately — without that step macOS keeps using the cached registration). After that:
-
-```sh
-open -a turbokod /path/to/project
-open -a turbokod /path/to/file.py
-open 'turbokod://open?file=/abs/path/to/run.sh&line=10'
-```
+`run_swift.sh` builds the Rust shim staticlib (`app/turbokod-shim`), the Mojo dylib (`src/turbokod/native_api.mojo` → `.build/libturbokod.dylib`), and the Swift binary (`app/swift/TurboKod.swift` → `.build/turbokod_swift`), then assembles them into `.build/TurboKod.app` and execs it. Swift owns the AppKit run loop / windows / menus / Core Text rendering; the Mojo dylib is the Desktop model.
 
 ## Layout
 
@@ -83,11 +79,15 @@ turbokod/
 │   │                             # docs / dictionary / grammar bundles
 │   ├── action_editor / settings / config / session_store
 │   │                             # config + session persistence
-│   ├── process_shim.c            # kill-on-parent-death registry for child PIDs
+│   ├── native_api.mojo           # C-ABI surface called by the Swift front-end
 │   └── data/                     # bundled language metadata (from helix)
 ├── examples/                     # runnable demos (desktop, hello, boxes, ...)
 ├── tests/                        # mojo tests + a couple of repro scripts
-└── app/                          # rust front-end for the macOS .app
+└── app/
+    ├── swift/                    # AppKit front-end (run_swift.sh entry point)
+    ├── turbokod-shim/            # Rust staticlib: pty + onig + listdir + login-shell PATH
+    ├── macos/                    # Info.plist + icon for the .app bundle
+    └── assets/                   # bundled bitmap font
 ```
 
 ## Design choices vs. C++ Turbo Vision

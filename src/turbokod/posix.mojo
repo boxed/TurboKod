@@ -631,6 +631,142 @@ def which(name: String) -> String:
     return String("")
 
 
+def setenv_value(name: String, value: String) -> Int32:
+    """Set ``name`` to ``value`` in our own process environment, overwriting
+    any existing value. Wraps ``setenv(3)`` with overwrite=1 so the caller
+    doesn't have to spell out the flag at every call site. Returns 0 on
+    success, non-zero on failure (typically ENOMEM)."""
+    var c_name = name + String("\0")
+    var c_value = value + String("\0")
+    return external_call["setenv", Int32](
+        c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
+    )
+
+
+def _path_has_entry(path: String, entry: String) -> Bool:
+    """Is ``entry`` already a colon-separated component of ``path``?"""
+    var pb = path.as_bytes()
+    var eb = entry.as_bytes()
+    if len(eb) == 0 or len(pb) == 0:
+        return False
+    var start = 0
+    var i = 0
+    while i <= len(pb):
+        if i == len(pb) or pb[i] == 0x3A:
+            if i - start == len(eb):
+                var matched = True
+                for k in range(len(eb)):
+                    if pb[start + k] != eb[k]:
+                        matched = False
+                        break
+                if matched:
+                    return True
+            start = i + 1
+        i += 1
+    return False
+
+
+def _dir_exists(path: String) -> Bool:
+    """``access(path, F_OK)`` — true when the entry exists. Cheap pre-check
+    so we don't add nonexistent dirs to ``$PATH`` (every later ``which``
+    call would then stat a path it'll never find)."""
+    var c = path + String("\0")
+    return Int(external_call["access", Int32](c.unsafe_ptr(), Int32(0))) == 0
+
+
+def prepend_user_bin_dirs_to_path() -> Int:
+    """Prepend the well-known per-user bin directories to ``$PATH``.
+
+    Each entry is included only when it exists on disk and isn't
+    already on ``PATH`` — so this is idempotent and safe to call from
+    any launch context. Returns the number of dirs added.
+
+    The covered set is the union of what a typical macOS dev shell
+    sources via ``.zshenv`` / ``.zprofile`` / ``.zshrc``: pip-user /
+    uv-tool (``~/.local/bin``), rustup (``~/.cargo/bin``), pixi
+    (``~/.pixi/bin``), pyenv (``~/.pyenv/shims``, ``~/.pyenv/bin``),
+    and Homebrew on Apple Silicon (``/opt/homebrew/{bin,sbin}``). This
+    is the fast, no-subprocess half of the GUI-launch recovery: see
+    ``recover_user_path_for_gui_launch`` for the login-shell override
+    that catches anything custom the user added in their rc files.
+    """
+    var home = getenv_value(String("HOME"))
+    if len(home.as_bytes()) == 0:
+        return 0
+    var dirs = List[String]()
+    dirs.append(home + String("/.local/bin"))
+    dirs.append(home + String("/.cargo/bin"))
+    dirs.append(home + String("/.pixi/bin"))
+    dirs.append(home + String("/.pyenv/shims"))
+    dirs.append(home + String("/.pyenv/bin"))
+    dirs.append(String("/opt/homebrew/bin"))
+    dirs.append(String("/opt/homebrew/sbin"))
+    dirs.append(String("/usr/local/bin"))
+
+    var path = getenv_value(String("PATH"))
+    var prefix = String("")
+    var added = 0
+    for i in range(len(dirs)):
+        var d = dirs[i]
+        if not _dir_exists(d):
+            continue
+        if _path_has_entry(path, d):
+            continue
+        if len(prefix.as_bytes()) > 0:
+            prefix += String(":")
+        prefix += d
+        added += 1
+    if added == 0:
+        return 0
+    var new_path: String
+    if len(path.as_bytes()) > 0:
+        new_path = prefix + String(":") + path
+    else:
+        new_path = prefix
+    _ = setenv_value(String("PATH"), new_path)
+    return added
+
+
+def recover_login_shell_path() -> Bool:
+    """Replace ``$PATH`` with the user's interactive login-shell ``PATH``.
+
+    Runs ``$SHELL -l -i -c /usr/bin/env`` via the Rust shim (which uses
+    raw ``fork``/``exec`` + a 3-second timeout to stay safe from rc
+    files that block on stdin), parses the ``PATH=`` line, and ``setenv``s
+    it. Returns True on success, False if the shim returned an error
+    (no SHELL, timeout, no ``PATH=`` line, or output too long).
+
+    This is the slow but-accurate half of GUI-launch recovery — paired
+    with ``prepend_user_bin_dirs_to_path`` to make sure the well-known
+    dirs end up on ``PATH`` even when the shell recovery comes back empty.
+    """
+    var cap = 8192
+    var buf = alloc_zero_buffer(cap)
+    var n = Int(external_call["tk_login_shell_path", Int32](
+        buf.unsafe_ptr(), Int32(cap),
+    ))
+    if n <= 0:
+        return False
+    var path = String(StringSlice(ptr=buf.unsafe_ptr(), length=n))
+    _ = setenv_value(String("PATH"), path)
+    return True
+
+
+def recover_user_path_for_gui_launch():
+    """Repair ``$PATH`` after a macOS Dock / launchd launch.
+
+    Order is deliberate: shell recovery first (gives us the user's full
+    interactive PATH if it succeeds), then the hardcoded prepend
+    (idempotently fills in any well-known dirs the shell didn't print
+    — and acts as a fallback when shell recovery times out / fails).
+    Both steps are safe to run from a terminal launch too: shell
+    recovery just re-derives the same PATH the terminal already gave
+    us, and the prepend is a no-op when every dir is already present.
+    """
+    _ = recover_login_shell_path()
+    _ = prepend_user_bin_dirs_to_path()
+
+
 def getcwd_path() -> String:
     """Return the process's current working directory, or "" on error.
 

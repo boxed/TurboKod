@@ -20,10 +20,6 @@
 use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void, CStr};
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::IntoRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use std::sync::Mutex;
 
 // --- Non-blocking write ---------------------------------------------------
@@ -279,15 +275,14 @@ pub unsafe extern "C" fn tk_pty_spawn(
             let term_var = c"TERM".as_ptr();
             let _ = libc::setenv(term_var, term, 1);
         }
-        // Strip the macOS malloc-debug env vars the Rust front-end
-        // sets on us — we want those active for the Mojo backend's
-        // own malloc (where they suppress a heap-corruption canary,
-        // see app/src/main.rs) but NOT for the shells we spawn from
-        // the docked terminal panes. Programs run from those shells
-        // see ``MallocScribble`` and print stderr noise like
-        // ``__chkstk_darwin: stack guard mismatch`` or
-        // ``MallocScribble: …`` on every launch, which clutters the
-        // terminal UI.
+        // Strip the macOS malloc-debug env vars from the pty-child
+        // environment. If our parent process happens to have any of
+        // them set (debug builds, an outer wrapper that uses them as
+        // a canary), passing them through to pty-spawned shells makes
+        // those shells print stderr noise like ``__chkstk_darwin:
+        // stack guard mismatch`` or ``MallocScribble: enabling
+        // scribbling to detect mods to free blocks`` on every launch,
+        // which clutters the terminal UI.
         let _ = libc::unsetenv(c"MallocScribble".as_ptr());
         let _ = libc::unsetenv(c"MallocPreScribble".as_ptr());
         let _ = libc::unsetenv(c"MallocGuardEdges".as_ptr());
@@ -587,12 +582,272 @@ static ONIG_AUTO_CLEANUP: extern "C" fn() = {
     cleanup
 };
 
+// --- Login-shell PATH recovery -------------------------------------------
+//
+// macOS hands Dock/launchd-launched apps a stripped ``PATH`` (just the
+// path_helper-derived ``/usr/bin:/bin:/usr/sbin:/sbin`` + ``/etc/paths.d``
+// entries) that omits the per-user dirs a login shell sets up
+// (``~/.cargo/bin``, ``~/.pyenv/shims``, homebrew, …). The Mojo backend
+// forwards its own ``PATH`` verbatim to every child it ``posix_spawnp``s
+// (LSP servers, ``rg``, ``git``), so a Dock launch can't find e.g.
+// ``ty-semantic`` even though it's plainly on the user's interactive
+// ``PATH``. We recover the way VS Code / exec-path-from-shell do: run
+// the user's login shell once and read back the ``PATH=`` line.
+//
+// Shell-agnostic on purpose: rather than ``echo $PATH`` (fish joins its
+// list var with spaces, not colons), we exec ``/usr/bin/env`` inside the
+// login+interactive shell and parse the ``PATH=`` line — by then PATH is
+// a normal colon-joined exported string regardless of shell. A hard
+// timeout guards against an interactive rc-file that blocks on input.
+//
+// We use libc directly (no ``std::process::Command``) because Rust's
+// ``std`` runtime has been observed to misbehave when called from a
+// staticlib linked into a non-Rust (Mojo) binary — same reason
+// ``tk_listdir`` avoids ``std::fs::read_dir``.
+
+const LOGIN_SHELL_TIMEOUT_MS: i64 = 3000;
+
+/// Run the user's login shell to recover the full interactive ``PATH``.
+/// Output is written into ``out`` (NUL-terminated, ASCII bytes) and the
+/// byte length is returned. Returns ``-1`` on any failure (no SHELL,
+/// timeout, no ``PATH=`` line in output, output too long for ``out``).
+///
+/// # Safety
+/// `out` must point to at least `cap` bytes writable. `cap` must be > 1.
+#[no_mangle]
+pub unsafe extern "C" fn tk_login_shell_path(out: *mut c_char, cap: c_int) -> c_int {
+    if out.is_null() || cap <= 1 {
+        return -1;
+    }
+
+    // Pick $SHELL; fall back to /bin/zsh which is the macOS default.
+    let shell_buf: Vec<u8> = {
+        let raw = libc::getenv(c"SHELL".as_ptr());
+        if raw.is_null() {
+            b"/bin/zsh\0".to_vec()
+        } else {
+            let s = CStr::from_ptr(raw).to_bytes();
+            if s.is_empty() {
+                b"/bin/zsh\0".to_vec()
+            } else {
+                let mut v = s.to_vec();
+                v.push(0);
+                v
+            }
+        }
+    };
+
+    // Build argv: [shell, "-l", "-i", "-c", "/usr/bin/env", NULL]
+    // ``-l`` (login) sources profile files; ``-i`` (interactive) sources
+    // the rc files where many users actually mutate PATH; ``-c`` runs the
+    // single command and exits without waiting for stdin.
+    let arg_l = b"-l\0";
+    let arg_i = b"-i\0";
+    let arg_c = b"-c\0";
+    let arg_env = b"/usr/bin/env\0";
+    let argv: [*mut c_char; 6] = [
+        shell_buf.as_ptr() as *mut c_char,
+        arg_l.as_ptr() as *mut c_char,
+        arg_i.as_ptr() as *mut c_char,
+        arg_c.as_ptr() as *mut c_char,
+        arg_env.as_ptr() as *mut c_char,
+        std::ptr::null_mut(),
+    ];
+
+    // Pipe for the child's stdout; stderr goes to /dev/null so an rc
+    // file's "warning: ..." chatter doesn't get mixed into the PATH
+    // line we parse.
+    let mut fds: [c_int; 2] = [-1, -1];
+    if libc::pipe(fds.as_mut_ptr()) < 0 {
+        return -1;
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+    if devnull < 0 {
+        libc::close(read_fd);
+        libc::close(write_fd);
+        return -1;
+    }
+
+    let pid = libc::fork();
+    if pid < 0 {
+        libc::close(read_fd);
+        libc::close(write_fd);
+        libc::close(devnull);
+        return -1;
+    }
+    if pid == 0 {
+        // Child. Wire stdin/stderr to /dev/null, stdout to the write end
+        // of the pipe, then exec the shell. Bail with _exit(127) on any
+        // setup failure — the parent will see EOF / nonzero exit.
+        libc::dup2(devnull, 0);
+        libc::dup2(write_fd, 1);
+        libc::dup2(devnull, 2);
+        libc::close(devnull);
+        libc::close(read_fd);
+        libc::close(write_fd);
+        libc::execvp(argv[0], argv.as_ptr() as *const *const c_char);
+        libc::_exit(127);
+    }
+
+    // Parent.
+    libc::close(write_fd);
+    libc::close(devnull);
+
+    // Make the read end non-blocking so we can poll with a deadline.
+    let flags = libc::fcntl(read_fd, libc::F_GETFL, 0);
+    if flags >= 0 {
+        let _ = libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let deadline = monotonic_ms() + LOGIN_SHELL_TIMEOUT_MS;
+    let mut captured: Vec<u8> = Vec::with_capacity(4096);
+    let mut scratch = [0u8; 4096];
+    let mut child_done = false;
+
+    loop {
+        // Try a non-blocking read first — drain whatever the child has
+        // already written.
+        loop {
+            let n = libc::read(
+                read_fd,
+                scratch.as_mut_ptr() as *mut c_void,
+                scratch.len() as libc::size_t,
+            );
+            if n > 0 {
+                captured.extend_from_slice(&scratch[..n as usize]);
+                // Cap the capture so a runaway child can't OOM us.
+                if captured.len() > 1 << 20 {
+                    break;
+                }
+                continue;
+            }
+            if n == 0 {
+                // EOF — pipe write end has been closed (child exited or
+                // closed its stdout).
+                child_done = true;
+                break;
+            }
+            // n < 0
+            let e = errno();
+            if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::EINTR {
+                break;
+            }
+            // Hard read error.
+            child_done = true;
+            break;
+        }
+        if child_done {
+            break;
+        }
+
+        // Check whether the child has reaped on its own anyway (it may
+        // exit before its stdout is fully drained).
+        let mut status: c_int = 0;
+        let r = libc::waitpid(pid, &mut status, libc::WNOHANG);
+        if r == pid {
+            // Drain any remaining bytes from the pipe before bailing.
+            loop {
+                let n = libc::read(
+                    read_fd,
+                    scratch.as_mut_ptr() as *mut c_void,
+                    scratch.len() as libc::size_t,
+                );
+                if n <= 0 {
+                    break;
+                }
+                captured.extend_from_slice(&scratch[..n as usize]);
+                if captured.len() > 1 << 20 {
+                    break;
+                }
+            }
+            // Child reaped + pipe drained — we're done with the outer
+            // loop too. ``child_done`` is no longer read after this
+            // break, so we don't bother setting it.
+            break;
+        }
+
+        if monotonic_ms() >= deadline {
+            // Timeout. SIGKILL the child (SIGTERM may be caught by the
+            // shell), drain whatever it managed to write, then bail.
+            libc::kill(pid, libc::SIGKILL);
+            let mut status: c_int = 0;
+            libc::waitpid(pid, &mut status, 0);
+            libc::close(read_fd);
+            return -1;
+        }
+
+        // Sleep 10 ms, then poll again. Bounded by the deadline check
+        // above so we never sleep past the timeout.
+        let ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000,
+        };
+        libc::nanosleep(&ts, std::ptr::null_mut());
+    }
+
+    libc::close(read_fd);
+    // Reap the child if we didn't already (e.g. EOF before exit).
+    let mut status: c_int = 0;
+    libc::waitpid(pid, &mut status, 0);
+
+    // Find a PATH=... line in the captured output. ``/usr/bin/env``
+    // prints one VAR=value per line.
+    let needle = b"PATH=";
+    let mut path_bytes: Option<&[u8]> = None;
+    let mut line_start = 0usize;
+    for i in 0..captured.len() {
+        if captured[i] == b'\n' {
+            let line = &captured[line_start..i];
+            if line.starts_with(needle) {
+                path_bytes = Some(&line[needle.len()..]);
+                break;
+            }
+            line_start = i + 1;
+        }
+    }
+    if path_bytes.is_none() && line_start < captured.len() {
+        let tail = &captured[line_start..];
+        if tail.starts_with(needle) {
+            path_bytes = Some(&tail[needle.len()..]);
+        }
+    }
+
+    let path = match path_bytes {
+        Some(p) if !p.is_empty() => p,
+        _ => return -1,
+    };
+
+    if path.len() + 1 > cap as usize {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(path.as_ptr(), out as *mut u8, path.len());
+    *out.add(path.len()) = 0;
+    path.len() as c_int
+}
+
+fn monotonic_ms() -> i64 {
+    unsafe {
+        let mut ts: libc::timespec = std::mem::zeroed();
+        // ``CLOCK_MONOTONIC`` is supported on both Darwin and Linux.
+        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
+            return 0;
+        }
+        (ts.tv_sec as i64) * 1000 + (ts.tv_nsec as i64) / 1_000_000
+    }
+}
+
 // --- helpers --------------------------------------------------------------
 
 /// Append ``msg`` (no newline added) to ``/tmp/turbokod_debug.log``
 /// using only libc syscalls — no Rust ``std`` allocator, no panic
 /// handler, no TLS init. Lets us see where we are even if higher
-/// layers of the Rust runtime are misbehaving.
+/// layers of the Rust runtime are misbehaving. Kept around as a
+/// dormant emergency-debugging utility — un-reference it for a
+/// release build and the linker drops it.
+#[allow(dead_code)]
 fn raw_debug(msg: &[u8]) {
     unsafe {
         let path = b"/tmp/turbokod_debug.log\0";
@@ -609,7 +864,9 @@ fn raw_debug(msg: &[u8]) {
 
 /// `raw_debug(prefix)` then `raw_debug(payload)` then a newline. Used
 /// to log a bytestring whose length isn't known at compile time
-/// (e.g. an incoming C-string the caller passed in).
+/// (e.g. an incoming C-string the caller passed in). Same dormant
+/// emergency-debugging status as ``raw_debug`` itself.
+#[allow(dead_code)]
 fn raw_debug_pfx(prefix: &[u8], payload: &[u8]) {
     raw_debug(prefix);
     raw_debug(payload);

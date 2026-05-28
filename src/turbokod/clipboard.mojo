@@ -77,19 +77,18 @@ def _paste_command() -> String:
 def _strip_macos_malloc_debug_env():
     """Remove the macOS malloc-debug env vars from our environment.
 
-    The native wrapper sets ``MallocScribble=1`` on the Mojo backend as
-    a workaround for a libsystem_malloc heap-corruption canary (see
-    app/src/main.rs). Without stripping, ``popen`` forks ``/bin/sh -c
-    …``; the shell's *own* libsystem_malloc reads MallocScribble at
-    process init and prints "MallocScribble: enabling scribbling to
-    detect mods to free blocks" on stderr — which lands on the TTY
-    behind our raw-mode UI and corrupts the visible display.
+    Defensive: if our process was started with ``MallocScribble=1`` (or
+    its siblings) set in the environment, ``popen`` would fork
+    ``/bin/sh -c …`` and the shell's *own* libsystem_malloc would read
+    the var at process init and print "MallocScribble: enabling
+    scribbling to detect mods to free blocks" on stderr — landing on
+    the TTY behind our raw-mode UI and corrupting the visible display.
 
     Doing this in the parent right before ``popen`` works because our
     own libmalloc initialized at our dyld load time and won't re-check
-    the var — the scribbling workaround stays active for us. The Rust
-    pty shim does the equivalent for pty-spawned shells; this is the
-    same fix for the popen path.
+    the var — anything that depended on scribbling for *us* stays
+    active. The Rust pty shim does the equivalent for pty-spawned
+    shells; this is the same fix for the popen path.
     """
     var s = String("MallocScribble\0")
     var ps = String("MallocPreScribble\0")
