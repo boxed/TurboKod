@@ -262,6 +262,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var timer: Timer?
     var persistSession = false   // off for one-off file opens, on for sessions/projects
     var isTerminating = false    // suppress per-window session saves during quit
+    // Debouncer for windowDidResize/windowDidMove — AppKit fires these every
+    // frame during a live resize; debouncing keeps us from rewriting the
+    // per-project JSON hundreds of times per drag. Keyed by NSWindow identity
+    // so two windows resized simultaneously don't share a timer.
+    private var frameSaveTimers: [ObjectIdentifier: Timer] = [:]
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppController.shared = self
@@ -271,11 +276,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let args = CommandLine.arguments
         if args.count > 1 {
             let p = args[1]
-            let v = newWindow()
             var isDir: ObjCBool = false
             FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
-            if isDir.boolValue { persistSession = true; openProject(v, p) }
-            else { openFile(v, p) }
+            if isDir.boolValue {
+                // CLI ``./run_swift.sh /path/to/project`` — pre-apply the
+                // project's remembered frame to newWindow so the window opens
+                // at its previous size, not the 1000×640 default.
+                persistSession = true
+                let v = newWindow(frame: loadProjectFrame(p))
+                openProject(v, p)
+            } else {
+                let v = newWindow()
+                openFile(v, p)
+            }
         } else {
             persistSession = true
             let saved = loadSession()
@@ -283,7 +296,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 _ = newWindow()
             } else {
                 for entry in saved {
-                    let v = newWindow(frame: entry.frame)
+                    // Per-project file wins; ``native_session.txt``'s frame
+                    // is the legacy fallback for projects that haven't yet
+                    // written the new file (first launch after upgrade).
+                    let frame = loadProjectFrame(entry.project) ?? entry.frame
+                    let v = newWindow(frame: frame)
                     openProject(v, entry.project)
                 }
             }
@@ -436,6 +453,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                     Int64(bytes.count))
         }
         v.project = path
+        // If this project has a remembered window frame, resize/reposition to
+        // it. New-window-at-launch paths pre-apply via newWindow(frame:) so
+        // there's no visible flash; for Open Project… on an existing window
+        // this is the one that resizes mid-session.
+        if let saved = loadProjectFrame(path), let win = v.window,
+           !NSEqualRects(win.frame, saved) {
+            win.setFrame(saved, display: true)
+        }
         saveSession()
         v.needsDisplay = true
     }
@@ -545,6 +570,76 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let text = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
         try? text.write(toFile: sessionPath(), atomically: true, encoding: .utf8)
+    }
+
+    // MARK: per-project NSWindow frame
+    //
+    // Lives at <project>/.turbokod/per_user/<USER>/native_window.json, matching
+    // the existing session.json / view_states.json / breakpoints.json layout
+    // the Mojo side uses for its own per-project state. Storing the frame
+    // here (rather than only in ~/.turbokod/native_session.txt) means a
+    // project remembers its window size/position even when:
+    //   - opened in a fresh window mid-session (Open Project…),
+    //   - opened from the CLI on a project not in the previous session,
+    //   - moved to another machine that shares the project directory.
+    // native_session.txt still records which projects to auto-open at next
+    // launch; the per-project file is the source of truth for geometry.
+
+    private func nativeWindowDir(_ project: String) -> String {
+        return project + "/.turbokod/per_user/" + NSUserName()
+    }
+
+    private func nativeWindowPath(_ project: String) -> String {
+        return nativeWindowDir(project) + "/native_window.json"
+    }
+
+    func loadProjectFrame(_ project: String) -> NSRect? {
+        let path = nativeWindowPath(project)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let frame = obj["frame"] as? [Any], frame.count == 4
+        else { return nil }
+        // Accept either integer or floating-point components — JSONSerialization
+        // gives NSNumber, which bridges to both Int and Double.
+        let nums = frame.compactMap { ($0 as? NSNumber)?.doubleValue }
+        guard nums.count == 4, nums[2] > 0, nums[3] > 0 else { return nil }
+        return NSRect(x: nums[0], y: nums[1], width: nums[2], height: nums[3])
+    }
+
+    func saveProjectFrame(_ project: String, _ frame: NSRect) {
+        try? FileManager.default.createDirectory(
+            atPath: nativeWindowDir(project), withIntermediateDirectories: true)
+        let obj: [String: Any] = ["frame": [
+            Int(frame.origin.x), Int(frame.origin.y),
+            Int(frame.size.width), Int(frame.size.height),
+        ]]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [])
+        else { return }
+        try? data.write(to: URL(fileURLWithPath: nativeWindowPath(project)), options: .atomic)
+    }
+
+    // MARK: live resize/move persistence
+
+    func windowDidResize(_ note: Notification) { scheduleFrameSave(note) }
+    func windowDidMove(_ note: Notification)   { scheduleFrameSave(note) }
+
+    // AppKit fires didResize/didMove on every frame of a live drag — debounce
+    // to ~150 ms after the last event so we write once per gesture instead of
+    // dozens of times. Cancelled-and-rescheduled rather than throttled so the
+    // *final* frame is what lands on disk.
+    private func scheduleFrameSave(_ note: Notification) {
+        guard let win = note.object as? NSWindow,
+              let idx = windows.firstIndex(of: win),
+              let project = views[idx].project else { return }
+        let key = ObjectIdentifier(win)
+        frameSaveTimers[key]?.invalidate()
+        let frame = win.frame
+        let proj  = project
+        let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            self?.saveProjectFrame(proj, frame)
+            self?.frameSaveTimers.removeValue(forKey: key)
+        }
+        frameSaveTimers[key] = t
     }
 }
 
