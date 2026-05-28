@@ -65,6 +65,7 @@ INSTALL_HINTS: dict[str, str] = {
     "php":        "npm install -g intelephense",
     "java":       "see https://github.com/eclipse-jdtls/eclipse.jdt.ls",
     "csharp":     "dotnet tool install -g csharp-ls",
+    "rst":        "pip install esbonio",
 }
 
 # Per-language preferred-server overrides. After Helix's order is
@@ -74,6 +75,21 @@ INSTALL_HINTS: dict[str, str] = {
 PREFERRED_FIRST: dict[str, list[str]] = {
     "python": ["ty"],
 }
+
+# Languages Helix's languages.toml doesn't ship a language-server for,
+# but which we still want routable (so we get our TextMate grammar
+# *and* a usable LSP when the user installs the suggested server).
+# Merged in after the Helix pass; entries here are skipped if Helix
+# already produced one with the same language_id, so a future upstream
+# addition silently takes over.
+EXTRA_LANGUAGES: list[dict] = [
+    {
+        "language_id": "rst",
+        "file_types": ["rst", "rest"],
+        "candidates": [{"argv": ["esbonio"]}],
+        "comment_token": "..",
+    },
+]
 
 
 def fetch_languages_toml() -> bytes:
@@ -175,6 +191,18 @@ def build_specs(toml_text: bytes) -> list[dict]:
             "candidates": candidates,
             "install_hint": INSTALL_HINTS.get(lang_id, ""),
             "comment_token": comment_token,
+        })
+
+    seen_ids = {s["language_id"] for s in out}
+    for extra in EXTRA_LANGUAGES:
+        if extra["language_id"] in seen_ids:
+            continue
+        out.append({
+            "language_id": extra["language_id"],
+            "file_types": list(extra.get("file_types", [])),
+            "candidates": [dict(c) for c in extra.get("candidates", [])],
+            "install_hint": INSTALL_HINTS.get(extra["language_id"], ""),
+            "comment_token": extra.get("comment_token", ""),
         })
 
     out.sort(key=lambda s: s["language_id"])

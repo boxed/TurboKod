@@ -1,0 +1,182 @@
+{
+    "information_for_contributors": [
+        "Hand-rolled for turbokod. Reference: docutils.sourceforge.io/docs/ref/rst/restructuredtext.html.",
+        "Companion docs in the repo: src/turbokod/grammars/README.md."
+    ],
+    "name": "reStructuredText",
+    "scopeName": "source.rst",
+    "fileTypes": ["rst", "rest"],
+    "patterns": [
+        { "include": "#directive" },
+        { "include": "#hyperlink_target" },
+        { "include": "#substitution_def" },
+        { "include": "#footnote_def" },
+        { "include": "#comment" },
+        { "include": "#section_adornment" },
+        { "include": "#field_list" },
+        { "include": "#list_marker" },
+        { "include": "#literal_block_marker" },
+        { "include": "#inline" }
+    ],
+    "repository": {
+        "directive": {
+            "comment": "Explicit-markup directive: `.. name:: argument`. Must precede `comment` and `hyperlink_target` in the top-level patterns.",
+            "match": "^(\\s*)(\\.\\.)\\s+([A-Za-z][A-Za-z0-9_-]*)(::)(.*)$",
+            "captures": {
+                "2": { "name": "punctuation.definition.directive.rst" },
+                "3": { "name": "support.function.directive.rst" },
+                "4": { "name": "punctuation.definition.directive.rst" },
+                "5": { "name": "string.unquoted.argument.directive.rst" }
+            }
+        },
+        "hyperlink_target": {
+            "comment": "Named or anonymous hyperlink target: `.. _name: url` / `.. __: url`. The URL portion is highlighted as a link.",
+            "match": "^(\\s*)(\\.\\.)\\s+(_[^:]*:|__:)(.*)$",
+            "captures": {
+                "2": { "name": "punctuation.definition.target.rst" },
+                "3": { "name": "entity.name.tag.target.rst" },
+                "4": { "name": "markup.underline.link.rst" }
+            }
+        },
+        "substitution_def": {
+            "comment": "Substitution definition: `.. |name| directive:: argument`.",
+            "match": "^(\\s*)(\\.\\.)\\s+(\\|[^|\\n]+\\|)\\s+([A-Za-z][A-Za-z0-9_-]*)(::)(.*)$",
+            "captures": {
+                "2": { "name": "punctuation.definition.substitution.rst" },
+                "3": { "name": "variable.other.substitution.rst" },
+                "4": { "name": "support.function.directive.rst" },
+                "5": { "name": "punctuation.definition.directive.rst" },
+                "6": { "name": "string.unquoted.argument.directive.rst" }
+            }
+        },
+        "footnote_def": {
+            "comment": "Footnote or citation definition: `.. [1]`, `.. [#name]`, `.. [name]`.",
+            "match": "^(\\s*)(\\.\\.)\\s+(\\[(?:[0-9]+|[#*]|[#]?[A-Za-z][A-Za-z0-9_.-]*)\\])(.*)$",
+            "captures": {
+                "2": { "name": "punctuation.definition.footnote.rst" },
+                "3": { "name": "constant.numeric.footnote.rst" }
+            }
+        },
+        "comment": {
+            "comment": "Plain rST comment: `.. ` followed by anything that wasn't claimed by the more specific patterns above.",
+            "match": "^(\\s*)(\\.\\.)(\\s.*)?$",
+            "name": "comment.line.rst"
+        },
+        "section_adornment": {
+            "comment": "Line of identical adornment characters under or over a section title. We don't try to detect the title text itself — TextMate has no multi-line context — but the adornment line alone reads as a clear section marker.",
+            "match": "^([=\\-~`*^#\"'+:<>])\\1{2,}\\s*$",
+            "name": "markup.heading.rst"
+        },
+        "field_list": {
+            "comment": "Field list: `:field: value`. The field name is non-greedy so a value like ` bar :baz: qux` stays in the value group.",
+            "match": "^(\\s*)(:)([^:\\s][^:]*?)(:)(\\s.*)?$",
+            "captures": {
+                "2": { "name": "punctuation.definition.field.rst" },
+                "3": { "name": "entity.name.tag.field.rst" },
+                "4": { "name": "punctuation.definition.field.rst" }
+            }
+        },
+        "list_marker": {
+            "comment": "Bullet (`*`, `-`, `+`) or enumerated (`1.`, `1)`, `#.`, `a.`) list marker at the start of a line.",
+            "match": "^(\\s*)([*\\-+]|(?:[0-9]+|[A-Za-z]|#)[.)])(\\s)",
+            "captures": {
+                "2": { "name": "markup.list.rst" }
+            }
+        },
+        "literal_block_marker": {
+            "comment": "Double-colon `::` introducing a literal block at end of a line. We just color the marker; the indented block below stays unstyled.",
+            "match": "(::)\\s*$",
+            "captures": {
+                "1": { "name": "keyword.control.literal.rst" }
+            }
+        },
+        "inline": {
+            "patterns": [
+                { "include": "#inline_literal" },
+                { "include": "#interpreted_text_role_prefix" },
+                { "include": "#interpreted_text_role_suffix" },
+                { "include": "#interpreted_text" },
+                { "include": "#strong" },
+                { "include": "#emphasis" },
+                { "include": "#link_ref_named" },
+                { "include": "#link_ref_anon" },
+                { "include": "#footnote_ref" },
+                { "include": "#substitution_ref" },
+                { "include": "#standalone_url" }
+            ]
+        },
+        "inline_literal": {
+            "comment": "Inline literal: ``code``. Must run before single-backtick patterns.",
+            "match": "``[^`]+``",
+            "name": "markup.inline.raw.rst"
+        },
+        "interpreted_text_role_prefix": {
+            "comment": "Interpreted text with leading role: `:role:`text``.",
+            "match": "(:[A-Za-z][A-Za-z0-9_:.-]*:)(`[^`\\n]+`)(_{0,2})",
+            "captures": {
+                "1": { "name": "support.function.role.rst" },
+                "2": { "name": "markup.inline.raw.rst" },
+                "3": { "name": "punctuation.definition.link.rst" }
+            }
+        },
+        "interpreted_text_role_suffix": {
+            "comment": "Interpreted text with trailing role: ``text`:role:`.",
+            "match": "(`[^`\\n]+`)(:[A-Za-z][A-Za-z0-9_:.-]*:)",
+            "captures": {
+                "1": { "name": "markup.inline.raw.rst" },
+                "2": { "name": "support.function.role.rst" }
+            }
+        },
+        "interpreted_text": {
+            "comment": "Plain single-backtick text (no role). Used for hyperlink-target text and generic interpreted text.",
+            "match": "(?<!`)`[^`\\n]+`(?!`)",
+            "name": "markup.inline.raw.rst"
+        },
+        "strong": {
+            "comment": "Strong emphasis: **text**.",
+            "match": "\\*\\*\\S(?:[^*\\n]*\\S)?\\*\\*",
+            "name": "markup.bold.rst"
+        },
+        "emphasis": {
+            "comment": "Emphasis: *text*. The lookarounds prevent matching `**` (strong, already handled above).",
+            "match": "(?<!\\*)\\*\\S(?:[^*\\n]*\\S)?\\*(?!\\*)",
+            "name": "markup.italic.rst"
+        },
+        "link_ref_named": {
+            "comment": "Embedded URI reference: `text <url>`_ / `text <url>`__.",
+            "match": "(`)([^`<\\n]+?)\\s*(<)([^>\\n]+)(>)(`)(__?)",
+            "captures": {
+                "1": { "name": "punctuation.definition.link.rst" },
+                "2": { "name": "string.other.link.title.rst" },
+                "3": { "name": "punctuation.definition.link.rst" },
+                "4": { "name": "markup.underline.link.rst" },
+                "5": { "name": "punctuation.definition.link.rst" },
+                "6": { "name": "punctuation.definition.link.rst" },
+                "7": { "name": "punctuation.definition.link.rst" }
+            }
+        },
+        "link_ref_anon": {
+            "comment": "Trailing-underscore hyperlink reference: `name_` or `name__`.",
+            "match": "\\b([A-Za-z][A-Za-z0-9_.-]*)(__?)\\b",
+            "captures": {
+                "1": { "name": "markup.underline.link.rst" },
+                "2": { "name": "punctuation.definition.link.rst" }
+            }
+        },
+        "footnote_ref": {
+            "comment": "Footnote / citation reference: `[1]_`, `[#]_`, `[*]_`, `[name]_`.",
+            "match": "\\[(?:[0-9]+|[#*]|[#]?[A-Za-z][A-Za-z0-9_.-]*)\\]_",
+            "name": "constant.numeric.footnote-ref.rst"
+        },
+        "substitution_ref": {
+            "comment": "Substitution reference: `|name|` and its `|name|_` / `|name|__` link forms.",
+            "match": "\\|[A-Za-z][A-Za-z0-9_.\\- ]*\\|(?:__?)?",
+            "name": "variable.other.substitution-ref.rst"
+        },
+        "standalone_url": {
+            "comment": "Bare URL — http(s):// and ftp(s):// schemes only, to keep the regex cheap.",
+            "match": "\\b(?:https?|ftps?|file|mailto):[^\\s<>`]+",
+            "name": "markup.underline.link.rst"
+        }
+    }
+}

@@ -35,12 +35,23 @@ if [ ! -f "$dylib" ] || find src "$shim_lib" -newer "$dylib" -print -quit 2>/dev
     echo "[run_swift] Mojo shared-lib build failed" >&2
     exit 1
   fi
-  # Absolute install name so the Swift binary loads it regardless of cwd.
-  install_name_tool -id "${root}/${dylib}" "$dylib"
 fi
 
-# Build the Swift binary against the dylib + frameworks. rpath to the pixi
-# lib dir resolves the dylib's @rpath deps (Mojo runtime + libonig).
+# Always (re-)stamp the install_name to ``@rpath/libturbokod.dylib`` so the
+# Swift binary loads it via rpath rather than baking in an absolute or
+# CWD-relative path. Idempotent and cheap — runs every invocation so an
+# interrupted earlier build (which may have left the install_name as
+# Mojo's default ``.build/libturbokod.dylib``) self-heals on the next
+# run. Without this, ``open`` / Dock launches crash at dyld with
+# ``Library not loaded`` because the CWD-relative path doesn't resolve.
+install_name_tool -id "@rpath/libturbokod.dylib" "$dylib" 2>/dev/null
+
+# Build the Swift binary against the dylib + frameworks. Two rpaths:
+#   * ``@executable_path/../Frameworks`` — the .app bundle's Frameworks dir,
+#     where the dylib gets copied during bundle assembly below. Makes the
+#     bundle relocatable (Dock launches, moved .app, etc.).
+#   * ``${env_prefix}/lib`` — pixi env, where the Mojo runtime + libonig
+#     live. These aren't bundle-relocatable so we keep the absolute rpath.
 if [ ! -f "$swiftbin" ] || [ app/swift/TurboKod.swift -nt "$swiftbin" ] \
    || [ app/swift/turbokod.h -nt "$swiftbin" ] || [ "$dylib" -nt "$swiftbin" ]; then
   echo "[run_swift] building Swift binary -> $swiftbin" >&2
@@ -48,6 +59,7 @@ if [ ! -f "$swiftbin" ] || [ app/swift/TurboKod.swift -nt "$swiftbin" ] \
       -import-objc-header app/swift/turbokod.h \
       -L .build -lturbokod \
       -framework AppKit -framework CoreText -framework CoreGraphics -framework Foundation \
+      -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
       -Xlinker -rpath -Xlinker "${env_prefix}/lib" \
       -o "$swiftbin"; then
     echo "[run_swift] Swift build failed" >&2
@@ -61,11 +73,16 @@ fi
 # resolve regardless of where it's launched from (Dock, moved .app, no repo).
 app_dir=".build/TurboKod.app"; contents="$app_dir/Contents"
 res="$contents/Resources"
+fwk="$contents/Frameworks"
 rm -rf "$res/src"
-mkdir -p "$contents/MacOS" "$res/src/turbokod"
+mkdir -p "$contents/MacOS" "$fwk" "$res/src/turbokod"
 cp app/macos/TurboKod-Info.plist "$contents/Info.plist"
 cp app/macos/icon.icns "$res/icon.icns"
 cp "$swiftbin" "$contents/MacOS/TurboKod"
+# Embed the Mojo dylib so the .app is self-contained for it. The Swift
+# binary's rpath ``@executable_path/../Frameworks`` resolves to this
+# location regardless of where the .app is launched from.
+cp "$dylib" "$fwk/libturbokod.dylib"
 cp -R src/turbokod/grammars "$res/src/turbokod/grammars"
 cp -R src/turbokod/data     "$res/src/turbokod/data"
 cp app/assets/Px437_IBM_VGA_8x16.ttf "$res/Px437_IBM_VGA_8x16.ttf"

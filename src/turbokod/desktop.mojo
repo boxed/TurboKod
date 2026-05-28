@@ -533,6 +533,13 @@ struct PendingSaveAction(ImplicitlyCopyable, Movable):
 
 struct Desktop(Movable):
     var menu_bar: MenuBar
+    # When True, the host frontend (e.g. the Swift/AppKit app) owns the
+    # menu surface — it builds a native menu by snapshotting `menu_bar` via
+    # the C ABI and dispatches actions via `tk_desktop_menu_invoke`. In this
+    # mode `paint` skips drawing `menu_bar` and `handle_event` skips routing
+    # mouse/key events to it, so the in-grid menu disappears entirely. Stays
+    # False for the terminal frontend, where the bar is the menu.
+    var host_owns_menu: Bool
     var windows: WindowManager
     var status_bar: StatusBar
     var tab_bar: TabBar
@@ -908,6 +915,7 @@ struct Desktop(Movable):
 
     def __init__(out self):
         self.menu_bar = MenuBar()
+        self.host_owns_menu = False
         self.windows = WindowManager()
         self.status_bar = StatusBar()
         self.tab_bar = TabBar()
@@ -1310,7 +1318,10 @@ struct Desktop(Movable):
         bottom -= self._terminal_stack_height(screen)
         if bottom < 1:
             bottom = 1
-        return Rect(0, 1, right, bottom)
+        # Row 0 is normally reserved for the in-grid menu bar; when the
+        # host owns the menu, that row is free for the workspace.
+        var top = 0 if self.host_owns_menu else 1
+        return Rect(0, top, right, bottom)
 
     def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked debug pane lives — above the status
@@ -1418,12 +1429,14 @@ struct Desktop(Movable):
         OSC just ignore whatever shape we ask for, so this is purely a
         UX hint."""
         # Menu bar — both the bar itself and any open dropdown sit on
-        # top of every other layer, so resolve them first.
-        if pos.y == 0:
-            return String("default")
-        if self.menu_bar.is_open() \
-                and self.menu_bar._dropdown_rect(screen.b.x).contains(pos):
-            return String("default")
+        # top of every other layer, so resolve them first. Skipped when
+        # the host owns the menu: row 0 is part of the workspace there.
+        if not self.host_owns_menu:
+            if pos.y == 0:
+                return String("default")
+            if self.menu_bar.is_open() \
+                    and self.menu_bar._dropdown_rect(screen.b.x).contains(pos):
+                return String("default")
         # Modals win — they cover whatever's underneath. Resolve in the
         # same order ``handle_event`` consults them so the shape matches
         # which widget would actually claim the next click.
@@ -1655,6 +1668,10 @@ struct Desktop(Movable):
         # the picker's entry list grows visibly as results arrive
         # rather than appearing all at once at the end.
         self.find_symbol.tick()
+        # QuickOpen does the same with ``git ls-files`` — its async
+        # FileIndexer trickles entries in over multiple frames so the
+        # dialog opens immediately even on giant projects.
+        self.quick_open.tick()
         # Update the recents list from whichever editor is focused this
         # frame. Cheap (one path compare against ``_recent_files[0]``)
         # on idle frames; promotes a path to the front exactly once
@@ -1762,7 +1779,10 @@ struct Desktop(Movable):
         debug_log(String("[paint] before debug_pane.paint"))
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
         debug_log(String("[paint] before menu_bar.paint"))
-        self.menu_bar.paint(canvas, screen)
+        # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
+        # in-grid paint so the top row stays clear for other content.
+        if not self.host_owns_menu:
+            self.menu_bar.paint(canvas, screen)
         debug_log(String("[paint] before tab_bar.paint"))
         self._paint_tab_bar(canvas, screen)
         debug_log(String("[paint] before status_bar.paint"))
@@ -3660,11 +3680,15 @@ struct Desktop(Movable):
                 if self.file_tree.handle_mouse(event, screen):
                     return Optional[String]()
         # Mouse events (and everything else): route through menu → pane → tree → windows.
-        var result = self.menu_bar.handle_event(event, screen.b.x)
-        if result.action:
-            return self.dispatch_action(result.action.value(), screen)
-        if result.consumed:
-            return Optional[String]()
+        # When the host owns the menu, the in-grid bar isn't painted; skip
+        # routing here so a top-row mouse click falls through to whichever
+        # widget sits underneath instead of toggling an invisible dropdown.
+        if not self.host_owns_menu:
+            var result = self.menu_bar.handle_event(event, screen.b.x)
+            if result.action:
+                return self.dispatch_action(result.action.value(), screen)
+            if result.consumed:
+                return Optional[String]()
         # Status-bar tab strip sits on the bottom row. Check it before
         # the workspace so a click on a tab doesn't also fall through
         # to whatever editor is rendered above it.
@@ -3771,7 +3795,7 @@ struct Desktop(Movable):
                         .editor.completion_popup_visible:
                 self.windows.windows[fidx_esc] \
                     .editor.close_completion_popup()
-            elif self.menu_bar.is_open():
+            elif (not self.host_owns_menu) and self.menu_bar.is_open():
                 self.menu_bar.close()
             elif self._run_output_held \
                     and not self.dap.is_active() \
@@ -3799,7 +3823,10 @@ struct Desktop(Movable):
         # When a menu is open, it captures keyboard focus: arrow keys
         # navigate, Enter activates. Mnemonic switching (Alt+<letter>)
         # still works as a fall-through if the menu doesn't consume.
-        if self.menu_bar.is_open():
+        # Skipped entirely under `host_owns_menu` — the native menu has no
+        # in-grid open state, and Alt+letter shortcuts shouldn't open a
+        # phantom dropdown over the workspace.
+        if (not self.host_owns_menu) and self.menu_bar.is_open():
             var mr = self.menu_bar.handle_key(event)
             if mr.action:
                 var action = mr.action.value()
@@ -3813,7 +3840,7 @@ struct Desktop(Movable):
             return Optional[String]()
         # ESC-prefix menu mnemonic: if the previous keystroke armed us and
         # this one is a letter, treat as Alt+<letter>.
-        if was_armed and event.mods == MOD_NONE \
+        if (not self.host_owns_menu) and was_armed and event.mods == MOD_NONE \
                 and self._open_menu_by_mnemonic(event.key):
             return Optional[String]()
         # Hotkey lookup: walk registrations newest-first so user-supplied
@@ -3833,7 +3860,9 @@ struct Desktop(Movable):
         # Direct Alt+<letter> mnemonic: works on terminals that send
         # Option+F as the literal ``ESC f`` byte pair (Linux defaults,
         # macOS terminals with "Use Option as Meta key" enabled).
-        if event.mods == MOD_ALT and self._open_menu_by_mnemonic(event.key):
+        # Disabled when the host owns the menu — see `host_owns_menu`.
+        if (not self.host_owns_menu) and event.mods == MOD_ALT \
+                and self._open_menu_by_mnemonic(event.key):
             return Optional[String]()
         var consumed = self.windows.handle_key(event)
         # An unbound Ctrl/Cmd chord that nothing claimed (no hotkey

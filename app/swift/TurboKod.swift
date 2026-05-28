@@ -255,7 +255,7 @@ final class CellView: NSView {
 
 // MARK: - App controller: windows + Mojo desktops + render timer
 
-final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     static var shared: AppController?
     var windows: [NSWindow] = []
     var views: [CellView] = []
@@ -267,6 +267,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // per-project JSON hundreds of times per drag. Keyed by NSWindow identity
     // so two windows resized simultaneously don't share a timer.
     private var frameSaveTimers: [ObjectIdentifier: Timer] = [:]
+    // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
+    // rebuild NSMenu when something actually changed (focus/visibility/
+    // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
+    // displaying an open NSMenu — pausing rebuilds then so the dropdown
+    // doesn't get yanked out from under the user mid-click.
+    private var menuBuf: [UInt8] = [UInt8](repeating: 0, count: 8192)
+    private var lastMenuHash: UInt64 = 0
+    private var menuTracking = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppController.shared = self
@@ -311,6 +319,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // resize, window dragging, menus, etc. Without this the cursor blink
         // and any background redraws freeze during those operations.
         let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.refreshMenu()
             for v in self?.views ?? [] { v.needsDisplay = true }
         }
         RunLoop.current.add(t, forMode: .common)
@@ -318,6 +327,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if let cap = ProcessInfo.processInfo.environment["TK_CAPTURE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                // Optional: fire Quick Open via the menu invoke path before
+                // capturing, so the captured frame shows the picker dialog.
+                if ProcessInfo.processInfo.environment["TK_QUICK_OPEN"] != nil,
+                   let v = self.views.first {
+                    let action = "file:quick_open"
+                    let bytes = Array(action.utf8)
+                    _ = bytes.withUnsafeBufferPointer { b in
+                        tk_desktop_menu_invoke(v.handle,
+                            Int64(Int(bitPattern: b.baseAddress)),
+                            Int64(bytes.count),
+                            Int64(v.cols()), Int64(v.rows()))
+                    }
+                    v.needsDisplay = true
+                }
+                // Optional extra delay so the async indexer has time to
+                // produce entries before the capture.
+                let extra = ProcessInfo.processInfo.environment["TK_CAPTURE_DELAY"]
+                    .flatMap(Double.init) ?? 0.0
+                DispatchQueue.main.asyncAfter(deadline: .now() + extra) {
                 self.views.first?.capturePNG(to: cap)
                 print("captured to \(cap)")
                 // TK_QUIT_VIA=close simulates the red-button close on the last
@@ -328,15 +356,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 } else {
                     NSApp.terminate(nil)
                 }
+                }
             }
         }
     }
 
     // MARK: native menu
 
+    // The native NSMenu mirrors Mojo's `menu_bar`. We snapshot it via
+    // `tk_desktop_menu_snapshot` (TSV) and rebuild whenever the snapshot's
+    // content hash changes. Items dispatch through `menuActionFired`, which
+    // calls `tk_desktop_menu_invoke` — the same `dispatch_action` path the
+    // in-grid menu would have taken — and routes any leftover host-level
+    // action code through `handleAction`.
     func buildMenu() {
+        // Stub the menu bar so `applicationDidFinishLaunching` has a chrome
+        // surface even before any Desktop is created. The real content is
+        // installed by the first `refreshMenu()` once we have a handle.
         let mainMenu = NSMenu()
-
         let appItem = NSMenuItem(); mainMenu.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About TurboKod", action: nil, keyEquivalent: "")
@@ -344,33 +381,206 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(withTitle: "Quit TurboKod",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
-
-        let fileItem = NSMenuItem(); mainMenu.addItem(fileItem)
-        let fileMenu = NSMenu(title: "File")
-        let nw = fileMenu.addItem(withTitle: "New Window",
-                                  action: #selector(newWindowAction), keyEquivalent: "n")
-        nw.target = self
-        let op = fileMenu.addItem(withTitle: "Open…",
-                                  action: #selector(openAction), keyEquivalent: "o")
-        op.target = self
-        let opp = fileMenu.addItem(withTitle: "Open Project…",
-                                   action: #selector(openProjectAction), keyEquivalent: "O")
-        opp.keyEquivalentModifierMask = [.command, .shift]
-        opp.target = self
-        fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Close Window",
-                         action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        fileItem.submenu = fileMenu
-
-        let winItem = NSMenuItem(); mainMenu.addItem(winItem)
-        let winMenu = NSMenu(title: "Window")
-        winMenu.addItem(withTitle: "Minimize",
-                        action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        winItem.submenu = winMenu
-        NSApp.windowsMenu = winMenu
-
         NSApp.mainMenu = mainMenu
     }
+
+    /// Pull the latest snapshot from Mojo and rebuild NSMenu when it changes.
+    /// Called from the per-frame timer; cheap on the steady state (one
+    /// snapshot + FNV-1a hash compare). Skipped while AppKit is tracking an
+    /// open NSMenu so the dropdown isn't ripped out mid-click.
+    func refreshMenu() {
+        guard !menuTracking, let h = views.first?.handle, h != 0 else { return }
+        // Snapshot into the existing buffer; grow once if it was too small.
+        var n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
+            Int(tk_desktop_menu_snapshot(h,
+                Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
+        }
+        if n == menuBuf.count {
+            menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
+            n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
+                Int(tk_desktop_menu_snapshot(h,
+                    Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
+            }
+        }
+        // FNV-1a hash over the snapshot bytes.
+        var hash: UInt64 = 0xcbf29ce484222325
+        for i in 0..<n {
+            hash = (hash ^ UInt64(menuBuf[i])) &* 0x100000001b3
+        }
+        if hash == lastMenuHash { return }
+        lastMenuHash = hash
+        let text = String(bytes: menuBuf[0..<n], encoding: .utf8) ?? ""
+        installMenu(from: text)
+    }
+
+    /// Parse a TSV snapshot into NSMenus, replacing the current mainMenu.
+    ///
+    /// The snapshot is already in painted display order (Mojo's
+    /// `MenuBar._display_order_indices`), so we just iterate: the system
+    /// (`≡`) menu lands first, where macOS expects the app-menu slot and
+    /// renames it after the bundle ("TurboKod"); rank-sorted left-aligned
+    /// menus follow (File, Edit, View, Git, Debug, Window); right-aligned
+    /// menus (Project) come last, which puts them on the right of the bar.
+    /// If Mojo emitted no system menu we synthesize one so macOS still
+    /// has an app-menu slot with About + Quit.
+    private func installMenu(from text: String) {
+        let mainMenu = NSMenu()
+        var sawSystem = false
+
+        var curSubmenu: NSMenu? = nil
+        var curIsSystem = false
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let parts = rawLine.split(separator: "\t", omittingEmptySubsequences: false)
+            if parts.isEmpty { continue }
+            switch parts[0] {
+            case "M":
+                // M\t<label>\t<visible>\t<is_system>\t<right_aligned>
+                guard parts.count >= 5 else { continue }
+                let label = String(parts[1])
+                // The snapshot only emits visible menus, but defensively
+                // honor the flag in case that ever changes.
+                guard parts[2] == "1" else { curSubmenu = nil; continue }
+                curIsSystem = parts[3] == "1"
+                let title = curIsSystem ? "TurboKod" : label
+                let submenu = NSMenu(title: title)
+                submenu.delegate = self
+                submenu.autoenablesItems = false
+                if curIsSystem {
+                    sawSystem = true
+                    // macOS app-menu conventions on top of Mojo's items.
+                    submenu.addItem(NSMenuItem(title: "About TurboKod",
+                                               action: nil, keyEquivalent: ""))
+                    submenu.addItem(.separator())
+                }
+                let item = NSMenuItem()
+                item.title = title
+                item.submenu = submenu
+                mainMenu.addItem(item)
+                curSubmenu = submenu
+            case "I":
+                // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>
+                guard let menu = curSubmenu, parts.count >= 7 else { continue }
+                let label = String(parts[1])
+                let action = String(parts[2])
+                let isSep = parts[3] == "1"
+                let checkable = parts[4] == "1"
+                let checked = parts[5] == "1"
+                let shortcut = String(parts[6])
+                if isSep {
+                    menu.addItem(.separator())
+                    continue
+                }
+                let item = NSMenuItem(
+                    title: label,
+                    action: #selector(menuActionFired(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = action
+                if checkable { item.state = checked ? .on : .off }
+                applyShortcut(shortcut, to: item)
+                menu.addItem(item)
+            default: continue
+            }
+        }
+
+        // Fallback: if Mojo emitted no system menu (shouldn't happen, but
+        // defensive — snapshot could be empty during a race), synthesize
+        // one so macOS has an app-menu slot to label.
+        if !sawSystem {
+            let appSub = NSMenu(title: "TurboKod")
+            appSub.addItem(NSMenuItem(title: "About TurboKod",
+                                      action: nil, keyEquivalent: ""))
+            appSub.addItem(.separator())
+            appSub.addItem(NSMenuItem(
+                title: "Quit TurboKod",
+                action: #selector(NSApplication.terminate(_:)),
+                keyEquivalent: "q"))
+            let app = NSMenuItem(); app.title = "TurboKod"; app.submenu = appSub
+            mainMenu.insertItem(app, at: 0)
+        }
+        NSApp.mainMenu = mainMenu
+    }
+
+    /// Map Mojo's `"Cmd+Shift+S"`-style shortcut strings onto an NSMenuItem.
+    /// Unknown tokens leave the item with no shortcut (still clickable).
+    private func applyShortcut(_ s: String, to item: NSMenuItem) {
+        if s.isEmpty { return }
+        var mask: NSEvent.ModifierFlags = []
+        let toks = s.split(separator: "+").map(String.init)
+        guard !toks.isEmpty else { return }
+        for mod in toks.dropLast() {
+            switch mod {
+            case "Cmd":   mask.insert(.command)
+            case "Ctrl":  mask.insert(.control)
+            case "Alt":   mask.insert(.option)
+            case "Shift": mask.insert(.shift)
+            default:      return    // unrecognized modifier — bail
+            }
+        }
+        let key = toks.last!
+        let equiv: String
+        switch key {
+        case "Up":    equiv = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
+        case "Down":  equiv = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
+        case "Left":  equiv = String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!))
+        case "Right": equiv = String(Character(UnicodeScalar(NSRightArrowFunctionKey)!))
+        case "Home":  equiv = String(Character(UnicodeScalar(NSHomeFunctionKey)!))
+        case "End":   equiv = String(Character(UnicodeScalar(NSEndFunctionKey)!))
+        case "PgUp":  equiv = String(Character(UnicodeScalar(NSPageUpFunctionKey)!))
+        case "PgDn":  equiv = String(Character(UnicodeScalar(NSPageDownFunctionKey)!))
+        case "Tab":   equiv = "\t"
+        case "Enter": equiv = "\r"
+        case "Esc":   equiv = "\u{1b}"
+        case "Space": equiv = " "
+        case "BkSp":  equiv = String(Character(UnicodeScalar(NSBackspaceCharacter)!))
+        case "Del":   equiv = String(Character(UnicodeScalar(NSDeleteCharacter)!))
+        case "F1":    equiv = String(Character(UnicodeScalar(NSF1FunctionKey)!))
+        case "F2":    equiv = String(Character(UnicodeScalar(NSF2FunctionKey)!))
+        case "F3":    equiv = String(Character(UnicodeScalar(NSF3FunctionKey)!))
+        case "F4":    equiv = String(Character(UnicodeScalar(NSF4FunctionKey)!))
+        case "F5":    equiv = String(Character(UnicodeScalar(NSF5FunctionKey)!))
+        case "F6":    equiv = String(Character(UnicodeScalar(NSF6FunctionKey)!))
+        case "F7":    equiv = String(Character(UnicodeScalar(NSF7FunctionKey)!))
+        case "F8":    equiv = String(Character(UnicodeScalar(NSF8FunctionKey)!))
+        case "F9":    equiv = String(Character(UnicodeScalar(NSF9FunctionKey)!))
+        case "F10":   equiv = String(Character(UnicodeScalar(NSF10FunctionKey)!))
+        case "F11":   equiv = String(Character(UnicodeScalar(NSF11FunctionKey)!))
+        case "F12":   equiv = String(Character(UnicodeScalar(NSF12FunctionKey)!))
+        default:
+            // Mojo emits letters as uppercase. NSMenuItem expects lowercase
+            // (with .shift in the modifier mask to mean "with Shift") — so
+            // lowercase the letter unless Shift was explicitly present.
+            equiv = mask.contains(.shift) ? key : key.lowercased()
+        }
+        item.keyEquivalent = equiv
+        item.keyEquivalentModifierMask = mask
+    }
+
+    /// Dispatch a menu pick by forwarding its action string into Mojo's
+    /// dispatch_action, then routing any host-level action code through the
+    /// existing handler (Open/Quit/etc.).
+    @objc func menuActionFired(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? String,
+              let view = NSApp.keyWindow?.contentView as? CellView ?? views.first
+        else { return }
+        let bytes = Array(action.utf8)
+        let code = bytes.withUnsafeBufferPointer { b in
+            tk_desktop_menu_invoke(view.handle,
+                Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count),
+                Int64(view.cols()), Int64(view.rows()))
+        }
+        handleAction(code, view: view)
+        view.needsDisplay = true
+    }
+
+    // NSMenuDelegate — pause refreshMenu while AppKit is tracking an open
+    // dropdown so a rebuild can't pull it out from under the user. Both the
+    // top-level menus and their submenus call back here because we set
+    // `submenu.delegate = self` in `installMenu`.
+    func menuWillOpen(_ menu: NSMenu) { menuTracking = true }
+    func menuDidClose(_ menu: NSMenu) { menuTracking = false }
 
     // The Mojo side loads grammars/wordlists via paths relative to cwd
     // (src/turbokod/grammars, src/turbokod/data). run_swift.sh bundles those
@@ -408,6 +618,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @discardableResult
     func newWindow(frame: NSRect? = nil) -> CellView {
         let h = tk_desktop_new()
+        // Tell the Desktop the host owns the menu surface — it stops painting
+        // the in-grid menu bar and stops routing top-row mouse / Alt-letter
+        // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
+        tk_desktop_set_host_owns_menu(h, 1)
         let view = CellView()
         view.handle = h
         let initial = frame ?? NSRect(x: 0, y: 0, width: 1000, height: 640)
@@ -442,6 +656,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tk_desktop_open_file(v.handle, Int64(Int(bitPattern: b.baseAddress)),
                                  Int64(bytes.count), Int64(v.cols()), Int64(v.rows()))
         }
+        // File-only windows (no project loaded): title + proxy track the
+        // file itself. When a project is loaded the title is the project
+        // name and stays put even as additional files are opened — the
+        // window represents the project, not the active buffer.
+        if v.project == nil, let win = v.window {
+            win.title = URL(fileURLWithPath: path).lastPathComponent
+            win.representedURL = URL(fileURLWithPath: path)
+        }
         v.needsDisplay = true
     }
 
@@ -452,6 +674,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                     Int64(bytes.count))
         }
         v.project = path
+        // Title + proxy icon: macOS convention is for project/document
+        // windows to show the project name with a draggable folder proxy
+        // icon next to it. `representedURL` is what makes the proxy appear;
+        // AppKit picks up the icon from the URL itself (the OS folder icon
+        // for a directory, the file's icon for a file). Cmd-click the title
+        // for the path popover; drag the icon to other apps.
+        if let win = v.window {
+            win.title = URL(fileURLWithPath: path).lastPathComponent
+            win.representedURL = URL(fileURLWithPath: path)
+        }
         // If this project has a remembered window frame, resize/reposition to
         // it. New-window-at-launch paths pre-apply via newWindow(frame:) so
         // there's no visible flash; for Open Project… on an existing window

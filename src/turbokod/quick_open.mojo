@@ -14,6 +14,7 @@ pruned so the list stays usable, but individual gitignored files like
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
@@ -26,7 +27,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
-from .project import walk_project_files
+from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .text_field import TextField
 from .view import RowCursor
 from .window import hit_close_button, paint_close_button, paint_window_title
@@ -88,6 +89,14 @@ struct QuickOpen(Movable):
     # so ``handle_mouse`` can route clicks back to the field without
     # re-running layout. Negative width = "no paint yet".
     var _input_rect: Rect
+    # Async file indexer. Owned for the duration of ``open()`` → first
+    # ``tick()`` that observes ``indexer.alive==False``. ``indexing``
+    # tracks whether the indexer is still running so ``paint`` can show
+    # an "<indexing… N>" status; ``truncated`` records whether the cap
+    # at ``QUICK_OPEN_FILE_CAP`` was hit.
+    var _indexer: Optional[FileIndexer]
+    var indexing: Bool
+    var truncated: Bool
 
     def __init__(out self):
         self.active = False
@@ -103,6 +112,9 @@ struct QuickOpen(Movable):
         self.title = String(" Quick Open ")
         self.picks_project = False
         self._input_rect = Rect(0, 0, 0, 0)
+        self._indexer = Optional[FileIndexer]()
+        self.indexing = False
+        self.truncated = False
 
     def open(mut self, var root: String):
         self.root = root^
@@ -114,29 +126,84 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
-        # Load candidate set from disk. Paths come back absolute; strip the
-        # root prefix so the picker shows the project-relative form.
         self.entries = List[String]()
         self.entries_abs = List[String]()
-        var paths = walk_project_files(self.root, include_ignored_files=True)
-        var rb = self.root.as_bytes()
-        for i in range(len(paths)):
-            var fb = paths[i].as_bytes()
-            if len(fb) > len(rb) + 1:
-                var matches_root = True
-                for k in range(len(rb)):
-                    if fb[k] != rb[k]:
-                        matches_root = False
-                        break
-                if matches_root and fb[len(rb)] == 0x2F:
-                    self.entries.append(String(StringSlice(
-                        unsafe_from_utf8=fb[len(rb) + 1:],
-                    )))
-                    self.entries_abs.append(paths[i])
-                    continue
-            self.entries.append(paths[i])
-            self.entries_abs.append(paths[i])
+        self.truncated = False
+        # Async path: ``git ls-files`` runs in a child process and its
+        # output is drained from ``tick()`` each frame. The dialog opens
+        # *immediately* showing an empty list + an "<indexing…>" status;
+        # entries fill in as git produces them. Hits ``QUICK_OPEN_FILE_CAP``
+        # → child gets SIGTERM, ``truncated`` flips on, list freezes at
+        # the cap so the user can still pick from what loaded.
+        var idx = FileIndexer.start(self.root)
+        if idx:
+            self._indexer = idx^
+            self.indexing = True
+        else:
+            # Non-git project (or git unavailable): fall back to the
+            # synchronous walk. Bounded by ``QUICK_OPEN_FILE_CAP`` so a
+            # malformed huge non-git tree still doesn't hang us forever.
+            self._indexer = Optional[FileIndexer]()
+            self.indexing = False
+            var paths = walk_project_files(self.root, include_ignored_files=True)
+            for i in range(len(paths)):
+                if len(self.entries) >= QUICK_OPEN_FILE_CAP:
+                    self.truncated = True
+                    break
+                self._append_path(paths[i])
         self._refilter()
+
+    fn _append_path(mut self, full: String):
+        """Append one absolute path to the entry list, also computing
+        the project-relative display form. Centralized so both the sync
+        and async paths produce identical entries."""
+        var rb = self.root.as_bytes()
+        var fb = full.as_bytes()
+        if len(fb) > len(rb) + 1:
+            var matches_root = True
+            for k in range(len(rb)):
+                if fb[k] != rb[k]:
+                    matches_root = False
+                    break
+            if matches_root and fb[len(rb)] == 0x2F:
+                self.entries.append(String(StringSlice(
+                    unsafe_from_utf8=fb[len(rb) + 1:],
+                )))
+                self.entries_abs.append(full)
+                return
+        self.entries.append(full)
+        self.entries_abs.append(full)
+
+    fn tick(mut self):
+        """Drain anything the async indexer has produced since the last
+        frame. Cheap when the indexer is done or the picker isn't open;
+        called every frame by ``Desktop.paint``.
+
+        After appending new entries we re-run the filter so the visible
+        list grows in step with the load. The re-filter is the dominant
+        cost; on a project where we end up with 100 k entries it amounts
+        to one extra substring-walk per frame, comparable to typing a
+        character into the query field.
+        """
+        if not self.active:
+            return
+        if not self._indexer:
+            return
+        var new_paths = self._indexer.value().poll(self.root)
+        if len(new_paths) > 0:
+            for i in range(len(new_paths)):
+                if len(self.entries) >= QUICK_OPEN_FILE_CAP:
+                    break
+                self._append_path(new_paths[i])
+            self._refilter()
+        if not self._indexer.value().alive:
+            # Indexer finished. Pick up its ``truncated`` flag and drop
+            # the handle so future ticks short-circuit on the ``not
+            # self._indexer`` check above.
+            self.truncated = self._indexer.value().truncated
+            self._indexer = Optional[FileIndexer]()
+            self.indexing = False
+            self._refilter()
 
     def open_recent(
         mut self, var root: String, var entries: List[String],
@@ -181,6 +248,15 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
+        # Tear down the indexer if it's still running — SIGTERM the
+        # child so it doesn't keep enumerating after the user dismissed
+        # the picker. ``_terminate`` is best-effort; the shim's atexit
+        # reaper catches anything still alive when the process exits.
+        if self._indexer:
+            self._indexer.value()._terminate()
+            self._indexer = Optional[FileIndexer]()
+        self.indexing = False
+        self.truncated = False
 
     # --- filtering --------------------------------------------------------
 
@@ -228,7 +304,18 @@ struct QuickOpen(Movable):
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
         painter.draw_box(canvas, rect, bg, False)
-        paint_window_title(canvas, rect, self.title, bg, bg)
+        # Dynamic title — base label + a parenthetical status while the
+        # async indexer is still running, or a one-shot "truncated"
+        # marker after we hit ``QUICK_OPEN_FILE_CAP`` so the user knows
+        # the visible list isn't the whole project.
+        var painted_title = self.title
+        if self.indexing:
+            painted_title = self.title + String("(indexing… ") \
+                + String(len(self.entries)) + String(") ")
+        elif self.truncated:
+            painted_title = self.title + String("(truncated at ") \
+                + String(QUICK_OPEN_FILE_CAP) + String(" files) ")
+        paint_window_title(canvas, rect, painted_title, bg, bg)
         # Standard ``[■]`` close button at the top-LEFT — equivalent to
         # ESC / cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.

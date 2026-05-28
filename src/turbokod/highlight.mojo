@@ -152,6 +152,8 @@ def _bundled_grammar_path_for_language(lang: String) -> String:
         return String("src/turbokod/grammars/diff.tmLanguage.json")
     if lang == String("markdown"):
         return String("src/turbokod/grammars/markdown.tmLanguage.json")
+    if lang == String("rst"):
+        return String("src/turbokod/grammars/rst.tmLanguage.json")
     return String("")
 
 
@@ -212,6 +214,8 @@ def _grammar_path_for_ext(ext: String) -> String:
         return String("src/turbokod/grammars/css.tmLanguage.json")
     if ext == String("diff") or ext == String("patch"):
         return String("src/turbokod/grammars/diff.tmLanguage.json")
+    if ext == String("rst") or ext == String("rest"):
+        return String("src/turbokod/grammars/rst.tmLanguage.json")
     # Markdown — the vscode grammar is dominated by ``while`` rules
     # (block-context tracking) and external-grammar embedding (code
     # fences). Without those, leaving it on the generic fallback

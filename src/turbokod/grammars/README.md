@@ -22,6 +22,7 @@ first.
 | `javascript.tmLanguage.json` | `microsoft/vscode/extensions/javascript`                            | MIT                    |
 | `json.tmLanguage.json`  | `microsoft/vscode-JSON.tmLanguage`                                       | MIT                    |
 | `markdown.tmLanguage.json` | `microsoft/vscode/extensions/markdown-basics`                         | MIT                    |
+| `rst.tmLanguage.json`   | hand-rolled (see `information_for_contributors` field)                   | MIT (this project)     |
 | `ruby.tmLanguage.json`  | `microsoft/vscode/extensions/ruby`                                       | MIT                    |
 | `rust.tmLanguage.json`  | `dustypomerleau/rust-syntax` (via `microsoft/vscode/extensions/rust`)    | MIT                    |
 | `shell.tmLanguage.json` | `microsoft/vscode/extensions/shellscript`                                | MIT                    |

@@ -5403,6 +5403,43 @@ def test_textmate_rust_grammar_paints_keywords_and_strings() raises:
     assert_true(saw_number)
 
 
+def test_highlight_rst_grammar_paints_common_constructs() raises:
+    """Smoke test for the bundled rST TextMate grammar. Asserts
+    presence of the four attr kinds the grammar exposes through scope
+    mapping: section adornment (keyword), directive name (ident),
+    inline literal (string), and comment line (comment). Span offsets
+    aren't asserted — they'd churn with grammar tweaks."""
+    var lines = _hl_lines(
+        String("Section Title"),
+        String("============="),
+        String(""),
+        String(".. note:: a directive argument"),
+        String(""),
+        String(".. a plain rST comment"),
+        String(""),
+        String("This is ``inline literal`` text."),
+    )
+    var hls = highlight_for_extension(String("rst"), lines)
+    var saw_heading = False
+    var saw_directive_ident = False
+    var saw_literal = False
+    var saw_comment = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 1 and h.attr == highlight_keyword_attr():
+            saw_heading = True
+        if h.row == 3 and h.attr == highlight_ident_attr():
+            saw_directive_ident = True
+        if h.row == 5 and h.attr == highlight_comment_attr():
+            saw_comment = True
+        if h.row == 7 and h.attr == highlight_string_attr():
+            saw_literal = True
+    assert_true(saw_heading)
+    assert_true(saw_directive_ident)
+    assert_true(saw_comment)
+    assert_true(saw_literal)
+
+
 def test_textmate_brackets_paint_as_operators() raises:
     """``()`` / ``[]`` / ``{}`` must be painted with the operator attr
     in TextMate-tokenized files. The vendored Python grammar doesn't
@@ -15485,6 +15522,7 @@ def _run_chunk_02() raises:
     test_onig_search_at_offset()
     test_onig_invalid_pattern_raises()
     test_textmate_rust_grammar_paints_keywords_and_strings()
+    test_highlight_rst_grammar_paints_common_constructs()
     test_textmate_brackets_paint_as_operators()
     test_textmate_html_embeds_css_inside_style_block()
     test_textmate_capture_patterns_run_inside_group()

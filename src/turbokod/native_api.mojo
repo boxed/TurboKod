@@ -393,3 +393,102 @@ fn tk_desktop_has_project(h: Int) -> Int32:
     if h == 0:
         return Int32(0)
     return Int32(1) if _desk(h)[].project else Int32(0)
+
+
+@export
+fn tk_desktop_set_host_owns_menu(h: Int, on: Int):
+    """Tell the Desktop a host frontend owns the menu surface.
+
+    When ``on`` is non-zero, Desktop stops painting the in-grid menu bar
+    and stops routing top-row mouse / Alt-letter mnemonic / Esc-prefix
+    key events to it. The host is expected to mirror ``menu_bar`` into a
+    native menu (via ``tk_desktop_menu_snapshot``) and dispatch picks
+    via ``tk_desktop_menu_invoke``. Idempotent; call once after
+    ``tk_desktop_new``.
+    """
+    if h == 0:
+        return
+    _desk(h)[].host_owns_menu = on != 0
+
+
+fn _b(v: Bool) -> String:
+    return String("1") if v else String("0")
+
+
+@export
+fn tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
+    """Serialize the current ``menu_bar`` into a flat TSV-shaped buffer.
+
+    The host re-reads this every tick and rebuilds its native menu when
+    the content changes (the cheap detection is a hash over the buffer).
+    Format is one record per line, fields TAB-separated, all ASCII-safe:
+
+      ``M\\t<label>\\t<visible>\\t<is_system>\\t<right_aligned>\\n``
+      ``I\\t<label>\\t<action>\\t<is_separator>\\t<checkable>\\t<checked>\\t<shortcut>\\n``
+
+    Booleans render as ``0``/``1``; missing strings render as empty
+    fields. Items belong to the most-recently-emitted M record. Returns
+    the number of bytes written; if it would exceed ``cap`` the buffer
+    is truncated to ``cap`` and the host should grow its allocation
+    and retry.
+    """
+    if h == 0 or out_ptr == 0 or cap <= 0:
+        return 0
+    ref bar = _desk(h)[].menu_bar
+    var TAB = String("\t")
+    var NL = String("\n")
+    var text = String("")
+    # Emit visible menus in painted left-to-right order — same rank-sorted
+    # sequence the terminal frontend's MenuBar uses (system first, then
+    # rank-ordered left-aligned, then right-aligned at the end). The host
+    # appends them to NSMenu in this order, which puts e.g. Window second-
+    # to-last (rank 90) and the project menu rightmost (right_aligned).
+    var order = bar._display_order_indices()
+    for k in range(len(order)):
+        var mi = order[k]
+        var m = bar.menus[mi].copy()
+        text = text + String("M") + TAB + m.label + TAB \
+             + _b(m.visible) + TAB + _b(m.is_system) + TAB \
+             + _b(m.right_aligned) + NL
+        for ii in range(len(m.items)):
+            var it = m.items[ii]
+            text = text + String("I") + TAB + it.label + TAB + it.action + TAB \
+                 + _b(it.is_separator) + TAB + _b(it.checkable) + TAB \
+                 + _b(it.checked) + TAB + it.shortcut + NL
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    if n > cap:
+        n = cap
+    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[i] = bytes[i]
+    return n
+
+
+@export
+fn tk_desktop_menu_invoke(
+    h: Int, action_ptr: Int, action_len: Int, cols: Int, rows: Int,
+) -> Int32:
+    """Run the menu action identified by its action string.
+
+    Mirrors what ``MenuBar.handle_event`` would have produced when the
+    user clicked the item in the in-grid menu: routes through
+    ``Desktop.dispatch_action`` and returns the host action code that
+    ``handle_event``'s Swift caller already understands (see
+    ``_action_code``). 0 means the action ran entirely inside the
+    Desktop (no host follow-up needed).
+    """
+    if h == 0:
+        return ACT_NONE
+    var action = _string_from(action_ptr, action_len)
+    if len(action.as_bytes()) == 0:
+        return ACT_NONE
+    var result: Optional[String]
+    try:
+        result = _desk(h)[].dispatch_action(action, Rect(0, 0, cols, rows))
+    except:
+        result = Optional[String]()
+    # ``dispatch_action`` returns the *unhandled* action string back to
+    # the host (so it can route framework-level actions like Quit / Open
+    # via its own UI). Map that the same way handle_event does.
+    return _action_code(result)

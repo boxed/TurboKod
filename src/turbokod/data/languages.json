@@ -2185,6 +2185,22 @@
     "comment_token": "//"
   },
   {
+    "language_id": "rst",
+    "file_types": [
+      "rst",
+      "rest"
+    ],
+    "candidates": [
+      {
+        "argv": [
+          "esbonio"
+        ]
+      }
+    ],
+    "install_hint": "pip install esbonio",
+    "comment_token": ".."
+  },
+  {
     "language_id": "ruby",
     "file_types": [
       "rb",

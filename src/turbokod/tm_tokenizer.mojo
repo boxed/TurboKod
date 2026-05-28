@@ -795,6 +795,24 @@ def _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_keyword_attr())
     if starts_with(scope, String("meta.attribute")):
         return Optional[Attr](highlight_decorator_attr())
+    # Prose markup (rST / Markdown): pick the closest palette color
+    # for each kind. ``markup.deleted/inserted/changed`` below are
+    # the diff-specific subset and must keep their distinct mappings.
+    if starts_with(scope, String("markup.heading")):
+        return Optional[Attr](highlight_keyword_attr())
+    if starts_with(scope, String("markup.bold")):
+        return Optional[Attr](highlight_keyword_attr())
+    if starts_with(scope, String("markup.italic")):
+        return Optional[Attr](highlight_ident_attr())
+    if starts_with(scope, String("markup.inline.raw")) \
+            or starts_with(scope, String("markup.raw")):
+        return Optional[Attr](highlight_string_attr())
+    if starts_with(scope, String("markup.underline")):
+        return Optional[Attr](highlight_ident_attr())
+    if starts_with(scope, String("markup.list")):
+        return Optional[Attr](highlight_operator_attr())
+    if starts_with(scope, String("markup.quote")):
+        return Optional[Attr](highlight_comment_attr())
     # Diff scopes: render like ``git diff`` does in a color terminal —
     # deleted lines red, inserted lines green, hunk-range hints cyan,
     # file headers white-on-blue (the keyword color, which is the most
