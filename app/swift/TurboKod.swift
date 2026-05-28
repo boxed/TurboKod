@@ -321,8 +321,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.views.first?.capturePNG(to: cap)
                 print("captured to \(cap)")
                 // TK_QUIT_VIA=close simulates the red-button close on the last
-                // window (triggers applicationShouldTerminateAfterLastWindowClosed
-                // → cascade), exercising the session-save-before-remove path.
+                // window (exercises the session-save-before-remove path).
                 // Default: NSApp.terminate (the Cmd+Q path).
                 if ProcessInfo.processInfo.environment["TK_QUIT_VIA"] == "close" {
                     self.windows.first?.performClose(nil)
@@ -396,7 +395,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func handleAction(_ code: Int32, view: CellView) {
         switch code {
-        case 1: closeWindow(view)            // APP_QUIT_ACTION (Ctrl+Q / in-grid Quit)
+        case 1: NSApp.terminate(nil)         // APP_QUIT_ACTION (Ctrl+Q / in-grid Quit)
         case 2, 3: openFilePanel(view)       // Open… / Quick open…
         case 4: openProjectPanel(view)       // Open project…
         case 5: _ = newWindow()              // in-grid File ▸ New window
@@ -487,42 +486,56 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func closeWindow(_ view: CellView) {
         if let idx = views.firstIndex(where: { $0 === view }) {
-            windows[idx].close()   // triggers windowWillClose → cleanup
+            // performClose routes through `windowShouldClose` (our safe path).
+            // NSWindow.close() bypasses it and tears down via `windowWillClose`,
+            // which lands in a Sequoia AppKit regression (see windowShouldClose).
+            windows[idx].performClose(nil)
         }
     }
 
-    func windowWillClose(_ note: Notification) {
-        guard let win = note.object as? NSWindow,
-              let idx = windows.firstIndex(of: win) else { return }
-        // Closing the *last* window auto-terminates the app (see
-        // applicationShouldTerminateAfterLastWindowClosed). If we removed
-        // this window first and *then* called saveSession, the file would
-        // be written empty — wiping the saved session. Snapshot now, with
-        // this window still in the lists, and set isTerminating so the
-        // follow-up applicationShouldTerminate doesn't re-save (empty).
-        let isLast = views.count == 1
-        if isLast && !isTerminating {
-            isTerminating = true
-            saveSession()
-        }
+    // macOS Sequoia (Darwin 24.x) AppKit regression: the standard close
+    // cascade — `performClose` (or `close`) → `windowWillClose` → AppKit
+    // window teardown — segfaults inside `objc_autoreleasePoolPop` on the
+    // next runloop turn (`AutoreleasePoolPage::releaseUntil` releasing an
+    // object at ~0x20). Reproducible in a stub Swift app with a single
+    // empty NSWindow and no delegate or custom view — i.e. the bug is in
+    // AppKit's own teardown, not user code.
+    //
+    // Workaround: intercept at `windowShouldClose` (which runs *before*
+    // AppKit starts the broken cascade), do all our cleanup + `orderOut`,
+    // and return `false` so AppKit skips the teardown entirely. The window
+    // object is technically leaked (still owned by AppKit's NSApp.windows),
+    // but it's hidden and our handle/Desktop are freed — a small price for
+    // not segfaulting. `windowWillClose` is intentionally not implemented;
+    // returning false here means it never fires.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let idx = windows.firstIndex(of: sender) else { return false }
         let v = views[idx]
         let h = v.handle
         v.handle = 0
         windows.remove(at: idx)
         views.remove(at: idx)
         tk_desktop_free(h)
-        // During quit (Cmd+Q cascade), windows close one by one; skip saving
-        // so they don't rewrite the session with an emptying list. A user
-        // closing a single non-last window *does* update it.
+        // Save the session each time a window closes so the on-disk state
+        // matches what's open. `isTerminating` (set by applicationShould
+        // Terminate during Cmd+Q) suppresses these mid-quit saves so they
+        // don't rewrite the file as windows drop one-by-one.
         if !isTerminating { saveSession() }
+        sender.orderOut(nil)
+        return false
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+    // App stays alive with no windows open (Finder/Safari-style). The user
+    // re-opens via the menu (File ▸ New Window / Open Project…). Quitting
+    // requires explicit Cmd+Q (NSApp.terminate).
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ s: NSApplication) -> NSApplication.TerminateReply {
-        // Snapshot the open windows + projects before the close cascade. If
-        // windowWillClose-on-last-window already saved, skip — saving again
-        // here would happen *after* its remove and clobber the file empty.
+        // Snapshot the open windows + projects before exit so the next launch
+        // restores them. `isTerminating` is checked by windowShouldClose to
+        // suppress per-window saves during a Cmd+Q cascade (windows close one
+        // by one; without the guard, each would rewrite the file with an
+        // emptying list and the final state would be `no windows`).
         if !isTerminating {
             saveSession()
             isTerminating = true
