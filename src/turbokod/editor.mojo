@@ -4827,6 +4827,30 @@ struct Editor(Copyable, Movable):
                     match_needle_n = cand_n
                     match_sel_row = sel_norm[0]
                     match_sel_byte = sel_norm[1]
+        # Index syntax highlights by visible buffer row before the
+        # overlay loop. ``self.highlights`` spans the *whole* buffer
+        # (30k+ entries on a large file), so the old "scan the full list
+        # for every screen row" pattern was O(rows x all_highlights) and
+        # was, by profiling, ~95% of all paint time. Bucketing once is
+        # O(all_highlights + applied): each screen row then touches only
+        # the handful of highlights that actually fall on its row.
+        var hl_buckets = List[List[Int]]()
+        var vis_lo = 0
+        if len(layout) > 0:
+            vis_lo = layout[0].line_idx
+            var vis_hi = layout[0].line_idx
+            for li in range(len(layout)):
+                var r = layout[li].line_idx
+                if r < vis_lo:
+                    vis_lo = r
+                if r > vis_hi:
+                    vis_hi = r
+            for _ in range(vis_hi - vis_lo + 1):
+                hl_buckets.append(List[Int]())
+            for h in range(len(self.highlights)):
+                var r = self.highlights[h].row
+                if r >= vis_lo and r <= vis_hi:
+                    hl_buckets[r - vis_lo].append(h)
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row].line_idx
             var start_byte = layout[screen_row].byte_start
@@ -4847,10 +4871,9 @@ struct Editor(Copyable, Movable):
             # Syntax-highlight overlay: change the attr on cells covered by
             # any highlight that targets this buffer row. Glyphs come from
             # ``paint_text_segments`` above; we only adjust attributes here.
-            for h in range(len(self.highlights)):
-                var hl = self.highlights[h]
-                if hl.row != buf_row:
-                    continue
+            ref row_bucket = hl_buckets[buf_row - vis_lo]
+            for hb in range(len(row_bucket)):
+                var hl = self.highlights[row_bucket[hb]]
                 var hl_byte_start = hl.col_start - start_byte
                 var hl_byte_end = hl.col_end - start_byte
                 if hl_byte_start < 0:
