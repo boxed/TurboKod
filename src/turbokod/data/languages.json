@@ -2193,11 +2193,12 @@
     "candidates": [
       {
         "argv": [
-          "esbonio"
+          "esbonio",
+          "server"
         ]
       }
     ],
-    "install_hint": "pip install esbonio",
+    "install_hint": "pipx install esbonio  # pip install will shim through pyenv and break on projects with a missing .python-version",
     "comment_token": ".."
   },
   {

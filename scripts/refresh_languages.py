@@ -65,7 +65,7 @@ INSTALL_HINTS: dict[str, str] = {
     "php":        "npm install -g intelephense",
     "java":       "see https://github.com/eclipse-jdtls/eclipse.jdt.ls",
     "csharp":     "dotnet tool install -g csharp-ls",
-    "rst":        "pip install esbonio",
+    "rst":        "pipx install esbonio  # pip install will shim through pyenv and break on projects with a missing .python-version",
 }
 
 # Per-language preferred-server overrides. After Helix's order is
@@ -86,7 +86,7 @@ EXTRA_LANGUAGES: list[dict] = [
     {
         "language_id": "rst",
         "file_types": ["rst", "rest"],
-        "candidates": [{"argv": ["esbonio"]}],
+        "candidates": [{"argv": ["esbonio", "server"]}],
         "comment_token": "..",
     },
 ]

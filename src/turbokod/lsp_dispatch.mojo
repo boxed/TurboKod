@@ -28,7 +28,7 @@ from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
 )
-from .file_io import basename, stat_file
+from .file_io import basename, join_path, parent_path, stat_file
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
     LspProcess, json_null_v, lsp_initialize_params,
@@ -79,6 +79,15 @@ comptime _STATE_NOT_STARTED  = UInt8(0)
 comptime _STATE_INITIALIZING = UInt8(1)
 comptime _STATE_READY        = UInt8(2)
 comptime _STATE_FAILED       = UInt8(3)
+
+# How long to keep showing the "analyzing edits…" spinner waiting for
+# a ``publishDiagnostics`` that may never come. See
+# ``diagnostics_inflight_ms_for`` for the rationale — servers that
+# don't push diagnostics for the current buffer would otherwise spin
+# the indicator forever. 8 seconds covers a slow first-time
+# rust-analyzer / pyright cold start with a fresh cache, but stops
+# short of "user wonders if it's broken." Cheap to bump if needed.
+comptime _DIAG_INFLIGHT_TIMEOUT_MS = 8000
 
 
 @fieldwise_init
@@ -391,8 +400,14 @@ struct LspManager(Copyable, Movable):
     var state: UInt8
     var failure_reason: String
 
-    var _init_id: Int
-    var _inflight_def_id: Int
+    # Outstanding request ids — strings so they round-trip verbatim
+    # whether they ride as JSON ints or JSON strings on the wire (we
+    # send strings; some servers reply with strings, our test stubs
+    # use ints — the comparison code is identical either way because
+    # we always canonicalize ids to strings before comparing).
+    # Empty string is the "no request in flight" sentinel.
+    var _init_id: String
+    var _inflight_def_id: String
     var _inflight_word: String       # surfaced via status_summary() while pending
     var _last_empty: Bool            # latched when a response had no location
     # Word from a definition request whose response *just* arrived empty.
@@ -416,18 +431,18 @@ struct LspManager(Copyable, Movable):
     # Parked as ``DefinitionResolved`` rows (same shape, different list).
     # ``_has_resolved_references`` distinguishes "no response yet" from
     # "empty list".
-    var _inflight_ref_id: Int
+    var _inflight_ref_id: String
     var _ref_word: String
     var _resolved_references: List[DefinitionResolved]
     var _has_resolved_references: Bool
-    var _inflight_symbol_id: Int
+    var _inflight_symbol_id: String
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and consume_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
     var _symbols_empty: Bool                 # latched when the last response was empty
     # ``workspace/symbol`` — parallel to the document-symbol fields but
     # scoped to a workspace-wide query rather than a single document.
     # Used by the Find Symbol picker to disambiguate same-named symbols.
-    var _inflight_ws_symbol_id: Int
+    var _inflight_ws_symbol_id: String
     var _resolved_ws_symbols: List[WorkspaceSymbolItem]
     var _has_resolved_ws_symbols: Bool
     # Pending ``textDocument/completion`` request state. ``_completion_path``
@@ -438,7 +453,7 @@ struct LspManager(Copyable, Movable):
     # whether the request was a user-invoked Ctrl+Space (vs. the as-you-
     # type auto-trigger) so the host can decide whether an empty
     # response should surface a ``<no completion found>`` message.
-    var _inflight_completion_id: Int
+    var _inflight_completion_id: String
     var _completion_path: String
     var _completion_row: Int
     var _completion_col: Int
@@ -451,19 +466,19 @@ struct LspManager(Copyable, Movable):
     # response when the cursor has moved off the symbol. ``_resolved_hover``
     # is the rendered hover text (already joined into a single string) and
     # ``_has_resolved_hover`` is the parked-and-waiting-for-consumption flag.
-    var _inflight_hover_id: Int
+    var _inflight_hover_id: String
     var _hover_path: String
     var _hover_row: Int
     var _hover_col: Int
     var _resolved_hover: String
     var _has_resolved_hover: Bool
     # Pending ``textDocument/codeAction`` request state. Pattern matches
-    # the other request kinds: ``_inflight_code_action_id`` is 0 when no
+    # the other request kinds: ``_inflight_code_action_id`` is "" when no
     # request is outstanding; ``_resolved_code_actions`` parks the parsed
     # action list until ``take_code_actions`` consumes it. ``_code_action_path``
     # is echoed via ``pending_code_action_path`` so the host can tell when
     # the response is for a stale diagnostic menu (the user moved on).
-    var _inflight_code_action_id: Int
+    var _inflight_code_action_id: String
     var _code_action_path: String
     var _resolved_code_actions: List[CodeAction]
     var _has_resolved_code_actions: Bool
@@ -510,8 +525,8 @@ struct LspManager(Copyable, Movable):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
-        self._init_id = 0
-        self._inflight_def_id = 0
+        self._init_id = String("")
+        self._inflight_def_id = String("")
         self._inflight_word = String("")
         self._last_empty = False
         self._empty_word = String("")
@@ -519,31 +534,31 @@ struct LspManager(Copyable, Movable):
         self._def_origin_line = 0
         self._def_origin_char = 0
         self._def_origin_word = String("")
-        self._inflight_ref_id = 0
+        self._inflight_ref_id = String("")
         self._ref_word = String("")
         self._resolved_references = List[DefinitionResolved]()
         self._has_resolved_references = False
-        self._inflight_symbol_id = 0
+        self._inflight_symbol_id = String("")
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
-        self._inflight_ws_symbol_id = 0
+        self._inflight_ws_symbol_id = String("")
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         self._has_resolved_ws_symbols = False
-        self._inflight_completion_id = 0
+        self._inflight_completion_id = String("")
         self._completion_path = String("")
         self._completion_row = 0
         self._completion_col = 0
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
-        self._inflight_hover_id = 0
+        self._inflight_hover_id = String("")
         self._hover_path = String("")
         self._hover_row = 0
         self._hover_col = 0
         self._resolved_hover = String("")
         self._has_resolved_hover = False
-        self._inflight_code_action_id = 0
+        self._inflight_code_action_id = String("")
         self._code_action_path = String("")
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
@@ -571,8 +586,8 @@ struct LspManager(Copyable, Movable):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
-        self._init_id = 0
-        self._inflight_def_id = 0
+        self._init_id = String("")
+        self._inflight_def_id = String("")
         self._inflight_word = String("")
         self._last_empty = False
         self._empty_word = String("")
@@ -580,31 +595,31 @@ struct LspManager(Copyable, Movable):
         self._def_origin_line = 0
         self._def_origin_char = 0
         self._def_origin_word = String("")
-        self._inflight_ref_id = 0
+        self._inflight_ref_id = String("")
         self._ref_word = String("")
         self._resolved_references = List[DefinitionResolved]()
         self._has_resolved_references = False
-        self._inflight_symbol_id = 0
+        self._inflight_symbol_id = String("")
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
         self._symbols_empty = False
-        self._inflight_ws_symbol_id = 0
+        self._inflight_ws_symbol_id = String("")
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         self._has_resolved_ws_symbols = False
-        self._inflight_completion_id = 0
+        self._inflight_completion_id = String("")
         self._completion_path = String("")
         self._completion_row = 0
         self._completion_col = 0
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
-        self._inflight_hover_id = 0
+        self._inflight_hover_id = String("")
         self._hover_path = String("")
         self._hover_row = 0
         self._hover_col = 0
         self._resolved_hover = String("")
         self._has_resolved_hover = False
-        self._inflight_code_action_id = 0
+        self._inflight_code_action_id = String("")
         self._code_action_path = String("")
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
@@ -663,7 +678,7 @@ struct LspManager(Copyable, Movable):
         self._last_empty = False
 
     def inflight_symbols(self) -> Bool:
-        return self._inflight_symbol_id != 0
+        return len(self._inflight_symbol_id.as_bytes()) > 0
 
     def symbols_empty(self) -> Bool:
         return self._symbols_empty
@@ -914,7 +929,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/definition"), params,
             )
         except:
-            self._inflight_def_id = 0
+            self._inflight_def_id = String("")
             return False
         self._def_origin_path = path
         self._def_origin_line = line
@@ -976,7 +991,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/references"), params,
             )
         except:
-            self._inflight_ref_id = 0
+            self._inflight_ref_id = String("")
             return False
         self._ref_word = word^
         self._has_resolved_references = False
@@ -1024,7 +1039,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/documentSymbol"), params,
             )
         except:
-            self._inflight_symbol_id = 0
+            self._inflight_symbol_id = String("")
             return False
         self._has_resolved_symbols = False
         self._resolved_symbols = List[SymbolItem]()
@@ -1069,14 +1084,14 @@ struct LspManager(Copyable, Movable):
                 String("workspace/symbol"), params,
             )
         except:
-            self._inflight_ws_symbol_id = 0
+            self._inflight_ws_symbol_id = String("")
             return False
         self._has_resolved_ws_symbols = False
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         return True
 
     def inflight_workspace_symbols(self) -> Bool:
-        return self._inflight_ws_symbol_id != 0
+        return len(self._inflight_ws_symbol_id.as_bytes()) > 0
 
     def has_pending_workspace_symbols(self) -> Bool:
         """True iff a parsed workspace-symbol response is parked."""
@@ -1146,10 +1161,10 @@ struct LspManager(Copyable, Movable):
         # response), so it costs us nothing on the read side. We
         # already shadow the old id below, so the response (cancelled
         # or not) is dropped on arrival.
-        if self._inflight_completion_id != 0:
+        if len(self._inflight_completion_id.as_bytes()) > 0:
             var cancel_params = json_object()
             cancel_params.put(
-                String("id"), json_int(self._inflight_completion_id),
+                String("id"), json_str(self._inflight_completion_id),
             )
             try:
                 self.client.send_notification(
@@ -1162,7 +1177,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/completion"), params,
             )
         except:
-            self._inflight_completion_id = 0
+            self._inflight_completion_id = String("")
             return False
         self._completion_path = path
         self._completion_row = line
@@ -1176,24 +1191,24 @@ struct LspManager(Copyable, Movable):
         """Cancel any in-flight completion request.
 
         Sends ``$/cancelRequest`` so the server can drop work it has
-        already started, and zeroes ``_inflight_completion_id`` so a
+        already started, and clears ``_inflight_completion_id`` so a
         late response — if one slips in before the cancel propagates —
         is ignored by the response handler instead of being parked
         for the host. Also clears any parked-but-unconsumed completion
         list (the user dismissed the popup; that list is irrelevant).
         No-op when nothing is in flight."""
-        if self._inflight_completion_id == 0 \
+        if len(self._inflight_completion_id.as_bytes()) == 0 \
                 and not self._has_resolved_completions:
             return
-        if self._inflight_completion_id != 0:
+        if len(self._inflight_completion_id.as_bytes()) > 0:
             _lsp_debug_log(
                 String("→ cancel_completion id=")
-                + String(self._inflight_completion_id)
+                + self._inflight_completion_id
                 + String(" lang=") + self._language_id,
             )
             var cancel_params = json_object()
             cancel_params.put(
-                String("id"), json_int(self._inflight_completion_id),
+                String("id"), json_str(self._inflight_completion_id),
             )
             try:
                 self.client.send_notification(
@@ -1201,7 +1216,7 @@ struct LspManager(Copyable, Movable):
                 )
             except:
                 pass
-            self._inflight_completion_id = 0
+            self._inflight_completion_id = String("")
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
 
@@ -1265,10 +1280,10 @@ struct LspManager(Copyable, Movable):
         params.put(String("position"), pos)
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
-        if self._inflight_hover_id != 0:
+        if len(self._inflight_hover_id.as_bytes()) > 0:
             var cancel_params = json_object()
             cancel_params.put(
-                String("id"), json_int(self._inflight_hover_id),
+                String("id"), json_str(self._inflight_hover_id),
             )
             try:
                 self.client.send_notification(
@@ -1281,7 +1296,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/hover"), params,
             )
         except:
-            self._inflight_hover_id = 0
+            self._inflight_hover_id = String("")
             return False
         self._hover_path = path
         self._hover_row = line
@@ -1383,7 +1398,7 @@ struct LspManager(Copyable, Movable):
                 String("textDocument/codeAction"), params,
             )
         except:
-            self._inflight_code_action_id = 0
+            self._inflight_code_action_id = String("")
             return False
         self._code_action_path = path
         self._resolved_code_actions = List[CodeAction]()
@@ -1509,7 +1524,9 @@ struct LspManager(Copyable, Movable):
                 continue
             if not msg.id:
                 continue
-            var id = msg.id.value()
+            var id = _id_to_string(msg.id.value())
+            if len(id.as_bytes()) == 0:
+                continue
             if self.state == _STATE_INITIALIZING and id == self._init_id:
                 self._on_initialize_response(msg)
                 continue
@@ -1523,7 +1540,7 @@ struct LspManager(Copyable, Movable):
                 if msg.error:
                     error_dump = encode_json(msg.error.value())
                 _lsp_debug_log(
-                    String("← definition response id=") + String(id)
+                    String("← definition response id=") + id
                     + String(" word=") + self._inflight_word
                     + String(" result=") + result_dump
                     + String(" error=") + error_dump,
@@ -1542,7 +1559,7 @@ struct LspManager(Copyable, Movable):
                     # same tick. ``_inflight_word`` is about to be
                     # cleared below, so capture it first.
                     self._empty_word = self._inflight_word
-                self._inflight_def_id = 0
+                self._inflight_def_id = String("")
                 self._inflight_word = String("")
                 continue
             if id == self._inflight_ref_id:
@@ -1550,13 +1567,13 @@ struct LspManager(Copyable, Movable):
                 if msg.result:
                     refs = _parse_references_result(msg.result.value())
                 _lsp_debug_log(
-                    String("← references response id=") + String(id)
+                    String("← references response id=") + id
                     + String(" lang=") + self._language_id
                     + String(" count=") + String(len(refs)),
                 )
                 self._resolved_references = refs^
                 self._has_resolved_references = True
-                self._inflight_ref_id = 0
+                self._inflight_ref_id = String("")
                 continue
             if id == self._inflight_symbol_id:
                 var items = List[SymbolItem]()
@@ -1565,7 +1582,7 @@ struct LspManager(Copyable, Movable):
                 self._resolved_symbols = items^
                 self._has_resolved_symbols = True
                 self._symbols_empty = (len(self._resolved_symbols) == 0)
-                self._inflight_symbol_id = 0
+                self._inflight_symbol_id = String("")
             if id == self._inflight_ws_symbol_id:
                 var ws_items = List[WorkspaceSymbolItem]()
                 if msg.result:
@@ -1574,46 +1591,101 @@ struct LspManager(Copyable, Movable):
                     )
                 self._resolved_ws_symbols = ws_items^
                 self._has_resolved_ws_symbols = True
-                self._inflight_ws_symbol_id = 0
+                self._inflight_ws_symbol_id = String("")
             if id == self._inflight_completion_id:
                 var comps = List[CompletionItem]()
                 if msg.result:
                     comps = _parse_completion_result(msg.result.value())
                 _lsp_debug_log(
-                    String("← completion response id=") + String(id)
+                    String("← completion response id=") + id
                     + String(" lang=") + self._language_id
                     + String(" count=") + String(len(comps)),
                 )
                 self._resolved_completions = comps^
                 self._has_resolved_completions = True
-                self._inflight_completion_id = 0
+                self._inflight_completion_id = String("")
             if id == self._inflight_hover_id:
                 var hover_text = String("")
                 if msg.result:
                     hover_text = _parse_hover_result(msg.result.value())
                 _lsp_debug_log(
-                    String("← hover response id=") + String(id)
+                    String("← hover response id=") + id
                     + String(" lang=") + self._language_id
                     + String(" len=") + String(len(hover_text.as_bytes())),
                 )
                 self._resolved_hover = hover_text^
                 self._has_resolved_hover = True
-                self._inflight_hover_id = 0
+                self._inflight_hover_id = String("")
             if id == self._inflight_code_action_id:
                 var actions = List[CodeAction]()
                 if msg.result:
                     actions = _parse_code_action_result(msg.result.value())
                 _lsp_debug_log(
-                    String("← codeAction response id=") + String(id)
+                    String("← codeAction response id=") + id
                     + String(" lang=") + self._language_id
                     + String(" count=") + String(len(actions)),
                 )
                 self._resolved_code_actions = actions^
                 self._has_resolved_code_actions = True
-                self._inflight_code_action_id = 0
+                self._inflight_code_action_id = String("")
         return resolved
 
     # --- internals ---------------------------------------------------------
+
+    def _esbonio_config(self) -> Optional[JsonValue]:
+        """Build the ``esbonio`` config object esbonio v2 expects from
+        ``workspace/configuration``. Returns ``None`` when the server
+        isn't esbonio or no Sphinx ``conf.py`` was found — caller
+        responds with ``null`` for that item (esbonio runs no
+        diagnostics module in that case, which is fine).
+
+        Why we *must* do this: esbonio v2 dropped auto-discovery — if
+        we don't point at a ``conf.py``, no Sphinx instance ever
+        starts and the server is silent for every .rst buffer. Schema:
+
+            {"sphinx": {
+                "pythonCommand": ["/path/to/python"],
+                "buildCommand": ["sphinx-build", "-M", "dirhtml", "<src>", "<out>"]
+            }}
+        """
+        if self._language_id != String("rst"):
+            return Optional[JsonValue]()
+        var root = _uri_to_path(self._root_uri)
+        if len(root.as_bytes()) == 0:
+            return Optional[JsonValue]()
+        var src_dir_opt = _find_sphinx_source_dir(root)
+        if not src_dir_opt:
+            return Optional[JsonValue]()
+        var src_dir = src_dir_opt.value()
+        # Python: prefer a project-local venv (most likely to have the
+        # docs' own deps + extensions installed) and fall back to the
+        # interpreter that ships beside the esbonio binary so Sphinx
+        # itself is available even if no venv exists.
+        var python_cmd = _python_for_sphinx(root, self._argv)
+        var sphinx = json_object()
+        var python_arr = json_array()
+        python_arr.append(json_str(python_cmd))
+        sphinx.put(String("pythonCommand"), python_arr^)
+        var build_arr = json_array()
+        build_arr.append(json_str(String("sphinx-build")))
+        build_arr.append(json_str(String("-M")))
+        build_arr.append(json_str(String("dirhtml")))
+        build_arr.append(json_str(src_dir))
+        # Output dir under /tmp so we don't pollute the project tree
+        # with build artefacts. esbonio uses this for diagnostics, not
+        # for actually serving HTML.
+        var out_dir = String("/tmp/turbokod-esbonio-")
+        out_dir = out_dir + basename(src_dir) + String("-build")
+        build_arr.append(json_str(out_dir))
+        sphinx.put(String("buildCommand"), build_arr^)
+        var cfg = json_object()
+        cfg.put(String("sphinx"), sphinx^)
+        _lsp_debug_log(
+            String("esbonio config: src=") + src_dir
+            + String(" python=") + python_cmd
+            + String(" out=") + out_dir,
+        )
+        return Optional[JsonValue](cfg^)
 
     def _absorb_stderr(mut self):
         """Drain whatever's available on the server's stderr pipe and
@@ -1719,27 +1791,50 @@ struct LspManager(Copyable, Movable):
         """
         if not msg.id or not msg.method:
             return
-        var id = msg.id.value()
+        var id = msg.id.value().copy()
+        # ``_id_to_string`` is purely for logging — the response itself
+        # carries the original JsonValue id verbatim so JSON-RPC pairing
+        # works regardless of integer-vs-string typing.
+        var id_label = _id_to_string(id)
         var method = msg.method.value()
         try:
             if method == String("workspace/configuration"):
-                # Reply with an array of nulls — one per requested
-                # item — meaning "no overrides, use defaults". The
-                # array length must match ``params.items`` so the
-                # server can pair entries by index.
-                var n = 0
+                # Reply with one entry per requested ``items[i]``,
+                # matching by section name. Unknown sections become
+                # ``null`` (= "use defaults"). The only section we
+                # actively configure today is ``esbonio``, which needs
+                # an explicit Sphinx project pointer to run anything
+                # — see ``_esbonio_config`` for the discovery flow.
+                var items_arr_opt = Optional[JsonValue]()
                 if msg.params and msg.params.value().is_object():
                     var items = msg.params.value().object_get(
                         String("items"),
                     )
                     if items and items.value().is_array():
-                        n = items.value().array_len()
+                        items_arr_opt = Optional[JsonValue](
+                            items.value().copy(),
+                        )
                 var result = json_array()
-                for _ in range(n):
-                    result.append(json_null_v())
+                var n = 0
+                if items_arr_opt:
+                    var items_arr = items_arr_opt.value().copy()
+                    n = items_arr.array_len()
+                    for i in range(n):
+                        var item = items_arr.array_at(i)
+                        var section = String("")
+                        if item.is_object():
+                            var sec = item.object_get(String("section"))
+                            if sec and sec.value().is_string():
+                                section = sec.value().as_str()
+                        if section == String("esbonio"):
+                            var cfg_opt = self._esbonio_config()
+                            if cfg_opt:
+                                result.append(cfg_opt.value().copy())
+                                continue
+                        result.append(json_null_v())
                 _lsp_debug_log(
                     String("← server request workspace/configuration id=")
-                    + String(id) + String(" items=") + String(n),
+                    + id_label + String(" items=") + String(n),
                 )
                 self.client.send_response(id, result^)
                 return
@@ -1752,7 +1847,7 @@ struct LspManager(Copyable, Movable):
                 # proceed instead of stalling on the probe.
                 _lsp_debug_log(
                     String("← server request ") + method
-                    + String(" id=") + String(id) + String(" (acked)"),
+                    + String(" id=") + id_label + String(" (acked)"),
                 )
                 self.client.send_response(id, json_null_v())
                 return
@@ -1764,7 +1859,7 @@ struct LspManager(Copyable, Movable):
                 resp.put(String("applied"), json_bool(False))
                 _lsp_debug_log(
                     String("← server request workspace/applyEdit id=")
-                    + String(id) + String(" (refused)"),
+                    + id_label + String(" (refused)"),
                 )
                 self.client.send_response(id, resp^)
                 return
@@ -1772,7 +1867,7 @@ struct LspManager(Copyable, Movable):
             # stops waiting.
             _lsp_debug_log(
                 String("← server request ") + method
-                + String(" id=") + String(id)
+                + String(" id=") + id_label
                 + String(" (MethodNotFound)"),
             )
             self.client.send_error(
@@ -1817,20 +1912,37 @@ struct LspManager(Copyable, Movable):
             self._doc_versions[idx] = version
             self._send_did_change(path, version, text^)
 
-    def diagnostics_inflight_ms_for(self, path: String) -> Int:
+    def diagnostics_inflight_ms_for(mut self, path: String) -> Int:
         """Elapsed milliseconds since the most recent didOpen / didChange
         for ``path`` if we're still waiting for the server to reply
         with a matching ``publishDiagnostics``; ``-1`` when no refresh
-        is in flight (server already responded, or never sent for this
-        path). Driven by the status bar's "analyzing edits…" spinner
-        so the user can see when squiggles are stale because the
-        server hasn't caught up yet."""
-        for k in range(len(self._diag_inflight_paths)):
+        is in flight (server already responded, never sent for this
+        path, or we gave up waiting). Driven by the status bar's
+        "analyzing edits…" spinner so the user can see when squiggles
+        are stale because the server hasn't caught up yet.
+
+        Caps the wait at ``_DIAG_INFLIGHT_TIMEOUT_MS``: some servers
+        push diagnostics only for project-scoped files and silently
+        ignore the rest (esbonio doesn't publish for .rst files
+        outside a Sphinx project; pyright with no ``pyproject.toml``
+        sometimes drops diagnostics for ad-hoc files; …). Without
+        a cap the spinner spins forever for those buffers. If real
+        diagnostics arrive later they still process correctly — the
+        cap only affects what the user sees, not internal state.
+        """
+        var k = 0
+        while k < len(self._diag_inflight_paths):
             if self._diag_inflight_paths[k] == path:
                 var elapsed = monotonic_ms() - self._diag_inflight_since_ms[k]
                 if elapsed < 0:
                     return 0
+                if elapsed >= _DIAG_INFLIGHT_TIMEOUT_MS:
+                    _ = self._diag_inflight_paths.pop(k)
+                    _ = self._diag_inflight_versions.pop(k)
+                    _ = self._diag_inflight_since_ms.pop(k)
+                    return -1
                 return elapsed
+            k += 1
         return -1
 
     def _mark_diag_inflight(mut self, path: String, version: Int):
@@ -1920,6 +2032,78 @@ struct LspManager(Copyable, Movable):
 
 
 # --- response parsing ------------------------------------------------------
+
+
+def _find_sphinx_source_dir(root: String) -> Optional[String]:
+    """Locate a Sphinx ``conf.py`` reachable from the workspace root.
+    Returns the directory containing it (the Sphinx *source dir*) or
+    ``None``. Checks the conventional layouts in priority order —
+    cheaper than walking the tree, and the ordering is "more specific
+    first" so e.g. ``docs/source/`` wins over a bare ``docs/`` when
+    both contain a ``conf.py`` (which would itself be weird).
+    """
+    var candidates = List[String]()
+    candidates.append(join_path(root, String("docs/source")))
+    candidates.append(join_path(root, String("doc/source")))
+    candidates.append(join_path(root, String("source")))
+    candidates.append(join_path(root, String("docs")))
+    candidates.append(join_path(root, String("doc")))
+    candidates.append(root)
+    for i in range(len(candidates)):
+        var conf_path = join_path(candidates[i], String("conf.py"))
+        if stat_file(conf_path).ok:
+            return Optional[String](candidates[i])
+    return Optional[String]()
+
+
+def _python_for_sphinx(root: String, server_argv: List[String]) -> String:
+    """Pick a Python interpreter for Sphinx. Project-local venvs win
+    because they're most likely to have the docs' own deps + Sphinx
+    extensions installed; the server's bundled Python is the fallback
+    (esbonio depends on Sphinx, so its interpreter at least has the
+    package available — autodoc on third-party project modules might
+    fail, but the server at least starts).
+    """
+    var venv_candidates = List[String]()
+    venv_candidates.append(join_path(root, String(".venv/bin/python")))
+    venv_candidates.append(join_path(root, String("venv/bin/python")))
+    venv_candidates.append(join_path(root, String(".venv/bin/python3")))
+    venv_candidates.append(join_path(root, String("venv/bin/python3")))
+    for i in range(len(venv_candidates)):
+        if stat_file(venv_candidates[i]).ok:
+            return venv_candidates[i]
+    # Fall back to the Python next to the server binary. e.g. when the
+    # server resolved to ``/Users/x/.pyenv/versions/3.12.6/bin/esbonio``
+    # we return ``/Users/x/.pyenv/versions/3.12.6/bin/python``.
+    if len(server_argv) > 0:
+        var server_bin = server_argv[0]
+        var dir = parent_path(server_bin)
+        var sibling = join_path(dir, String("python"))
+        if stat_file(sibling).ok:
+            return sibling
+        var sibling3 = join_path(dir, String("python3"))
+        if stat_file(sibling3).ok:
+            return sibling3
+    return String("python3")
+
+
+def _id_to_string(v: JsonValue) -> String:
+    """Canonicalize a JSON-RPC id (``integer | string``) to a String so
+    callers can compare against ``_inflight_*_id`` (always String).
+
+    Our own outgoing requests already stringify their ids in
+    ``LspClient.send_request``, so any response paired with a request
+    we issued comes back as a string the server echoed verbatim. But a
+    server free to interpret-and-rewrite would still be spec-compliant
+    re-emitting the same digits as a JSON integer — so we accept both
+    shapes. Returns ``""`` for ids of any other JSON type (null,
+    object, array — none are legal, but better to skip than crash).
+    """
+    if v.is_string():
+        return v.as_str()
+    if v.is_int():
+        return String(v.as_int())
+    return String("")
 
 
 def _parse_definition_result(v: JsonValue) -> Optional[DefinitionResolved]:

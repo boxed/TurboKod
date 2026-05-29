@@ -51,7 +51,8 @@ from .config import (
 )
 from .diff import unified_diff
 from .file_io import (
-    basename, find_git_project, join_path, parent_path, read_file, stat_file,
+    basename, find_git_project, join_path, list_directory, parent_path,
+    read_file, stat_file,
 )
 from .git_blame import compute_blame
 from .git_changes import (
@@ -71,8 +72,8 @@ from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
 from .posix import (
-    alloc_zero_buffer, close_fd, debug_log, poll_stdin, read_into, realpath,
-    untrack_child, waitpid_nohang,
+    alloc_zero_buffer, close_fd, debug_log, getenv_value, poll_stdin,
+    read_into, realpath, untrack_child, waitpid_nohang,
 )
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -2364,11 +2365,27 @@ struct Desktop(Movable):
             var cand = spec.candidates[c].copy()
             if len(cand.argv) == 0:
                 continue
-            if len(which(cand.argv[0]).as_bytes()) > 0:
-                for k in range(len(cand.argv)):
-                    argv.append(cand.argv[k])
-                argv_found = True
-                break
+            var resolved = which(cand.argv[0])
+            if len(resolved.as_bytes()) == 0:
+                continue
+            # When the catalog binary lands on a pyenv shim and we know
+            # the server doesn't actually need the project's Python
+            # (see ``_lsp_bypass_pyenv_shim``), substitute the shim with
+            # the real binary inside the pyenv version that has it.
+            # Sidesteps "version `3.14' is not installed" failures from
+            # the shim consulting the project's .python-version.
+            if _lsp_bypass_pyenv_shim(spec.language_id):
+                var real = _resolve_pyenv_shim_to_real(resolved, cand.argv[0])
+                if len(real.as_bytes()) > 0:
+                    argv.append(real)
+                    for k in range(1, len(cand.argv)):
+                        argv.append(cand.argv[k])
+                    argv_found = True
+                    break
+            for k in range(len(cand.argv)):
+                argv.append(cand.argv[k])
+            argv_found = True
+            break
         if not argv_found:
             return List[String]()
         if spec.language_id == String("mojo"):
@@ -2391,7 +2408,9 @@ struct Desktop(Movable):
         ``ext`` is matched against the registry's ``file_types``; the
         matching ``LanguageSpec`` then drives binary selection via
         ``_pick_lsp_argv`` (first installed candidate wins; Mojo gets
-        ``-I`` include flags threaded in).
+        ``-I`` include flags threaded in). See
+        ``_lsp_bypass_pyenv_shim`` for the pyenv-shim resolution wrinkle
+        in ``_pick_lsp_argv``.
         """
         var spec_idx = find_language_for_extension(self.lsp_specs, ext)
         if spec_idx < 0:
@@ -9030,6 +9049,70 @@ def _same_file(a: String, b: String) -> Bool:
 
 
 
+def _lsp_bypass_pyenv_shim(language_id: String) -> Bool:
+    """Should we resolve ``language_id``'s LSP through any pyenv shim
+    to the underlying real binary?
+
+    True for languages whose server is a Python tool that **doesn't
+    depend on the project's Python** (esbonio analyses rST text, not
+    your source code). The pyenv shim respects ``.python-version`` and
+    blows up when that interpreter isn't installed — bypassing it lets
+    us find the binary in whichever pyenv version actually has it
+    installed. Setting ``PYENV_VERSION=system`` doesn't fix this
+    because the binary often lives under a non-system version
+    (esbonio installed under e.g. 3.12.6, not system Python).
+
+    Stays False for ``python`` itself — there we *want* pyenv to
+    pick the project's version.
+    """
+    if language_id == String("rst"):
+        return True
+    return False
+
+
+def _resolve_pyenv_shim_to_real(path: String, name: String) -> String:
+    """If ``path`` is a pyenv shim (``~/.pyenv/shims/<name>``), walk
+    ``~/.pyenv/versions/*/bin/<name>`` and return the first existing
+    real binary path. Returns ``""`` when the path isn't a shim or
+    no version actually has the binary installed.
+
+    Heuristic: we match shims by the ``/.pyenv/shims/`` substring
+    rather than parsing ``$PYENV_ROOT`` because the rare custom-root
+    user can still set a non-shim path in their language overrides.
+    """
+    if not _contains_substr(path, String("/.pyenv/shims/")):
+        return String("")
+    var home = getenv_value(String("HOME"))
+    if len(home.as_bytes()) == 0:
+        return String("")
+    var versions_dir = home + String("/.pyenv/versions")
+    var entries = list_directory(versions_dir)
+    for i in range(len(entries)):
+        var cand = versions_dir + String("/") + entries[i] \
+            + String("/bin/") + name
+        if stat_file(cand).ok:
+            return cand
+    return String("")
+
+
+def _contains_substr(haystack: String, needle: String) -> Bool:
+    var hb = haystack.as_bytes()
+    var nb = needle.as_bytes()
+    if len(nb) == 0:
+        return True
+    if len(nb) > len(hb):
+        return False
+    for i in range(len(hb) - len(nb) + 1):
+        var matched = True
+        for k in range(len(nb)):
+            if hb[i + k] != nb[k]:
+                matched = False
+                break
+        if matched:
+            return True
+    return False
+
+
 def _argv_equal(a: List[String], b: List[String]) -> Bool:
     """Element-wise equality for two argv lists. Used to detect when a
     settings change (server re-ordering, candidate add/remove) means
@@ -9069,7 +9152,7 @@ def _mojo_include_dirs(root: String) -> List[String]:
 
 
 def _refresh_status_for(
-    mut sb: StatusBar, prefix: String, m: LspManager, focused_path: String,
+    mut sb: StatusBar, prefix: String, mut m: LspManager, focused_path: String,
 ):
     """Free function so the caller can pass ``self.status_bar`` and one
     of ``self.lsp_*`` without tripping Mojo's exclusivity check (a

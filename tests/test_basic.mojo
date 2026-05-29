@@ -115,7 +115,8 @@ from turbokod.type_ahead import (
     TypeAhead, is_printable_ascii, type_ahead_pick,
 )
 from turbokod.lsp import (
-    LSP_NOTIFICATION, LSP_RESPONSE, LspClient, LspIncoming, LspProcess,
+    LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE,
+    LspClient, LspIncoming, LspProcess,
     _drop_prefix, _find_double_crlf, _parse_content_length, capture_command,
     classify_message, lsp_initialize_params,
 )
@@ -3916,25 +3917,46 @@ def test_gitignore_matches_glob_and_negate() raises:
 
 
 def test_walk_project_files_respects_gitignore() raises:
-    """The repo's .gitignore lists ``tvision/`` — that subtree must be
-    excluded from the default walk, but visible when explicitly opted out."""
-    var root = find_git_project(String("examples/hello.mojo"))
-    assert_true(root)
-    var paths = walk_project_files(root.value())
-    var saw_tvision = False
+    """A directory-only ``.gitignore`` pattern (``vendored/``) excludes the
+    entire subtree from the default walk; ``respect_gitignore=False``
+    reaches into it. Self-contained temp fixture — previously this test
+    depended on the repo's own ``tvision/`` subtree, which broke once
+    that vendored copy stopped being checked out on every dev machine.
+    Use a temp dir we fully control instead."""
+    var root = _temp_path(String("_walk_gitignore"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var vend = join_path(root, String("vendored"))
+    _ = external_call["mkdir", Int32](
+        (vend + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(
+        join_path(root, String(".gitignore")), String("vendored/\n"),
+    ))
+    assert_true(write_file(
+        join_path(root, String("kept.txt")), String("real\n"),
+    ))
+    assert_true(write_file(
+        join_path(vend, String("buried.txt")), String("noise\n"),
+    ))
+
+    var paths = walk_project_files(root)
+    var saw_vendored = False
     for i in range(len(paths)):
-        if _contains(paths[i], String("/tvision/")):
-            saw_tvision = True
+        if _contains(paths[i], String("/vendored/")):
+            saw_vendored = True
             break
-    assert_false(saw_tvision)
-    # Without gitignore respect, the walk reaches into tvision/.
-    var all_paths = walk_project_files(root.value(), respect_gitignore=False)
-    var any_tvision = False
+    assert_false(saw_vendored)
+
+    # Without gitignore respect, the walk reaches into vendored/.
+    var all_paths = walk_project_files(root, respect_gitignore=False)
+    var any_vendored = False
     for i in range(len(all_paths)):
-        if _contains(all_paths[i], String("/tvision/")):
-            any_tvision = True
+        if _contains(all_paths[i], String("/vendored/")):
+            any_vendored = True
             break
-    assert_true(any_tvision)
+    assert_true(any_vendored)
 
 
 def test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs() raises:
@@ -6340,6 +6362,15 @@ def test_quick_open_filters_as_you_type() raises:
     var qo = QuickOpen()
     qo.open(root.value())
     assert_true(qo.active)
+    # QuickOpen.open is async on git projects — it spawns ``git ls-files``
+    # and the entries fill in via subsequent ``tick()`` calls (Desktop
+    # pumps these every frame). Drive the same loop here, capped so a
+    # silent indexer can't hang the test. ~5 s budget is comfortable for
+    # any normal repo (~100 ms for this one).
+    var deadline = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
     var initial_count = len(qo.matched)
     assert_true(initial_count > 5)
     # Typing narrows the match list.
@@ -6357,6 +6388,43 @@ def test_quick_open_filters_as_you_type() raises:
     qo.selected_path = join_path(qo.root, qo.entries[qo.matched[0]])
     qo.submitted = True
     assert_true(_starts_with(qo.selected_path, root.value()))
+
+
+def test_quick_open_preserves_query_across_close_and_reopen() raises:
+    """``close()`` (whether triggered by ESC or by Desktop after submit)
+    should stash the current query so the *next* ``open()`` restores it
+    select-all'd. That way the user reopens to the same filter and can
+    either keep going or replace it with the first keystroke."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var qo = QuickOpen()
+    qo.open(root.value())
+    qo.query.set_text(String("editor"))
+    qo._refilter()
+    # Simulate "user picked a file" — same path Desktop runs after Enter.
+    qo.close()
+    assert_false(qo.active)
+    # Reopen: the query and its filtered selection should come back.
+    qo.open(root.value())
+    assert_equal(qo.query.text, String("editor"))
+    # Restored text is selected so the next keystroke replaces it.
+    assert_equal(qo.query.anchor, 0)
+    assert_equal(qo.query.cursor, len(qo.query.text.as_bytes()))
+    # Drain the indexer so we can confirm the restored query actually
+    # filters the freshly-indexed list (not just that the field text
+    # came back).
+    var deadline = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    qo._refilter()
+    assert_true(len(qo.matched) > 0)
+    var found_editor_module = False
+    for i in range(len(qo.matched)):
+        if qo.entries[qo.matched[i]] == String("src/turbokod/editor.mojo"):
+            found_editor_module = True
+            break
+    assert_true(found_editor_module)
 
 
 def _starts_with(s: String, prefix: String) -> Bool:
@@ -7649,7 +7717,8 @@ def test_lsp_classify_message() raises:
     var c = classify_message(resp)
     assert_equal(Int(c.kind), Int(LSP_RESPONSE))
     assert_true(Bool(c.id))
-    assert_equal(c.id.value(), 7)
+    assert_true(c.id.value().is_int())
+    assert_equal(c.id.value().as_int(), 7)
     assert_true(Bool(c.result))
     var note = parse_json(String(
         "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\","
@@ -7658,6 +7727,22 @@ def test_lsp_classify_message() raises:
     var cn = classify_message(note)
     assert_equal(Int(cn.kind), Int(LSP_NOTIFICATION))
     assert_equal(cn.method.value(), String("window/logMessage"))
+    # esbonio sends ``workspace/configuration`` requests with a UUID
+    # string id. Must classify as REQUEST (not NOTIFICATION) so the
+    # server-request handler fires, and ``id`` must preserve the
+    # string form so the response echoes the right id and esbonio
+    # actually pairs them. Without this fix esbonio hangs forever.
+    var str_req = parse_json(String(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"abc-123\","
+        + "\"method\":\"workspace/configuration\","
+        + "\"params\":{\"items\":[]}}"
+    ))
+    var cr = classify_message(str_req)
+    assert_equal(Int(cr.kind), Int(LSP_REQUEST))
+    assert_true(Bool(cr.id))
+    assert_true(cr.id.value().is_string())
+    assert_equal(cr.id.value().as_str(), String("abc-123"))
+    assert_equal(cr.method.value(), String("workspace/configuration"))
 
 
 def test_lsp_parse_diagnostics_array_minimum_fields() raises:
@@ -9066,7 +9151,9 @@ def test_lsp_initialize_against_mojo_lsp_server() raises:
         raise Error(String("no LSP response; stderr=") + err)
     var msg = got.value().copy()
     assert_equal(Int(msg.kind), Int(LSP_RESPONSE))
-    assert_equal(msg.id.value(), req_id)
+    assert_true(Bool(msg.id))
+    assert_true(msg.id.value().is_string())
+    assert_equal(msg.id.value().as_str(), req_id)
     assert_true(Bool(msg.result))
     assert_true(msg.result.value().is_object())
     assert_true(msg.result.value().object_has(String("capabilities")))
@@ -9075,7 +9162,8 @@ def test_lsp_initialize_against_mojo_lsp_server() raises:
     for _ in range(100):
         var maybe2 = client.poll(Int32(50))
         if maybe2 and Bool(maybe2.value().id) \
-                and maybe2.value().id.value() == shutdown_id:
+                and maybe2.value().id.value().is_string() \
+                and maybe2.value().id.value().as_str() == shutdown_id:
             break
     client.send_notification(String("exit"), json_null())
     var exited = False
@@ -9155,7 +9243,8 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     for _ in range(200):
         var maybe = client.poll(Int32(50))
         if maybe and Bool(maybe.value().id) \
-                and maybe.value().id.value() == init_id:
+                and maybe.value().id.value().is_string() \
+                and maybe.value().id.value().as_str() == init_id:
             saw_init = True
             break
     if not saw_init:
@@ -9254,7 +9343,8 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
         var msg = maybe.value().copy()
         if Int(msg.kind) != Int(LSP_RESPONSE):
             continue
-        if not Bool(msg.id) or msg.id.value() != ca_id:
+        if not Bool(msg.id) or not msg.id.value().is_string() \
+                or msg.id.value().as_str() != ca_id:
             continue
         if Bool(msg.result):
             ca_result = Optional[JsonValue](msg.result.value().copy())
@@ -9305,7 +9395,8 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     for _ in range(40):
         var maybe = client.poll(Int32(50))
         if maybe and Bool(maybe.value().id) \
-                and maybe.value().id.value() == shutdown_id:
+                and maybe.value().id.value().is_string() \
+                and maybe.value().id.value().as_str() == shutdown_id:
             break
     client.send_notification(String("exit"), json_null())
     var exited = False

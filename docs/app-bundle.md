@@ -51,6 +51,19 @@ cp "$dylib" "$contents/Frameworks/libturbokod.dylib"
 
 Drops the dylib into the canonical macOS location. `@executable_path/../Frameworks/libturbokod.dylib` resolves there regardless of how the .app was launched or where it was moved to.
 
+## Gotcha: relaunching the .app skips the bundle sync
+
+The dylib is built into `.build/libturbokod.dylib`, then **copied** into `.build/TurboKod.app/Contents/Frameworks/libturbokod.dylib` as the last step of `run_swift.sh`. The two are independent files — editing Mojo source rebuilds the first but does *not* touch the second.
+
+Anything that launches the `.app` without going through `run_swift.sh` — Dock, Finder, `open .build/TurboKod.app`, an agent that "restarts" by re-launching — loads the **bundled** dylib, which may be hours old. The new code never runs and the bug looks unfixed.
+
+Two ways to keep things in sync:
+
+1. **Always launch via `./run_swift.sh`** — it rebuilds whatever's stale and re-copies the dylib into the bundle on every invocation.
+2. **`make app`** — runs `run_swift.sh` with `TURBOKOD_BUILD_ONLY=1`, so it rebuilds + re-copies the dylib into the bundle without launching. Pair with a Dock / Finder relaunch (or `open .build/TurboKod.app`) when you want to manually trigger the next launch. `make` (no args) does this for both frontends, which is the right hammer for "I touched a Mojo file, sync everything."
+
+A quick check: if `stat -f %m .build/TurboKod.app/Contents/Frameworks/libturbokod.dylib` is older than your most recent edit to anything under `src/`, the bundled dylib is stale.
+
 ## Verifying
 
 ```sh

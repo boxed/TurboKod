@@ -34,7 +34,18 @@ Full details in [docs/native-menu.md](docs/native-menu.md).
 
 ## Running the Mojo code
 
-Terminal path:
+Two entry points: `make` (build-only, no launch) and the `./run.sh` / `./run_swift.sh` wrappers (build + launch).
+
+Build-only (use after editing Mojo source — keeps both frontends compilable *and* refreshes the bundled dylib so a Dock relaunch of `.app` picks up the new code):
+
+```sh
+make            # build both frontends, no launch
+make app        # build .build/TurboKod.app
+make tui        # build examples/desktop.mojo (canonical terminal entry)
+make test       # build + run tests/test_basic.mojo
+```
+
+Terminal path (build + launch):
 
 ```sh
 ./run.sh examples/hello.mojo     # demo: windowed greeting
@@ -42,7 +53,7 @@ Terminal path:
 ./run.sh tests/test_basic.mojo   # pure-data tests, no TTY required
 ```
 
-Native macOS path:
+Native macOS path (build + launch):
 
 ```sh
 ./run_swift.sh                       # restore previous session
@@ -53,7 +64,9 @@ TK_CAPTURE=/tmp/shot.png ./run_swift.sh   # headless render then quit
 
 `run.sh` does `mojo build -I src` and runs the resulting native binary. We use `mojo build` (not `mojo run`) because `mojo run` is JIT-only and silently ignores `-Xlinker` — the build step is what makes linking C deps (e.g. libonig for TextMate-grammar highlighting) actually work. Built binaries are cached under `.build/` keyed by source path; the script skips the build when no `.mojo` file in `src/` (or the entry point itself) is newer than the cached binary, so repeat runs are essentially free. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) all route through `run.sh`.
 
-`run_swift.sh` does three builds in dependency order, each cached by mtime: the Rust shim (`app/turbokod-shim/`), the Mojo shared library (`.build/libturbokod.dylib` from `native_api.mojo`), and the Swift binary (linked against the dylib + AppKit). It then assembles `.build/TurboKod.app` and `exec`s it. The bundle layout (dylib in `Contents/Frameworks/`, `@rpath` resolution, resource chdir for Mojo's relative paths) is detailed in [docs/app-bundle.md](docs/app-bundle.md).
+`run_swift.sh` does three builds in dependency order, each cached by mtime: the Rust shim (`app/turbokod-shim/`), the Mojo shared library (`.build/libturbokod.dylib` from `native_api.mojo`), and the Swift binary (linked against the dylib + AppKit). It then assembles `.build/TurboKod.app` and `exec`s it. The bundle layout (dylib in `Contents/Frameworks/`, `@rpath` resolution, resource chdir for Mojo's relative paths) is detailed in [docs/app-bundle.md](docs/app-bundle.md) — including the stale-bundle-dylib gotcha that `make app` exists to solve.
+
+Both scripts honor `TURBOKOD_BUILD_ONLY=1` to skip the launch — that's how the make targets reuse them without spawning processes.
 
 First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 

@@ -97,6 +97,13 @@ struct QuickOpen(Movable):
     var _indexer: Optional[FileIndexer]
     var indexing: Bool
     var truncated: Bool
+    # Query text remembered across close/reopen, scoped to the project-
+    # files ``open()`` path. ``close()`` captures the current query before
+    # tearing the field down, and ``open()`` restores it (select-all'd
+    # so the user's first keystroke replaces it). The "Open Recent"
+    # variants do not restore — they always start empty since they
+    # filter a different list.
+    var _saved_query: String
 
     def __init__(out self):
         self.active = False
@@ -115,10 +122,18 @@ struct QuickOpen(Movable):
         self._indexer = Optional[FileIndexer]()
         self.indexing = False
         self.truncated = False
+        self._saved_query = String("")
 
     def open(mut self, var root: String):
         self.root = root^
         self.query = TextField()
+        # Restore the last query the user typed in this picker. ``set_text``
+        # places the cursor at the end; ``select_all`` then highlights the
+        # whole field so the next printable keystroke replaces it (same
+        # pattern VS Code / Sublime use when reopening their quick-open).
+        if len(self._saved_query.as_bytes()) > 0:
+            self.query.set_text(self._saved_query)
+            self.query.select_all()
         self.active = True
         self.submitted = False
         self.selected_path = String("")
@@ -239,6 +254,12 @@ struct QuickOpen(Movable):
         self.active = False
         self.submitted = False
         self.root = String("")
+        # Remember the query for the next ``open()`` so the user comes
+        # back to the same filter (cancel-by-ESC and submit-via-Enter
+        # both route through here). ``open_recent()`` doesn't read
+        # ``_saved_query``, so its no-op restore keeps that variant
+        # starting fresh.
+        self._saved_query = self.query.text
         self.query = TextField()
         self.selected_path = String("")
         self.entries = List[String]()

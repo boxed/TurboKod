@@ -807,10 +807,16 @@ struct LspIncoming(Copyable, Movable):
 
     * ``kind == LSP_RESPONSE``:     ``id`` is set; one of ``result``/``error``.
     * ``kind == LSP_NOTIFICATION``: ``method`` + ``params`` are set.
-    * ``kind == LSP_REQUEST``:      ``id`` + ``method`` + ``params`` set.
+    * ``kind == LSP_REQUEST``:      ``id`` + ``method`` + ``params`` are set.
+
+    ``id`` is the raw JSON value. JSON-RPC allows ``integer | string``
+    and esbonio uses UUIDs for its ``workspace/configuration`` server
+    requests; our own outgoing requests stringify their counter
+    (``"1"``, ``"2"``, …) so every correlation site is a plain string
+    compare regardless of who issued the id.
     """
     var kind: UInt8
-    var id: Optional[Int]
+    var id: Optional[JsonValue]
     var method: Optional[String]
     var params: Optional[JsonValue]
     var result: Optional[JsonValue]
@@ -844,14 +850,19 @@ struct LspClient(Copyable, Movable):
 
     def send_request(
         mut self, method: String, params: JsonValue,
-    ) raises -> Int:
-        """Send a JSON-RPC request and return the issued id (so callers
-        can correlate with the eventual response)."""
-        var id = self._next_id
+    ) raises -> String:
+        """Send a JSON-RPC request and return the issued id (a stringified
+        monotonic counter) so callers can correlate with the eventual
+        response. Stringifying means every id comparison in this codebase
+        is a string compare — server-initiated requests use a UUID
+        string (esbonio's ``workspace/configuration``), and rather than
+        special-case integer-vs-string at every callsite we just put
+        everything on the same footing."""
+        var id = String(self._next_id)
         self._next_id += 1
         var envelope = json_object()
         envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), json_int(id))
+        envelope.put(String("id"), json_str(id))
         envelope.put(String("method"), json_str(method))
         envelope.put(String("params"), params)
         self.process.write_message(encode_json(envelope))
@@ -867,20 +878,23 @@ struct LspClient(Copyable, Movable):
         self.process.write_message(encode_json(envelope))
 
     def send_response(
-        mut self, id: Int, result: JsonValue,
+        mut self, id: JsonValue, result: JsonValue,
     ) raises:
-        """Reply to a server-issued request. Required for servers that
-        gate work on a client-side probe (taplo blocks all
-        ``publishDiagnostics`` until ``workspace/configuration`` is
-        answered)."""
+        """Reply to a server-issued request. The id is echoed verbatim:
+        JSON-RPC requires the response id to byte-match the request id,
+        so an integer-typed request id is NOT the same as the same
+        digits in a string. Required for servers that gate work on a
+        client-side probe (taplo blocks all ``publishDiagnostics``
+        until ``workspace/configuration`` is answered; esbonio
+        similarly stalls)."""
         var envelope = json_object()
         envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), json_int(id))
+        envelope.put(String("id"), id)
         envelope.put(String("result"), result)
         self.process.write_message(encode_json(envelope))
 
     def send_error(
-        mut self, id: Int, code: Int, message: String,
+        mut self, id: JsonValue, code: Int, message: String,
     ) raises:
         """Reply to a server-issued request with a JSON-RPC error
         envelope. Use ``-32601`` (MethodNotFound) for requests we don't
@@ -888,7 +902,7 @@ struct LspClient(Copyable, Movable):
         than blocking on our (absent) response."""
         var envelope = json_object()
         envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), json_int(id))
+        envelope.put(String("id"), id)
         var err = json_object()
         err.put(String("code"), json_int(code))
         err.put(String("message"), json_str(message))
@@ -909,15 +923,15 @@ struct LspClient(Copyable, Movable):
 def classify_message(v: JsonValue) -> LspIncoming:
     """Examine a parsed JSON-RPC envelope and tag it as response /
     notification / request. Top-level utility for tests + clients."""
-    var id_opt = Optional[Int]()
+    var id_opt = Optional[JsonValue]()
     var method_opt = Optional[String]()
     var params_opt = Optional[JsonValue]()
     var result_opt = Optional[JsonValue]()
     var error_opt = Optional[JsonValue]()
     if v.is_object():
         var maybe_id = v.object_get(String("id"))
-        if maybe_id and maybe_id.value().is_int():
-            id_opt = Optional[Int](maybe_id.value().as_int())
+        if maybe_id:
+            id_opt = Optional[JsonValue](maybe_id.value().copy())
         var maybe_method = v.object_get(String("method"))
         if maybe_method and maybe_method.value().is_string():
             method_opt = Optional[String](maybe_method.value().as_str())
@@ -938,7 +952,8 @@ def classify_message(v: JsonValue) -> LspIncoming:
     else:
         kind = LSP_RESPONSE
     return LspIncoming(
-        kind, id_opt, method_opt, params_opt.copy(), result_opt.copy(), error_opt.copy(),
+        kind, id_opt.copy(), method_opt,
+        params_opt.copy(), result_opt.copy(), error_opt.copy(),
     )
 
 
