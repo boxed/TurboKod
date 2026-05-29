@@ -74,8 +74,31 @@ final class CellView: NSView {
     var project: String?      // set when a project is opened; drives session save
     private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: 3)
     private var bufCells = 1
+    // Last cell a passive (no-button) mouse move was dispatched for. macOS
+    // delivers bare motion at the display refresh rate (60–120 Hz), but the
+    // Mojo side works in cell coordinates — every pixel move inside one cell
+    // produces identical hover state and pointer shape. Dispatching them is
+    // pure waste (two FFI hit-tests per event), so we drop motion that didn't
+    // cross a cell boundary. -1 forces the first move through.
+    private var lastPassiveCol: Int64 = -1, lastPassiveRow: Int64 = -1
     private let palette = buildPalette()
     private let font = cellFont
+
+    // Change detection. There is no cursor blink, so an idle Desktop lays out
+    // a byte-identical frame every tick — `pollFrame` hashes the laid-out
+    // buffer and reports whether anything actually changed, letting the timer
+    // skip the (expensive) Core Text draw when nothing did. When a change is
+    // detected the buffer it produced is handed to the next `draw` verbatim
+    // (`framePending`) so we tick + layout only once per presented frame.
+    private var lastFrameHash: UInt64 = 0
+    private var framePending = false
+    private var frameCols = 0, frameRows = 0, frameN = 0
+
+    private func hashBuf(_ words: Int) -> UInt64 {
+        var h: UInt64 = 0xcbf29ce484222325
+        for i in 0..<words { h = (h ^ UInt64(buf[i])) &* 0x100000001b3 }
+        return h
+    }
 
     override var isFlipped: Bool { true }            // y increases downward (row index)
     override var acceptsFirstResponder: Bool { true }
@@ -92,6 +115,44 @@ final class CellView: NSView {
         }
     }
 
+    /// Run the Mojo per-frame tick + layout into `buf` and report whether the
+    /// resulting frame differs from the one last presented. The timer uses this
+    /// to decide whether to invalidate the view: with no cursor blink an idle
+    /// Desktop produces an identical frame, so we can skip the Core Text draw
+    /// entirely. On a real change the buffer is kept for the next `draw`
+    /// (`framePending`) so the frame is laid out exactly once.
+    @discardableResult
+    func pollFrame() -> Bool {
+        guard handle != 0 else { return false }
+        tk_desktop_tick(handle, Int64(cols()), Int64(rows()))
+        return detectChange()
+    }
+
+    /// Lay out the current Desktop state and report whether it differs from
+    /// what's on screen, caching the buffer for the next `draw` if so. Unlike
+    /// `pollFrame` this does *not* run the async tick — callers that already
+    /// know why the frame might have changed (a mouse/scroll event) use it to
+    /// avoid a full repaint when the event didn't actually change anything.
+    @discardableResult
+    func detectChange() -> Bool {
+        guard handle != 0 else { return false }
+        let c = cols(), r = rows()
+        ensureBuf(c * r)
+        let n = Int(tk_desktop_layout(handle, Int64(c), Int64(r),
+                                      Int64(Int(bitPattern: buf)), Int64(c * r)))
+        frameCols = c; frameRows = r; frameN = n
+        let hash = hashBuf(n * 3)
+        if hash == lastFrameHash { return false }
+        lastFrameHash = hash
+        framePending = true
+        return true
+    }
+
+    /// Drop the cached frame so the next `draw` re-runs tick + layout. Input
+    /// handlers call this because a key/mouse event mutates the Desktop, making
+    /// any frame an earlier `pollFrame` left behind stale.
+    func invalidateFrame() { framePending = false }
+
     override func draw(_ dirtyRect: NSRect) {
         guard handle != 0, let ctx = NSGraphicsContext.current?.cgContext else { return }
         // Px437 is a pixel font — render it crisp (no anti-aliasing / font
@@ -104,9 +165,21 @@ final class CellView: NSView {
         NSGraphicsContext.current?.shouldAntialias = false
         let c = cols(), r = rows()
         ensureBuf(c * r)
-        tk_desktop_tick(handle, Int64(c), Int64(r))
-        let n = Int(tk_desktop_layout(handle, Int64(c), Int64(r),
+        let n: Int
+        if framePending && frameCols == c && frameRows == r {
+            // The timer's pollFrame just laid this exact frame out — reuse it
+            // rather than ticking + laying out a second time.
+            n = frameN
+        } else {
+            tk_desktop_tick(handle, Int64(c), Int64(r))
+            n = Int(tk_desktop_layout(handle, Int64(c), Int64(r),
                                       Int64(Int(bitPattern: buf)), Int64(c * r)))
+            // Keep the change detector in sync with what we actually present so
+            // the next pollFrame compares against this frame.
+            frameCols = c; frameRows = r; frameN = n
+            lastFrameHash = hashBuf(n * 3)
+        }
+        framePending = false
 
         // Clear to default background once.
         ctx.setFillColor(cgcolor(palette[0]))
@@ -196,12 +269,24 @@ final class CellView: NSView {
         if key == 0 { return }
         let action = tk_desktop_key(handle, key, mods(event), Int64(cols()), Int64(rows()))
         handleAction(action)
+        invalidateFrame()
         needsDisplay = true
     }
 
-    private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8) {
+    private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8,
+                           passive: Bool = false) {
         let p = convert(e.locationInWindow, from: nil)
         let col = Int64(max(0, p.x) / CELL_W), row = Int64(max(0, p.y) / CELL_H)
+        if passive {
+            // Coalesce bare motion to cell granularity — see lastPassiveCol.
+            if col == lastPassiveCol && row == lastPassiveRow { return }
+            lastPassiveCol = col; lastPassiveRow = row
+        } else {
+            // A button event can change hover/shape without a position change
+            // (e.g. release ending a drag); don't let the passive cache stale
+            // it out. Reset so the next bare move always re-dispatches.
+            lastPassiveCol = -1; lastPassiveRow = -1
+        }
         let action = tk_desktop_mouse(handle, col, row, button, pressed, motion,
                                       mods(e), Int64(cols()), Int64(rows()))
         handleAction(action)
@@ -212,7 +297,21 @@ final class CellView: NSView {
         case 2: NSCursor.pointingHand.set()
         default: NSCursor.arrow.set()
         }
-        needsDisplay = true
+        if passive {
+            // Bare mouse motion (no button). macOS delivers these at the
+            // display refresh rate; laying out + repainting the whole Desktop
+            // on each one is what pegs a core when you jiggle the mouse. The
+            // Mojo side has been told the new position (hover state) and the
+            // cursor shape is set — that's all that must happen synchronously.
+            // Any resulting visual change is caught by the timer's pollFrame
+            // at its gated cadence; noteActivity keeps that at full 20 Hz
+            // while the mouse is moving so hover feedback stays prompt.
+            AppController.shared?.noteActivity()
+        } else if detectChange() {
+            // Clicks / drags / scroll: repaint only if the event actually
+            // changed what's on screen.
+            needsDisplay = true
+        }
     }
 
     override func mouseDown(with e: NSEvent) { sendMouse(e, button: 1, pressed: 1, motion: 0) }
@@ -220,7 +319,7 @@ final class CellView: NSView {
     override func mouseUp(with e: NSEvent) { sendMouse(e, button: 1, pressed: 0, motion: 0) }
     override func rightMouseDown(with e: NSEvent) { sendMouse(e, button: 3, pressed: 1, motion: 0) }
     override func rightMouseUp(with e: NSEvent) { sendMouse(e, button: 3, pressed: 0, motion: 0) }
-    override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1) }
+    override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1, passive: true) }
     override func scrollWheel(with e: NSEvent) {
         sendMouse(e, button: e.scrollingDeltaY > 0 ? 4 : 5, pressed: 1, motion: 0)
     }
@@ -275,6 +374,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var menuBuf: [UInt8] = [UInt8](repeating: 0, count: 8192)
     private var lastMenuHash: UInt64 = 0
     private var menuTracking = false
+    // Idle backoff for the redraw timer. With no cursor blink, a still Desktop
+    // needs no repaint at all, so once frames have been identical for ~1s we
+    // poll at ~4 Hz instead of 20 Hz (and skip even that work when nothing
+    // changes). Any visible change resets `idleTicks` to 0 → full rate.
+    private var idleTicks = 0
+    private var tickSeq = 0
+
+    /// Pull the redraw timer out of idle backoff (full 20 Hz) for the next
+    /// ~1 s. Called on activity that doesn't itself trigger a redraw — notably
+    /// bare mouse motion — so hover/cursor feedback stays prompt.
+    func noteActivity() { idleTicks = 0 }
     // Always-alive Mojo Desktop used to drive the menu bar when no window
     // is open. Without it, closing the last window (or starting with an
     // empty session) leaves NSApp.mainMenu pointing at items wired to
@@ -332,14 +442,74 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Schedule in .common mode (not just default) so the timer also fires
         // during the modal event-tracking run loop AppKit uses for live
-        // resize, window dragging, menus, etc. Without this the cursor blink
-        // and any background redraws freeze during those operations.
+        // resize, window dragging, menus, etc. Without this, async-driven
+        // redraws (LSP/terminal output, external file changes) would freeze
+        // during those operations.
+        //
+        // The body is gated on visibility so an idle, hidden, or fully
+        // occluded app doesn't burn CPU at 20 Hz. Concretely:
+        //   - When NSApp is hidden (Cmd+H), do nothing — no menu, no
+        //     windows, nothing to paint.
+        //   - When NSApp is not active (another app is frontmost), skip
+        //     refreshMenu — our menu isn't being shown anyway; it'll
+        //     refresh on the next tick after we regain focus (≤50 ms).
+        //   - Only set ``needsDisplay = true`` for views whose window is
+        //     visible AND not fully covered by other windows. Hidden /
+        //     occluded views would otherwise drive a full ``tk_desktop_tick``
+        //     + ``tk_desktop_layout`` + canvas repaint every 50 ms even
+        //     though nothing visible would change.
+        // The user observed high idle CPU when the app was buried behind
+        // other windows; this is what closes that.
         let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.refreshMenu()
-            for v in self?.views ?? [] { v.needsDisplay = true }
+            guard let self else { return }
+            if NSApp.isHidden { return }
+            self.tickSeq &+= 1
+            // Idle backoff: once frames have been static for ~1s (20 ticks),
+            // drop from 20 Hz to ~4 Hz. The work below — tick + layout + the
+            // menu snapshot — is what costs CPU; skipping it on 4 of every 5
+            // ticks while idle drives idle CPU toward zero, and async work
+            // (LSP, terminal, external file edits) still surfaces within
+            // ~250 ms. Any change resets idleTicks and we run full-rate again.
+            if self.idleTicks > 20 && self.tickSeq % 5 != 0 { return }
+
+            var changed = false
+            if NSApp.isActive && self.refreshMenu() { changed = true }
+            for v in self.views {
+                guard let w = v.window, w.isVisible,
+                      w.occlusionState.contains(.visible) else { continue }
+                // Only mark for redraw when the laid-out frame actually
+                // differs from what's on screen — no cursor blink means an
+                // idle frame is identical and needs no Core Text repaint.
+                if v.pollFrame() { v.needsDisplay = true; changed = true }
+            }
+            self.idleTicks = changed ? 0 : self.idleTicks &+ 1
         }
         RunLoop.current.add(t, forMode: .common)
         timer = t
+
+        // When the app regains focus or a window emerges from occlusion,
+        // refresh immediately rather than waiting up to 50 ms for the
+        // next tick. Without this the menu / cursor briefly show stale
+        // state on Cmd+Tab back to TurboKod.
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                       object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.idleTicks = 0   // run full-rate after refocus
+            self.refreshMenu()
+            for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
+        }
+        nc.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                       object: nil, queue: .main) { [weak self] note in
+            guard let self,
+                  let w = note.object as? NSWindow,
+                  w.occlusionState.contains(.visible),
+                  let v = w.contentView as? CellView,
+                  self.views.contains(v) == true else { return }
+            self.idleTicks = 0
+            v.invalidateFrame()
+            v.needsDisplay = true
+        }
 
         if let cap = ProcessInfo.processInfo.environment["TK_CAPTURE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -417,9 +587,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return chromeDesktop
     }
 
-    func refreshMenu() {
+    @discardableResult
+    func refreshMenu() -> Bool {
         let h = menuHandle()
-        guard !menuTracking, h != 0 else { return }
+        guard !menuTracking, h != 0 else { return false }
         // The chrome Desktop never gets drawn (its draw cycle is what
         // ticks per-window Desktops via tk_desktop_tick), so its menu
         // visibility flags would otherwise never update — Edit / View
@@ -444,10 +615,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for i in 0..<n {
             hash = (hash ^ UInt64(menuBuf[i])) &* 0x100000001b3
         }
-        if hash == lastMenuHash { return }
+        if hash == lastMenuHash { return false }
         lastMenuHash = hash
         let text = String(bytes: menuBuf[0..<n], encoding: .utf8) ?? ""
         installMenu(from: text)
+        return true
     }
 
     /// Parse a TSV snapshot into NSMenus, replacing the current mainMenu.
@@ -642,6 +814,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 cols, rows)
         }
         handleHostAction(code, sourceHandle: h, view: view)
+        view?.invalidateFrame()
         view?.needsDisplay = true
     }
 

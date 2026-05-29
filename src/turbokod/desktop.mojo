@@ -3347,7 +3347,7 @@ struct Desktop(Movable):
 
     # --- events ------------------------------------------------------------
 
-    def handle_event(mut self, event: Event, screen: Rect) -> Optional[String]:
+    def handle_event(mut self, event: Event, screen: Rect) raises -> Optional[String]:
         """Single entry point for every event the app receives.
 
         The Desktop handles the prompt-modal lifecycle, mouse routing, and
@@ -3498,17 +3498,14 @@ struct Desktop(Movable):
                 self.save_as_dialog.close()
                 var idx = self._focused_editor_idx()
                 if idx >= 0:
-                    try:
-                        if self.windows.windows[idx].editor.save_as(path):
-                            # Adopt the new filename as the window's title so the
-                            # title bar / tab strip reflect the just-written
-                            # path instead of the stale ``Untitled`` (or the
-                            # previous backing file's basename).
-                            self.windows.windows[idx].title = basename(
-                                self.windows.windows[idx].editor.file_path,
-                            )
-                    except:
-                        pass
+                    if self.windows.windows[idx].editor.save_as(path):
+                        # Adopt the new filename as the window's title so the
+                        # title bar / tab strip reflect the just-written
+                        # path instead of the stale ``Untitled`` (or the
+                        # previous backing file's basename).
+                        self.windows.windows[idx].title = basename(
+                            self.windows.windows[idx].editor.file_path,
+                        )
             return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:
@@ -3538,14 +3535,18 @@ struct Desktop(Movable):
                     for i in range(len(paths)):
                         if paths[i] == primary:
                             continue
+                        # Best-effort across the batch — one bad path
+                        # (e.g. file deleted between indexing and
+                        # submission) shouldn't abort the others. Log
+                        # so the failure is visible.
                         try:
                             self.open_file(paths[i], screen)
-                        except:
-                            pass
-                    try:
-                        self.open_file(primary, screen)
-                    except:
-                        pass
+                        except e:
+                            print(
+                                "desktop: quick-open batch open_file",
+                                paths[i], ":", String(e),
+                            )
+                    self.open_file(primary, screen)
             return Optional[String]()
         if self.symbol_pick.active:
             if event.kind == EVENT_KEY:
@@ -3639,13 +3640,10 @@ struct Desktop(Movable):
                 var abs = rel
                 if not starts_with(rel, String("/")) and self.project:
                     abs = join_path(self.project.value(), rel)
-                try:
-                    if jump_line > 0:
-                        self.open_file_at(abs, jump_line - 1, 0, screen)
-                    else:
-                        self.open_file(abs, screen)
-                except:
-                    pass
+                if jump_line > 0:
+                    self.open_file_at(abs, jump_line - 1, 0, screen)
+                else:
+                    self.open_file(abs, screen)
             return Optional[String]()
         if self.targets_dialog.active:
             if event.kind == EVENT_KEY:
@@ -4196,10 +4194,16 @@ struct Desktop(Movable):
                     if x == 0x44 and (y == 0x20 or y == 0x44):
                         continue
                     var abs = join_path(root, statuses[i].path)
+                    # Best-effort across the batch — one bad path
+                    # shouldn't abort the others. Log so the failure
+                    # is visible.
                     try:
                         self.open_file(abs, screen)
-                    except:
-                        pass
+                    except e:
+                        print(
+                            "desktop: GIT_OPEN_ALL_CHANGED open_file",
+                            abs, ":", String(e),
+                        )
             return Optional[String]()
         if action == EDITOR_TOGGLE_BLAME:
             var idx = self._focused_editor_idx()
@@ -4219,10 +4223,12 @@ struct Desktop(Movable):
                             self.windows.windows[idx].editor.set_blame(
                                 lines^,
                             )
-                        except:
+                        except e:
                             # Git missing or file not in a repo: leave
                             # the toggle off rather than blowing up.
-                            pass
+                            # Logged so the silent-toggle-noop is
+                            # diagnosable.
+                            print("desktop: compute_blame", path, ":", String(e))
                     else:
                         self.windows.windows[idx].editor.blame_visible = True
             return Optional[String]()
@@ -5110,15 +5116,15 @@ struct Desktop(Movable):
             self.debug_pane.collapse_at(cclick)
         # Output-log link click: ``File "<path>", line N`` parsed out of
         # a stdout/stderr line and clicked. Open (or focus) the file
-        # and jump to the line. Failures are swallowed — opening can
-        # raise on a missing file, and stack traces from a previous
-        # run can easily reference paths that have since moved.
+        # and jump to the line. Failures are logged but not fatal —
+        # opening can raise on a missing file, and stack traces from a
+        # previous run can easily reference paths that have since moved.
         var oreq = self.debug_pane.consume_open_request()
         if len(oreq[0].as_bytes()) > 0:
             try:
                 self.open_file_at(oreq[0], oreq[1] - 1, 0, screen)
-            except:
-                pass
+            except e:
+                print("desktop: debug_pane open_file_at", oreq[0], ":", String(e))
         # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
         # stamps the action id; we route it through the same
         # dispatch_action path the keyboard shortcut uses, so a click
@@ -6864,8 +6870,12 @@ struct Desktop(Movable):
                     self._maybe_reload_targets(saved_path)
                     self.windows.windows[i].editor.invalidate_git_changes()
                     self._run_on_save_actions(saved_path)
-            except:
-                pass
+            except e:
+                print(
+                    "desktop: autosave_all_dirty",
+                    self.windows.windows[i].editor.file_path,
+                    ":", String(e),
+                )
 
     def _autosave_on_window_focus_change(mut self):
         """Per-frame check: when keyboard focus has moved from one
@@ -6911,8 +6921,8 @@ struct Desktop(Movable):
                     self._maybe_reload_targets(prev)
                     self.windows.windows[i].editor.invalidate_git_changes()
                     self._run_on_save_actions(prev)
-            except:
-                pass
+            except e:
+                print("desktop: autosave_on_focus_change", prev, ":", String(e))
             return
 
     def _do_save(mut self):
@@ -6939,8 +6949,12 @@ struct Desktop(Movable):
                 # asynchronously by ``save_actions_tick`` so a slow or
                 # hung formatter can't freeze the UI.
                 self._run_on_save_actions(saved_path)
-            except:
-                pass
+            except e:
+                print(
+                    "desktop: _do_save",
+                    self.windows.windows[idx].editor.file_path,
+                    ":", String(e),
+                )
             return
         # No backing file — escalate to Save As.
         self._open_save_as_dialog()
@@ -6986,8 +7000,8 @@ struct Desktop(Movable):
                 continue
             try:
                 _ = self.windows.windows[i].editor.check_for_external_change()
-            except:
-                pass
+            except e:
+                print("desktop: _reload_after_on_save", saved_path, ":", String(e))
             return
 
     def _spawn_on_save_action(
@@ -7779,8 +7793,12 @@ struct Desktop(Movable):
                 String("Installing ") + package + String(" into ") + venv_dir,
                 Attr(BLACK, LIGHT_GRAY),
             )
-        except:
-            pass
+        except e:
+            print("desktop: _start_venv_lsp_install", venv_dir, ":", String(e))
+            self.status_bar.set_message(
+                String("Failed to start install of ") + package,
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
 
     def _start_doc_install(mut self, lang: String):
         """Spawn the ``curl`` install for the docset matching ``lang``,
@@ -8780,8 +8798,8 @@ struct Desktop(Movable):
                     self.windows.add(_summary_window(
                         find, replacement, summary[0], summary[1],
                     ))
-                except:
-                    pass
+                except e:
+                    print("desktop: replace_in_project:", String(e))
             return Optional[String]()
         if pa == _PA_BP_CONDITION:
             # ``_pending_arg`` carries ``path|line`` from when the
@@ -8805,8 +8823,10 @@ struct Desktop(Movable):
                 var line = 0
                 try:
                     line = Int(atol(line_str))
-                except:
-                    pass
+                except e:
+                    # Malformed ``path|line`` payload — surface and
+                    # fall through with line=0 (no-op condition set).
+                    print("desktop: _PA_BP_CONDITION parse line", line_str, ":", String(e))
                 self.dap.set_breakpoint_condition(path, line, text)
             return Optional[String]()
         if pa == _PA_ADD_WATCH:

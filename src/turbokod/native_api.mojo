@@ -217,8 +217,11 @@ fn _recover_path_once():
     try:
         recover_user_path_for_gui_launch()
         _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
-    except:
-        pass
+    except e:
+        # Best-effort: a failure here just means children inherit the
+        # launch-time PATH (same fallback as if this function didn't
+        # exist). Log so we can tell when it happens.
+        print("turbokod: _recover_path_once:", String(e))
 
 
 @export
@@ -240,8 +243,11 @@ fn tk_desktop_new() -> Int:
     try:
         p[].load_config_from_disk()
         _build_menus(p[])
-    except:
-        pass
+    except e:
+        # @export boundary: can't propagate to Swift. Log so a broken
+        # config or menu-build raises a visible stderr line instead of
+        # silently shipping a Desktop with no menus.
+        print("turbokod: tk_desktop_new:", String(e))
     return addr
 
 
@@ -263,8 +269,8 @@ fn tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int):
         return
     try:
         _desk(h)[].open_project(path)
-    except:
-        pass
+    except e:
+        print("turbokod: tk_desktop_open_project:", String(e))
 
 
 @export
@@ -276,8 +282,8 @@ fn tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: I
         return
     try:
         _desk(h)[].open_file(path, Rect(0, 0, cols, rows))
-    except:
-        pass
+    except e:
+        print("turbokod: tk_desktop_open_file:", String(e))
 
 
 @export
@@ -291,8 +297,8 @@ fn tk_desktop_tick(h: Int, cols: Int, rows: Int):
     ref d = _desk(h)[]
     try:
         d.process_external_changes(screen)
-    except:
-        pass
+    except e:
+        print("turbokod: tk_desktop_tick.process_external_changes:", String(e))
     _refresh_menu_visibility(d)
     # Stamp the right-aligned shortcut text on each menu item so the
     # host's menu snapshot has it. ``paint`` already does this for
@@ -304,8 +310,8 @@ fn tk_desktop_tick(h: Int, cols: Int, rows: Int):
     if tree_open:
         try:
             d.open_file(tree_open.value(), screen)
-        except:
-            pass
+        except e:
+            print("turbokod: tk_desktop_tick.open_file:", String(e))
     d.lsp_tick(screen)
     d.dap_tick(screen)
     d.terminal_tick()
@@ -358,7 +364,8 @@ fn tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_event(Event.key_event(k, mods), Rect(0, 0, cols, rows))
-    except:
+    except e:
+        print("turbokod: tk_desktop_key:", String(e))
         action = Optional[String]()
     return _action_code(action)
 
@@ -376,7 +383,8 @@ fn tk_desktop_mouse(
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_event(ev, Rect(0, 0, cols, rows))
-    except:
+    except e:
+        print("turbokod: tk_desktop_mouse:", String(e))
         action = Optional[String]()
     return _action_code(action)
 
@@ -492,7 +500,8 @@ fn tk_desktop_menu_invoke(
     var result: Optional[String]
     try:
         result = _desk(h)[].dispatch_action(action, Rect(0, 0, cols, rows))
-    except:
+    except e:
+        print("turbokod: tk_desktop_menu_invoke:", String(e))
         result = Optional[String]()
     # ``dispatch_action`` returns the *unhandled* action string back to
     # the host (so it can route framework-level actions like Quit / Open

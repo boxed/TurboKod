@@ -140,8 +140,10 @@ def built_in_servers() -> List[LanguageSpec]:
             var spec = _spec_from_json(root.array_at(i))
             if spec:
                 out.append(spec.value().copy())
-    except:
-        pass
+    except e:
+        # Bundled JSON shouldn't fail to parse; if it does we want to
+        # know loudly rather than silently ship an empty language list.
+        print("language_config: load_language_specs:", String(e))
     return out^
 
 

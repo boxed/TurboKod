@@ -322,8 +322,10 @@ def load_config() -> TurbokodConfig:
                         if len(argv) > 0:
                             ov.argvs.append(argv^)
                 cfg.language_servers.append(ov^)
-    except:
-        pass
+    except e:
+        # Defaults-on-failure is the contract — but log so a
+        # corrupt/unparseable config doesn't disappear into the void.
+        print("config: load_config:", String(e))
     return cfg^
 
 

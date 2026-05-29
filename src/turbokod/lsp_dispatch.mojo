@@ -1170,8 +1170,11 @@ struct LspManager(Copyable, Movable):
                 self.client.send_notification(
                     String("$/cancelRequest"), cancel_params,
                 )
-            except:
-                pass
+            except e:
+                # Cancel-best-effort: if the server has already
+                # returned, the cancel is a no-op anyway. Log so a
+                # stuck pipe is visible.
+                print("lsp: cancelRequest (completion):", String(e))
         try:
             self._inflight_completion_id = self.client.send_request(
                 String("textDocument/completion"), params,
@@ -1214,8 +1217,8 @@ struct LspManager(Copyable, Movable):
                 self.client.send_notification(
                     String("$/cancelRequest"), cancel_params,
                 )
-            except:
-                pass
+            except e:
+                print("lsp: cancelRequest (cancel_completion):", String(e))
             self._inflight_completion_id = String("")
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
@@ -1289,8 +1292,8 @@ struct LspManager(Copyable, Movable):
                 self.client.send_notification(
                     String("$/cancelRequest"), cancel_params,
                 )
-            except:
-                pass
+            except e:
+                print("lsp: cancelRequest (hover):", String(e))
         try:
             self._inflight_hover_id = self.client.send_request(
                 String("textDocument/hover"), params,
@@ -1874,8 +1877,8 @@ struct LspManager(Copyable, Movable):
                 id, -32601,
                 String("method not implemented by turbokod: ") + method,
             )
-        except:
-            pass
+        except e:
+            print("lsp: send_error (MethodNotFound) id=", id_label, ":", String(e))
 
     def _on_initialize_response(mut self, msg: LspIncoming):
         # Spec: send the ``initialized`` notification before any other request,
@@ -1999,8 +2002,8 @@ struct LspManager(Copyable, Movable):
             self.client.send_notification(
                 String("textDocument/didOpen"), params,
             )
-        except:
-            pass
+        except e:
+            print("lsp: didOpen", path, ":", String(e))
         self._mark_diag_inflight(path, 1)
 
     def _send_did_change(mut self, path: String, version: Int, var text: String):
@@ -2026,8 +2029,8 @@ struct LspManager(Copyable, Movable):
             self.client.send_notification(
                 String("textDocument/didChange"), params,
             )
-        except:
-            pass
+        except e:
+            print("lsp: didChange", path, "v=", version, ":", String(e))
         self._mark_diag_inflight(path, version)
 
 

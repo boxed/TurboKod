@@ -201,8 +201,11 @@ struct Speller(Movable):
                 if len(content.as_bytes()) > 0:
                     var lines = split_lines_no_trailing(content)
                     self._load_words(lines)
-            except:
-                pass
+            except e:
+                # User dictionary is optional; a missing/unreadable
+                # file is the common case. Log so a permission flap
+                # is debuggable.
+                print("spell: load user_dict_path", udp, ":", String(e))
 
     def reload(mut self):
         """Drop the in-memory main bucket set and re-run ``load_default``.

@@ -823,8 +823,10 @@ struct DapManager(Copyable, Movable):
             args.put(String("terminateDebuggee"), json_bool(True))
             try:
                 _ = self.client.send_request(String("disconnect"), args)
-            except:
-                pass
+            except e:
+                # Disconnect is best-effort; we ``terminate`` the
+                # child unconditionally just below.
+                print("dap: shutdown disconnect:", String(e))
         self.client.terminate()
         self.state = _STATE_TERMINATED
         # Clear pause-related latches. Without this, a session that
@@ -1310,8 +1312,8 @@ struct DapManager(Copyable, Movable):
             # ``_handle_set_breakpoints_response`` re-derives lines from
             # the live arrays, so we don't need to stash sent_lines.
             _ = sent_lines^
-        except:
-            pass
+        except e:
+            print("dap: setBreakpoints", path, ":", String(e))
         # Mirror to the attached subprocess if any — without this, a
         # breakpoint toggled after attach in shared code (a Django view
         # served from the forked child) wouldn't fire because only the
@@ -1322,8 +1324,8 @@ struct DapManager(Copyable, Movable):
                 _ = self._subprocess.client.send_request(
                     String("setBreakpoints"), args,
                 )
-            except:
-                pass
+            except e:
+                print("dap: setBreakpoints (subprocess)", path, ":", String(e))
 
     # --- exception breakpoints --------------------------------------------
 
@@ -1351,8 +1353,8 @@ struct DapManager(Copyable, Movable):
             _ = self.client.send_request(
                 String("setExceptionBreakpoints"), args,
             )
-        except:
-            pass
+        except e:
+            print("dap: setExceptionBreakpoints:", String(e))
 
     # --- evaluate (watch / REPL) ------------------------------------------
 
@@ -1945,8 +1947,8 @@ struct DapManager(Copyable, Movable):
                 self._subprocess.client.send_response(
                     msg.seq, msg.command.value(), False, json_object(),
                 )
-            except:
-                pass
+            except e:
+                print("dap: subprocess reverse-request not-supported reply:", String(e))
 
     def _subprocess_configure(mut self):
         """Push breakpoints + exception filters, then ``configurationDone``."""
@@ -1960,8 +1962,8 @@ struct DapManager(Copyable, Movable):
             _ = self._subprocess.client.send_request(
                 String("setDebuggerProperty"), sdp^,
             )
-        except:
-            pass
+        except e:
+            print("dap: subprocess setDebuggerProperty:", String(e))
         # setBreakpoints per source path.
         var paths = List[String]()
         for i in range(len(self._subprocess.bp_paths)):
@@ -2002,8 +2004,8 @@ struct DapManager(Copyable, Movable):
                 _ = self._subprocess.client.send_request(
                     String("setBreakpoints"), args^,
                 )
-            except:
-                pass
+            except e:
+                print("dap: subprocess _configure setBreakpoints", path, ":", String(e))
         # setExceptionBreakpoints — same defaults as parent.
         var ex_args = json_object()
         var arr = json_array()
@@ -2014,8 +2016,8 @@ struct DapManager(Copyable, Movable):
             _ = self._subprocess.client.send_request(
                 String("setExceptionBreakpoints"), ex_args^,
             )
-        except:
-            pass
+        except e:
+            print("dap: subprocess _configure setExceptionBreakpoints:", String(e))
         try:
             self._subprocess.inflight_config_done = \
                 self._subprocess.client.send_request(
@@ -2143,8 +2145,8 @@ struct DapManager(Copyable, Movable):
             self.client.send_response(
                 msg.seq, msg.command.value(), False, json_object(),
             )
-        except:
-            pass
+        except e:
+            print("dap: reverse-request not-supported reply:", String(e))
 
     def _on_initialize_response(mut self, msg: DapIncoming):
         # Entry trace: when a session goes FAILED here, the only previous
@@ -2595,8 +2597,8 @@ struct DapManager(Copyable, Movable):
             _ = self.client.send_request(
                 String("setDebuggerProperty"), args^,
             )
-        except:
-            pass
+        except e:
+            print("dap: setDebuggerProperty (debugpy):", String(e))
 
     def _do_configure(mut self):
         """Push all breakpoints + exception filters, then send

@@ -251,6 +251,13 @@ def write_buffer(fd: Int32, mut buf: List[UInt8]):
 def debug_log(msg: String):
     """Append ``msg`` plus a newline to ``/tmp/turbokod_debug.log``.
 
+    Diagnostics-only and OFF by default: gated behind ``TURBOKOD_DEBUG``
+    so the per-frame ``debug_log`` calls in the paint path don't fire an
+    open/write/close syscall burst (and grow a multi-MB log) on every
+    frame, which idles the CPU at several percent. Set ``TURBOKOD_DEBUG``
+    to any non-empty value to enable. The unset path is a cheap ``getenv``
+    that returns before any allocation or I/O.
+
     Diagnostics-only: opens fresh in O_APPEND mode each call so a
     ``tail -F`` of the log shows progress in real time even if the
     next Mojo line never runs (the file is closed before the call
@@ -260,6 +267,8 @@ def debug_log(msg: String):
     because Mojo's FFI rejects a second ``open`` binding with a
     different arity, and the rest of the codebase already declares
     the two-arg form."""
+    if len(getenv_value(String("TURBOKOD_DEBUG")).as_bytes()) == 0:
+        return
     var path = String("/tmp/turbokod_debug.log\0")
     var fd = external_call["tk_debug_log_open", Int32](
         path.unsafe_ptr(),
