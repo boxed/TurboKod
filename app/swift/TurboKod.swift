@@ -381,10 +381,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var idleTicks = 0
     private var tickSeq = 0
 
-    /// Pull the redraw timer out of idle backoff (full 20 Hz) for the next
-    /// ~1 s. Called on activity that doesn't itself trigger a redraw — notably
-    /// bare mouse motion — so hover/cursor feedback stays prompt.
-    func noteActivity() { idleTicks = 0 }
+    /// Nudge the redraw timer out of deep idle on activity that doesn't
+    /// itself trigger a redraw — notably bare mouse motion.
+    ///
+    /// It deliberately does NOT force full 20 Hz. Profiling showed that
+    /// pinning 20 Hz during continuous mouse movement spent ~6% of a core
+    /// laying out + hashing the whole Desktop every tick purely to detect
+    /// change — and `draw` almost never fired, i.e. the frame rarely
+    /// actually changed. Hover hints are dwell-based and don't need 20 Hz,
+    /// and the cursor *shape* is set synchronously in `sendMouse`, not by
+    /// this timer. So we clamp into the medium (~10 Hz) tier: prompt enough
+    /// for hover, half the repaint cost. A frame that genuinely changes
+    /// still resets `idleTicks` to 0 (full rate) via the timer body below.
+    func noteActivity() { if idleTicks > 30 { idleTicks = 30 } }
     // Always-alive Mojo Desktop used to drive the menu bar when no window
     // is open. Without it, closing the last window (or starting with an
     // empty session) leaves NSApp.mainMenu pointing at items wired to
@@ -464,13 +473,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let self else { return }
             if NSApp.isHidden { return }
             self.tickSeq &+= 1
-            // Idle backoff: once frames have been static for ~1s (20 ticks),
-            // drop from 20 Hz to ~4 Hz. The work below — tick + layout + the
-            // menu snapshot — is what costs CPU; skipping it on 4 of every 5
-            // ticks while idle drives idle CPU toward zero, and async work
-            // (LSP, terminal, external file edits) still surfaces within
-            // ~250 ms. Any change resets idleTicks and we run full-rate again.
-            if self.idleTicks > 20 && self.tickSeq % 5 != 0 { return }
+            // Three-tier backoff. The work below — tick + layout + the menu
+            // snapshot — is what costs CPU; running it less often when nothing
+            // is visibly changing is the whole game. Any frame that actually
+            // changes resets idleTicks to 0 (full rate); `noteActivity`
+            // (bare mouse motion) clamps into the medium tier rather than
+            // forcing full rate, since hover hints don't need 20 Hz.
+            //   idleTicks 0–20  : full 20 Hz (something is visibly changing)
+            //   idleTicks 21–60 : ~10 Hz     (mouse moving, frame steady)
+            //   idleTicks >60   : ~4 Hz      (deep idle)
+            // Async work (LSP, terminal, external edits) still surfaces within
+            // ~100–250 ms at the lower tiers.
+            if self.idleTicks > 60 {
+                if self.tickSeq % 5 != 0 { return }
+            } else if self.idleTicks > 20 {
+                if self.tickSeq % 2 != 0 { return }
+            }
 
             var changed = false
             if NSApp.isActive && self.refreshMenu() { changed = true }
