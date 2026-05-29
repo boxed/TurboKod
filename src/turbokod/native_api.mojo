@@ -294,6 +294,12 @@ fn tk_desktop_tick(h: Int, cols: Int, rows: Int):
     except:
         pass
     _refresh_menu_visibility(d)
+    # Stamp the right-aligned shortcut text on each menu item so the
+    # host's menu snapshot has it. ``paint`` already does this for
+    # per-window Desktops, but the always-on chrome Desktop never
+    # paints — without this call its snapshot ships items with empty
+    # shortcut fields and the macOS menu shows no Cmd+Q text.
+    d._refresh_shortcuts()
     var tree_open = d.file_tree.consume_open()
     if tree_open:
         try:
@@ -492,3 +498,38 @@ fn tk_desktop_menu_invoke(
     # the host (so it can route framework-level actions like Quit / Open
     # via its own UI). Map that the same way handle_event does.
     return _action_code(result)
+
+
+@export
+fn tk_desktop_take_pending_new_window_project(
+    h: Int, out_ptr: Int, cap: Int,
+) -> Int:
+    """Drain the "open this project in a new window" path queued by the
+    Project menu's inline recent-project picks. Returns the number of
+    UTF-8 bytes written into the caller's buffer; returns 0 when
+    nothing is queued or the buffer can't hold the path (the latter
+    leaves the path queued so the host can retry with a larger cap).
+
+    The host calls this right after receiving ``ACT_NEW_WINDOW`` from
+    ``tk_desktop_menu_invoke`` to discover whether the new-window
+    request was a plain "File ▸ New window" pick (returns 0) or a
+    recent-project pick that should land in a project-loaded window
+    (returns the path)."""
+    if h == 0 or out_ptr == 0 or cap <= 0:
+        return 0
+    # Peek before consuming so an undersized buffer leaves the path
+    # in place for the caller to retry with a larger ``cap`` — a
+    # truncated path would point somewhere wrong.
+    ref pending = _desk(h)[]._pending_new_window_project
+    if not pending:
+        return 0
+    var path = pending.value()
+    var bytes = path.as_bytes()
+    var n = len(bytes)
+    if n > cap:
+        return 0
+    _desk(h)[]._pending_new_window_project = Optional[String]()
+    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[i] = bytes[i]
+    return n

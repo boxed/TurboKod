@@ -23,7 +23,7 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC,
-    MOUSE_BUTTON_LEFT,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .picker_input import picker_nav_key, picker_wheel_scroll
@@ -69,7 +69,15 @@ struct QuickOpen(Movable):
     var submitted: Bool
     var root: String
     var query: TextField
+    # The "primary" submitted path — the one the cursor was on at submit
+    # time. ``selected_paths`` (below) is the full set including the
+    # multi-select range; this single field is what Desktop uses to
+    # decide which window to focus after opening.
     var selected_path: String
+    # Full set of paths to open on submit. Single-row selection ⇒ one
+    # entry; multi-row (shift+arrow) ⇒ the whole range in row order
+    # (low → high). Desktop iterates this and opens each.
+    var selected_paths: List[String]
     # Display labels (project-relative when possible). Each entry has a
     # parallel absolute path in ``entries_abs`` used as the submit target.
     var entries: List[String]
@@ -77,6 +85,11 @@ struct QuickOpen(Movable):
     # Indices into ``entries`` that match the current query.
     var matched: List[Int]
     var selected: Int
+    # Multi-select anchor (index into ``matched``). When ``anchor ==
+    # selected`` the picker has a single-row selection; shift+arrow keys
+    # move ``selected`` while leaving ``anchor`` pinned, painting the
+    # whole range highlighted and submitting all of it on Enter.
+    var anchor: Int
     var scroll: Int
     # Dialog title — "Quick Open" by default, "Open Recent" for the
     # recents-mode entry point.
@@ -104,6 +117,30 @@ struct QuickOpen(Movable):
     # variants do not restore — they always start empty since they
     # filter a different list.
     var _saved_query: String
+    # Saved selection + scroll, also scoped to ``open()``. Stored as
+    # raw indices (not paths) so the restore survives a partially-loaded
+    # async indexer: ``_refilter`` clamps these into the current
+    # ``matched`` length on every pass while ``_pending_restore`` is
+    # True, so as the indexer fills entries the cursor settles back to
+    # the saved row. Both reset to 0 the first time ``open()`` sees a
+    # new project root.
+    var _saved_selected: Int
+    var _saved_scroll: Int
+    # Project root associated with the saved query/selection/scroll. A
+    # different root on the next ``open()`` clears the saved state —
+    # carrying row 47 from project A into project B's file list would
+    # land the cursor on an unrelated file.
+    var _saved_root: String
+    # While True, ``_refilter`` clamps ``selected`` / ``scroll`` to the
+    # saved values instead of resetting them to 0. Set in ``open()``,
+    # cleared the moment the user navigates, scrolls, or types — all
+    # signals they're past the initial restore.
+    var _pending_restore: Bool
+    # True while we're inside the project-files ``open()`` lifecycle.
+    # ``close()`` writes back to ``_saved_*`` only when this is set, so
+    # an "Open Recent" close doesn't pollute the main picker's saved
+    # state (open_recent always starts fresh).
+    var _in_main_open: Bool
 
     def __init__(out self):
         self.active = False
@@ -111,10 +148,12 @@ struct QuickOpen(Movable):
         self.root = String("")
         self.query = TextField()
         self.selected_path = String("")
+        self.selected_paths = List[String]()
         self.entries = List[String]()
         self.entries_abs = List[String]()
         self.matched = List[Int]()
         self.selected = 0
+        self.anchor = 0
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
@@ -123,9 +162,24 @@ struct QuickOpen(Movable):
         self.indexing = False
         self.truncated = False
         self._saved_query = String("")
+        self._saved_selected = 0
+        self._saved_scroll = 0
+        self._saved_root = String("")
+        self._pending_restore = False
+        self._in_main_open = False
 
     def open(mut self, var root: String):
+        # A different project root invalidates everything we'd saved —
+        # the file list won't share indices, and the saved query was
+        # likely about the previous tree. Reset before the move so
+        # ``self.root`` reflects the new value when we compare next time.
+        if self._saved_root != root:
+            self._saved_query = String("")
+            self._saved_selected = 0
+            self._saved_scroll = 0
+        self._saved_root = root
         self.root = root^
+        self._in_main_open = True
         self.query = TextField()
         # Restore the last query the user typed in this picker. ``set_text``
         # places the cursor at the end; ``select_all`` then highlights the
@@ -137,8 +191,14 @@ struct QuickOpen(Movable):
         self.active = True
         self.submitted = False
         self.selected_path = String("")
+        self.selected_paths = List[String]()
         self.selected = 0
+        self.anchor = 0
         self.scroll = 0
+        # ``_refilter`` will clamp ``_saved_selected`` / ``_saved_scroll``
+        # into ``selected`` / ``scroll`` while this flag is True. The
+        # first user navigation / scroll / keystroke flips it off.
+        self._pending_restore = True
         self.title = String(" Quick Open ")
         self.picks_project = False
         self.entries = List[String]()
@@ -236,11 +296,15 @@ struct QuickOpen(Movable):
         path through ``open_project`` instead of ``open_file``.
         """
         self.root = root^
+        self._in_main_open = False
+        self._pending_restore = False
         self.query = TextField()
         self.active = True
         self.submitted = False
         self.selected_path = String("")
+        self.selected_paths = List[String]()
         self.selected = 0
+        self.anchor = 0
         self.scroll = 0
         self.title = String(
             " Open Recent Project " if picks_project else " Open Recent "
@@ -253,19 +317,31 @@ struct QuickOpen(Movable):
     def close(mut self):
         self.active = False
         self.submitted = False
+        # Remember the query / selection / scroll for the next
+        # ``open()`` so the user comes back to the same state (cancel-
+        # by-ESC and submit-via-Enter both route through here). Only
+        # the main project-files variant participates; ``open_recent``
+        # cleared ``_in_main_open`` so its close doesn't pollute the
+        # main picker's saved state. The multi-select range is NOT
+        # saved — only the cursor position — since "I shift-selected
+        # 5 files, opened them, and reopened the picker" should land
+        # back on a single cursor, not on a 5-row highlight.
+        if self._in_main_open:
+            self._saved_query = self.query.text
+            self._saved_selected = self.selected
+            self._saved_scroll = self.scroll
+            # ``_saved_root`` was already set in ``open()``; leave it.
+        self._in_main_open = False
+        self._pending_restore = False
         self.root = String("")
-        # Remember the query for the next ``open()`` so the user comes
-        # back to the same filter (cancel-by-ESC and submit-via-Enter
-        # both route through here). ``open_recent()`` doesn't read
-        # ``_saved_query``, so its no-op restore keeps that variant
-        # starting fresh.
-        self._saved_query = self.query.text
         self.query = TextField()
         self.selected_path = String("")
+        self.selected_paths = List[String]()
         self.entries = List[String]()
         self.entries_abs = List[String]()
         self.matched = List[Int]()
         self.selected = 0
+        self.anchor = 0
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
@@ -290,8 +366,30 @@ struct QuickOpen(Movable):
             for i in range(len(self.entries)):
                 if quick_open_match(self.entries[i], self.query.text):
                     self.matched.append(i)
-        self.selected = 0
-        self.scroll = 0
+        if self._pending_restore and len(self.matched) > 0:
+            # Initial restore from a prior ``close()``. We always read
+            # from ``_saved_selected`` / ``_saved_scroll`` (untouched
+            # across multiple ``tick`` ⇒ ``_refilter`` cycles during
+            # async indexing) and clamp into the *current* matched
+            # length, so as more entries stream in the cursor settles
+            # onto the saved row.
+            var s = self._saved_selected
+            if s >= len(self.matched): s = len(self.matched) - 1
+            if s < 0: s = 0
+            self.selected = s
+            self.anchor = s
+            var sc = self._saved_scroll
+            if sc < 0: sc = 0
+            # Loose clamp — keep ``scroll`` from running past where
+            # there's anything to show. Paint's slice handles the
+            # tight bound against list-height.
+            if sc >= len(self.matched): sc = len(self.matched) - 1
+            if sc < 0: sc = 0
+            self.scroll = sc
+        else:
+            self.selected = 0
+            self.anchor = 0
+            self.scroll = 0
 
     # --- geometry ---------------------------------------------------------
 
@@ -345,7 +443,11 @@ struct QuickOpen(Movable):
         _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
         self._input_rect = layout.input_rect
         self.query.paint(canvas, layout.input_rect, True)
-        # Listing.
+        # Listing. The whole multi-select range gets the highlight
+        # attribute — when ``anchor == selected`` that's just a single
+        # row, when shift+arrow has extended the selection it's a span.
+        var sel_lo = self.anchor if self.anchor < self.selected else self.selected
+        var sel_hi = self.selected if self.anchor < self.selected else self.anchor
         var top = layout.list_top
         var h = layout.list_height
         for i in range(h):
@@ -353,7 +455,7 @@ struct QuickOpen(Movable):
             if idx >= len(self.matched):
                 break
             var entry = self.entries[self.matched[idx]]
-            var attr = sel_attr if idx == self.selected else bg
+            var attr = sel_attr if sel_lo <= idx and idx <= sel_hi else bg
             painter.fill(
                 canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
                 String(" "), attr,
@@ -383,18 +485,45 @@ struct QuickOpen(Movable):
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.matched):
                 return True
-            self.selected_path = self.entries_abs[self.matched[self.selected]]
+            self._collect_selected_paths()
             self.submitted = True
             return True
         if picker_nav_key(k, len(self.matched), self.selected):
+            # Any deliberate navigation ends the "restore" phase — the
+            # next ``_refilter`` (e.g. an in-flight indexer tick) must
+            # respect where the user just moved to, not snap back.
+            self._pending_restore = False
+            # Shift held ⇒ extend the multi-selection (anchor stays
+            # pinned, ``selected`` is now the moving end). No shift ⇒
+            # collapse to the new cursor position.
+            if (event.mods & MOD_SHIFT) == 0:
+                self.anchor = self.selected
             self._scroll_to_selection()
             return True
         var r = self.query.handle_key(event)
         if r.consumed:
             if r.changed:
+                # Query changed ⇒ the saved row index is meaningless
+                # against the new filter; let ``_refilter`` reset.
+                self._pending_restore = False
                 self._refilter()
             return True
         return True
+
+    def _collect_selected_paths(mut self):
+        """Populate ``selected_paths`` from the multi-select range
+        ``[min(anchor, selected) … max(anchor, selected)]`` in row order,
+        and set ``selected_path`` to the cursor row so Desktop knows
+        which file to focus after opening. Always emits at least one
+        path; ``selected_path`` is always a member of ``selected_paths``."""
+        self.selected_paths = List[String]()
+        var lo = self.anchor if self.anchor < self.selected else self.selected
+        var hi = self.selected if self.anchor < self.selected else self.anchor
+        if lo < 0: lo = 0
+        if hi >= len(self.matched): hi = len(self.matched) - 1
+        for i in range(lo, hi + 1):
+            self.selected_paths.append(self.entries_abs[self.matched[i]])
+        self.selected_path = self.entries_abs[self.matched[self.selected]]
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
@@ -419,6 +548,9 @@ struct QuickOpen(Movable):
                 event.button, self.scroll, len(self.matched),
                 layout.list_height,
             ):
+                # Wheel scroll counts as user interaction — end restore
+                # mode so the next ``_refilter`` doesn't snap back.
+                self._pending_restore = False
                 return True
         if event.button != MOUSE_BUTTON_LEFT:
             return True
@@ -432,11 +564,23 @@ struct QuickOpen(Movable):
         var idx = self.scroll + (event.pos.y - layout.list_top)
         if idx < 0 or idx >= len(self.matched):
             return True
-        if idx == self.selected:
-            self.selected_path = self.entries_abs[self.matched[idx]]
+        # Shift+click extends the multi-select (anchor stays); plain
+        # click collapses to a single-row selection. Click-on-already-
+        # selected (with no shift) is the submit shortcut, matching how
+        # the picker behaved before multi-select existed.
+        self._pending_restore = False
+        var shift = (event.mods & MOD_SHIFT) != 0
+        if shift:
+            self.selected = idx
+            return True
+        if idx == self.selected and self.anchor == self.selected:
+            self.selected = idx
+            self.anchor = idx
+            self._collect_selected_paths()
             self.submitted = True
             return True
         self.selected = idx
+        self.anchor = idx
         return True
 
     def _scroll_to_selection(mut self):

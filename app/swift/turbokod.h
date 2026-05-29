@@ -25,5 +25,7 @@ void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
 int64_t tk_desktop_menu_snapshot(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_menu_invoke(int64_t h, int64_t action_ptr, int64_t action_len,
                                int64_t cols, int64_t rows);
+int64_t tk_desktop_take_pending_new_window_project(int64_t h, int64_t out_ptr,
+                                                   int64_t cap);
 
 #endif

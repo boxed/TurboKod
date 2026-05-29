@@ -275,11 +275,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var menuBuf: [UInt8] = [UInt8](repeating: 0, count: 8192)
     private var lastMenuHash: UInt64 = 0
     private var menuTracking = false
+    // Always-alive Mojo Desktop used to drive the menu bar when no window
+    // is open. Without it, closing the last window (or starting with an
+    // empty session) leaves NSApp.mainMenu pointing at items wired to
+    // `menuActionFired`, which used to bail when `views` was empty —
+    // turning Cmd+Q + Project ▸ Recent into no-ops. The chrome desktop
+    // is created in applicationDidFinishLaunching, has host_owns_menu
+    // set, and loads config so its menu snapshot reflects the real
+    // recent-projects list.
+    private var chromeDesktop: Int64 = 0
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppController.shared = self
         chdirToResourceRoot()
         buildMenu()
+        // Initialize the chrome Desktop before any session restore so its
+        // menu snapshot is ready to drive NSApp.mainMenu the moment we
+        // have zero windows (empty session, or last window closed).
+        chromeDesktop = tk_desktop_new()
+        if chromeDesktop != 0 {
+            tk_desktop_set_host_owns_menu(chromeDesktop, 1)
+        }
 
         let args = CommandLine.arguments
         if args.count > 1 {
@@ -300,17 +316,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         } else {
             persistSession = true
             let saved = loadSession()
-            if saved.isEmpty {
-                _ = newWindow()
-            } else {
-                for entry in saved {
-                    // Per-project file wins; ``native_session.txt``'s frame
-                    // is the legacy fallback for projects that haven't yet
-                    // written the new file (first launch after upgrade).
-                    let frame = loadProjectFrame(entry.project) ?? entry.frame
-                    let v = newWindow(frame: frame)
-                    openProject(v, entry.project)
-                }
+            // Empty session: leave zero windows. The macOS menu bar stays
+            // up (sourced from chromeDesktop) so the user can quit, open
+            // a project, or pick a recent project — all of which spawn a
+            // new window as needed. No blank-window auto-open.
+            for entry in saved {
+                // Per-project file wins; ``native_session.txt``'s frame
+                // is the legacy fallback for projects that haven't yet
+                // written the new file (first launch after upgrade).
+                let frame = loadProjectFrame(entry.project) ?? entry.frame
+                let v = newWindow(frame: frame)
+                openProject(v, entry.project)
             }
         }
 
@@ -388,8 +404,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Called from the per-frame timer; cheap on the steady state (one
     /// snapshot + FNV-1a hash compare). Skipped while AppKit is tracking an
     /// open NSMenu so the dropdown isn't ripped out mid-click.
+    // Whichever Mojo Desktop should source the macOS menu bar right now —
+    // the key window's view's Desktop when one is focused, otherwise any
+    // open window's view, and finally the always-alive chrome Desktop when
+    // no windows exist. Returns 0 only if even the chrome Desktop failed
+    // to allocate.
+    private func menuHandle() -> Int64 {
+        if let v = NSApp.keyWindow?.contentView as? CellView, v.handle != 0 {
+            return v.handle
+        }
+        if let v = views.first, v.handle != 0 { return v.handle }
+        return chromeDesktop
+    }
+
     func refreshMenu() {
-        guard !menuTracking, let h = views.first?.handle, h != 0 else { return }
+        let h = menuHandle()
+        guard !menuTracking, h != 0 else { return }
+        // The chrome Desktop never gets drawn (its draw cycle is what
+        // ticks per-window Desktops via tk_desktop_tick), so its menu
+        // visibility flags would otherwise never update — Edit / View
+        // would stay visible with no editor. Tick it manually right
+        // before snapshotting so the snapshot reflects "no editor
+        // focused" state.
+        if h == chromeDesktop { tk_desktop_tick(h, 80, 24) }
         // Snapshot into the existing buffer; grow once if it was too small.
         var n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
             Int(tk_desktop_menu_snapshot(h,
@@ -471,13 +508,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     menu.addItem(.separator())
                     continue
                 }
-                let item = NSMenuItem(
-                    title: label,
-                    action: #selector(menuActionFired(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = action
+                // A few app-level actions need to use AppKit's native
+                // selectors so their key equivalents still dispatch when
+                // the app has no key window (Cmd+Q with no windows open
+                // otherwise doesn't reach a custom `menuActionFired:`
+                // because AppKit walks mainMenu via the responder chain
+                // and our AppController-as-NSObject isn't on it). Mouse
+                // clicks happen to work either way, but a uniform path
+                // for both is cleaner.
+                let nativeSel: Selector?
+                switch action {
+                case "quit":           nativeSel = #selector(NSApplication.terminate(_:))
+                case "app.new_window": nativeSel = #selector(newWindowAction)
+                case "project:open":   nativeSel = #selector(openProjectAction)
+                case "file:open":      nativeSel = #selector(openAction)
+                default:               nativeSel = nil
+                }
+                let item: NSMenuItem
+                if let sel = nativeSel {
+                    item = NSMenuItem(title: label, action: sel, keyEquivalent: "")
+                    // Native selectors go to the application via the
+                    // responder chain (target=nil) so AppKit's standard
+                    // dispatch picks them up regardless of key-window state.
+                } else {
+                    item = NSMenuItem(
+                        title: label,
+                        action: #selector(menuActionFired(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = action
+                }
+                item.isEnabled = true
                 if checkable { item.state = checked ? .on : .off }
                 applyShortcut(shortcut, to: item)
                 menu.addItem(item)
@@ -562,17 +624,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// dispatch_action, then routing any host-level action code through the
     /// existing handler (Open/Quit/etc.).
     @objc func menuActionFired(_ sender: NSMenuItem) {
-        guard let action = sender.representedObject as? String,
-              let view = NSApp.keyWindow?.contentView as? CellView ?? views.first
-        else { return }
+        guard let action = sender.representedObject as? String else { return }
+        // Dispatch through whatever Desktop is currently driving the menu
+        // (key window's, any open window's, or the chrome desktop when no
+        // windows exist) — same handle `refreshMenu` snapshotted from, so
+        // the action's source-Desktop state (e.g. the recent-project
+        // pending-path stash) is read back from the right place.
+        let view = (NSApp.keyWindow?.contentView as? CellView) ?? views.first
+        let h = view?.handle ?? chromeDesktop
+        guard h != 0 else { return }
+        let cols = Int64(view?.cols() ?? 80)
+        let rows = Int64(view?.rows() ?? 24)
         let bytes = Array(action.utf8)
         let code = bytes.withUnsafeBufferPointer { b in
-            tk_desktop_menu_invoke(view.handle,
+            tk_desktop_menu_invoke(h,
                 Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count),
-                Int64(view.cols()), Int64(view.rows()))
+                cols, rows)
         }
-        handleAction(code, view: view)
-        view.needsDisplay = true
+        handleHostAction(code, sourceHandle: h, view: view)
+        view?.needsDisplay = true
     }
 
     // NSMenuDelegate — pause refreshMenu while AppKit is tracking an open
@@ -598,19 +668,99 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc func newWindowAction() { _ = newWindow() }
-    @objc func openAction() { if let v = keyView() { openFilePanel(v) } }
-    @objc func openProjectAction() { if let v = keyView() { openProjectPanel(v) } }
+    @objc func openAction() {
+        if let v = keyView() { openFilePanel(v) }
+        else { openFilePanelInNewWindow() }
+    }
+    @objc func openProjectAction() {
+        if let v = keyView() { openProjectPanel(v) }
+        else { openProjectPanelInNewWindow() }
+    }
 
     // MARK: action codes from Mojo (in-grid menu / Ctrl shortcuts)
 
+    // CellView's keyDown / mouse handlers go through this one — they
+    // always have a real view, so the source Desktop is that view's handle.
     func handleAction(_ code: Int32, view: CellView) {
+        handleHostAction(code, sourceHandle: view.handle, view: view)
+    }
+
+    // Generalized action-code dispatch. The source `sourceHandle` is the
+    // Mojo Desktop that produced this action (a real window's, or the
+    // chrome desktop when a menu pick fired without a window). `view` is
+    // the window the action came from (when one exists) so file/project
+    // dialogs can land back in it — when nil we open a fresh window for
+    // those, since dropping the user's pick on the floor is worse.
+    func handleHostAction(_ code: Int32, sourceHandle: Int64, view: CellView?) {
         switch code {
-        case 1: NSApp.terminate(nil)         // APP_QUIT_ACTION (Ctrl+Q / in-grid Quit)
-        case 2, 3: openFilePanel(view)       // Open… / Quick open…
-        case 4: openProjectPanel(view)       // Open project…
-        case 5: _ = newWindow()              // in-grid File ▸ New window
+        case 1: NSApp.terminate(nil)         // APP_QUIT_ACTION
+        case 2, 3:                           // Open… / Quick open…
+            if let v = view { openFilePanel(v) }
+            else { openFilePanelInNewWindow() }
+        case 4:                              // Open project…
+            if let v = view { openProjectPanel(v) }
+            else { openProjectPanelInNewWindow() }
+        case 5:
+            // ACT_NEW_WINDOW. Two paths share this code: a plain
+            // File ▸ New window (no payload) and a Project ▸ <recent>
+            // pick (path queued on the source Desktop). We drain the
+            // pending project off the *source* Desktop — that may be
+            // the chrome desktop when the pick came from a no-window
+            // menu. If there's a path, spawn the window at its
+            // remembered frame and load the project.
+            let pending = takePendingNewWindowProject(sourceHandle)
+            if let path = pending {
+                let v = newWindow(frame: loadProjectFrame(path))
+                openProject(v, path)
+            } else {
+                _ = newWindow()
+            }
         default: break
         }
+    }
+
+    // No-window variants of the file/project open panels: spawn a fresh
+    // window and load the user's pick into it. Used when the user fires
+    // Open… / Open project… from the menu while no windows are open.
+    private func openFilePanelInNewWindow() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let nv = newWindow()
+        for url in panel.urls { openFile(nv, url.path) }
+    }
+
+    private func openProjectPanelInNewWindow() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        let nv = newWindow(frame: loadProjectFrame(url.path))
+        openProject(nv, url.path)
+    }
+
+    // Pull the path the Mojo Desktop queued when the user picked a
+    // recent project from the right-aligned Project menu. Returns nil
+    // when no path is queued (the usual case for File ▸ New window).
+    private func takePendingNewWindowProject(_ h: Int64) -> String? {
+        // 4 KiB covers every realistic project path; PATH_MAX on macOS
+        // is 1024 and even deep monorepos rarely exceed a few hundred
+        // bytes. If the Mojo side ever queues something larger,
+        // tk_desktop_take_pending_new_window_project returns 0 *and
+        // leaves the path queued*, so we'd need to retry with a bigger
+        // buffer — not worth the complication today.
+        let cap = 4096
+        var buf = [UInt8](repeating: 0, count: cap)
+        let n = buf.withUnsafeMutableBufferPointer { b -> Int in
+            return Int(tk_desktop_take_pending_new_window_project(
+                h, Int64(Int(bitPattern: b.baseAddress)), Int64(cap),
+            ))
+        }
+        if n <= 0 { return nil }
+        return String(bytes: buf[0..<n], encoding: .utf8)
     }
 
     // MARK: windows + desktops
@@ -771,6 +921,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if !isTerminating {
             saveSession()
             isTerminating = true
+        }
+        // Free the chrome Desktop so a clean leaks(1) run reports zero
+        // hangers. The real per-window Desktops are freed in
+        // windowShouldClose; this is the one allocation outside that path.
+        if chromeDesktop != 0 {
+            tk_desktop_free(chromeDesktop)
+            chromeDesktop = 0
         }
         return .terminateNow
     }

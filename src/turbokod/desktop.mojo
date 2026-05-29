@@ -286,15 +286,19 @@ comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
-# "Open recent project..." — same QuickOpen-style picker as Open Recent
-# files, but populated from ``self.config.recent_projects`` and routed
-# through ``open_project`` on submit instead of ``open_file``.
-comptime PROJECT_OPEN_RECENT  = String("project:open_recent")
-# Direct-pick recent-project menu entries that appear in the no-project
-# state. ``PROJECT_OPEN_RECENT_PREFIX + <index>`` encodes the slot in
-# ``config.recent_projects`` so the dispatcher can route the click
-# without a parallel lookup table.
+# Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
+# + <index>`` encodes the slot in ``config.recent_projects`` so the
+# dispatcher can route the click without a parallel lookup table.
+# Always present in the project menu (both project-open and no-project
+# states); when a host frontend owns the menu (``host_owns_menu``) a
+# click opens the picked project in a *new* window via the host instead
+# of swapping it in place.
 comptime PROJECT_OPEN_RECENT_PREFIX = String("project:open_recent_idx:")
+# Host-side action sentinel: matches ``native_api.NEW_WINDOW``. When the
+# Swift host owns the menu, picking a recent project stashes the path
+# on the Desktop and returns this action so the host can spawn a window
+# and read the pending path via ``tk_desktop_take_pending_new_window_project``.
+comptime _HOST_NEW_WINDOW_ACTION = String("app.new_window")
 # "Open project..." — host-handled action that asks the framework's
 # ``FileDialog`` to pick a directory (dirs-only mode). The Desktop
 # doesn't intercept it; it falls through ``dispatch_action`` so the
@@ -585,6 +589,11 @@ struct Desktop(Movable):
     var project: Optional[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
+    # Path to open in a new host window on the next ``take_pending_new_window_project``
+    # call. Set when the user picks a recent project from the Project menu
+    # while ``host_owns_menu`` is True. The host reads + clears it after
+    # spawning the new window.
+    var _pending_new_window_project: Optional[String]
     var _pending_action: String      # what to do on next prompt submit
     var _pending_arg: String         # accumulator for two-step prompts
     var _last_search: String         # last Find needle, repeated by Ctrl+G
@@ -947,6 +956,7 @@ struct Desktop(Movable):
         self._last_search = String("")
         self._last_search_opts = SearchOptions()
         self._last_goto_line = String("")
+        self._pending_new_window_project = Optional[String]()
         self._open_count = 0
         self._untitled_count = 0
         self._hotkeys = List[Hotkey]()
@@ -1032,17 +1042,15 @@ struct Desktop(Movable):
         # ``_rebuild_window_menu`` repopulates its items every paint.
         self.menu_bar.add(Menu(_WINDOW_MENU_LABEL, List[MenuItem]()))
         self._window_menu_idx = len(self.menu_bar.menus) - 1
-        # Right-aligned project menu. Always visible: when no project is
-        # open the label reads "project" and the only entry is the
-        # recent-projects picker, so the user can switch back to a recent
-        # project from a fresh launch. ``_set_project`` swaps in the
-        # project basename and the full item list.
-        var initial_project_items = List[MenuItem]()
-        initial_project_items.append(MenuItem(
-            String("Open recent project..."), PROJECT_OPEN_RECENT,
-        ))
+        # Right-aligned project menu. Always visible and always labelled
+        # "Project". In the no-project state the only entries are the
+        # recent projects from ``config.recent_projects``; once a project
+        # is opened ``_set_project`` rebuilds the list with the tree
+        # toggle, configure-targets, the inline recents, and close-project.
+        # Recents shown inline (not behind a "..." picker) so the user can
+        # one-click switch projects from any state.
         self.menu_bar.add(Menu(
-            String("project"), initial_project_items^, right_aligned=True,
+            String("Project"), List[MenuItem](), right_aligned=True,
         ))
         self._project_menu_idx = len(self.menu_bar.menus) - 1
         # Command bindings. By convention in this app: ``Cmd+letter``
@@ -2730,37 +2738,40 @@ struct Desktop(Movable):
         # project then restores exactly these files.
         self._close_all_editor_windows()
 
-    def _reset_no_project_menu(mut self):
-        """Populate the right-aligned project menu for the no-project
-        state: label "project", "Open recent project..." on top, then a
-        separator and up to 10 direct-pick entries drawn from
-        ``config.recent_projects`` (filtered to paths that still stat
-        as directories). Each direct entry's action is
-        ``PROJECT_OPEN_RECENT_PREFIX + <index>`` so the dispatcher can
-        round-trip back to the same slot."""
-        if self._project_menu_idx < 0:
-            return
-        var items = List[MenuItem]()
-        items.append(MenuItem(
-            String("Open recent project..."), PROJECT_OPEN_RECENT,
-        ))
+    def _append_recent_project_items(self, mut items: List[MenuItem]):
+        """Append up to 10 direct-pick entries from ``config.recent_projects``
+        to ``items``. Skips paths that no longer stat as directories and
+        skips the currently-active project (no point letting the user
+        re-pick it). Each entry's action is ``PROJECT_OPEN_RECENT_PREFIX
+        + <index>``, where the index is the slot in
+        ``config.recent_projects`` so the dispatcher can round-trip back."""
+        var current = String("")
+        if self.project:
+            current = self.project.value()
         var added = 0
-        var first = True
         for i in range(len(self.config.recent_projects)):
             if added >= 10:
                 break
             var p = self.config.recent_projects[i]
+            if p == current:
+                continue
             var info = stat_file(p)
             if not info.ok or not info.is_dir():
                 continue
-            if first:
-                items.append(MenuItem.separator())
-                first = False
             items.append(MenuItem(
                 basename(p), PROJECT_OPEN_RECENT_PREFIX + String(i),
             ))
             added += 1
-        self.menu_bar.menus[self._project_menu_idx].label = String("project")
+
+    def _reset_no_project_menu(mut self):
+        """Populate the right-aligned "Project" menu for the no-project
+        state: just the inline list of recent projects (up to 10),
+        filtered to paths that still stat as directories."""
+        if self._project_menu_idx < 0:
+            return
+        var items = List[MenuItem]()
+        self._append_recent_project_items(items)
+        self.menu_bar.menus[self._project_menu_idx].label = String("Project")
         self.menu_bar.menus[self._project_menu_idx].items = items^
         self.menu_bar.menus[self._project_menu_idx].visible = True
         if self.menu_bar.open_idx == self._project_menu_idx:
@@ -2820,19 +2831,26 @@ struct Desktop(Movable):
         debug_log(String("[_set_project] after record_recent_project"))
         _ = save_config(self.config)
         debug_log(String("[_set_project] after save_config"))
-        var label = basename(canonical)
         var items = List[MenuItem]()
         items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
         items.append(MenuItem(
             String("Configure targets..."), PROJECT_CONFIG_TARGETS,
         ))
+        # Inline recent-project list lives between the project-specific
+        # actions and Close project — always present (no "..." picker)
+        # so a one-click switch is reachable even with a project open.
+        # Skips the currently-active project in
+        # ``_append_recent_project_items`` to avoid a redundant entry.
+        var recents_start = len(items)
         items.append(MenuItem.separator())
-        items.append(MenuItem(
-            String("Open recent project..."), PROJECT_OPEN_RECENT,
-        ))
+        self._append_recent_project_items(items)
+        if len(items) == recents_start + 1:
+            # No surviving recents — drop the orphaned separator we just
+            # added so the menu doesn't show two separators in a row.
+            _ = items.pop()
         items.append(MenuItem.separator())
         items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
-        self.menu_bar.menus[self._project_menu_idx].label = label
+        self.menu_bar.menus[self._project_menu_idx].label = String("Project")
         self.menu_bar.menus[self._project_menu_idx].items = items^
         self.menu_bar.menus[self._project_menu_idx].visible = True
         # Load the per-project target list now that we know the root.
@@ -3498,19 +3516,34 @@ struct Desktop(Movable):
             else:
                 _ = self.quick_open.handle_mouse(event, screen)
             if self.quick_open.submitted:
-                var path = self.quick_open.selected_path
+                var primary = self.quick_open.selected_path
+                var paths = self.quick_open.selected_paths.copy()
                 var to_project = self.quick_open.picks_project
                 self.quick_open.close()
                 if to_project:
                     # Project switch: close any current project so
                     # ``open_project``'s "no-op when one is set" guard
-                    # doesn't swallow the request, then re-arm.
+                    # doesn't swallow the request, then re-arm. Multi-
+                    # select isn't meaningful here — recents-as-projects
+                    # always submits a single row — so we just use the
+                    # primary path.
                     if self.project:
                         self.close_project()
-                    self.open_project(path)
+                    self.open_project(primary)
                 else:
+                    # Open every file in the multi-select range. We
+                    # leave the primary (cursor) path for last so it
+                    # ends up focused; ``open_file`` activates whichever
+                    # window it just opened.
+                    for i in range(len(paths)):
+                        if paths[i] == primary:
+                            continue
+                        try:
+                            self.open_file(paths[i], screen)
+                        except:
+                            pass
                     try:
-                        self.open_file(path, screen)
+                        self.open_file(primary, screen)
                     except:
                         pass
             return Optional[String]()
@@ -3988,9 +4021,6 @@ struct Desktop(Movable):
         if action == EDITOR_OPEN_RECENT:
             self._open_recent_picker()
             return Optional[String]()
-        if action == PROJECT_OPEN_RECENT:
-            self._open_recent_projects_picker()
-            return Optional[String]()
         if starts_with(action, PROJECT_OPEN_RECENT_PREFIX):
             var idx = parse_int_prefix(
                 action, len(PROJECT_OPEN_RECENT_PREFIX.as_bytes()),
@@ -3998,6 +4028,17 @@ struct Desktop(Movable):
             )
             if idx >= 0 and idx < len(self.config.recent_projects):
                 var path = self.config.recent_projects[idx]
+                # On a host frontend (Swift/macOS) that owns the menu,
+                # open the picked project in a *new* window so the
+                # current window's state is preserved. We stash the
+                # path and bubble up the host's "new window" sentinel;
+                # the host reads the path back via
+                # ``take_pending_new_window_project`` after creating
+                # the window. The terminal frontend has no multi-window
+                # story, so it keeps the swap-in-place behavior.
+                if self.host_owns_menu:
+                    self._pending_new_window_project = Optional[String](path)
+                    return Optional[String](_HOST_NEW_WINDOW_ACTION)
                 if self.project:
                     self.close_project()
                 self.open_project(path)
@@ -6719,44 +6760,6 @@ struct Desktop(Movable):
         if len(rel_entries) == 0:
             return
         self.quick_open.open_recent(root, rel_entries^, abs_entries^)
-
-    def _open_recent_projects_picker(mut self):
-        """Open the QuickOpen picker over ``self.config.recent_projects``.
-
-        Skips the currently active project (if any), and silently drops
-        entries whose path no longer stats — a project that was moved
-        or deleted shouldn't dead-end the dialog. No-op when nothing
-        survives the filter.
-        """
-        if len(self.config.recent_projects) == 0:
-            return
-        var current = String("")
-        if self.project:
-            current = self.project.value()
-        # Display labels: basename + " — " + parent for disambiguation
-        # ("turbokod — /Users/boxed/Projects" reads better than the full
-        # path), with parallel absolute paths for the actual open.
-        var labels = List[String]()
-        var abs_entries = List[String]()
-        for i in range(len(self.config.recent_projects)):
-            var p = self.config.recent_projects[i]
-            if p == current:
-                continue
-            var info = stat_file(p)
-            if not info.ok or not info.is_dir():
-                continue
-            var name = basename(p)
-            var parent = parent_path(p)
-            var label = name
-            if len(name.as_bytes()) > 0 and len(parent.as_bytes()) > 0:
-                label = name + String(" — ") + parent
-            labels.append(label)
-            abs_entries.append(p)
-        if len(labels) == 0:
-            return
-        self.quick_open.open_recent(
-            String(""), labels^, abs_entries^, picks_project=True,
-        )
 
     # --- editor-action helpers --------------------------------------------
 
