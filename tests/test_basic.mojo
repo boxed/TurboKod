@@ -52,7 +52,7 @@ from turbokod.desktop import (
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
-    PROJECT_OPEN_RECENT, PROJECT_OPEN_RECENT_PREFIX,
+    PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX,
     _expand_save_placeholders,
@@ -1692,57 +1692,100 @@ def test_right_aligned_menu_layout() raises:
 def test_desktop_project_lifecycle() raises:
     var d = Desktop()
     assert_false(d.project)
-    # The project menu is created at construction time so the recents
-    # picker is reachable even before any project has been opened. Its
-    # label reads "project" and its only entry is "Open recent project...".
+    # The Project menu is created at construction time and is always
+    # labelled "Project" — both in the no-project state and once a
+    # project is loaded. Right-aligned so it lives on the far right
+    # of the menu bar. The empty default config has no recents to
+    # show, so the initial item list is empty.
     var idx = d._project_menu_idx
     assert_true(idx >= 0)
     assert_true(d.menu_bar.menus[idx].visible)
     assert_true(d.menu_bar.menus[idx].right_aligned)
-    assert_equal(d.menu_bar.menus[idx].label, String("project"))
-    assert_equal(len(d.menu_bar.menus[idx].items), 1)
-    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT)
+    assert_equal(d.menu_bar.menus[idx].label, String("Project"))
+    assert_equal(len(d.menu_bar.menus[idx].items), 0)
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
-    # Label is the project root's basename — for this repo, "turbokod".
-    assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
+    # Label stays "Project" — the project name lives in the window
+    # title bar, not the menu label.
+    assert_equal(d.menu_bar.menus[idx].label, String("Project"))
     # Active-project items: tree-toggle, configure-targets, separator,
-    # open-recent-project, separator, close. Separators carry no action.
-    assert_equal(len(d.menu_bar.menus[idx].items), 6)
+    # separator (no other recents survive — ``_append_recent_project_items``
+    # skips the active one), close. ``_set_project`` drops the orphan
+    # separator only when the recents block is entirely empty; with a
+    # single matching-active recent we still see one separator (between
+    # the project actions and Close project). Separators carry no action.
     assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
     assert_equal(
         d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_TARGETS,
     )
-    assert_true(d.menu_bar.menus[idx].items[2].is_separator)
-    assert_equal(d.menu_bar.menus[idx].items[3].action, PROJECT_OPEN_RECENT)
-    assert_true(d.menu_bar.menus[idx].items[4].is_separator)
-    assert_equal(d.menu_bar.menus[idx].items[5].action, PROJECT_CLOSE_ACTION)
+    var last = len(d.menu_bar.menus[idx].items) - 1
+    assert_equal(
+        d.menu_bar.menus[idx].items[last].action, PROJECT_CLOSE_ACTION,
+    )
+    assert_true(d.menu_bar.menus[idx].items[last - 1].is_separator)
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
     d.detect_project_from(String("src/turbokod/desktop.mojo"))
     assert_equal(d.project.value(), first)
-    # close_project clears project state but keeps the menu visible —
-    # the label resets to "project", and the dropdown becomes the
-    # recents-picker entry followed by a separator and direct-pick
-    # entries for the recent projects. ``_set_project`` recorded the
-    # turbokod root into ``config.recent_projects`` on the way in, so
-    # at least one direct-pick entry exists here.
+    # close_project clears project state but keeps the menu visible.
+    # The label stays "Project" and the dropdown is just the inline
+    # recent-project list now. ``_set_project`` recorded the turbokod
+    # root into ``config.recent_projects`` on the way in, so at least
+    # one direct-pick entry exists here.
     d.close_project()
     assert_false(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
-    assert_equal(d.menu_bar.menus[idx].label, String("project"))
-    assert_true(len(d.menu_bar.menus[idx].items) >= 3)
-    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT)
-    assert_true(d.menu_bar.menus[idx].items[1].is_separator)
+    assert_equal(d.menu_bar.menus[idx].label, String("Project"))
+    assert_true(len(d.menu_bar.menus[idx].items) >= 1)
     assert_true(_starts_with(
-        d.menu_bar.menus[idx].items[2].action, PROJECT_OPEN_RECENT_PREFIX,
+        d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT_PREFIX,
     ))
     # After closing, detection works again.
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
-    assert_equal(d.menu_bar.menus[idx].label, String("turbokod"))
+    assert_equal(d.menu_bar.menus[idx].label, String("Project"))
+
+
+def test_recent_project_pick_routes_to_new_window_when_host_owns_menu() raises:
+    """When ``host_owns_menu`` is on (Swift frontend), picking a recent
+    project from the Project menu must stash the path on the Desktop and
+    return the ``app.new_window`` sentinel so the host spawns a window
+    and reads the path back. With ``host_owns_menu`` off (terminal) the
+    same action falls back to swap-in-place — verified by the absence
+    of a pending path after dispatch."""
+    var d = Desktop()
+    # Prime recents by detecting and then closing the current project.
+    d.detect_project_from(String("examples/hello.mojo"))
+    var primed = d.project.value()
+    d.close_project()
+    # Find the recent-project action we just primed — its index in
+    # ``config.recent_projects`` is the suffix of its menu action.
+    var slot = -1
+    for i in range(len(d.config.recent_projects)):
+        if d.config.recent_projects[i] == primed:
+            slot = i
+            break
+    assert_true(slot >= 0)
+    var action = PROJECT_OPEN_RECENT_PREFIX + String(slot)
+    # Host-owned: dispatch returns the host sentinel and stashes the path.
+    d.host_owns_menu = True
+    var screen = Rect(0, 0, 80, 24)
+    var result = d.dispatch_action(action, screen)
+    assert_true(result)
+    assert_equal(result.value(), String("app.new_window"))
+    assert_true(d._pending_new_window_project)
+    assert_equal(d._pending_new_window_project.value(), primed)
+    assert_false(d.project)   # didn't open here — host will spawn the window
+    # Terminal path: same action swaps in place, no pending path.
+    d._pending_new_window_project = Optional[String]()
+    d.host_owns_menu = False
+    var r2 = d.dispatch_action(action, screen)
+    assert_false(r2)
+    assert_false(d._pending_new_window_project)
+    assert_true(d.project)
+    assert_equal(d.project.value(), primed)
 
 
 def test_file_tree_expand_collapse() raises:
@@ -6425,6 +6468,122 @@ def test_quick_open_preserves_query_across_close_and_reopen() raises:
             found_editor_module = True
             break
     assert_true(found_editor_module)
+
+
+def test_quick_open_preserves_selection_and_scroll_across_close_and_reopen() raises:
+    """The cursor row and scroll offset should both come back on the
+    next ``open()``, scoped to the same project root. Tracks against
+    saved indices clamped into the current matched length, so a project
+    where the file list grew slightly still lands close to where the
+    user was."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var qo = QuickOpen()
+    qo.open(root.value())
+    var deadline = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    assert_true(len(qo.matched) > 20)
+    # User scrolls / cursors down, then closes.
+    qo.selected = 17
+    qo.anchor = 17
+    qo.scroll = 5
+    qo.close()
+    # Reopen the same project — selection and scroll should restore.
+    qo.open(root.value())
+    var deadline2 = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline2:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    assert_equal(qo.selected, 17)
+    assert_equal(qo.scroll, 5)
+    # First navigation should treat the restored position as the
+    # starting point AND end "restore mode" so the next tick (were
+    # one to fire) wouldn't snap back to the saved row.
+    var ev_down = Event.key_event(KEY_DOWN)
+    _ = qo.handle_key(ev_down)
+    assert_equal(qo.selected, 18)
+    assert_false(qo._pending_restore)
+
+
+def test_quick_open_resets_saved_state_when_project_root_changes() raises:
+    """Saved indices belong to the previous tree; carrying them into a
+    different project would land the cursor on an unrelated file. The
+    saved query is dropped too — it was about the previous tree."""
+    var root_a = find_git_project(String("examples/hello.mojo"))
+    assert_true(root_a)
+    var qo = QuickOpen()
+    qo.open(root_a.value())
+    qo.query.set_text(String("editor"))
+    qo._refilter()
+    qo.selected = 12
+    qo.scroll = 4
+    qo.close()
+    # A different root invalidates the saved query / sel / scroll.
+    qo.open(String("/tmp"))
+    assert_equal(qo.query.text, String(""))
+    assert_equal(qo.selected, 0)
+    assert_equal(qo.scroll, 0)
+
+
+def test_quick_open_shift_down_extends_multi_selection() raises:
+    """Holding Shift while pressing DOWN extends the selection without
+    moving the anchor. Enter then submits *all* paths in the range
+    with the cursor row exposed as ``selected_path``."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var qo = QuickOpen()
+    qo.open(root.value())
+    var deadline = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    assert_true(len(qo.matched) > 3)
+    # Start at row 0 (anchor=0, selected=0). Two shift+down keystrokes
+    # should extend the range to rows [0..2] without moving the anchor.
+    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
+    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
+    assert_equal(qo.anchor, 0)
+    assert_equal(qo.selected, 2)
+    # Enter submits the whole range; ``selected_paths`` has 3 entries
+    # in row order, and ``selected_path`` is the cursor row (the last
+    # one navigated to).
+    _ = qo.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(qo.submitted)
+    assert_equal(len(qo.selected_paths), 3)
+    assert_equal(qo.selected_paths[0], qo.entries_abs[qo.matched[0]])
+    assert_equal(qo.selected_paths[2], qo.entries_abs[qo.matched[2]])
+    assert_equal(qo.selected_path, qo.entries_abs[qo.matched[2]])
+
+
+def test_quick_open_plain_down_after_shift_collapses_anchor() raises:
+    """A plain (no-shift) arrow key after a shift+arrow run should
+    collapse the multi-selection back to a single row at the cursor
+    position. That keeps "I extended, then changed my mind" usable
+    without ESC + reopen."""
+    var root = find_git_project(String("examples/hello.mojo"))
+    assert_true(root)
+    var qo = QuickOpen()
+    qo.open(root.value())
+    var deadline = monotonic_ms() + 5000
+    while qo.indexing and monotonic_ms() < deadline:
+        qo.tick()
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    assert_true(len(qo.matched) > 3)
+    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
+    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
+    assert_equal(qo.anchor, 0)
+    assert_equal(qo.selected, 2)
+    # Plain down: collapse anchor to the new cursor.
+    _ = qo.handle_key(Event.key_event(KEY_DOWN))
+    assert_equal(qo.anchor, 3)
+    assert_equal(qo.selected, 3)
+    # Submit yields a single-entry list now.
+    _ = qo.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(qo.submitted)
+    assert_equal(len(qo.selected_paths), 1)
+    assert_equal(qo.selected_paths[0], qo.entries_abs[qo.matched[3]])
 
 
 def _starts_with(s: String, prefix: String) -> Bool:
