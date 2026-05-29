@@ -135,4 +135,11 @@ fi
 # is harmless on whichever platform isn't relevant.
 export DYLD_LIBRARY_PATH="${env_prefix}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export LD_LIBRARY_PATH="${env_prefix}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# ``TURBOKOD_BUILD_ONLY=1`` skips the launch — used by ``make tui`` so
+# the build pipeline can be exercised from CI / cron without spawning
+# an interactive terminal app. ``trap restore_term`` still fires.
+if [ -n "${TURBOKOD_BUILD_ONLY:-}" ]; then
+  echo "[run.sh] built $bin (TURBOKOD_BUILD_ONLY=1; not running)" >&2
+  exit 0
+fi
 exec "$bin" ${prog_args[@]+"${prog_args[@]}"}

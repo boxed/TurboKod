@@ -87,4 +87,12 @@ cp -R src/turbokod/grammars "$res/src/turbokod/grammars"
 cp -R src/turbokod/data     "$res/src/turbokod/data"
 cp app/assets/Px437_IBM_VGA_8x16.ttf "$res/Px437_IBM_VGA_8x16.ttf"
 
+# ``TURBOKOD_BUILD_ONLY=1`` skips the launch — used by ``make app`` so
+# the bundle gets refreshed without forcing an interactive launch.
+# Relaunching the .app via Dock then picks up the fresh dylib (see
+# docs/app-bundle.md "Gotcha: relaunching the .app skips the bundle sync").
+if [ -n "${TURBOKOD_BUILD_ONLY:-}" ]; then
+  echo "[run_swift] built $contents/MacOS/TurboKod (TURBOKOD_BUILD_ONLY=1; not launching)" >&2
+  exit 0
+fi
 exec "$contents/MacOS/TurboKod" "$@"
