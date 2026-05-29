@@ -1513,10 +1513,22 @@ struct Desktop(Movable):
             var k = len(self.windows.z_order) - 1
             while k >= 0:
                 var i = self.windows.z_order[k]
-                var win = self.windows.windows[i].copy()
+                # Bind a reference, never a copy: ``Window.copy()`` here
+                # deep-copies the whole Editor (buffer + every highlight +
+                # undo stack + tokenizer cache) on *every mouse move*, which
+                # profiling showed dominated CPU while moving the pointer.
+                # We only need two rectangles, so read them off the window
+                # in place and compute the interior inline (``interior()``
+                # would itself copy ``self``).
+                ref win = self.windows.windows[i]
                 if win.rect.contains(pos):
-                    if win.is_editor and win.interior().contains(pos):
-                        return String("text")
+                    if win.is_editor:
+                        var inner = Rect(
+                            win.rect.a.x + 1, win.rect.a.y + 1,
+                            win.rect.b.x - 1, win.rect.b.y - 1,
+                        )
+                        if inner.contains(pos):
+                            return String("text")
                     return String("default")
                 k -= 1
         return String("default")
