@@ -170,7 +170,9 @@ from .settings import Settings
 from .targets_dialog import TargetsDialog
 from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
-from .find_symbol import FindSymbol, FindSymbolMatch
+from .find_symbol import (
+    FindSymbol, FindSymbolMatch, container_matches_qualifier,
+)
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .window import (
@@ -579,6 +581,11 @@ struct Desktop(Movable):
     var _find_symbol_hit_path: String
     var _find_symbol_hit_line: Int
     var _find_symbol_hit_column: Int
+    # The qualifier from a ``Class.member`` query (empty for a bare
+    # name), captured at submit and used in
+    # ``_resolve_find_symbol_workspace`` to narrow the workspace/symbol
+    # hits to the matching container.
+    var _find_symbol_qualifier: String
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
@@ -946,6 +953,7 @@ struct Desktop(Movable):
         self._find_symbol_hit_path = String("")
         self._find_symbol_hit_line = 0
         self._find_symbol_hit_column = 0
+        self._find_symbol_qualifier = String("")
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
@@ -3604,6 +3612,7 @@ struct Desktop(Movable):
                 self._find_symbol_pending_lsps = List[Int]()
                 self._find_symbol_collected = List[WorkspaceSymbolItem]()
                 self._find_symbol_hit_path = String("")
+                self._find_symbol_qualifier = String("")
                 return Optional[String]()
             if self.find_symbol.take_submitted():
                 self._submit_find_symbol(screen)
@@ -7262,6 +7271,7 @@ struct Desktop(Movable):
         self._find_symbol_pending_lsps = List[Int]()
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
+        self._find_symbol_qualifier = String("")
         var prefill = String("")
         var idx = self._focused_editor_idx()
         if idx >= 0:
@@ -7309,6 +7319,7 @@ struct Desktop(Movable):
         var line = self.find_symbol.selected_line - 1   # 0-based for LSP
         var col = self.find_symbol.selected_column - 1
         var name = self.find_symbol.selected_name
+        var qualifier = self.find_symbol.selected_qualifier
         if len(path.as_bytes()) == 0:
             self.find_symbol.set_error(String("No selection."))
             return
@@ -7344,6 +7355,7 @@ struct Desktop(Movable):
             return
         self._find_symbol_pending_lsps = pending^
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
+        self._find_symbol_qualifier = qualifier
         self._find_symbol_hit_path = path
         self._find_symbol_hit_line = line
         self._find_symbol_hit_column = col
@@ -7381,10 +7393,27 @@ struct Desktop(Movable):
         var hit_path = self._find_symbol_hit_path
         var hit_line = self._find_symbol_hit_line
         var hit_col = self._find_symbol_hit_column
-        var filtered = List[WorkspaceSymbolItem]()
+        var base = List[WorkspaceSymbolItem]()
         for k in range(len(items)):
             if items[k].name == name:
-                filtered.append(items[k])
+                base.append(items[k])
+        # A ``Class.member`` query carries a qualifier — narrow the
+        # name-exact hits to the ones whose container matches it, so
+        # ``User.has_permission`` skips the ``Account.has_permission``
+        # of another class. If nothing matches (the LSP omitted
+        # ``containerName``, or no container lined up) we keep the
+        # name-exact set, so a qualified query is never *worse* than a
+        # bare one — at most it fails to narrow.
+        var filtered = List[WorkspaceSymbolItem]()
+        var qualifier = self._find_symbol_qualifier
+        if len(qualifier.as_bytes()) > 0:
+            for k in range(len(base)):
+                if container_matches_qualifier(base[k].container, qualifier):
+                    filtered.append(base[k])
+            if len(filtered) == 0:
+                filtered = base^
+        else:
+            filtered = base^
         # Dedupe by (path, line): multiple LSPs in the same project
         # occasionally see the same file (e.g. an LSP-friendly
         # toolchain proxy) and would otherwise produce duplicate rows.
