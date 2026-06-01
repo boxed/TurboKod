@@ -268,6 +268,11 @@ struct FindSymbol(Movable):
     var selected_line: Int
     var selected_column: Int
     var selected_name: String
+    # The qualifier the user typed in front of the submitted name, if
+    # any: ``User.has_permission`` → ``User``. Empty for a bare name.
+    # The host matches it against the LSP ``containerName`` to pick the
+    # right ``has_permission`` when several classes define one.
+    var selected_qualifier: String
     var state: UInt8
     var status_message: String
     var runner: _FindSymbolRunner
@@ -299,6 +304,7 @@ struct FindSymbol(Movable):
         self.selected_line = 0
         self.selected_column = 0
         self.selected_name = String("")
+        self.selected_qualifier = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner = _FindSymbolRunner()
@@ -339,6 +345,7 @@ struct FindSymbol(Movable):
         self.selected_line = 0
         self.selected_column = 0
         self.selected_name = String("")
+        self.selected_qualifier = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
@@ -346,9 +353,10 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
-        if len(self.query.text.as_bytes()) >= _MIN_QUERY_LEN \
+        var member = _query_member(self.query.text)
+        if len(member.as_bytes()) >= _MIN_QUERY_LEN \
                 and len(self.root.as_bytes()) > 0:
-            _ = self.runner.start(self.query.text, self.root)
+            _ = self.runner.start(member, self.root)
 
     def close(mut self):
         self.active = False
@@ -359,6 +367,7 @@ struct FindSymbol(Movable):
         self.selected = 0
         self.scroll = 0
         self.submitted = False
+        self.selected_qualifier = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
@@ -451,7 +460,7 @@ struct FindSymbol(Movable):
                 and 0 <= self.selected \
                 and self.selected < len(self.entries):
             prev_selected_name = self.entries[self.selected].name
-        _sort_entries_ranked(self.entries, self.query.text)
+        _sort_entries_ranked(self.entries, _query_member(self.query.text))
         if len(prev_selected_name.as_bytes()) > 0:
             for i in range(len(self.entries)):
                 if self.entries[i].name == prev_selected_name:
@@ -475,11 +484,16 @@ struct FindSymbol(Movable):
         self.scroll = 0
         self._user_navigated = False
         self.runner.cancel()
-        if len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
+        # rg searches for the *member* segment only — the qualifier is
+        # a container hint resolved later via the LSP, and it never
+        # appears at the definition site, so feeding it to rg would
+        # just suppress every hit.
+        var member = _query_member(self.query.text)
+        if len(member.as_bytes()) < _MIN_QUERY_LEN:
             return
         if len(self.root.as_bytes()) == 0:
             return
-        _ = self.runner.start(self.query.text, self.root)
+        _ = self.runner.start(member, self.root)
 
     # --- geometry ---------------------------------------------------------
 
@@ -556,7 +570,7 @@ struct FindSymbol(Movable):
                 canvas, Point(rect.a.x + 2, top),
                 self.status_message, error_attr,
             )
-        elif len(self.query.text.as_bytes()) < _MIN_QUERY_LEN:
+        elif len(_query_member(self.query.text).as_bytes()) < _MIN_QUERY_LEN:
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, top),
                 String("Type at least 2 letters of a symbol name."),
@@ -642,6 +656,7 @@ struct FindSymbol(Movable):
             self.selected_line = entry.line
             self.selected_column = entry.column
             self.selected_name = entry.name
+            self.selected_qualifier = _query_qualifier(self.query.text)
             self.submitted = True
             return True
         if picker_nav_key(k, len(self.entries), self.selected):
@@ -711,6 +726,7 @@ struct FindSymbol(Movable):
             self.selected_line = entry.line
             self.selected_column = entry.column
             self.selected_name = entry.name
+            self.selected_qualifier = _query_qualifier(self.query.text)
             self.submitted = True
             return True
         self.selected = idx
@@ -990,20 +1006,103 @@ def _parse_int(b: Span[UInt8, _], start: Int, end: Int) -> Int:
     return n
 
 
-def sanitize_symbol_query(query: String) -> String:
-    """Strip everything that isn't an identifier byte.
+def _is_query_byte(b: UInt8) -> Bool:
+    """Bytes permitted in the live query field: identifier bytes plus
+    ``.`` so the user can type a qualified ``Class.member`` name.
 
-    The query is interpolated into rg's regex, so leaving punctuation
-    in place would let the user accidentally write something rg
-    interprets as a regex (or, worse, a flag — a leading ``-`` would
-    be especially trouble). We're looking for symbol names; dropping
-    everything else is the right semantics for the input field.
+    The dot is deliberately *not* an identifier byte (see
+    ``_is_ident_byte``) — it's only a segment separator the picker
+    splits on (``_query_member`` / ``_query_qualifier``). The member
+    that actually reaches rg's regex is pure identifier bytes, so the
+    regex/flag-injection guard ``sanitize_symbol_query`` exists for
+    still holds."""
+    return _is_ident_byte(b) or Int(b) == 0x2E   # '.'
+
+
+def sanitize_symbol_query(query: String) -> String:
+    """Strip everything that isn't a query byte (identifier byte or
+    a ``.`` separator).
+
+    The member segment is interpolated into rg's regex, so leaving
+    punctuation in place would let the user accidentally write
+    something rg interprets as a regex (or, worse, a flag — a leading
+    ``-`` would be especially trouble). The dot survives only as a
+    qualifier separator; it never reaches rg. We're looking for symbol
+    names; dropping everything else is the right semantics here.
     """
     var b = query.as_bytes()
     var out = List[UInt8]()
     for i in range(len(b)):
-        if _is_ident_byte(b[i]):
+        if _is_query_byte(b[i]):
             out.append(b[i])
     if len(out) == 0:
         return String("")
     return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+
+
+def _query_member(q: String) -> String:
+    """The segment after the last ``.`` — the symbol name rg searches
+    for and the LSP resolves. ``User.has_permission`` →
+    ``has_permission``; a query with no dot is its own member."""
+    var b = q.as_bytes()
+    var start = 0
+    for i in range(len(b)):
+        if Int(b[i]) == 0x2E:   # '.'
+            start = i + 1
+    return String(StringSlice(unsafe_from_utf8=b[start:len(b)]))
+
+
+def _query_qualifier(q: String) -> String:
+    """Everything before the last ``.`` (the trailing dot dropped) —
+    the container hint used to disambiguate which class/module owns
+    the member. ``User.has_permission`` → ``User``; empty when the
+    query has no dot."""
+    var b = q.as_bytes()
+    var last = -1
+    for i in range(len(b)):
+        if Int(b[i]) == 0x2E:   # '.'
+            last = i
+    if last < 0:
+        return String("")
+    return String(StringSlice(unsafe_from_utf8=b[0:last]))
+
+
+def container_matches_qualifier(container: String, qualifier: String) -> Bool:
+    """Does an LSP ``containerName`` satisfy the user-typed qualifier?
+
+    Case-insensitive, and forgiving about how much of the path each
+    side spells out: we accept when either is a substring of the
+    other, so a qualifier of ``User`` matches a container of ``User``
+    or ``mypkg.User``, and a fuller qualifier of ``mypkg.User`` still
+    matches a bare ``User`` container. An empty qualifier matches
+    anything (the unqualified case)."""
+    if len(qualifier.as_bytes()) == 0:
+        return True
+    if len(container.as_bytes()) == 0:
+        return False
+    return _contains_ci(container, qualifier) \
+        or _contains_ci(qualifier, container)
+
+
+def _contains_ci(haystack: String, needle: String) -> Bool:
+    var hb = haystack.as_bytes()
+    var nb = needle.as_bytes()
+    if len(nb) == 0:
+        return True
+    if len(nb) > len(hb):
+        return False
+    var i = 0
+    while i + len(nb) <= len(hb):
+        var ok = True
+        for j in range(len(nb)):
+            var a = Int(hb[i + j])
+            var c = Int(nb[j])
+            if 0x41 <= a and a <= 0x5A: a += 0x20
+            if 0x41 <= c and c <= 0x5A: c += 0x20
+            if a != c:
+                ok = False
+                break
+        if ok:
+            return True
+        i += 1
+    return False
