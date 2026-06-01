@@ -3983,6 +3983,31 @@ struct Desktop(Movable):
         """
         self._hotkeys.append(Hotkey(key, mods, action))
 
+    def _modal_owns_input(self) -> Bool:
+        """True when a modal that ``handle_event`` routes ahead of the
+        hotkey table currently owns the screen.
+
+        The native Edit menu's ⌘ key-equivalents (Paste / Cut / …) are
+        matched by AppKit *before* the keystroke reaches ``handle_event``,
+        so they land in ``dispatch_action`` directly and skip the modal
+        routing every typed key goes through. Clipboard/history actions
+        consult this to re-route into the focused modal's text field
+        instead of the editor behind it. Mirrors the modal sequence at
+        the top of ``handle_event`` — keep the two in sync; any modal
+        listed here is guaranteed to return before the hotkey lookup, so
+        re-injecting a chord can't recurse back into ``dispatch_action``.
+        """
+        return self.spell_menu.active or self.breakpoint_error.active \
+            or self.breakpoint_menu.active or self.fill_dialog.active \
+            or self.git_gutter_menu.active or self.diagnostic_menu.active \
+            or self.lsp_status_menu.active or self.prompt.active \
+            or self.confirm_dialog.active or self.save_as_dialog.active \
+            or self.quick_open.active or self.symbol_pick.active \
+            or self.reference_pick.active or self.find_symbol.active \
+            or self.doc_pick.active or self.project_find.active \
+            or self.local_changes.active or self.targets_dialog.active \
+            or self.settings.active
+
     def dispatch_action(
         mut self, action: String, screen: Rect,
     ) -> Optional[String]:
@@ -3992,6 +4017,38 @@ struct Desktop(Movable):
         without going through the menu bar. ``screen`` is needed for the
         maximize-related actions; pass the same rect you use for paint.
         """
+        # Clipboard / history edits target whatever currently owns input.
+        # On the native frontend AppKit fires these via the Edit menu's ⌘
+        # key-equivalents, which arrive here directly and bypass the
+        # modal routing in ``handle_event`` — so a paste while a text
+        # dialog (Find-in-Project, Save As, …) is open would land in the
+        # editor behind it. Re-inject the equivalent chord through
+        # ``handle_event`` so the dialog's text field handles it exactly
+        # as a typed chord. The chord comes from the hotkey table so we
+        # don't duplicate the binding. ``_modal_owns_input`` guarantees
+        # ``handle_event`` consumes the event before its own hotkey
+        # lookup, so this can't recurse.
+        if self._modal_owns_input() and (
+            action == EDITOR_PASTE or action == EDITOR_CUT
+            or action == EDITOR_COPY or action == EDITOR_UNDO
+            or action == EDITOR_REDO
+        ):
+            var i = len(self._hotkeys) - 1
+            while i >= 0:
+                if self._hotkeys[i].action == action:
+                    var ev = Event.key_event(
+                        self._hotkeys[i].key, self._hotkeys[i].mods,
+                    )
+                    try:
+                        _ = self.handle_event(ev, screen)
+                    except:
+                        pass
+                    break
+                i -= 1
+            # Swallow regardless of whether a chord was found — a
+            # clipboard edit must never fall through to the editor while
+            # a modal owns the screen.
+            return Optional[String]()
         if action == PROJECT_CLOSE_ACTION:
             # On a host frontend (Swift/macOS) the window *is* the project,
             # so closing the project closes the window — bubble the sentinel
@@ -4035,7 +4092,12 @@ struct Desktop(Movable):
             # one, bubble the action up so the host can fall back to its
             # own "Open..." UI (typically a file dialog).
             if self.project:
-                self.quick_open.open(self.project.value())
+                # Seed the picker with the focused editor's selection (when
+                # single-line) so Quick Open opens pre-searched for whatever
+                # the user just highlighted, fully selected for easy replace.
+                self.quick_open.open(
+                    self.project.value(), self._selection_seed_for_search(),
+                )
                 return Optional[String]()
             return Optional[String](action)
         if action == EDITOR_OPEN_RECENT:
@@ -5543,6 +5605,12 @@ struct Desktop(Movable):
         elif self.run_session.is_active():
             out.append(TitleCommand(
                 String("[■ Stop]"), DEBUG_STOP,
+            ))
+            # Restart re-runs the active target. ``TARGET_RUN`` already
+            # terminates the in-flight run before relaunching, so this is
+            # a true stop-then-rerun without a separate handler.
+            out.append(TitleCommand(
+                String("[↻ Restart]"), TARGET_RUN,
             ))
         elif self._run_output_held \
                 or self.dap.is_failed() or self.dap.is_terminated():

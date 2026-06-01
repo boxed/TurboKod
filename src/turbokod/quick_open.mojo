@@ -168,7 +168,7 @@ struct QuickOpen(Movable):
         self._pending_restore = False
         self._in_main_open = False
 
-    def open(mut self, var root: String):
+    def open(mut self, var root: String, var prefill: String = String("")):
         # A different project root invalidates everything we'd saved —
         # the file list won't share indices, and the saved query was
         # likely about the previous tree. Reset before the move so
@@ -181,11 +181,18 @@ struct QuickOpen(Movable):
         self.root = root^
         self._in_main_open = True
         self.query = TextField()
-        # Restore the last query the user typed in this picker. ``set_text``
-        # places the cursor at the end; ``select_all`` then highlights the
+        # A non-empty ``prefill`` (the editor's current selection) takes
+        # priority over the remembered query: opening Quick Open with text
+        # selected starts pre-searched for it. Otherwise restore the last
+        # query the user typed in this picker. Either way ``set_text``
+        # places the cursor at the end and ``select_all`` highlights the
         # whole field so the next printable keystroke replaces it (same
         # pattern VS Code / Sublime use when reopening their quick-open).
-        if len(self._saved_query.as_bytes()) > 0:
+        var has_prefill = len(prefill.as_bytes()) > 0
+        if has_prefill:
+            self.query.set_text(prefill^)
+            self.query.select_all()
+        elif len(self._saved_query.as_bytes()) > 0:
             self.query.set_text(self._saved_query)
             self.query.select_all()
         self.active = True
@@ -197,8 +204,11 @@ struct QuickOpen(Movable):
         self.scroll = 0
         # ``_refilter`` will clamp ``_saved_selected`` / ``_saved_scroll``
         # into ``selected`` / ``scroll`` while this flag is True. The
-        # first user navigation / scroll / keystroke flips it off.
-        self._pending_restore = True
+        # first user navigation / scroll / keystroke flips it off. With a
+        # prefill the saved row/scroll are meaningless against the new
+        # filter, so skip the restore and let ``_refilter`` start at the
+        # top of the prefiltered results.
+        self._pending_restore = not has_prefill
         self.title = String(" Quick Open ")
         self.picks_project = False
         self.entries = List[String]()

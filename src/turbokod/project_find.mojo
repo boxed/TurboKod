@@ -40,7 +40,7 @@ from .highlight import (
 )
 from .lsp import CaptureResult, LspProcess, capture_command
 from .picker_input import picker_nav_key, picker_wheel_scroll
-from .posix import alloc_zero_buffer, poll_stdin, read_into
+from .posix import alloc_zero_buffer, monotonic_ms, poll_stdin, read_into
 from .project import ProjectMatch
 from .search_options import SearchOptions
 from .string_utils import display_columns, split_lines
@@ -48,7 +48,7 @@ from .text_field import TextField
 from .window import hit_close_button, paint_close_button, paint_window_title
 
 
-comptime _DEBOUNCE_MS: Int = 200
+comptime _DEBOUNCE_MS: Int = 300
 comptime _CONTEXT_LINES: Int = 5     # lines on each side of the match
 # Hard caps on per-line work. Minified JS / CSS bundles routinely have a
 # single multi-MB line — without these the TextMate tokenizer would burn
@@ -56,6 +56,15 @@ comptime _CONTEXT_LINES: Int = 5     # lines on each side of the match
 # while ESC and keystrokes wait their turn behind paint.
 comptime _MATCH_TEXT_CAP: Int = 1024     # truncate rg's matched-line text
 comptime _ROW_HIGHLIGHT_CAP: Int = 2048  # skip syntax overlay above this
+# Per-paint-frame wall-clock budget for *newly* tokenizing match rows.
+# Cached rows (see ``_row_hl_cache``) are free and always painted; only
+# cache-miss tokenizations are gated. Once a frame has spent this long
+# tokenizing fresh rows, the remaining misses render as plain text and
+# get picked up on a later frame. This bounds the worst-case paint cost
+# when a result set lands on a minified bundle (highcharts.js et al.),
+# where a single ~1 KB line can cost tens of ms to walk with the JS/TS
+# grammar — without it, a screenful of such rows froze arrow navigation.
+comptime _ROW_HL_BUDGET_MS: Int = 20
 comptime _CTX_LINE_CAP: Int = 4096       # skip context tokenize above this
 comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
 # Hard cap on the result list. A query like ``a`` over a large tree can
@@ -96,6 +105,17 @@ struct ProjectFind(Movable):
     var _context_path: String
     var _context_lines: List[String]
     var _context_highlights: List[Highlight]
+    # Per-match syntax-highlight cache for the result list, kept aligned
+    # 1:1 with ``matches`` (grown lazily in ``paint``). A match's row
+    # highlights depend only on its line text + extension, both immutable
+    # once parsed, so tokenizing once and reusing across paint frames
+    # turns arrow-key navigation over a result set from per-frame
+    # re-tokenization into a free lookup. ``_row_hl_cached[i]`` flags
+    # whether entry ``i`` has been computed (an empty highlight list is a
+    # valid result, so we can't use length as the sentinel). Both reset
+    # whenever ``matches`` is replaced wholesale.
+    var _row_hl_cache: List[List[Highlight]]
+    var _row_hl_cached: List[Bool]
     # Streaming ripgrep runner. Holds the spawned child for the in-flight
     # search (if any); a fresh keystroke after the debounce kills the old
     # one and starts a new one, so a query that turns out to be too broad
@@ -133,6 +153,8 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
+        self._row_hl_cache = List[List[Highlight]]()
+        self._row_hl_cached = List[Bool]()
         self._runner = _RgRunner()
         self._truncated = False
 
@@ -289,10 +311,18 @@ struct ProjectFind(Movable):
         if self._runner.is_active():
             self._runner.cancel()
             self.matches = List[ProjectMatch]()
+            self._reset_row_hl_cache()
             self.selected = 0
             self.scroll = 0
         self._truncated = False
         self._query_dirty_at_ms = 1
+
+    def _reset_row_hl_cache(mut self):
+        """Drop the per-match row-highlight cache. Called whenever
+        ``matches`` is replaced wholesale, since the index→line mapping
+        the cache is keyed on no longer holds."""
+        self._row_hl_cache = List[List[Highlight]]()
+        self._row_hl_cached = List[Bool]()
 
     def _mark_query_dirty(mut self, now_ms: Int):
         # Reset the debounce on every keystroke. ``now_ms == 0`` (clock
@@ -308,6 +338,7 @@ struct ProjectFind(Movable):
         if self._runner.is_active():
             self._runner.cancel()
             self.matches = List[ProjectMatch]()
+            self._reset_row_hl_cache()
             self.selected = 0
             self.scroll = 0
             self._truncated = False
@@ -317,6 +348,7 @@ struct ProjectFind(Movable):
         var opts = self._current_options()
         self._last_searched_opts = opts
         self.matches = List[ProjectMatch]()
+        self._reset_row_hl_cache()
         self.selected = 0
         self.scroll = 0
         self._truncated = False
@@ -542,6 +574,14 @@ struct ProjectFind(Movable):
             _ = painter.put_text(
                 canvas, Point(screen.a.x + 2, top), msg, ctx_attr,
             )
+        # Keep the row-highlight cache aligned 1:1 with ``matches`` (only
+        # grows; reset wholesale on a new search). Then give this frame a
+        # fixed wall-clock budget for *fresh* tokenization — cached rows
+        # stay free, so steady-state navigation pays nothing.
+        while len(self._row_hl_cache) < len(self.matches):
+            self._row_hl_cache.append(List[Highlight]())
+            self._row_hl_cached.append(False)
+        var hl_deadline = monotonic_ms() + _ROW_HL_BUDGET_MS
         for i in range(h):
             var idx = self.scroll + i
             if idx >= len(self.matches):
@@ -553,7 +593,7 @@ struct ProjectFind(Movable):
             self._paint_match_row(
                 canvas, screen, painter, top + i, m, idx == self.selected,
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
-                registry,
+                registry, idx, hl_deadline,
             )
         # Separator above the context panel.
         var ctx_top = self._list_bottom(screen)
@@ -604,6 +644,7 @@ struct ProjectFind(Movable):
         hl_attr: Attr, sel_hl_attr: Attr,
         path_attr: Attr, sel_path: Attr,
         mut registry: GrammarRegistry,
+        idx: Int, hl_deadline: Int,
     ):
         var row_attr = sel_line if is_sel else line_attr
         var row_path = sel_path if is_sel else path_attr
@@ -655,38 +696,48 @@ struct ProjectFind(Movable):
         # prior line (e.g. a triple-quoted string) won't be recognized;
         # acceptable for a one-line preview.
         if not is_sel and len(bytes) <= _ROW_HIGHLIGHT_CAP:
-            var one_line = List[String]()
-            one_line.append(line_stripped)
-            # Cached path: the shared ``GrammarRegistry`` keeps compiled
-            # grammars across paint frames, so each visible row only
-            # pays the regex-compile cost the first time we see a new
-            # extension this session — not on every paint. (Going
-            # through ``highlight_for_extension`` instead would re-load
-            # and re-compile the grammar 30+ times per frame, pegging
-            # the UI thread at 100% CPU on any sizable result set.)
-            #
-            # Long-line guard: tokenizing a 5 KB+ single line with a
-            # complex grammar (e.g. TypeScript on minified JS output)
-            # walks every regex across the whole string, easily eating
-            # 100 ms per row. The plain-text rendering above is
-            # already correct without highlights — we just lose color
-            # for that row, which is the right tradeoff vs. a hang.
-            var row_cache = HighlightCache()
-            var hls = highlight_for_extension_cached(
-                extension_of(m.path), one_line, registry, row_cache,
-            )
-            for h in range(len(hls)):
-                var hl = hls[h]
-                if hl.row != 0:
-                    continue
-                var hs = hl.col_start
-                var he = hl.col_end
-                if hs < start: hs = start
-                if he > end:   he = end
-                for i in range(hs, he):
-                    var b = Int(bytes[i])
-                    var ch = chr(b) if b < 0x80 else String("?")
-                    painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
+            # Resolve this row's highlights, preferring the per-match
+            # cache. The shared ``GrammarRegistry`` keeps compiled
+            # grammars across the session, but tokenizing a single line
+            # still walks every regex across the whole string — for a
+            # ~1 KB minified-JS line that's tens of ms, and a screenful
+            # of them re-tokenized every paint is what made arrow-key
+            # navigation crawl. So:
+            #   - cache hit  → reuse, free, always painted;
+            #   - cache miss → tokenize only while the frame's
+            #     ``hl_deadline`` budget holds, then store the result;
+            #   - over budget → render plain this frame, leave it
+            #     uncached so a later frame fills it in.
+            var have_hls = False
+            var hls = List[Highlight]()
+            if idx >= 0 and idx < len(self._row_hl_cached) \
+                    and self._row_hl_cached[idx]:
+                hls = self._row_hl_cache[idx].copy()
+                have_hls = True
+            elif monotonic_ms() < hl_deadline:
+                var one_line = List[String]()
+                one_line.append(line_stripped)
+                var row_cache = HighlightCache()
+                hls = highlight_for_extension_cached(
+                    extension_of(m.path), one_line, registry, row_cache,
+                )
+                if idx >= 0 and idx < len(self._row_hl_cache):
+                    self._row_hl_cache[idx] = hls.copy()
+                    self._row_hl_cached[idx] = True
+                have_hls = True
+            if have_hls:
+                for h in range(len(hls)):
+                    var hl = hls[h]
+                    if hl.row != 0:
+                        continue
+                    var hs = hl.col_start
+                    var he = hl.col_end
+                    if hs < start: hs = start
+                    if he > end:   he = end
+                    for i in range(hs, he):
+                        var b = Int(bytes[i])
+                        var ch = chr(b) if b < 0x80 else String("?")
+                        painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
         # Highlight overlay for the hit.
         if hit >= 0 and len(self.query.text.as_bytes()) > 0:
             var hl_start = hit
