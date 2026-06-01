@@ -72,6 +72,19 @@ First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 
 `tests/test_basic.mojo` exercises everything that doesn't need a TTY — run it via `./run.sh tests/test_basic.mojo` to verify package changes. It does **not** exercise the Swift frontend; for that, smoke-test with `TK_CAPTURE=/tmp/shot.png ./run_swift.sh` (renders one frame to PNG and quits).
 
+### Keep the build warning-free
+
+**Zero compiler warnings is a hard rule.** A clean build must emit *no* warnings — not "no new warnings." If you touch a file, fix any warning it emits, including pre-existing ones you happen to surface. Don't let warnings accumulate; a noisy build trains everyone to ignore the one warning that actually matters.
+
+Mojo only reports warnings for files in the *current* build's import graph, so no single build sees all of them. After a change, sweep every entry point that compiles your code:
+
+```sh
+./run.sh tests/test_basic.mojo 2>&1 | grep -i warning:   # shared core (TTY-free)
+TURBOKOD_BUILD_ONLY=1 ./run_swift.sh 2>&1 | grep -i warning:   # native_api.mojo + dylib + Swift
+```
+
+`native_api.mojo` in particular is compiled *only* by the dylib build, so its warnings never show up in the test or TUI builds — check the Swift path explicitly whenever you edit it. Common offenders seen here: `'fn' is deprecated, use 'def' instead` (this Mojo version unifies on `def` — including `@export def` for the C ABI, which keeps the same ABI), and dead `try`/`except` blocks the compiler flags as unreachable once the callee is non-raising (`'except' logic is unreachable` / `variable 'e' was never used`) — delete the wrapper, keep the body.
+
 ## Mojo port architecture
 
 Single-pass dataflow per frame: widgets paint into the back `Canvas` → the frontend presents it. For the terminal frontend, `Terminal.present` diffs against the front canvas and writes only changed cells as ANSI sequences. For the Swift frontend, `tk_desktop_layout` packs the back canvas into a `[codepoint, fg|bg<<8|style<<16, underline]` buffer that Swift rasterizes with Core Text. Either way, the source of truth is the same `Canvas`.
