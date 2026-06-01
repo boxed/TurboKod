@@ -7012,6 +7012,19 @@ struct Editor(Copyable, Movable):
             self._add_caret(Caret(row, col, _utf8_cell_of_byte(line, col),
                                    row, col))
             return True
+        # Shift+click: extend the selection from the existing anchor (the
+        # last cursor position) to the clicked point — identical to holding
+        # Shift and moving the cursor there. Keeps the primary anchor frozen
+        # (move_to extend=True) and skips the multi-click cycle so it stays a
+        # pure range-select gesture rather than promoting into word/line
+        # selection.
+        if (event.mods & MOD_SHIFT) != 0 and not event.motion:
+            self.clear_extra_carets()
+            self._dc_active = False
+            self._tc_active = False
+            self.move_to(row, col, True)
+            self._scroll_to_cursor(view)
+            return True
         if event.motion:
             # Drag-motion: extend the selection. While a multi-click
             # gesture is in progress, snap the moving end to whole-word
