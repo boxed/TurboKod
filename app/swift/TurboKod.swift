@@ -81,6 +81,13 @@ final class CellView: NSView {
     // pure waste (two FFI hit-tests per event), so we drop motion that didn't
     // cross a cell boundary. -1 forces the first move through.
     private var lastPassiveCol: Int64 = -1, lastPassiveRow: Int64 = -1
+    // Accumulated vertical scroll delta not yet turned into wheel notches.
+    // macOS delivers scroll as a high-frequency stream of small (often
+    // sub-line) deltas plus post-liftoff momentum; the Mojo core consumes
+    // discrete wheel notches (3 lines each). We integrate the delta here
+    // and emit one notch per notch-worth of travel so scroll speed tracks
+    // the gesture, not the raw event rate. See scrollWheel.
+    private var scrollAccumY: CGFloat = 0
     private let palette = buildPalette()
     private let font = cellFont
 
@@ -321,7 +328,28 @@ final class CellView: NSView {
     override func rightMouseUp(with e: NSEvent) { sendMouse(e, button: 3, pressed: 0, motion: 0) }
     override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1, passive: true) }
     override func scrollWheel(with e: NSEvent) {
-        sendMouse(e, button: e.scrollingDeltaY > 0 ? 4 : 5, pressed: 1, motion: 0)
+        // Drop the fractional carry at the start of a fresh gesture so leftover
+        // momentum from a previous flick can't bleed into this one.
+        if e.phase == .began { scrollAccumY = 0 }
+        let dy = e.scrollingDeltaY
+        if dy == 0 { return }
+
+        // Each emitted notch scrolls 3 lines in the core (editor.mojo). For
+        // precise devices (trackpad / Magic Mouse) scrollingDeltaY is in
+        // points. A strict 1:1 mapping (one 3-line notch per 3 cell-rows =
+        // CELL_H*3 points of travel) feels sluggish at slow speed: nothing
+        // moves until you've traveled a full 3 lines' worth, then it jumps 3
+        // lines at once. Emitting a notch per 2 cell-rows of travel keeps the
+        // notch firing sooner so slow scrolling stays responsive, while still
+        // tracking the gesture (not the raw event rate). Legacy wheels report
+        // line units (detents); one notch per detent = classic 3-per-click.
+        let perNotch: CGFloat = e.hasPreciseScrollingDeltas ? CELL_H * 2 : 1
+        scrollAccumY += dy
+        while abs(scrollAccumY) >= perNotch {
+            let up = scrollAccumY > 0
+            sendMouse(e, button: up ? 4 : 5, pressed: 1, motion: 0)
+            scrollAccumY += up ? -perNotch : perNotch
+        }
     }
 
     override func updateTrackingAreas() {

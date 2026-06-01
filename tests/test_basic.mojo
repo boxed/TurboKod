@@ -10636,7 +10636,7 @@ def test_debug_pane_run_mode_uses_full_height_for_output() raises:
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     for i in range(20):
-        pane.append_output(String("line ") + String(i))
+        pane.append_output(String("line ") + String(i) + String("\n"))
     var c = Canvas(40, 10)
     pane.paint(c, Rect(0, 0, 40, 10))
     # Bottom panel row is y=9. Autoscroll keeps the latest line
@@ -10949,7 +10949,7 @@ def test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     for i in range(40):
-        pane.append_output(String("line ") + String(i))
+        pane.append_output(String("line ") + String(i) + String("\n"))
     var panel = Rect(0, 0, 40, 10)
     var c = Canvas(40, 10)
     pane.paint(c, panel)
@@ -10991,7 +10991,7 @@ def test_debug_pane_run_log_arrow_click_scrolls_output() raises:
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     for i in range(40):
-        pane.append_output(String("line ") + String(i))
+        pane.append_output(String("line ") + String(i) + String("\n"))
     var panel = Rect(0, 0, 40, 10)
     var c = Canvas(40, 10)
     pane.paint(c, panel)
@@ -11012,7 +11012,7 @@ def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     for i in range(40):
-        pane.append_output(String("line ") + String(i))
+        pane.append_output(String("line ") + String(i) + String("\n"))
     var panel = Rect(0, 0, 40, 10)
     var c = Canvas(40, 10)
     pane.paint(c, panel)
@@ -11070,7 +11070,7 @@ def test_debug_pane_clear_output_wipes_log() raises:
     pane.visible = True
     pane.set_mode(PANE_MODE_RUN)
     for i in range(5):
-        pane.append_output(String("noise ") + String(i))
+        pane.append_output(String("noise ") + String(i) + String("\n"))
     assert_equal(len(pane.output.lines), 5)
     pane.clear_output()
     assert_equal(len(pane.output.lines), 0)
@@ -15208,6 +15208,66 @@ def test_text_log_full_rewrap_on_width_change() raises:
     assert_true(len(log.last_visual) < len(first_pass))
 
 
+def test_text_log_streaming_appends_continue_open_line() raises:
+    """Raw stdout/stderr arrives in chunks with no newline between
+    them — pytest emits one ``.`` per test, and each lands in its own
+    drain tick. A ``streaming`` append whose chunk doesn't end in a
+    newline must continue the current row instead of starting a new
+    one, so the dots stay on a single line (the reported bug was one
+    dot per line)."""
+    var log = TextLog(default_attr())
+    # Three dots arrive as three separate streaming chunks, then the
+    # line is closed by pytest's percentage suffix + newline.
+    log.append(String("."), streaming=True)
+    log.append(String("."), streaming=True)
+    log.append(String("."), streaming=True)
+    assert_equal(len(log.lines), 1)
+    assert_equal(log.lines[0], String("..."))
+    log.append(String(" [100%]\n"), streaming=True)
+    assert_equal(len(log.lines), 1)
+    assert_equal(log.lines[0], String("... [100%]"))
+    # After the newline the line is closed, so the next chunk starts a
+    # fresh row.
+    log.append(String("next"), streaming=True)
+    assert_equal(len(log.lines), 2)
+    assert_equal(log.lines[1], String("next"))
+
+
+def test_text_log_discrete_appends_stay_separate_rows() raises:
+    """Non-streaming (console-banner) appends keep one-row-per-call
+    semantics even without a trailing newline — and a discrete append
+    must close any open streaming line so a later streaming chunk
+    doesn't glue onto the banner."""
+    var log = TextLog(default_attr())
+    log.append(String("$ pytest"))   # discrete, no newline
+    log.append(String("$ done"))     # discrete, no newline
+    assert_equal(len(log.lines), 2)
+    assert_equal(log.lines[0], String("$ pytest"))
+    assert_equal(log.lines[1], String("$ done"))
+    # A streaming dot after a discrete line starts its own row, not a
+    # continuation of "$ done".
+    log.append(String("."), streaming=True)
+    assert_equal(len(log.lines), 3)
+    assert_equal(log.lines[2], String("."))
+
+
+def test_text_log_streaming_continuation_keeps_layout_cache() raises:
+    """Continuing an open line mutates the last row in place; the
+    incremental layout cache must re-wrap just that line and stay
+    equal to a fresh full wrap (no stale or duplicated visual rows)."""
+    var log = TextLog(default_attr())
+    var canvas = Canvas(40, 12)
+    log.append(String("alpha\n"), streaming=True)
+    log.paint(canvas, Rect(0, 0, 20, 5))   # prime the cache at width 20
+    # Stream a run of dots that will eventually wrap past 20 cells.
+    for _ in range(30):
+        log.append(String("."), streaming=True)
+    var fresh = wrap_lines(log.lines, 20)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+
+
 def test_text_log_autoscroll_pins_to_bottom_on_append() raises:
     """While ``autoscroll`` is True, new lines arriving must keep the
     last row visible — ``last_first_visual`` shifts as content grows
@@ -16135,6 +16195,9 @@ def _run_chunk_05() raises:
     test_text_log_incremental_layout_matches_full_rewrap()
     test_text_log_incremental_layout_handles_trim()
     test_text_log_full_rewrap_on_width_change()
+    test_text_log_streaming_appends_continue_open_line()
+    test_text_log_discrete_appends_stay_separate_rows()
+    test_text_log_streaming_continuation_keeps_layout_cache()
     test_editor_bracket_match_finds_pair_under_cursor()
     test_editor_bracket_match_uses_char_just_behind_cursor()
     test_editor_bracket_match_respects_nesting()
