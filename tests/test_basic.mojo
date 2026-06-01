@@ -32,6 +32,10 @@ from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
 )
 from turbokod.file_dialog import FileDialog
+from turbokod.find_symbol import (
+    container_matches_qualifier, sanitize_symbol_query,
+    _query_member, _query_qualifier,
+)
 from turbokod.save_as_dialog import SaveAsDialog
 from turbokod.scrollbar import HScrollbar, VScrollbar
 from turbokod.session_store import (
@@ -16218,6 +16222,60 @@ def _run_chunk_05() raises:
     test_text_field_ctrl_letter_does_not_insert()
     test_text_field_paints_visible_window_after_scroll()
     test_vt_osc_52_decodes_base64_to_clipboard()
+    test_find_symbol_query_keeps_dot()
+    test_find_symbol_query_split()
+    test_find_symbol_container_match()
+
+def test_find_symbol_query_keeps_dot() raises:
+    # The dot survives sanitization so the user can type a qualified
+    # ``Class.member`` query (it used to be stripped, leaving the field
+    # apparently ignoring the keypress).
+    assert_equal(
+        sanitize_symbol_query(String("User.has_permission")),
+        String("User.has_permission"),
+    )
+    # All other punctuation is still stripped — the member is the only
+    # thing that reaches rg's regex, so the injection guard holds.
+    assert_equal(
+        sanitize_symbol_query(String("-User.has*()")), String("User.has"),
+    )
+
+
+def test_find_symbol_query_split() raises:
+    # Split on the last dot: everything after is the member rg searches
+    # for, everything before is the container qualifier.
+    assert_equal(
+        _query_member(String("User.has_permission")),
+        String("has_permission"),
+    )
+    assert_equal(_query_qualifier(String("User.has_permission")), String("User"))
+    # No dot → the whole query is the member, no qualifier.
+    assert_equal(_query_member(String("has_permission")), String("has_permission"))
+    assert_equal(_query_qualifier(String("has_permission")), String(""))
+    # Nested qualifier splits on the *last* dot.
+    assert_equal(_query_member(String("pkg.User.method")), String("method"))
+    assert_equal(_query_qualifier(String("pkg.User.method")), String("pkg.User"))
+
+
+def test_find_symbol_container_match() raises:
+    # Exact and case-insensitive container hits.
+    assert_true(container_matches_qualifier(String("User"), String("User")))
+    assert_true(container_matches_qualifier(String("user"), String("User")))
+    # Either side may spell out more of the path than the other.
+    assert_true(
+        container_matches_qualifier(String("mypkg.User"), String("User")),
+    )
+    assert_true(
+        container_matches_qualifier(String("User"), String("mypkg.User")),
+    )
+    # A different class is rejected — this is what disambiguates
+    # ``User.has_permission`` from ``Account.has_permission``.
+    assert_false(container_matches_qualifier(String("Account"), String("User")))
+    # Empty qualifier matches anything (the unqualified path).
+    assert_true(container_matches_qualifier(String("Account"), String("")))
+    # A real qualifier against a container-less symbol can't match.
+    assert_false(container_matches_qualifier(String(""), String("User")))
+
 
 def main() raises:
     # Redirect $HOME to a scratch dir so tests that construct ``Desktop``
