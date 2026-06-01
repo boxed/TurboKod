@@ -299,6 +299,13 @@ comptime PROJECT_OPEN_RECENT_PREFIX = String("project:open_recent_idx:")
 # on the Desktop and returns this action so the host can spawn a window
 # and read the pending path via ``tk_desktop_take_pending_new_window_project``.
 comptime _HOST_NEW_WINDOW_ACTION = String("app.new_window")
+# Host-side action sentinel for "Close project" under ``host_owns_menu``.
+# The native frontend is one-project-per-window, so closing the project
+# means closing its window — the host receives this and tears the window
+# down (the same path as the window's red close button). The terminal
+# frontend has no window concept and instead reverts the Desktop to its
+# no-project state in place (``close_project``).
+comptime _HOST_CLOSE_WINDOW_ACTION = String("app.close_window")
 # "Open project..." — host-handled action that asks the framework's
 # ``FileDialog`` to pick a directory (dirs-only mode). The Desktop
 # doesn't intercept it; it falls through ``dispatch_action`` so the
@@ -344,13 +351,10 @@ comptime TARGET_SELECT_PREFIX    = String("target:select:")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
 # Docked terminal-pane actions. The desktop holds a stack of panes —
 # the host can open as many as it wants (File → New terminal pane,
-# Ctrl+T) and each pane carries its own shell + scrollback. ``NEW``
-# always appends a new pane. ``TOGGLE`` is the convenience hotkey:
-# with no panes open it spawns one, with any panes open it tears them
-# all down. ``FOCUS`` lands keyboard focus on the most recently
-# created pane.
+# Ctrl+Shift+T) and each pane carries its own shell + scrollback.
+# ``NEW`` always appends a new pane. ``FOCUS`` lands keyboard focus on
+# the most recently created pane.
 comptime TERMINAL_NEW            = String("terminal:new")
-comptime TERMINAL_TOGGLE         = String("terminal:toggle")
 comptime TERMINAL_FOCUS          = String("terminal:focus")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
@@ -767,8 +771,8 @@ struct Desktop(Movable):
     var terminal_panes: List[TerminalPane]
     """Stack of docked shell panes — see ``terminal_pane.mojo``. Each
     pane carries its own ``/bin/sh`` subprocess and scrollback. The
-    user appends new panes via File → New terminal pane (or Ctrl+T
-    on an empty stack) and removes them via the per-pane ``[X]``
+    user appends new panes via File → New terminal pane (or
+    Ctrl+Shift+T) and removes them via the per-pane ``[X]``
     title button. Panes paint top-to-bottom in list order, sitting
     above the debug pane (when visible) and the status / tab strip
     at the very bottom."""
@@ -1164,12 +1168,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
         ))
-        # Ctrl+T toggles the docked terminal. Spawn $SHELL on first
-        # open; hide + terminate on close so an unused pane doesn't
-        # leak a shell. The pane paints "T" in the top-right corner
+        # Ctrl+Shift+T opens a new docked terminal pane (each carries
+        # its own $SHELL + scrollback). Same action the File → "New
+        # terminal pane" menu item dispatches, so the menu surfaces
+        # this shortcut. The pane paints "T" in the top-right corner
         # to advertise this binding (mirroring the debug pane's "9").
         self._hotkeys.append(Hotkey(
-            ctrl_key("t"), MOD_CTRL, TERMINAL_TOGGLE,
+            ctrl_key("t"), MOD_CTRL | MOD_SHIFT, TERMINAL_NEW,
         ))
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
         self._hotkeys.append(Hotkey(
@@ -1235,9 +1240,8 @@ struct Desktop(Movable):
         # works; arrow keys then scroll the stack list while the
         # pane is focused.
         self._hotkeys.append(Hotkey(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE))
-        # Ctrl+R / Ctrl+D / Cmd+T — run / debug / test the active project
-        # target. Registered after the EDITOR_GOTO_SYMBOL Cmd+T above so
-        # the newest-first lookup picks TARGET_TEST.
+        # Ctrl+R / Ctrl+D / Ctrl+T — run / debug / test the active
+        # project target.
         self._hotkeys.append(Hotkey(
             ctrl_key("r"), MOD_CTRL, TARGET_RUN,
         ))
@@ -1245,7 +1249,7 @@ struct Desktop(Movable):
             ctrl_key("d"), MOD_CTRL, TARGET_DEBUG,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(ord("t")), MOD_META, TARGET_TEST,
+            ctrl_key("t"), MOD_CTRL, TARGET_TEST,
         ))
         # Cmd+Shift+D — run the test suite under the DAP debugger.
         self._hotkeys.append(Hotkey(
@@ -3989,6 +3993,12 @@ struct Desktop(Movable):
         maximize-related actions; pass the same rect you use for paint.
         """
         if action == PROJECT_CLOSE_ACTION:
+            # On a host frontend (Swift/macOS) the window *is* the project,
+            # so closing the project closes the window — bubble the sentinel
+            # up and let the host tear it down. The terminal frontend reverts
+            # the Desktop to its no-project state in place instead.
+            if self.host_owns_menu:
+                return Optional[String](_HOST_CLOSE_WINDOW_ACTION)
             self.close_project()
             return Optional[String]()
         if action == PROJECT_TREE_ACTION:
@@ -4441,16 +4451,6 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == TERMINAL_NEW:
             self._open_terminal_pane()
-            return Optional[String]()
-        if action == TERMINAL_TOGGLE:
-            # Toggle semantics across the stack: any panes open ⇒ tear
-            # them all down; none ⇒ spawn one. ``_terminate_shell``
-            # runs via ``close`` on each pane, so no shell is left
-            # behind.
-            if len(self.terminal_panes) > 0:
-                self._close_all_terminal_panes()
-            else:
-                self._open_terminal_pane()
             return Optional[String]()
         if action == TERMINAL_FOCUS:
             # Land focus on the most recently created pane — the one
@@ -5496,14 +5496,6 @@ struct Desktop(Movable):
         pane.open()
         self.terminal_panes.append(pane^)
         self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
-
-    def _close_all_terminal_panes(mut self):
-        """Tear down every terminal pane (SIGTERM + close fds via
-        ``pane.close``), then clear the list. Used by
-        ``TERMINAL_TOGGLE`` to hide the stack as a unit."""
-        for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].close()
-        self.terminal_panes = List[TerminalPane]()
 
     def _build_debug_pane_commands(self) -> List[TitleCommand]:
         """Title-strip buttons for the debug pane.

@@ -361,6 +361,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var timer: Timer?
     var persistSession = false   // off for one-off file opens, on for sessions/projects
     var isTerminating = false    // suppress per-window session saves during quit
+    // Filesystem paths handed to us via application(_:open:) — Dock
+    // drag-and-drop and "Open With". They can arrive before launch
+    // finishes (delegate is wired before app.run()), so we buffer them
+    // here and either drain them or use them in place of session restore
+    // once applicationDidFinishLaunching runs. `didFinishLaunchingDone`
+    // flips true at the end of launch so later drops open immediately.
+    private var pendingOpenPaths: [String] = []
+    // turbokod://open?file=X&line=N URLs that arrived before launch
+    // finished (e.g. a click on a link is what cold-launched the app).
+    // Unlike dropped paths, these do NOT suppress session restore — we
+    // want the restored project windows to exist so the URL's file can
+    // route into the right one. Drained after restore in didFinishLaunching.
+    private var pendingOpenURLs: [URL] = []
+    private var didFinishLaunchingDone = false
     // Debouncer for windowDidResize/windowDidMove — AppKit fires these every
     // frame during a live resize; debouncing keeps us from rewriting the
     // per-project JSON hundreds of times per drag. Keyed by NSWindow identity
@@ -432,6 +446,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let v = newWindow()
                 openFile(v, p)
             }
+        } else if !pendingOpenPaths.isEmpty {
+            // Launched by dropping folders/files on the Dock icon (or
+            // "Open With"). Open those instead of restoring the previous
+            // session — the drop is the explicit intent.
+            persistSession = true
+            let dropped = pendingOpenPaths
+            pendingOpenPaths.removeAll()
+            for p in dropped { openDroppedPath(p) }
         } else {
             persistSession = true
             let saved = loadSession()
@@ -448,6 +470,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 openProject(v, entry.project)
             }
         }
+        // From here on, drops open immediately rather than buffering.
+        // Drain anything that raced in during launch setup.
+        didFinishLaunchingDone = true
+        let late = pendingOpenPaths
+        pendingOpenPaths.removeAll()
+        for p in late { openDroppedPath(p) }
+        // Drain turbokod:// URLs after session restore so they can route
+        // into restored project windows.
+        let lateURLs = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        for u in lateURLs { openTurbokodURL(u) }
 
         // Schedule in .common mode (not just default) so the timer also fires
         // during the modal event-tracking run loop AppKit uses for live
@@ -876,6 +909,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         handleHostAction(code, sourceHandle: view.handle, view: view)
     }
 
+    // Action codes the Mojo core bubbles up when an action can't be
+    // handled below the frontend boundary — mirrors the ACT_* constants
+    // in native_api.mojo (kept in sync by hand; the C ABI is plain Int32).
+    enum HostAction: Int32 {
+        case none        = 0   // ACT_NONE — handled inside Desktop
+        case quit        = 1   // ACT_QUIT
+        case openFile    = 2   // ACT_OPEN_FILE
+        case quickOpen   = 3   // ACT_QUICK_OPEN
+        case openProject = 4   // ACT_OPEN_PROJECT
+        case newWindow   = 5   // ACT_NEW_WINDOW (also Project ▸ recent)
+        case closeWindow = 6   // ACT_CLOSE_WINDOW (Close project)
+    }
+
     // Generalized action-code dispatch. The source `sourceHandle` is the
     // Mojo Desktop that produced this action (a real window's, or the
     // chrome desktop when a menu pick fired without a window). `view` is
@@ -883,30 +929,47 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // dialogs can land back in it — when nil we open a fresh window for
     // those, since dropping the user's pick on the floor is worse.
     func handleHostAction(_ code: Int32, sourceHandle: Int64, view: CellView?) {
-        switch code {
-        case 1: NSApp.terminate(nil)         // APP_QUIT_ACTION
-        case 2, 3:                           // Open… / Quick open…
+        guard let action = HostAction(rawValue: code) else { return }
+        switch action {
+        case .none: break   // handled inside Desktop; nothing for the host
+        case .quit: NSApp.terminate(nil)
+        case .openFile, .quickOpen:
             if let v = view { openFilePanel(v) }
             else { openFilePanelInNewWindow() }
-        case 4:                              // Open project…
+        case .openProject:
             if let v = view { openProjectPanel(v) }
             else { openProjectPanelInNewWindow() }
-        case 5:
-            // ACT_NEW_WINDOW. Two paths share this code: a plain
-            // File ▸ New window (no payload) and a Project ▸ <recent>
-            // pick (path queued on the source Desktop). We drain the
-            // pending project off the *source* Desktop — that may be
-            // the chrome desktop when the pick came from a no-window
-            // menu. If there's a path, spawn the window at its
-            // remembered frame and load the project.
+        case .newWindow:
+            // Two paths share this code: a plain File ▸ New window (no
+            // payload) and a Project ▸ <recent> pick (path queued on the
+            // source Desktop). We drain the pending project off the
+            // *source* Desktop — that may be the chrome desktop when the
+            // pick came from a no-window menu. If there's a path, spawn the
+            // window at its remembered frame and load the project.
             let pending = takePendingNewWindowProject(sourceHandle)
             if let path = pending {
-                let v = newWindow(frame: loadProjectFrame(path))
-                openProject(v, path)
+                // If this project is already open in a window, just bring
+                // that window to the front instead of opening a duplicate.
+                // Recents paths are realpath-canonical from the Mojo side,
+                // so canonicalize the window's path the same way to match.
+                let want = canonicalPath(path)
+                if let existing = views.first(where: {
+                    ($0.project).map { canonicalPath($0) == want } ?? false
+                }) {
+                    existing.window?.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    let v = newWindow(frame: loadProjectFrame(path))
+                    openProject(v, path)
+                }
             } else {
                 _ = newWindow()
             }
-        default: break
+        case .closeWindow:
+            // "Close project". The window is the project on macOS, so close
+            // it (same path as the red close button). The Project menu only
+            // offers this when a project is open, so `view` is its window.
+            if let v = view { closeWindow(v) }
         }
     }
 
@@ -931,6 +994,91 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard panel.runModal() == .OK, let url = panel.urls.first else { return }
         let nv = newWindow(frame: loadProjectFrame(url.path))
         openProject(nv, url.path)
+    }
+
+    // Dock drag-and-drop and "Open With": macOS hands us the dropped
+    // folders/files here (folders are accepted because Info.plist
+    // declares the public.folder document type). Before launch finishes
+    // we buffer them — applicationDidFinishLaunching opens them in place
+    // of restoring the session; after launch we open them immediately.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if url.isFileURL {
+                if didFinishLaunchingDone { openDroppedPath(url.path) }
+                else { pendingOpenPaths.append(url.path) }
+            } else if url.scheme == "turbokod" {
+                if didFinishLaunchingDone { openTurbokodURL(url) }
+                else { pendingOpenURLs.append(url) }
+            }
+        }
+    }
+
+    // Handle a turbokod://open?file=X&line=N URL: open the file (1-based
+    // `line`, optional) and jump the cursor there. Route into an already-open
+    // project window whose project contains the file when there is one, so a
+    // link to a file in an open project lands in that project's window rather
+    // than spawning a bare file window.
+    func openTurbokodURL(_ url: URL) {
+        guard url.host == "open" || url.path == "open" || url.host == nil,
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = comps.queryItems,
+              let file = items.first(where: { $0.name == "file" })?.value,
+              !file.isEmpty
+        else { return }
+        // URL line is 1-based (matching editor line numbers); the Mojo
+        // side wants 0-based. Absent/malformed → open at the top.
+        var line0 = 0
+        if let lv = items.first(where: { $0.name == "line" })?.value,
+           let n = Int(lv), n > 0 { line0 = n - 1 }
+
+        let target = canonicalPath(file)
+        let host = views.first { v in
+            guard let p = v.project else { return false }
+            let proj = canonicalPath(p)
+            return target == proj || target.hasPrefix(proj + "/")
+        }
+        let v = host ?? newWindow()
+        if host != nil { v.window?.makeKeyAndOrderFront(nil) }
+        openFileAt(v, file, line0, 0)
+    }
+
+    func openFileAt(_ v: CellView, _ path: String, _ line: Int, _ character: Int) {
+        let bytes = Array(path.utf8)
+        bytes.withUnsafeBufferPointer { b in
+            tk_desktop_open_file_at(v.handle, Int64(Int(bitPattern: b.baseAddress)),
+                                    Int64(bytes.count), Int64(line), Int64(character),
+                                    Int64(v.cols()), Int64(v.rows()))
+        }
+        if v.project == nil, let win = v.window {
+            win.title = URL(fileURLWithPath: path).lastPathComponent
+            win.representedURL = URL(fileURLWithPath: path)
+        }
+        v.needsDisplay = true
+    }
+
+    // Open one forwarded filesystem path in its own fresh window: a
+    // directory becomes a project (the Mojo core records it into the
+    // recent-projects list via open_project → _set_project); anything
+    // else opens as a file buffer.
+    func openDroppedPath(_ path: String) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        else { return }
+        if isDir.boolValue {
+            persistSession = true
+            let v = newWindow(frame: loadProjectFrame(path))
+            openProject(v, path)
+        } else {
+            let v = newWindow()
+            openFile(v, path)
+        }
+    }
+
+    // Resolve symlinks + normalize so two spellings of the same project
+    // path compare equal. Mirrors the Mojo side's realpath() (which is
+    // how paths land in the recent-projects list).
+    private func canonicalPath(_ p: String) -> String {
+        return URL(fileURLWithPath: p).resolvingSymlinksInPath().path
     }
 
     // Pull the path the Mojo Desktop queued when the user picked a
@@ -1053,7 +1201,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.urls.first {
-            openProject(v, url.path)
+            // A window already showing a project can't swap its root in
+            // place — the Mojo Desktop is one-project-per-window and
+            // open_project no-ops once a project is set (so the pick
+            // would silently do nothing and never reach the recents
+            // list). Open it in a fresh window instead, matching how
+            // Project ▸ <recent> behaves. An empty/file-only window
+            // adopts the project directly.
+            if v.project != nil {
+                let nv = newWindow(frame: loadProjectFrame(url.path))
+                openProject(nv, url.path)
+            } else {
+                openProject(v, url.path)
+            }
         }
     }
 

@@ -235,7 +235,7 @@ def load_project_gitignore(root: String) -> GitignoreMatcher:
 # down the walk by orders of magnitude. A project that legitimately
 # wants to expose one of these (e.g. for some weird tooling) needs a
 # different code path — this list is for the quick-open picker only.
-fn _picker_skip_dirs() -> List[String]:
+def _picker_skip_dirs() -> List[String]:
     var s = List[String]()
     s.append(String("__pycache__"))
     s.append(String("node_modules"))
@@ -250,7 +250,7 @@ fn _picker_skip_dirs() -> List[String]:
     return s^
 
 
-fn _name_in(name: String, names: List[String]) -> Bool:
+def _name_in(name: String, names: List[String]) -> Bool:
     for i in range(len(names)):
         if names[i] == name:
             return True
@@ -372,7 +372,7 @@ struct FileIndexer(Movable):
         except:
             return Optional[Self]()
 
-    fn poll(mut self, root: String) -> List[String]:
+    def poll(mut self, root: String) -> List[String]:
         """Read whatever the child has produced since the last call,
         parse complete NUL-terminated paths, and return them as absolute
         paths under ``root``. A partial trailing entry (no NUL yet) is
@@ -439,7 +439,7 @@ struct FileIndexer(Movable):
             self.proc.alive = False
         return new_paths^
 
-    fn _terminate(mut self):
+    def _terminate(mut self):
         """Best-effort SIGTERM + clear alive. The shim's atexit handler
         will SIGKILL anything still alive at process exit."""
         if self.proc.alive:

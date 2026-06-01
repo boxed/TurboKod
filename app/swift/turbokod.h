@@ -10,6 +10,9 @@ void    tk_desktop_free(int64_t h);
 void    tk_desktop_open_project(int64_t h, int64_t path_ptr, int64_t path_len);
 void    tk_desktop_open_file(int64_t h, int64_t path_ptr, int64_t path_len,
                              int64_t cols, int64_t rows);
+void    tk_desktop_open_file_at(int64_t h, int64_t path_ptr, int64_t path_len,
+                                int64_t line, int64_t character,
+                                int64_t cols, int64_t rows);
 void    tk_desktop_tick(int64_t h, int64_t cols, int64_t rows);
 int64_t tk_desktop_layout(int64_t h, int64_t cols, int64_t rows,
                           int64_t out_ptr, int64_t cap);

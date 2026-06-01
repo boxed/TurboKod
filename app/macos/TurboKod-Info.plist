@@ -2,12 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Info.plist for the pure-Mojo native frontend (run_native.sh wraps
-	     the built binary in a TurboKod.app so macOS shows the proper app
-	     name + icon in the menu bar and Dock). Distinct bundle id from the
-	     alacritty wrapper (se.dryft.turbokod), and no URL/document-type
-	     registration here so this dev bundle doesn't fight the wrapper for
-	     the turbokod:// scheme. -->
+	<!-- Info.plist for the native Swift frontend (run_swift.sh wraps the
+	     built binary in a TurboKod.app so macOS shows the proper app name
+	     + icon in the menu bar and Dock). This is now the only TurboKod
+	     app, so it owns the turbokod:// scheme outright (the old alacritty
+	     wrapper, se.dryft.turbokod, is gone). -->
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
@@ -24,6 +23,41 @@
 	<string>TurboKod</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<!-- Register the turbokod:// custom URL scheme so links like
+	     turbokod://open?file=/path/to/file.py&line=180 route to
+	     application(_:open:), which jumps to that file + line. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>se.dryft.turbokod.url</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>turbokod</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Declare that the app can open folders, so dropping a project
+	     directory onto the Dock icon (or "Open With") routes through
+	     application(_:open:) and opens it as a project. Rank Alternate
+	     so we don't try to become the system's default folder handler. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleShortVersionString</key>
 	<string>0.0.1</string>
 	<key>CFBundleVersion</key>

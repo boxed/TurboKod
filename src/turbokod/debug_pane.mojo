@@ -483,13 +483,22 @@ struct DebugPane(Copyable, Movable):
         burst that arrives as one DAP event still shows row-by-row.
         The DAP category drives the per-line color (``Attr``); the
         backing ``TextLog`` handles splitting, the backlog cap, and
-        the selection-follows-trim bookkeeping."""
+        the selection-follows-trim bookkeeping.
+
+        stdout/stderr are raw child byte streams, so they append in
+        ``streaming`` mode — a chunk with no trailing newline (pytest's
+        progress dots, a prompt with no newline) continues the current
+        line instead of starting a new row each drain tick. Console
+        banners are discrete IDE annotations and keep one-row-per-call
+        semantics."""
         var attr = self.output.default_attr
         if category == PANE_OUT_STDERR:
             attr = Attr(LIGHT_RED, BLACK)
         elif category == PANE_OUT_CONSOLE:
             attr = Attr(LIGHT_GRAY, BLACK)
-        self.output.append(text^, attr)
+        self.output.append(
+            text^, attr, streaming=category != PANE_OUT_CONSOLE,
+        )
 
     def clear(mut self):
         """Wipe inspect state (stack/locals/watches). Called on

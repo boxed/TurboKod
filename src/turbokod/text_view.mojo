@@ -434,6 +434,15 @@ struct TextLog(Copyable, Movable):
     var last_x_max: Int
     var last_first_visual: Int
     var last_visible_count: Int
+    var _open: Bool
+    """True iff the last line was written by a ``streaming`` append that
+    didn't end in ``\\n`` — i.e. it's an unterminated line still being
+    built up byte-by-byte. The next streaming append continues it
+    instead of starting a fresh row. This is what keeps pytest's
+    one-dot-per-test progress (each dot arrives as its own read chunk,
+    with no newline between dots) on a single line. Discrete
+    (non-streaming) appends — the IDE's own ``$ …`` console banners —
+    always start and close their own row and reset this to False."""
     var _layout_w: Int
     """Content width (cells) the cached ``last_visual`` was built for.
     -1 sentinel means "invalid, recompute" — set on every mutation
@@ -459,6 +468,7 @@ struct TextLog(Copyable, Movable):
         self.last_x_max = 0
         self.last_first_visual = 0
         self.last_visible_count = 0
+        self._open = False
         self._layout_w = -1
 
     def __copyinit__(mut self, copy: Self):
@@ -475,35 +485,81 @@ struct TextLog(Copyable, Movable):
         self.last_x_max = copy.last_x_max
         self.last_first_visual = copy.last_first_visual
         self.last_visible_count = copy.last_visible_count
+        self._open = copy._open
         self._layout_w = copy._layout_w
 
     # --- mutation -------------------------------------------------------
 
-    def append(mut self, var text: String, attr: Optional[Attr] = None):
+    def append(
+        mut self, var text: String, attr: Optional[Attr] = None,
+        streaming: Bool = False,
+    ):
         """Append ``text``, splitting on ``\\n``. Each split line gets
         its own ``Attr`` — when ``attr`` is None we fall back to
-        ``default_attr``. Trims the front when ``max_lines`` is hit."""
+        ``default_attr``. Trims the front when ``max_lines`` is hit.
+
+        ``streaming`` controls how a chunk that *doesn't* end in ``\\n``
+        is treated. Discrete callers (the default — IDE console banners
+        like ``$ …``) push that trailing text as its own row. Streaming
+        callers (raw child stdout/stderr) leave the line "open" so the
+        next streaming append continues it. The latter is what keeps
+        pytest's progress dots — which arrive as separate read chunks
+        with no newline between them — on one line instead of one dot
+        per row. See ``_open``."""
         var resolved = self.default_attr
         if attr:
             resolved = attr.value()
         var b = text.as_bytes()
+        if len(b) == 0:
+            return
+        # The first emitted segment continues the previous open line
+        # only when both that line and this append are streaming.
+        var continue_open = streaming and self._open and len(self.lines) > 0
+        var first = True
         var start = 0
         for i in range(len(b)):
             if b[i] == 0x0A:  # '\n'
-                self._push_line(
-                    String(StringSlice(
-                        ptr=b.unsafe_ptr() + start, length=i - start,
-                    )),
-                    resolved,
-                )
+                var seg = String(StringSlice(
+                    ptr=b.unsafe_ptr() + start, length=i - start,
+                ))
+                if first and continue_open:
+                    self._extend_last(seg^)
+                else:
+                    self._push_line(seg^, resolved)
+                first = False
                 start = i + 1
         if start < len(b):
-            self._push_line(
-                String(StringSlice(
-                    ptr=b.unsafe_ptr() + start, length=len(b) - start,
-                )),
-                resolved,
+            var seg = String(StringSlice(
+                ptr=b.unsafe_ptr() + start, length=len(b) - start,
+            ))
+            if first and continue_open:
+                self._extend_last(seg^)
+            else:
+                self._push_line(seg^, resolved)
+        # Line stays "open" only for a streaming chunk that didn't end
+        # on a newline; anything else closes the current row so a later
+        # streaming append starts fresh rather than gluing onto it.
+        self._open = streaming and b[len(b) - 1] != 0x0A
+
+    def _extend_last(mut self, var seg: String):
+        """Glue ``seg`` onto the last (open) line in place, keeping the
+        incremental layout cache valid by re-wrapping just that one
+        logical line — never the full backlog."""
+        var idx = len(self.lines) - 1
+        self.lines[idx] = self.lines[idx] + seg^
+        if self._layout_w >= 0:
+            # Drop the mutated line's stale visual rows, then re-append
+            # its freshly-wrapped rows. Rows are grouped by ``line_idx``
+            # and this line is last, so its rows are a trailing run.
+            while len(self.last_visual) > 0 and \
+                    self.last_visual[len(self.last_visual) - 1].line_idx \
+                    == idx:
+                _ = self.last_visual.pop()
+            var new_rows = wrap_lines(
+                self.lines, self._layout_w, start_line=idx,
             )
+            for k in range(len(new_rows)):
+                self.last_visual.append(new_rows[k])
 
     def clear(mut self):
         """Drop all lines and any selection. Scroll resets to top."""
@@ -513,6 +569,7 @@ struct TextLog(Copyable, Movable):
         self.scroll = 0
         self.autoscroll = True
         self.last_visual = List[VisualLine]()
+        self._open = False
         self._layout_w = -1
 
     def _push_line(mut self, var line: String, attr: Attr):

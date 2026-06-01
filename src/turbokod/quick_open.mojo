@@ -228,7 +228,7 @@ struct QuickOpen(Movable):
                 self._append_path(paths[i])
         self._refilter()
 
-    fn _append_path(mut self, full: String):
+    def _append_path(mut self, full: String):
         """Append one absolute path to the entry list, also computing
         the project-relative display form. Centralized so both the sync
         and async paths produce identical entries."""
@@ -249,7 +249,7 @@ struct QuickOpen(Movable):
         self.entries.append(full)
         self.entries_abs.append(full)
 
-    fn tick(mut self):
+    def tick(mut self):
         """Drain anything the async indexer has produced since the last
         frame. Cheap when the indexer is done or the picker isn't open;
         called every frame by ``Desktop.paint``.

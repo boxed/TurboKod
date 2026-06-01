@@ -49,12 +49,16 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE,
-    TARGET_RUN, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
+    TARGET_RUN, TARGET_TEST, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
 )
 
 
 # Host action: open a new Desktop window (Desktop returns it unclaimed).
 comptime NEW_WINDOW = String("app.new_window")
+# Host action: close the current window. Returned by "Close project" when
+# the host owns the menu (one-project-per-window on macOS). Mirrors
+# ``desktop._HOST_CLOSE_WINDOW_ACTION``.
+comptime CLOSE_WINDOW = String("app.close_window")
 
 # Action codes returned to Swift. Everything else is handled inside Desktop.
 comptime ACT_NONE         = Int32(0)
@@ -63,6 +67,7 @@ comptime ACT_OPEN_FILE    = Int32(2)
 comptime ACT_QUICK_OPEN   = Int32(3)
 comptime ACT_OPEN_PROJECT = Int32(4)
 comptime ACT_NEW_WINDOW   = Int32(5)
+comptime ACT_CLOSE_WINDOW = Int32(6)
 
 # Mouse-button ids Swift passes (match events.mojo MOUSE_*).
 comptime _MB_LEFT       = UInt8(1)
@@ -72,11 +77,11 @@ comptime _MB_WHEEL_UP   = UInt8(4)
 comptime _MB_WHEEL_DOWN = UInt8(5)
 
 
-fn _desk(h: Int) -> UnsafePointer[Desktop, MutExternalOrigin]:
+def _desk(h: Int) -> UnsafePointer[Desktop, MutExternalOrigin]:
     return UnsafePointer[Desktop, MutExternalOrigin](unsafe_from_address=h)
 
 
-fn _string_from(ptr: Int, n: Int) -> String:
+def _string_from(ptr: Int, n: Int) -> String:
     if ptr == 0 or n <= 0:
         return String("")
     var p = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=ptr)
@@ -150,6 +155,7 @@ def _build_menus(mut d: Desktop):
     ))
     var dbg = List[MenuItem]()
     dbg.append(MenuItem(String("Run"), TARGET_RUN))
+    dbg.append(MenuItem(String("Test"), TARGET_TEST))
     dbg.append(MenuItem.separator())
     dbg.append(MenuItem(String("Start / Continue"), DEBUG_START_OR_CONTINUE))
     dbg.append(MenuItem(String("Stop"), DEBUG_STOP))
@@ -179,7 +185,7 @@ def _refresh_menu_visibility(mut d: Desktop):
                 break
 
 
-fn _action_code(action: Optional[String]) -> Int32:
+def _action_code(action: Optional[String]) -> Int32:
     if not action:
         return ACT_NONE
     var a = action.value()
@@ -188,6 +194,7 @@ fn _action_code(action: Optional[String]) -> Int32:
     if a == EDITOR_QUICK_OPEN: return ACT_QUICK_OPEN
     if a == PROJECT_OPEN:      return ACT_OPEN_PROJECT
     if a == NEW_WINDOW:        return ACT_NEW_WINDOW
+    if a == CLOSE_WINDOW:      return ACT_CLOSE_WINDOW
     return ACT_NONE
 
 
@@ -202,7 +209,7 @@ fn _action_code(action: Optional[String]) -> Int32:
 comptime _PATH_RECOVERY_MARKER = String("__TURBOKOD_PATH_RECOVERED")
 
 
-fn _recover_path_once():
+def _recover_path_once():
     """Run GUI-launch PATH recovery on the first call; no-op afterward.
 
     Called from ``tk_desktop_new`` so the repair is in place before any
@@ -214,18 +221,12 @@ fn _recover_path_once():
     var marker = getenv_value(_PATH_RECOVERY_MARKER)
     if len(marker.as_bytes()) > 0:
         return
-    try:
-        recover_user_path_for_gui_launch()
-        _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
-    except e:
-        # Best-effort: a failure here just means children inherit the
-        # launch-time PATH (same fallback as if this function didn't
-        # exist). Log so we can tell when it happens.
-        print("turbokod: _recover_path_once:", String(e))
+    recover_user_path_for_gui_launch()
+    _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
 
 
 @export
-fn tk_desktop_new() -> Int:
+def tk_desktop_new() -> Int:
     """Create a Desktop on the heap, load config + standard menus, return the
     opaque handle."""
     # macOS Dock/launchd launches give us a stripped ``PATH`` that lacks
@@ -240,19 +241,13 @@ fn tk_desktop_new() -> Int:
         return 0
     var p = UnsafePointer[Desktop, MutExternalOrigin](unsafe_from_address=addr)
     p.init_pointee_move(Desktop())
-    try:
-        p[].load_config_from_disk()
-        _build_menus(p[])
-    except e:
-        # @export boundary: can't propagate to Swift. Log so a broken
-        # config or menu-build raises a visible stderr line instead of
-        # silently shipping a Desktop with no menus.
-        print("turbokod: tk_desktop_new:", String(e))
+    p[].load_config_from_disk()
+    _build_menus(p[])
     return addr
 
 
 @export
-fn tk_desktop_free(h: Int):
+def tk_desktop_free(h: Int):
     if h == 0:
         return
     var p = _desk(h)
@@ -261,20 +256,17 @@ fn tk_desktop_free(h: Int):
 
 
 @export
-fn tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int):
+def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int):
     if h == 0:
         return
     var path = _string_from(path_ptr, path_len)
     if len(path.as_bytes()) == 0:
         return
-    try:
-        _desk(h)[].open_project(path)
-    except e:
-        print("turbokod: tk_desktop_open_project:", String(e))
+    _desk(h)[].open_project(path)
 
 
 @export
-fn tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: Int):
+def tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: Int):
     if h == 0:
         return
     var path = _string_from(path_ptr, path_len)
@@ -287,7 +279,26 @@ fn tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: I
 
 
 @export
-fn tk_desktop_tick(h: Int, cols: Int, rows: Int):
+def tk_desktop_open_file_at(
+    h: Int, path_ptr: Int, path_len: Int, line: Int, character: Int,
+    cols: Int, rows: Int,
+):
+    """Open ``path`` and place the cursor at ``(line, character)`` — both
+    0-based. Backs the ``turbokod://open?file=X&line=N`` URL scheme; the
+    Swift host converts the URL's 1-based line to 0-based before calling."""
+    if h == 0:
+        return
+    var path = _string_from(path_ptr, path_len)
+    if len(path.as_bytes()) == 0:
+        return
+    try:
+        _desk(h)[].open_file_at(path, line, character, Rect(0, 0, cols, rows))
+    except e:
+        print("turbokod: tk_desktop_open_file_at:", String(e))
+
+
+@export
+def tk_desktop_tick(h: Int, cols: Int, rows: Int):
     """Per-frame housekeeping Swift runs before laying out: external-change
     reload, menu visibility, file-tree opens, and the LSP/DAP/autosave
     ticks."""
@@ -319,7 +330,7 @@ fn tk_desktop_tick(h: Int, cols: Int, rows: Int):
 
 
 @export
-fn tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
     """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
     caller's buffer (3 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
@@ -352,7 +363,7 @@ fn tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> In
 
 
 @export
-fn tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int32:
+def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int32:
     if h == 0:
         return ACT_NONE
     # Canonicalize Ctrl/Cmd + uppercase letter to lowercase (matches the
@@ -371,7 +382,7 @@ fn tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int
 
 
 @export
-fn tk_desktop_mouse(
+def tk_desktop_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int,
 ) -> Int32:
@@ -390,7 +401,7 @@ fn tk_desktop_mouse(
 
 
 @export
-fn tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
+def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
     """0 = default, 1 = text, 2 = pointer."""
     if h == 0:
         return Int32(0)
@@ -403,14 +414,14 @@ fn tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int
 
 
 @export
-fn tk_desktop_has_project(h: Int) -> Int32:
+def tk_desktop_has_project(h: Int) -> Int32:
     if h == 0:
         return Int32(0)
     return Int32(1) if _desk(h)[].project else Int32(0)
 
 
 @export
-fn tk_desktop_set_host_owns_menu(h: Int, on: Int):
+def tk_desktop_set_host_owns_menu(h: Int, on: Int):
     """Tell the Desktop a host frontend owns the menu surface.
 
     When ``on`` is non-zero, Desktop stops painting the in-grid menu bar
@@ -425,12 +436,12 @@ fn tk_desktop_set_host_owns_menu(h: Int, on: Int):
     _desk(h)[].host_owns_menu = on != 0
 
 
-fn _b(v: Bool) -> String:
+def _b(v: Bool) -> String:
     return String("1") if v else String("0")
 
 
 @export
-fn tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
     """Serialize the current ``menu_bar`` into a flat TSV-shaped buffer.
 
     The host re-reads this every tick and rebuilds its native menu when
@@ -480,7 +491,7 @@ fn tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
 
 
 @export
-fn tk_desktop_menu_invoke(
+def tk_desktop_menu_invoke(
     h: Int, action_ptr: Int, action_len: Int, cols: Int, rows: Int,
 ) -> Int32:
     """Run the menu action identified by its action string.
@@ -497,12 +508,7 @@ fn tk_desktop_menu_invoke(
     var action = _string_from(action_ptr, action_len)
     if len(action.as_bytes()) == 0:
         return ACT_NONE
-    var result: Optional[String]
-    try:
-        result = _desk(h)[].dispatch_action(action, Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_menu_invoke:", String(e))
-        result = Optional[String]()
+    var result = _desk(h)[].dispatch_action(action, Rect(0, 0, cols, rows))
     # ``dispatch_action`` returns the *unhandled* action string back to
     # the host (so it can route framework-level actions like Quit / Open
     # via its own UI). Map that the same way handle_event does.
@@ -510,7 +516,7 @@ fn tk_desktop_menu_invoke(
 
 
 @export
-fn tk_desktop_take_pending_new_window_project(
+def tk_desktop_take_pending_new_window_project(
     h: Int, out_ptr: Int, cap: Int,
 ) -> Int:
     """Drain the "open this project in a new window" path queued by the
