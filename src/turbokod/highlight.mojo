@@ -112,6 +112,34 @@ def highlight_for_extension(
     return hls^
 
 
+def bundled_grammar_languages() -> List[String]:
+    """The ``language_id`` of every grammar shipped in-tree. Keep in
+    sync with ``_bundled_grammar_path_for_language`` below — this is the
+    list form of the same source of truth, used to populate the
+    project-grammar override picker. Downloadable-but-unbundled
+    languages (elm, django-html) come from
+    ``built_in_downloadable_grammars`` and are merged in by the picker."""
+    var out = List[String]()
+    out.append(String("python"))
+    out.append(String("mojo"))
+    out.append(String("rust"))
+    out.append(String("json"))
+    out.append(String("go"))
+    out.append(String("typescript"))
+    out.append(String("javascript"))
+    out.append(String("ruby"))
+    out.append(String("cpp"))
+    out.append(String("shell"))
+    out.append(String("sql"))
+    out.append(String("yaml"))
+    out.append(String("html"))
+    out.append(String("css"))
+    out.append(String("diff"))
+    out.append(String("markdown"))
+    out.append(String("rst"))
+    return out^
+
+
 def _bundled_grammar_path_for_language(lang: String) -> String:
     """Return the bundled grammar JSON path for ``language_id``
     (``"python"``, ``"rust"``, ``"django-html"``, …), or ``""`` when

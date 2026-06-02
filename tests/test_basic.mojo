@@ -177,7 +177,7 @@ from turbokod.grammar_install import (
     grammar_install_command, user_grammar_path, user_grammar_path_for_ext,
 )
 from turbokod.project_grammars import (
-    GrammarOverride, load_project_grammar_overrides,
+    GrammarOverride, load_project_grammar_overrides, write_grammar_overrides,
 )
 from turbokod.action_editor import ActionEditor
 from turbokod.config import LanguageServerOverride, OnSaveAction
@@ -4281,6 +4281,54 @@ def test_load_project_grammar_overrides_malformed_is_empty() raises:
     assert_equal(len(overrides), 1)
     assert_equal(overrides[0].ext, String("py"))
     assert_equal(overrides[0].language_id, String("python"))
+
+
+def test_write_grammar_overrides_round_trips_through_loader() raises:
+    """``write_grammar_overrides`` emits the shape the loader reads:
+    write a set of mappings, load them back, and they must match. The
+    writer creates ``.turbokod/`` if it doesn't exist yet (the dialog's
+    Save shouldn't require the dir to pre-exist)."""
+    var dir = _temp_path(String("_grammar_write"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    # Note: no .turbokod subdir created here — the writer must mkdir it.
+    var to_write = List[GrammarOverride]()
+    to_write.append(GrammarOverride(String("html"), String("django-html")))
+    to_write.append(GrammarOverride(String("txt"), String("plain-text")))
+    assert_true(write_grammar_overrides(dir, to_write))
+    var loaded = load_project_grammar_overrides(dir)
+    assert_equal(len(loaded), 2)
+    var html_lang = String("")
+    var txt_lang = String("")
+    for i in range(len(loaded)):
+        if loaded[i].ext == String("html"):
+            html_lang = loaded[i].language_id
+        elif loaded[i].ext == String("txt"):
+            txt_lang = loaded[i].language_id
+    assert_equal(html_lang, String("django-html"))
+    assert_equal(txt_lang, String("plain-text"))
+
+
+def test_write_grammar_overrides_drops_blank_and_duplicate_rows() raises:
+    """Half-filled rows (empty ext or language) never reach disk, and a
+    duplicate extension keeps only its first mapping — matching
+    ``GrammarRegistry.lookup_override``'s first-match resolution so the
+    UI can't write a config that shadows itself."""
+    var dir = _temp_path(String("_grammar_write_clean"))
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var to_write = List[GrammarOverride]()
+    to_write.append(GrammarOverride(String("html"), String("django-html")))
+    to_write.append(GrammarOverride(String(""), String("python")))  # blank ext
+    to_write.append(GrammarOverride(String("md"), String("")))      # blank lang
+    to_write.append(GrammarOverride(String("html"), String("html"))) # dup ext
+    assert_true(write_grammar_overrides(dir, to_write))
+    var loaded = load_project_grammar_overrides(dir)
+    assert_equal(len(loaded), 1)
+    assert_equal(loaded[0].ext, String("html"))
+    assert_equal(loaded[0].language_id, String("django-html"))
 
 
 def test_grammar_registry_override_routes_to_alternate_grammar() raises:
@@ -15889,6 +15937,8 @@ def _run_chunk_01() raises:
     test_load_project_grammar_overrides_missing_file_is_empty()
     test_load_project_grammar_overrides_parses_extensions_map()
     test_load_project_grammar_overrides_malformed_is_empty()
+    test_write_grammar_overrides_round_trips_through_loader()
+    test_write_grammar_overrides_drops_blank_and_duplicate_rows()
     test_grammar_registry_override_routes_to_alternate_grammar()
     test_grammar_registry_set_overrides_clears_grammar_cache()
     test_user_grammar_path_for_ext_misses_when_not_installed()

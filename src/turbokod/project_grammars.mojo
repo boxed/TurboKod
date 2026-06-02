@@ -29,9 +29,12 @@ something, just with the default grammar.
 """
 
 from std.collections.list import List
+from std.ffi import external_call
 
-from .file_io import join_path, read_file, stat_file
-from .json import JsonValue, parse_json
+from .file_io import join_path, read_file, stat_file, write_file
+from .json import (
+    JsonValue, encode_json, json_object, json_str, parse_json,
+)
 
 
 comptime _TURBOKOD_DIR    = String(".turbokod")
@@ -46,12 +49,24 @@ struct GrammarOverride(Copyable, Movable):
     var language_id: String
 
 
-def _grammars_path(project_root: String) -> String:
+def _grammars_dir(project_root: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return String("")
-    return join_path(
-        join_path(project_root, _TURBOKOD_DIR), _GRAMMARS_FILE,
-    )
+    return join_path(project_root, _TURBOKOD_DIR)
+
+
+def _grammars_path(project_root: String) -> String:
+    var dir = _grammars_dir(project_root)
+    if len(dir.as_bytes()) == 0:
+        return String("")
+    return join_path(dir, _GRAMMARS_FILE)
+
+
+def _ensure_dir(path: String):
+    if len(path.as_bytes()) == 0:
+        return
+    var c_path = path + String("\0")
+    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
 def load_project_grammar_overrides(
@@ -94,3 +109,41 @@ def load_project_grammar_overrides(
             continue
         out.append(GrammarOverride(ext, lang))
     return out^
+
+
+def write_grammar_overrides(
+    project_root: String, overrides: List[GrammarOverride],
+) -> Bool:
+    """Rewrite ``<project>/.turbokod/grammars.json`` from ``overrides``.
+
+    Inverse of ``load_project_grammar_overrides`` — emits the same
+    ``{"extensions": {ext: language_id}}`` shape the loader reads.
+    Rows with an empty extension or language are dropped (the dialog
+    can hold half-filled rows mid-edit; they shouldn't reach disk).
+    The first mapping for a given extension wins, matching
+    ``GrammarRegistry.lookup_override``'s first-match semantics, so a
+    duplicate ext added in the UI doesn't silently shadow the original.
+    Returns False when there's no project root or the write fails."""
+    var path = _grammars_path(project_root)
+    if len(path.as_bytes()) == 0:
+        return False
+    _ensure_dir(_grammars_dir(project_root))
+    var exts = json_object()
+    var seen = List[String]()
+    for i in range(len(overrides)):
+        var ext = overrides[i].ext
+        var lang = overrides[i].language_id
+        if len(ext.as_bytes()) == 0 or len(lang.as_bytes()) == 0:
+            continue
+        var dup = False
+        for j in range(len(seen)):
+            if seen[j] == ext:
+                dup = True
+                break
+        if dup:
+            continue
+        seen.append(ext)
+        exts.put(ext, json_str(lang))
+    var root = json_object()
+    root.put(String("extensions"), exts^)
+    return write_file(path, encode_json(root) + String("\n"))

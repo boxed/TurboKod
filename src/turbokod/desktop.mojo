@@ -138,7 +138,7 @@ from .project_targets import (
     write_all_targets,
 )
 from .project_grammars import (
-    GrammarOverride, load_project_grammar_overrides,
+    GrammarOverride, load_project_grammar_overrides, write_grammar_overrides,
 )
 from .breakpoint_dialog import (
     BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY,
@@ -168,6 +168,7 @@ from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
 from .targets_dialog import TargetsDialog
+from .grammars_dialog import GrammarsDialog
 from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
 from .find_symbol import (
@@ -288,6 +289,7 @@ comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
+comptime PROJECT_CONFIG_GRAMMARS = String("project:configure_grammars")
 # Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
 # + <index>`` encodes the slot in ``config.recent_projects`` so the
 # dispatcher can route the click without a parallel lookup table.
@@ -600,6 +602,7 @@ struct Desktop(Movable):
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var targets_dialog: TargetsDialog
+    var grammars_dialog: GrammarsDialog
     # Fullscreen Settings view (hamburger ▸ Settings). Independent of
     # the modal stack — paints over the workspace but leaves the menu
     # bar and status bar untouched. Edits to ``settings.actions`` are
@@ -977,6 +980,7 @@ struct Desktop(Movable):
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.targets_dialog = TargetsDialog()
+        self.grammars_dialog = GrammarsDialog()
         self.settings = Settings()
         self.bg_pattern = String("▒")
         self.bg_attr = Attr(LIGHT_GRAY, BLUE)
@@ -1559,6 +1563,10 @@ struct Desktop(Movable):
             if self.targets_dialog.is_input_at(pos, screen):
                 return String("text")
             return String("default")
+        if self.grammars_dialog.active:
+            if self.grammars_dialog.is_input_at(pos, screen):
+                return String("text")
+            return String("default")
         # Resize edges of the docked side panels — checked before the
         # window pass so the cursor flips the moment the user crosses
         # the border, even when an editor's interior would otherwise
@@ -1914,6 +1922,7 @@ struct Desktop(Movable):
         self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen, self.grammar_registry)
         self.targets_dialog.paint(canvas, screen)
+        self.grammars_dialog.paint(canvas, screen)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
@@ -2245,7 +2254,19 @@ struct Desktop(Movable):
         the other.
         """
         var specs = built_in_downloadable_grammars()
-        var spec_idx = find_downloadable_grammar_for_extension(specs, ext)
+        # A project override (``.turbokod/grammars.json``) takes priority:
+        # an ext mapped to a downloadable language (the canonical case is
+        # ``html`` -> ``django-html``) must prompt for *that* grammar even
+        # though the ext isn't in its ``file_types`` — django-html keeps
+        # ``file_types`` empty precisely so it never auto-binds ``.html``.
+        var spec_idx = -1
+        var override_lang = self.grammar_registry.lookup_override(ext)
+        if len(override_lang.as_bytes()) > 0:
+            spec_idx = find_downloadable_grammar_by_language(
+                specs, override_lang,
+            )
+        if spec_idx < 0:
+            spec_idx = find_downloadable_grammar_for_extension(specs, ext)
         if spec_idx < 0:
             return
         var spec = specs[spec_idx].copy()
@@ -2942,6 +2963,9 @@ struct Desktop(Movable):
         items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
         items.append(MenuItem(
             String("Configure targets..."), PROJECT_CONFIG_TARGETS,
+        ))
+        items.append(MenuItem(
+            String("Configure project grammars..."), PROJECT_CONFIG_GRAMMARS,
         ))
         # Inline recent-project list lives between the project-specific
         # actions and Close project — always present (no "..." picker)
@@ -3761,6 +3785,14 @@ struct Desktop(Movable):
             if self.targets_dialog.submitted:
                 self._on_targets_dialog_submit()
             return Optional[String]()
+        if self.grammars_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.grammars_dialog.handle_key(event)
+            else:
+                _ = self.grammars_dialog.handle_mouse(event, screen)
+            if self.grammars_dialog.submitted:
+                self._on_grammars_dialog_submit()
+            return Optional[String]()
         if self.settings.active:
             if event.kind == EVENT_KEY:
                 _ = self.settings.handle_key(event)
@@ -4121,6 +4153,7 @@ struct Desktop(Movable):
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
             or self.local_changes.active or self.targets_dialog.active \
+            or self.grammars_dialog.active \
             or self.settings.active
 
     def dispatch_action(
@@ -4178,6 +4211,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_CONFIG_TARGETS:
             self._open_targets_config()
+            return Optional[String]()
+        if action == PROJECT_CONFIG_GRAMMARS:
+            self._open_grammars_config()
             return Optional[String]()
         if action == APP_SETTINGS:
             var cur_ext = String("")
@@ -6200,6 +6236,38 @@ struct Desktop(Movable):
         self.targets = self.targets_dialog.into_targets()
         _ = write_all_targets(self.project.value(), self.targets)
         self.targets_dialog.close()
+
+    def _open_grammars_config(mut self):
+        """Open the per-project grammar-override editor. Edits a private
+        copy seeded from the live registry; persisted only on Save (see
+        ``_on_grammars_dialog_submit``)."""
+        if not self.project:
+            self.status_bar.set_message(
+                String("Configure project grammars: open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        self.grammars_dialog.open(self.grammar_registry.overrides.copy())
+
+    def _on_grammars_dialog_submit(mut self):
+        """Persist the edited overrides, refresh the registry (which
+        drops the compiled-grammar cache so open editors re-tokenize
+        against the new mapping on the next paint), and offer to
+        download any mapped grammar that isn't installed yet."""
+        if not self.project:
+            self.grammars_dialog.close()
+            return
+        var overrides = self.grammars_dialog.into_overrides()
+        _ = write_grammar_overrides(self.project.value(), overrides)
+        # Apply before prompting so ``_maybe_prompt_grammar_install`` sees
+        # the new mapping when it resolves the focused editor's extension.
+        self.grammar_registry.set_overrides(overrides.copy())
+        self.grammars_dialog.close()
+        # If any mapping points at a downloadable-but-uninstalled grammar
+        # (the django-html case), nudge the user to fetch it — otherwise
+        # the override silently falls back to the default grammar.
+        for i in range(len(overrides)):
+            self._maybe_prompt_grammar_install(overrides[i].ext)
 
     def _target_run(mut self):
         """Cmd+R: spawn the active target's ``run_command``.

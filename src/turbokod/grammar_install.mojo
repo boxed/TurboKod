@@ -88,7 +88,7 @@ def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
         List[String](),
         String(
             "https://raw.githubusercontent.com/"
-            "batisteo/vscode-django/"
+            "vscode-django/vscode-django/"
             "master/syntaxes/django-html.tmLanguage.json"
         ),
         String("Django HTML templates"),
