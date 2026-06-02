@@ -153,7 +153,7 @@ from .prompt import (
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
-from .string_utils import parse_int_prefix, starts_with
+from .string_utils import display_columns, parse_int_prefix, starts_with
 from .session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
@@ -555,6 +555,27 @@ struct PendingSaveAction(ImplicitlyCopyable, Movable):
     var saved_path: String
 
 
+# Tool-panel kinds for the floating-panels window layout. See
+# `Desktop._panel_window_slots`.
+comptime PANEL_KIND_TERMINAL = 0
+comptime PANEL_KIND_DEBUG    = 1
+comptime PANEL_KIND_TEST     = 2
+
+
+@fieldwise_init
+struct PanelSlot(ImplicitlyCopyable, Movable):
+    """One tool panel's placement inside the floating-panels window.
+
+    ``kind`` is one of the ``PANEL_KIND_*`` constants; ``idx`` is the
+    ``terminal_panes`` index for ``PANEL_KIND_TERMINAL`` (0 otherwise).
+    ``rect`` is the panel's slice of the panel window, top-to-bottom in
+    stack order. Both ``paint_panels`` and ``handle_panels_event`` walk
+    the same slot list so paint and hit-testing never disagree."""
+    var kind: Int
+    var idx: Int
+    var rect: Rect
+
+
 struct Desktop(Movable):
     var menu_bar: MenuBar
     # When True, the host frontend (e.g. the Swift/AppKit app) owns the
@@ -564,6 +585,15 @@ struct Desktop(Movable):
     # mouse/key events to it, so the in-grid menu disappears entirely. Stays
     # False for the terminal frontend, where the bar is the menu.
     var host_owns_menu: Bool
+    # When True, the tool panels (terminal panes, debug pane, test pane) are
+    # rendered on a *separate* host window (the native "Floating panels"
+    # feature) instead of docked at the bottom of this Desktop's grid. The
+    # main surface (`paint` / `workspace_rect` / `handle_event`) then ignores
+    # them entirely — the editor area reclaims the bottom rows — and the host
+    # drives the second surface via `paint_panels` / `handle_panels_event`.
+    # Only ever set by a host frontend (the Swift app); the terminal frontend
+    # leaves it False and always renders docked. See docs/floating-panels.md.
+    var panels_detached: Bool
     var windows: WindowManager
     var status_bar: StatusBar
     var tab_bar: TabBar
@@ -960,6 +990,7 @@ struct Desktop(Movable):
     def __init__(out self):
         self.menu_bar = MenuBar()
         self.host_owns_menu = False
+        self.panels_detached = False
         self.windows = WindowManager()
         self.status_bar = StatusBar()
         self.tab_bar = TabBar()
@@ -1365,17 +1396,21 @@ struct Desktop(Movable):
             if right < 0:
                 right = 0
         var bottom = screen.b.y - self._bottom_chrome_height(screen)
-        if self.test_pane.visible:
-            bottom -= self._test_pane_height(screen)
+        # When the panels float on a separate host window, they eat no rows
+        # here — the editor area grows into the space they used to occupy.
+        # The bottom chrome (status / tab strip) still belongs to this window.
+        if not self.panels_detached:
+            if self.test_pane.visible:
+                bottom -= self._test_pane_height(screen)
+                if bottom < 1:
+                    bottom = 1
+            if self.debug_pane.visible:
+                bottom -= self._debug_pane_height(screen)
+                if bottom < 1:
+                    bottom = 1
+            bottom -= self._terminal_stack_height(screen)
             if bottom < 1:
                 bottom = 1
-        if self.debug_pane.visible:
-            bottom -= self._debug_pane_height(screen)
-            if bottom < 1:
-                bottom = 1
-        bottom -= self._terminal_stack_height(screen)
-        if bottom < 1:
-            bottom = 1
         # Row 0 is normally reserved for the in-grid menu bar; when the
         # host owns the menu, that row is free for the workspace.
         var top = 0 if self.host_owns_menu else 1
@@ -1503,6 +1538,171 @@ struct Desktop(Movable):
         if y < 1:
             return Rect.empty()
         return Rect(0, y, screen.b.x, y + 1)
+
+    # --- Floating-panels surface ------------------------------------------
+    #
+    # When `panels_detached` is set, the host renders the tool panels on a
+    # second window via `paint_panels` and feeds its events through
+    # `handle_panels_event`. The panels own that window's whole grid (no menu,
+    # no file tree, no status strip to work around), so they get a fresh
+    # top-to-bottom stack layout rather than the bottom-dock geometry the main
+    # surface uses. See docs/floating-panels.md.
+
+    def _panel_window_slots(self, screen: Rect) -> List[PanelSlot]:
+        """Placement of every visible tool panel inside the panel window.
+
+        Order: terminal panes (top), then the run/debug pane, then the test
+        pane (bottom). Each takes its ``dock.effective_height`` (with no
+        bottom chrome, against the panel window); the last visible panel
+        absorbs any leftover rows so the window is always fully used, and an
+        overflowing stack clamps later panels to whatever fits."""
+        var slots = List[PanelSlot]()
+        var kinds = List[Int]()
+        var idxs = List[Int]()
+        var heights = List[Int]()
+        for i in range(len(self.terminal_panes)):
+            kinds.append(PANEL_KIND_TERMINAL)
+            idxs.append(i)
+            heights.append(
+                self.terminal_panes[i].dock.effective_height(screen, 0),
+            )
+        if self.debug_pane.visible:
+            kinds.append(PANEL_KIND_DEBUG)
+            idxs.append(0)
+            heights.append(self.debug_pane.dock.effective_height(screen, 0))
+        if self.test_pane.visible:
+            kinds.append(PANEL_KIND_TEST)
+            idxs.append(0)
+            heights.append(self.test_pane.dock.effective_height(screen, 0))
+        var n = len(kinds)
+        var y = 0
+        for i in range(n):
+            var top = y
+            var bottom: Int
+            if i == n - 1:
+                bottom = screen.b.y   # last panel absorbs the remainder
+            else:
+                bottom = top + heights[i]
+            if bottom > screen.b.y:
+                bottom = screen.b.y
+            if top >= bottom:
+                slots.append(PanelSlot(kinds[i], idxs[i], Rect.empty()))
+            else:
+                slots.append(
+                    PanelSlot(kinds[i], idxs[i], Rect(0, top, screen.b.x, bottom)),
+                )
+            y = bottom
+        return slots^
+
+    def paint_panels(mut self, mut canvas: Canvas, screen: Rect):
+        """Paint the tool panels to fill the host's separate panel window.
+
+        The companion to the main-surface `paint` when `panels_detached` is
+        set. Lays the visible panels out via `_panel_window_slots`; when none
+        are open it paints the background plus a one-line hint."""
+        Painter(screen).fill(canvas, screen, self.bg_pattern, self.bg_attr)
+        var slots = self._panel_window_slots(screen)
+        if len(slots) == 0:
+            var hint = String("No panels open — open a terminal with Ctrl+Shift+T")
+            var hx = (screen.b.x - display_columns(hint)) // 2
+            if hx < 0:
+                hx = 0
+            var hy = screen.b.y // 2
+            _ = canvas.put_text(
+                Point(hx, hy), hint, Attr(LIGHT_GRAY, BLUE), screen.b.x,
+            )
+            return
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            if s.kind == PANEL_KIND_TERMINAL:
+                self.terminal_panes[s.idx].paint(canvas, s.rect)
+            elif s.kind == PANEL_KIND_DEBUG:
+                self.debug_pane.paint(canvas, s.rect)
+            else:
+                self.test_pane.paint(canvas, s.rect)
+
+    def _panel_slot_handle_mouse(
+        mut self, kind: Int, idx: Int, event: Event, rect: Rect,
+    ) -> Bool:
+        """Route a mouse event to one panel and rebroadcast its focus.
+        Returns True when the panel consumed the event."""
+        if kind == PANEL_KIND_TERMINAL:
+            if self.terminal_panes[idx].handle_mouse(event, rect):
+                if self.terminal_panes[idx].focused:
+                    self._focus_dock(DOCK_TERMINAL, idx)
+                return True
+            return False
+        if kind == PANEL_KIND_DEBUG:
+            if self.debug_pane.handle_mouse(event, rect):
+                if self.debug_pane.focused:
+                    self._focus_dock(DOCK_DEBUG_PANE)
+                return True
+            return False
+        if self.test_pane.handle_mouse(event, rect):
+            if self.test_pane.focused:
+                self._focus_dock(DOCK_TEST_PANE)
+            return True
+        return False
+
+    def _panel_slot_resize_edge(
+        self, kind: Int, idx: Int, event: Event, rect: Rect,
+    ) -> Bool:
+        """Whether ``event`` should be claimed by this panel's resize drag —
+        either a press on its top border or motion while it's already
+        resizing (mirrors the docked path's first-dibs resize handling)."""
+        var on_edge = event.button == MOUSE_BUTTON_LEFT \
+            and event.pressed and not event.motion
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].is_resizing() \
+                or (on_edge and self.terminal_panes[idx].is_on_resize_edge(
+                    event.pos, rect))
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.is_resizing() \
+                or (on_edge and self.debug_pane.is_on_resize_edge(
+                    event.pos, rect))
+        return self.test_pane.is_resizing() \
+            or (on_edge and self.test_pane.is_on_resize_edge(event.pos, rect))
+
+    def handle_panels_event(
+        mut self, event: Event, screen: Rect,
+    ) raises -> Optional[String]:
+        """Route a key/mouse event from the host's panel window to the tool
+        panels. The companion to `handle_event` for the floating surface;
+        returns an unhandled action string for the host the same way (e.g. a
+        link click in the debug output that opens a file)."""
+        if event.kind == EVENT_KEY:
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].handle_key(event):
+                    return Optional[String]()
+            if self.debug_pane.handle_key(event):
+                return Optional[String]()
+            if self.test_pane.handle_key(event):
+                return Optional[String]()
+            return Optional[String]()
+        if event.kind != EVENT_MOUSE:
+            return Optional[String]()
+        var slots = self._panel_window_slots(screen)
+        # Resize drags get first dibs, exactly like the docked path.
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            if self._panel_slot_resize_edge(s.kind, s.idx, event, s.rect):
+                if self._panel_slot_handle_mouse(s.kind, s.idx, event, s.rect):
+                    return Optional[String]()
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            if self._panel_slot_handle_mouse(s.kind, s.idx, event, s.rect):
+                return Optional[String]()
+        return Optional[String]()
+
+    def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
+        """Pointer hint for the panel window. The terminal body and pane
+        chrome both read fine with the default arrow, so this is ``default``
+        everywhere for now — kept as a parallel to `pointer_shape_at` so the
+        host can call a uniform API for both surfaces."""
+        return String("default")
 
     def pointer_shape_at(self, pos: Point, screen: Rect) -> String:
         """Mouse-pointer icon the host should display at ``pos``.
@@ -1887,13 +2087,16 @@ struct Desktop(Movable):
         self.file_tree.paint(canvas, screen)
         debug_log(String("[paint] before terminal_panes.paint n=")
             + String(len(self.terminal_panes)))
-        for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].paint(
-                canvas, self.terminal_pane_rect(screen, i),
-            )
-        debug_log(String("[paint] before debug_pane.paint"))
-        self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
-        self.test_pane.paint(canvas, self.test_pane_rect(screen))
+        # When floating, the tool panels render on the host's separate panel
+        # window (see `paint_panels`); the main surface skips them entirely.
+        if not self.panels_detached:
+            for i in range(len(self.terminal_panes)):
+                self.terminal_panes[i].paint(
+                    canvas, self.terminal_pane_rect(screen, i),
+                )
+            debug_log(String("[paint] before debug_pane.paint"))
+            self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
+            self.test_pane.paint(canvas, self.test_pane_rect(screen))
         debug_log(String("[paint] before menu_bar.paint"))
         # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
         # in-grid paint so the top row stays clear for other content.
@@ -3805,13 +4008,17 @@ struct Desktop(Movable):
             # dispatch (menu mnemonics, hotkeys, focused window). At
             # most one terminal pane carries focus at a time so a
             # plain iteration is fine.
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].handle_key(event):
+            # When floating, the panels live on the host's separate window and
+            # take their keys through `handle_panels_event` — the main surface
+            # routes only to the file tree and the focused editor.
+            if not self.panels_detached:
+                for i in range(len(self.terminal_panes)):
+                    if self.terminal_panes[i].handle_key(event):
+                        return Optional[String]()
+                if self.debug_pane.handle_key(event):
                     return Optional[String]()
-            if self.debug_pane.handle_key(event):
-                return Optional[String]()
-            if self.test_pane.handle_key(event):
-                return Optional[String]()
+                if self.test_pane.handle_key(event):
+                    return Optional[String]()
             if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
@@ -3847,7 +4054,7 @@ struct Desktop(Movable):
         # the debug pane's bottom rows, and the debug pane's top
         # border sits over the workspace where ``windows.handle_mouse``
         # would otherwise grab clicks.
-        if event.kind == EVENT_MOUSE:
+        if event.kind == EVENT_MOUSE and not self.panels_detached:
             var dp_rect = self.debug_pane_rect(screen)
             if self.debug_pane.is_resizing() \
                     or (event.button == MOUSE_BUTTON_LEFT \
@@ -3872,6 +4079,7 @@ struct Desktop(Movable):
                             )):
                     if self.terminal_panes[i].handle_mouse(event, tp_rect):
                         return Optional[String]()
+        if event.kind == EVENT_MOUSE:
             if self.file_tree.is_resizing() \
                     or (event.button == MOUSE_BUTTON_LEFT \
                         and event.pressed and not event.motion \
@@ -3935,21 +4143,24 @@ struct Desktop(Movable):
         # rebroadcast through ``_focus_dock`` so every other dock drops
         # focus in one shot — keeps "exactly one dock is keyboard-live"
         # as a single invariant rather than per-route plumbing.
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].handle_mouse(
-                event, self.terminal_pane_rect(screen, i),
-            ):
-                if self.terminal_panes[i].focused:
-                    self._focus_dock(DOCK_TERMINAL, i)
+        # When floating, the panels are hit-tested by `handle_panels_event`
+        # against the separate window's grid — never on this surface.
+        if not self.panels_detached:
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].handle_mouse(
+                    event, self.terminal_pane_rect(screen, i),
+                ):
+                    if self.terminal_panes[i].focused:
+                        self._focus_dock(DOCK_TERMINAL, i)
+                    return Optional[String]()
+            if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
+                if self.debug_pane.focused:
+                    self._focus_dock(DOCK_DEBUG_PANE)
                 return Optional[String]()
-        if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
-            if self.debug_pane.focused:
-                self._focus_dock(DOCK_DEBUG_PANE)
-            return Optional[String]()
-        if self.test_pane.handle_mouse(event, self.test_pane_rect(screen)):
-            if self.test_pane.focused:
-                self._focus_dock(DOCK_TEST_PANE)
-            return Optional[String]()
+            if self.test_pane.handle_mouse(event, self.test_pane_rect(screen)):
+                if self.test_pane.focused:
+                    self._focus_dock(DOCK_TEST_PANE)
+                return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
             if self.file_tree.focused:
                 self._focus_dock(DOCK_FILE_TREE)

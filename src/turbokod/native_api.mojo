@@ -59,15 +59,21 @@ comptime NEW_WINDOW = String("app.new_window")
 # the host owns the menu (one-project-per-window on macOS). Mirrors
 # ``desktop._HOST_CLOSE_WINDOW_ACTION``.
 comptime CLOSE_WINDOW = String("app.close_window")
+# Host action: toggle the native "Floating panels" feature for this window.
+# The host owns the windowing (it creates/destroys the separate panel
+# window) and then calls ``tk_desktop_set_panels_detached`` to update the
+# Desktop flag that drives the View-menu checkmark. See docs/floating-panels.md.
+comptime TOGGLE_FLOATING_PANELS = String("app.toggle_floating_panels")
 
 # Action codes returned to Swift. Everything else is handled inside Desktop.
-comptime ACT_NONE         = Int32(0)
-comptime ACT_QUIT         = Int32(1)
-comptime ACT_OPEN_FILE    = Int32(2)
-comptime ACT_QUICK_OPEN   = Int32(3)
-comptime ACT_OPEN_PROJECT = Int32(4)
-comptime ACT_NEW_WINDOW   = Int32(5)
-comptime ACT_CLOSE_WINDOW = Int32(6)
+comptime ACT_NONE                   = Int32(0)
+comptime ACT_QUIT                   = Int32(1)
+comptime ACT_OPEN_FILE              = Int32(2)
+comptime ACT_QUICK_OPEN             = Int32(3)
+comptime ACT_OPEN_PROJECT           = Int32(4)
+comptime ACT_NEW_WINDOW             = Int32(5)
+comptime ACT_CLOSE_WINDOW           = Int32(6)
+comptime ACT_TOGGLE_FLOATING_PANELS = Int32(7)
 
 # Mouse-button ids Swift passes (match events.mojo MOUSE_*).
 comptime _MB_LEFT       = UInt8(1)
@@ -147,6 +153,11 @@ def _build_menus(mut d: Desktop):
     v.append(MenuItem(String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES, checkable=True))
     v.append(MenuItem(String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR, checkable=True))
     v.append(MenuItem(String("Minimap"), EDITOR_TOGGLE_MINIMAP, checkable=True))
+    v.append(MenuItem.separator())
+    # Native-only: float the tool panels (terminal / debug / test) into a
+    # separate window. The terminal frontend builds its own menus
+    # (examples/desktop.mojo), so this item is Swift-only by construction.
+    v.append(MenuItem(String("Floating panels"), TOGGLE_FLOATING_PANELS, checkable=True))
     d.menu_bar.add(Menu(String("View"), v^))
     d.menu_bar.add(_mk_menu(String("Git"),
         (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
@@ -173,6 +184,10 @@ def _refresh_menu_visibility(mut d: Desktop):
     var is_editor = d.windows.focused_is_editor()
     d.menu_bar.set_visible_by_label(String("Edit"), is_editor)
     d.menu_bar.set_visible_by_label(String("View"), is_editor)
+    # Keep the Floating-panels checkmark in lockstep with the live state.
+    # The Desktop owns the flag, the host owns the window; this is the one
+    # per-tick place both are reachable for the native menu snapshot.
+    d.menu_bar.set_item_checked(TOGGLE_FLOATING_PANELS, d.panels_detached)
     var git_visible = is_editor
     if not git_visible and d.project:
         git_visible = True
@@ -195,6 +210,7 @@ def _action_code(action: Optional[String]) -> Int32:
     if a == PROJECT_OPEN:      return ACT_OPEN_PROJECT
     if a == NEW_WINDOW:        return ACT_NEW_WINDOW
     if a == CLOSE_WINDOW:      return ACT_CLOSE_WINDOW
+    if a == TOGGLE_FLOATING_PANELS: return ACT_TOGGLE_FLOATING_PANELS
     return ACT_NONE
 
 
@@ -329,15 +345,12 @@ def tk_desktop_tick(h: Int, cols: Int, rows: Int):
     d.save_actions_tick()
 
 
-@export
-def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
-    """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
-    caller's buffer (3 u32 per cell). Returns the number of cells written."""
-    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
-        return 0
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
-    _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
+def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
+    """Pack a laid-out canvas into the caller's ``UInt32`` buffer, 3 words
+    per cell (``[codepoint, fg|bg<<8|style<<16, underline]``). Returns the
+    number of cells written (clamped to ``cap``). Shared by the main and the
+    floating-panels layout entry points so the packing format stays in one
+    place."""
     var op = UnsafePointer[UInt32, MutExternalOrigin](unsafe_from_address=out_ptr)
     var n = cols * rows
     if n > cap:
@@ -360,6 +373,111 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> I
         op[i * 3 + 1] = w1
         op[i * 3 + 2] = w2
     return n
+
+
+@export
+def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
+    """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
+    caller's buffer (3 u32 per cell). Returns the number of cells written."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = Canvas(cols, rows)
+    canvas.clear(default_attr())
+    _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
+    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_set_panels_detached(h: Int, on: Int):
+    """Tell the Desktop its tool panels are rendered on a separate host
+    window (the native "Floating panels" feature).
+
+    When ``on`` is non-zero, the main surface (``paint`` / ``workspace_rect``
+    / ``handle_event``) ignores the terminal / debug / test panels — the
+    editor area reclaims the freed rows — and the host drives the second
+    surface via ``tk_desktop_layout_panels`` + ``tk_desktop_panels_*``. Also
+    flips the View ▸ Floating panels checkmark. See docs/floating-panels.md."""
+    if h == 0:
+        return
+    _desk(h)[].panels_detached = on != 0
+
+
+@export
+def tk_desktop_layout_panels(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) -> Int:
+    """Paint *only* the tool panels into the host's separate panel window and
+    pack them into the caller's buffer (same 3-u32-per-cell format as
+    ``tk_desktop_layout``). Returns the number of cells written. The panel
+    window does not run its own tick — the main window's ``tk_desktop_tick``
+    drives the whole Desktop's per-frame work for both surfaces."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = Canvas(cols, rows)
+    canvas.clear(default_attr())
+    _desk(h)[].paint_panels(canvas, Rect(0, 0, cols, rows))
+    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_panels_key(
+    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a keystroke from the panel window into the tool panels.
+    Mirrors ``tk_desktop_key`` (same Ctrl/Cmd canonicalization and action
+    codes), but dispatches through ``handle_panels_event``."""
+    if h == 0:
+        return ACT_NONE
+    var k = key
+    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
+        if k >= UInt32(0x41) and k <= UInt32(0x5A):
+            k = k + UInt32(0x20)
+    var action: Optional[String]
+    try:
+        action = _desk(h)[].handle_panels_event(
+            Event.key_event(k, mods), Rect(0, 0, cols, rows),
+        )
+    except e:
+        print("turbokod: tk_desktop_panels_key:", String(e))
+        action = Optional[String]()
+    return _action_code(action)
+
+
+@export
+def tk_desktop_panels_mouse(
+    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a mouse event from the panel window into the tool panels.
+    Mirrors ``tk_desktop_mouse`` but dispatches through
+    ``handle_panels_event``."""
+    if h == 0:
+        return ACT_NONE
+    var ev = Event.mouse_event(
+        Point(x, y), button, pressed != 0, motion != 0, mods,
+    )
+    var action: Optional[String]
+    try:
+        action = _desk(h)[].handle_panels_event(ev, Rect(0, 0, cols, rows))
+    except e:
+        print("turbokod: tk_desktop_panels_mouse:", String(e))
+        action = Optional[String]()
+    return _action_code(action)
+
+
+@export
+def tk_desktop_panels_pointer_shape(
+    h: Int, x: Int, y: Int, cols: Int, rows: Int,
+) -> Int32:
+    """0 = default, 1 = text, 2 = pointer — for the panel window."""
+    if h == 0:
+        return Int32(0)
+    var shape = _desk(h)[].pointer_shape_panels(Point(x, y), Rect(0, 0, cols, rows))
+    if shape == String("text"):
+        return Int32(1)
+    if shape == String("pointer"):
+        return Int32(2)
+    return Int32(0)
 
 
 @export

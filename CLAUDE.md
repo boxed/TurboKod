@@ -32,6 +32,19 @@ Everything else — widgets, Editor, Desktop, syntax highlighting, LSP/DAP, file
 
 Full details in [docs/native-menu.md](docs/native-menu.md).
 
+### Floating panels (native macOS)
+
+A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /
+debug / test) into a second native window, leaving editors + file tree in the
+main window. It's a Swift-only *presentation* feature like the native menu: the
+Mojo core keeps one `Desktop` and gains a `panels_detached` flag plus a parallel
+`paint_panels` / `handle_panels_event` surface; the terminal frontend never turns
+it on. Window geometry and the floating-vs-docked choice are remembered **per
+display configuration** (keyed by `CGDisplay` UUIDs + resolutions), so unplugging
+the external display the panels lived on falls back to docked automatically.
+
+Full details in [docs/floating-panels.md](docs/floating-panels.md).
+
 ## Running the Mojo code
 
 Two entry points: `make` (build-only, no launch) and the `./run.sh` / `./run_swift.sh` wrappers (build + launch).
