@@ -696,6 +696,7 @@ struct DockChromeMouseResult(Copyable, Movable):
 
 def handle_bottom_dock_chrome_mouse(
     event: Event, panel: Rect, mut dock: BottomDockedPanel,
+    allow_resize: Bool = True,
 ) -> DockChromeMouseResult:
     """Process a mouse event against the chrome row or an in-flight
     resize drag.
@@ -709,6 +710,14 @@ def handle_bottom_dock_chrome_mouse(
     routing so chrome targets win against overlapping body widgets,
     and *before* the body's own drag-state checks so a resize-in-flight
     can't be hijacked by a wandering selection.
+
+    ``allow_resize`` is True for the docked stack (bottom-anchored: a
+    panel's own top border is its drag handle). The floating panel
+    window passes False — that stack is top-anchored and stacks
+    downward, so a panel's top border is the *splitter with the panel
+    above it* and the resize is driven by the host
+    (``Desktop._panels_drive_resize``), not the panel itself. With
+    ``allow_resize`` False a press on the bare top border just focuses.
     """
     if event.kind != EVENT_MOUSE:
         return DockChromeMouseResult(False, False)
@@ -745,15 +754,16 @@ def handle_bottom_dock_chrome_mouse(
         if len(cmd_id.as_bytes()) > 0:
             dock.pending_command_id = cmd_id^
             return DockChromeMouseResult(True, True)
-        # Drag-to-resize is NORMAL-only; in min/max the top border is
-        # just a chrome strip — clicks there focus the pane.
-        if dock.state == PANEL_STATE_NORMAL \
+        # Drag-to-resize is NORMAL-only (and only when the caller allows
+        # self-resize); in min/max — or in the floating window, where the
+        # host drives splitter resize — the top border is just a chrome
+        # strip and clicks there focus the pane.
+        if allow_resize and dock.state == PANEL_STATE_NORMAL \
                 and event.pos.y == panel.a.y \
                 and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
             dock.resizing = True
             return DockChromeMouseResult(True, False)
-        if dock.state != PANEL_STATE_NORMAL \
-                and event.pos.y == panel.a.y \
+        if event.pos.y == panel.a.y \
                 and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
             return DockChromeMouseResult(True, True)
     return DockChromeMouseResult(False, False)

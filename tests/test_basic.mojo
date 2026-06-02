@@ -13286,6 +13286,69 @@ def test_docked_panel_stack_min_on_max_sibling_clears_max() raises:
     assert_true(dock.all_normal())
 
 
+def test_floating_panel_splitter_drag_resizes_upper_pane() raises:
+    """Floating panel window: dragging the splitter between two stacked
+    panels resizes the panel *above* it (top-anchored), not the lower
+    one. The lower panel absorbs the remainder, so the docked path's
+    bottom-anchored `height = bottom - cursor` math would leave the
+    upper pane untouched — this is the regression that bug fixed."""
+    var d = Desktop()
+    # Two non-terminal panels (no pty needed): debug on top, test below.
+    d.debug_pane.visible = True
+    d.test_pane.visible = True
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    # Default preferred_height is 14, so the debug slot is rows [0,14)
+    # and the test slot (last) absorbs [14,40). The splitter is row 14.
+    assert_equal(d.debug_pane.dock.preferred_height, 14)
+    assert_equal(d.test_pane.dock.preferred_height, 14)
+    # The splitter row shows the vertical-resize cursor.
+    assert_equal(
+        d.pointer_shape_panels(Point(5, 14), screen), String("ns-resize"),
+    )
+    # Press on the splitter (x=5 avoids the right-edge chrome buttons),
+    # drag down to row 22, release.
+    _ = d.handle_panels_event(
+        Event.mouse_event(Point(5, 14), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    _ = d.handle_panels_event(
+        Event.mouse_event(Point(5, 22), MOUSE_BUTTON_LEFT, True, True),
+        screen,
+    )
+    _ = d.handle_panels_event(
+        Event.mouse_event(Point(5, 22), MOUSE_BUTTON_LEFT, False, False),
+        screen,
+    )
+    # Upper (debug) pane grew to the cursor row; lower (test) pane,
+    # which only absorbs the remainder, kept its preferred height.
+    assert_equal(d.debug_pane.dock.preferred_height, 22)
+    assert_equal(d.test_pane.dock.preferred_height, 14)
+    assert_false(d.debug_pane.dock.is_resizing())
+
+
+def test_floating_panel_top_border_does_not_self_resize() raises:
+    """A press on the *first* panel's top border (the window's top row,
+    no splitter above it) must not start a resize — only focus. The
+    docked path would have started a bottom-anchored drag here."""
+    var d = Desktop()
+    d.debug_pane.visible = True
+    d.test_pane.visible = True
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    _ = d.handle_panels_event(
+        Event.mouse_event(Point(5, 0), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_false(d.debug_pane.dock.is_resizing())
+    # A subsequent drag therefore changes nothing.
+    _ = d.handle_panels_event(
+        Event.mouse_event(Point(5, 8), MOUSE_BUTTON_LEFT, True, True),
+        screen,
+    )
+    assert_equal(d.debug_pane.dock.preferred_height, 14)
+
+
 def test_build_minimal_patch_keeps_only_target_plus_line() raises:
     """A pure-add hunk with two ``+`` lines: targeting one of them
     must produce a patch with just that one as ``+`` and the other
@@ -15786,6 +15849,8 @@ def _run_chunk_00() raises:
     test_docked_panel_stack_max_then_restore_resets_all()
     test_docked_panel_stack_min_collapses_one()
     test_docked_panel_stack_min_on_max_sibling_clears_max()
+    test_floating_panel_splitter_drag_resizes_upper_pane()
+    test_floating_panel_top_border_does_not_self_resize()
     test_build_minimal_patch_keeps_only_target_plus_line()
     test_build_minimal_patch_demotes_paired_minus_to_context()
     test_build_minimal_patch_reverse_drops_paired_minus()

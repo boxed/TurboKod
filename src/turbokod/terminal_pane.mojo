@@ -536,11 +536,15 @@ struct TerminalPane(Copyable, Movable):
 
     # --- mouse ---------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
+    def handle_mouse(
+        mut self, event: Event, panel: Rect, allow_resize: Bool = True,
+    ) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
         # Chrome wins first — close button, resize edge, etc.
-        var cr = handle_bottom_dock_chrome_mouse(event, panel, self.dock)
+        var cr = handle_bottom_dock_chrome_mouse(
+            event, panel, self.dock, allow_resize,
+        )
         if cr.consumed:
             if cr.focus_request:
                 self.focused = True

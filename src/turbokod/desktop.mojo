@@ -177,7 +177,7 @@ from .find_symbol import (
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .window import (
-    MIN_WIN_H, MIN_WIN_W,
+    DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     compute_display_titles,
 )
@@ -1626,43 +1626,145 @@ struct Desktop(Movable):
         mut self, kind: Int, idx: Int, event: Event, rect: Rect,
     ) -> Bool:
         """Route a mouse event to one panel and rebroadcast its focus.
-        Returns True when the panel consumed the event."""
+        Returns True when the panel consumed the event.
+
+        ``allow_resize=False``: panels in the floating window never resize
+        via their own top border — the host drives splitter resize through
+        ``_panels_drive_resize`` instead. A top-border press here only
+        focuses."""
         if kind == PANEL_KIND_TERMINAL:
-            if self.terminal_panes[idx].handle_mouse(event, rect):
+            if self.terminal_panes[idx].handle_mouse(
+                event, rect, allow_resize=False,
+            ):
                 if self.terminal_panes[idx].focused:
                     self._focus_dock(DOCK_TERMINAL, idx)
                 return True
             return False
         if kind == PANEL_KIND_DEBUG:
-            if self.debug_pane.handle_mouse(event, rect):
+            if self.debug_pane.handle_mouse(event, rect, allow_resize=False):
                 if self.debug_pane.focused:
                     self._focus_dock(DOCK_DEBUG_PANE)
                 return True
             return False
-        if self.test_pane.handle_mouse(event, rect):
+        if self.test_pane.handle_mouse(event, rect, allow_resize=False):
             if self.test_pane.focused:
                 self._focus_dock(DOCK_TEST_PANE)
             return True
         return False
 
-    def _panel_slot_resize_edge(
-        self, kind: Int, idx: Int, event: Event, rect: Rect,
-    ) -> Bool:
-        """Whether ``event`` should be claimed by this panel's resize drag —
-        either a press on its top border or motion while it's already
-        resizing (mirrors the docked path's first-dibs resize handling)."""
-        var on_edge = event.button == MOUSE_BUTTON_LEFT \
-            and event.pressed and not event.motion
+    # --- floating-panel dock accessors -------------------------------------
+    # The panel window resizes a dock identified by (kind, idx). Mojo can't
+    # hand back a mut ref to one of three differently-typed fields behind a
+    # runtime branch, so these tiny helpers branch per access instead.
+
+    def _panel_dock_resizing(self, kind: Int, idx: Int) -> Bool:
         if kind == PANEL_KIND_TERMINAL:
-            return self.terminal_panes[idx].is_resizing() \
-                or (on_edge and self.terminal_panes[idx].is_on_resize_edge(
-                    event.pos, rect))
+            return self.terminal_panes[idx].dock.resizing
         if kind == PANEL_KIND_DEBUG:
-            return self.debug_pane.is_resizing() \
-                or (on_edge and self.debug_pane.is_on_resize_edge(
-                    event.pos, rect))
-        return self.test_pane.is_resizing() \
-            or (on_edge and self.test_pane.is_on_resize_edge(event.pos, rect))
+            return self.debug_pane.dock.resizing
+        return self.test_pane.dock.resizing
+
+    def _panel_dock_normal(self, kind: Int, idx: Int) -> Bool:
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].dock.state == PANEL_STATE_NORMAL
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.dock.state == PANEL_STATE_NORMAL
+        return self.test_pane.dock.state == PANEL_STATE_NORMAL
+
+    def _panel_dock_chrome_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].dock.chrome_hits.on_any(pos)
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.dock.chrome_hits.on_any(pos)
+        return self.test_pane.dock.chrome_hits.on_any(pos)
+
+    def _panel_dock_set_resizing(mut self, kind: Int, idx: Int, v: Bool):
+        if kind == PANEL_KIND_TERMINAL:
+            self.terminal_panes[idx].dock.resizing = v
+        elif kind == PANEL_KIND_DEBUG:
+            self.debug_pane.dock.resizing = v
+        else:
+            self.test_pane.dock.resizing = v
+
+    def _panel_dock_set_preferred(mut self, kind: Int, idx: Int, h: Int):
+        if kind == PANEL_KIND_TERMINAL:
+            self.terminal_panes[idx].dock.preferred_height = h
+        elif kind == PANEL_KIND_DEBUG:
+            self.debug_pane.dock.preferred_height = h
+        else:
+            self.test_pane.dock.preferred_height = h
+
+    def _panel_splitter_upper(
+        self, slots: List[PanelSlot], pos: Point,
+    ) -> Int:
+        """Index into ``slots`` of the panel *above* the splitter under
+        ``pos``, or -1 if ``pos`` isn't on a draggable splitter.
+
+        In the floating stack panels are top-anchored and stack downward,
+        so the boundary between two panels is the *lower* panel's top
+        border row. A press there drags that boundary, which resizes the
+        panel above it (its top stays pinned). The lower panel's chrome
+        buttons live on the same row, so they're excluded; the upper panel
+        must be NORMAL to have a resizable height at all."""
+        var prev = -1
+        for i in range(len(slots)):
+            if slots[i].rect.is_empty():
+                continue
+            if prev >= 0:
+                var lower = slots[i].rect
+                if pos.y == lower.a.y \
+                        and pos.x >= lower.a.x and pos.x < lower.b.x \
+                        and not self._panel_dock_chrome_hit(
+                            slots[i].kind, slots[i].idx, pos) \
+                        and self._panel_dock_normal(
+                            slots[prev].kind, slots[prev].idx):
+                    return prev
+            prev = i
+        return -1
+
+    def _panels_drive_resize(
+        mut self, event: Event, slots: List[PanelSlot], screen: Rect,
+    ) -> Bool:
+        """Resize handling for the floating panel window. Returns True when
+        the event was consumed by a resize (started, dragged, or released).
+
+        Unlike the docked path (bottom-anchored, ``height = bottom -
+        cursor``), the floating stack is top-anchored: a panel's top is
+        pinned by the panels above it, so a splitter drag sets the upper
+        panel's ``preferred_height = cursor.y - top`` directly."""
+        if event.kind != EVENT_MOUSE:
+            return False
+        # An in-flight drag owns every event until release, even when the
+        # cursor wanders off the panel's rect.
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            if not self._panel_dock_resizing(s.kind, s.idx):
+                continue
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._panel_dock_set_resizing(s.kind, s.idx, False)
+                return True
+            var top = s.rect.a.y
+            var want = event.pos.y - top
+            # Keep at least DOCK_MIN_HEIGHT of rows below for the lower
+            # panel(s), and the panel itself at least DOCK_MIN_HEIGHT tall.
+            var hi = screen.b.y - top - DOCK_MIN_HEIGHT
+            if want > hi:
+                want = hi
+            if want < DOCK_MIN_HEIGHT:
+                want = DOCK_MIN_HEIGHT
+            self._panel_dock_set_preferred(s.kind, s.idx, want)
+            return True
+        # A fresh press on a splitter starts resizing the panel above it.
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion:
+            var upper = self._panel_splitter_upper(slots, event.pos)
+            if upper >= 0:
+                self._panel_dock_set_resizing(
+                    slots[upper].kind, slots[upper].idx, True,
+                )
+                return True
+        return False
 
     def handle_panels_event(
         mut self, event: Event, screen: Rect,
@@ -1683,13 +1785,11 @@ struct Desktop(Movable):
         if event.kind != EVENT_MOUSE:
             return Optional[String]()
         var slots = self._panel_window_slots(screen)
-        # Resize drags get first dibs, exactly like the docked path.
-        for ref s in slots:
-            if s.rect.is_empty():
-                continue
-            if self._panel_slot_resize_edge(s.kind, s.idx, event, s.rect):
-                if self._panel_slot_handle_mouse(s.kind, s.idx, event, s.rect):
-                    return Optional[String]()
+        # Resize drags get first dibs. The floating stack is top-anchored,
+        # so a splitter resizes the panel above it (see _panels_drive_resize)
+        # rather than the panel's own top border resizing itself.
+        if self._panels_drive_resize(event, slots, screen):
+            return Optional[String]()
         for ref s in slots:
             if s.rect.is_empty():
                 continue
@@ -1699,9 +1799,16 @@ struct Desktop(Movable):
 
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
-        chrome both read fine with the default arrow, so this is ``default``
-        everywhere for now — kept as a parallel to `pointer_shape_at` so the
-        host can call a uniform API for both surfaces."""
+        chrome read fine with the default arrow; the one exception is a
+        panel-stack splitter (or an in-flight resize drag), which shows the
+        vertical resize cursor exactly like the docked path."""
+        var slots = self._panel_window_slots(screen)
+        for ref s in slots:
+            if not s.rect.is_empty() \
+                    and self._panel_dock_resizing(s.kind, s.idx):
+                return String("ns-resize")
+        if self._panel_splitter_upper(slots, pos) >= 0:
+            return String("ns-resize")
         return String("default")
 
     def pointer_shape_at(self, pos: Point, screen: Rect) -> String:

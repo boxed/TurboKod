@@ -904,7 +904,9 @@ struct DebugPane(Copyable, Movable):
             self.output.last_first_visual,
         )
 
-    def handle_mouse(mut self, event: Event, panel: Rect) -> Bool:
+    def handle_mouse(
+        mut self, event: Event, panel: Rect, allow_resize: Bool = True,
+    ) -> Bool:
         """Return True if the click landed in the pane (consumed),
         False to let it fall through to the workspace."""
         if event.kind != EVENT_MOUSE:
@@ -913,7 +915,9 @@ struct DebugPane(Copyable, Movable):
         # — including an in-flight resize drag. Routing through the
         # shared helper keeps title-bar behavior identical with the
         # terminal pane.
-        var cr = handle_bottom_dock_chrome_mouse(event, panel, self.dock)
+        var cr = handle_bottom_dock_chrome_mouse(
+            event, panel, self.dock, allow_resize,
+        )
         if cr.consumed:
             if cr.focus_request:
                 self.focused = True
