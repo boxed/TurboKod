@@ -2413,6 +2413,71 @@ def test_editor_save_uses_editorconfig_line_endings() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
+def test_editor_save_applies_global_transform_defaults() raises:
+    """With no editorconfig opinion on trim / final-newline, ``save``
+    must fall back to the per-editor global defaults (Settings ▸ Editor).
+    The fixture's ``root = true`` editorconfig sets only ``end_of_line``,
+    so both transform properties stay unset and the defaults drive."""
+    var dir = String("/tmp/turbokod_global_defaults_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var ec_path = dir + String("/.editorconfig")
+    # ``root = true`` with no trim/final-newline keys → both stay unset.
+    assert_true(write_file(ec_path, String("root = true\n[*]\ncharset = utf-8\n")))
+    var f_path = dir + String("/x.txt")
+    assert_true(write_file(f_path, String("alpha   \nbeta")))
+    var ed = Editor.from_file(f_path)
+    assert_equal(ed.editorconfig.trim_trailing_whitespace, -1)
+    assert_equal(ed.editorconfig.insert_final_newline, -1)
+    # Globals on (the app default): trim trailing whitespace + add the
+    # missing final newline.
+    ed.default_trim_trailing_whitespace = 1
+    ed.default_insert_final_newline = 1
+    assert_true(ed.save())
+    assert_equal(read_file(f_path), String("alpha\nbeta\n"))
+    # Globals off → leave the file untouched (no trim, no forced newline).
+    assert_true(write_file(f_path, String("alpha   \nbeta")))
+    var ed2 = Editor.from_file(f_path)
+    ed2.default_trim_trailing_whitespace = 0
+    ed2.default_insert_final_newline = -1
+    assert_true(ed2.save())
+    assert_equal(read_file(f_path), String("alpha   \nbeta"))
+    _ = external_call["unlink", Int32]((f_path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((ec_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
+def test_editor_editorconfig_overrides_global_transform_default() raises:
+    """An explicit ``.editorconfig`` value wins over the global default:
+    ``trim_trailing_whitespace = false`` keeps trailing spaces even when
+    the global trim default is on."""
+    var dir = String("/tmp/turbokod_ec_wins_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var ec_path = dir + String("/.editorconfig")
+    assert_true(write_file(ec_path, String(
+        "root = true\n[*]\ntrim_trailing_whitespace = false\n"
+    )))
+    var f_path = dir + String("/x.txt")
+    assert_true(write_file(f_path, String("alpha   \nbeta")))
+    var ed = Editor.from_file(f_path)
+    assert_equal(ed.editorconfig.trim_trailing_whitespace, 0)
+    ed.default_trim_trailing_whitespace = 1  # global says trim…
+    ed.default_insert_final_newline = -1
+    assert_true(ed.save())
+    # …but the editorconfig's explicit false wins: spaces survive.
+    assert_equal(read_file(f_path), String("alpha   \nbeta"))
+    _ = external_call["unlink", Int32]((f_path + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((ec_path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+
+
 def test_text_buffer_strips_crlf_on_split() raises:
     """A CRLF-encoded payload must split into clean lines — leaving the
     ``\\r`` byte attached to each line would later corrupt the terminal
@@ -4481,6 +4546,52 @@ def test_settings_save_behavior_no_change_no_dirty() raises:
     s._sync_dropdown_commit(prev_idx)
     assert_false(s.auto_save)
     assert_false(s.dirty)
+
+
+def test_settings_open_seeds_editor_toggles() raises:
+    """``open`` must seed the Editor-section toggle working copies and
+    their checkbox glyphs from the passed-in config values (defaulting
+    to on)."""
+    var s = Settings()
+    s.open(
+        List[OnSaveAction](), True,
+        List[LanguageServerOverride](), String(""),
+        True, True,
+    )
+    assert_true(s.trim_trailing_whitespace)
+    assert_true(s.ensure_final_newline)
+    assert_true(s._trim_cb.on)
+    assert_true(s._final_nl_cb.on)
+    s.close()
+    s.open(
+        List[OnSaveAction](), True,
+        List[LanguageServerOverride](), String(""),
+        False, False,
+    )
+    assert_false(s.trim_trailing_whitespace)
+    assert_false(s.ensure_final_newline)
+    assert_false(s._trim_cb.on)
+    assert_false(s._final_nl_cb.on)
+
+
+def test_settings_editor_toggle_marks_dirty() raises:
+    """Toggling either Editor checkbox flips the working copy, keeps the
+    checkbox glyph in sync, and raises ``dirty`` so the host persists it."""
+    var s = Settings()
+    s.open(
+        List[OnSaveAction](), True,
+        List[LanguageServerOverride](), String(""),
+        True, True,
+    )
+    s._toggle_trim_ws()
+    assert_false(s.trim_trailing_whitespace)
+    assert_false(s._trim_cb.on)
+    assert_true(s.dirty)
+    s.dirty = False
+    s._toggle_final_nl()
+    assert_false(s.ensure_final_newline)
+    assert_false(s._final_nl_cb.on)
+    assert_true(s.dirty)
 
 
 def test_language_catalog_carries_comment_tokens() raises:
@@ -15758,6 +15869,8 @@ def _run_chunk_01() raises:
     test_editorconfig_load_from_fixture()
     test_editor_uses_editorconfig_indent()
     test_editor_save_applies_editorconfig_transforms()
+    test_editor_save_applies_global_transform_defaults()
+    test_editor_editorconfig_overrides_global_transform_default()
     test_editor_save_uses_editorconfig_line_endings()
     test_text_buffer_strips_crlf_on_split()
     test_editor_preserves_crlf_round_trip()
@@ -15792,6 +15905,8 @@ def _run_chunk_02() raises:
     test_settings_open_seeds_save_behavior_dropdown()
     test_settings_save_behavior_commit_marks_dirty()
     test_settings_save_behavior_no_change_no_dirty()
+    test_settings_open_seeds_editor_toggles()
+    test_settings_editor_toggle_marks_dirty()
     test_language_catalog_carries_comment_tokens()
     test_apply_language_overrides_replaces_candidates()
     test_apply_language_overrides_adds_new_language()
