@@ -778,6 +778,15 @@ struct Editor(Copyable, Movable):
     # its pre-editorconfig behavior — 4-space tabs, ``\n`` line endings,
     # no trim/final-newline enforcement).
     var editorconfig: EditorConfig
+    # Global Settings ▸ Editor fallbacks for the two on-save transforms,
+    # pushed in by ``Desktop._apply_view_config``. They use the same
+    # ``-1`` unset / ``0`` false / ``1`` true tri-state as the matching
+    # ``EditorConfig`` fields. ``_disk_text`` only consults them when the
+    # file's editorconfig leaves the property unset, so an explicit
+    # ``.editorconfig`` still wins. Default ``-1`` keeps a bare Editor
+    # (tests, direct construction) on its pre-config behavior.
+    var default_trim_trailing_whitespace: Int
+    var default_insert_final_newline: Int
     # Syntax highlighting overlay. ``_highlights_dirty`` triggers
     # ``_refresh_highlights`` after edits / file loads;
     # ``_hl_dirty_row`` says where to start re-tokenizing — every
@@ -1100,6 +1109,8 @@ struct Editor(Copyable, Movable):
         self.dirty = False
         self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
+        self.default_trim_trailing_whitespace = -1
+        self.default_insert_final_newline = -1
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
@@ -1193,6 +1204,8 @@ struct Editor(Copyable, Movable):
         self.dirty = False
         self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
+        self.default_trim_trailing_whitespace = -1
+        self.default_insert_final_newline = -1
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
@@ -1313,6 +1326,9 @@ struct Editor(Copyable, Movable):
         self.dirty = copy.dirty
         self.disk_baseline = copy.disk_baseline
         self.editorconfig = copy.editorconfig
+        self.default_trim_trailing_whitespace = \
+            copy.default_trim_trailing_whitespace
+        self.default_insert_final_newline = copy.default_insert_final_newline
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
         self._hl_dirty_row = copy._hl_dirty_row
@@ -2885,8 +2901,17 @@ struct Editor(Copyable, Movable):
         default-constructed and this reduces to the same join-with-``\\n``
         behavior that ``text_snapshot`` produces.
         """
-        var trim = self.editorconfig.trim_trailing_whitespace == 1
+        # editorconfig wins when it sets the property; otherwise fall
+        # back to the global Settings ▸ Editor default. Both use ``-1``
+        # for "unset", so the fallback only fires when neither source
+        # has an opinion.
+        var tw = self.editorconfig.trim_trailing_whitespace
+        if tw < 0:
+            tw = self.default_trim_trailing_whitespace
+        var trim = tw == 1
         var ifn = self.editorconfig.insert_final_newline
+        if ifn < 0:
+            ifn = self.default_insert_final_newline
         var sep = self.editorconfig.line_separator()
         var n = self.buffer.line_count()
         # ``has_trailing_newline``: by buffer convention, a file that ends

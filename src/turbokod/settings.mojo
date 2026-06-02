@@ -33,7 +33,8 @@ from std.collections.optional import Optional
 
 from .action_editor import ActionEditor
 from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
+    BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton,
+    paint_checkbox, paint_shadow_button,
 )
 from .canvas import Canvas
 from .painter import Painter
@@ -57,7 +58,7 @@ from .dropdown import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP,
+    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
@@ -76,6 +77,8 @@ comptime _FOCUS_EDIT          = UInt8(3)
 comptime _FOCUS_REMOVE        = UInt8(4)
 comptime _FOCUS_CLOSE         = UInt8(5)
 comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
+comptime _FOCUS_TRIM_WS       = UInt8(14)
+comptime _FOCUS_FINAL_NL      = UInt8(15)
 comptime _FOCUS_DICT_LIST     = UInt8(7)
 comptime _FOCUS_DICT_INSTALL  = UInt8(8)
 comptime _FOCUS_DICT_REMOVE   = UInt8(9)
@@ -164,6 +167,12 @@ struct Settings(Movable):
     """Working copy of ``TurbokodConfig.auto_save`` — Editor ▸ Save
     behavior. ``False`` means Manual (Ctrl+S only), ``True`` means
     Automatic. Driven by ``_save_dropdown``."""
+    var trim_trailing_whitespace: Bool
+    """Working copy of ``TurbokodConfig.trim_trailing_whitespace`` —
+    Editor ▸ "Trim trailing whitespace". Driven by ``_trim_cb``."""
+    var ensure_final_newline: Bool
+    """Working copy of ``TurbokodConfig.ensure_final_newline`` — Editor
+    ▸ "Ensure newline at end of files". Driven by ``_final_nl_cb``."""
     var section: Int
     """Index into ``_section_labels`` for the active section."""
     var selected_action: Int
@@ -191,6 +200,13 @@ struct Settings(Movable):
     """Last-painted bounds of the dropdown strip. Cached so mouse
     events arriving between paints can hit-test against the same
     rectangle the user just clicked."""
+    var _trim_cb: Checkbox
+    """Editor ▸ "Trim trailing whitespace" toggle. ``on`` tracks
+    ``trim_trailing_whitespace``; position is set each paint so the
+    press/release state machine hit-tests against the live row."""
+    var _final_nl_cb: Checkbox
+    """Editor ▸ "Ensure newline at end of files" toggle. Mirrors
+    ``ensure_final_newline``."""
     var dict_specs: List[DownloadableDictionary]
     """Catalog of downloadable spell-check dictionaries shown in the
     Spell-check pane. Snapshotted on ``open`` so the list and the
@@ -229,6 +245,8 @@ struct Settings(Movable):
         self.dirty = False
         self.actions = List[OnSaveAction]()
         self.auto_save = False
+        self.trim_trailing_whitespace = False
+        self.ensure_final_newline = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -270,6 +288,12 @@ struct Settings(Movable):
         ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
+        self._trim_cb = Checkbox(
+            String("Trim trailing whitespace"), 0, 0, False,
+        )
+        self._final_nl_cb = Checkbox(
+            String("Ensure newline at end of files"), 0, 0, False,
+        )
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
@@ -284,9 +308,15 @@ struct Settings(Movable):
         mut self, var actions: List[OnSaveAction], auto_save: Bool,
         var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
         current_language_ext: String = String(""),
+        trim_trailing_whitespace: Bool = True,
+        ensure_final_newline: Bool = True,
     ):
         self.actions = actions^
         self.auto_save = auto_save
+        self.trim_trailing_whitespace = trim_trailing_whitespace
+        self.ensure_final_newline = ensure_final_newline
+        self._trim_cb.on = trim_trailing_whitespace
+        self._final_nl_cb.on = ensure_final_newline
         self.active = True
         self.dirty = False
         self.section = 0
@@ -327,12 +357,18 @@ struct Settings(Movable):
         self.active = False
         self.actions = List[OnSaveAction]()
         self.auto_save = False
+        self.trim_trailing_whitespace = False
+        self.ensure_final_newline = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
         self.editor.close()
         self._save_dropdown.close()
+        self._trim_cb.pressed = False
+        self._trim_cb.pressed_inside = False
+        self._final_nl_cb.pressed = False
+        self._final_nl_cb.pressed_inside = False
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
@@ -552,8 +588,8 @@ struct Settings(Movable):
     def _paint_editor_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
-        """Editor preferences pane. Single row for now: a label and an
-        inline ``Save behavior`` dropdown."""
+        """Editor preferences pane: the inline ``Save behavior`` dropdown
+        plus the two on-save transform checkboxes."""
         var bg = Attr(BLACK, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var label = String("Save behavior:")
@@ -586,6 +622,28 @@ struct Settings(Movable):
         _ = painter.put_text(
             canvas, Point(inner.a.x, label_y + 2),
             String("Manual: save with Ctrl+S. Automatic: save on focus changes."),
+            hint,
+        )
+        # On-save transform checkboxes. Both keep their glyph in lock-step
+        # with the working-copy bools (the bools can be mutated directly
+        # in tests, same contract as the dropdown's ``want_idx`` sync).
+        self._trim_cb.on = self.trim_trailing_whitespace
+        self._final_nl_cb.on = self.ensure_final_newline
+        var chip = Attr(BLACK, CYAN)
+        var focus_attr = Attr(WHITE, BLUE)
+        self._trim_cb.move_to(inner.a.x, label_y + 4)
+        paint_checkbox(
+            canvas, self._trim_cb, chip, focus_attr,
+            self.focus == _FOCUS_TRIM_WS, inner.b.x,
+        )
+        self._final_nl_cb.move_to(inner.a.x, label_y + 5)
+        paint_checkbox(
+            canvas, self._final_nl_cb, chip, focus_attr,
+            self.focus == _FOCUS_FINAL_NL, inner.b.x,
+        )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, label_y + 7),
+            String("Applied on every save unless a project .editorconfig overrides it."),
             hint,
         )
 
@@ -906,6 +964,17 @@ struct Settings(Movable):
                 _ = self._save_dropdown.handle_key(event)
                 self._sync_dropdown_commit(prev_idx)
             return True
+        # Space toggles a focused Editor-section checkbox (matches the
+        # cluster-item behavior in the modal dialogs). Intercepted ahead
+        # of the type-to-jump fallthrough so it doesn't leak in as a
+        # search character.
+        if k == KEY_SPACE:
+            if self.focus == _FOCUS_TRIM_WS:
+                self._toggle_trim_ws()
+                return True
+            if self.focus == _FOCUS_FINAL_NL:
+                self._toggle_final_nl()
+                return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
         # type "py" to land on the python row regardless of which
@@ -955,6 +1024,19 @@ struct Settings(Movable):
             self.auto_save = new_auto
             self.dirty = True
 
+    def _toggle_trim_ws(mut self):
+        """Flip the trailing-whitespace toggle, keep the checkbox glyph
+        in sync, and raise ``dirty`` so the host persists it."""
+        self.trim_trailing_whitespace = not self.trim_trailing_whitespace
+        self._trim_cb.on = self.trim_trailing_whitespace
+        self.dirty = True
+
+    def _toggle_final_nl(mut self):
+        """Counterpart for the final-newline toggle."""
+        self.ensure_final_newline = not self.ensure_final_newline
+        self._final_nl_cb.on = self.ensure_final_newline
+        self.dirty = True
+
     def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
         # otherwise Tab from the rail would land on Add/Edit even
@@ -972,6 +1054,8 @@ struct Settings(Movable):
                 ordered.append(_FOCUS_REMOVE)
         elif self.section == _SECTION_EDITOR:
             ordered.append(_FOCUS_SAVE_BEHAVIOR)
+            ordered.append(_FOCUS_TRIM_WS)
+            ordered.append(_FOCUS_FINAL_NL)
         elif self.section == _SECTION_SPELL:
             if len(self.dict_specs) > 0:
                 ordered.append(_FOCUS_DICT_LIST)
@@ -1154,6 +1238,12 @@ struct Settings(Movable):
             self._save_dropdown.toggle()
             self._sync_dropdown_commit(prev_idx)
             return True
+        if self.focus == _FOCUS_TRIM_WS:
+            self._toggle_trim_ws()
+            return True
+        if self.focus == _FOCUS_FINAL_NL:
+            self._toggle_final_nl()
+            return True
         if self.focus == _FOCUS_DICT_INSTALL:
             self._request_dict_install()
             return True
@@ -1292,6 +1382,21 @@ struct Settings(Movable):
             # ``DROPDOWN_HIT_OUTSIDE`` and ``DROPDOWN_HIT_NONE`` both
             # fall through to the regular dispatch; the popup has
             # already auto-closed in the OUTSIDE case.
+            # On-save transform checkboxes. Each runs the shared press /
+            # drag / release state machine; we own the toggle so it only
+            # flips on a release that lands back on the chip.
+            var trim_status = self._trim_cb.handle_mouse(event)
+            if trim_status != BUTTON_NONE:
+                if trim_status == BUTTON_FIRED:
+                    self.focus = _FOCUS_TRIM_WS
+                    self._toggle_trim_ws()
+                return True
+            var nl_status = self._final_nl_cb.handle_mouse(event)
+            if nl_status != BUTTON_NONE:
+                if nl_status == BUTTON_FIRED:
+                    self.focus = _FOCUS_FINAL_NL
+                    self._toggle_final_nl()
+                return True
         if self._dispatch_buttons(event):
             return True
         if event.button == MOUSE_WHEEL_UP:

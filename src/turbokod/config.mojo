@@ -158,6 +158,17 @@ struct TurbokodConfig(Copyable, Movable):
     # inside the app. ``False`` opts out, leaving Ctrl+S as the only
     # write path.
     var auto_save: Bool
+    # Settings ▸ Editor toggles, both default ``True``. They act as the
+    # global fallback for the matching editorconfig properties: an
+    # explicit ``.editorconfig`` value always wins, but when the file's
+    # editorconfig leaves the property unset the editor uses these.
+    #   ``trim_trailing_whitespace`` — strip trailing spaces/tabs from
+    #     every line on save.
+    #   ``ensure_final_newline`` — guarantee the saved file ends in a
+    #     newline. Off means "leave whatever's there" (it never strips a
+    #     trailing newline — that stays an editorconfig-only behavior).
+    var trim_trailing_whitespace: Bool
+    var ensure_final_newline: Bool
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -185,6 +196,8 @@ struct TurbokodConfig(Copyable, Movable):
         self.tab_bar = False
         self.minimap = True
         self.auto_save = True
+        self.trim_trailing_whitespace = True
+        self.ensure_final_newline = True
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
@@ -199,6 +212,8 @@ struct TurbokodConfig(Copyable, Movable):
         self.tab_bar = copy.tab_bar
         self.minimap = copy.minimap
         self.auto_save = copy.auto_save
+        self.trim_trailing_whitespace = copy.trim_trailing_whitespace
+        self.ensure_final_newline = copy.ensure_final_newline
         self.recent_projects = copy.recent_projects.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
@@ -274,6 +289,14 @@ def load_config() -> TurbokodConfig:
         cfg.auto_save = json_get_bool(
             root, String("auto_save"), cfg.auto_save,
         )
+        cfg.trim_trailing_whitespace = json_get_bool(
+            root, String("trim_trailing_whitespace"),
+            cfg.trim_trailing_whitespace,
+        )
+        cfg.ensure_final_newline = json_get_bool(
+            root, String("ensure_final_newline"),
+            cfg.ensure_final_newline,
+        )
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -347,6 +370,14 @@ def save_config(config: TurbokodConfig) -> Bool:
     root.put(String("tab_bar"), json_bool(config.tab_bar))
     root.put(String("minimap"), json_bool(config.minimap))
     root.put(String("auto_save"), json_bool(config.auto_save))
+    root.put(
+        String("trim_trailing_whitespace"),
+        json_bool(config.trim_trailing_whitespace),
+    )
+    root.put(
+        String("ensure_final_newline"),
+        json_bool(config.ensure_final_newline),
+    )
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))

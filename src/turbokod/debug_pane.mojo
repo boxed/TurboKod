@@ -197,6 +197,12 @@ struct DebugPane(Copyable, Movable):
     Output. ``PANE_MODE_RUN`` collapses the pane to Output-only and
     flips the title to "Run". Set by the host on every tick to match
     the active session (or the post-run hold)."""
+    var title: String
+    """Title-bar label override. Empty (the default) lets ``paint``
+    derive "Run"/"Debug" from ``mode``; a non-empty value is painted
+    verbatim instead. The host sets this once for a dedicated pane —
+    e.g. the test-runner pane labels itself "Tests" regardless of
+    mode (it's always output-only / RUN)."""
 
     var rows: List[PaneRow]
     """Inspect-view rows (status not included). Sectioned via
@@ -280,6 +286,7 @@ struct DebugPane(Copyable, Movable):
         self.dock.close_button_id = DEBUG_PANE_CLOSE
         self.status_text = String("")
         self.mode = PANE_MODE_DEBUG
+        self.title = String("")
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
         self.output = TextLog(
@@ -312,6 +319,7 @@ struct DebugPane(Copyable, Movable):
         self.dock = copy.dock
         self.status_text = copy.status_text
         self.mode = copy.mode
+        self.title = copy.title
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
         self.output = copy.output
@@ -344,6 +352,10 @@ struct DebugPane(Copyable, Movable):
 
     def set_mode(mut self, mode: UInt8):
         self.mode = mode
+
+    def set_title(mut self, var text: String):
+        """Pin the title-bar label. See the ``title`` field docstring."""
+        self.title = text^
 
     def set_commands(mut self, var commands: List[TitleCommand]):
         """Replace the title-row command strip. Called by the host
@@ -609,8 +621,12 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_x = -1
         painter.fill(canvas, panel, String(" "), bg)
         var top = panel.a.y
-        var title_text = String("Run") if self.mode == PANE_MODE_RUN \
-            else String("Debug")
+        var title_text: String
+        if len(self.title.as_bytes()) > 0:
+            title_text = self.title
+        else:
+            title_text = String("Run") if self.mode == PANE_MODE_RUN \
+                else String("Debug")
         var body = paint_bottom_dock_chrome(
             canvas, painter, panel, title_text, self.focused, self.dock,
         )

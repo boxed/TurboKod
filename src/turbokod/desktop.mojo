@@ -346,6 +346,16 @@ comptime TARGET_TEST             = String("target:test")
 # ``TARGET_TEST`` but launches it under the DAP adapter for the
 # project's language, so breakpoints fire inside the test suite.
 comptime TARGET_TEST_DEBUG       = String("target:test_debug")
+# Test-pane chrome actions. The test runner (``TARGET_TEST``) owns its
+# own bottom-docked output pane — separate process slot from the
+# run/debug pane — so running tests never disturbs an in-flight target
+# run (e.g. a dev server). ``TEST_STOP`` SIGTERMs the test child;
+# ``TEST_CLEAR_OUTPUT`` wipes just that pane's scrollback;
+# ``TEST_PANE_CLOSE`` is the pane's ``[■]`` close button. "Re-run" on
+# the pane reuses ``TARGET_TEST`` (which stop-then-reruns the tests).
+comptime TEST_STOP               = String("test:stop")
+comptime TEST_CLEAR_OUTPUT       = String("test:clear_output")
+comptime TEST_PANE_CLOSE         = String("test:pane_close")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
 # the active tab to that index. The dispatch parser walks the
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
@@ -403,6 +413,7 @@ comptime DOCK_NONE        = UInt8(0)
 comptime DOCK_FILE_TREE   = UInt8(1)
 comptime DOCK_DEBUG_PANE  = UInt8(2)
 comptime DOCK_TERMINAL    = UInt8(3)
+comptime DOCK_TEST_PANE   = UInt8(4)
 
 # Throttle for the external-git polling in ``_apply_view_config``. One
 # second is fast enough that ``git commit`` / ``git checkout`` outside
@@ -860,6 +871,15 @@ struct Desktop(Movable):
     # happened. Cleared when a new run/debug starts, the project
     # closes, or the user dismisses the pane (ESC while focused).
     var _run_output_held: Bool
+    # Test runner — a *separate* process slot and output pane from
+    # ``run_session`` / ``debug_pane``. Cmd+T launches the project's
+    # test suite here so it streams into its own bottom-docked pane
+    # ("Tests") and never terminates an in-flight target run (a dev
+    # server keeps serving while the tests run). ``_test_output_held``
+    # is the test pane's analog of ``_run_output_held``.
+    var test_session: RunSession
+    var test_pane: DebugPane
+    var _test_output_held: Bool
     # Per-user window session, persisted in
     # ``<project>/.turbokod/per_user/<username>/session.json``.
     # ``_pending_restore`` is
@@ -1037,6 +1057,15 @@ struct Desktop(Movable):
         self.targets = ProjectTargets()
         self.run_session = RunSession()
         self._run_output_held = False
+        self.test_session = RunSession()
+        self.test_pane = DebugPane()
+        # The test pane is always output-only and self-labels "Tests"
+        # so it reads distinctly from the run/debug pane stacked above
+        # it. Give it a distinct close-button id so the host can tell a
+        # test-pane close from a run/debug-pane close.
+        self.test_pane.set_title(String("Tests"))
+        self.test_pane.dock.close_button_id = TEST_PANE_CLOSE
+        self._test_output_held = False
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
@@ -1332,6 +1361,10 @@ struct Desktop(Movable):
             if right < 0:
                 right = 0
         var bottom = screen.b.y - self._bottom_chrome_height(screen)
+        if self.test_pane.visible:
+            bottom -= self._test_pane_height(screen)
+            if bottom < 1:
+                bottom = 1
         if self.debug_pane.visible:
             bottom -= self._debug_pane_height(screen)
             if bottom < 1:
@@ -1345,16 +1378,21 @@ struct Desktop(Movable):
         return Rect(0, top, right, bottom)
 
     def debug_pane_rect(self, screen: Rect) -> Rect:
-        """Where the bottom-docked debug pane lives — above the status
-        bar (and the tab bar, when visible) which together always
-        sit at the screen's bottom edge."""
+        """Where the bottom-docked run/debug pane lives — above the
+        status bar (and the tab bar, when visible) and above the test
+        pane when that's also up. The status / tab strip always sits at
+        the screen's bottom edge; the test pane (when visible) sits just
+        above it, and the run/debug pane stacks above the test pane."""
         if not self.debug_pane.visible:
             return Rect.empty()
         var chrome = self._bottom_chrome_height(screen)
-        var top = screen.b.y - chrome - self._debug_pane_height(screen)
+        var bottom = screen.b.y - chrome
+        if self.test_pane.visible:
+            bottom -= self._test_pane_height(screen)
+        var top = bottom - self._debug_pane_height(screen)
         if top < 1:
             top = 1
-        return Rect(0, top, screen.b.x, screen.b.y - chrome)
+        return Rect(0, top, screen.b.x, bottom)
 
     def _debug_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the debug pane, considering
@@ -1363,6 +1401,26 @@ struct Desktop(Movable):
         whole bottom area, leaving just the menu bar above and the
         status / tab strip below."""
         return self.debug_pane.dock.effective_height(
+            screen, self._bottom_chrome_height(screen),
+        )
+
+    def test_pane_rect(self, screen: Rect) -> Rect:
+        """Where the bottom-docked test pane lives — the bottom-most
+        docked pane, sitting directly above the status / tab strip with
+        the run/debug pane (and terminal stack) above it. Mirrors
+        ``debug_pane_rect`` so the two output panes read as a stack."""
+        if not self.test_pane.visible:
+            return Rect.empty()
+        var chrome = self._bottom_chrome_height(screen)
+        var top = screen.b.y - chrome - self._test_pane_height(screen)
+        if top < 1:
+            top = 1
+        return Rect(0, top, screen.b.x, screen.b.y - chrome)
+
+    def _test_pane_height(self, screen: Rect) -> Int:
+        """Effective rendered height for the test pane — same
+        state-machine logic as ``_debug_pane_height``."""
+        return self.test_pane.dock.effective_height(
             screen, self._bottom_chrome_height(screen),
         )
 
@@ -1379,6 +1437,8 @@ struct Desktop(Movable):
             return Rect.empty()
         var chrome = self._bottom_chrome_height(screen)
         var stack_bottom = screen.b.y - chrome
+        if self.test_pane.visible:
+            stack_bottom -= self._test_pane_height(screen)
         if self.debug_pane.visible:
             stack_bottom -= self._debug_pane_height(screen)
         if stack_bottom < 2:
@@ -1510,6 +1570,11 @@ struct Desktop(Movable):
                     pos, self.debug_pane_rect(screen)
                 ):
             return String("ns-resize")
+        if self.test_pane.is_resizing() \
+                or self.test_pane.is_on_resize_edge(
+                    pos, self.test_pane_rect(screen)
+                ):
+            return String("ns-resize")
         for i in range(len(self.terminal_panes)):
             if self.terminal_panes[i].is_resizing() \
                     or self.terminal_panes[i].is_on_resize_edge(
@@ -1633,6 +1698,15 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             self.windows.windows[i].editor.soft_wrap = self.config.soft_wrap
+            # Push the global on-save transforms in as editorconfig
+            # fallbacks. ``trim`` off and final-newline off both map to a
+            # value that leaves the file untouched (0 / -1) rather than
+            # forcibly stripping — an explicit ``.editorconfig`` still
+            # overrides either of these.
+            self.windows.windows[i].editor.default_trim_trailing_whitespace = \
+                1 if self.config.trim_trailing_whitespace else 0
+            self.windows.windows[i].editor.default_insert_final_newline = \
+                1 if self.config.ensure_final_newline else -1
             if self.config.soft_wrap:
                 # Soft-wrap forces a left-aligned visible area; keep the
                 # invariant even if the host poked ``scroll_x`` directly.
@@ -1811,6 +1885,7 @@ struct Desktop(Movable):
             )
         debug_log(String("[paint] before debug_pane.paint"))
         self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
+        self.test_pane.paint(canvas, self.test_pane_rect(screen))
         debug_log(String("[paint] before menu_bar.paint"))
         # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
         # in-grid paint so the top row stays clear for other content.
@@ -1869,6 +1944,12 @@ struct Desktop(Movable):
         if self.settings.active and self.settings.dirty:
             self.config.on_save_actions = self.settings.actions.copy()
             self.config.auto_save = self.settings.auto_save
+            self.config.trim_trailing_whitespace = (
+                self.settings.trim_trailing_whitespace
+            )
+            self.config.ensure_final_newline = (
+                self.settings.ensure_final_newline
+            )
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
@@ -2728,10 +2809,12 @@ struct Desktop(Movable):
         # most recent projects so the user can switch back without
         # going through the picker.
         self._reset_no_project_menu()
-        # Drop the targets list and stop any in-flight run — the
+        # Drop the targets list and stop any in-flight run / test — the
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
         self._run_output_held = False
+        self.test_session.terminate()
+        self._test_output_held = False
         self.targets = ProjectTargets()
         # Drop any per-project grammar overrides loaded from this
         # project's ``.turbokod/grammars.json`` so a buffer opened
@@ -3695,6 +3778,8 @@ struct Desktop(Movable):
                     return Optional[String]()
             if self.debug_pane.handle_key(event):
                 return Optional[String]()
+            if self.test_pane.handle_key(event):
+                return Optional[String]()
             if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
@@ -3737,6 +3822,13 @@ struct Desktop(Movable):
                         and event.pressed and not event.motion \
                         and self.debug_pane.is_on_resize_edge(event.pos, dp_rect)):
                 if self.debug_pane.handle_mouse(event, dp_rect):
+                    return Optional[String]()
+            var test_rect = self.test_pane_rect(screen)
+            if self.test_pane.is_resizing() \
+                    or (event.button == MOUSE_BUTTON_LEFT \
+                        and event.pressed and not event.motion \
+                        and self.test_pane.is_on_resize_edge(event.pos, test_rect)):
+                if self.test_pane.handle_mouse(event, test_rect):
                     return Optional[String]()
             for i in range(len(self.terminal_panes)):
                 var tp_rect = self.terminal_pane_rect(screen, i)
@@ -3822,6 +3914,10 @@ struct Desktop(Movable):
             if self.debug_pane.focused:
                 self._focus_dock(DOCK_DEBUG_PANE)
             return Optional[String]()
+        if self.test_pane.handle_mouse(event, self.test_pane_rect(screen)):
+            if self.test_pane.focused:
+                self._focus_dock(DOCK_TEST_PANE)
+            return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
             if self.file_tree.focused:
                 self._focus_dock(DOCK_FILE_TREE)
@@ -3872,6 +3968,16 @@ struct Desktop(Movable):
                     .editor.close_completion_popup()
             elif (not self.host_owns_menu) and self.menu_bar.is_open():
                 self.menu_bar.close()
+            elif self._test_output_held \
+                    and not self.test_session.is_active() \
+                    and (self.test_pane.focused or not self._run_output_held):
+                # Dismiss the held test-output pane — when it's focused,
+                # or when it's the only held output pane. Same idempotent
+                # "drop the hold, release focus if we owned it" shape as
+                # the run-output branch below.
+                self._test_output_held = False
+                if self.test_pane.focused:
+                    self._focus_dock(DOCK_NONE)
             elif self._run_output_held \
                     and not self.dap.is_active() \
                     and not self.run_session.is_active():
@@ -4085,6 +4191,8 @@ struct Desktop(Movable):
                 self.config.auto_save,
                 self.config.language_servers.copy(),
                 cur_ext,
+                self.config.trim_trailing_whitespace,
+                self.config.ensure_final_newline,
             )
             return Optional[String]()
         if action == EDITOR_NEW:
@@ -4502,6 +4610,24 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == DEBUG_CLEAR_OUTPUT:
             self.debug_pane.clear_output()
+            return Optional[String]()
+        if action == TEST_STOP:
+            # Stop only the test child — the run/debug session is a
+            # separate slot and keeps running.
+            self.test_session.terminate()
+            return Optional[String]()
+        if action == TEST_CLEAR_OUTPUT:
+            self.test_pane.clear_output()
+            return Optional[String]()
+        if action == TEST_PANE_CLOSE:
+            # Standard [■] close button on the test pane: kill the test
+            # child, release the post-run hold, drop focus off the pane,
+            # and let dap_tick's next pass hide it (visibility is fully
+            # driven by these flags).
+            self.test_session.terminate()
+            self._test_output_held = False
+            if self.test_pane.focused:
+                self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == DEBUG_PANE_CLOSE:
             # Standard [■] close button on the run/debug pane: equivalent
@@ -5490,6 +5616,21 @@ struct Desktop(Movable):
         # each tick so it tracks DAP state (Continue ↔ Pause swap
         # depending on whether the program is stopped or running).
         self.debug_pane.set_commands(self._build_debug_pane_commands())
+        # Test pane is an independent bottom-docked output pane driven
+        # by ``test_session`` — same visibility/status/command-strip
+        # pattern as the run/debug pane, but it never carries DAP
+        # inspect content so it stays in RUN mode and self-labels
+        # "Tests" (via the pinned title set at construction).
+        self.test_tick()
+        self.test_pane.visible = self.test_session.is_active() \
+            or self._test_output_held
+        if self.test_session.is_active():
+            self.test_pane.set_mode(PANE_MODE_RUN)
+            self.test_pane.set_status(String("running tests"))
+        elif self._test_output_held:
+            self.test_pane.set_mode(PANE_MODE_RUN)
+            self.test_pane.set_status(String("(exited — Esc to dismiss)"))
+        self.test_pane.set_commands(self._build_test_pane_commands())
         self._refresh_dap_status()
         # End-of-tick marker — only emitted when the session is
         # actively running so we don't flood the log with one line per
@@ -5534,6 +5675,7 @@ struct Desktop(Movable):
         the stack)."""
         self.file_tree.focused = kind == DOCK_FILE_TREE
         self.debug_pane.focused = kind == DOCK_DEBUG_PANE
+        self.test_pane.focused = kind == DOCK_TEST_PANE
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].focused = (
                 kind == DOCK_TERMINAL and i == idx
@@ -5543,7 +5685,8 @@ struct Desktop(Movable):
         """True when any docked pane currently owns keyboard focus —
         used to dim the editor-window chrome so the visible focus
         matches the keyboard target."""
-        if self.file_tree.focused or self.debug_pane.focused:
+        if self.file_tree.focused or self.debug_pane.focused \
+                or self.test_pane.focused:
             return True
         for i in range(len(self.terminal_panes)):
             if self.terminal_panes[i].focused:
@@ -5630,6 +5773,30 @@ struct Desktop(Movable):
         # backlog whether or not a session is currently running.
         out.append(TitleCommand(
             String("[⌫ Clear]"), DEBUG_CLEAR_OUTPUT,
+        ))
+        return out^
+
+    def _build_test_pane_commands(self) -> List[TitleCommand]:
+        """Title-strip buttons for the test pane. While tests run:
+        Stop + Re-run. After they exit (output held): Re-run only —
+        there's nothing left to stop. Clear is always available.
+        ``TARGET_TEST`` terminates the in-flight test child before
+        relaunching, so Re-run is a true stop-then-rerun without a
+        separate handler (same idiom as the run pane's Restart)."""
+        var out = List[TitleCommand]()
+        if self.test_session.is_active():
+            out.append(TitleCommand(
+                String("[■ Stop]"), TEST_STOP,
+            ))
+            out.append(TitleCommand(
+                String("[↻ Re-run]"), TARGET_TEST,
+            ))
+        elif self._test_output_held:
+            out.append(TitleCommand(
+                String("[↻ Re-run]"), TARGET_TEST,
+            ))
+        out.append(TitleCommand(
+            String("[⌫ Clear]"), TEST_CLEAR_OUTPUT,
         ))
         return out^
 
@@ -6218,12 +6385,12 @@ struct Desktop(Movable):
         for the project venv's interpreter when one exists (same
         idiom as Cmd+R).
 
-        Like Cmd+R, this terminates any in-flight run / debug session
-        first — the debug pane only has one slot and the user's
-        intent is "this pane now means tests". Test output streams
-        through the same RUN-mode pane as Cmd+R, so the title flips
-        to ``Run`` and the inspect column collapses to give the
-        output log the full pane.
+        Tests run in their *own* process slot (``test_session``) and
+        stream into their *own* bottom-docked pane (``test_pane``,
+        labelled "Tests"). Crucially this does **not** touch the
+        run/debug session — a target run (e.g. a dev server) keeps
+        running while the tests run. Re-running tests terminates only
+        the previous *test* child, not the target run.
         """
         if not self.project:
             self.status_bar.set_message(
@@ -6261,23 +6428,21 @@ struct Desktop(Movable):
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
-        # Stop any prior run / debug — the debug pane is single-slot.
-        if self.dap.is_active():
-            self.dap.shutdown()
-            self._dap_exec_path = String("")
-            self._dap_exec_line = -1
-        self.run_session.terminate()
-        self._run_output_held = False
-        self.debug_pane.clear_all()
-        self.debug_pane.visible = True
+        # Stop only the *previous test run* — the run/debug session is a
+        # separate slot and is left untouched (a dev server keeps
+        # serving while tests run).
+        self.test_session.terminate()
+        self._test_output_held = False
+        self.test_pane.clear_all()
+        self.test_pane.visible = True
         var pretty = program
         for k in range(len(args)):
             pretty = pretty + String(" ") + args[k]
-        self.debug_pane.append_output(
+        self.test_pane.append_output(
             String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
         )
         try:
-            self.run_session.start(
+            self.test_session.start(
                 String("pytest"), program, args^, project_root,
             )
             self.status_bar.set_message(
@@ -6408,6 +6573,39 @@ struct Desktop(Movable):
             # otherwise the exit message and any tail output flash off
             # screen as ``run_session.is_active()`` flips to False.
             self._run_output_held = True
+
+    def test_tick(mut self):
+        """Drain the test session's output into the test pane and reap
+        on exit. The test-pane analog of ``target_tick`` — a separate
+        process slot and pane so a test run never disturbs an in-flight
+        target run. Called once per frame from ``dap_tick``.
+
+        Cheap when no test run is in flight — early-out on the first
+        line.
+        """
+        if not self.test_session.is_active():
+            return
+        var out = drain_run_output(self.test_session)
+        if len(out.stdout.as_bytes()) > 0:
+            self.test_pane.append_output(out.stdout, UInt8(0))  # PANE_OUT_STDOUT
+        if len(out.stderr.as_bytes()) > 0:
+            self.test_pane.append_output(out.stderr, UInt8(1))  # PANE_OUT_STDERR
+        if poll_run_exit(self.test_session):
+            var code = self.test_session.exit_code
+            self.test_session.terminate()
+            self.test_pane.append_output(
+                String("[tests exited with ") + String(code) + String("]"),
+                UInt8(2),  # PANE_OUT_CONSOLE
+            )
+            var attr = Attr(BLACK, LIGHT_GRAY) if code == 0 \
+                else Attr(LIGHT_RED, LIGHT_GRAY)
+            self.status_bar.set_message(
+                String("tests exited (") + String(code) + String(")"),
+                attr,
+            )
+            # Pin the pane open so the results don't flash off screen
+            # when ``test_session.is_active()`` flips to False.
+            self._test_output_held = True
 
     def _paint_tab_bar(mut self, mut canvas: Canvas, screen: Rect):
         """Render one tab per open window directly above the status
