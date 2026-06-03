@@ -39,6 +39,10 @@ int64_t tk_desktop_take_pending_new_window_project(int64_t h, int64_t out_ptr,
 // 1 while a DAP session is paused at a breakpoint. Polled by the scripted
 // screenshot path (TK_CAPTURE_WHEN=debug-stopped) — see scripts/screenshots.sh.
 int32_t tk_desktop_debug_stopped(int64_t h);
+// Drain attention events (Claude turn finished in a terminal pane, debugger
+// stop) accumulated since the last call. Polled per tick; while the app is
+// in the background each batch bounces the Dock icon and bumps the badge.
+int32_t tk_desktop_take_attention(int64_t h);
 
 // Floating panels (native macOS) — see docs/floating-panels.md. The tool
 // panels render on a separate host window via the _panels entry points; the
@@ -85,5 +89,14 @@ int64_t tk_theme_palette(int64_t h, int64_t out_ptr, int64_t cap);
 void    tk_desktop_set_font_options(int64_t h, int64_t ptr, int64_t n);
 int64_t tk_font_version(int64_t h);
 int64_t tk_font_name(int64_t h, int64_t out_ptr, int64_t cap);
+// Configured point size (0 = the font's default: 16 bitmap / 13 vector).
+// Fetched alongside tk_font_name on a version bump.
+int64_t tk_font_size(int64_t h);
+// Host -> core report after every font apply: the point size actually
+// rendering and the font's design ("ideal") size — 16 for the bundled
+// bitmap font, the embedded bitmap-strike ppem for true bitmap fonts,
+// 0 when unknown. Drives the Settings size stepper + "Restore ideal".
+void    tk_desktop_set_font_size_info(int64_t h, int64_t effective,
+                                      int64_t ideal);
 
 #endif

@@ -1,8 +1,10 @@
-"""FileTree: right-docked collapsible project file browser.
+"""FileTree: side-docked collapsible project file browser.
 
-The tree is conceptually outside the floating-window workspace — when shown,
-``Desktop.workspace_rect`` shrinks by ``FILE_TREE_WIDTH`` so floating windows
-get moved/resized to fit the smaller area, exactly as if the terminal itself
+The tree docks on the right edge by default; the View-menu cycle (hidden →
+right → left) can flip it to the left edge instead. It is conceptually
+outside the floating-window workspace — when shown, ``Desktop.workspace_rect``
+shrinks by ``FILE_TREE_WIDTH`` on the docked side so floating windows get
+moved/resized to fit the smaller area, exactly as if the terminal itself
 had narrowed by that amount.
 
 Internally ``entries`` is a flat list with a ``depth`` per entry — expanding
@@ -72,6 +74,15 @@ struct FileTree(Movable):
     var visible: Bool
     var root: String
     var width: Int
+    var top: Int
+    """First screen row of the panel. Row 0 belongs to the in-grid menu
+    bar on the terminal frontend (top=1, the default); when the host
+    owns the menu (Swift/AppKit) the workspace starts at row 0 and the
+    Desktop syncs this to 0 so the panel doesn't show a blank row above
+    its title."""
+    var dock_left: Bool
+    """False → docked on the right edge (default), True → left edge.
+    Cycled by the View-menu file-tree item: hidden → right → left."""
     var entries: List[FileTreeEntry]
     var selected: Int
     var scroll: Int
@@ -84,7 +95,7 @@ struct FileTree(Movable):
     docked side panels."""
     var _resizing: Bool
     """True while the user holds the left button after pressing on
-    the panel's left border. Mouse motion in this state updates
+    the panel's separator border. Mouse motion in this state updates
     ``width``; the next non-pressed event clears the flag."""
     var _type_ahead: TypeAhead
     """Type-to-jump prefix buffer. Auto-resets after the
@@ -100,6 +111,8 @@ struct FileTree(Movable):
         self.visible = False
         self.root = String("")
         self.width = FILE_TREE_WIDTH
+        self.top = 1
+        self.dock_left = False
         self.entries = List[FileTreeEntry]()
         self.selected = -1
         self.scroll = 0
@@ -218,7 +231,22 @@ struct FileTree(Movable):
     # --- geometry & paint -------------------------------------------------
 
     def rect(self, screen: Rect) -> Rect:
-        return Rect(screen.b.x - self.width, 1, screen.b.x, screen.b.y - 1)
+        if self.dock_left:
+            return Rect(0, self.top, self.width, screen.b.y - 1)
+        return Rect(
+            screen.b.x - self.width, self.top, screen.b.x, screen.b.y - 1,
+        )
+
+    def _sep_x(self, area: Rect) -> Int:
+        """Column of the separator / resize-handle line — always the
+        workspace-facing edge: left edge when right-docked, right edge
+        when left-docked."""
+        return area.b.x - 1 if self.dock_left else area.a.x
+
+    def _content_x(self, area: Rect) -> Int:
+        """First column of the title / listing content (the column just
+        inside the separator on the docked side)."""
+        return area.a.x if self.dock_left else area.a.x + 1
 
     def paint(self, mut canvas: Canvas, screen: Rect):
         if not self.visible:
@@ -242,35 +270,38 @@ struct FileTree(Movable):
             title_attr = Attr(BORDER_FOCUS, LIGHT_GRAY)
         else:
             title_attr = Attr(BLACK, LIGHT_GRAY)
-        # Left separator column lives at area.a.x. Focus is shown via line
-        # weight (single → double), mirroring how normal windows render
-        # their frame.
+        # Separator column lives on the workspace-facing edge. Focus is
+        # shown via line weight (single → double), mirroring how normal
+        # windows render their frame.
         var painter = Painter(area)
+        var sep_x = self._sep_x(area)
+        var content_x = self._content_x(area)
+        var content_end = content_x + (area.b.x - area.a.x - 1)
         var sep_glyph = String("║") if self.focused else String("│")
         for y in range(area.a.y, area.b.y):
-            painter.set(canvas, area.a.x, y, Cell(sep_glyph, bg, 1))
+            painter.set(canvas, sep_x, y, Cell(sep_glyph, bg, 1))
         # Title bar fills the rest of the top row of the panel.
         painter.fill(
-            canvas, Rect(area.a.x + 1, area.a.y, area.b.x, area.a.y + 1),
+            canvas, Rect(content_x, area.a.y, content_end, area.a.y + 1),
             String(" "),
             title_attr,
         )
         var title = String(" ") + basename(self.root)
         _ = painter.put_text(
-            canvas, Point(area.a.x + 1, area.a.y), title, title_attr,
+            canvas, Point(content_x, area.a.y), title, title_attr,
         )
-        # Number indicator at the top-right, mirroring the per-window
-        # ``Ctrl+N`` shortcut hint. ``0`` is the file tree's slot —
-        # paired with ``Ctrl+0`` to focus it from anywhere.
+        # Number indicator at the top-right of the content area,
+        # mirroring the per-window ``Ctrl+N`` shortcut hint. ``0`` is the
+        # file tree's slot — paired with ``Ctrl+0`` to focus it from
+        # anywhere.
         if area.b.x - area.a.x >= 4:
             _ = painter.put_text(
-                canvas, Point(area.b.x - 2, area.a.y), String("0"),
+                canvas, Point(content_end - 2, area.a.y), String("0"),
                 title_attr,
             )
         # Listing area starts one row below the title.
         var list_top = area.a.y + 1
         var list_h = area.b.y - list_top
-        var content_x = area.a.x + 1
         for i in range(list_h):
             var idx = self.scroll + i
             if idx >= len(self.entries):
@@ -285,7 +316,7 @@ struct FileTree(Movable):
             # Paint the row background first so selection covers full width.
             painter.fill(
                 canvas,
-                Rect(content_x, list_top + i, area.b.x, list_top + i + 1),
+                Rect(content_x, list_top + i, content_end, list_top + i + 1),
                 String(" "),
                 attr,
             )
@@ -407,13 +438,14 @@ struct FileTree(Movable):
             self.scroll = self.selected - visible + 1
 
     def is_on_resize_edge(self, pos: Point, screen: Rect) -> Bool:
-        """Hit-test for the left border column — the row-tall handle the
+        """Hit-test for the separator column — the row-tall handle the
         user drags to widen / narrow the panel. Used by the host to
         switch the mouse pointer to ``ew-resize`` while hovering."""
         if not self.visible:
             return False
         var area = self.rect(screen)
-        return pos.x == area.a.x and pos.y >= area.a.y and pos.y < area.b.y
+        return pos.x == self._sep_x(area) \
+            and pos.y >= area.a.y and pos.y < area.b.y
 
     def is_resizing(self) -> Bool:
         return self._resizing
@@ -437,11 +469,14 @@ struct FileTree(Movable):
             # Bare hover events under 1003 also flow here while a drag
             # is in progress, but they have button=NONE & motion=True;
             # we still want them to update the width since some
-            # terminals report drag motion that way.
-            self.width = self._clamp_width(screen.b.x - event.pos.x, screen)
+            # terminals report drag motion that way. The separator sits
+            # at column ``width - 1`` when left-docked, hence the +1.
+            var want = event.pos.x + 1 if self.dock_left \
+                else screen.b.x - event.pos.x
+            self.width = self._clamp_width(want, screen)
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
-            if event.pos.x == area.a.x \
+            if event.pos.x == self._sep_x(area) \
                     and event.pos.y >= area.a.y and event.pos.y < area.b.y:
                 self._resizing = True
                 return True
@@ -482,6 +517,13 @@ struct FileTree(Movable):
         var list_top = area.a.y + 1
         var idx = self.scroll + (event.pos.y - list_top)
         if idx < 0 or idx >= len(self.entries):
+            return True
+        # A click on a directory's expand/collapse chevron toggles it
+        # immediately — no select-first round trip.
+        if self.entries[idx].is_dir and event.pos.x \
+                == self._content_x(area) + 2 * self.entries[idx].depth:
+            self.selected = idx
+            self._toggle_expand(idx)
             return True
         if idx == self.selected:
             # Second click on the same entry: directories toggle, files open.

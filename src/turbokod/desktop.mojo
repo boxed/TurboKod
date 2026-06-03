@@ -46,7 +46,7 @@ from .events import (
 )
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
-    OnSaveAction,
+    MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
     TurbokodConfig, default_font_label, load_config, record_recent_file,
     record_recent_project, save_config,
 )
@@ -428,8 +428,12 @@ comptime _GIT_POLL_INTERVAL_MS = 1000
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
 comptime APP_QUIT_ACTION      = String("quit")
 
-comptime _SHOW_TREE_LABEL = String("Show file tree")
-comptime _HIDE_TREE_LABEL = String("Hide file tree")
+# View-menu file-tree item labels — the label encodes the current state
+# of the three-way cycle (hidden → docked right → docked left) and is
+# re-stamped every paint by ``_apply_view_config``.
+comptime _TREE_LABEL_HIDDEN = String("File tree: hidden")
+comptime _TREE_LABEL_RIGHT  = String("File tree: right")
+comptime _TREE_LABEL_LEFT   = String("File tree: left")
 
 # Internal pending-action values for the Replace prompt. The prompt
 # itself now carries two input rows (find + replace), so this is just
@@ -661,6 +665,17 @@ struct Desktop(Movable):
     # same cheap version-poll pattern as ``theme_version``.
     var host_font_names: List[String]
     var font_version: Int
+    # Host-reported cell-font size info (native macOS frontend). The Swift
+    # host calls ``tk_desktop_set_font_size_info`` after every font apply:
+    # ``host_font_effective_size`` is the point size actually rendering
+    # right now (the explicit ``config.font_size`` or the font's default
+    # when that's 0), ``host_font_ideal_size`` is the size the active font
+    # was designed for — 16 for the bundled bitmap font, the embedded
+    # bitmap-strike ppem for true bitmap fonts, 0 when there's no such
+    # thing (ordinary vector fonts). Settings shows a "Restore ideal"
+    # button only when the ideal is known.
+    var host_font_effective_size: Int
+    var host_font_ideal_size: Int
     var project: Optional[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
@@ -847,6 +862,12 @@ struct Desktop(Movable):
     title button. Panes paint top-to-bottom in list order, sitting
     above the debug pane (when visible) and the status / tab strip
     at the very bottom."""
+    var attention_events: Int
+    """Desktop-level attention events (currently: the debugger hitting
+    a stop — breakpoint, exception, pause) since the host last drained
+    via ``take_attention_events``. The macOS host polls each tick and,
+    when the app isn't frontmost, bounces the Dock icon and bumps the
+    badge; the terminal frontend currently ignores them."""
     # Latched current-execution location. Painted as ``▶`` in the gutter
     # of whichever editor has a matching ``file_path``. Cleared on
     # ``continued`` / ``terminated`` events.
@@ -1040,6 +1061,8 @@ struct Desktop(Movable):
         self.theme_version = 0
         self.host_font_names = List[String]()
         self.font_version = 0
+        self.host_font_effective_size = 0
+        self.host_font_ideal_size = 0
         self.project = Optional[String]()
         self._project_menu_idx = -1
         self._window_menu_idx = -1
@@ -1094,6 +1117,7 @@ struct Desktop(Movable):
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
         self.terminal_panes = List[TerminalPane]()
+        self.attention_events = 0
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self._dap_current_frame_id = -1
@@ -1146,8 +1170,9 @@ struct Desktop(Movable):
         # Right-aligned project menu. Always visible and always labelled
         # "Project". In the no-project state the only entries are the
         # recent projects from ``config.recent_projects``; once a project
-        # is opened ``_set_project`` rebuilds the list with the tree
-        # toggle, configure-targets, the inline recents, and close-project.
+        # is opened ``_set_project`` rebuilds the list with
+        # configure-targets, the inline recents, and close-project. (The
+        # file-tree cycle lives in the host's View menu.)
         # Recents shown inline (not behind a "..." picker) so the user can
         # one-click switch projects from any state.
         self.menu_bar.add(Menu(
@@ -1412,14 +1437,21 @@ struct Desktop(Movable):
 
     def workspace_rect(self, screen: Rect) -> Rect:
         """Floating-window area: between menu bar, status bar, and any docked
-        widgets. The file tree, when visible, eats space on the right; the
+        widgets. The file tree, when visible, eats space on its docked side
+        (right by default, left after one extra View-menu cycle); the
         terminal panes and debug pane, when active, eat space at the bottom
         (terminal stack on top of debug when both are up)."""
+        var left = 0
         var right = screen.b.x
         if self.file_tree.visible:
-            right -= self.file_tree.width
-            if right < 0:
-                right = 0
+            if self.file_tree.dock_left:
+                left += self.file_tree.width
+                if left > screen.b.x:
+                    left = screen.b.x
+            else:
+                right -= self.file_tree.width
+                if right < 0:
+                    right = 0
         var bottom = screen.b.y - self._bottom_chrome_height(screen)
         # When the panels float on a separate host window, they eat no rows
         # here — the editor area grows into the space they used to occupy.
@@ -1439,7 +1471,7 @@ struct Desktop(Movable):
         # Row 0 is normally reserved for the in-grid menu bar; when the
         # host owns the menu, that row is free for the workspace.
         var top = 0 if self.host_owns_menu else 1
-        return Rect(0, top, right, bottom)
+        return Rect(left, top, right, bottom)
 
     def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked run/debug pane lives — above the
@@ -2066,6 +2098,13 @@ struct Desktop(Movable):
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
+        # The file-tree item cycles three states instead of checking a
+        # box, so its *label* carries the state.
+        var tree_label = _TREE_LABEL_HIDDEN
+        if self.file_tree.visible:
+            tree_label = _TREE_LABEL_LEFT if self.file_tree.dock_left \
+                else _TREE_LABEL_RIGHT
+        self.menu_bar.set_item_label(PROJECT_TREE_ACTION, tree_label)
         debug_log(String("[_apply_view_config] after menu_bar checks"))
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
@@ -2291,6 +2330,10 @@ struct Desktop(Movable):
         # painted over by the editor it's describing.
         self.windows.paint_title_tooltip(canvas, ws)
         debug_log(String("[paint] before file_tree.paint"))
+        # Row 0 hosts the in-grid menu bar only when we own the menu;
+        # under a host-owned menu the panel starts at the top edge so it
+        # doesn't show a blank row above its title.
+        self.file_tree.top = 0 if self.host_owns_menu else 1
         self.file_tree.paint(canvas, screen)
         debug_log(String("[paint] before terminal_panes.paint n=")
             + String(len(self.terminal_panes)))
@@ -2364,6 +2407,14 @@ struct Desktop(Movable):
         # cursor has been resting on the message rect long enough for
         # the dwell timer to fire.
         self.status_bar.paint_tooltip(canvas, screen)
+        # Keep the Font pane's size readout live: changing the family
+        # mid-dialog changes the effective/ideal sizes the host reports,
+        # and the report arrives a frame after ``set_font`` bumps the
+        # version — so refresh every paint, not just on open.
+        if self.settings.active:
+            self.settings.update_font_info(
+                self.host_font_effective_size, self.host_font_ideal_size,
+            )
         if self.settings.active and self.settings.dirty:
             self.config.on_save_actions = self.settings.actions.copy()
             self.config.auto_save = self.settings.auto_save
@@ -2388,6 +2439,12 @@ struct Desktop(Movable):
                     and self.settings.font_choice != self.font_label():
                 var new_font = self.settings.font_choice.copy()
                 self.set_font(new_font)
+            # And for a size change — ``set_font_size`` clamps, updates
+            # ``config.font_size``, and bumps ``font_version``.
+            if len(self.settings._font_names) > 0 \
+                    and self.settings.font_size_choice \
+                        != self.config.font_size:
+                self.set_font_size(self.settings.font_size_choice)
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
             self.settings.ack_dirty()
@@ -3220,6 +3277,22 @@ struct Desktop(Movable):
             self.config.font = label
         self.font_version += 1
 
+    def set_font_size(mut self, size: Int):
+        """Set the cell-font point size (native macOS frontend). 0 restores
+        "the font's default size"; explicit values are clamped to a sane
+        range. Bumps ``font_version`` so the Swift host refetches and
+        rebuilds its cell metrics — same live-apply path as ``set_font``."""
+        var s = size
+        if s != 0:
+            if s < MIN_FONT_SIZE:
+                s = MIN_FONT_SIZE
+            if s > MAX_FONT_SIZE:
+                s = MAX_FONT_SIZE
+        if s == self.config.font_size:
+            return
+        self.config.font_size = s
+        self.font_version += 1
+
     def font_label(self) -> String:
         """The Settings-facing label for the active ``config.font`` —
         the built-in default's empty string renders as its label."""
@@ -3443,7 +3516,6 @@ struct Desktop(Movable):
         _ = save_config(self.config)
         debug_log(String("[_set_project] after save_config"))
         var items = List[MenuItem]()
-        items.append(MenuItem(_SHOW_TREE_LABEL, PROJECT_TREE_ACTION))
         items.append(MenuItem(
             String("Configure targets..."), PROJECT_CONFIG_TARGETS,
         ))
@@ -3947,17 +4019,19 @@ struct Desktop(Movable):
         # doesn't re-write the file with the now-correctly-fit bytes.
         self._last_session_json = encode_session(self._snapshot_session())
 
-    def _toggle_file_tree(mut self):
-        if self._project_menu_idx < 0 or not self.project:
+    def _cycle_file_tree(mut self):
+        """Step the file tree through its three-way cycle:
+        hidden → docked right → docked left → hidden. The View-menu
+        item's label tracks the state (see ``_apply_view_config``)."""
+        if not self.project:
             return
-        if self.file_tree.visible:
-            self.file_tree.close()
-            self.menu_bar.menus[self._project_menu_idx].items[0].label = \
-                _SHOW_TREE_LABEL
-        else:
+        if not self.file_tree.visible:
+            self.file_tree.dock_left = False
             self.file_tree.open(self.project.value())
-            self.menu_bar.menus[self._project_menu_idx].items[0].label = \
-                _HIDE_TREE_LABEL
+        elif not self.file_tree.dock_left:
+            self.file_tree.dock_left = True
+        else:
+            self.file_tree.close()
 
     # --- events ------------------------------------------------------------
 
@@ -4702,7 +4776,7 @@ struct Desktop(Movable):
             self.close_project()
             return Optional[String]()
         if action == PROJECT_TREE_ACTION:
-            self._toggle_file_tree()
+            self._cycle_file_tree()
             return Optional[String]()
         if action == PROJECT_CONFIG_TARGETS:
             self._open_targets_config()
@@ -4736,6 +4810,9 @@ struct Desktop(Movable):
                 self.config.theme,
                 self.font_label(),
                 font_names^,
+                self.config.font_size,
+                self.host_font_effective_size,
+                self.host_font_ideal_size,
             )
             return Optional[String]()
         if action == EDITOR_NEW:
@@ -5851,6 +5928,9 @@ struct Desktop(Movable):
             # just the top frame. 64 frames is plenty for typical
             # stacks and trivial in payload size.
             _ = self.dap.request_stack_trace(stopped.value().thread_id, 64)
+            # A stop is attention-worthy: when the app isn't frontmost
+            # the macOS host turns this into a Dock bounce + badge.
+            self.attention_events += 1
         # Frame click from the pane: re-fetch scopes for the chosen frame
         # and jump the editor to its source location.
         var fclick = self.debug_pane.consume_frame_click()
@@ -6221,6 +6301,19 @@ struct Desktop(Movable):
                     continue
                 _ = self.terminal_panes[i].handle_command(cmd)
             i += 1
+
+    def take_attention_events(mut self) -> Int:
+        """Drain and return every pending attention event: Desktop-level
+        ones (debugger stops) plus each terminal pane's Claude-state
+        transitions (working → waiting/done). The host polls this once
+        per tick; events raised while the app is frontmost are drained
+        all the same and simply discarded by the host, so they never
+        pile up and fire stale."""
+        var n = self.attention_events
+        self.attention_events = 0
+        for i in range(len(self.terminal_panes)):
+            n += self.terminal_panes[i].take_attention()
+        return n
 
     def _focus_dock(mut self, kind: UInt8, idx: Int = 0):
         """Single source of truth for which docked pane owns keyboard

@@ -62,7 +62,7 @@ from turbokod import (
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE,
+    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TERMINAL_NEW,
     WINDOW_CLOSE, WINDOW_CLOSE_ALL,
     stat_file,
@@ -229,6 +229,12 @@ def main() raises:
             String("Minimap"), EDITOR_TOGGLE_MINIMAP,
             checkable=True,
         ))
+        view_items.append(MenuItem.separator())
+        # Three-way cycle (hidden → right → left) rather than a checkbox;
+        # Desktop re-stamps the label from the live state every paint.
+        view_items.append(MenuItem(
+            String("File tree: hidden"), PROJECT_TREE_ACTION,
+        ))
         desktop.menu_bar.add(Menu(String("View"), view_items^))
         desktop.menu_bar.add(_mk_menu(String("Git"),
             (String("Toggle Blame"),       EDITOR_TOGGLE_BLAME),
@@ -313,8 +319,14 @@ def main() raises:
                 desktop.menu_bar.set_visible_by_label(
                     String("Edit"), desktop.windows.focused_is_editor(),
                 )
+                # View stays reachable whenever a project is open (even
+                # with no editor focused) — the file-tree cycle lives
+                # there now.
+                var view_visible = desktop.windows.focused_is_editor()
+                if not view_visible and desktop.project:
+                    view_visible = True
                 desktop.menu_bar.set_visible_by_label(
-                    String("View"), desktop.windows.focused_is_editor(),
+                    String("View"), view_visible,
                 )
                 # Toggle the ``Fill...`` row in/out of the Edit menu
                 # based on whether the focused editor has multiple

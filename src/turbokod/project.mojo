@@ -257,7 +257,40 @@ def _name_in(name: String, names: List[String]) -> Bool:
     return False
 
 
-def _git_ls_project_files(root: String) -> Optional[List[String]]:
+def _git_ls_files_argv(root: String, ignored_only: Bool) -> List[String]:
+    """Argv for the two ``git ls-files`` enumerations the picker uses.
+
+    ``ignored_only=False`` → ``-co --exclude-standard``: every tracked +
+    untracked-not-ignored file. ``ignored_only=True`` → ``-oi
+    --exclude-standard --directory``: untracked files that the ignore
+    rules exclude — and crucially, ``--directory`` collapses a
+    fully-ignored directory to a single ``dir/`` entry instead of
+    enumerating its contents, so ``node_modules`` / ``venv`` don't flood
+    the output while an individually-ignored file like
+    ``settings_local.py`` or ``.env`` still appears as a plain path.
+    Callers drop the trailing-slash directory entries.
+    """
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(root)
+    argv.append(String("ls-files"))
+    if ignored_only:
+        argv.append(String("-o"))
+        argv.append(String("-i"))
+        argv.append(String("--exclude-standard"))
+        argv.append(String("--directory"))
+    else:
+        argv.append(String("-c"))
+        argv.append(String("-o"))
+        argv.append(String("--exclude-standard"))
+    argv.append(String("-z"))
+    return argv^
+
+
+def _git_ls_project_files(
+    root: String, ignored_only: Bool = False,
+) -> Optional[List[String]]:
     """Run ``git ls-files -co --exclude-standard -z`` in ``root`` and return
     absolute paths of every tracked + untracked-not-ignored file.
 
@@ -270,21 +303,19 @@ def _git_ls_project_files(root: String) -> Optional[List[String]]:
     is unavailable, or the command failed for any reason — callers fall
     back to the manual walk.
 
+    With ``ignored_only=True`` the enumeration flips to gitignored
+    untracked files instead (see ``_git_ls_files_argv``); the ``dir/``
+    entries that ``--directory`` emits for wholly-ignored directories
+    are dropped here, so the result is exactly the individually-ignored
+    files outside those directories.
+
     ``-z`` uses NUL separators so paths with newlines or other oddities
     round-trip safely. Each NUL-terminated entry is appended to the
     project root (with a ``/`` separator) to produce the absolute path.
     """
     if len(root.as_bytes()) == 0:
         return Optional[List[String]]()
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(root)
-    argv.append(String("ls-files"))
-    argv.append(String("-c"))
-    argv.append(String("-o"))
-    argv.append(String("--exclude-standard"))
-    argv.append(String("-z"))
+    var argv = _git_ls_files_argv(root, ignored_only)
     try:
         var cap = capture_command(argv)
         if Int(cap.status) != 0:
@@ -295,12 +326,14 @@ def _git_ls_project_files(root: String) -> Optional[List[String]]:
         var start = 0
         for i in range(n):
             if bytes[i] == 0:
-                if i > start:
+                # Skip ``dir/`` entries (``--directory`` output for a
+                # wholly-ignored directory) — only plain file paths pass.
+                if i > start and bytes[i - 1] != 0x2F:
                     var rel = String(StringSlice(unsafe_from_utf8=bytes[start:i]))
                     out.append(join_path(root, rel))
                 start = i + 1
         # No trailing NUL? Treat the tail as a final entry too.
-        if start < n:
+        if start < n and bytes[n - 1] != 0x2F:
             var rel_tail = String(StringSlice(unsafe_from_utf8=bytes[start:n]))
             out.append(join_path(root, rel_tail))
         return Optional[List[String]](out^)
@@ -350,21 +383,19 @@ struct FileIndexer(Movable):
         self.produced = 0
 
     @staticmethod
-    def start(root: String) -> Optional[Self]:
+    def start(root: String, ignored_only: Bool = False) -> Optional[Self]:
         """Spawn ``git ls-files`` in ``root``. Returns ``None`` if the
         spawn failed (no ``git``, not a checkout, or any other error).
+
+        ``ignored_only=True`` enumerates gitignored files instead of the
+        tracked + untracked set (see ``_git_ls_files_argv``) — QuickOpen
+        runs both in parallel so individually-ignored files like
+        ``.env`` are openable without flooding the list with the
+        contents of ignored directories.
         """
         if len(root.as_bytes()) == 0:
             return Optional[Self]()
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(root)
-        argv.append(String("ls-files"))
-        argv.append(String("-c"))
-        argv.append(String("-o"))
-        argv.append(String("--exclude-standard"))
-        argv.append(String("-z"))
+        var argv = _git_ls_files_argv(root, ignored_only)
         try:
             var proc = LspProcess.spawn(argv, String(""))
             var idx = Self(proc^)
@@ -410,7 +441,9 @@ struct FileIndexer(Movable):
         var start = 0
         for i in range(len(self.buf)):
             if self.buf[i] == 0:
-                if i > start:
+                # ``dir/`` entries (``--directory`` output in
+                # ignored-only mode) are dropped — see ``start``.
+                if i > start and self.buf[i - 1] != 0x2F:
                     var rel = String(StringSlice(
                         unsafe_from_utf8=self.buf[start:i],
                     ))
@@ -487,12 +520,24 @@ def walk_project_files(
     too, so it gets pruning right on projects that rely on those. On a
     real-world Python project this dropped quick-open from ~48 s
     (169 k files) to <100 ms (~2 k files). Falls back to the manual
-    walk if ``git`` isn't available or the call failed.
+    walk if ``git`` isn't available or the call failed. With
+    ``include_ignored_files=True`` the fast path runs a second
+    ``ls-files`` pass for individually-ignored files, mirroring the
+    manual walk's keep-files / prune-dirs behavior.
     """
     if respect_gitignore:
         var via_git = _git_ls_project_files(root)
         if via_git:
-            return via_git.value().copy()
+            var files = via_git.value().copy()
+            if include_ignored_files:
+                # Second enumeration for individually-ignored files
+                # (``settings_local.py``, ``.env``, …). Wholly-ignored
+                # directories stay pruned — see ``_git_ls_files_argv``.
+                var ignored = _git_ls_project_files(root, ignored_only=True)
+                if ignored:
+                    for i in range(len(ignored.value())):
+                        files.append(ignored.value()[i])
+            return files^
     var matcher = load_project_gitignore(root) if respect_gitignore \
         else GitignoreMatcher()
     # Belt-and-suspenders for non-git projects (or git failures): never

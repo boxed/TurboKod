@@ -5,14 +5,14 @@ import CoreGraphics
 // The bundled IBM VGA bitmap font (8×16), matching the terminal/Rust look.
 // Designed at 16px, so 16pt gives an 8pt advance — exactly our cell size.
 // Falls back to Menlo if the bundled TTF is missing.
-func loadCellFont() -> NSFont {
+func loadCellFont(size: CGFloat = 16) -> NSFont {
     if let res = Bundle.main.resourcePath {
         let url = URL(fileURLWithPath: res + "/Px437_IBM_VGA_8x16.ttf")
         if FileManager.default.fileExists(atPath: url.path) {
             CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
             if let descs = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL)
                 as? [CTFontDescriptor], let desc = descs.first {
-                return CTFontCreateWithFontDescriptor(desc, 16, nil) as NSFont
+                return CTFontCreateWithFontDescriptor(desc, size, nil) as NSFont
             }
         }
     }
@@ -20,14 +20,27 @@ func loadCellFont() -> NSFont {
         ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 }
 
+// Default point sizes when config.font_size is 0 ("the font's default"):
+// the bundled bitmap font's 16px design size, and the conventional 13pt
+// for system monospace families.
+let BITMAP_FONT_DEFAULT_SIZE = 16
+let VECTOR_FONT_DEFAULT_SIZE = 13
+
 // Active cell font (Settings ▸ Font). Defaults to the bundled bitmap font;
-// `applyCellFont` swaps in a system monospace family and recomputes the cell
-// metrics — every CellView reads these globals per draw, so the whole grid
-// reflows on the next frame. `cellFontIsBitmap` gates the no-antialias path:
-// the Px437 bitmap must render crisp, vector fonts must not.
+// `applyCellFont` swaps in a system monospace family and/or point size and
+// recomputes the cell metrics — every CellView reads these globals per draw,
+// so the whole grid reflows on the next frame. `cellFontIsBitmap` gates the
+// no-antialias path: bitmap glyphs at their pixel-exact size must render
+// crisp, everything else must not.
 var cellFont = loadCellFont()
 var cellFontIsBitmap = true
-var currentCellFontName = ""   // "" = the bundled default
+var currentCellFontName = ""             // "" = the bundled default
+var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the first apply through
+// Resolved size info the host reports back to the Mojo core after every
+// apply (tk_desktop_set_font_size_info): the point size actually rendering,
+// and the active font's design ("ideal") size — 0 when it has none.
+var cellFontEffectiveSize = BITMAP_FONT_DEFAULT_SIZE
+var cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
 
 // Monospace families the user may pick from (Settings ▸ Font). A lazy
 // static (not a top-level let — those initialize eagerly in main-file
@@ -61,30 +74,101 @@ func fetchFontName(_ h: Int64) -> String {
     return n > 0 ? (String(bytes: buf[0..<n], encoding: .utf8) ?? "") : ""
 }
 
+/// FourCC for a CTFontCopyTable tag (e.g. "EBLC").
+private func fontTableTag(_ s: String) -> CTFontTableTag {
+    var v: UInt32 = 0
+    for u in s.unicodeScalars { v = (v << 8) | (u.value & 0xFF) }
+    return CTFontTableTag(v)
+}
+
+/// Native ("ideal") pixel-per-em size of a font's embedded bitmap strikes,
+/// or 0 when the font has none (ordinary vector fonts). A true bitmap font
+/// only looks right at a strike size — Settings surfaces this as the
+/// "Restore ideal" button. EBLC / CBLC / bloc share the 48-byte
+/// bitmapSize-record layout (ppemY at record offset 45); sbix keeps a
+/// u16 ppem per strike. When a font ships several strikes, pick the one
+/// closest to 16 — the app's classic cell height — preferring the larger
+/// on ties.
+func bitmapStrikePPEM(_ font: NSFont) -> Int {
+    var strikes: [Int] = []
+    let ct = font as CTFont
+    for tag in ["EBLC", "CBLC", "bloc"] {
+        guard let cfData = CTFontCopyTable(ct, fontTableTag(tag), []) else { continue }
+        let d = [UInt8](cfData as Data)
+        guard d.count >= 8 else { continue }
+        let numSizes = Int(d[4]) << 24 | Int(d[5]) << 16 | Int(d[6]) << 8 | Int(d[7])
+        for i in 0..<numSizes {
+            let rec = 8 + i * 48
+            guard rec + 48 <= d.count else { break }
+            let ppem = Int(d[rec + 45])   // ppemY
+            if ppem > 0 { strikes.append(ppem) }
+        }
+    }
+    if let cfData = CTFontCopyTable(ct, fontTableTag("sbix"), []) {
+        let d = [UInt8](cfData as Data)
+        if d.count >= 8 {
+            let numStrikes = Int(d[4]) << 24 | Int(d[5]) << 16 | Int(d[6]) << 8 | Int(d[7])
+            for i in 0..<numStrikes {
+                let op = 8 + i * 4
+                guard op + 4 <= d.count else { break }
+                let off = Int(d[op]) << 24 | Int(d[op + 1]) << 16
+                        | Int(d[op + 2]) << 8 | Int(d[op + 3])
+                guard off >= 0, off + 2 <= d.count else { continue }
+                let ppem = Int(d[off]) << 8 | Int(d[off + 1])
+                if ppem > 0 { strikes.append(ppem) }
+            }
+        }
+    }
+    return strikes.min { a, b in
+        let (da, db) = (abs(a - 16), abs(b - 16))
+        return da != db ? da < db : a > b
+    } ?? 0
+}
+
+/// The bundled Px437 font at `size` points (0 = its 16px design size).
+/// The glyph grid is exactly 8×16 at 16pt, so the cell scales as a strict
+/// 1:2 box. Crisp (no-AA) rendering only at integer multiples of the
+/// design size, where the bitmap pixels land exactly on cell pixels —
+/// fractional scales look better antialiased.
+private func applyBundledCellFont(_ size: CGFloat) {
+    let eff = size > 0 ? size : CGFloat(BITMAP_FONT_DEFAULT_SIZE)
+    cellFont = loadCellFont(size: eff)
+    cellFontEffectiveSize = Int(eff.rounded())
+    cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
+    cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
+    CELL_W = max(1, (eff / 2).rounded())
+    CELL_H = max(1, eff.rounded())
+}
+
 /// Switch the cell font to `name` (a family from `monospaceFontFamilies`;
-/// empty = the bundled bitmap font) and recompute CELL_W/CELL_H from its
-/// metrics. No-op when `name` is already active.
-func applyCellFont(_ name: String) {
-    if name == currentCellFontName { return }
+/// empty = the bundled bitmap font) at `size` points (0 = the font's
+/// default) and recompute CELL_W/CELL_H from its metrics. No-op when both
+/// are already active. Derives `cellFontEffectiveSize` / `cellFontIdealSize`
+/// for the caller to report back to the Mojo core.
+func applyCellFont(_ name: String, size: CGFloat = 0) {
+    if name == currentCellFontName && size == currentCellFontSize { return }
     currentCellFontName = name
+    currentCellFontSize = size
     if name.isEmpty {
-        cellFont = loadCellFont()
-        cellFontIsBitmap = true
-        CELL_W = 8; CELL_H = 16
+        applyBundledCellFont(size)
         return
     }
+    let eff = size > 0 ? size : CGFloat(VECTOR_FONT_DEFAULT_SIZE)
     guard let f = NSFontManager.shared.font(withFamily: name, traits: [],
-                                            weight: 5, size: 13)
-        ?? NSFont(name: name, size: 13) else {
+                                            weight: 5, size: eff)
+        ?? NSFont(name: name, size: eff) else {
         // Unknown family (e.g. config written on another machine): keep
         // the bundled default rather than rendering nothing.
-        cellFont = loadCellFont()
-        cellFontIsBitmap = true
-        CELL_W = 8; CELL_H = 16
+        applyBundledCellFont(size)
         return
     }
     cellFont = f
-    cellFontIsBitmap = false
+    cellFontEffectiveSize = Int(eff.rounded())
+    cellFontIdealSize = bitmapStrikePPEM(f)
+    // A font with embedded bitmap strikes renders crisp (no AA) at exactly
+    // its strike size — same rule as the bundled bitmap font.
+    cellFontIsBitmap = cellFontIdealSize > 0
+        && cellFontEffectiveSize == cellFontIdealSize
     // Cell metrics: a monospace glyph advance for the width, the font's
     // line height for the cell height — same numbers a terminal emulator
     // would use for its grid.
@@ -189,18 +273,26 @@ final class CellView: NSView {
     // check through (a no-op while the config holds the default).
     private var fontVersion: Int64 = -1
 
-    /// Refetch the configured cell font if the Mojo core's font version has
-    /// moved. Returns true when the font actually changed (the grid metrics
-    /// are different, so everything must re-lay-out + redraw).
+    /// Refetch the configured cell font + size if the Mojo core's font
+    /// version has moved. Returns true when the font actually changed (the
+    /// grid metrics are different, so everything must re-lay-out + redraw).
     @discardableResult
     private func refreshFontIfNeeded() -> Bool {
         guard handle != 0 else { return false }
         let v = tk_font_version(handle)
         if v == fontVersion { return false }
         fontVersion = v
-        let prev = currentCellFontName
-        applyCellFont(fetchFontName(handle))
-        return prev != currentCellFontName
+        let prevName = currentCellFontName
+        let prevSize = currentCellFontSize
+        applyCellFont(fetchFontName(handle),
+                      size: CGFloat(tk_font_size(handle)))
+        // Report the resolved effective + ideal sizes back to the core —
+        // the Settings size stepper and "Restore ideal" button read these.
+        tk_desktop_set_font_size_info(handle,
+                                      Int64(cellFontEffectiveSize),
+                                      Int64(cellFontIdealSize))
+        return prevName != currentCellFontName
+            || prevSize != currentCellFontSize
     }
 
     /// Refetch the active theme's palette if the Mojo core's theme version has
@@ -303,6 +395,16 @@ final class CellView: NSView {
         guard handle != 0 else { return false }
         tickSurface(cols(), rows())
         return detectChange()
+    }
+
+    /// Bare tick with no layout / change detection — for views whose window
+    /// is hidden or fully occluded. Keeps the Mojo state machines (pty
+    /// drain, LSP, DAP) advancing so attention events (a Claude turn
+    /// finishing, the debugger stopping) still fire and badge the Dock
+    /// while the app is buried, without paying for Core Text repaints.
+    func tickOnly() {
+        guard handle != 0, surface == .main else { return }
+        tickSurface(cols(), rows())
     }
 
     /// Lay out the current Desktop state and report whether it differs from
@@ -634,6 +736,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // changes). Any visible change resets `idleTicks` to 0 → full rate.
     private var idleTicks = 0
     private var tickSeq = 0
+    // Running Dock-badge count. Attention events (a Claude session in a
+    // terminal pane finishing its turn, the debugger hitting a stop) are
+    // drained from every project Desktop once per tick; while the app is
+    // in the background each batch bounces the Dock icon and adds to this
+    // count. While frontmost the events are discarded — the user is
+    // already looking. Cleared (badge removed) when the app activates.
+    private var attentionBadge = 0
+
+    private func drainAttention() {
+        var n = 0
+        for v in views where v.handle != 0 {
+            n += Int(tk_desktop_take_attention(v.handle))
+        }
+        guard n > 0, !NSApp.isActive else { return }
+        attentionBadge += n
+        NSApp.dockTile.badgeLabel = String(attentionBadge)
+        NSApp.requestUserAttention(.informationalRequest)
+    }
 
     /// Nudge the redraw timer out of deep idle on activity that doesn't
     /// itself trigger a redraw — notably bare mouse motion.
@@ -669,9 +789,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if chromeDesktop != 0 {
             tk_desktop_set_host_owns_menu(chromeDesktop, 1)
             // The chrome Desktop loaded the user config — apply the saved
-            // cell font now so the first window opens with the right grid
-            // metrics instead of reflowing one frame in.
-            applyCellFont(fetchFontName(chromeDesktop))
+            // cell font + size now so the first window opens with the right
+            // grid metrics instead of reflowing one frame in.
+            applyCellFont(fetchFontName(chromeDesktop),
+                          size: CGFloat(tk_font_size(chromeDesktop)))
         }
 
         let args = CommandLine.arguments
@@ -748,8 +869,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // other windows; this is what closes that.
         let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if NSApp.isHidden { return }
             self.tickSeq &+= 1
+            if NSApp.isHidden {
+                // Hidden (Cmd+H): no menu, no windows, nothing to paint —
+                // but keep the Mojo state machines advancing at the deep-
+                // idle rate so attention events (a Claude turn finishing,
+                // a debugger stop) still bounce + badge the Dock.
+                if self.tickSeq % 5 == 0 {
+                    for v in self.views { v.tickOnly() }
+                    self.drainAttention()
+                }
+                return
+            }
             // Three-tier backoff. The work below — tick + layout + the menu
             // snapshot — is what costs CPU; running it less often when nothing
             // is visibly changing is the whole game. Any frame that actually
@@ -769,9 +900,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             var changed = false
             if NSApp.isActive && self.refreshMenu() { changed = true }
+            // Scripted captures (TK_CAPTURE) must keep ticking even when the
+            // window is occluded or the display is asleep — the DAP/LSP state
+            // machines only advance inside tk_desktop_tick, and a capture
+            // waiting on TK_CAPTURE_WHEN=debug-stopped would otherwise stall
+            // until the watchdog kills the session.
+            let capturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
             for v in self.views {
                 guard let w = v.window, w.isVisible,
-                      w.occlusionState.contains(.visible) else { continue }
+                      capturing || w.occlusionState.contains(.visible) else {
+                    // Not paintable (miniaturized / fully covered) — bare-
+                    // tick so background work keeps advancing and attention
+                    // events still fire while the window is buried.
+                    v.tickOnly()
+                    continue
+                }
                 // Only mark for redraw when the laid-out frame actually
                 // differs from what's on screen — no cursor blink means an
                 // idle frame is identical and needs no Core Text repaint.
@@ -807,6 +950,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       w.occlusionState.contains(.visible) else { continue }
                 if sv.pollFrame() { sv.needsDisplay = true; changed = true }
             }
+            self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
         }
         RunLoop.current.add(t, forMode: .common)
@@ -821,6 +965,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                        object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.idleTicks = 0   // run full-rate after refocus
+            // The user is looking again — retire the attention badge.
+            self.attentionBadge = 0
+            NSApp.dockTile.badgeLabel = nil
             self.refreshMenu()
             for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
         }
@@ -1471,7 +1618,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Tell the Desktop the host owns the menu surface — it stops painting
         // the in-grid menu bar and stops routing top-row mouse / Alt-letter
         // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
-        tk_desktop_set_host_owns_menu(h, 1)
+        // TK_MENU_INGRID=1 skips the handoff so the classic in-grid menu bar
+        // stays visible — scripts/screenshots.sh uses it for the terminal-style
+        // README hero shot.
+        if ProcessInfo.processInfo.environment["TK_MENU_INGRID"] == nil {
+            tk_desktop_set_host_owns_menu(h, 1)
+        }
         // Likewise the Settings view renders in its own native window (see
         // settingsWins) — the main surface skips the in-grid overlay and
         // stays interactive while Settings is open.

@@ -38,7 +38,8 @@ from std.memory.span import Span
 from .canvas import Canvas
 from .cell import Cell
 from .claude_detect import (
-    CLAUDE_NONE, ClaudeStateTracker, claude_state_label,
+    CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
+    ClaudeStateTracker, claude_state_label,
 )
 from .clipboard import clipboard_copy
 from .colors import Attr, PANE_BG, WHITE
@@ -129,6 +130,18 @@ struct TerminalPane(Copyable, Movable):
     single unrecognized spinner-glyph frame doesn't flip the title bar
     from ``working`` to ``waiting``. See ``ClaudeStateTracker`` for
     the smoothing contract."""
+    var _attn_armed: Bool
+    """True once a ``CLAUDE_WORKING`` state has been seen by ``tick``.
+    When an armed pane settles into ``waiting`` / ``clean`` / ``none``
+    (turn finished, permission prompt, or Claude exited), an attention
+    event fires and the flag disarms. ``CLAUDE_ACTIVE`` (indeterminate
+    mid-conversation) neither fires nor disarms, so a brief
+    working→active→waiting wobble still produces exactly one event."""
+    var attention_events: Int
+    """Count of attention-worthy Claude transitions since the host
+    last drained via ``take_attention``. The macOS host turns these
+    into a Dock bounce + badge when the app isn't frontmost; the
+    terminal frontend currently ignores them."""
 
     def __init__(out self):
         self.visible = False
@@ -154,6 +167,8 @@ struct TerminalPane(Copyable, Movable):
         self._last_body = Rect.empty()
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
+        self._attn_armed = False
+        self.attention_events = 0
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
@@ -177,6 +192,8 @@ struct TerminalPane(Copyable, Movable):
         self._last_body = copy._last_body
         self._last_panel_top = copy._last_panel_top
         self._claude_tracker = copy._claude_tracker
+        self._attn_armed = copy._attn_armed
+        self.attention_events = copy.attention_events
 
     # --- chrome forwarders ---------------------------------------------
 
@@ -308,6 +325,37 @@ struct TerminalPane(Copyable, Movable):
         var clip = self.vt.take_clipboard()
         if len(clip.as_bytes()) > 0:
             clipboard_copy(clip)
+        # Attention detection lives here (not in ``paint``) so it keeps
+        # running while the pane is minimized or the window is occluded —
+        # the whole point is alerting a user who is looking elsewhere.
+        # Classification is skipped when nothing arrived and we're not
+        # armed: entering ``working`` requires new output, so an idle
+        # shell costs nothing; while armed we must keep polling because
+        # the tracker's working-stickiness can expire with no new bytes.
+        if total > 0 or self._attn_armed:
+            self._note_claude_state(self._claude_tracker.classify(
+                self.vt.tail_rows(20), monotonic_ms(),
+            ))
+
+    def _note_claude_state(mut self, state: UInt8):
+        """Arm on ``working``; fire one attention event when an armed
+        pane reaches ``waiting`` (turn finished / permission prompt),
+        ``clean`` (cleared), or ``none`` (Claude exited — done)."""
+        if state == CLAUDE_WORKING:
+            self._attn_armed = True
+            return
+        if not self._attn_armed:
+            return
+        if state == CLAUDE_WAITING or state == CLAUDE_CLEAN \
+                or state == CLAUDE_NONE:
+            self.attention_events += 1
+            self._attn_armed = False
+
+    def take_attention(mut self) -> Int:
+        """Drain and return the pending attention-event count."""
+        var n = self.attention_events
+        self.attention_events = 0
+        return n
 
     def notify_focus_change(mut self, focused: Bool):
         """Forward the host's focus-in / focus-out to the child when

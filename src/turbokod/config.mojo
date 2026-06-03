@@ -14,9 +14,9 @@ from std.ffi import external_call
 
 from .file_io import read_file, stat_file, write_file
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_object, json_str,
-    json_get_bool, json_get_string, json_get_string_array,
-    parse_json,
+    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
+    json_str, json_get_bool, json_get_int, json_get_string,
+    json_get_string_array, parse_json,
 )
 from .posix import getenv_value
 
@@ -47,6 +47,14 @@ def _config_path() -> String:
     if len(dir.as_bytes()) == 0:
         return String("")
     return dir + String("/config.json")
+
+
+# Clamp range for an explicit ``font_size``. Generous on purpose — the
+# point is to reject nonsense (0-adjacent and absurd sizes), not to
+# police taste. Both the Settings size stepper and ``Desktop.set_font_size``
+# enforce the same range.
+comptime MIN_FONT_SIZE = 6
+comptime MAX_FONT_SIZE = 128
 
 
 def default_font_label() -> String:
@@ -187,6 +195,12 @@ struct TurbokodConfig(Copyable, Movable):
     # bundled Px437 IBM VGA bitmap font. The terminal frontend ignores it
     # — the terminal emulator owns the font there.
     var font: String
+    # Settings ▸ Font size in points (native macOS frontend only). 0 means
+    # "the font's default size" — 16 for the bundled bitmap font (its
+    # design size), 13 for system monospace families — so a config that
+    # never touched the size keeps each font's natural default when the
+    # family changes.
+    var font_size: Int
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -218,6 +232,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = True
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
+        self.font_size = 0
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
@@ -236,6 +251,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = copy.ensure_final_newline
         self.theme = copy.theme
         self.font = copy.font
+        self.font_size = copy.font_size
         self.recent_projects = copy.recent_projects.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
@@ -323,6 +339,9 @@ def load_config() -> TurbokodConfig:
         if len(theme_v.as_bytes()) > 0:
             cfg.theme = theme_v
         cfg.font = json_get_string(root, String("font"))
+        cfg.font_size = json_get_int(
+            root, String("font_size"), cfg.font_size,
+        )
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -406,6 +425,7 @@ def save_config(config: TurbokodConfig) -> Bool:
     )
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
+    root.put(String("font_size"), json_int(config.font_size))
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))

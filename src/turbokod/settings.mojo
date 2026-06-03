@@ -45,7 +45,9 @@ from .colors import (
     SYN_NUMBER, SYN_IDENT,
 )
 from .theme import theme_names
-from .config import LanguageServerOverride, OnSaveAction
+from .config import (
+    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
+)
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
     user_dictionary_installed,
@@ -91,6 +93,9 @@ comptime _FOCUS_LANG_EDIT     = UInt8(12)
 comptime _FOCUS_LANG_REMOVE   = UInt8(13)
 comptime _FOCUS_THEME_LIST    = UInt8(16)
 comptime _FOCUS_FONT_LIST     = UInt8(17)
+comptime _FOCUS_FONT_SMALLER  = UInt8(18)
+comptime _FOCUS_FONT_LARGER   = UInt8(19)
+comptime _FOCUS_FONT_IDEAL    = UInt8(20)
 
 
 # --- section indices ------------------------------------------------------
@@ -127,6 +132,9 @@ comptime _BTN_DICT_REMOVE  = 5
 comptime _BTN_LANG_ADD     = 6
 comptime _BTN_LANG_EDIT    = 7
 comptime _BTN_LANG_REMOVE  = 8
+comptime _BTN_FONT_SMALLER = 9
+comptime _BTN_FONT_LARGER  = 10
+comptime _BTN_FONT_IDEAL   = 11
 
 # Width of the inline dropdown strip in the Editor section. Wide enough
 # for "Automatic" plus the right-edge ``▼`` indicator.
@@ -273,6 +281,20 @@ struct Settings(Movable):
     hides the Font section entirely."""
     var _last_scroll_font: Int
     """Counterpart of ``_last_scroll_action`` for ``selected_font``."""
+    var font_size_choice: Int
+    """Working copy of ``TurbokodConfig.font_size`` — 0 means "the
+    font's default size", anything else is an explicit point size. The
+    size stepper writes here and raises ``dirty``; the host applies it
+    live via ``Desktop.set_font_size``."""
+    var _font_effective_size: Int
+    """Host-reported point size actually rendering right now (resolves
+    the 0-means-default case for display). Refreshed every paint via
+    ``update_font_info`` so it tracks live font-family changes."""
+    var _font_ideal_size: Int
+    """Host-reported design size of the active font — 16 for the
+    built-in bitmap font, the embedded bitmap-strike ppem for true
+    bitmap fonts, 0 when unknown (ordinary vector fonts). Gates the
+    "Restore ideal" button."""
     var detached: Bool
     """True when the host renders Settings in its own native window (the
     macOS frontend; see ``Desktop.set_settings_detached``). The dialog then
@@ -343,6 +365,16 @@ struct Settings(Movable):
             ShadowButton(String(" - Remove "), 0, 0),
             _FOCUS_LANG_REMOVE, True,
         ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" - "), 0, 0), _FOCUS_FONT_SMALLER, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" + "), 0, 0), _FOCUS_FONT_LARGER, True,
+        ))
+        self._buttons.append(_PlacedButton(
+            ShadowButton(String(" Restore ideal "), 0, 0),
+            _FOCUS_FONT_IDEAL, True,
+        ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
         self._trim_cb = Checkbox(
@@ -366,6 +398,9 @@ struct Settings(Movable):
         self.selected_font = 0
         self._font_names = List[String]()
         self._last_scroll_font = -2
+        self.font_size_choice = 0
+        self._font_effective_size = 0
+        self._font_ideal_size = 0
         self.detached = False
         self.bounds = Rect(0, 0, 0, 0)
         self._moving = False
@@ -386,6 +421,9 @@ struct Settings(Movable):
         theme: String = String("Turbo C++ 3.0"),
         font: String = String(""),
         var font_names: List[String] = List[String](),
+        font_size: Int = 0,
+        font_effective_size: Int = 0,
+        font_ideal_size: Int = 0,
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -441,6 +479,17 @@ struct Settings(Movable):
             if self._font_names[i] == font:
                 self.selected_font = i
                 break
+        self.font_size_choice = font_size
+        self._font_effective_size = font_effective_size
+        self._font_ideal_size = font_ideal_size
+
+    def update_font_info(mut self, effective: Int, ideal: Int):
+        """Host pushes the live effective/ideal sizes every paint —
+        a font-family change mid-dialog changes both, and the values
+        only become known a frame after the host applies the font.
+        Display-only; never touches ``dirty``."""
+        self._font_effective_size = effective
+        self._font_ideal_size = ideal
 
     def _rebuild_languages_view(mut self):
         self.languages_view = apply_language_overrides(
@@ -496,15 +545,19 @@ struct Settings(Movable):
         if not self.detached:
             paint_drop_shadow(canvas, rect)
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         # Bind every write inside the Settings dialog to its workspace
         # rect — ``rect`` excludes the menu bar above and status bar
         # below, so even an over-wide section row can't bleed into
         # them.
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
-        painter.draw_box(canvas, rect, border, True)
-        paint_window_title(canvas, rect, String(" Settings "), bg, bg)
+        # In-grid the dialog draws its own window chrome (border + title);
+        # detached the native window's title bar already provides both, so
+        # painting them again would be redundant.
+        if not self.detached:
+            var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
+            painter.draw_box(canvas, rect, border, True)
+            paint_window_title(canvas, rect, String(" Settings "), bg, bg)
         # Left rail.
         self._paint_sections(canvas, painter, rect)
         # Right pane: section header + per-section content.
@@ -737,15 +790,97 @@ struct Settings(Movable):
         elif self.section == _SECTION_FONT:
             self._paint_font_section(canvas, sub, inner)
 
+    def _font_display_size(self) -> Int:
+        """The point size to show in the stepper: the explicit choice,
+        or the host-reported effective size when the choice is 0 (the
+        font's default). Falls back to 16 before the host has reported
+        anything (shouldn't happen in practice — the report lands on
+        the first frame)."""
+        if self.font_size_choice > 0:
+            return self.font_size_choice
+        if self._font_effective_size > 0:
+            return self._font_effective_size
+        return 16
+
+    def _bump_font_size(mut self, delta: Int):
+        """Step the size by ``delta`` from the currently displayed
+        value, clamped, committing an explicit size + ``dirty``."""
+        var s = self._font_display_size() + delta
+        if s < MIN_FONT_SIZE:
+            s = MIN_FONT_SIZE
+        if s > MAX_FONT_SIZE:
+            s = MAX_FONT_SIZE
+        if s != self.font_size_choice:
+            self.font_size_choice = s
+            self.dirty = True
+
+    def _restore_ideal_font_size(mut self):
+        """Snap the size back to the active font's design size (the
+        host-reported ideal). No-op when the host reported none."""
+        if self._font_ideal_size <= 0:
+            return
+        if self.font_size_choice != self._font_ideal_size:
+            self.font_size_choice = self._font_ideal_size
+            self.dirty = True
+
     def _paint_font_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
-        """Scrollable list of the host's monospace font families (the
-        built-in bitmap font first). Selecting a row applies it live —
-        the whole UI re-renders in the new font, which *is* the preview
-        — so there's no separate sample pane like the Theme section's."""
+        """A size stepper row, then a scrollable list of the host's
+        monospace font families (the built-in bitmap font first).
+        Selecting a row applies it live — the whole UI re-renders in
+        the new font, which *is* the preview — so there's no separate
+        sample pane like the Theme section's."""
         var hint = Attr(BLUE, LIGHT_GRAY)
-        var list_top = inner.a.y + 2
+        var bg = Attr(BLACK, LIGHT_GRAY)
+        # Size stepper: ``Size: [ - ] 16 pt [ + ]   [ Restore ideal ]``.
+        # Buttons claim two rows (face + drop shadow).
+        var size_y = inner.a.y + 2
+        var x = inner.a.x
+        _ = painter.put_text(canvas, Point(x, size_y), String("Size:"), bg)
+        x += 6
+        self._buttons[_BTN_FONT_SMALLER].button.move_to(x, size_y)
+        self._buttons[_BTN_FONT_SMALLER].enabled = (
+            self._font_display_size() > MIN_FONT_SIZE
+        )
+        x += self._buttons[_BTN_FONT_SMALLER].button.total_width() + 1
+        var size_label = String(self._font_display_size()) + String(" pt")
+        if self.font_size_choice == 0:
+            size_label += String(" (default)")
+        _ = painter.put_text(canvas, Point(x, size_y), size_label, bg)
+        x += display_columns(size_label) + 1
+        self._buttons[_BTN_FONT_LARGER].button.move_to(x, size_y)
+        self._buttons[_BTN_FONT_LARGER].enabled = (
+            self._font_display_size() < MAX_FONT_SIZE
+        )
+        x += self._buttons[_BTN_FONT_LARGER].button.total_width() + 3
+        # "Restore ideal" only renders when the active font has a known
+        # design size (the built-in bitmap font, or a font with embedded
+        # bitmap strikes) *and* it fits — buttons paint straight to the
+        # canvas (no painter clipping), so an overflow would spill past
+        # the dialog border. Greyed out while already at that size.
+        var ideal_visible = False
+        if self._font_ideal_size > 0:
+            self._buttons[_BTN_FONT_IDEAL].button.label = (
+                String(" Restore ideal (")
+                + String(self._font_ideal_size) + String(" pt) ")
+            )
+            ideal_visible = (
+                x + self._buttons[_BTN_FONT_IDEAL].button.total_width()
+                <= inner.b.x
+            )
+        if ideal_visible:
+            self._buttons[_BTN_FONT_IDEAL].button.move_to(x, size_y)
+            self._buttons[_BTN_FONT_IDEAL].enabled = (
+                self._font_display_size() != self._font_ideal_size
+            )
+        else:
+            self._buttons[_BTN_FONT_IDEAL].enabled = False
+        self._paint_button(canvas, _BTN_FONT_SMALLER)
+        self._paint_button(canvas, _BTN_FONT_LARGER)
+        if ideal_visible:
+            self._paint_button(canvas, _BTN_FONT_IDEAL)
+        var list_top = inner.a.y + 5
         var list_bottom = inner.b.y - 1
         if list_bottom <= list_top:
             return
@@ -1524,6 +1659,10 @@ struct Settings(Movable):
         elif self.section == _SECTION_FONT:
             if len(self._font_names) > 0:
                 ordered.append(_FOCUS_FONT_LIST)
+            ordered.append(_FOCUS_FONT_SMALLER)
+            ordered.append(_FOCUS_FONT_LARGER)
+            if self._font_ideal_size > 0:
+                ordered.append(_FOCUS_FONT_IDEAL)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -1755,6 +1894,15 @@ struct Settings(Movable):
         if self.focus == _FOCUS_LANG_LIST:
             self._edit_language()
             return True
+        if self.focus == _FOCUS_FONT_SMALLER:
+            self._bump_font_size(-1)
+            return True
+        if self.focus == _FOCUS_FONT_LARGER:
+            self._bump_font_size(1)
+            return True
+        if self.focus == _FOCUS_FONT_IDEAL:
+            self._restore_ideal_font_size()
+            return True
         return True
 
     def _request_dict_install(mut self):
@@ -1962,8 +2110,11 @@ struct Settings(Movable):
                 return True
         elif self.section == _SECTION_FONT:
             var inner = self._right_rect(rect)
+            # +5: the size-stepper row (face + shadow + a blank row)
+            # sits above the family list — keep in sync with
+            # ``_paint_font_section``.
             var list_rect = Rect(
-                inner.a.x, inner.a.y + 2, inner.b.x, inner.b.y - 1,
+                inner.a.x, inner.a.y + 5, inner.b.x, inner.b.y - 1,
             )
             if list_rect.contains(event.pos):
                 var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
@@ -2003,6 +2154,12 @@ struct Settings(Movable):
                 idx == _BTN_LANG_ADD or idx == _BTN_LANG_EDIT
                 or idx == _BTN_LANG_REMOVE
             )
+        if self.section == _SECTION_FONT:
+            if idx == _BTN_FONT_IDEAL:
+                # Not painted at all when the host reported no ideal —
+                # its stale rect must not eat clicks.
+                return self._font_ideal_size > 0
+            return idx == _BTN_FONT_SMALLER or idx == _BTN_FONT_LARGER
         return False
 
 

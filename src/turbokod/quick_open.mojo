@@ -6,11 +6,15 @@ Enter submits the selected entry; Esc cancels. ``submitted`` /
 ``selected_path`` mirror ``FileDialog`` so the desktop owner can either
 inspect them or rely on ``Desktop`` to dispatch into ``open_file``.
 
-The candidate set comes from ``walk_project_files(root,
-include_ignored_files=True)`` — ignored *directories* (``node_modules``,
-``venv``, ``__pycache__``, vendored trees like ``tvision/``) are still
-pruned so the list stays usable, but individual gitignored files like
+The candidate set keeps ignored *directories* (``node_modules``,
+``venv``, ``__pycache__``, vendored trees like ``tvision/``) pruned so
+the list stays usable, but individual gitignored files like
 ``settings_local.py`` or ``.env`` are kept so the user can open them.
+On the async git path that's two parallel ``FileIndexer``s — the main
+``ls-files -co`` enumeration plus an ignored-only one whose
+``--directory`` flag collapses ignored dirs to a skipped single entry;
+the non-git fallback gets the same split from ``walk_project_files(root,
+include_ignored_files=True)``.
 """
 
 from std.collections.list import List
@@ -102,12 +106,16 @@ struct QuickOpen(Movable):
     # so ``handle_mouse`` can route clicks back to the field without
     # re-running layout. Negative width = "no paint yet".
     var _input_rect: Rect
-    # Async file indexer. Owned for the duration of ``open()`` → first
-    # ``tick()`` that observes ``indexer.alive==False``. ``indexing``
-    # tracks whether the indexer is still running so ``paint`` can show
+    # Async file indexers. Owned for the duration of ``open()`` → first
+    # ``tick()`` that observes ``indexer.alive==False``. ``_indexer`` is
+    # the main ``ls-files -co`` enumeration; ``_ignored_indexer`` runs
+    # the ignored-only pass in parallel so individually-gitignored files
+    # (``.env``, ``settings_local.py``) make the list too. ``indexing``
+    # tracks whether either is still running so ``paint`` can show
     # an "<indexing… N>" status; ``truncated`` records whether the cap
     # at ``QUICK_OPEN_FILE_CAP`` was hit.
     var _indexer: Optional[FileIndexer]
+    var _ignored_indexer: Optional[FileIndexer]
     var indexing: Bool
     var truncated: Bool
     # Query text remembered across close/reopen, scoped to the project-
@@ -159,6 +167,7 @@ struct QuickOpen(Movable):
         self.picks_project = False
         self._input_rect = Rect(0, 0, 0, 0)
         self._indexer = Optional[FileIndexer]()
+        self._ignored_indexer = Optional[FileIndexer]()
         self.indexing = False
         self.truncated = False
         self._saved_query = String("")
@@ -223,12 +232,20 @@ struct QuickOpen(Movable):
         var idx = FileIndexer.start(self.root)
         if idx:
             self._indexer = idx^
+            # Parallel ignored-only pass: individually-gitignored files
+            # (``.env``, ``settings_local.py``) are openable too. Ignored
+            # *directories* arrive as single ``dir/`` entries the indexer
+            # drops, so ``node_modules`` content never floods the list.
+            self._ignored_indexer = FileIndexer.start(
+                self.root, ignored_only=True,
+            )
             self.indexing = True
         else:
             # Non-git project (or git unavailable): fall back to the
             # synchronous walk. Bounded by ``QUICK_OPEN_FILE_CAP`` so a
             # malformed huge non-git tree still doesn't hang us forever.
             self._indexer = Optional[FileIndexer]()
+            self._ignored_indexer = Optional[FileIndexer]()
             self.indexing = False
             var paths = walk_project_files(self.root, include_ignored_files=True)
             for i in range(len(paths)):
@@ -272,22 +289,44 @@ struct QuickOpen(Movable):
         """
         if not self.active:
             return
-        if not self._indexer:
-            return
-        var new_paths = self._indexer.value().poll(self.root)
-        if len(new_paths) > 0:
+        var changed = False
+        if self._indexer:
+            var new_paths = self._indexer.value().poll(self.root)
             for i in range(len(new_paths)):
                 if len(self.entries) >= QUICK_OPEN_FILE_CAP:
+                    self.truncated = True
                     break
                 self._append_path(new_paths[i])
-            self._refilter()
-        if not self._indexer.value().alive:
-            # Indexer finished. Pick up its ``truncated`` flag and drop
-            # the handle so future ticks short-circuit on the ``not
-            # self._indexer`` check above.
-            self.truncated = self._indexer.value().truncated
-            self._indexer = Optional[FileIndexer]()
-            self.indexing = False
+            if len(new_paths) > 0:
+                changed = True
+            if not self._indexer.value().alive:
+                # Indexer finished. Pick up its ``truncated`` flag and
+                # drop the handle so future ticks skip it.
+                if self._indexer.value().truncated:
+                    self.truncated = True
+                self._indexer = Optional[FileIndexer]()
+                changed = True
+        if self._ignored_indexer:
+            var ign_paths = self._ignored_indexer.value().poll(self.root)
+            for i in range(len(ign_paths)):
+                if len(self.entries) >= QUICK_OPEN_FILE_CAP:
+                    self.truncated = True
+                    break
+                self._append_path(ign_paths[i])
+            if len(ign_paths) > 0:
+                changed = True
+            if not self._ignored_indexer.value().alive:
+                if self._ignored_indexer.value().truncated:
+                    self.truncated = True
+                self._ignored_indexer = Optional[FileIndexer]()
+                changed = True
+        # "Indexing…" shows while either enumeration is still running.
+        self.indexing = False
+        if self._indexer:
+            self.indexing = True
+        if self._ignored_indexer:
+            self.indexing = True
+        if changed:
             self._refilter()
 
     def open_recent(
@@ -355,13 +394,17 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
-        # Tear down the indexer if it's still running — SIGTERM the
-        # child so it doesn't keep enumerating after the user dismissed
-        # the picker. ``_terminate`` is best-effort; the shim's atexit
-        # reaper catches anything still alive when the process exits.
+        # Tear down the indexers if still running — SIGTERM the
+        # children so they don't keep enumerating after the user
+        # dismissed the picker. ``_terminate`` is best-effort; the
+        # shim's atexit reaper catches anything still alive when the
+        # process exits.
         if self._indexer:
             self._indexer.value()._terminate()
             self._indexer = Optional[FileIndexer]()
+        if self._ignored_indexer:
+            self._ignored_indexer.value()._terminate()
+            self._ignored_indexer = Optional[FileIndexer]()
         self.indexing = False
         self.truncated = False
 

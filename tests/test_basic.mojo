@@ -59,7 +59,8 @@ from turbokod.desktop import (
     EDITOR_NEW, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
-    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
+    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_GRAMMARS, PROJECT_CONFIG_TARGETS,
+    PROJECT_FIND,
     PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX,
@@ -81,7 +82,8 @@ from turbokod.local_changes import LocalChanges, build_minimal_patch
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
-    GitignoreMatcher, find_in_project, replace_in_project, walk_project_files,
+    FileIndexer, GitignoreMatcher, find_in_project, replace_in_project,
+    walk_project_files,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.project_targets import (
@@ -185,7 +187,9 @@ from turbokod.project_grammars import (
     GrammarOverride, load_project_grammar_overrides, write_grammar_overrides,
 )
 from turbokod.action_editor import ActionEditor
-from turbokod.config import LanguageServerOverride, OnSaveAction
+from turbokod.config import (
+    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
+)
 from turbokod.dropdown import Dropdown
 from turbokod.settings import Settings
 from turbokod.onig import OnigRegex, onig_global_init
@@ -386,6 +390,40 @@ def test_claude_state_label_round_trip() raises:
     assert_equal(claude_state_label(CLAUDE_WAITING), String("waiting"))
     assert_equal(claude_state_label(CLAUDE_WORKING), String("working"))
     assert_equal(claude_state_label(CLAUDE_ACTIVE),  String("active"))
+
+
+def test_terminal_pane_attention_on_working_to_waiting() raises:
+    """Working → waiting fires exactly one attention event; the
+    intermediate ``active`` wobble neither fires nor disarms."""
+    var pane = TerminalPane()
+    pane._note_claude_state(CLAUDE_WORKING)
+    assert_equal(pane.take_attention(), 0)
+    pane._note_claude_state(CLAUDE_ACTIVE)       # between-turns wobble
+    assert_equal(pane.take_attention(), 0)
+    pane._note_claude_state(CLAUDE_WAITING)
+    assert_equal(pane.take_attention(), 1)
+    # Disarmed: staying in waiting doesn't keep firing.
+    pane._note_claude_state(CLAUDE_WAITING)
+    assert_equal(pane.take_attention(), 0)
+    # Claude exiting after a working stint counts as "done".
+    pane._note_claude_state(CLAUDE_WORKING)
+    pane._note_claude_state(CLAUDE_NONE)
+    assert_equal(pane.take_attention(), 1)
+    # Waiting without ever having been working is not attention-worthy.
+    pane._note_claude_state(CLAUDE_WAITING)
+    assert_equal(pane.take_attention(), 0)
+
+
+def test_desktop_take_attention_drains_panes_and_dap() raises:
+    """``Desktop.take_attention_events`` sums + clears the Desktop
+    counter (debugger stops) and every terminal pane's counter."""
+    var d = Desktop()
+    d.attention_events = 1                       # as bumped by dap_tick
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WORKING)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING)
+    assert_equal(d.take_attention_events(), 2)
+    assert_equal(d.take_attention_events(), 0)   # drained
 
 
 def test_point_arithmetic() raises:
@@ -1719,15 +1757,18 @@ def test_desktop_project_lifecycle() raises:
     # Label stays "Project" — the project name lives in the window
     # title bar, not the menu label.
     assert_equal(d.menu_bar.menus[idx].label, String("Project"))
-    # Active-project items: tree-toggle, configure-targets, separator,
+    # Active-project items: configure-targets, configure-grammars,
     # separator (no other recents survive — ``_append_recent_project_items``
-    # skips the active one), close. ``_set_project`` drops the orphan
+    # skips the active one), close. (The file-tree cycle lives in the
+    # host's View menu, not here.) ``_set_project`` drops the orphan
     # separator only when the recents block is entirely empty; with a
     # single matching-active recent we still see one separator (between
     # the project actions and Close project). Separators carry no action.
-    assert_equal(d.menu_bar.menus[idx].items[0].action, PROJECT_TREE_ACTION)
     assert_equal(
-        d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_TARGETS,
+        d.menu_bar.menus[idx].items[0].action, PROJECT_CONFIG_TARGETS,
+    )
+    assert_equal(
+        d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_GRAMMARS,
     )
     var last = len(d.menu_bar.menus[idx].items) - 1
     assert_equal(
@@ -1848,30 +1889,104 @@ def test_file_tree_filters_dotfiles() raises:
     assert_true(saw_gitignore)
 
 
-def test_desktop_workspace_shrinks_with_file_tree() raises:
+def test_file_tree_chevron_click_expands_immediately() raises:
+    """A click on a directory's expand/collapse chevron toggles it on the
+    first click — it must not take one click to select the row and a
+    second to expand."""
+    var t = FileTree()
+    t.open(String("."))
+    var screen = Rect(0, 0, 100, 30)
+    var area = t.rect(screen)
+    var examples_idx = -1
+    for i in range(len(t.entries)):
+        if t.entries[i].name == String("examples") and t.entries[i].is_dir:
+            examples_idx = i
+            break
+    assert_true(examples_idx >= 0)
+    # Nothing selected yet — the chevron click must not need a
+    # select-first round trip.
+    assert_equal(t.selected, -1)
+    var initial_count = len(t.entries)
+    # Chevron column for a depth-0 entry is the first content column;
+    # rows start one below the title row.
+    var chevron_x = area.a.x + 1
+    var row_y = area.a.y + 1 + examples_idx
+    var click = Event.mouse_event(
+        Point(chevron_x, row_y), MOUSE_BUTTON_LEFT, True, False,
+    )
+    assert_true(t.handle_mouse(click, screen))
+    assert_true(t.entries[examples_idx].is_expanded)
+    assert_true(len(t.entries) > initial_count)
+    assert_equal(t.selected, examples_idx)
+    # Same click again collapses right back — still single-click.
+    assert_true(t.handle_mouse(click, screen))
+    assert_false(t.entries[examples_idx].is_expanded)
+    assert_equal(len(t.entries), initial_count)
+    # A click on the *name* (past the chevron) of a non-selected dir
+    # still selects without toggling, preserving the two-step open for
+    # everything that isn't the chevron.
+    t.selected = -1
+    var name_click = Event.mouse_event(
+        Point(chevron_x + 2, row_y), MOUSE_BUTTON_LEFT, True, False,
+    )
+    assert_true(t.handle_mouse(name_click, screen))
+    assert_false(t.entries[examples_idx].is_expanded)
+    assert_equal(t.selected, examples_idx)
+
+
+def test_file_tree_starts_at_top_row_when_host_owns_menu() raises:
+    """Terminal frontend: row 0 is the in-grid menu bar, the tree starts
+    at row 1. Swift frontend (host-owned menu): the workspace starts at
+    row 0 and Desktop.paint syncs the tree up one row so the panel
+    doesn't render a blank line above its title."""
+    var t = FileTree()
+    var screen = Rect(0, 0, 100, 30)
+    assert_equal(t.rect(screen).a.y, 1)   # terminal default
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    d._cycle_file_tree()
+    d.host_owns_menu = True
+    var canvas = Canvas(screen.width(), screen.height())
+    d.paint(canvas, screen)
+    assert_equal(d.file_tree.top, 0)
+    assert_equal(d.file_tree.rect(screen).a.y, 0)
+    # And back: an in-grid menu reclaims row 0.
+    d.host_owns_menu = False
+    d.paint(canvas, screen)
+    assert_equal(d.file_tree.rect(screen).a.y, 1)
+
+
+def test_desktop_file_tree_cycle_shrinks_workspace() raises:
+    """The View-menu file-tree item is a three-way cycle:
+    hidden → docked right → docked left → hidden. The workspace gives
+    up ``FILE_TREE_WIDTH`` columns on whichever side the tree occupies."""
     var d = Desktop()
     var screen = Rect(0, 0, 100, 30)
     var ws_no_tree = d.workspace_rect(screen)
+    assert_equal(ws_no_tree.a.x, 0)
     assert_equal(ws_no_tree.b.x, 100)
-    # Detect project, then toggle the tree on via the menu action handler.
+    # Detect project, then cycle the tree on via the menu action handler.
     d.detect_project_from(String("examples/hello.mojo"))
-    d._toggle_file_tree()
+    d._cycle_file_tree()
     assert_true(d.file_tree.visible)
-    var ws_tree = d.workspace_rect(screen)
-    assert_equal(ws_tree.b.x, 100 - FILE_TREE_WIDTH)
-    # Tree-toggle item label should now read "Hide file tree".
-    assert_equal(
-        d.menu_bar.menus[d._project_menu_idx].items[0].label,
-        String("Hide file tree"),
-    )
-    # Toggling again hides the tree and restores workspace + label.
-    d._toggle_file_tree()
+    assert_false(d.file_tree.dock_left)
+    var ws_right = d.workspace_rect(screen)
+    assert_equal(ws_right.a.x, 0)
+    assert_equal(ws_right.b.x, 100 - FILE_TREE_WIDTH)
+    assert_equal(d.file_tree.rect(screen).a.x, 100 - FILE_TREE_WIDTH)
+    # Second step: same tree, docked on the left edge instead.
+    d._cycle_file_tree()
+    assert_true(d.file_tree.visible)
+    assert_true(d.file_tree.dock_left)
+    var ws_left = d.workspace_rect(screen)
+    assert_equal(ws_left.a.x, FILE_TREE_WIDTH)
+    assert_equal(ws_left.b.x, 100)
+    assert_equal(d.file_tree.rect(screen).a.x, 0)
+    # Third step: hidden again, workspace back to full width.
+    d._cycle_file_tree()
     assert_false(d.file_tree.visible)
+    assert_equal(d.workspace_rect(screen).a.x, 0)
     assert_equal(d.workspace_rect(screen).b.x, 100)
-    assert_equal(
-        d.menu_bar.menus[d._project_menu_idx].items[0].label,
-        String("Show file tree"),
-    )
 
 
 def test_window_min_size_enforced_at_construction() raises:
@@ -4212,6 +4327,130 @@ def test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs() rais
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
+def test_walk_project_files_git_fast_path_includes_ignored_files() raises:
+    """Same contract as the manual-walk test above, but through the git
+    fast path (``root`` is a real checkout, so ``walk_project_files``
+    shells out to ``git ls-files``). ``include_ignored_files=True`` must
+    surface a file the ``.gitignore`` names explicitly while still
+    pruning the contents of an ignored *directory* — previously the fast
+    path dropped the flag entirely and ignored files never made the
+    quick-open list on git projects."""
+    var root = _temp_path(String("_walk_git_ignored"))
+    var init = List[String]()
+    init.append(String("git"))
+    init.append(String("init"))
+    init.append(String("-q"))
+    init.append(root)
+    var cap = capture_command(init)
+    if Int(cap.status) != 0:
+        return  # no git available — fast path can't be exercised
+    var nm = join_path(root, String("node_modules"))
+    _ = external_call["mkdir", Int32](
+        (nm + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(
+        join_path(root, String(".gitignore")),
+        String("settings_local.py\nnode_modules/\n"),
+    ))
+    assert_true(write_file(
+        join_path(root, String("settings.py")), String("# main\n"),
+    ))
+    assert_true(write_file(
+        join_path(root, String("settings_local.py")), String("# local\n"),
+    ))
+    assert_true(write_file(
+        join_path(nm, String("dep.js")), String("// noise\n"),
+    ))
+
+    # Default strict mode: ignored file hidden, ignored dir pruned.
+    var strict = walk_project_files(root)
+    var strict_saw_local = False
+    for i in range(len(strict)):
+        if _contains(strict[i], String("settings_local.py")):
+            strict_saw_local = True
+    assert_false(strict_saw_local)
+
+    # Picker mode: ignored file shows up; ignored dir contents stay out.
+    var picker = walk_project_files(root, include_ignored_files=True)
+    var picker_saw_local = False
+    var picker_saw_main = False
+    var picker_saw_node = False
+    for i in range(len(picker)):
+        if _contains(picker[i], String("settings_local.py")):
+            picker_saw_local = True
+        if _contains(picker[i], String("/settings.py")):
+            picker_saw_main = True
+        if _contains(picker[i], String("/node_modules/")):
+            picker_saw_node = True
+    assert_true(picker_saw_local)
+    assert_true(picker_saw_main)
+    assert_false(picker_saw_node)
+
+    # ``.git`` is deep — clean up with rm -rf rather than unlink/rmdir.
+    var rm = List[String]()
+    rm.append(String("rm"))
+    rm.append(String("-rf"))
+    rm.append(root)
+    _ = capture_command(rm)
+
+
+def test_file_indexer_ignored_mode_skips_directory_entries() raises:
+    """The async ``FileIndexer`` in ``ignored_only`` mode (QuickOpen's
+    second enumeration) must yield individually-gitignored files but
+    drop the ``dir/`` entries ``--directory`` emits for wholly-ignored
+    directories — its ``poll`` parses the NUL stream separately from
+    the sync ``_git_ls_project_files`` path, so test it separately."""
+    var root = _temp_path(String("_indexer_ignored"))
+    var init = List[String]()
+    init.append(String("git"))
+    init.append(String("init"))
+    init.append(String("-q"))
+    init.append(root)
+    var cap = capture_command(init)
+    if Int(cap.status) != 0:
+        return  # no git available
+    var nm = join_path(root, String("node_modules"))
+    _ = external_call["mkdir", Int32](
+        (nm + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(
+        join_path(root, String(".gitignore")),
+        String(".env\nnode_modules/\n"),
+    ))
+    assert_true(write_file(join_path(root, String(".env")), String("X=1\n")))
+    assert_true(write_file(
+        join_path(nm, String("dep.js")), String("// noise\n"),
+    ))
+
+    var idx_opt = FileIndexer.start(root, ignored_only=True)
+    assert_true(Bool(idx_opt))
+    var got = List[String]()
+    # Poll until the child exits; tiny repo, so bound the wait at ~10 s.
+    for _ in range(2000):
+        var batch = idx_opt.value().poll(root)
+        for i in range(len(batch)):
+            got.append(batch[i])
+        if not idx_opt.value().alive:
+            break
+        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
+    assert_false(idx_opt.value().alive)
+    var saw_env = False
+    var saw_dir_entry = False
+    for i in range(len(got)):
+        if _contains(got[i], String("/.env")):
+            saw_env = True
+        if _contains(got[i], String("node_modules")):
+            saw_dir_entry = True
+    assert_true(saw_env)
+    assert_false(saw_dir_entry)
+
+    var rm = List[String]()
+    rm.append(String("rm"))
+    rm.append(String("-rf"))
+    rm.append(root)
+    _ = capture_command(rm)
+
+
 def _hl_lines(*texts: String) -> List[String]:
     var out = List[String]()
     for t in texts:
@@ -4621,15 +4860,30 @@ def test_settings_windowed_move_and_resize() raises:
 
 def test_settings_detached_fills_surface() raises:
     """Detached (native settings window) the dialog fills the whole
-    surface — the host window provides move/resize chrome instead."""
+    surface and skips the in-grid window chrome — the host window
+    provides the title bar, close button, and move/resize instead."""
     var s = Settings()
     s.detached = True
     s.open(List[OnSaveAction](), False)
     var c = Canvas(80, 24)
     c.clear(default_attr())
     s.paint(c, Rect(0, 0, 80, 24))
-    assert_equal(c.get(0, 0).glyph, String("╔"))
-    assert_equal(c.get(79, 23).glyph, String("╝"))
+    # No border box, no " Settings " title — just the dialog bg fill
+    # edge to edge.
+    assert_equal(c.get(0, 0).glyph, String(" "))
+    assert_equal(c.get(79, 23).glyph, String(" "))
+    var title_found = False
+    for x in range(80):
+        if c.get(x, 0).glyph == String("S"):
+            title_found = True
+    assert_false(title_found)
+    # In-grid still draws its own chrome.
+    var s2 = Settings()
+    s2.open(List[OnSaveAction](), False)
+    var c2 = Canvas(80, 24)
+    c2.clear(default_attr())
+    s2.paint(c2, Rect(0, 0, 80, 24))
+    assert_equal(c2.get(s2.bounds.a.x, s2.bounds.a.y).glyph, String("╔"))
 
 
 def test_settings_open_empty_parks_selection_at_minus_one() raises:
@@ -4978,6 +5232,97 @@ def test_desktop_set_font_maps_default_label_to_empty() raises:
     d.set_font(String("IBM VGA 8x16 (built-in)"))
     assert_equal(d.config.font, String(""))
     assert_equal(d.font_version, v0 + 2)
+
+
+def test_settings_font_size_stepper_commits_and_marks_dirty() raises:
+    """The Font pane's size stepper steps from the *displayed* size (the
+    explicit choice, or the host-reported effective size when the choice
+    is 0), clamps, commits an explicit size, and raises ``dirty``."""
+    var s = Settings()
+    var fonts = List[String]()
+    fonts.append(String("IBM VGA 8x16 (built-in)"))
+    s.open(
+        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        String(""), True, True, String("Turbo C++ 3.0"),
+        String("IBM VGA 8x16 (built-in)"), fonts^,
+        0,    # font_size: default
+        16,   # host-reported effective size
+        16,   # host-reported ideal size
+    )
+    assert_equal(s.font_size_choice, 0)
+    assert_equal(s._font_display_size(), 16)
+    assert_false(s.dirty)
+    # First bump turns the default into an explicit 17.
+    s._bump_font_size(1)
+    assert_equal(s.font_size_choice, 17)
+    assert_true(s.dirty)
+    s.ack_dirty()
+    # Subsequent bumps step the explicit value.
+    s._bump_font_size(-1)
+    assert_equal(s.font_size_choice, 16)
+    assert_true(s.dirty)
+    s.ack_dirty()
+    # Clamped at the bottom of the range: stepping to the floor dirties
+    # once, stepping past it is a no-op.
+    s.font_size_choice = MIN_FONT_SIZE + 1
+    s._bump_font_size(-1)
+    assert_equal(s.font_size_choice, MIN_FONT_SIZE)
+    s.ack_dirty()
+    s._bump_font_size(-1)
+    assert_equal(s.font_size_choice, MIN_FONT_SIZE)
+    assert_false(s.dirty)
+
+
+def test_settings_restore_ideal_font_size() raises:
+    """"Restore ideal" snaps the explicit size to the host-reported
+    design size; it's a no-op when the host reported none (vector
+    fonts) or when already there."""
+    var s = Settings()
+    var fonts = List[String]()
+    fonts.append(String("IBM VGA 8x16 (built-in)"))
+    s.open(
+        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        String(""), True, True, String("Turbo C++ 3.0"),
+        String("IBM VGA 8x16 (built-in)"), fonts^,
+        20, 20, 16,
+    )
+    s._restore_ideal_font_size()
+    assert_equal(s.font_size_choice, 16)
+    assert_true(s.dirty)
+    s.ack_dirty()
+    # Already at the ideal: no re-dirty.
+    s._restore_ideal_font_size()
+    assert_false(s.dirty)
+    # Host reports no ideal (e.g. the user picked a vector font while
+    # the dialog was open): the button does nothing.
+    s.update_font_info(13, 0)
+    s.font_size_choice = 20
+    s._restore_ideal_font_size()
+    assert_equal(s.font_size_choice, 20)
+    assert_false(s.dirty)
+
+
+def test_desktop_set_font_size_clamps_and_bumps_version() raises:
+    """``set_font_size`` clamps explicit sizes into the sane range, keeps
+    0 as "the font's default", and bumps ``font_version`` only on real
+    changes so the Swift host refetches exactly when needed."""
+    var d = Desktop()
+    assert_equal(d.config.font_size, 0)
+    var v0 = d.font_version
+    d.set_font_size(20)
+    assert_equal(d.config.font_size, 20)
+    assert_equal(d.font_version, v0 + 1)
+    # No-op on the same value.
+    d.set_font_size(20)
+    assert_equal(d.font_version, v0 + 1)
+    # Clamped at both ends.
+    d.set_font_size(1)
+    assert_equal(d.config.font_size, MIN_FONT_SIZE)
+    d.set_font_size(1000)
+    assert_equal(d.config.font_size, MAX_FONT_SIZE)
+    # 0 restores "default" untouched by the clamp.
+    d.set_font_size(0)
+    assert_equal(d.config.font_size, 0)
 
 
 def test_settings_remove_language_override_marks_dirty() raises:
@@ -16219,6 +16564,8 @@ def _run_chunk_00() raises:
     test_claude_detect_marker_outside_tail_window_is_ignored()
     test_claude_detect_finds_marker_inside_ansi_wrapped_line()
     test_claude_state_label_round_trip()
+    test_terminal_pane_attention_on_working_to_waiting()
+    test_desktop_take_attention_drains_panes_and_dap()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()
@@ -16363,7 +16710,9 @@ def _run_chunk_01() raises:
     test_desktop_project_lifecycle()
     test_file_tree_expand_collapse()
     test_file_tree_filters_dotfiles()
-    test_desktop_workspace_shrinks_with_file_tree()
+    test_file_tree_chevron_click_expands_immediately()
+    test_file_tree_starts_at_top_row_when_host_owns_menu()
+    test_desktop_file_tree_cycle_shrinks_workspace()
     test_window_min_size_enforced_at_construction()
     test_window_min_size_survives_workspace_shrink()
     test_window_manager_fit_into_moves_then_resizes()
@@ -16409,6 +16758,8 @@ def _run_chunk_01() raises:
     test_gitignore_matches_glob_and_negate()
     test_walk_project_files_respects_gitignore()
     test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs()
+    test_walk_project_files_git_fast_path_includes_ignored_files()
+    test_file_indexer_ignored_mode_skips_directory_entries()
     test_downloadable_grammar_registry_has_elm()
     test_downloadable_grammar_registry_misses_unknown()
     test_grammar_install_command_targets_user_config()
@@ -16445,6 +16796,9 @@ def _run_chunk_02() raises:
     test_settings_font_section_requires_host_fonts()
     test_settings_font_step_commits_and_marks_dirty()
     test_desktop_set_font_maps_default_label_to_empty()
+    test_settings_font_size_stepper_commits_and_marks_dirty()
+    test_settings_restore_ideal_font_size()
+    test_desktop_set_font_size_clamps_and_bumps_version()
     test_settings_remove_language_override_marks_dirty()
     test_language_editor_save_emits_override()
     test_list_box_paint_never_overflows_bounds()

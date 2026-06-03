@@ -2,7 +2,7 @@
 
 A modern full featured IDE in the style of Borland Turbo C++ 3.0. Based on the modern C++ reference implementation of TurboVision [`magiblot/tvision`](https://github.com/magiblot/tvision).
 
-![Turbokod (native macOS app) editing its own test suite, with a debug session paused at a breakpoint](screenshot.png)
+![Turbokod editing its own source in two cascaded windows with the file tree docked on the right, and a debug session paused at a breakpoint in the test suite](screenshot.png)
 
 The project has two layers:
 

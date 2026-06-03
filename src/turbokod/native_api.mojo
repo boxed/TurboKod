@@ -49,7 +49,7 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE,
+    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
 )
 
@@ -155,6 +155,10 @@ def _build_menus(mut d: Desktop):
     v.append(MenuItem(String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR, checkable=True))
     v.append(MenuItem(String("Minimap"), EDITOR_TOGGLE_MINIMAP, checkable=True))
     v.append(MenuItem.separator())
+    # Three-way cycle (hidden → right → left); the label is re-stamped
+    # from the live state every paint by ``_apply_view_config``, so this
+    # initial text only has to match the no-tree default.
+    v.append(MenuItem(String("File tree: hidden"), PROJECT_TREE_ACTION))
     # Native-only: float the tool panels (terminal / debug / test) into a
     # separate window. The terminal frontend builds its own menus
     # (examples/desktop.mojo), so this item is Swift-only by construction.
@@ -184,7 +188,12 @@ def _build_menus(mut d: Desktop):
 def _refresh_menu_visibility(mut d: Desktop):
     var is_editor = d.windows.focused_is_editor()
     d.menu_bar.set_visible_by_label(String("Edit"), is_editor)
-    d.menu_bar.set_visible_by_label(String("View"), is_editor)
+    # View stays reachable whenever a project is open (even with no
+    # editor focused) — the file-tree cycle lives there now.
+    var view_visible = is_editor
+    if not view_visible and d.project:
+        view_visible = True
+    d.menu_bar.set_visible_by_label(String("View"), view_visible)
     # Keep the Floating-panels checkmark in lockstep with the live state.
     # The Desktop owns the flag, the host owns the window; this is the one
     # per-tick place both are reachable for the native menu snapshot.
@@ -468,6 +477,32 @@ def tk_font_name(h: Int, out_ptr: Int, cap: Int) -> Int:
 
 
 @export
+def tk_font_size(h: Int) -> Int:
+    """The configured cell-font point size. 0 means "the font's default
+    size" — the host picks 16 for the bundled bitmap font, 13 for system
+    monospace families. Polled together with ``tk_font_name`` whenever
+    ``tk_font_version`` moves."""
+    if h == 0:
+        return 0
+    return _desk(h)[].config.font_size
+
+
+@export
+def tk_desktop_set_font_size_info(h: Int, effective: Int, ideal: Int):
+    """Host reports the active font's live size info after every font
+    apply: ``effective`` is the point size actually rendering (resolves
+    the 0-means-default config value), ``ideal`` is the font's design
+    size — 16 for the bundled bitmap font, the embedded bitmap-strike
+    ppem for true bitmap fonts, 0 when unknown. Settings displays the
+    effective size in its stepper and gates the "Restore ideal" button
+    on the ideal."""
+    if h == 0:
+        return
+    _desk(h)[].host_font_effective_size = effective
+    _desk(h)[].host_font_ideal_size = ideal
+
+
+@export
 def tk_desktop_set_panels_detached(h: Int, on: Int):
     """Tell the Desktop its tool panels are rendered on a separate host
     window (the native "Floating panels" feature).
@@ -590,6 +625,19 @@ def tk_desktop_settings_active(h: Int) -> Int32:
     if _desk(h)[].settings.active:
         return Int32(1)
     return Int32(0)
+
+
+@export
+def tk_desktop_take_attention(h: Int) -> Int32:
+    """Drain and return the count of attention events (a Claude session
+    in a terminal pane finishing its turn, the debugger hitting a stop)
+    since the last call. The host polls this every tick and, when the
+    app isn't frontmost, bounces the Dock icon and adds the count to
+    the badge number. Draining while frontmost discards the events —
+    the user is already looking."""
+    if h == 0:
+        return Int32(0)
+    return Int32(_desk(h)[].take_attention_events())
 
 
 @export

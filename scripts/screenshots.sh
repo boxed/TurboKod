@@ -5,7 +5,8 @@
 #   docs/screenshots/theme-<slug>.png   one per built-in theme
 #   screenshot.png                      hero: debug session paused at a
 #                                       breakpoint in the repo's own test
-#                                       suite (default theme)
+#                                       suite, file tree docked right
+#                                       (default theme)
 #
 # Everything is driven through env knobs the app honors when TK_CAPTURE is
 # set (see "scripted screenshot capture" in app/swift/TurboKod.swift):
@@ -73,6 +74,13 @@ capture_theme dracula          "Dracula"
 capture_theme solarized-light  "Solarized Light"
 
 # -------------------------------------------------------- debugger (hero) --
+# Prefer Xcode's real lldb-dap over whatever shims sit first on PATH — the
+# swiftly multiplexer symlinks `lldb-dap` to itself and hangs in DAP
+# `initialize` when spawned from the app.
+if xcdap="$(xcrun -f lldb-dap 2>/dev/null)"; then
+  export PATH="$(dirname "$xcdap"):$PATH"
+fi
+
 # Mirror run.sh's binary cache key: basename + short hash of the absolute
 # entry-point path, ``_g`` suffix for the debug-info build.
 test_src="$root/tests/test_basic.mojo"
@@ -82,12 +90,14 @@ test_bin="$root/.build/test_basic_${hash}_g"
 
 targets="$root/.turbokod/targets.json"
 bps="$root/.turbokod/per_user/$(id -un)/breakpoints.json"
+session="$root/.turbokod/per_user/$(id -un)/session.json"
 mkdir -p "$(dirname "$bps")"
 
-# Stage targets + breakpoints; put the user's own files back no matter how
-# we exit. A missing original means "remove the staged file on exit".
+# Stage targets + breakpoints + session; put the user's own files back no
+# matter how we exit. A missing original means "remove the staged file on
+# exit".
 restore() {
-  for f in "$targets" "$bps"; do
+  for f in "$targets" "$bps" "$session"; do
     if [ -f "$f.screenshots-bak" ]; then mv "$f.screenshots-bak" "$f"
     else rm -f "$f"; fi
   done
@@ -95,6 +105,7 @@ restore() {
 trap restore EXIT
 if [ -f "$targets" ]; then cp "$targets" "$targets.screenshots-bak"; fi
 if [ -f "$bps" ];     then cp "$bps"     "$bps.screenshots-bak"; fi
+if [ -f "$session" ]; then cp "$session" "$session.screenshots-bak"; fi
 
 cat > "$targets" <<EOF
 {
@@ -115,10 +126,38 @@ printf '{"breakpoints":[]}' > "$bps"
 # survives the suite growing.
 bp_line="$(grep -n -m1 '^def test_' "$test_src" | cut -d: -f1)"
 
+# Stage the scene as a session: two cascaded, non-maximized windows so the
+# shot shows window chrome + drop shadows + the desktop behind them —
+# editor.mojo behind, the test suite in front with the cursor parked on the
+# breakpoint line (debug:toggle_bp toggles at the cursor). Rects are cell
+# coords; restore clips them to the actual workspace, so a smaller grid
+# still produces a sane layout. Session cursor/scroll are 0-based.
+cat > "$session" <<EOF
+{
+  "focused": 1,
+  "z_order": [0, 1],
+  "windows": [
+    { "path": "src/turbokod/editor.mojo",
+      "rect": [3, 1, 128, 62], "maximized": false,
+      "restore_rect": [3, 1, 128, 62],
+      "cursor": [$((scene_line - 1)), 0],
+      "scroll": [0, $((scene_line > 6 ? scene_line - 6 : 0))] },
+    { "path": "tests/test_basic.mojo",
+      "rect": [12, 6, 137, 68], "maximized": false,
+      "restore_rect": [12, 6, 137, 68],
+      "cursor": [$((bp_line - 1)), 0],
+      "scroll": [0, $((bp_line > 6 ? bp_line - 6 : 0))] }
+  ]
+}
+EOF
+
 echo "[screenshots] debugger paused at $test_src:$bp_line -> $root/screenshot.png"
+# The tree toggle fires first (one step of the hidden→right→left cycle
+# docks it on the right) so the workspace refits the two windows before
+# the breakpoint + launch actions run.
 TK_THEME="Turbo C++ 3.0" \
-TK_OPEN="${test_src}:${bp_line}" \
-TK_CAPTURE_ACTIONS="debug:toggle_bp,debug:start_or_continue" \
+TK_MENU_INGRID=1 \
+TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue" \
 TK_CAPTURE_WHEN="debug-stopped" \
 TK_CAPTURE="$root/screenshot.png" \
   ./run_swift.sh "$root"

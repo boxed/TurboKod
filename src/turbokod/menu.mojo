@@ -161,6 +161,19 @@ struct MenuBar(Movable):
                     self.menus[i].items[j].checked = checked
                     return
 
+    def set_item_label(mut self, action: String, var label: String):
+        """Rewrite the label on the first menu item whose action matches.
+        No-op if no such item exists. Used for items whose label encodes
+        the current state (e.g. the View-menu file-tree cycle:
+        hidden → right → left)."""
+        for i in range(len(self.menus)):
+            for j in range(len(self.menus[i].items)):
+                if self.menus[i].items[j].is_separator:
+                    continue
+                if self.menus[i].items[j].action == action:
+                    self.menus[i].items[j].label = label^
+                    return
+
     def is_open(self) -> Bool:
         return self.open_idx >= 0
 
