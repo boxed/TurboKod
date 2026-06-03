@@ -772,9 +772,17 @@ struct TerminalPane(Copyable, Movable):
             return False
         # ESC routes through the chrome ladder first (collapses any
         # in-flight resize / focus state); only if the chrome doesn't
-        # consume it do we forward to the child.
+        # consume it do we forward to the child. Exception: when a
+        # Claude Code session is detected in the pane, ESC goes
+        # straight to the child — it's a vital key there (interrupt
+        # the agent, clear the input, close menus) and stepping the
+        # pane down the max → normal → min ladder instead would be
+        # hostile. The chrome remains reachable via mouse and the
+        # pane hotkey.
         if event.key == KEY_ESC and event.mods == MOD_NONE:
-            if handle_bottom_dock_esc(self.dock):
+            var tail = self.vt.tail_rows(20)
+            var claude = self._claude_tracker.classify(tail, monotonic_ms())
+            if claude == CLAUDE_NONE and handle_bottom_dock_esc(self.dock):
                 return True
             self._write_to_pty(String("\x1b"))
             return True

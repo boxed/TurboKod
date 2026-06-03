@@ -2711,6 +2711,40 @@ def test_dispatch_paste_targets_focused_terminal_pane() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_terminal_pane_esc_steps_chrome_ladder_without_claude() raises:
+    """Baseline for the Claude exception below: with plain shell
+    output in the pane, ESC walks the dock chrome ladder
+    (NORMAL → MINIMIZED) instead of reaching the child."""
+    var pane = TerminalPane()
+    pane.focused = True
+    pane.vt.feed_string(String("$ ls\nfile.txt\n$ "))
+    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_true(pane.handle_key(Event.key_event(KEY_ESC)))
+    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+
+
+def test_terminal_pane_esc_bypasses_chrome_ladder_in_claude_mode() raises:
+    """When a Claude Code session is detected in the pane, ESC must go
+    to the child (it interrupts the agent / clears the input) rather
+    than stepping the dock down the max → normal → min ladder. The pty
+    write is a no-op without a live child — the dock state is the
+    observable: it must NOT change."""
+    var pane = TerminalPane()
+    pane.focused = True
+    # Park the marker near the grid bottom — the detector scans only
+    # the bottom rows (``tail_rows``), matching where Claude actually
+    # paints its status line.
+    pane.vt.feed_string(
+        String("\x1b[23;1H✻ Pondering… (12s · esc to interrupt)")
+    )
+    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_true(pane.handle_key(Event.key_event(KEY_ESC)))
+    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
+    pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    assert_true(pane.handle_key(Event.key_event(KEY_ESC)))
+    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+
+
 def test_window_focus_change_saves_prior_window() raises:
     """Switching focus from window A to window B saves A's dirty
     buffer — the per-window counterpart of ``EVENT_FOCUS_OUT``'s
@@ -16394,6 +16428,8 @@ def _run_chunk_03() raises:
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
     test_dispatch_paste_targets_focused_terminal_pane()
+    test_terminal_pane_esc_steps_chrome_ladder_without_claude()
+    test_terminal_pane_esc_bypasses_chrome_ladder_in_claude_mode()
     test_window_focus_change_saves_prior_window()
     test_window_focus_change_via_dispatch_action_saves()
     test_app_focus_out_saves_all_dirty_windows_by_default()
