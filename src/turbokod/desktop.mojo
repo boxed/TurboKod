@@ -366,7 +366,7 @@ comptime TARGET_SELECT_PREFIX    = String("target:select:")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
 # Docked terminal-pane actions. The desktop holds a stack of panes —
 # the host can open as many as it wants (File → New terminal pane,
-# Ctrl+Shift+T) and each pane carries its own shell + scrollback.
+# Cmd+Shift+T) and each pane carries its own shell + scrollback.
 # ``NEW`` always appends a new pane. ``FOCUS`` lands keyboard focus on
 # the most recently created pane.
 comptime TERMINAL_NEW            = String("terminal:new")
@@ -836,7 +836,7 @@ struct Desktop(Movable):
     """Stack of docked shell panes — see ``terminal_pane.mojo``. Each
     pane carries its own ``/bin/sh`` subprocess and scrollback. The
     user appends new panes via File → New terminal pane (or
-    Ctrl+Shift+T) and removes them via the per-pane ``[X]``
+    Cmd+Shift+T) and removes them via the per-pane ``[X]``
     title button. Panes paint top-to-bottom in list order, sitting
     above the debug pane (when visible) and the status / tab strip
     at the very bottom."""
@@ -1256,13 +1256,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
         ))
-        # Ctrl+Shift+T opens a new docked terminal pane (each carries
+        # Cmd+Shift+T opens a new docked terminal pane (each carries
         # its own $SHELL + scrollback). Same action the File → "New
         # terminal pane" menu item dispatches, so the menu surfaces
         # this shortcut. The pane paints "T" in the top-right corner
         # to advertise this binding (mirroring the debug pane's "9").
         self._hotkeys.append(Hotkey(
-            ctrl_key("t"), MOD_CTRL | MOD_SHIFT, TERMINAL_NEW,
+            UInt32(ord("t")), MOD_META | MOD_SHIFT, TERMINAL_NEW,
         ))
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
         self._hotkeys.append(Hotkey(
@@ -1642,7 +1642,7 @@ struct Desktop(Movable):
         Painter(screen).fill(canvas, screen, self.bg_pattern, self.bg_attr)
         var slots = self._panel_window_slots(screen)
         if len(slots) == 0:
-            var hint = String("No panels open — open a terminal with Ctrl+Shift+T")
+            var hint = String("No panels open — open a terminal with Cmd+Shift+T")
             var hx = (screen.b.x - display_columns(hint)) // 2
             if hx < 0:
                 hx = 0
@@ -2894,14 +2894,39 @@ struct Desktop(Movable):
             var resolved = which(cand.argv[0])
             if len(resolved.as_bytes()) == 0:
                 continue
-            # When the catalog binary lands on a pyenv shim and we know
-            # the server doesn't actually need the project's Python
-            # (see ``_lsp_bypass_pyenv_shim``), substitute the shim with
-            # the real binary inside the pyenv version that has it.
-            # Sidesteps "version `3.14' is not installed" failures from
-            # the shim consulting the project's .python-version.
-            if _lsp_bypass_pyenv_shim(spec.language_id):
-                var real = _resolve_pyenv_shim_to_real(resolved, cand.argv[0])
+            # When the catalog binary lands on a pyenv shim, substitute
+            # the shim with a real binary in two cases: (a) the server
+            # is known not to need the project's Python at all (see
+            # ``_lsp_bypass_pyenv_shim``), or (b) the shim would
+            # provably die at spawn because the project pins a Python
+            # version pyenv doesn't have — the uv-managed-project case,
+            # where ``.python-version`` says e.g. ``3.14`` for uv's own
+            # interpreter store but pyenv answers "version `3.14' is
+            # not installed". The replacement prefers the project
+            # venv's own binary (it sees the project's packages), then
+            # falls back to whichever pyenv version has it installed.
+            var root = String("")
+            if self.project:
+                root = self.project.value()
+            var bypass = _lsp_bypass_pyenv_shim(spec.language_id)
+            if not bypass and _contains_substr(
+                resolved, String("/.pyenv/shims/"),
+            ):
+                bypass = _pyenv_shim_would_fail(root)
+            if bypass:
+                var real = String("")
+                var venv = python_venv_dir(root)
+                if len(venv.as_bytes()) > 0:
+                    var vb = join_path(
+                        venv, String("bin/") + cand.argv[0],
+                    )
+                    var vinfo = stat_file(vb)
+                    if vinfo.ok and not vinfo.is_dir():
+                        real = vb
+                if len(real.as_bytes()) == 0:
+                    real = _resolve_pyenv_shim_to_real(
+                        resolved, cand.argv[0],
+                    )
                 if len(real.as_bytes()) > 0:
                     argv.append(real)
                     for k in range(1, len(cand.argv)):
