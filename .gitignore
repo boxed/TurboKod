@@ -1,3 +1,5 @@
 tvision/
 .build/
 .pixi/
+.turbokod
+.claude
