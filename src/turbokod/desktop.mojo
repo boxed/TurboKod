@@ -4936,6 +4936,20 @@ struct Desktop(Movable):
                 self.windows.windows[self.windows.focused].editor.copy_to_clipboard()
             return Optional[String]()
         if action == EDITOR_PASTE:
+            # Paste targets whatever owns keyboard focus, exactly like
+            # typing. A focused terminal pane takes the clipboard as a
+            # paste event — ``handle_key`` applies bracketed-paste
+            # wrapping for the child — instead of letting the text land
+            # in the editor window behind it. Same pane-first rule as
+            # EDITOR_COPY above.
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].focused:
+                    var pasted = clipboard_paste()
+                    if len(pasted.as_bytes()) > 0:
+                        _ = self.terminal_panes[i].handle_key(
+                            Event.paste_event(pasted),
+                        )
+                    return Optional[String]()
             # Paste, undo, and redo can land the cursor anywhere in the
             # buffer — ``reveal_cursor`` brings it back into view since
             # the per-keystroke ``_scroll_to_cursor`` in editor.handle_key
@@ -9896,7 +9910,11 @@ def _lsp_bypass_pyenv_shim(language_id: String) -> Bool:
     (esbonio installed under e.g. 3.12.6, not system Python).
 
     Stays False for ``python`` itself — there we *want* pyenv to
-    pick the project's version.
+    pick the project's version when it can. The case where it
+    *can't* (project pins a version pyenv doesn't have, e.g. a
+    uv-managed ``.python-version``) is handled separately in
+    ``_pick_lsp_argv`` via ``_pyenv_shim_would_fail``, which applies
+    to every language.
     """
     if language_id == String("rst"):
         return True
@@ -9926,6 +9944,88 @@ def _resolve_pyenv_shim_to_real(path: String, name: String) -> String:
         if stat_file(cand).ok:
             return cand
     return String("")
+
+
+def _pyenv_shim_would_fail(root: String) -> Bool:
+    """True when spawning a pyenv shim with the project at ``root``
+    would die with ``version `X' is not installed`` — i.e. something
+    pins a Python version pyenv doesn't actually have. The canonical
+    trigger is a uv-managed project: uv writes ``.python-version``
+    files (e.g. ``3.14``) that it satisfies from its own interpreter
+    store, but the pyenv shim consults the same file and refuses to
+    run anything at all — including servers like ty that are native
+    binaries and never needed the pinned interpreter in the first
+    place.
+
+    Mirrors pyenv's version lookup order: ``$PYENV_VERSION`` overrides
+    the project's ``.python-version``. No pin found means the global
+    version applies, and we assume that one works — the shim resolved
+    via ``$PATH`` under the same global. ``system`` always works.
+    """
+    var pin = getenv_value(String("PYENV_VERSION"))
+    if len(pin.as_bytes()) == 0:
+        if len(root.as_bytes()) == 0:
+            return False
+        var vf = join_path(root, String(".python-version"))
+        if not stat_file(vf).ok:
+            return False
+        try:
+            pin = read_file(vf)
+        except:
+            return False
+    var pins = _split_version_pins(pin)
+    if len(pins) == 0:
+        return False
+    var home = getenv_value(String("HOME"))
+    if len(home.as_bytes()) == 0:
+        return False
+    var installed = list_directory(home + String("/.pyenv/versions"))
+    return not _pyenv_pins_satisfied(pins, installed)
+
+
+def _split_version_pins(content: String) -> List[String]:
+    """Whitespace-split ``content`` (a ``.python-version`` body or a
+    ``$PYENV_VERSION`` value) into individual version names. pyenv
+    accepts one version per line; splitting on all whitespace also
+    swallows ``\\r`` and trailing newlines for free."""
+    var pins = List[String]()
+    var b = content.as_bytes()
+    var start = -1
+    for i in range(len(b)):
+        var ws = b[i] == UInt8(ord(" ")) or b[i] == UInt8(ord("\t")) \
+            or b[i] == UInt8(ord("\n")) or b[i] == UInt8(ord("\r"))
+        if ws:
+            if start >= 0:
+                pins.append(String(StringSlice(
+                    unsafe_from_utf8=b[start:i],
+                )))
+                start = -1
+        elif start < 0:
+            start = i
+    if start >= 0:
+        pins.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    return pins^
+
+
+def _pyenv_pins_satisfied(
+    pins: List[String], installed: List[String],
+) -> Bool:
+    """Every pin names either ``system`` or an installed version
+    directory (exact match — pyenv does no prefix resolution, which is
+    exactly why uv's ``3.14`` pin breaks it). Pure core of
+    ``_pyenv_shim_would_fail`` so tests can drive it without a real
+    ``~/.pyenv``."""
+    for i in range(len(pins)):
+        if pins[i] == String("system"):
+            continue
+        var found = False
+        for k in range(len(installed)):
+            if installed[k] == pins[i]:
+                found = True
+                break
+        if not found:
+            return False
+    return True
 
 
 def _contains_substr(haystack: String, needle: String) -> Bool:

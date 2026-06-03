@@ -735,37 +735,110 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         if let cap = ProcessInfo.processInfo.environment["TK_CAPTURE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                // Optional: fire Quick Open via the menu invoke path before
-                // capturing, so the captured frame shows the picker dialog.
-                if ProcessInfo.processInfo.environment["TK_QUICK_OPEN"] != nil,
-                   let v = self.views.first {
-                    let action = "file:quick_open"
-                    let bytes = Array(action.utf8)
-                    _ = bytes.withUnsafeBufferPointer { b in
-                        tk_desktop_menu_invoke(v.handle,
-                            Int64(Int(bitPattern: b.baseAddress)),
-                            Int64(bytes.count),
-                            Int64(v.cols()), Int64(v.rows()))
-                    }
-                    v.needsDisplay = true
-                }
-                // Optional extra delay so the async indexer has time to
-                // produce entries before the capture.
-                let extra = ProcessInfo.processInfo.environment["TK_CAPTURE_DELAY"]
-                    .flatMap(Double.init) ?? 0.0
+                self.runCaptureScene(to: cap)
+            }
+        }
+    }
+
+    // MARK: scripted screenshot capture (TK_CAPTURE)
+
+    // Drive a scene before the TK_CAPTURE grab, all via env vars so
+    // scripts/screenshots.sh can stage README shots without poking at
+    // saved sessions:
+    //   TK_OPEN="path[:line]"      open a file (absolute path; 1-based
+    //                              line) in the first window's Desktop.
+    //   TK_CAPTURE_ACTIONS="a,b"   menu actions invoked in order, 0.3 s
+    //                              apart, through the same
+    //                              tk_desktop_menu_invoke path a click
+    //                              would take (e.g. "debug:toggle_bp,
+    //                              debug:start_or_continue").
+    //   TK_QUICK_OPEN              legacy alias for
+    //                              TK_CAPTURE_ACTIONS=file:quick_open.
+    //   TK_CAPTURE_WHEN=debug-stopped
+    //                              poll tk_desktop_debug_stopped until the
+    //                              debugger pauses (breakpoint hit), then
+    //                              settle 1 s so the stack/variables panes
+    //                              populate before the grab.
+    //   TK_CAPTURE_TIMEOUT=secs    give up on the WHEN condition after
+    //                              this long (default 30) — capture
+    //                              anyway with a warning so the script
+    //                              still produces an inspectable PNG.
+    //   TK_CAPTURE_DELAY=secs      extra settle before the grab (async
+    //                              indexers, LSP, etc.).
+    //   TK_QUIT_VIA=close          quit via red-button close instead of
+    //                              NSApp.terminate.
+    private func runCaptureScene(to cap: String) {
+        let env = ProcessInfo.processInfo.environment
+        if let spec = env["TK_OPEN"], let v = views.first {
+            // "path[:line]" — only treat the suffix as a line number when
+            // it parses, so plain paths containing ':' still open.
+            var path = spec
+            var line0 = 0
+            if let idx = spec.lastIndex(of: ":"),
+               let n = Int(spec[spec.index(after: idx)...]), n > 0 {
+                path = String(spec[..<idx])
+                line0 = n - 1
+            }
+            openFileAt(v, path, line0, 0)
+        }
+        var actions = (env["TK_CAPTURE_ACTIONS"] ?? "")
+            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if env["TK_QUICK_OPEN"] != nil { actions.insert("file:quick_open", at: 0) }
+        invokeCaptureActions(actions, then: {
+            let timeout = env["TK_CAPTURE_TIMEOUT"].flatMap(Double.init) ?? 30.0
+            self.awaitCaptureCondition(env["TK_CAPTURE_WHEN"], timeout: timeout) {
+                let extra = env["TK_CAPTURE_DELAY"].flatMap(Double.init) ?? 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + extra) {
-                self.views.first?.capturePNG(to: cap)
-                print("captured to \(cap)")
-                // TK_QUIT_VIA=close simulates the red-button close on the last
-                // window (exercises the session-save-before-remove path).
-                // Default: NSApp.terminate (the Cmd+Q path).
-                if ProcessInfo.processInfo.environment["TK_QUIT_VIA"] == "close" {
-                    self.windows.first?.performClose(nil)
-                } else {
-                    NSApp.terminate(nil)
-                }
+                    self.views.first?.capturePNG(to: cap)
+                    print("captured to \(cap)")
+                    // TK_QUIT_VIA=close simulates the red-button close on the
+                    // last window (exercises the session-save-before-remove
+                    // path). Default: NSApp.terminate (the Cmd+Q path).
+                    if env["TK_QUIT_VIA"] == "close" {
+                        self.windows.first?.performClose(nil)
+                    } else {
+                        NSApp.terminate(nil)
+                    }
                 }
             }
+        })
+    }
+
+    // Fire each action 0.3 s after the previous so the 20 Hz tick runs
+    // between them — debug:start_or_continue must see the breakpoint
+    // debug:toggle_bp just registered.
+    private func invokeCaptureActions(_ actions: [String], then done: @escaping () -> Void) {
+        guard let action = actions.first, let v = views.first else { done(); return }
+        let bytes = Array(action.utf8)
+        _ = bytes.withUnsafeBufferPointer { b in
+            tk_desktop_menu_invoke(v.handle,
+                Int64(Int(bitPattern: b.baseAddress)),
+                Int64(bytes.count),
+                Int64(v.cols()), Int64(v.rows()))
+        }
+        v.needsDisplay = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            self.invokeCaptureActions(Array(actions.dropFirst()), then: done)
+        }
+    }
+
+    private func awaitCaptureCondition(_ cond: String?, timeout: Double,
+                                       _ done: @escaping () -> Void) {
+        guard cond == "debug-stopped", let v = views.first else { done(); return }
+        if tk_desktop_debug_stopped(v.handle) != 0 {
+            // Paused — give the stack / variables / debug pane a beat to
+            // fetch and paint before the grab.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: done)
+            return
+        }
+        if timeout <= 0 {
+            print("warning: TK_CAPTURE_WHEN=debug-stopped never satisfied; capturing anyway")
+            done()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            self.awaitCaptureCondition(cond, timeout: timeout - 0.25, done)
         }
     }
 
@@ -1886,8 +1959,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let m = entry?.main ?? geom.last, !NSEqualRects(mainWin.frame, m) {
             mainWin.setFrame(m, display: true)
         }
+        // Capture runs grab a single window — keep the panels docked so a
+        // staged debug/terminal pane is actually in the shot, regardless of
+        // the layout saved for this display config. Read-only: the saved
+        // floating entry survives for the next interactive launch.
         let wantFloat = (entry?.floating ?? false)
             && (entry?.panel.map { frameIsVisible($0) } ?? false)
+            && ProcessInfo.processInfo.environment["TK_CAPTURE"] == nil
         if wantFloat {
             showPanelWindow(for: mainView, frame: entry?.panel)
         } else {

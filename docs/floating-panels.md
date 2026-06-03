@@ -112,7 +112,7 @@ the lower panel's chrome buttons; the upper must be `NORMAL`), starts its
 panel fills the window and has no splitter, so it's correctly non-resizable.
 
 If **no** tool panels are visible, the panel window paints an empty fill with a
-hint line ("No panels open — open a terminal with Ctrl+Shift+T"). The host keeps the
+hint line ("No panels open — open a terminal with Cmd+Shift+T"). The host keeps the
 window open (an empty panel window is normal and expected while floating is on).
 
 ### Menu surface

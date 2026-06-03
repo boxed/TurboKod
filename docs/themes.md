@@ -19,11 +19,23 @@ Bundled themes: Turbo C++ 3.0, Monokai, Dracula, One Dark, Gruvbox Dark,
 Solarized Dark, Solarized Light, GitHub Light, One Light, Turbo Pascal 7,
 Norton Commander, QBasic.
 
-| Turbo C++ 3.0 (default) | Dracula | Solarized Light |
+| Turbo C++ 3.0 (default) | Monokai | Dracula |
 |---|---|---|
-| ![Turbo C++ 3.0](screenshot-turbo.png) | ![Dracula](screenshot-dracula.png) | ![Solarized Light](screenshot-solarized-light.png) |
+| ![Turbo C++ 3.0](screenshots/theme-turbo-cpp-3.png) | ![Monokai](screenshots/theme-monokai.png) | ![Dracula](screenshots/theme-dracula.png) |
 
-> Regenerate these with `scripts/screenshots.sh` (needs a real display — see below).
+| One Dark | Gruvbox Dark | Solarized Dark |
+|---|---|---|
+| ![One Dark](screenshots/theme-one-dark.png) | ![Gruvbox Dark](screenshots/theme-gruvbox-dark.png) | ![Solarized Dark](screenshots/theme-solarized-dark.png) |
+
+| Solarized Light | GitHub Light | One Light |
+|---|---|---|
+| ![Solarized Light](screenshots/theme-solarized-light.png) | ![GitHub Light](screenshots/theme-github-light.png) | ![One Light](screenshots/theme-one-light.png) |
+
+| Turbo Pascal 7 | Norton Commander | QBasic |
+|---|---|---|
+| ![Turbo Pascal 7](screenshots/theme-turbo-pascal-7.png) | ![Norton Commander](screenshots/theme-norton-commander.png) | ![QBasic](screenshots/theme-qbasic.png) |
+
+> Regenerate these with `make screenshots` (needs a real display — see below).
 
 ## How it works
 
@@ -77,13 +89,29 @@ frontends pick it up.
 
 ## Capturing screenshots
 
-`scripts/screenshots.sh [project] [out-dir]` opens the app once per theme and
-writes a PNG for each, using two env knobs the app already honors:
+`make screenshots` (= `scripts/screenshots.sh [out-dir]`) opens the app once
+per theme and writes a PNG for each into `docs/screenshots/`, then stages a
+debug session paused at a breakpoint in the repo's own test suite and grabs
+the README hero shot (`screenshot.png`). It's driven entirely by env knobs
+the app honors when `TK_CAPTURE` is set (see "scripted screenshot capture"
+in `app/swift/TurboKod.swift`):
 
-- `TK_THEME=<name>` — override the active theme for this process only (not
-  persisted). Handy on its own: `TK_THEME=Dracula ./run_swift.sh .`
 - `TK_CAPTURE=<path>` — render one frame to `<path>` then quit
   (`TK_CAPTURE_DELAY` controls the settle delay).
+- `TK_THEME=<name>` — override the active theme for this process only (not
+  persisted). Handy on its own: `TK_THEME=Dracula ./run_swift.sh .`
+- `TK_OPEN=<abs-path>:<line>` — open a file at a 1-based line, so every
+  theme shot shows the same scene.
+- `TK_CAPTURE_ACTIONS=<a>,<b>` — menu actions invoked in order before the
+  grab, through the same dispatch path a click would take (the debugger
+  shot uses `debug:toggle_bp,debug:start_or_continue`).
+- `TK_CAPTURE_WHEN=debug-stopped` — hold the grab until the debugger is
+  actually paused at its breakpoint (polls `tk_desktop_debug_stopped`;
+  `TK_CAPTURE_TIMEOUT` caps the wait, default 30 s).
+
+While `TK_CAPTURE` is set the tool panels stay docked even if the saved
+layout floats them, so the staged debug pane is in the captured window.
 
 GUI capture needs a real display, so run it on a Mac desktop session — not
-headless or over SSH, where the grab comes out blank.
+headless or over SSH, where the grab comes out blank. The debugger shot
+additionally needs `lldb-dap` on `$PATH` (ships with Xcode 15+).

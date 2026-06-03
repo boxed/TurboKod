@@ -1,4 +1,4 @@
-.PHONY: build app tui test update-lsp-list
+.PHONY: build app tui test screenshots update-lsp-list
 .DEFAULT_GOAL := build
 
 # ``make`` (default) — build both frontends without launching either.
@@ -30,6 +30,13 @@ tui:
 # target launches.
 test:
 	./run.sh tests/test_basic.mojo
+
+# Regenerate the README / docs screenshots: the per-theme gallery under
+# docs/screenshots/ and the debugger-paused hero shot (screenshot.png).
+# Launches the native app once per shot, so it needs a real display —
+# run on a Mac desktop session, not headless / over SSH / in CI.
+screenshots:
+	scripts/screenshots.sh
 
 # Refresh src/turbokod/data/languages.json from upstream Helix
 # (helix-editor/helix on master). Commit the resulting JSON.

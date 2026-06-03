@@ -56,7 +56,7 @@ from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
     EDITOR_FIND, EDITOR_GOTO, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
-    EDITOR_NEW, EDITOR_OPEN, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
+    EDITOR_NEW, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
     PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS, PROJECT_FIND,
@@ -65,6 +65,7 @@ from turbokod.desktop import (
     WINDOW_CLOSE, WINDOW_FOCUS_PREFIX,
     _expand_save_placeholders,
     _find_doc_entry_for_word,
+    _pyenv_pins_satisfied, _split_version_pins,
     ctrl_key, format_hotkey,
 )
 from turbokod.file_io import (
@@ -215,6 +216,7 @@ from turbokod.prompt import (
 )
 from turbokod.terminal import parse_input
 from turbokod import Vt
+from turbokod.terminal_pane import TerminalPane
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
@@ -2677,6 +2679,35 @@ def test_desktop_dispatch_editor_save_writes_focused_editor() raises:
     assert_false(Bool(maybe))
     assert_false(d.windows.windows[0].editor.dirty)
     assert_equal(read_file(path), String("hello!\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_dispatch_paste_targets_focused_terminal_pane() raises:
+    """⌘V on the native frontend arrives as ``dispatch_action(
+    EDITOR_PASTE)`` via the Edit menu's key-equivalent. When a terminal
+    pane owns keyboard focus the paste belongs to the pane — exactly
+    like typing — and must not fall through to the editor window
+    behind it. Regression: the old path called the focused editor's
+    ``paste_from_clipboard`` unconditionally, which clobbered the
+    editor's selection (with the test-suite fake clipboard the paste
+    text is empty, so the selection is simply deleted)."""
+    var path = _temp_path(String("_dpaste.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("dpaste.txt"), Rect(0, 1, 40, 12), path))
+    # Select "hello" so a stray editor paste would visibly mutate the buffer.
+    d.windows.windows[0].editor.move_to(0, 0, False)
+    d.windows.windows[0].editor.move_to(0, 5, True)
+    assert_true(d.windows.windows[0].editor.has_selection())
+    # A focused terminal pane (no pty child needed — routing is what's
+    # under test; the pty write is a no-op when the child isn't alive).
+    var pane = TerminalPane()
+    pane.focused = True
+    d.terminal_panes.append(pane^)
+    var maybe = d.dispatch_action(EDITOR_PASTE, _SCREEN)
+    assert_false(Bool(maybe))
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("hello"))
+    assert_true(d.windows.windows[0].editor.has_selection())
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -5436,6 +5467,42 @@ def test_expand_save_placeholders_substitutes_filepath() raises:
         String("$filepath$"), String("/work/main.py"),
     )
     assert_equal(case_sensitive, String("$filepath$"))
+
+
+def test_pyenv_pin_satisfaction() raises:
+    """The broken-pyenv-shim detector: a ``.python-version`` pin only
+    counts as satisfied when it names ``system`` or an exactly-matching
+    installed version directory. The uv-managed case — pin ``3.14``,
+    pyenv has only ``3.12.6`` — must read as broken even though uv
+    itself would resolve it fine."""
+    var installed = List[String]()
+    installed.append(String("3.12.6"))
+    # uv-style pin that pyenv can't satisfy.
+    var uv_pin = _split_version_pins(String("3.14\n"))
+    assert_equal(len(uv_pin), 1)
+    assert_equal(uv_pin[0], String("3.14"))
+    assert_false(_pyenv_pins_satisfied(uv_pin, installed))
+    # Exact match works; no prefix resolution in either direction.
+    assert_true(_pyenv_pins_satisfied(
+        _split_version_pins(String("3.12.6")), installed,
+    ))
+    assert_false(_pyenv_pins_satisfied(
+        _split_version_pins(String("3.12")), installed,
+    ))
+    # ``system`` is always available.
+    assert_true(_pyenv_pins_satisfied(
+        _split_version_pins(String("system")), installed,
+    ))
+    # Multi-version file: every line must be installed.
+    assert_false(_pyenv_pins_satisfied(
+        _split_version_pins(String("3.12.6\n3.14\n")), installed,
+    ))
+    # CRLF + surrounding whitespace are stripped by the splitter.
+    var crlf = _split_version_pins(String("  3.12.6\r\n"))
+    assert_equal(len(crlf), 1)
+    assert_equal(crlf[0], String("3.12.6"))
+    # Empty file → no pins → caller treats as "global applies".
+    assert_equal(len(_split_version_pins(String("\n"))), 0)
 
 
 def test_extension_of_helper() raises:
@@ -16249,6 +16316,7 @@ def _run_chunk_02() raises:
     test_action_editor_args_buffer_seeded_from_entry()
     test_on_save_action_reloads_buffer_when_action_rewrites_file()
     test_expand_save_placeholders_substitutes_filepath()
+    test_pyenv_pin_satisfaction()
     test_extension_of_helper()
     test_word_at_helper()
     test_highlight_for_extension_recognizes_mojo()
@@ -16325,6 +16393,7 @@ def _run_chunk_03() raises:
     test_desktop_dispatch_editor_save_passes_through_when_no_editor()
     test_desktop_dispatch_passes_through_unknown_actions()
     test_desktop_dispatch_editor_save_writes_focused_editor()
+    test_dispatch_paste_targets_focused_terminal_pane()
     test_window_focus_change_saves_prior_window()
     test_window_focus_change_via_dispatch_action_saves()
     test_app_focus_out_saves_all_dirty_windows_by_default()

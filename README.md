@@ -2,7 +2,7 @@
 
 A port of [Turbo Vision](https://en.wikipedia.org/wiki/Turbo_Vision) to [Mojo](https://www.modular.com/mojo) — and a working code editor / IDE built on top of it. Based on the modern C++ reference implementation [`magiblot/tvision`](https://github.com/magiblot/tvision).
 
-![Turbokod editing its own test suite, with a debug session paused at a breakpoint](screenshot.png)
+![Turbokod (native macOS app) editing its own test suite, with a debug session paused at a breakpoint](screenshot.png)
 
 The project has two layers:
 
@@ -10,6 +10,28 @@ The project has two layers:
 2. **A code editor / IDE** built on top of that toolkit: multi-cursor editor, syntax highlighting via TextMate grammars, LSP and DAP integrations, spell checking, project-wide find/replace, file tree, git blame and gutter, run/debug targets, editorconfig support, undo/redo, soft wrap, minimap, tab bar.
 
 The editor runs in any terminal, but ships with an optional native macOS `.app` wrapper (Swift / AppKit front-end loading the Mojo backend as a dylib) that gives it a real window, system clipboard, font fallback for emoji/CJK, and dock icon.
+
+## Themes
+
+Color themes retint both the syntax highlighting and the whole UI chrome, in
+both frontends (Settings ▸ Theme). A sample, rendered by the native macOS app:
+
+| Monokai | Dracula |
+|---|---|
+| ![Monokai](docs/screenshots/theme-monokai.png) | ![Dracula](docs/screenshots/theme-dracula.png) |
+
+| Gruvbox Dark | Solarized Light |
+|---|---|
+| ![Gruvbox Dark](docs/screenshots/theme-gruvbox-dark.png) | ![Solarized Light](docs/screenshots/theme-solarized-light.png) |
+
+| Norton Commander | QBasic |
+|---|---|
+| ![Norton Commander](docs/screenshots/theme-norton-commander.png) | ![QBasic](docs/screenshots/theme-qbasic.png) |
+
+Twelve ship in total — see [docs/themes.md](docs/themes.md) for the full
+gallery and how themes work. All screenshots (including the debugger shot
+above) are regenerated with `make screenshots`
+([scripts/screenshots.sh](scripts/screenshots.sh)).
 
 ## Status
 

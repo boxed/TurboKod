@@ -36,6 +36,9 @@ int32_t tk_desktop_menu_invoke(int64_t h, int64_t action_ptr, int64_t action_len
                                int64_t cols, int64_t rows);
 int64_t tk_desktop_take_pending_new_window_project(int64_t h, int64_t out_ptr,
                                                    int64_t cap);
+// 1 while a DAP session is paused at a breakpoint. Polled by the scripted
+// screenshot path (TK_CAPTURE_WHEN=debug-stopped) — see scripts/screenshots.sh.
+int32_t tk_desktop_debug_stopped(int64_t h);
 
 // Floating panels (native macOS) — see docs/floating-panels.md. The tool
 // panels render on a separate host window via the _panels entry points; the

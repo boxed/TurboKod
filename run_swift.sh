@@ -37,14 +37,18 @@ if [ ! -f "$dylib" ] || find src "$shim_lib" -newer "$dylib" -print -quit 2>/dev
   fi
 fi
 
-# Always (re-)stamp the install_name to ``@rpath/libturbokod.dylib`` so the
+# (Re-)stamp the install_name to ``@rpath/libturbokod.dylib`` so the
 # Swift binary loads it via rpath rather than baking in an absolute or
-# CWD-relative path. Idempotent and cheap — runs every invocation so an
-# interrupted earlier build (which may have left the install_name as
-# Mojo's default ``.build/libturbokod.dylib``) self-heals on the next
-# run. Without this, ``open`` / Dock launches crash at dyld with
-# ``Library not loaded`` because the CWD-relative path doesn't resolve.
-install_name_tool -id "@rpath/libturbokod.dylib" "$dylib" 2>/dev/null
+# CWD-relative path. Checked every invocation so an interrupted earlier
+# build (which may have left the install_name as Mojo's default
+# ``.build/libturbokod.dylib``) self-heals on the next run. Without this,
+# ``open`` / Dock launches crash at dyld with ``Library not loaded``
+# because the CWD-relative path doesn't resolve. Stamp only when needed:
+# install_name_tool rewrites the file even for a no-op id change, and the
+# fresh mtime would re-trigger the Swift build below on every launch.
+if ! otool -D "$dylib" 2>/dev/null | grep -q "^@rpath/libturbokod.dylib$"; then
+  install_name_tool -id "@rpath/libturbokod.dylib" "$dylib" 2>/dev/null
+fi
 
 # Build the Swift binary against the dylib + frameworks. Two rpaths:
 #   * ``@executable_path/../Frameworks`` — the .app bundle's Frameworks dir,

@@ -548,6 +548,19 @@ def tk_desktop_settings_active(h: Int) -> Int32:
 
 
 @export
+def tk_desktop_debug_stopped(h: Int) -> Int32:
+    """1 while a DAP session is active and paused (stopped event received,
+    not yet resumed). Backs ``TK_CAPTURE_WHEN=debug-stopped`` — the host's
+    scripted-screenshot path polls this to know the debugger has actually
+    hit its breakpoint before grabbing the frame (see scripts/screenshots.sh)."""
+    if h == 0:
+        return Int32(0)
+    if _desk(h)[].dap.is_stopped():
+        return Int32(1)
+    return Int32(0)
+
+
+@export
 def tk_desktop_settings_close(h: Int):
     """Close the Settings view — the host calls this when the user closes
     the settings window via its native close button (the reverse direction
