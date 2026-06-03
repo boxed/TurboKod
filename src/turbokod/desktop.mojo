@@ -364,6 +364,9 @@ comptime TEST_PANE_CLOSE         = String("test:pane_close")
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
 comptime TARGET_SELECT_PREFIX    = String("target:select:")
 comptime FILE_TREE_FOCUS         = String("file_tree:focus")
+# View ▸ Show in file tree: open the tree if hidden, expand to the
+# focused editor's file, select it, and hand the tree keyboard focus.
+comptime FILE_TREE_REVEAL        = String("file_tree:reveal")
 # Docked terminal-pane actions. The desktop holds a stack of panes —
 # the host can open as many as it wants (File → New terminal pane,
 # Cmd+Shift+T) and each pane carries its own shell + scrollback.
@@ -810,6 +813,12 @@ struct Desktop(Movable):
     var _pending_dap_cwd: String
     var _pending_dap_args: List[String]
     var _pending_dap_venv_dir: String
+    # What the current/last debug session is debugging, for the pane
+    # title ("Debug - <name>"). Set at every ``dap.start`` call site —
+    # target name, test suite, or ad-hoc file basename. Survives the
+    # deferred-install replay because it's stamped before the prompt
+    # gate.
+    var _debug_target_name: String
     # Extension of a deferred install prompt: a file was opened while
     # another modal was active, so the prompt couldn't fire then. Drained
     # at the top of ``paint`` whenever no modal is in the way. Empty
@@ -1105,6 +1114,7 @@ struct Desktop(Movable):
         self._pending_dap_cwd = String("")
         self._pending_dap_args = List[String]()
         self._pending_dap_venv_dir = String("")
+        self._debug_target_name = String("")
         self._pending_lsp_prompt_ext = String("")
         self.install_runner = InstallRunner()
         self.pending_save_actions = List[PendingSaveAction]()
@@ -1473,6 +1483,26 @@ struct Desktop(Movable):
         var top = 0 if self.host_owns_menu else 1
         return Rect(left, top, right, bottom)
 
+    def _panel_left(self, screen: Rect) -> Int:
+        """Left edge for the bottom-docked panes. The file tree runs
+        the full height of the workspace on its docked side, so the
+        panes give way horizontally rather than painting over it."""
+        if self.file_tree.visible and self.file_tree.dock_left:
+            var left = self.file_tree.width
+            if left > screen.b.x:
+                left = screen.b.x
+            return left
+        return 0
+
+    def _panel_right(self, screen: Rect) -> Int:
+        """Right edge for the bottom-docked panes — see ``_panel_left``."""
+        if self.file_tree.visible and not self.file_tree.dock_left:
+            var right = screen.b.x - self.file_tree.width
+            if right < 0:
+                right = 0
+            return right
+        return screen.b.x
+
     def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked run/debug pane lives — above the
         status bar (and the tab bar, when visible) and above the test
@@ -1488,7 +1518,8 @@ struct Desktop(Movable):
         var top = bottom - self._debug_pane_height(screen)
         if top < 1:
             top = 1
-        return Rect(0, top, screen.b.x, bottom)
+        return Rect(self._panel_left(screen), top,
+                    self._panel_right(screen), bottom)
 
     def _debug_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the debug pane, considering
@@ -1511,7 +1542,8 @@ struct Desktop(Movable):
         var top = screen.b.y - chrome - self._test_pane_height(screen)
         if top < 1:
             top = 1
-        return Rect(0, top, screen.b.x, screen.b.y - chrome)
+        return Rect(self._panel_left(screen), top,
+                    self._panel_right(screen), screen.b.y - chrome)
 
     def _test_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the test pane — same
@@ -1560,7 +1592,8 @@ struct Desktop(Movable):
             bottom = stack_bottom
         if top >= bottom:
             return Rect.empty()
-        return Rect(0, top, screen.b.x, bottom)
+        return Rect(self._panel_left(screen), top,
+                    self._panel_right(screen), bottom)
 
     def _terminal_stack_height(self, screen: Rect) -> Int:
         """Sum of ``effective_height`` across every terminal pane.
@@ -2334,6 +2367,17 @@ struct Desktop(Movable):
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
         self.file_tree.top = 0 if self.host_owns_menu else 1
+        # Sync which files carry uncommitted changes so the tree can
+        # tint their rows with the tab bar's dirty colors.
+        self.file_tree.modified_paths = List[String]()
+        if self.file_tree.visible:
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor \
+                        and self.windows.windows[i].editor \
+                            .has_uncommitted_changes():
+                    self.file_tree.modified_paths.append(
+                        self.windows.windows[i].editor.file_path,
+                    )
         self.file_tree.paint(canvas, screen)
         debug_log(String("[paint] before terminal_panes.paint n=")
             + String(len(self.terminal_panes)))
@@ -4033,6 +4077,24 @@ struct Desktop(Movable):
         else:
             self.file_tree.close()
 
+    def _reveal_in_file_tree(mut self):
+        """View ▸ Show in file tree: open the tree if it's hidden (on
+        its remembered dock side), expand down to the focused editor's
+        file, select it, and hand the tree keyboard focus. No-op
+        without a project or a file-backed focused editor."""
+        if not self.project:
+            return
+        var fidx = self._focused_editor_idx()
+        if fidx < 0:
+            return
+        var path = self.windows.windows[fidx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        if not self.file_tree.visible:
+            self.file_tree.open(self.project.value())
+        self.file_tree.reveal(path)
+        self._focus_dock(DOCK_FILE_TREE)
+
     # --- events ------------------------------------------------------------
 
     def handle_event(mut self, event: Event, screen: Rect) raises -> Optional[String]:
@@ -5280,6 +5342,9 @@ struct Desktop(Movable):
         if action == FILE_TREE_FOCUS:
             self._focus_dock(DOCK_FILE_TREE)
             return Optional[String]()
+        if action == FILE_TREE_REVEAL:
+            self._reveal_in_file_tree()
+            return Optional[String]()
         if action == TERMINAL_NEW:
             self._open_terminal_pane()
             return Optional[String]()
@@ -6234,12 +6299,20 @@ struct Desktop(Movable):
         # those modes — we collapse it and give Output the full pane.
         if self.dap.is_active():
             self.debug_pane.set_mode(PANE_MODE_DEBUG)
+            var title = String("Debug")
+            if len(self._debug_target_name.as_bytes()) > 0:
+                title = title + String(" - ") + self._debug_target_name
+            self.debug_pane.set_title(title^)
             self.debug_pane.set_status(self.dap.status_summary())
         elif self.run_session.is_active():
+            # Target name lives in the title ("Run - <target>") rather
+            # than a status row, so the status stays empty and the row
+            # is given back to the output area.
             self.debug_pane.set_mode(PANE_MODE_RUN)
-            self.debug_pane.set_status(
-                String("running ") + self.run_session.target_name,
+            self.debug_pane.set_title(
+                String("Run - ") + self.run_session.target_name,
             )
+            self.debug_pane.set_status(String(""))
         elif self._run_output_held:
             self.debug_pane.set_mode(PANE_MODE_RUN)
             self.debug_pane.set_status(String("(exited — Esc to dismiss)"))
@@ -6794,6 +6867,8 @@ struct Desktop(Movable):
         # accepts and pip finishes. Ordered ahead of the LSP install
         # so the single-slot ``install_runner`` is free for the debugpy
         # job we're about to kick off if the user says yes.
+        # Stamped before the prompt gate so the deferred replay keeps it.
+        self._debug_target_name = basename(path)
         if self._maybe_prompt_debugpy_install(
             lang_id, venv_dir, path, cwd, List[String](),
         ):
@@ -7034,6 +7109,7 @@ struct Desktop(Movable):
         # gating, with the deferred replay rebuilding the spawn-line
         # log + status flash from the same fields the user authored
         # the target with.
+        self._debug_target_name = target.name
         if self._maybe_prompt_debugpy_install(
             target.debug_language, venv_dir, program, cwd, args.copy(),
         ):
@@ -7195,6 +7271,7 @@ struct Desktop(Movable):
         # Same prompt-before-start gating as ``_target_debug``: if
         # debugpy isn't installed in the venv, surface the install
         # prompt instead of failing the spawn.
+        self._debug_target_name = String("tests")
         if self._maybe_prompt_debugpy_install(
             language, venv_dir, program, project_root, args.copy(),
         ):

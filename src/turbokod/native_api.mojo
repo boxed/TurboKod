@@ -48,6 +48,7 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP, EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
+    FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
@@ -159,6 +160,7 @@ def _build_menus(mut d: Desktop):
     # from the live state every paint by ``_apply_view_config``, so this
     # initial text only has to match the no-tree default.
     v.append(MenuItem(String("File tree: hidden"), PROJECT_TREE_ACTION))
+    v.append(MenuItem(String("Show in file tree"), FILE_TREE_REVEAL))
     # Native-only: float the tool panels (terminal / debug / test) into a
     # separate window. The terminal frontend builds its own menus
     # (examples/desktop.mojo), so this item is Swift-only by construction.

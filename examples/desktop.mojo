@@ -61,6 +61,7 @@ from turbokod import (
     EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
+    FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TERMINAL_NEW,
@@ -234,6 +235,9 @@ def main() raises:
         # Desktop re-stamps the label from the live state every paint.
         view_items.append(MenuItem(
             String("File tree: hidden"), PROJECT_TREE_ACTION,
+        ))
+        view_items.append(MenuItem(
+            String("Show in file tree"), FILE_TREE_REVEAL,
         ))
         desktop.menu_bar.add(Menu(String("View"), view_items^))
         desktop.menu_bar.add(_mk_menu(String("Git"),

@@ -1908,9 +1908,9 @@ def test_file_tree_chevron_click_expands_immediately() raises:
     assert_equal(t.selected, -1)
     var initial_count = len(t.entries)
     # Chevron column for a depth-0 entry is the first content column;
-    # rows start one below the title row.
+    # rows start at the panel's top edge (no title row).
     var chevron_x = area.a.x + 1
-    var row_y = area.a.y + 1 + examples_idx
+    var row_y = area.a.y + examples_idx
     var click = Event.mouse_event(
         Point(chevron_x, row_y), MOUSE_BUTTON_LEFT, True, False,
     )
@@ -1987,6 +1987,77 @@ def test_desktop_file_tree_cycle_shrinks_workspace() raises:
     assert_false(d.file_tree.visible)
     assert_equal(d.workspace_rect(screen).a.x, 0)
     assert_equal(d.workspace_rect(screen).b.x, 100)
+
+
+def test_file_tree_reveal_expands_and_selects() raises:
+    """View ▸ Show in file tree: ``reveal`` expands every ancestor of
+    the target path and lands the selection on its entry."""
+    var t = FileTree()
+    t.open(String("."))
+    t.reveal(String("./src/turbokod/file_tree.mojo"))
+    assert_true(t.selected >= 0)
+    assert_equal(t.entries[t.selected].name, String("file_tree.mojo"))
+    assert_equal(t.entries[t.selected].depth, 2)
+    # The ancestors got expanded along the way.
+    var src_expanded = False
+    for i in range(len(t.entries)):
+        if t.entries[i].name == String("src") and t.entries[i].depth == 0:
+            src_expanded = t.entries[i].is_expanded
+    assert_true(src_expanded)
+    # A path outside the root is a silent no-op.
+    var before = t.selected
+    t.reveal(String("/nonexistent/elsewhere.txt"))
+    assert_equal(t.selected, before)
+
+
+def test_file_tree_modified_rows_tinted_like_tab_bar() raises:
+    """Files with uncommitted changes pick up the tab bar's dirty
+    colors: LIGHT_GREEN surface for plain rows, GREEN with WHITE text
+    when the row is also the selection."""
+    var t = FileTree()
+    t.open(String("."))
+    var screen = Rect(0, 0, 100, 40)
+    var area = t.rect(screen)
+    # Flag the first top-level file entry as modified.
+    var file_idx = -1
+    for i in range(len(t.entries)):
+        if not t.entries[i].is_dir:
+            file_idx = i
+            break
+    assert_true(file_idx >= 0)
+    t.modified_paths.append(t.entries[file_idx].path)
+    var c = Canvas(screen.width(), screen.height())
+    t.paint(c, screen)
+    var row_y = area.a.y + file_idx       # scroll is 0, no title row
+    var cx = area.a.x + 1                 # first content column (right dock)
+    assert_equal(c.get(cx, row_y).attr.bg, LIGHT_GREEN)
+    assert_equal(c.get(cx, row_y).attr.fg, BLACK)
+    # Selecting the row flips it to the active-tab dirty colors.
+    t.selected = file_idx
+    t.paint(c, screen)
+    assert_equal(c.get(cx, row_y).attr.bg, GREEN)
+    assert_equal(c.get(cx, row_y).attr.fg, WHITE)
+
+
+def test_panel_rects_give_way_to_file_tree() raises:
+    """Bottom-docked panes must not paint over the file tree: their
+    rects stop at the tree's column on whichever side it's docked."""
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 30)
+    d.detect_project_from(String("examples/hello.mojo"))
+    d.debug_pane.visible = True
+    d.test_pane.visible = True
+    # No tree: full width.
+    assert_equal(d.debug_pane_rect(screen).a.x, 0)
+    assert_equal(d.debug_pane_rect(screen).b.x, 100)
+    d._cycle_file_tree()    # tree on, docked right
+    assert_equal(d.debug_pane_rect(screen).a.x, 0)
+    assert_equal(d.debug_pane_rect(screen).b.x, 100 - FILE_TREE_WIDTH)
+    assert_equal(d.test_pane_rect(screen).b.x, 100 - FILE_TREE_WIDTH)
+    d._cycle_file_tree()    # docked left
+    assert_equal(d.debug_pane_rect(screen).a.x, FILE_TREE_WIDTH)
+    assert_equal(d.debug_pane_rect(screen).b.x, 100)
+    assert_equal(d.test_pane_rect(screen).a.x, FILE_TREE_WIDTH)
 
 
 def test_window_min_size_enforced_at_construction() raises:
@@ -11450,9 +11521,10 @@ def test_debug_pane_run_mode_hides_inspect_divider() raises:
     var c = Canvas(40, 10)
     c.fill(Rect(0, 0, 40, 10), String("·"), Attr(BLACK, LIGHT_GRAY))
     pane.paint(c, Rect(0, 0, 40, 10))
-    # Scan rows 2..9 (below the title and status row): no row should
-    # be a continuous ``─`` strip carrying an ``Output`` label.
-    for y in range(2, 10):
+    # Scan rows 1..9 (below the title row — no status text is set, so
+    # the status row isn't reserved): no row should be a continuous
+    # ``─`` strip carrying an ``Output`` label.
+    for y in range(1, 10):
         if c.get(3, y).glyph == String("O") \
                 and c.get(4, y).glyph == String("u") \
                 and c.get(5, y).glyph == String("t"):
@@ -11494,7 +11566,7 @@ def test_debug_pane_debug_mode_keeps_output_divider() raises:
     var c = Canvas(40, 12)
     pane.paint(c, Rect(0, 0, 40, 12))
     var found = False
-    for y in range(2, 11):
+    for y in range(1, 11):
         if c.get(3, y).glyph == String("O") \
                 and c.get(4, y).glyph == String("u") \
                 and c.get(5, y).glyph == String("t"):
@@ -11528,7 +11600,7 @@ def test_debug_pane_subtle_frame_paints_dim() raises:
     pane.paint(c, Rect(0, 0, 60, 16))
     # Find the row containing ``recv`` — that's the subtle frame.
     var subtle_y = -1
-    for y in range(2, 16):
+    for y in range(1, 16):
         var x = _find_glyph_x(c, y, String("r"))
         if x >= 0 and c.get(x + 1, y).glyph == String("e") \
                 and c.get(x + 2, y).glyph == String("c") \
@@ -11540,7 +11612,7 @@ def test_debug_pane_subtle_frame_paints_dim() raises:
     assert_equal(c.get(subtle_x, subtle_y).attr.fg, DARK_GRAY)
     # And the inspected user frame stays in the highlight color, not dim.
     var user_y = -1
-    for y in range(2, 16):
+    for y in range(1, 16):
         var x = _find_glyph_x(c, y, String("m"))
         if x >= 0 and c.get(x + 1, y).glyph == String("y") \
                 and c.get(x + 2, y).glyph == String("_"):
@@ -11564,7 +11636,7 @@ def test_debug_pane_debug_mode_running_hides_inspect() raises:
     pane.append_output(String("debug output"))
     var c = Canvas(40, 12)
     pane.paint(c, Rect(0, 0, 40, 12))
-    for y in range(2, 12):
+    for y in range(1, 12):
         if c.get(3, y).glyph == String("O") \
                 and c.get(4, y).glyph == String("u") \
                 and c.get(5, y).glyph == String("t"):
@@ -11593,7 +11665,7 @@ def test_debug_pane_traceback_link_underlines_span() raises:
     # Find ``F`` of ``File`` on whichever row Output painted to.
     var link_y = -1
     var link_x = -1
-    for y in range(2, 8):
+    for y in range(1, 8):
         var x = _find_glyph_x(c, y, String("F"))
         if x >= 0 and c.get(x + 1, y).glyph == String("i"):
             link_y = y
@@ -11634,7 +11706,7 @@ def test_debug_pane_plain_output_has_no_link_styling() raises:
     pane.paint(c, Rect(0, 0, 40, 8))
     # Walk every cell that ended up with ``j`` of ``just`` and verify
     # neither styling artifact is present.
-    for y in range(2, 8):
+    for y in range(1, 8):
         var x = _find_glyph_x(c, y, String("j"))
         if x < 0:
             continue
@@ -11658,7 +11730,7 @@ def test_debug_pane_click_on_traceback_link_sets_pending_open() raises:
     # Find ``F`` so we click on a known cell inside the link.
     var link_y = -1
     var link_x = -1
-    for y in range(2, 8):
+    for y in range(1, 8):
         var x = _find_glyph_x(c, y, String("F"))
         if x >= 0 and c.get(x + 1, y).glyph == String("i"):
             link_y = y
@@ -11784,12 +11856,13 @@ def test_debug_pane_run_log_paints_scrollbar_when_overflowing() raises:
     var panel = Rect(0, 0, 40, 10)
     var c = Canvas(40, 10)
     pane.paint(c, panel)
-    # Output rect spans rows [out_top, panel.b.y - 1] = [2, 9].
-    assert_equal(c.get(39, 2).glyph, String("▲"))
+    # Output rect spans rows [out_top, panel.b.y - 1] = [1, 9] — no
+    # status text is set, so the status row isn't reserved.
+    assert_equal(c.get(39, 1).glyph, String("▲"))
     assert_equal(c.get(39, 9).glyph, String("▼"))
     # At least one █ thumb glyph must exist somewhere on the rail.
     var thumb_seen = False
-    for y in range(3, 9):
+    for y in range(2, 9):
         if c.get(39, y).glyph == String("█"):
             thumb_seen = True
             break
@@ -11806,7 +11879,7 @@ def test_debug_pane_run_log_no_scrollbar_when_content_fits() raises:
     var panel = Rect(0, 0, 40, 10)
     var c = Canvas(40, 10)
     pane.paint(c, panel)
-    for y in range(2, 10):
+    for y in range(1, 10):
         var glyph = c.get(39, y).glyph
         assert_true(
             glyph != String("▲") and glyph != String("▼")
@@ -11827,9 +11900,10 @@ def test_debug_pane_run_log_arrow_click_scrolls_output() raises:
     var c = Canvas(40, 10)
     pane.paint(c, panel)
     # Arrow-up click pulls scroll up by 3 rows; autoscroll must turn off
-    # because we're no longer at the bottom.
+    # because we're no longer at the bottom. The ▲ arrow sits on the
+    # first output row (y=1 — no status text, so no status row).
     var ev = Event.mouse_event(
-        Point(39, 2), MOUSE_BUTTON_LEFT, True, False,
+        Point(39, 1), MOUSE_BUTTON_LEFT, True, False,
     )
     var consumed = pane.handle_mouse(ev, panel)
     assert_true(consumed)
@@ -11849,7 +11923,7 @@ def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
     pane.paint(c, panel)
     # Find the thumb glyph y on the scrollbar column.
     var thumb_y = -1
-    for y in range(3, 9):
+    for y in range(2, 9):
         if c.get(39, y).glyph == String("█"):
             thumb_y = y
             break
@@ -11859,16 +11933,16 @@ def test_debug_pane_run_log_thumb_drag_scrolls_output() raises:
         Event.mouse_event(Point(39, thumb_y), MOUSE_BUTTON_LEFT, True, False),
         panel,
     )
-    # Drag to the top of the track (mouse_y = 3 — first track row).
+    # Drag to the top of the track (mouse_y = 2 — first track row).
     _ = pane.handle_mouse(
-        Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, True, True),
+        Event.mouse_event(Point(39, 2), MOUSE_BUTTON_LEFT, True, True),
         panel,
     )
     # Drag must have disengaged autoscroll.
     assert_false(pane.output.autoscroll)
     # Release.
     _ = pane.handle_mouse(
-        Event.mouse_event(Point(39, 3), MOUSE_BUTTON_LEFT, False, False),
+        Event.mouse_event(Point(39, 2), MOUSE_BUTTON_LEFT, False, False),
         panel,
     )
 
@@ -11923,13 +11997,13 @@ def test_debug_pane_long_output_line_soft_wraps() raises:
     var c = Canvas(20, 8)
     pane.paint(c, panel)
     # First wrapped segment should start at the panel left margin on
-    # the first output row.
-    var first_x = _find_glyph_x(c, 2, String("A"))
+    # the first output row (y=1 — no status text, so no status row).
+    var first_x = _find_glyph_x(c, 1, String("A"))
     assert_true(first_x >= 0)
     # Second segment continues on the next row, starting where the
     # first segment ran out — find a char that should land in the
     # second wrapped row to confirm the line actually wrapped.
-    var second_x = _find_glyph_x(c, 3, String("R"))
+    var second_x = _find_glyph_x(c, 2, String("R"))
     assert_true(second_x >= 0)
 
 
@@ -11947,7 +12021,7 @@ def test_debug_pane_drag_selects_output_text() raises:
     # Find the row 'h' landed on.
     var hy = -1
     var hx = -1
-    for y in range(2, 8):
+    for y in range(1, 8):
         var x = _find_glyph_x(c, y, String("h"))
         if x >= 0:
             hy = y
@@ -11987,7 +12061,7 @@ def test_debug_pane_selection_spans_multiple_lines() raises:
     var sy = -1
     var fx = -1
     var sx = -1
-    for y in range(2, 8):
+    for y in range(1, 8):
         var fx_try = _find_glyph_x(c, y, String("f"))
         if fx_try >= 0 and c.get(fx_try + 1, y).glyph == String("i"):
             fy = y
@@ -12032,7 +12106,7 @@ def test_debug_pane_plain_click_clears_selection() raises:
     pane.paint(c, panel)
     var hy = -1
     var hx = -1
-    for y in range(2, 8):
+    for y in range(1, 8):
         var x = _find_glyph_x(c, y, String("h"))
         if x >= 0:
             hy = y
@@ -16713,6 +16787,9 @@ def _run_chunk_01() raises:
     test_file_tree_chevron_click_expands_immediately()
     test_file_tree_starts_at_top_row_when_host_owns_menu()
     test_desktop_file_tree_cycle_shrinks_workspace()
+    test_file_tree_reveal_expands_and_selects()
+    test_file_tree_modified_rows_tinted_like_tab_bar()
+    test_panel_rects_give_way_to_file_tree()
     test_window_min_size_enforced_at_construction()
     test_window_min_size_survives_workspace_shrink()
     test_window_manager_fit_into_moves_then_resizes()

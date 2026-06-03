@@ -18,7 +18,9 @@ from std.collections.optional import Optional
 from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, LIGHT_GRAY, YELLOW
+from .colors import (
+    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, WHITE, YELLOW,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -26,7 +28,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .file_io import (
-    basename, join_path, list_directory, sort_directory_listing, stat_file,
+    join_path, list_directory, sort_directory_listing, stat_file,
 )
 from .geometry import Point, Rect
 from .project import GitignoreMatcher, load_project_gitignore
@@ -106,6 +108,11 @@ struct FileTree(Movable):
     so listings hide ``.pixi``/``.build``/etc. without re-parsing per
     directory. ``.git`` is always hidden — it's not in ``.gitignore``
     but git itself treats it as implicitly ignored."""
+    var modified_paths: List[String]
+    """Full paths of files with uncommitted changes — synced by the
+    Desktop from the open editors before every paint. Rows whose path
+    matches are tinted with the same green scheme the tab bar uses for
+    dirty tabs."""
 
     def __init__(out self):
         self.visible = False
@@ -122,6 +129,7 @@ struct FileTree(Movable):
         self._resizing = False
         self._type_ahead = TypeAhead()
         self._gitignore = GitignoreMatcher()
+        self.modified_paths = List[String]()
 
     def open(mut self, var root: String):
         self.root = root^
@@ -228,6 +236,62 @@ struct FileTree(Movable):
             rebuilt.append(self.entries[i])
         self.entries = rebuilt^
 
+    def reveal(mut self, path: String):
+        """Expand every ancestor directory of ``path`` and land the
+        selection on its entry. Silent no-op when the path lies outside
+        the project root or one of its components is hidden from the
+        listing (gitignored)."""
+        if not self.visible:
+            return
+        var rel = _strip_root_prefix(self.root, path)
+        var rb = rel.as_bytes()
+        if len(rb) == 0:
+            return
+        if rb[0] == 0x2F:
+            # ``_strip_root_prefix`` echoed the absolute path back —
+            # the prefix didn't match, so the file is outside the root.
+            return
+        # Split into components (no leading / trailing slashes by now).
+        var parts = List[String]()
+        var start = 0
+        for i in range(len(rb) + 1):
+            if i == len(rb) or rb[i] == 0x2F:
+                if i > start:
+                    parts.append(
+                        String(StringSlice(unsafe_from_utf8=rb[start:i])),
+                    )
+                start = i + 1
+        # Walk the flat entry list one component at a time. A component
+        # at depth ``d`` lives somewhere after its parent and before the
+        # first entry shallower than ``d`` (end of the parent's subtree).
+        var search_from = 0
+        for d in range(len(parts)):
+            var idx = -1
+            var i = search_from
+            while i < len(self.entries):
+                if self.entries[i].depth < d:
+                    break
+                if self.entries[i].depth == d \
+                        and self.entries[i].name == parts[d]:
+                    idx = i
+                    break
+                i += 1
+            if idx < 0:
+                return
+            if d + 1 < len(parts):
+                if not self.entries[idx].is_expanded:
+                    self._toggle_expand(idx)
+                search_from = idx + 1
+            else:
+                self.selected = idx
+                self._scroll_to_selection()
+
+    def _is_modified(self, path: String) -> Bool:
+        for i in range(len(self.modified_paths)):
+            if self.modified_paths[i] == path:
+                return True
+        return False
+
     # --- geometry & paint -------------------------------------------------
 
     def rect(self, screen: Rect) -> Rect:
@@ -258,18 +322,6 @@ struct FileTree(Movable):
         var dir_attr    = Attr(BLUE,   LIGHT_GRAY)
         var sel_attr    = Attr(BLACK,  YELLOW)
         var sel_dir_attr = Attr(BLUE,  YELLOW)
-        # Title row gets the focused tint when keyboard focus lands
-        # here — same convention windows use (their title brightens
-        # with the same color flip). The title's *background* stays the
-        # panel's own surface (LIGHT_GRAY) so the strip doesn't read as a
-        # random accent bar under non-default themes; focus is carried by
-        # the fg flip (bright BORDER_FOCUS vs the regular BLACK chrome text) plus
-        # the separator's line weight below.
-        var title_attr: Attr
-        if self.focused:
-            title_attr = Attr(BORDER_FOCUS, LIGHT_GRAY)
-        else:
-            title_attr = Attr(BLACK, LIGHT_GRAY)
         # Separator column lives on the workspace-facing edge. Focus is
         # shown via line weight (single → double), mirroring how normal
         # windows render their frame.
@@ -280,27 +332,10 @@ struct FileTree(Movable):
         var sep_glyph = String("║") if self.focused else String("│")
         for y in range(area.a.y, area.b.y):
             painter.set(canvas, sep_x, y, Cell(sep_glyph, bg, 1))
-        # Title bar fills the rest of the top row of the panel.
-        painter.fill(
-            canvas, Rect(content_x, area.a.y, content_end, area.a.y + 1),
-            String(" "),
-            title_attr,
-        )
-        var title = String(" ") + basename(self.root)
-        _ = painter.put_text(
-            canvas, Point(content_x, area.a.y), title, title_attr,
-        )
-        # Number indicator at the top-right of the content area,
-        # mirroring the per-window ``Ctrl+N`` shortcut hint. ``0`` is the
-        # file tree's slot — paired with ``Ctrl+0`` to focus it from
-        # anywhere.
-        if area.b.x - area.a.x >= 4:
-            _ = painter.put_text(
-                canvas, Point(content_end - 2, area.a.y), String("0"),
-                title_attr,
-            )
-        # Listing area starts one row below the title.
-        var list_top = area.a.y + 1
+        # Listing fills the whole panel — the root's name needs no title
+        # row of its own (the window title / project state already says
+        # which project is open).
+        var list_top = area.a.y
         var list_h = area.b.y - list_top
         for i in range(list_h):
             var idx = self.scroll + i
@@ -313,6 +348,15 @@ struct FileTree(Movable):
                 attr = sel_dir_attr if e.is_dir else sel_attr
             else:
                 attr = dir_attr if e.is_dir else bg
+            # Uncommitted changes recolor the row with the same scheme
+            # the tab bar uses for dirty tabs: LIGHT_GREEN surface for
+            # plain rows, GREEN (with the active tab's WHITE text) when
+            # the row is also the selection.
+            if not e.is_dir and self._is_modified(e.path):
+                if is_sel:
+                    attr = Attr(WHITE, GREEN)
+                else:
+                    attr = attr.with_bg(LIGHT_GREEN)
             # Paint the row background first so selection covers full width.
             painter.fill(
                 canvas,
@@ -495,7 +539,7 @@ struct FileTree(Movable):
                         self.scroll = 0
                 return True
             if event.button == MOUSE_WHEEL_DOWN:
-                var list_h = area.b.y - (area.a.y + 1)
+                var list_h = area.b.y - area.a.y
                 var max_scroll = len(self.entries) - list_h
                 if max_scroll < 0:
                     max_scroll = 0
@@ -511,11 +555,7 @@ struct FileTree(Movable):
         # Any click inside the panel takes keyboard focus, mirroring
         # the debug pane's click-to-focus behaviour.
         self.focused = True
-        if event.pos.y == area.a.y:
-            # Title-bar click: no-op (panel isn't draggable).
-            return True
-        var list_top = area.a.y + 1
-        var idx = self.scroll + (event.pos.y - list_top)
+        var idx = self.scroll + (event.pos.y - area.a.y)
         if idx < 0 or idx >= len(self.entries):
             return True
         # A click on a directory's expand/collapse chevron toggles it

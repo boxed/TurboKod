@@ -641,12 +641,18 @@ struct DebugPane(Copyable, Movable):
             self._left_indices = List[Int]()
             self._right_indices = List[Int]()
             return
-        # Status row (one line).
+        # Status row (one line). Skipped entirely when there's no
+        # status text (e.g. RUN mode while the target is alive — the
+        # target name lives in the title) so the row goes back to the
+        # content area instead of sitting blank under the title.
         var row_y = top + 1
-        if row_y < panel.b.y and len(self.status_text.as_bytes()) > 0:
-            _ = painter.put_text(
-                canvas, Point(panel.a.x + 2, row_y), self.status_text, dim,
-            )
+        var content_top = row_y
+        if len(self.status_text.as_bytes()) > 0:
+            if row_y < panel.b.y:
+                _ = painter.put_text(
+                    canvas, Point(panel.a.x + 2, row_y), self.status_text, dim,
+                )
+            content_top = row_y + 1
         # Compute the inspect/output split. In RUN mode the inspect
         # section would always be empty (no DAP stack frames to show),
         # so the pane collapses to Output-only and gives the full
@@ -656,7 +662,6 @@ struct DebugPane(Copyable, Movable):
         # headers above blank columns just wastes space. In DEBUG mode
         # *with* inspect rows we keep the original 60% / 40% split with
         # at least 2 output rows when the pane is taller than 6.
-        var content_top = top + 2
         var content_h = panel.b.y - content_top
         if content_h < 1:
             return
