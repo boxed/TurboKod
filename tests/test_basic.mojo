@@ -13349,6 +13349,43 @@ def test_floating_panel_top_border_does_not_self_resize() raises:
     assert_equal(d.debug_pane.dock.preferred_height, 14)
 
 
+def test_floating_panel_minimize_bottom_keeps_one_row() raises:
+    """Minimizing the *bottom* panel in the floating window must collapse
+    it to its single header row — the upper panel becomes the absorber and
+    takes the freed rows. Regression: the old layout let the last panel
+    absorb the remainder unconditionally, so minimizing it did nothing."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    var slots = d._panel_window_slots(screen)
+    assert_equal(len(slots), 2)
+    # Bottom (test) pane collapses to one row; top (debug) absorbs the rest.
+    assert_equal(slots[1].rect.a.y, 39)
+    assert_equal(slots[1].rect.b.y, 40)
+    assert_equal(slots[0].rect.a.y, 0)
+    assert_equal(slots[0].rect.b.y, 39)
+
+
+def test_floating_panel_minimize_top_keeps_one_row() raises:
+    """Minimizing the *top* panel collapses it to one row and the bottom
+    panel (the absorber) takes the rest — the symmetric case."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.debug_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    var slots = d._panel_window_slots(screen)
+    assert_equal(len(slots), 2)
+    assert_equal(slots[0].rect.a.y, 0)
+    assert_equal(slots[0].rect.b.y, 1)
+    assert_equal(slots[1].rect.a.y, 1)
+    assert_equal(slots[1].rect.b.y, 40)
+
+
 def test_build_minimal_patch_keeps_only_target_plus_line() raises:
     """A pure-add hunk with two ``+`` lines: targeting one of them
     must produce a patch with just that one as ``+`` and the other
@@ -15851,6 +15888,8 @@ def _run_chunk_00() raises:
     test_docked_panel_stack_min_on_max_sibling_clears_max()
     test_floating_panel_splitter_drag_resizes_upper_pane()
     test_floating_panel_top_border_does_not_self_resize()
+    test_floating_panel_minimize_bottom_keeps_one_row()
+    test_floating_panel_minimize_top_keeps_one_row()
     test_build_minimal_patch_keeps_only_target_plus_line()
     test_build_minimal_patch_demotes_paired_minus_to_context()
     test_build_minimal_patch_reverse_drops_paired_minus()

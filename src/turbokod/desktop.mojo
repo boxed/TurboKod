@@ -1553,36 +1553,59 @@ struct Desktop(Movable):
 
         Order: terminal panes (top), then the run/debug pane, then the test
         pane (bottom). Each takes its ``dock.effective_height`` (with no
-        bottom chrome, against the panel window); the last visible panel
-        absorbs any leftover rows so the window is always fully used, and an
-        overflowing stack clamps later panels to whatever fits."""
+        bottom chrome, against the panel window); the **last non-minimized**
+        panel absorbs any leftover rows so the window is always fully used,
+        and an overflowing stack clamps later panels to whatever fits.
+
+        The absorber is the last *non-minimized* panel rather than simply
+        the last one: a minimized panel must keep its single header row even
+        when it sits at the bottom, otherwise minimizing the bottom panel
+        would do nothing (it would just re-absorb every row it gave up)."""
         var slots = List[PanelSlot]()
         var kinds = List[Int]()
         var idxs = List[Int]()
         var heights = List[Int]()
+        var minimized = List[Bool]()
         for i in range(len(self.terminal_panes)):
             kinds.append(PANEL_KIND_TERMINAL)
             idxs.append(i)
             heights.append(
                 self.terminal_panes[i].dock.effective_height(screen, 0),
             )
+            minimized.append(self.terminal_panes[i].dock.is_minimized())
         if self.debug_pane.visible:
             kinds.append(PANEL_KIND_DEBUG)
             idxs.append(0)
             heights.append(self.debug_pane.dock.effective_height(screen, 0))
+            minimized.append(self.debug_pane.dock.is_minimized())
         if self.test_pane.visible:
             kinds.append(PANEL_KIND_TEST)
             idxs.append(0)
             heights.append(self.test_pane.dock.effective_height(screen, 0))
+            minimized.append(self.test_pane.dock.is_minimized())
         var n = len(kinds)
+        if n > 0:
+            # Pick the absorber: the last panel that isn't minimized. If
+            # every panel is minimized, the last one absorbs (so the window
+            # still fills) — there's no non-minimized panel to hand it to.
+            var absorber = n - 1
+            var j = n - 1
+            while j >= 0:
+                if not minimized[j]:
+                    absorber = j
+                    break
+                j -= 1
+            var others = 0
+            for i in range(n):
+                if i != absorber:
+                    others += heights[i]
+            heights[absorber] = screen.b.y - others
+            if heights[absorber] < 1:
+                heights[absorber] = 1
         var y = 0
         for i in range(n):
             var top = y
-            var bottom: Int
-            if i == n - 1:
-                bottom = screen.b.y   # last panel absorbs the remainder
-            else:
-                bottom = top + heights[i]
+            var bottom = top + heights[i]
             if bottom > screen.b.y:
                 bottom = screen.b.y
             if top >= bottom:
