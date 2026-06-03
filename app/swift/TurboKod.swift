@@ -349,6 +349,12 @@ final class CellView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Capture runs are scripted via env (TK_OPEN / TK_CAPTURE_ACTIONS);
+        // the window briefly steals focus on the user's desktop, so any
+        // typing mid-run would land in the staged buffer — and autosave
+        // would write it to the real file on disk. Drop keyboard input
+        // entirely while capturing.
+        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
         var key: UInt32 = 0
         if let sp = specialKey(event.keyCode) {
             key = sp
@@ -364,6 +370,8 @@ final class CellView: NSView {
 
     private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8,
                            passive: Bool = false) {
+        // See keyDown — scripted capture runs ignore live input.
+        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
         let p = convert(e.locationInWindow, from: nil)
         let col = Int64(max(0, p.x) / CELL_W), row = Int64(max(0, p.y) / CELL_H)
         if passive {

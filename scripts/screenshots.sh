@@ -35,21 +35,27 @@ root="$PWD"
 
 out="${1:-docs/screenshots}"
 mkdir -p "$out"
+# The app chdir's to its bundle Resources dir on launch, so TK_CAPTURE
+# must be absolute or the PNG lands inside (or fails to write into) the
+# bundle.
+case "$out" in /*) ;; *) out="$root/$out" ;; esac
 
 # Give the app a moment to open the project / settle layout / finish the
 # first highlight pass before the grab.
 export TK_CAPTURE_DELAY="${TK_CAPTURE_DELAY:-1.5}"
 
 # Build everything up front so the per-shot launches hit warm caches.
+# The test binary needs line tables (TURBOKOD_DEBUG_INFO) or lldb can't
+# bind the staged breakpoint and the debugger shot runs straight through.
 TURBOKOD_BUILD_ONLY=1 ./run_swift.sh
-TURBOKOD_BUILD_ONLY=1 ./run.sh tests/test_basic.mojo
+TURBOKOD_DEBUG_INFO=1 TURBOKOD_BUILD_ONLY=1 ./run.sh tests/test_basic.mojo
 
 # ---------------------------------------------------------------- themes --
 # Same scene for every theme: the project open with the editor on a meaty
 # function, so the shots differ only in palette. Anchored by grep, not a
 # hard-coded line, so the scene survives edits to editor.mojo.
 scene_file="$root/src/turbokod/editor.mojo"
-scene_line="$(grep -n 'def handle_key' "$scene_file" | head -1 | cut -d: -f1)"
+scene_line="$(grep -n -m1 'def handle_key' "$scene_file" | cut -d: -f1)"
 
 capture_theme() {  # <out-slug> <theme-name>
   local slug="$1" theme="$2"
@@ -60,26 +66,18 @@ capture_theme() {  # <out-slug> <theme-name>
     ./run_swift.sh "$root"
 }
 
-# Keep in sync with theme.mojo's built_in_themes().
-capture_theme turbo-cpp-3      "Turbo C++ 3.0"
-capture_theme monokai          "Monokai"
+# One dark + one light example is enough for the docs — the hero shot
+# already shows the default Turbo C++ 3.0. Names must match
+# theme.mojo's built_in_themes().
 capture_theme dracula          "Dracula"
-capture_theme one-dark         "One Dark"
-capture_theme gruvbox-dark     "Gruvbox Dark"
-capture_theme solarized-dark   "Solarized Dark"
 capture_theme solarized-light  "Solarized Light"
-capture_theme github-light     "GitHub Light"
-capture_theme one-light        "One Light"
-capture_theme turbo-pascal-7   "Turbo Pascal 7"
-capture_theme norton-commander "Norton Commander"
-capture_theme qbasic           "QBasic"
 
 # -------------------------------------------------------- debugger (hero) --
 # Mirror run.sh's binary cache key: basename + short hash of the absolute
-# entry-point path.
+# entry-point path, ``_g`` suffix for the debug-info build.
 test_src="$root/tests/test_basic.mojo"
 hash="$(printf '%s' "$test_src" | shasum -a 256 | cut -c1-8)"
-test_bin="$root/.build/test_basic_${hash}"
+test_bin="$root/.build/test_basic_${hash}_g"
 [ -x "$test_bin" ] || { echo "[screenshots] missing $test_bin" >&2; exit 1; }
 
 targets="$root/.turbokod/targets.json"
@@ -115,7 +113,7 @@ printf '{"breakpoints":[]}' > "$bps"
 # Breakpoint on the first test function — hit within moments of launch, and
 # the paused stack shows main → the test. Anchored by grep so the shot
 # survives the suite growing.
-bp_line="$(grep -n '^def test_' "$test_src" | head -1 | cut -d: -f1)"
+bp_line="$(grep -n -m1 '^def test_' "$test_src" | cut -d: -f1)"
 
 echo "[screenshots] debugger paused at $test_src:$bp_line -> $root/screenshot.png"
 TK_THEME="Turbo C++ 3.0" \

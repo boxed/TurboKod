@@ -19,21 +19,9 @@ Bundled themes: Turbo C++ 3.0, Monokai, Dracula, One Dark, Gruvbox Dark,
 Solarized Dark, Solarized Light, GitHub Light, One Light, Turbo Pascal 7,
 Norton Commander, QBasic.
 
-| Turbo C++ 3.0 (default) | Monokai | Dracula |
-|---|---|---|
-| ![Turbo C++ 3.0](screenshots/theme-turbo-cpp-3.png) | ![Monokai](screenshots/theme-monokai.png) | ![Dracula](screenshots/theme-dracula.png) |
-
-| One Dark | Gruvbox Dark | Solarized Dark |
-|---|---|---|
-| ![One Dark](screenshots/theme-one-dark.png) | ![Gruvbox Dark](screenshots/theme-gruvbox-dark.png) | ![Solarized Dark](screenshots/theme-solarized-dark.png) |
-
-| Solarized Light | GitHub Light | One Light |
-|---|---|---|
-| ![Solarized Light](screenshots/theme-solarized-light.png) | ![GitHub Light](screenshots/theme-github-light.png) | ![One Light](screenshots/theme-one-light.png) |
-
-| Turbo Pascal 7 | Norton Commander | QBasic |
-|---|---|---|
-| ![Turbo Pascal 7](screenshots/theme-turbo-pascal-7.png) | ![Norton Commander](screenshots/theme-norton-commander.png) | ![QBasic](screenshots/theme-qbasic.png) |
+| Dracula (dark) | Solarized Light (light) |
+|---|---|
+| ![Dracula](screenshots/theme-dracula.png) | ![Solarized Light](screenshots/theme-solarized-light.png) |
 
 > Regenerate these with `make screenshots` (needs a real display — see below).
 

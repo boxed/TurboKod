@@ -16,21 +16,13 @@ The editor runs in any terminal, but ships with an optional native macOS `.app` 
 Color themes retint both the syntax highlighting and the whole UI chrome, in
 both frontends (Settings ▸ Theme). A sample, rendered by the native macOS app:
 
-| Monokai | Dracula |
+| Dracula | Solarized Light |
 |---|---|
-| ![Monokai](docs/screenshots/theme-monokai.png) | ![Dracula](docs/screenshots/theme-dracula.png) |
+| ![Dracula](docs/screenshots/theme-dracula.png) | ![Solarized Light](docs/screenshots/theme-solarized-light.png) |
 
-| Gruvbox Dark | Solarized Light |
-|---|---|
-| ![Gruvbox Dark](docs/screenshots/theme-gruvbox-dark.png) | ![Solarized Light](docs/screenshots/theme-solarized-light.png) |
-
-| Norton Commander | QBasic |
-|---|---|
-| ![Norton Commander](docs/screenshots/theme-norton-commander.png) | ![QBasic](docs/screenshots/theme-qbasic.png) |
-
-Twelve ship in total — see [docs/themes.md](docs/themes.md) for the full
-gallery and how themes work. All screenshots (including the debugger shot
-above) are regenerated with `make screenshots`
+Twelve ship in total — see [docs/themes.md](docs/themes.md) for the list and
+how themes work. All screenshots (including the debugger shot above) are
+regenerated with `make screenshots`
 ([scripts/screenshots.sh](scripts/screenshots.sh)).
 
 ## Status

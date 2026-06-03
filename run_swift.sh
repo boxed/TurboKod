@@ -91,6 +91,15 @@ cp -R src/turbokod/grammars "$res/src/turbokod/grammars"
 cp -R src/turbokod/data     "$res/src/turbokod/data"
 cp app/assets/Px437_IBM_VGA_8x16.ttf "$res/Px437_IBM_VGA_8x16.ttf"
 
+# Ad-hoc re-sign the assembled bundle, innermost first. The executable and
+# dylib can land here with a signature that no longer matches (a stale
+# linker signature, or one invalidated by install_name_tool), and arm64
+# macOS SIGKILLs (``Killed: 9``) any binary whose signature doesn't
+# validate — the launch dies before main() with no output. Re-signing on
+# every assembly is cheap (<100 ms) and makes the bundle always runnable.
+codesign --force --sign - "$fwk/libturbokod.dylib" 2>/dev/null
+codesign --force --sign - "$app_dir" 2>/dev/null
+
 # ``TURBOKOD_BUILD_ONLY=1`` skips the launch — used by ``make app`` so
 # the bundle gets refreshed without forcing an interactive launch.
 # Relaunching the .app via Dock then picks up the fresh dylib (see

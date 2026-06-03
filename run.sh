@@ -43,9 +43,24 @@ prog_args=("${args[@]:1}")
 # Cache key: basename + short hash of the absolute path, so two files
 # with the same basename in different dirs (``examples/desktop.mojo`` vs
 # ``tests/desktop.mojo``) don't clobber each other's binary.
+#
+# ``TURBOKOD_DEBUG_INFO=1`` compiles with DWARF line tables so lldb can
+# bind source-line breakpoints — ``mojo build`` defaults to *no* debug
+# info, which makes every breakpoint silently come back ``verified:
+# false``. ``line-tables`` rather than ``full``: full ``-g`` currently
+# crashes the Mojo compiler on this codebase ("translate module to
+# LLVMIR failed"), and line tables are what breakpoints + stepping need
+# (no variable inspection, but the debugger is usable). Debug binaries
+# get their own ``_g`` cache slot so a debug build doesn't evict the
+# fast one (and vice versa).
 mkdir -p .build
 hash="$(printf '%s' "$src" | shasum -a 256 | cut -c1-8)"
 bin=".build/$(basename -- "$src" .mojo)_${hash}"
+debug_flags=()
+if [ -n "${TURBOKOD_DEBUG_INFO:-}" ]; then
+  bin="${bin}_g"
+  debug_flags=(--debug-level line-tables)
+fi
 
 # Skip the build when the cached binary is newer than every Mojo source
 # in ``src/``, the entry point itself, and the C shims linked into it
@@ -117,7 +132,7 @@ proc_obj="$shim_lib"
 if [ "$needs_build" -eq 1 ]; then
   echo "[run.sh] building $src -> $bin" >&2
   if ! pixi run mojo build \
-    -I src \
+    -I src ${debug_flags[@]+"${debug_flags[@]}"} \
     -Xlinker "-L${env_prefix}/lib" \
     -Xlinker "-lonig" \
     -Xlinker "$proc_obj" \
