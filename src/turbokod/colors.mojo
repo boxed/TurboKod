@@ -9,6 +9,8 @@ into a 16-bit attribute byte and is unnecessary in Mojo.
 Truecolor (24-bit) support is a future extension — the design leaves room.
 """
 
+from std.collections.list import List
+
 # --- Standard 16-color ANSI palette as named constants -----------------------
 
 comptime BLACK         = UInt8(0)
@@ -27,6 +29,60 @@ comptime LIGHT_BLUE    = UInt8(12)
 comptime LIGHT_MAGENTA = UInt8(13)
 comptime LIGHT_CYAN    = UInt8(14)
 comptime WHITE         = UInt8(15)
+
+# --- Reserved theme slots ----------------------------------------------------
+#
+# Indices 0..15 above are the ANSI-16 palette and drive *all* UI chrome
+# (menus, windows, dialogs, status bar). A theme remaps their RGB at the
+# frontend boundary, so re-skinning the chrome needs no change to the
+# hundreds of ``Attr(...)`` literals that reference the named constants.
+#
+# The editor body and syntax-highlight tokens, however, want colors that are
+# *independent* of the chrome palette (e.g. yellow strings without recoloring
+# menu hotkeys). They use the reserved indices below — picked out of the
+# 6x6x6 color-cube range (16..231), which nothing else in the app references
+# (every other color goes through the named constants 0..15). A `Theme`
+# overrides exactly these slots; everything else in 16..255 keeps the standard
+# cube/grayscale values. The indices are stable across themes, so highlights
+# baked at tokenize time stay valid — switching theme is a pure palette swap,
+# no re-tokenize.
+comptime EDITOR_BG     = UInt8(16)
+comptime EDITOR_FG     = UInt8(17)
+comptime SYN_KEYWORD   = UInt8(18)
+comptime SYN_STRING    = UInt8(19)
+comptime SYN_COMMENT   = UInt8(20)
+comptime SYN_NUMBER    = UInt8(21)
+comptime SYN_IDENT     = UInt8(22)
+comptime SYN_DECORATOR = UInt8(23)
+comptime SYN_OPERATOR  = UInt8(24)
+# Tool-pane surface (terminal / debug / test panels) and window drop-shadow.
+# These are a *dark terminal-like* surface in every theme, independent of the
+# chrome palette: keeping them on a dedicated slot frees the chrome ``BLACK``
+# (slot 0) / ``LIGHT_GRAY`` (slot 7) pair to flip light-on-dark for dark themes
+# without turning the panes or shadows into low-contrast mud. ``PANE_FG`` is the
+# neutral text/border color on that surface.
+comptime PANE_BG       = UInt8(25)
+comptime PANE_FG       = UInt8(26)
+# The editor caret block: ``CARET_BG`` is the block color, ``CARET_FG`` the
+# glyph showing through it. Dedicated slots because the caret must contrast
+# with *every* theme's editor surface — the classic ``BLUE``-on-``YELLOW``
+# pair only worked because those slots happened to be blue and yellow; under
+# a theme they're arbitrary accents. Each theme sets these to its published
+# cursor color (Monokai #F8F8F0, One Dark #528BFF, …); the default keeps the
+# exact classic yellow-block-blue-glyph RGB.
+comptime CARET_FG      = UInt8(27)
+comptime CARET_BG      = UInt8(28)
+# Focused window-border / chrome-line color. Border *backgrounds* match the
+# window's content (``EDITOR_BG``), so the line color must contrast with that
+# surface in every theme: near-white for dark editors, a strong dark for light
+# ones. Unfocused borders don't need a slot — they use ``EDITOR_FG``, which
+# contrasts with ``EDITOR_BG`` by construction (and resolves to the same RGB
+# the old LIGHT_GRAY border had under the default theme).
+comptime BORDER_FOCUS  = UInt8(29)
+# Number of palette slots a theme defines (ANSI 0..15 + every reserved slot
+# above). Derived from the last reserved index so adding a slot can't leave a
+# stale count anywhere; ``theme.mojo`` sizes its rows and prefix-copy with it.
+comptime THEME_SLOT_COUNT = Int(BORDER_FOCUS) + 1
 
 # --- Style bits --------------------------------------------------------------
 
@@ -137,4 +193,44 @@ def attr_to_sgr(attr: Attr) -> String:
     s += String(";48;5;") + String(Int(attr.bg))
     if attr.underline_color >= 0:
         s += String(";58;5;") + String(Int(attr.underline_color))
+    return s
+
+
+def _rgb_triplet(rgb: UInt32) -> String:
+    """``r;g;b`` decimal from a packed ``0xRRGGBB`` value."""
+    var r = (Int(rgb) >> 16) & 0xFF
+    var g = (Int(rgb) >> 8) & 0xFF
+    var b = Int(rgb) & 0xFF
+    return String(r) + String(";") + String(g) + String(";") + String(b)
+
+
+def attr_to_sgr_rgb(attr: Attr, palette: List[UInt32]) -> String:
+    """Like ``attr_to_sgr`` but resolves the palette indices to 24-bit
+    truecolor through ``palette`` and emits ``38;2;r;g;b`` / ``48;2;r;g;b``.
+
+    This is what the terminal frontend uses on truecolor-capable terminals so
+    a bundled theme renders identically to the native app — independent of the
+    user's own terminal color scheme. ``palette`` must have 256 entries
+    (``0xRRGGBB``); out-of-range indices fall back to index 0.
+    """
+    var s = String("0")  # reset first; simpler than diffing previous attr
+    if (attr.style & STYLE_BOLD) != 0:      s += String(";1")
+    if (attr.style & STYLE_DIM) != 0:       s += String(";2")
+    if (attr.style & STYLE_ITALIC) != 0:    s += String(";3")
+    if (attr.style & STYLE_UNDERLINE) != 0:
+        if (attr.style & STYLE_UNDERLINE_CURLY) != 0:
+            s += String(";4:3")
+        else:
+            s += String(";4")
+    if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
+    if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
+    var n = len(palette)
+    var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
+    var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
+    s += String(";38;2;") + _rgb_triplet(palette[fg_i])
+    s += String(";48;2;") + _rgb_triplet(palette[bg_i])
+    if attr.underline_color >= 0:
+        var uc = Int(attr.underline_color)
+        if uc < n:
+            s += String(";58;2;") + _rgb_triplet(palette[uc])
     return s

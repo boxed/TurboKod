@@ -30,7 +30,7 @@ font issue.
 
 from .canvas import Canvas
 from .cell import Cell
-from .colors import Attr, BLACK
+from .colors import Attr, BLACK, PANE_BG
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
 from .string_utils import display_columns
@@ -210,7 +210,10 @@ def paint_shadow_button(
     moment the cursor drags off the held button, the shadow returns
     so the user can see the click is now armed to cancel.
     """
-    var shadow = Attr(BLACK, shadow_bg)
+    # The shadow's dark half-block is ``PANE_BG`` (dark in every theme) rather
+    # than ``BLACK`` — under a dark theme ``BLACK`` is a light chrome-text
+    # color, which would turn the "lifted" shadow into a light smear.
+    var shadow = Attr(PANE_BG, shadow_bg)
     # Face row.
     _ = canvas.put_text(Point(button.x, button.y), button.label, face, max_x)
     var face_w = button.face_width()

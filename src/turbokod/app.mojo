@@ -22,6 +22,7 @@ which is the root of the entire view tree.
 """
 
 from std.collections import Optional
+from std.collections.list import List
 
 from .canvas import Canvas
 from .colors import default_attr
@@ -61,6 +62,12 @@ struct Application:
 
     def present(mut self) raises:
         self.terminal.present(self.back)
+
+    def set_palette(mut self, palette: List[UInt32]):
+        """Push the active color theme's palette to the terminal so the
+        truecolor renderer resolves indices through it. The Desktop loop
+        calls this at startup and whenever ``Desktop.theme_version`` moves."""
+        self.terminal.set_palette(palette)
 
     def next_event(mut self, timeout_ms: Int = 50) raises -> Optional[Event]:
         # Polled-cursor refresh stays as a fallback for real terminals where

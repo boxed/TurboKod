@@ -54,8 +54,9 @@ from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, RED, STYLE_UNDERLINE, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GREEN,
+    LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, PANE_BG, PANE_FG, RED,
+    STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
@@ -290,7 +291,7 @@ struct DebugPane(Copyable, Movable):
         self.rows = List[PaneRow]()
         self.current_frame_index = 0
         self.output = TextLog(
-            default_attr=Attr(WHITE, BLACK), max_lines=_MAX_OUTPUT_LINES,
+            default_attr=Attr(WHITE, PANE_BG), max_lines=_MAX_OUTPUT_LINES,
         )
         self.stack_scroll = 0
         self.right_scroll = 0
@@ -505,9 +506,9 @@ struct DebugPane(Copyable, Movable):
         semantics."""
         var attr = self.output.default_attr
         if category == PANE_OUT_STDERR:
-            attr = Attr(LIGHT_RED, BLACK)
+            attr = Attr(LIGHT_RED, PANE_BG)
         elif category == PANE_OUT_CONSOLE:
-            attr = Attr(LIGHT_GRAY, BLACK)
+            attr = Attr(PANE_FG, PANE_BG)
         self.output.append(
             text^, attr, streaming=category != PANE_OUT_CONSOLE,
         )
@@ -598,19 +599,19 @@ struct DebugPane(Copyable, Movable):
         neighbouring pane on either side."""
         if not self.visible or panel.is_empty():
             return
-        var bg = Attr(WHITE, BLACK)
-        var border = Attr(LIGHT_GRAY, BLACK)
-        var title = Attr(LIGHT_YELLOW, BLACK)
-        var section = Attr(YELLOW, BLACK)
+        var bg = Attr(WHITE, PANE_BG)
+        var border = Attr(PANE_FG, PANE_BG)
+        var title = Attr(LIGHT_YELLOW, PANE_BG)
+        var section = Attr(YELLOW, PANE_BG)
         var current = Attr(BLACK, LIGHT_YELLOW)
-        var dim = Attr(LIGHT_GRAY, BLACK)
+        var dim = Attr(PANE_FG, PANE_BG)
         # Frame-specific dim. ANSI 7 (``LIGHT_GRAY``) collides with bright
         # white on many terminals, so non-project frames painted in
         # ``dim`` would read as the same color as user code. ``DARK_GRAY``
         # (ANSI 8) is consistently dimmer across xterm-256 palettes, which
         # is what we want for "you can see it, but it's not your code."
-        var subtle_frame = Attr(DARK_GRAY, BLACK)
-        var link_attr = Attr(LIGHT_BLUE, BLACK, STYLE_UNDERLINE)
+        var subtle_frame = Attr(DARK_GRAY, PANE_BG)
+        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
         var painter = Painter(panel)
         # Reset visible-link rects + scrollbar bookkeeping each paint —
         # only what's currently on screen counts for click hit-testing.
@@ -1158,18 +1159,18 @@ def _type_attr(type_name: String) -> Attr:
     """
     if type_name == String("str") or type_name == String("bytes") \
             or type_name == String("bytearray"):
-        return Attr(RED, BLACK)
+        return Attr(RED, PANE_BG)
     if type_name == String("int") or type_name == String("float") \
             or type_name == String("complex"):
-        return Attr(LIGHT_GRAY, BLACK)
+        return Attr(PANE_FG, PANE_BG)
     if type_name == String("bool") or type_name == String("NoneType") \
             or type_name == String("None"):
-        return Attr(LIGHT_MAGENTA, BLACK)
+        return Attr(LIGHT_MAGENTA, PANE_BG)
     if type_name == String("list") or type_name == String("dict") \
             or type_name == String("tuple") or type_name == String("set") \
             or type_name == String("frozenset"):
-        return Attr(LIGHT_GREEN, BLACK)
-    return Attr(LIGHT_YELLOW, BLACK)
+        return Attr(LIGHT_GREEN, PANE_BG)
+    return Attr(LIGHT_YELLOW, PANE_BG)
 
 
 def _basename(path: String) -> String:

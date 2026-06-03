@@ -30,8 +30,9 @@ from std.collections.optional import Optional
 from .canvas import Canvas
 from .painter import Painter
 from .colors import (
-    Attr, BLACK, BLUE, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
+    Attr, BLACK, BLUE, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
 )
+from .theme import Theme, theme_by_name
 from .events import (
     Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOD_KEY,
     EVENT_MOUSE, EVENT_RESIZE,
@@ -639,8 +640,20 @@ struct Desktop(Movable):
     # mirrored back into ``self.config.on_save_actions`` and persisted
     # whenever ``settings.dirty`` is True.
     var settings: Settings
+    # True when the host renders Settings in its own native window (macOS
+    # frontend) — the main surface then skips the in-grid settings overlay
+    # and keeps routing events to the workspace, while the host drives the
+    # second surface via ``paint_settings`` / ``handle_settings_event``.
+    # Mirrors ``panels_detached`` (see docs/floating-panels.md).
+    var settings_detached: Bool
     var bg_pattern: String
     var bg_attr: Attr
+    # Active color theme (see ``theme.mojo``). Owns the 256-entry palette the
+    # frontends resolve indices through, so it retints chrome + syntax together.
+    # ``theme_version`` bumps on every change so the Swift host knows to refetch
+    # the palette (cheap version check per frame).
+    var active_theme: Theme
+    var theme_version: Int
     var project: Optional[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
@@ -1013,8 +1026,11 @@ struct Desktop(Movable):
         self.targets_dialog = TargetsDialog()
         self.grammars_dialog = GrammarsDialog()
         self.settings = Settings()
+        self.settings_detached = False
         self.bg_pattern = String("▒")
-        self.bg_attr = Attr(LIGHT_GRAY, BLUE)
+        self.bg_attr = Attr(EDITOR_FG, EDITOR_BG)
+        self.active_theme = theme_by_name(String("Turbo C++ 3.0"))
+        self.theme_version = 0
         self.project = Optional[String]()
         self._project_menu_idx = -1
         self._window_menu_idx = -1
@@ -1632,7 +1648,7 @@ struct Desktop(Movable):
                 hx = 0
             var hy = screen.b.y // 2
             _ = canvas.put_text(
-                Point(hx, hy), hint, Attr(LIGHT_GRAY, BLUE), screen.b.x,
+                Point(hx, hy), hint, Attr(EDITOR_FG, EDITOR_BG), screen.b.x,
             )
             return
         for ref s in slots:
@@ -1819,6 +1835,39 @@ struct Desktop(Movable):
             if self._panel_slot_handle_mouse(s.kind, s.idx, event, s.rect):
                 return Optional[String]()
         return Optional[String]()
+
+    def set_settings_detached(mut self, on: Bool):
+        """Tell the Desktop the Settings view renders in a separate host
+        window. The main surface stops painting the in-grid overlay and
+        stops routing events to it; the host drives the second surface via
+        ``paint_settings`` / ``handle_settings_event``. The companion flag
+        on ``Settings`` makes it fill the whole surface instead of its
+        movable in-grid bounds."""
+        self.settings_detached = on
+        self.settings.detached = on
+
+    def paint_settings(mut self, mut canvas: Canvas, screen: Rect):
+        """Paint the Settings view to fill the host's separate settings
+        window (companion to ``paint_panels``). When Settings just closed
+        and the host hasn't hidden the window yet, paint a flat dialog
+        surface rather than leaving stale cells."""
+        if not self.settings.active:
+            Painter(screen).fill(
+                canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        self.settings.paint(canvas, screen)
+
+    def handle_settings_event(mut self, event: Event, screen: Rect):
+        """Route a key/mouse event from the host's settings window into the
+        Settings view. The companion to ``handle_event`` for the detached
+        settings surface."""
+        if not self.settings.active:
+            return
+        if event.kind == EVENT_KEY:
+            _ = self.settings.handle_key(event)
+        elif event.kind == EVENT_MOUSE:
+            _ = self.settings.handle_mouse(event, screen)
 
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
@@ -2277,7 +2326,11 @@ struct Desktop(Movable):
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
         # survive a restart without an explicit "save settings" step.
-        self.settings.paint(canvas, screen)
+        # When detached, the host's separate settings window paints it
+        # (``paint_settings``) — but the dirty-sync below still runs here,
+        # because the main surface's paint is the per-frame persistence hook.
+        if not self.settings_detached:
+            self.settings.paint(canvas, screen)
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
         # cursor has been resting on the message rect long enough for
@@ -2295,6 +2348,12 @@ struct Desktop(Movable):
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
+            # Apply a theme change live (retints chrome + syntax) before
+            # persisting. ``set_theme`` updates ``config.theme`` too, so the
+            # ``save_config`` below writes the new name.
+            if self.settings.theme_choice != self.config.theme:
+                var new_theme = self.settings.theme_choice.copy()
+                self.set_theme(new_theme)
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
             self.settings.ack_dirty()
@@ -3063,6 +3122,9 @@ struct Desktop(Movable):
         ``__init__`` deliberately doesn't, so tests get deterministic
         defaults instead of inheriting the developer's local config."""
         self.config = load_config()
+        # Apply the saved theme (or the default if the name is unknown).
+        self.active_theme = theme_by_name(self.config.theme)
+        self.theme_version += 1
         # Seed the in-memory recents from the persisted list so the
         # File ▸ "Open recent..." picker has entries to show on the
         # very first invocation of a fresh process — otherwise the
@@ -3076,6 +3138,16 @@ struct Desktop(Movable):
         # appear from the just-loaded list.
         if not self.project:
             self._reset_no_project_menu()
+
+    def set_theme(mut self, name: String):
+        """Switch the active color theme. Updates ``config.theme`` (so the
+        host persists it on the next config sync), rebuilds the palette, and
+        bumps ``theme_version`` so the Swift host refetches. No re-tokenize is
+        needed — highlights bake stable reserved indices, only their RGB
+        mapping changes."""
+        self.config.theme = name
+        self.active_theme = theme_by_name(name)
+        self.theme_version += 1
 
     def _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
@@ -4126,7 +4198,11 @@ struct Desktop(Movable):
             if self.grammars_dialog.submitted:
                 self._on_grammars_dialog_submit()
             return Optional[String]()
-        if self.settings.active:
+        if self.settings.active and not self.settings_detached:
+            # In-grid Settings is modal over the workspace. Detached, the
+            # host's settings window routes events via
+            # ``handle_settings_event`` and the main window stays fully
+            # interactive — that's what makes the live theme preview useful.
             if event.kind == EVENT_KEY:
                 _ = self.settings.handle_key(event)
             else:
@@ -4570,6 +4646,7 @@ struct Desktop(Movable):
                 cur_ext,
                 self.config.trim_trailing_whitespace,
                 self.config.ensure_final_newline,
+                self.config.theme,
             )
             return Optional[String]()
         if action == EDITOR_NEW:

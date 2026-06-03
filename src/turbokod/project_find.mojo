@@ -25,7 +25,8 @@ from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, RED, WHITE, YELLOW,
+    Attr, BLACK, BORDER_FOCUS, CYAN, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, RED,
+    WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -458,20 +459,20 @@ struct ProjectFind(Movable):
              mut registry: GrammarRegistry):
         if not self.active:
             return
-        var bg          = Attr(YELLOW, BLUE)
-        var border      = Attr(WHITE,  BLUE)
-        var title_attr  = Attr(WHITE,  BLUE)
-        var label_attr  = Attr(WHITE,  BLUE)
-        var line_attr   = Attr(YELLOW, BLUE)
+        var bg          = Attr(YELLOW, EDITOR_BG)
+        var border      = Attr(BORDER_FOCUS, EDITOR_BG)
+        var title_attr  = Attr(BORDER_FOCUS, EDITOR_BG)
+        var label_attr  = Attr(BORDER_FOCUS, EDITOR_BG)
+        var line_attr   = Attr(YELLOW, EDITOR_BG)
         var sel_line    = Attr(BLACK,  YELLOW)
         var hl_attr     = Attr(WHITE,  RED)            # match highlight
         var sel_hl_attr = Attr(WHITE,  RED)            # same when row selected
-        var path_attr   = Attr(LIGHT_GRAY, BLUE)
+        var path_attr   = Attr(EDITOR_FG, EDITOR_BG)
         var sel_path    = Attr(BLACK,  YELLOW)
-        var ctx_attr    = Attr(LIGHT_GRAY, BLUE)
-        var ctx_match   = Attr(YELLOW, BLUE)
+        var ctx_attr    = Attr(EDITOR_FG, EDITOR_BG)
+        var ctx_match   = Attr(YELLOW, EDITOR_BG)
         var hint_attr   = Attr(BLACK,  LIGHT_GRAY)
-        var sep_attr    = Attr(WHITE,  BLUE)
+        var sep_attr    = Attr(BORDER_FOCUS, EDITOR_BG)
         # Bind every write to the dialog rect so an over-long match
         # path or context line can't leak onto the modal's border or
         # outside ``screen`` entirely.
@@ -522,7 +523,7 @@ struct ProjectFind(Movable):
         # Toggle chips. Off uses a darker on-blue paint so an inactive
         # chip blends with the dialog body; on inverts to the standard
         # yellow selection background.
-        var toggle_off = Attr(LIGHT_GRAY, BLUE)
+        var toggle_off = Attr(EDITOR_FG, EDITOR_BG)
         var toggle_on  = Attr(BLACK, YELLOW)
         paint_option_toggle(
             canvas, self.toggle_case, toggle_off, toggle_on, screen.b.x - 1,

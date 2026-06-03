@@ -21,7 +21,11 @@ from turbokod.colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY,
     LIGHT_GREEN, LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
-    attr_to_sgr, default_attr,
+    BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, PANE_BG,
+    attr_to_sgr, attr_to_sgr_rgb, default_attr,
+)
+from turbokod.theme import (
+    Theme, built_in_themes, default_theme_name, theme_by_name, theme_names,
 )
 from turbokod.diff import MergeResult, diff3_merge, diff_lines, unified_diff
 from turbokod.editor import (
@@ -4480,6 +4484,89 @@ def test_settings_open_seeds_state() raises:
     assert_equal(len(s.actions), 0)
 
 
+def test_settings_windowed_default_is_centered_dialog() raises:
+    """In-grid (terminal) Settings is a centered floating dialog, not a
+    workspace takeover — the editor behind it stays visible so a theme
+    change retints it live. The first paint establishes the default
+    bounds inside the workspace (rows 1..h-1, menu/status excluded)."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    var c = Canvas(100, 40)
+    c.clear(default_attr())
+    s.paint(c, Rect(0, 0, 100, 40))
+    assert_true(s.bounds.a.y >= 1)
+    assert_true(s.bounds.b.y <= 39)
+    assert_true(s.bounds.width() <= 104)
+    assert_true(s.bounds.a.x > 0)
+    # The dialog's top-left corner carries the double-line box; a cell
+    # left of the dialog is untouched workspace.
+    assert_equal(
+        c.get(s.bounds.a.x, s.bounds.a.y).glyph, String("╔"),
+    )
+    var outside = c.get(0, s.bounds.a.y)
+    assert_equal(outside.attr.fg, default_attr().fg)
+    assert_equal(outside.attr.bg, default_attr().bg)
+
+
+def test_settings_windowed_move_and_resize() raises:
+    """Dragging the title row moves the dialog; dragging the bottom-right
+    corner resizes it (mirrors WindowStack's chrome). The drag owns events
+    until release, and sizes clamp to the minimums."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    var screen = Rect(0, 0, 100, 40)
+    var c = Canvas(100, 40)
+    s.paint(c, screen)   # establish default bounds
+    var b0 = s.bounds
+    # Move: press on the title row, drag +3 cols / +2 rows, release.
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b0.a.x + 5, b0.a.y), MOUSE_BUTTON_LEFT, True, False,
+    ), screen)
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b0.a.x + 8, b0.a.y + 2), MOUSE_BUTTON_LEFT, True, True,
+    ), screen)
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b0.a.x + 8, b0.a.y + 2), MOUSE_BUTTON_LEFT, False, False,
+    ), screen)
+    assert_equal(s.bounds.a.x, b0.a.x + 3)
+    assert_equal(s.bounds.a.y, b0.a.y + 2)
+    assert_equal(s.bounds.width(), b0.width())
+    assert_equal(s.bounds.height(), b0.height())
+    # Resize: press the bottom-right corner, drag inward 10 cols / 3 rows.
+    var b1 = s.bounds
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b1.b.x - 1, b1.b.y - 1), MOUSE_BUTTON_LEFT, True, False,
+    ), screen)
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b1.b.x - 11, b1.b.y - 4), MOUSE_BUTTON_LEFT, True, True,
+    ), screen)
+    _ = s.handle_mouse(Event.mouse_event(
+        Point(b1.b.x - 11, b1.b.y - 4), MOUSE_BUTTON_LEFT, False, False,
+    ), screen)
+    assert_equal(s.bounds.width(), b1.width() - 10)
+    assert_equal(s.bounds.height(), b1.height() - 3)
+    # Bounds survive close + reopen (session-persistent size/position).
+    var kept = s.bounds
+    s.close()
+    s.open(List[OnSaveAction](), False)
+    s.paint(c, screen)
+    assert_equal(s.bounds.a.x, kept.a.x)
+    assert_equal(s.bounds.width(), kept.width())
+
+
+def test_settings_detached_fills_surface() raises:
+    """Detached (native settings window) the dialog fills the whole
+    surface — the host window provides move/resize chrome instead."""
+    var s = Settings()
+    s.detached = True
+    s.open(List[OnSaveAction](), False)
+    var c = Canvas(80, 24)
+    c.clear(default_attr())
+    s.paint(c, Rect(0, 0, 80, 24))
+    assert_equal(c.get(0, 0).glyph, String("╔"))
+    assert_equal(c.get(79, 23).glyph, String("╝"))
+
+
 def test_settings_open_empty_parks_selection_at_minus_one() raises:
     """Opening with no actions: selection = -1 so ``Edit`` / ``Remove``
     skip themselves in the focus walk and the right pane shows the
@@ -5997,16 +6084,82 @@ def test_editor_default_text_is_light_green() raises:
     """
     var ed = Editor(String("hello world"))
     var c = Canvas(20, 3)
-    # ``focused=False`` so the cursor inversion (BLUE on YELLOW at
+    # ``focused=False`` so the cursor block (CARET_FG on CARET_BG at
     # the cursor position) doesn't fight the default-attr probe.
     ed.paint(c, Rect(0, 0, 20, 3), False)
-    # Column 0 of an unhighlighted, plain-text buffer must carry
-    # the new default.
-    assert_equal(c.get(0, 0).attr.fg, LIGHT_GREEN)
-    assert_equal(c.get(0, 0).attr.bg, BLUE)
+    # Column 0 of an unhighlighted, plain-text buffer must carry the
+    # editor baseline: the reserved ``SYN_IDENT`` fg on ``EDITOR_BG``.
+    # Under the default "Turbo C++ 3.0" theme these slots resolve to the
+    # classic LIGHT_GREEN-on-BLUE RGB, so the look is unchanged; the
+    # indices differ because a theme can now retint them independently.
+    assert_equal(c.get(0, 0).attr.fg, SYN_IDENT)
+    assert_equal(c.get(0, 0).attr.bg, EDITOR_BG)
     # Past EOL the trailing fill cells must also be the new default.
-    assert_equal(c.get(15, 0).attr.fg, LIGHT_GREEN)
-    assert_equal(c.get(15, 0).attr.bg, BLUE)
+    assert_equal(c.get(15, 0).attr.fg, SYN_IDENT)
+    assert_equal(c.get(15, 0).attr.bg, EDITOR_BG)
+
+
+def test_themes_have_full_palettes() raises:
+    """Every bundled theme exposes a complete 256-entry RGB palette, and the
+    standard xterm cube + grayscale tail is preserved across all of them (only
+    the chrome + reserved slots are overridden)."""
+    var themes = built_in_themes()
+    assert_true(len(themes) >= 12)
+    for i in range(len(themes)):
+        var pal = themes[i].palette.copy()
+        assert_equal(len(pal), 256)
+        # Cube tail untouched: last cube cell is white, grayscale ramp intact.
+        assert_equal(pal[231], UInt32(0xFFFFFF))
+        assert_equal(pal[232], UInt32(0x080808))
+        assert_equal(pal[255], UInt32(0xEEEEEE))
+
+
+def test_default_theme_matches_classic_look() raises:
+    """The default theme must reproduce the pre-theme RGB exactly, so existing
+    screenshots / muscle memory are unchanged. This pins the reserved editor +
+    syntax slots to the classic Turbo C++ colors."""
+    assert_equal(default_theme_name(), String("Turbo C++ 3.0"))
+    var names = theme_names()
+    assert_equal(names[0], String("Turbo C++ 3.0"))
+    var d = theme_by_name(String("Turbo C++ 3.0"))
+    assert_equal(d.palette[Int(EDITOR_BG)], UInt32(0x0021AA))   # classic blue
+    assert_equal(d.palette[Int(EDITOR_FG)], UInt32(0xE5E5E5))   # light gray
+    assert_equal(d.palette[Int(SYN_IDENT)], UInt32(0x00FF00))   # light green
+    # Caret block: the classic blue-glyph-on-yellow-block pair, now on
+    # dedicated slots so every theme can pin its own cursor color.
+    assert_equal(d.palette[Int(CARET_FG)], UInt32(0x0021AA))
+    assert_equal(d.palette[Int(CARET_BG)], UInt32(0xCDCD00))
+    # Focused border: classic white by default; light themes set a dark one.
+    assert_equal(d.palette[Int(BORDER_FOCUS)], UInt32(0xFFFFFF))
+    var sl = theme_by_name(String("Solarized Light"))
+    assert_equal(sl.palette[Int(BORDER_FOCUS)], UInt32(0x002B36))
+    # ANSI slots match the original Swift base16.
+    assert_equal(d.palette[4], UInt32(0x0021AA))                # BLUE
+    assert_equal(d.palette[7], UInt32(0xE5E5E5))                # LIGHT_GRAY
+    assert_equal(d.palette[15], UInt32(0xFFFFFF))               # WHITE
+
+
+def test_theme_lookup_and_distinctness() raises:
+    """An unknown name falls back to the default; a real alternate theme has a
+    genuinely different editor background."""
+    var fallback = theme_by_name(String("does-not-exist"))
+    assert_equal(fallback.palette[Int(EDITOR_BG)], UInt32(0x0021AA))
+    var dracula: Theme = theme_by_name(String("Dracula"))
+    assert_equal(dracula.palette[Int(EDITOR_BG)], UInt32(0x282A36))
+    assert_true(
+        dracula.palette[Int(EDITOR_BG)] != fallback.palette[Int(EDITOR_BG)]
+    )
+
+
+def test_attr_to_sgr_rgb_resolves_palette() raises:
+    """The truecolor SGR renderer resolves indices through the supplied
+    palette and emits ``38;2;r;g;b`` / ``48;2;r;g;b`` so a theme renders in
+    the terminal independent of the user's own color scheme."""
+    var d = theme_by_name(String("Turbo C++ 3.0"))
+    var sgr = attr_to_sgr_rgb(Attr(SYN_IDENT, EDITOR_BG), d.palette)
+    # SYN_IDENT = 0x00FF00 -> fg 0;255;0 ; EDITOR_BG = 0x0021AA -> bg 0;33;170.
+    assert_true(sgr.find(String("38;2;0;255;0")) >= 0)
+    assert_true(sgr.find(String("48;2;0;33;170")) >= 0)
 
 
 def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
@@ -10693,11 +10846,11 @@ def test_canvas_darken_rect_preserves_glyph() raises:
     assert_equal(c.get(3, 0).glyph, String("l"))
     assert_equal(c.get(2, 1).glyph, String("r"))
     assert_equal(c.get(3, 1).glyph, String("l"))
-    # Attr is the shadow attr — DARK_GRAY on BLACK.
+    # Attr is the shadow attr — DARK_GRAY on the dark pane surface.
     assert_equal(c.get(2, 0).attr.fg, DARK_GRAY)
-    assert_equal(c.get(2, 0).attr.bg, BLACK)
+    assert_equal(c.get(2, 0).attr.bg, PANE_BG)
     assert_equal(c.get(3, 1).attr.fg, DARK_GRAY)
-    assert_equal(c.get(3, 1).attr.bg, BLACK)
+    assert_equal(c.get(3, 1).attr.bg, PANE_BG)
     # Cells outside the rect are untouched.
     assert_equal(c.get(0, 0).attr.fg, WHITE)
     assert_equal(c.get(0, 0).attr.bg, BLUE)
@@ -10715,18 +10868,18 @@ def test_paint_drop_shadow_targets_right_and_bottom() raises:
     var dialog = Rect(3, 2, 13, 6)   # 10×4 dialog
     paint_drop_shadow(c, dialog)
     # Right strip: x in {13, 14}, y in [3, 6).
-    assert_equal(c.get(13, 3).attr.bg, BLACK)
-    assert_equal(c.get(14, 3).attr.bg, BLACK)
-    assert_equal(c.get(13, 5).attr.bg, BLACK)
-    assert_equal(c.get(14, 5).attr.bg, BLACK)
+    assert_equal(c.get(13, 3).attr.bg, PANE_BG)
+    assert_equal(c.get(14, 3).attr.bg, PANE_BG)
+    assert_equal(c.get(13, 5).attr.bg, PANE_BG)
+    assert_equal(c.get(14, 5).attr.bg, PANE_BG)
     # Glyph underneath the shadow survives.
     assert_equal(c.get(13, 3).glyph, String("·"))
     # Top-right corner of the dialog is *not* shadowed (shadow starts
     # one row down so the top edge looks "lit").
     assert_equal(c.get(13, 2).attr.bg, BLUE)
     # Bottom strip: x in [5, 15), y == 6.
-    assert_equal(c.get(5, 6).attr.bg, BLACK)
-    assert_equal(c.get(14, 6).attr.bg, BLACK)
+    assert_equal(c.get(5, 6).attr.bg, PANE_BG)
+    assert_equal(c.get(14, 6).attr.bg, PANE_BG)
     # The two cells immediately under the dialog's left edge are
     # *not* shadowed (offset 2) — keeps the bottom-left corner lit.
     assert_equal(c.get(3, 6).attr.bg, BLUE)
@@ -13085,7 +13238,9 @@ def test_editor_right_gutter_paints_gray_square_for_changes() raises:
     # Column 39 is the right gutter. Row 0 (ADDED) and row 2 (MODIFIED)
     # should carry the square; row 1 (NONE) is blank.
     assert_equal(canvas.get(39, 0).glyph, String("■"))
-    assert_equal(canvas.get(39, 0).attr.fg, LIGHT_GRAY)
+    # EDITOR_FG: the classic light gray under the default theme, but a slot
+    # that keeps contrast against the editor surface in light themes too.
+    assert_equal(canvas.get(39, 0).attr.fg, EDITOR_FG)
     assert_equal(canvas.get(39, 1).glyph, String(" "))
     assert_equal(canvas.get(39, 2).glyph, String("■"))
     # When git-changes is off the right gutter is zero-width again.
@@ -14581,10 +14736,11 @@ def test_editor_minimap_git_change_wins_over_spell_on_same_row() raises:
     canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
     ed.paint(canvas, Rect(0, 0, 40, 5), False)
     # The right-edge cell on row 0 paints in the git-change color
-    # (LIGHT_GRAY on BLUE), not the spell color (YELLOW on BLUE).
+    # (EDITOR_FG — the classic light gray under the default theme), not
+    # the spell color (YELLOW).
     var sq = canvas.get(39, 0)
     assert_equal(sq.glyph, String("■"))
-    assert_equal(sq.attr.fg, LIGHT_GRAY)
+    assert_equal(sq.attr.fg, EDITOR_FG)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -16113,6 +16269,13 @@ def _run_chunk_02() raises:
     test_textmate_captures_overlay_on_match()
     test_textmate_incremental_matches_full_retokenize()
     test_editor_default_text_is_light_green()
+    test_settings_windowed_default_is_centered_dialog()
+    test_settings_windowed_move_and_resize()
+    test_settings_detached_fills_surface()
+    test_themes_have_full_palettes()
+    test_default_theme_matches_classic_look()
+    test_theme_lookup_and_distinctness()
+    test_attr_to_sgr_rgb_resolves_palette()
     test_textmate_all_bundled_grammars_load()
     test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()

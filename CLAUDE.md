@@ -124,6 +124,24 @@ view.mojo   Drawable trait + Label/Frame/Fill widgets — sits beside app/deskto
 
 Pure-data modules (everything except `terminal.mojo`, `app.mojo`, `native_api.mojo`, and the Swift host) are TTY-free *and* AppKit-free and unit-testable directly. The frontend boundary is `Canvas` going out and `Event` coming in — nothing below it should know whether it's running under a terminal or under AppKit.
 
+## Themes
+
+A color theme (Settings ▸ Theme, default "Turbo C++ 3.0") retints **both**
+syntax highlighting and the UI chrome. A `Theme` (`theme.mojo`) is just a
+256-entry RGB palette; every widget paints through *palette indices* (the named
+constants in `colors.mojo`) and both frontends resolve indices→RGB at the edge —
+Swift via `tk_theme_palette`/`tk_theme_version`, the terminal via truecolor
+`attr_to_sgr_rgb`. So swapping the palette retints everything with no change to
+the ~450 `Attr(...)` paint sites. Reserved indices `16..29` (`EDITOR_BG/FG`, the
+7 `SYN_*` token roles, `PANE_BG/FG`, `CARET_FG/BG`, `BORDER_FOCUS`) decouple editor + syntax +
+tool-pane + caret + border colors from the ANSI-16 chrome slots. `Desktop.active_theme` owns the palette;
+`set_theme` bumps `theme_version` so both frontends refetch. Theme switching is a
+pure palette swap — no re-tokenize. Settings itself doesn't cover the workspace
+(so the preview is live): on macOS it's a separate native window (same
+second-surface pattern as floating panels, `tk_desktop_*_settings`), in the
+terminal a movable/resizable in-grid dialog. Full details in
+[docs/themes.md](docs/themes.md).
+
 ## Syntax highlighting
 
 Two tiers, picked by file extension in `highlight_for_extension`:

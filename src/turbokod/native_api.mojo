@@ -33,6 +33,7 @@ from turbokod.posix import (
     getenv_value, recover_user_path_for_gui_launch, setenv_value,
 )
 from turbokod.string_utils import codepoint_at
+from turbokod.theme import theme_by_name
 from turbokod.desktop import (
     Desktop,
     APP_QUIT_ACTION, APP_SETTINGS,
@@ -258,6 +259,13 @@ def tk_desktop_new() -> Int:
     var p = UnsafePointer[Desktop, MutExternalOrigin](unsafe_from_address=addr)
     p.init_pointee_move(Desktop())
     p[].load_config_from_disk()
+    # ``TK_THEME`` overrides the saved theme for this process only (not
+    # persisted) — used to capture doc screenshots in a specific theme, e.g.
+    # ``TK_THEME=Dracula TK_CAPTURE=/tmp/x.png ./run_swift.sh``.
+    var tk_theme = getenv_value(String("TK_THEME"))
+    if len(tk_theme.as_bytes()) > 0:
+        p[].active_theme = theme_by_name(tk_theme)
+        p[].theme_version += 1
     _build_menus(p[])
     return addr
 
@@ -388,6 +396,33 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> I
 
 
 @export
+def tk_theme_version(h: Int) -> Int:
+    """Monotonic counter that bumps whenever the active color theme changes.
+    The Swift host polls this each frame and refetches the palette only when
+    it moves — copying 256 ints every frame would be pointless churn."""
+    if h == 0:
+        return 0
+    return _desk(h)[].theme_version
+
+
+@export
+def tk_theme_palette(h: Int, out_ptr: Int, cap: Int) -> Int:
+    """Write the active theme's 256-entry RGB palette (packed ``0xRRGGBB``)
+    into the caller's UInt32 buffer. Returns the number of entries written
+    (256, clamped to ``cap``). Swift resolves cell color indices through this
+    table, so this is how a theme retints the whole native UI."""
+    if h == 0 or out_ptr == 0 or cap <= 0:
+        return 0
+    var op = UnsafePointer[UInt32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var n = len(_desk(h)[].active_theme.palette)
+    if n > cap:
+        n = cap
+    for i in range(n):
+        op[i] = _desk(h)[].active_theme.palette[i]
+    return n
+
+
+@export
 def tk_desktop_set_panels_detached(h: Int, on: Int):
     """Tell the Desktop its tool panels are rendered on a separate host
     window (the native "Floating panels" feature).
@@ -478,6 +513,97 @@ def tk_desktop_panels_pointer_shape(
     if shape == String("pointer"):
         return Int32(2)
     return Int32(0)
+
+
+# --- Settings window surface -------------------------------------------------
+#
+# The macOS host renders Settings in its own native window (like the floating
+# panels): the main surface skips the in-grid overlay and stays interactive —
+# which is what makes the live theme preview useful — while the host drives
+# this surface. The host polls ``tk_desktop_settings_active`` each tick and
+# opens/closes the NSWindow on transitions.
+
+
+@export
+def tk_desktop_set_settings_detached(h: Int, on: Int):
+    """Tell the Desktop the Settings view is rendered on a separate host
+    window. The terminal frontend never sets this — there Settings is a
+    movable/resizable in-grid dialog."""
+    if h == 0:
+        return
+    _desk(h)[].set_settings_detached(on != 0)
+
+
+@export
+def tk_desktop_settings_active(h: Int) -> Int32:
+    """1 while the Settings view is open. The host polls this per tick and
+    shows/hides its settings window on transitions (the Mojo side opens via
+    the menu action and closes via Esc / the Close button, so the host can't
+    know without asking)."""
+    if h == 0:
+        return Int32(0)
+    if _desk(h)[].settings.active:
+        return Int32(1)
+    return Int32(0)
+
+
+@export
+def tk_desktop_settings_close(h: Int):
+    """Close the Settings view — the host calls this when the user closes
+    the settings window via its native close button (the reverse direction
+    of ``tk_desktop_settings_active``)."""
+    if h == 0:
+        return
+    _desk(h)[].settings.close()
+
+
+@export
+def tk_desktop_layout_settings(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) -> Int:
+    """Paint the Settings view into the host's settings window and pack it
+    into the caller's buffer (same 3-u32-per-cell format as
+    ``tk_desktop_layout``). Returns the number of cells written."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = Canvas(cols, rows)
+    canvas.clear(default_attr())
+    _desk(h)[].paint_settings(canvas, Rect(0, 0, cols, rows))
+    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_settings_key(
+    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a keystroke from the settings window into the Settings view.
+    Mirrors ``tk_desktop_key``'s Ctrl/Cmd canonicalization; Settings never
+    produces host actions, so this always returns ACT_NONE."""
+    if h == 0:
+        return ACT_NONE
+    var k = key
+    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
+        if k >= UInt32(0x41) and k <= UInt32(0x5A):
+            k = k + UInt32(0x20)
+    _desk(h)[].handle_settings_event(
+        Event.key_event(k, mods), Rect(0, 0, cols, rows),
+    )
+    return ACT_NONE
+
+
+@export
+def tk_desktop_settings_mouse(
+    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a mouse event from the settings window into the Settings view."""
+    if h == 0:
+        return ACT_NONE
+    var ev = Event.mouse_event(
+        Point(x, y), button, pressed != 0, motion != 0, mods,
+    )
+    _desk(h)[].handle_settings_event(ev, Rect(0, 0, cols, rows))
+    return ACT_NONE
 
 
 @export

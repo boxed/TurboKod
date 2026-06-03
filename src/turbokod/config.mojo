@@ -169,6 +169,11 @@ struct TurbokodConfig(Copyable, Movable):
     #     trailing newline — that stays an editorconfig-only behavior).
     var trim_trailing_whitespace: Bool
     var ensure_final_newline: Bool
+    # Settings ▸ Theme. Name of the active color theme (see ``theme.mojo``).
+    # Drives both syntax highlighting and the UI chrome palette. Defaults to
+    # the classic ``"Turbo C++ 3.0"`` look; an unknown name (e.g. a config
+    # written by a newer build) falls back to the default at load time.
+    var theme: String
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -198,6 +203,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.auto_save = True
         self.trim_trailing_whitespace = True
         self.ensure_final_newline = True
+        self.theme = String("Turbo C++ 3.0")
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
@@ -214,6 +220,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.auto_save = copy.auto_save
         self.trim_trailing_whitespace = copy.trim_trailing_whitespace
         self.ensure_final_newline = copy.ensure_final_newline
+        self.theme = copy.theme
         self.recent_projects = copy.recent_projects.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
@@ -297,6 +304,9 @@ def load_config() -> TurbokodConfig:
             root, String("ensure_final_newline"),
             cfg.ensure_final_newline,
         )
+        var theme_v = json_get_string(root, String("theme"))
+        if len(theme_v.as_bytes()) > 0:
+            cfg.theme = theme_v
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -378,6 +388,7 @@ def save_config(config: TurbokodConfig) -> Bool:
         String("ensure_final_newline"),
         json_bool(config.ensure_final_newline),
     )
+    root.put(String("theme"), json_str(config.theme))
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))

@@ -36,7 +36,7 @@ from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
+    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
 )
 from .config import OnSaveAction
 from .dropdown import (
@@ -280,7 +280,7 @@ struct ActionEditor(Movable):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(WHITE, LIGHT_GRAY)
+        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)

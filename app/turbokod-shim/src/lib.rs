@@ -122,6 +122,17 @@ fn terminate_all() {
     }
 }
 
+/// Exported wrapper for the Swift host. AppKit's `NSApp.terminate`
+/// ends the process via `_exit()`, which skips dyld static
+/// terminators — so `AUTO_CLEANUP` below never runs on Cmd+Q and any
+/// live children (run targets, LSP servers, pty shells) would be
+/// orphaned. The app delegate calls this from
+/// `applicationWillTerminate` instead.
+#[no_mangle]
+pub extern "C" fn tk_terminate_all() {
+    terminate_all();
+}
+
 extern "C" fn on_signal(sig: c_int) {
     terminate_all();
     // Restore default disposition and re-raise so the process exits

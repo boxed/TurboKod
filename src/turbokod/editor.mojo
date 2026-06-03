@@ -25,6 +25,7 @@ from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
     LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
     STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
+    CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeResult, diff3_merge, unified_diff
@@ -3528,17 +3529,17 @@ struct Editor(Copyable, Movable):
         order as ``_minimap_kind_in_slice``, returning the Attr to paint."""
         var kind = self._minimap_kind_in_slice(start, end)
         if kind == 1:
-            return Optional[Attr](Attr(LIGHT_GRAY, BLUE))
+            return Optional[Attr](Attr(EDITOR_FG, EDITOR_BG))
         if kind == 2:
-            return Optional[Attr](Attr(CYAN, BLUE))
+            return Optional[Attr](Attr(CYAN, EDITOR_BG))
         if kind == 3:
-            return Optional[Attr](Attr(LIGHT_RED, BLUE))
+            return Optional[Attr](Attr(LIGHT_RED, EDITOR_BG))
         if kind == 4:
-            return Optional[Attr](Attr(LIGHT_YELLOW, BLUE))
+            return Optional[Attr](Attr(LIGHT_YELLOW, EDITOR_BG))
         if kind == 5:
-            return Optional[Attr](Attr(LIGHT_BLUE, BLUE))
+            return Optional[Attr](Attr(LIGHT_BLUE, EDITOR_BG))
         if kind == 6:
-            return Optional[Attr](Attr(DARK_GRAY, BLUE))
+            return Optional[Attr](Attr(DARK_GRAY, EDITOR_BG))
         return Optional[Attr]()
 
     def _minimap_first_misspelled_word(self, row: Int) -> String:
@@ -4473,9 +4474,9 @@ struct Editor(Copyable, Movable):
                 and view.a.y <= sy and sy < content_bottom):
             return
         if col < line_byte_count:
-            painter.set_attr(canvas, sx, sy, Attr(BLUE, YELLOW))
+            painter.set_attr(canvas, sx, sy, Attr(CARET_FG, CARET_BG))
         else:
-            painter.set(canvas, sx, sy, Cell(String(" "), Attr(BLUE, YELLOW), 1))
+            painter.set(canvas, sx, sy, Cell(String(" "), Attr(CARET_FG, CARET_BG), 1))
 
     def _paint_attr_at(
         self, mut canvas: Canvas, painter: Painter, view: Rect,
@@ -4682,8 +4683,8 @@ struct Editor(Copyable, Movable):
         # that *want* to stand out against the green baseline (e.g.
         # the exec-line marker in the gutter, dirty-buffer asterisk,
         # selection inversion below).
-        var attr = Attr(LIGHT_GREEN, BLUE)
-        var sel_attr = Attr(LIGHT_GREEN, CYAN)
+        var attr = Attr(SYN_IDENT, EDITOR_BG)
+        var sel_attr = Attr(SYN_IDENT, CYAN)
         # Single Painter for the entire editor view. Every gutter,
         # text, caret, and overlay write below routes through it so an
         # over-long highlight or a stray cell write at the right edge
@@ -4719,10 +4720,10 @@ struct Editor(Copyable, Movable):
         # segment of each buffer row (start_byte == 0 in the segment, AND
         # this segment isn't a continuation row produced by soft-wrap).
         if total_gutter > 0:
-            var gutter_attr = Attr(LIGHT_GRAY, BLUE)
-            var bp_attr = Attr(LIGHT_RED, BLUE)
-            var exec_attr = Attr(LIGHT_YELLOW, BLUE)
-            var ln_attr = Attr(DARK_GRAY, BLUE)
+            var gutter_attr = Attr(EDITOR_FG, EDITOR_BG)
+            var bp_attr = Attr(LIGHT_RED, EDITOR_BG)
+            var exec_attr = Attr(LIGHT_YELLOW, EDITOR_BG)
+            var ln_attr = Attr(DARK_GRAY, EDITOR_BG)
             for screen_row in range(len(layout)):
                 var buf_row = layout[screen_row].line_idx
                 var seg_start = layout[screen_row].byte_start
@@ -4761,10 +4762,10 @@ struct Editor(Copyable, Movable):
                             var dot_attr = bp_attr
                             if k < len(self.breakpoint_enabled) \
                                     and not self.breakpoint_enabled[k]:
-                                dot_attr = Attr(DARK_GRAY, BLUE)
+                                dot_attr = Attr(DARK_GRAY, EDITOR_BG)
                             elif k < len(self.breakpoint_conditional) \
                                     and self.breakpoint_conditional[k]:
-                                dot_attr = Attr(LIGHT_YELLOW, BLUE)
+                                dot_attr = Attr(LIGHT_YELLOW, EDITOR_BG)
                             painter.set(
                                 canvas, view.a.x + ln_gutter, sy_g,
                                 Cell(String("●"), dot_attr, 1),
@@ -4778,7 +4779,7 @@ struct Editor(Copyable, Movable):
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
                     if status != GIT_CHANGE_NONE:
-                        var bar_attr = Attr(LIGHT_GRAY, BLUE)
+                        var bar_attr = Attr(EDITOR_FG, EDITOR_BG)
                         var gx = view.a.x + ln_gutter + dap_gutter
                         painter.set(canvas, gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
@@ -5074,13 +5075,13 @@ struct Editor(Copyable, Movable):
         # Bracket-match overlay: when the primary caret sits on / right
         # after a bracket and the matching one exists, recolour both
         # with ``bracket_attr``. White-on-magenta + bold is distinct
-        # from the cursor (BLUE on YELLOW), selection (LIGHT_GREEN on
+        # from the cursor (the theme caret block), selection (LIGHT_GREEN on
         # CYAN), and search-match (LIGHT_GREEN on MAGENTA — same bg
         # but the fg differs and bracket-match is single-cell so
         # confusion is low). Skipped during selection / multi-cursor
         # because the visual would compete with the selection overlay
         # and add no navigation value. The cursor block below repaints
-        # the source-side cell with BLUE-on-YELLOW so the cursor stays
+        # the source-side cell with the caret colors so the cursor stays
         # readable when it sits *on* the source bracket.
         if focused and not self.has_extra_carets() \
                 and not self.has_selection():

@@ -15,7 +15,7 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_YELLOW, WHITE, YELLOW
+from .colors import Attr, BLACK, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY, LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW
 from .editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor,
@@ -611,9 +611,9 @@ def paint_bottom_dock_chrome(
     panel — the debug pane uses ``"9"`` for Ctrl+9. Pass an empty
     string to skip the hint entirely.
     """
-    var border = Attr(LIGHT_GRAY, BLACK)
-    var title_attr = Attr(LIGHT_YELLOW, BLACK)
-    var body_bg = Attr(WHITE, BLACK)
+    var border = Attr(PANE_FG, PANE_BG)
+    var title_attr = Attr(LIGHT_YELLOW, PANE_BG)
+    var body_bg = Attr(WHITE, PANE_BG)
     var top = panel.a.y
     var top_glyph = String("═") if focused else String("─")
     for x in range(panel.a.x, panel.b.x):
@@ -1197,13 +1197,13 @@ struct Window(Copyable, Movable):
             # WHITE (ANSI 15), which would otherwise collapse the
             # focused-subdued case onto the focused-prominent case.
             # Focus is still readable via the single-vs-double border.
-            border = Attr(DARK_GRAY, BLUE)
+            border = Attr(DARK_GRAY, EDITOR_BG)
         elif focused:
-            border = Attr(WHITE, BLUE)
+            border = Attr(BORDER_FOCUS, EDITOR_BG)
         else:
-            border = Attr(LIGHT_GRAY, BLUE)
-        var content_attr = Attr(YELLOW, BLUE)
-        var body_bg = Attr(LIGHT_GRAY, BLUE)
+            border = Attr(EDITOR_FG, EDITOR_BG)
+        var content_attr = Attr(YELLOW, EDITOR_BG)
+        var body_bg = Attr(LIGHT_GRAY, EDITOR_BG)
         # Bind every write to the window's own rect — chrome (border,
         # title, indicators, scrollbars) sits ON the rect's perimeter,
         # body content fills the interior; either way nothing should
@@ -1285,7 +1285,7 @@ struct Window(Copyable, Movable):
             painter.set(
                 canvas,
                 self.rect.a.x + 2, self.rect.b.y - 1,
-                Cell(String("*"), Attr(GREEN, BLUE), 1),
+                Cell(String("*"), Attr(GREEN, EDITOR_BG), 1),
             )
 
     # --- scroll bar geometry ----------------------------------------------

@@ -47,7 +47,7 @@ from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, LIGHT_RED, RED, WHITE,
+    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, LIGHT_RED, RED, WHITE,
 )
 from .dropdown import (
     DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
@@ -530,7 +530,7 @@ struct TargetsDialog(Movable):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(WHITE, LIGHT_GRAY)
+        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)
         # Push current geometry + visitability into the focus group up
@@ -743,7 +743,7 @@ struct TargetsDialog(Movable):
             # Dim face — same hue, but light-gray text on green
             # signals "not actionable right now" without dropping
             # the visual weight of the button entirely.
-            face = Attr(LIGHT_GRAY, GREEN)
+            face = Attr(WHITE, GREEN)
         elif self._focus.is_focused(pb.slot):
             # Focused: blue face. Matches the focus colour used for
             # input strips so the eye groups them as "where typing

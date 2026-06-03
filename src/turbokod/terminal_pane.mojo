@@ -41,7 +41,7 @@ from .claude_detect import (
     CLAUDE_NONE, ClaudeStateTracker, claude_state_label,
 )
 from .clipboard import clipboard_copy
-from .colors import Attr, BLACK, LIGHT_GRAY, WHITE
+from .colors import Attr, PANE_BG, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
@@ -344,7 +344,7 @@ struct TerminalPane(Copyable, Movable):
     def paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
             return
-        var bg = Attr(WHITE, BLACK)
+        var bg = Attr(WHITE, PANE_BG)
         var painter = Painter(panel)
         painter.fill(canvas, panel, String(" "), bg)
         self._last_panel_top = panel.a.y
@@ -416,7 +416,7 @@ struct TerminalPane(Copyable, Movable):
                     if c < len(sb_row):
                         cell = sb_row[c]
                     else:
-                        cell = Cell(String(" "), Attr(WHITE, BLACK), 1)
+                        cell = Cell(String(" "), Attr(WHITE, PANE_BG), 1)
                 elif scrolled_back:
                     # Scrolled back into the live tail's residual rows
                     # (when scrollback is shorter than view_offset).

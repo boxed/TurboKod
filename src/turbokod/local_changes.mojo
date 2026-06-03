@@ -44,8 +44,8 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
-    WHITE, YELLOW,
+    Attr, BLACK, BORDER_FOCUS, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG,
+    LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED, WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -1465,22 +1465,22 @@ struct LocalChanges(Movable):
     ):
         if not self.active:
             return
-        var bg          = Attr(YELLOW, BLUE)
-        var border      = Attr(WHITE,  BLUE)
-        var title_attr  = Attr(WHITE,  BLUE)
-        var sep_attr    = Attr(WHITE,  BLUE)
+        var bg          = Attr(YELLOW, EDITOR_BG)
+        var border      = Attr(BORDER_FOCUS, EDITOR_BG)
+        var title_attr  = Attr(BORDER_FOCUS, EDITOR_BG)
+        var sep_attr    = Attr(BORDER_FOCUS, EDITOR_BG)
         var hint_attr   = Attr(BLACK,  LIGHT_GRAY)
-        var list_attr   = Attr(YELLOW, BLUE)
-        var list_dim    = Attr(LIGHT_GRAY, BLUE)
+        var list_attr   = Attr(YELLOW, EDITOR_BG)
+        var list_dim    = Attr(EDITOR_FG, EDITOR_BG)
         var sel_attr    = Attr(BLACK,  YELLOW)
         var sel_inactive = Attr(BLACK, LIGHT_GRAY)
         var section_attr = Attr(WHITE, DARK_GRAY)
-        var splitter_attr = Attr(LIGHT_GRAY, BLUE)
-        var ctx_attr    = Attr(LIGHT_GRAY, BLUE)
-        var add_attr    = Attr(LIGHT_GREEN, BLUE)
-        var rem_attr    = Attr(LIGHT_RED,   BLUE)
-        var hunk_attr   = Attr(CYAN,  BLUE)
-        var header_attr = Attr(WHITE, BLUE)
+        var splitter_attr = Attr(EDITOR_FG, EDITOR_BG)
+        var ctx_attr    = Attr(EDITOR_FG, EDITOR_BG)
+        var add_attr    = Attr(LIGHT_GREEN, EDITOR_BG)
+        var rem_attr    = Attr(LIGHT_RED, EDITOR_BG)
+        var hunk_attr   = Attr(CYAN, EDITOR_BG)
+        var header_attr = Attr(BORDER_FOCUS, EDITOR_BG)
         # The modal always covers the full screen — it intercepts every
         # input event, so a windowed mode wouldn't gain any interactive
         # surface area behind it.
@@ -1749,8 +1749,8 @@ struct LocalChanges(Movable):
         # commits pane). Untracked entries (XY == "??") get a single
         # red ``?`` in both columns; the path stays normal so the eye
         # picks up "this is new" without losing the path.
-        var staged_attr   = Attr(LIGHT_GREEN, BLUE)
-        var unstaged_attr = Attr(LIGHT_RED,   BLUE)
+        var staged_attr   = Attr(LIGHT_GREEN, EDITOR_BG)
+        var unstaged_attr = Attr(LIGHT_RED, EDITOR_BG)
         for i in range(height):
             var idx = self.scroll_files + i
             if idx >= len(self.files):
@@ -1833,10 +1833,10 @@ struct LocalChanges(Movable):
         # itself is green for commits that have been pushed to a remote
         # and red for commits that only exist locally — at-a-glance
         # signal of "what would I lose if this branch went away."
-        var sha_pushed   = Attr(LIGHT_GREEN, BLUE)
-        var sha_local    = Attr(LIGHT_RED,   BLUE)
-        var author_attr = Attr(CYAN,        BLUE)
-        var subject_attr = Attr(LIGHT_GRAY, BLUE)
+        var sha_pushed   = Attr(LIGHT_GREEN, EDITOR_BG)
+        var sha_local    = Attr(LIGHT_RED, EDITOR_BG)
+        var author_attr = Attr(CYAN, EDITOR_BG)
+        var subject_attr = Attr(EDITOR_FG, EDITOR_BG)
         for i in range(height):
             var idx = self.scroll_commits + i
             if idx >= len(self.commits):
@@ -1992,7 +1992,7 @@ struct LocalChanges(Movable):
         # ``RED``, comments ``CYAN``, etc. — and idents/variables stay
         # ``LIGHT_GREEN`` which reads as the default text colour rather
         # than a highlight.
-        var body_bg = Attr(LIGHT_GREEN, BLUE)
+        var body_bg = Attr(LIGHT_GREEN, EDITOR_BG)
         # Add/remove gutter cells. Saturated bg + black fg gives a
         # solid coloured block on the left edge that reads as a status
         # band even at a glance — easier to spot than a fg-only glyph
@@ -2000,7 +2000,7 @@ struct LocalChanges(Movable):
         var add_gutter_attr = Attr(BLACK, LIGHT_GREEN)
         var rem_gutter_attr = Attr(BLACK, LIGHT_RED)
         # Explicit body fill — the outer ``LocalChanges.paint`` sets
-        # every screen cell to ``YELLOW`` on ``BLUE``, but per-cell
+        # every screen cell to ``YELLOW`` on ``EDITOR_BG``, but per-cell
         # writes below only touch the gutter glyph (col 0), the body
         # text (col +2 onward), and any highlight overlays. Without an
         # explicit fill the spacer column (col +1) and the trailing
@@ -2025,7 +2025,7 @@ struct LocalChanges(Movable):
             # Cursor row: paint the whole row in cursor_active and write
             # the line content on top — overrides the per-kind colouring
             # below. Skip the syntax overlay for this row so the YELLOW
-            # background isn't recoloured back to BLUE.
+            # background isn't recoloured back to the editor background.
             if is_cursor:
                 painter.fill(
                     canvas,

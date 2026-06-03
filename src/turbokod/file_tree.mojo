@@ -16,7 +16,7 @@ from std.collections.optional import Optional
 from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -232,12 +232,16 @@ struct FileTree(Movable):
         var sel_dir_attr = Attr(BLUE,  YELLOW)
         # Title row gets the focused tint when keyboard focus lands
         # here — same convention windows use (their title brightens
-        # with the same color flip).
+        # with the same color flip). The title's *background* stays the
+        # panel's own surface (LIGHT_GRAY) so the strip doesn't read as a
+        # random accent bar under non-default themes; focus is carried by
+        # the fg flip (bright BORDER_FOCUS vs the regular BLACK chrome text) plus
+        # the separator's line weight below.
         var title_attr: Attr
         if self.focused:
-            title_attr = Attr(WHITE, BLUE)
+            title_attr = Attr(BORDER_FOCUS, LIGHT_GRAY)
         else:
-            title_attr = Attr(LIGHT_GRAY, BLUE)
+            title_attr = Attr(BLACK, LIGHT_GRAY)
         # Left separator column lives at area.a.x. Focus is shown via line
         # weight (single → double), mirroring how normal windows render
         # their frame.

@@ -17,8 +17,9 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .colors import (
-    Attr, BLUE, CYAN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_YELLOW,
-    RED, WHITE, STYLE_NONE,
+    Attr, STYLE_NONE,
+    EDITOR_BG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
+    SYN_IDENT, SYN_DECORATOR, SYN_OPERATOR,
 )
 from .grammar_install import (
     built_in_downloadable_grammars,
@@ -50,14 +51,18 @@ struct Highlight(ImplicitlyCopyable, Movable):
     var attr: Attr
 
 
-# Public colors. They render against the editor's standard blue background.
-def highlight_keyword_attr() -> Attr:    return Attr(WHITE,       BLUE, STYLE_NONE)
-def highlight_string_attr()  -> Attr:    return Attr(RED,         BLUE, STYLE_NONE)
-def highlight_comment_attr() -> Attr:    return Attr(CYAN,        BLUE, STYLE_NONE)
-def highlight_number_attr()  -> Attr:    return Attr(LIGHT_GRAY,  BLUE, STYLE_NONE)
-def highlight_ident_attr()   -> Attr:    return Attr(LIGHT_GREEN, BLUE, STYLE_NONE)
-def highlight_decorator_attr() -> Attr:  return Attr(LIGHT_CYAN,    BLUE, STYLE_NONE)
-def highlight_operator_attr()  -> Attr:  return Attr(LIGHT_YELLOW,  BLUE, STYLE_NONE)
+# Public colors. They render against the editor background (``EDITOR_BG``) and
+# use the reserved per-token slots, so the active theme controls every token
+# hue independently of the chrome palette. The default ("Turbo C++ 3.0") theme
+# sets these slots to the classic white/red/cyan/etc. RGB, so the look is
+# unchanged until the user picks another theme.
+def highlight_keyword_attr() -> Attr:    return Attr(SYN_KEYWORD,   EDITOR_BG, STYLE_NONE)
+def highlight_string_attr()  -> Attr:    return Attr(SYN_STRING,    EDITOR_BG, STYLE_NONE)
+def highlight_comment_attr() -> Attr:    return Attr(SYN_COMMENT,   EDITOR_BG, STYLE_NONE)
+def highlight_number_attr()  -> Attr:    return Attr(SYN_NUMBER,    EDITOR_BG, STYLE_NONE)
+def highlight_ident_attr()   -> Attr:    return Attr(SYN_IDENT,     EDITOR_BG, STYLE_NONE)
+def highlight_decorator_attr() -> Attr:  return Attr(SYN_DECORATOR, EDITOR_BG, STYLE_NONE)
+def highlight_operator_attr()  -> Attr:  return Attr(SYN_OPERATOR,  EDITOR_BG, STYLE_NONE)
 
 
 # Per-line state passed between calls to ``_highlight_generic_line``.

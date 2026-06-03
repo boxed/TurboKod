@@ -77,13 +77,39 @@ test_pane    (if visible)
 ```
 
 Each slot takes its `dock.effective_height` (with `bottom_chrome = 0` and
-`screen` = the panel window), stacked top-to-bottom. The **last visible panel
-absorbs any remaining rows** so the window is always fully used; if the heights
-overflow, later panels are clamped. The existing min/max state machine still
-works — `MAXIMIZED` fills, `MINIMIZED` collapses to its one header row — and the
-top-border drag still updates `preferred_height`. Both `paint_panels` and
-`handle_panels_event` walk this same slot list so paint and hit-testing never
-disagree.
+`screen` = the panel window), stacked top-to-bottom. The **last non-minimized
+panel absorbs any remaining rows** so the window is always fully used; if the
+heights overflow, later panels are clamped. The existing min/max state machine
+still works — `MAXIMIZED` fills, `MINIMIZED` collapses to its one header row.
+Both `paint_panels` and `handle_panels_event` walk this same slot list so paint
+and hit-testing never disagree.
+
+The absorber is the last *non-minimized* panel, not simply the last one. If the
+last panel absorbed unconditionally, minimizing the bottom panel would do
+nothing — it would re-absorb every row it just gave up. So a minimized panel
+always keeps its single header row wherever it sits, and the rows it frees go to
+the nearest non-minimized panel above it. When *every* panel is minimized the
+last one absorbs (there's no non-minimized panel to hand the space to).
+
+#### Resize is top-anchored, driven by the host
+
+The docked stack is **bottom-anchored**: a panel grows upward from a fixed
+bottom, so its own top border is the drag handle and `height = bottom - cursor`.
+The floating stack is the opposite — **top-anchored**, stacking downward — so a
+panel's top is pinned by the panels above it and the boundary between two panels
+is the *lower* panel's top border. Dragging that splitter must resize the panel
+**above** it (whose top stays put), via `preferred_height = cursor.y - top`.
+
+So the panel's own chrome must *not* self-resize in the panel window: panes are
+routed through `handle_mouse(..., allow_resize=False)`, which makes
+`handle_bottom_dock_chrome_mouse` treat a bare top-border press as focus-only.
+The actual resize is owned by `Desktop._panels_drive_resize` —
+`_panel_splitter_upper` maps a press to the panel above the splitter (excluding
+the lower panel's chrome buttons; the upper must be `NORMAL`), starts its
+`dock.resizing`, and in-flight motion sets that upper panel's `preferred_height`
+(clamped to keep `DOCK_MIN_HEIGHT` rows for the lower panel(s)).
+`pointer_shape_panels` shows `ns-resize` over a splitter or during a drag. A lone
+panel fills the window and has no splitter, so it's correctly non-resizable.
 
 If **no** tool panels are visible, the panel window paints an empty fill with a
 hint line ("No panels open — open a terminal with Ctrl+Shift+T"). The host keeps the

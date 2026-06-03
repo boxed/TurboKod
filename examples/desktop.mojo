@@ -168,6 +168,11 @@ def main() raises:
     try:
         var desktop = Desktop()
         desktop.load_config_from_disk()
+        # Push the active theme's palette so the terminal's truecolor renderer
+        # paints the theme (not the user's terminal scheme). Re-pushed in the
+        # loop whenever the user switches theme in Settings.
+        app.set_palette(desktop.active_theme.palette)
+        var last_theme_version = desktop.theme_version
         var file_dialog = FileDialog()
 
         # Hamburger menu (≡) — app-level commands that don't belong on the
@@ -338,6 +343,12 @@ def main() raises:
                         )
 
                 app.clear()
+                # Re-push the palette if the user switched theme this frame
+                # (Settings applies it via Desktop.set_theme, bumping the
+                # version). Cheap to skip when unchanged.
+                if desktop.theme_version != last_theme_version:
+                    app.set_palette(desktop.active_theme.palette)
+                    last_theme_version = desktop.theme_version
                 if desktop.dap.is_active():
                     desktop.dap.client.process.trace(
                         String("iter ") + String(iter_n) + String(" before-paint"),

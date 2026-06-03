@@ -36,12 +36,15 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton,
     paint_checkbox, paint_shadow_button,
 )
-from .canvas import Canvas
+from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
+    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, RED,
+    WHITE, EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT,
+    SYN_NUMBER, SYN_IDENT,
 )
+from .theme import theme_names
 from .config import LanguageServerOverride, OnSaveAction
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
@@ -86,6 +89,7 @@ comptime _FOCUS_LANG_LIST     = UInt8(10)
 comptime _FOCUS_LANG_ADD      = UInt8(11)
 comptime _FOCUS_LANG_EDIT     = UInt8(12)
 comptime _FOCUS_LANG_REMOVE   = UInt8(13)
+comptime _FOCUS_THEME_LIST    = UInt8(16)
 
 
 # --- section indices ------------------------------------------------------
@@ -94,11 +98,17 @@ comptime _SECTION_ACTIONS   = 0
 comptime _SECTION_EDITOR    = 1
 comptime _SECTION_SPELL     = 2
 comptime _SECTION_LANGUAGES = 3
+comptime _SECTION_THEME     = 4
 
 
 # --- layout ---------------------------------------------------------------
 
 comptime _SECTION_W = 22
+
+# Minimum in-grid dialog size (terminal frontend). Wide enough for the left
+# rail plus a usable right pane; tall enough for the section lists.
+comptime _SETTINGS_MIN_W = 64
+comptime _SETTINGS_MIN_H = 16
 
 
 # --- button table indices -------------------------------------------------
@@ -130,6 +140,7 @@ def _section_labels() -> List[String]:
     out.append(String("Editor"))
     out.append(String("Spell check"))
     out.append(String("Languages"))
+    out.append(String("Theme"))
     return out^
 
 
@@ -234,6 +245,33 @@ struct Settings(Movable):
     var selected_language: Int
     """Row in ``languages_view`` that's highlighted in the right pane."""
     var language_editor: LanguageEditor
+    var theme_choice: String
+    """Working copy of ``TurbokodConfig.theme`` — the Theme section's
+    authoritative value. Changing the selection in the theme list commits
+    here and raises ``dirty``; the host applies it live via
+    ``Desktop.set_theme`` and persists on the next config sync."""
+    var selected_theme: Int
+    """Row in ``_theme_names`` that's highlighted in the Theme pane."""
+    var _theme_names: List[String]
+    """Snapshot of the available theme names (``theme.theme_names()``)."""
+    var detached: Bool
+    """True when the host renders Settings in its own native window (the
+    macOS frontend; see ``Desktop.set_settings_detached``). The dialog then
+    fills the whole surface and the in-grid move/resize chrome is disabled —
+    the native window provides both."""
+    var bounds: Rect
+    """In-grid dialog rect (terminal frontend). Centered by default, then
+    movable by dragging the title row and resizable by dragging the left /
+    right / bottom border — so the workspace behind stays visible while a
+    theme change retints it live. Session-persistent across open/close;
+    ``_ensure_bounds`` re-clamps it against the current screen."""
+    var _moving: Bool
+    var _move_dx: Int
+    var _move_dy: Int
+    var _resizing: Bool
+    var _rs_left: Bool
+    var _rs_right: Bool
+    var _rs_bottom: Bool
     var _type_ahead: TypeAhead
     """Shared type-to-jump prefix buffer for whichever section list
     currently owns focus. Reset on focus / section changes so a
@@ -302,6 +340,18 @@ struct Settings(Movable):
         self.languages_view = List[LanguageSpec]()
         self.selected_language = -1
         self.language_editor = LanguageEditor()
+        self.theme_choice = String("Turbo C++ 3.0")
+        self.selected_theme = 0
+        self._theme_names = theme_names()
+        self.detached = False
+        self.bounds = Rect(0, 0, 0, 0)
+        self._moving = False
+        self._move_dx = 0
+        self._move_dy = 0
+        self._resizing = False
+        self._rs_left = False
+        self._rs_right = False
+        self._rs_bottom = False
         self._type_ahead = TypeAhead()
 
     def open(
@@ -310,6 +360,7 @@ struct Settings(Movable):
         current_language_ext: String = String(""),
         trim_trailing_whitespace: Bool = True,
         ensure_final_newline: Bool = True,
+        theme: String = String("Turbo C++ 3.0"),
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -347,6 +398,14 @@ struct Settings(Movable):
         if lang_idx < 0:
             lang_idx = 0 if len(self.languages_view) > 0 else -1
         self.selected_language = lang_idx
+        # Theme section: snapshot the catalog and select the active theme.
+        self._theme_names = theme_names()
+        self.theme_choice = theme
+        self.selected_theme = 0
+        for i in range(len(self._theme_names)):
+            if self._theme_names[i] == theme:
+                self.selected_theme = i
+                break
 
     def _rebuild_languages_view(mut self):
         self.languages_view = apply_language_overrides(
@@ -355,6 +414,10 @@ struct Settings(Movable):
 
     def close(mut self):
         self.active = False
+        # Drop any in-flight move/resize drag; ``bounds`` itself is kept so
+        # the next open reuses the user's size + position.
+        self._moving = False
+        self._resizing = False
         self.actions = List[OnSaveAction]()
         self.auto_save = False
         self.trim_trailing_whitespace = False
@@ -391,9 +454,14 @@ struct Settings(Movable):
     def paint(mut self, mut canvas: Canvas, screen: Rect):
         if not self.active:
             return
+        self._ensure_bounds(screen)
         var rect = self._workspace_rect(screen)
+        # In-grid the dialog floats over the workspace — drop a shadow so it
+        # reads as lifted (the host window provides this when detached).
+        if not self.detached:
+            paint_drop_shadow(canvas, rect)
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(WHITE, LIGHT_GRAY)
+        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         # Bind every write inside the Settings dialog to its workspace
         # rect — ``rect`` excludes the menu bar above and status bar
         # below, so even an over-wide section row can't bleed into
@@ -423,12 +491,144 @@ struct Settings(Movable):
             self.language_editor.paint(canvas, screen)
 
     def _workspace_rect(self, screen: Rect) -> Rect:
-        """Settings takes the workspace area — ``screen`` minus the
-        menu bar (row 0) and status bar (last row). The host paints
-        those above/below us so the user keeps their bearings."""
+        """The dialog's rect. Detached (native settings window) it fills the
+        whole surface; in-grid (terminal) it's the movable / resizable
+        ``bounds``, which ``_ensure_bounds`` keeps valid against the current
+        screen. Every geometry helper and hit-test derives from this, so the
+        whole dialog follows a move/resize for free."""
+        if self.detached:
+            return screen
+        return self.bounds
+
+    def _host_workspace(self, screen: Rect) -> Rect:
+        """The area the in-grid dialog may occupy — ``screen`` minus the
+        menu bar (row 0) and status bar (last row), which the host keeps
+        painting so the user keeps their bearings."""
         var top = 1 if screen.b.y > 2 else 0
         var bottom = screen.b.y - 1 if screen.b.y > 2 else screen.b.y
         return Rect(screen.a.x, top, screen.b.x, bottom)
+
+    def _ensure_bounds(mut self, screen: Rect):
+        """Initialize ``bounds`` (centered default) on first open and clamp
+        it back into the workspace after a terminal resize. No-op when the
+        host owns the window (detached)."""
+        if self.detached:
+            return
+        var ws = self._host_workspace(screen)
+        var w = self.bounds.width()
+        var h = self.bounds.height()
+        if w < _SETTINGS_MIN_W or h < _SETTINGS_MIN_H:
+            # First open (or degenerate): centered, big enough to be
+            # comfortable, small enough to leave the workspace visible
+            # around it (that's the point — live theme preview).
+            w = ws.width() - 8
+            if w > 104:
+                w = 104
+            h = ws.height() - 4
+            if h > 30:
+                h = 30
+            var x = ws.a.x + (ws.width() - w) // 2
+            var y = ws.a.y + (ws.height() - h) // 2
+            self.bounds = Rect(x, y, x + w, y + h)
+        # Shrink to fit, then slide fully on-screen.
+        var b = self.bounds
+        if b.width() > ws.width():
+            b = Rect(b.a.x, b.a.y, b.a.x + ws.width(), b.b.y)
+        if b.height() > ws.height():
+            b = Rect(b.a.x, b.a.y, b.b.x, b.a.y + ws.height())
+        var dx = 0
+        var dy = 0
+        if b.a.x < ws.a.x:
+            dx = ws.a.x - b.a.x
+        if b.b.x > ws.b.x:
+            dx = ws.b.x - b.b.x
+        if b.a.y < ws.a.y:
+            dy = ws.a.y - b.a.y
+        if b.b.y > ws.b.y:
+            dy = ws.b.y - b.b.y
+        self.bounds = Rect(b.a.x + dx, b.a.y + dy, b.b.x + dx, b.b.y + dy)
+
+    def _handle_window_chrome(
+        mut self, event: Event, rect: Rect, screen: Rect,
+    ) -> Bool:
+        """In-grid window chrome: drag the title row to move, drag the
+        left / right / bottom border (corners included) to resize. An
+        in-flight drag owns every event until the button is released —
+        even when the cursor wanders outside the dialog (mirrors
+        ``WindowStack``'s drag/resize state machine). Returns True when
+        the event was consumed."""
+        if self.detached:
+            return False
+        var ws = self._host_workspace(screen)
+        if self._moving:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._moving = False
+                return True
+            var w = self.bounds.width()
+            var h = self.bounds.height()
+            var nx = event.pos.x - self._move_dx
+            var ny = event.pos.y - self._move_dy
+            if nx < ws.a.x:
+                nx = ws.a.x
+            if ny < ws.a.y:
+                ny = ws.a.y
+            if nx + w > ws.b.x:
+                nx = ws.b.x - w
+            if ny + h > ws.b.y:
+                ny = ws.b.y - h
+            self.bounds = Rect(nx, ny, nx + w, ny + h)
+            return True
+        if self._resizing:
+            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+                self._resizing = False
+                return True
+            var ax = self.bounds.a.x
+            var ay = self.bounds.a.y
+            var bx = self.bounds.b.x
+            var by = self.bounds.b.y
+            if self._rs_left:
+                ax = event.pos.x
+                if ax < ws.a.x:
+                    ax = ws.a.x
+                if bx - ax < _SETTINGS_MIN_W:
+                    ax = bx - _SETTINGS_MIN_W
+            if self._rs_right:
+                bx = event.pos.x + 1
+                if bx > ws.b.x:
+                    bx = ws.b.x
+                if bx - ax < _SETTINGS_MIN_W:
+                    bx = ax + _SETTINGS_MIN_W
+            if self._rs_bottom:
+                by = event.pos.y + 1
+                if by > ws.b.y:
+                    by = ws.b.y
+                if by - ay < _SETTINGS_MIN_H:
+                    by = ay + _SETTINGS_MIN_H
+            self.bounds = Rect(ax, ay, bx, by)
+            return True
+        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
+                or event.motion:
+            return False
+        var inside_x = event.pos.x >= rect.a.x and event.pos.x < rect.b.x
+        var inside_y = event.pos.y >= rect.a.y and event.pos.y < rect.b.y
+        if not (inside_x and inside_y):
+            return False
+        # Title row (top border) moves; the other three borders resize.
+        if event.pos.y == rect.a.y:
+            self._moving = True
+            self._move_dx = event.pos.x - rect.a.x
+            self._move_dy = event.pos.y - rect.a.y
+            return True
+        var on_left = event.pos.x == rect.a.x
+        var on_right = event.pos.x == rect.b.x - 1
+        var on_bottom = event.pos.y == rect.b.y - 1
+        if on_left or on_right or on_bottom:
+            self._resizing = True
+            self._rs_left = on_left
+            self._rs_right = on_right
+            self._rs_bottom = on_bottom
+            return True
+        return False
 
     def _sections_rect(self, rect: Rect) -> Rect:
         """Inner area of the left rail (inside the framed border)."""
@@ -492,6 +692,126 @@ struct Settings(Movable):
             self._paint_spell_section(canvas, sub, inner)
         elif self.section == _SECTION_LANGUAGES:
             self._paint_languages_section(canvas, sub, inner)
+        elif self.section == _SECTION_THEME:
+            self._paint_theme_section(canvas, sub, inner)
+
+    def _paint_theme_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
+        """Left: scrollable list of theme names. Right: a live preview that
+        paints a faux title bar, menu strip, and a few syntax-colored code
+        lines using the active palette's chrome + reserved syntax indices.
+        Selecting a theme applies it live (the whole dialog retints on the
+        next frame), so the preview tracks the real thing."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var list_top = inner.a.y + 2
+        var list_bottom = inner.b.y - 1
+        if list_bottom <= list_top:
+            return
+        # The list occupies the left ~18 columns of the right pane; the
+        # preview fills the remainder.
+        var list_w = 20
+        var split = inner.a.x + list_w
+        if split > inner.b.x - 12:
+            split = inner.b.x - 12
+        var list_rect = Rect(inner.a.x, list_top, split, list_bottom)
+        var body_attr = Attr(BLACK, CYAN)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
+        for i in range(len(self._theme_names)):
+            var y = list_rect.a.y + i
+            if y >= list_rect.b.y:
+                break
+            var attr = body_attr
+            if i == self.selected_theme:
+                attr = (
+                    Attr(WHITE, BLUE) if self.focus == _FOCUS_THEME_LIST
+                    else Attr(BLACK, GREEN)
+                )
+                painter.fill(
+                    canvas, Rect(list_rect.a.x, y, list_rect.b.x, y + 1),
+                    String(" "), attr,
+                )
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, y),
+                self._theme_names[i], attr,
+            )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, inner.b.y),
+            String("↑↓ to preview live — change is saved automatically"),
+            hint,
+        )
+        # Preview pane to the right of the list.
+        var px = split + 2
+        if px < inner.b.x - 4:
+            self._paint_theme_preview(
+                canvas, painter,
+                Rect(px, list_top, inner.b.x, list_bottom),
+            )
+
+    def _paint_theme_preview(
+        self, mut canvas: Canvas, painter: Painter, box: Rect,
+    ):
+        """Sample of the active theme: a title bar, a menu strip, and a few
+        lines of fake code colored with the reserved syntax slots. All cells
+        carry palette indices; the frontend resolves them through the live
+        theme, so this mirrors exactly how editors will look."""
+        if box.width() < 8 or box.height() < 6:
+            return
+        var menu_bar = Attr(BLACK, LIGHT_GRAY)
+        var menu_key = Attr(RED, LIGHT_GRAY)
+        var title = Attr(BLACK, LIGHT_GRAY)
+        var ed = Attr(EDITOR_FG, EDITOR_BG)
+        # Title row.
+        painter.fill(canvas, Rect(box.a.x, box.a.y, box.b.x, box.a.y + 1),
+                     String("─"), title)
+        _ = painter.put_text(
+            canvas, Point(box.a.x + 1, box.a.y), String(" sample.py "), title,
+        )
+        # Menu strip.
+        var my = box.a.y + 1
+        painter.fill(canvas, Rect(box.a.x, my, box.b.x, my + 1),
+                     String(" "), menu_bar)
+        _ = painter.put_text(canvas, Point(box.a.x + 1, my),
+                             String("File  Edit  View"), menu_bar)
+        _ = painter.put_text(canvas, Point(box.a.x + 1, my), String("F"),
+                             menu_key)
+        # Editor body.
+        var body = Rect(box.a.x, my + 1, box.b.x, box.b.y)
+        painter.fill(canvas, body, String(" "), ed)
+        var ky = Attr(SYN_KEYWORD, EDITOR_BG)
+        var st = Attr(SYN_STRING, EDITOR_BG)
+        var cm = Attr(SYN_COMMENT, EDITOR_BG)
+        var nu = Attr(SYN_NUMBER, EDITOR_BG)
+        # Identifiers (function names, calls) paint with the ident slot —
+        # same as the editor's real scope mapping (entity.name.function /
+        # support.function → ident), which is also the unhighlighted-text
+        # baseline. ``ed`` is only the punctuation/plain-cell color.
+        var id = Attr(SYN_IDENT, EDITOR_BG)
+        var x0 = body.a.x + 1
+        var ry = body.a.y
+        if ry < body.b.y:
+            _ = painter.put_text(canvas, Point(x0, ry),
+                                 String("# greet the world"), cm)
+        ry += 1
+        if ry < body.b.y:
+            var cx = x0
+            cx += painter.put_text(canvas, Point(cx, ry), String("def "), ky)
+            cx += painter.put_text(canvas, Point(cx, ry), String("main"), id)
+            _ = painter.put_text(canvas, Point(cx, ry), String("():"), ed)
+        ry += 1
+        if ry < body.b.y:
+            var cx2 = x0 + 4
+            cx2 += painter.put_text(canvas, Point(cx2, ry), String("print"), id)
+            cx2 += painter.put_text(canvas, Point(cx2, ry), String("("), ed)
+            cx2 += painter.put_text(canvas, Point(cx2, ry),
+                                    String('"hello"'), st)
+            _ = painter.put_text(canvas, Point(cx2, ry), String(")"), ed)
+        ry += 1
+        if ry < body.b.y:
+            var cx3 = x0 + 4
+            cx3 += painter.put_text(canvas, Point(cx3, ry), String("return "),
+                                    ky)
+            _ = painter.put_text(canvas, Point(cx3, ry), String("42"), nu)
 
     def _paint_actions_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -896,7 +1216,7 @@ struct Settings(Movable):
         var pb = self._buttons[idx]
         var face: Attr
         if not pb.enabled:
-            face = Attr(LIGHT_GRAY, GREEN)
+            face = Attr(WHITE, GREEN)
         elif self.focus == pb.focus:
             face = Attr(WHITE, BLUE)
         else:
@@ -947,6 +1267,8 @@ struct Settings(Movable):
                 self._step_dict(-1)
             elif self.focus == _FOCUS_LANG_LIST:
                 self._step_language(-1)
+            elif self.focus == _FOCUS_THEME_LIST:
+                self._step_theme(-1)
             return True
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
@@ -957,6 +1279,8 @@ struct Settings(Movable):
                 self._step_dict(1)
             elif self.focus == _FOCUS_LANG_LIST:
                 self._step_language(1)
+            elif self.focus == _FOCUS_THEME_LIST:
+                self._step_theme(1)
             elif self.focus == _FOCUS_SAVE_BEHAVIOR:
                 # Closed: open the popup. Forward the keystroke so
                 # the highlight starts on the committed row.
@@ -1011,6 +1335,10 @@ struct Settings(Movable):
             var hit = type_ahead_pick(self._type_ahead, labels, ch)
             if hit >= 0:
                 self.selected_language = hit
+        elif self.focus == _FOCUS_THEME_LIST:
+            var hit = type_ahead_pick(self._type_ahead, self._theme_names, ch)
+            if hit >= 0:
+                self._commit_theme(hit)
 
     def _sync_dropdown_commit(mut self, prev_idx: Int):
         """If the dropdown's committed index moved, propagate it back
@@ -1084,6 +1412,9 @@ struct Settings(Movable):
                     self.language_overrides, spec.language_id,
                 ):
                     ordered.append(_FOCUS_LANG_REMOVE)
+        elif self.section == _SECTION_THEME:
+            if len(self._theme_names) > 0:
+                ordered.append(_FOCUS_THEME_LIST)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -1145,6 +1476,26 @@ struct Settings(Movable):
         if s >= len(self.languages_view):
             s = len(self.languages_view) - 1
         self.selected_language = s
+
+    def _commit_theme(mut self, idx: Int):
+        """Select theme row ``idx`` and, if it changed the choice, commit it
+        and raise ``dirty`` so the host applies + persists it."""
+        if idx < 0 or idx >= len(self._theme_names):
+            return
+        self.selected_theme = idx
+        if self._theme_names[idx] != self.theme_choice:
+            self.theme_choice = self._theme_names[idx]
+            self.dirty = True
+
+    def _step_theme(mut self, delta: Int):
+        if len(self._theme_names) == 0:
+            return
+        var s = self.selected_theme + delta
+        if s < 0:
+            s = 0
+        if s >= len(self._theme_names):
+            s = len(self._theme_names) - 1
+        self._commit_theme(s)
 
     def _add_language(mut self):
         var argvs = List[String]()
@@ -1363,7 +1714,12 @@ struct Settings(Movable):
             return True
         if event.kind != EVENT_MOUSE:
             return True
+        self._ensure_bounds(screen)
         var rect = self._workspace_rect(screen)
+        # Move / resize chrome first — an in-flight drag owns every event,
+        # and border presses must win over the widgets inside.
+        if self._handle_window_chrome(event, rect, screen):
+            return True
         # Save-behavior dropdown gets first crack on the editor section
         # — both for body clicks (which would otherwise miss the focus
         # walk) and for popup clicks (which sit *above* the dialog
@@ -1461,6 +1817,19 @@ struct Settings(Movable):
                         and 0 <= self.selected_language \
                         and self.selected_language < len(self.languages_view):
                     self._edit_language()
+                return True
+        elif self.section == _SECTION_THEME:
+            var inner = self._right_rect(rect)
+            var split = inner.a.x + 20
+            if split > inner.b.x - 12:
+                split = inner.b.x - 12
+            var list_rect = Rect(
+                inner.a.x, inner.a.y + 2, split, inner.b.y - 1,
+            )
+            if list_rect.contains(event.pos):
+                var idx = event.pos.y - list_rect.a.y
+                self._commit_theme(idx)
+                self.focus = _FOCUS_THEME_LIST
                 return True
         return True
 

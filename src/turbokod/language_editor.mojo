@@ -34,7 +34,7 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, WHITE
 from .config import LanguageServerOverride
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -282,7 +282,7 @@ struct LanguageEditor(Movable):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(WHITE, LIGHT_GRAY)
+        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)
@@ -394,7 +394,7 @@ struct LanguageEditor(Movable):
         var pb = self._buttons[idx]
         var face: Attr
         if not pb.enabled:
-            face = Attr(LIGHT_GRAY, GREEN)
+            face = Attr(WHITE, GREEN)
         elif self.focus == pb.focus:
             face = Attr(WHITE, BLUE)
         else:

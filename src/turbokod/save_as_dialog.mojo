@@ -27,7 +27,7 @@ from .buttons import (
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, GREEN, LIGHT_GRAY, WHITE
 from .dir_browser import DirBrowser
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -202,7 +202,7 @@ struct SaveAsDialog(Movable):
         # body, bright double-line frame, and a title chunk painted
         # in body colors over the top edge.
         var bg = Attr(BLACK, LIGHT_GRAY)
-        var border = Attr(WHITE, LIGHT_GRAY)
+        var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
         var rect = _dialog_rect(screen, self.pos)
         var layout = _build_layout(rect)

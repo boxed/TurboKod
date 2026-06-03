@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import CoreGraphics
 
 // The bundled IBM VGA bitmap font (8×16), matching the terminal/Rust look.
 // Designed at 16px, so 16pt gives an 8pt advance — exactly our cell size.
@@ -69,8 +70,24 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 
 // MARK: - Cell-grid view, backed by a Mojo Desktop handle
 
+// Which Mojo render surface a CellView draws. `.main` is the project window
+// (editors + file tree + status, panels docked unless floated). `.panels` is
+// the separate floating-panels window, which shares the main view's Desktop
+// handle and draws ONLY the tool panels via the `_panels` C ABI. See
+// docs/floating-panels.md.
+// `.settings` is the standalone Settings window — like `.panels` it shares the
+// main view's Desktop handle and never ticks; it renders via the `_settings`
+// C ABI and is opened/closed by polling tk_desktop_settings_active.
+enum CellSurface { case main, panels, settings }
+
 final class CellView: NSView {
     var handle: Int64 = 0
+    var surface: CellSurface = .main
+    // For a `.panels` view: the project window's view it mirrors. Actions the
+    // panel surface bubbles up (e.g. an open-file from a debug-output link)
+    // route to this peer so they land in the project window, not the panel
+    // window. nil for `.main` views.
+    weak var mainPeer: CellView?
     var project: String?      // set when a project is opened; drives session save
     private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: 3)
     private var bufCells = 1
@@ -88,8 +105,33 @@ final class CellView: NSView {
     // and emit one notch per notch-worth of travel so scroll speed tracks
     // the gesture, not the raw event rate. See scrollWheel.
     private var scrollAccumY: CGFloat = 0
-    private let palette = buildPalette()
+    // Palette is the active theme's index→RGB table. Seeded with the classic
+    // built-in palette and refreshed from the Mojo core whenever the theme
+    // version changes (Settings ▸ Theme). `themeVersion = -1` forces the first
+    // refresh through.
+    private var palette = buildPalette()
+    private var themeVersion: Int64 = -1
     private let font = cellFont
+
+    /// Refetch the active theme's palette if the Mojo core's theme version has
+    /// moved. Returns true when the palette changed (so a redraw is warranted
+    /// even if the cell buffer is byte-identical — a theme swap changes only
+    /// the index→RGB mapping, not the indices in the buffer).
+    @discardableResult
+    private func refreshPaletteIfNeeded() -> Bool {
+        guard handle != 0 else { return false }
+        let v = tk_theme_version(handle)
+        if v == themeVersion { return false }
+        themeVersion = v
+        var p = [UInt32](repeating: 0, count: 256)
+        p.withUnsafeMutableBufferPointer { b in
+            _ = tk_theme_palette(handle,
+                                 Int64(Int(bitPattern: b.baseAddress)),
+                                 Int64(b.count))
+        }
+        palette = p
+        return true
+    }
 
     // Change detection. There is no cursor blink, so an idle Desktop lays out
     // a byte-identical frame every tick — `pollFrame` hashes the laid-out
@@ -114,6 +156,44 @@ final class CellView: NSView {
     func cols() -> Int { max(1, Int(bounds.width / CELL_W)) }
     func rows() -> Int { max(1, Int(bounds.height / CELL_H)) }
 
+    // Surface-aware C-ABI shims: `.main` drives the whole Desktop; `.panels`
+    // draws only the tool panels and never ticks (the main window's tick runs
+    // the shared Desktop's per-frame work for both surfaces).
+    private func layoutSurface(_ c: Int, _ r: Int, _ cap: Int) -> Int {
+        let p = Int64(Int(bitPattern: buf))
+        switch surface {
+        case .main:     return Int(tk_desktop_layout(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
+        }
+    }
+    private func tickSurface(_ c: Int, _ r: Int) {
+        if surface == .main { tk_desktop_tick(handle, Int64(c), Int64(r)) }
+    }
+    private func keySurface(_ key: UInt32, _ m: UInt8, _ c: Int, _ r: Int) -> Int32 {
+        switch surface {
+        case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
+        case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
+        case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
+        }
+    }
+    private func mouseSurface(_ col: Int64, _ row: Int64, _ button: UInt8,
+                              _ pressed: UInt8, _ motion: UInt8, _ m: UInt8,
+                              _ c: Int, _ r: Int) -> Int32 {
+        switch surface {
+        case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
+        case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
+        case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
+        }
+    }
+    private func pointerShapeSurface(_ col: Int64, _ row: Int64, _ c: Int, _ r: Int) -> Int32 {
+        switch surface {
+        case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
+        case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
+        case .settings: return 0   // default arrow everywhere in Settings
+        }
+    }
+
     private func ensureBuf(_ cells: Int) {
         if cells > bufCells {
             buf.deallocate()
@@ -131,7 +211,7 @@ final class CellView: NSView {
     @discardableResult
     func pollFrame() -> Bool {
         guard handle != 0 else { return false }
-        tk_desktop_tick(handle, Int64(cols()), Int64(rows()))
+        tickSurface(cols(), rows())
         return detectChange()
     }
 
@@ -145,11 +225,13 @@ final class CellView: NSView {
         guard handle != 0 else { return false }
         let c = cols(), r = rows()
         ensureBuf(c * r)
-        let n = Int(tk_desktop_layout(handle, Int64(c), Int64(r),
-                                      Int64(Int(bitPattern: buf)), Int64(c * r)))
+        let n = layoutSurface(c, r, c * r)
         frameCols = c; frameRows = r; frameN = n
         let hash = hashBuf(n * 3)
-        if hash == lastFrameHash { return false }
+        // A theme swap changes only the palette, not the laid-out indices, so
+        // force a frame through even when the buffer hash is unchanged.
+        let themeChanged = refreshPaletteIfNeeded()
+        if hash == lastFrameHash && !themeChanged { return false }
         lastFrameHash = hash
         framePending = true
         return true
@@ -162,6 +244,7 @@ final class CellView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard handle != 0, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        refreshPaletteIfNeeded()
         // Px437 is a pixel font — render it crisp (no anti-aliasing / font
         // smoothing) or the bitmap glyphs come out blurred. Cells are on
         // integer pixel boundaries so hard-edged rasterization is exact.
@@ -178,9 +261,8 @@ final class CellView: NSView {
             // rather than ticking + laying out a second time.
             n = frameN
         } else {
-            tk_desktop_tick(handle, Int64(c), Int64(r))
-            n = Int(tk_desktop_layout(handle, Int64(c), Int64(r),
-                                      Int64(Int(bitPattern: buf)), Int64(c * r)))
+            tickSurface(c, r)
+            n = layoutSurface(c, r, c * r)
             // Keep the change detector in sync with what we actually present so
             // the next pollFrame compares against this frame.
             frameCols = c; frameRows = r; frameN = n
@@ -274,7 +356,7 @@ final class CellView: NSView {
             key = sc.value
         }
         if key == 0 { return }
-        let action = tk_desktop_key(handle, key, mods(event), Int64(cols()), Int64(rows()))
+        let action = keySurface(key, mods(event), cols(), rows())
         handleAction(action)
         invalidateFrame()
         needsDisplay = true
@@ -294,11 +376,11 @@ final class CellView: NSView {
             // it out. Reset so the next bare move always re-dispatches.
             lastPassiveCol = -1; lastPassiveRow = -1
         }
-        let action = tk_desktop_mouse(handle, col, row, button, pressed, motion,
-                                      mods(e), Int64(cols()), Int64(rows()))
+        let action = mouseSurface(col, row, button, pressed, motion,
+                                  mods(e), cols(), rows())
         handleAction(action)
         // Cursor hint.
-        let shape = tk_desktop_pointer_shape(handle, col, row, Int64(cols()), Int64(rows()))
+        let shape = pointerShapeSurface(col, row, cols(), rows())
         switch shape {
         case 1: NSCursor.iBeam.set()
         case 2: NSCursor.pointingHand.set()
@@ -368,7 +450,9 @@ final class CellView: NSView {
     }
 
     func handleAction(_ code: Int32) {
-        AppController.shared?.handleAction(code, view: self)
+        // Actions from the panel surface route to the project window's view so
+        // an open-file (etc.) lands there, not in the panel window.
+        AppController.shared?.handleAction(code, view: mainPeer ?? self)
     }
 
     func capturePNG(to path: String) {
@@ -377,6 +461,19 @@ final class CellView: NSView {
         if let data = rep.representation(using: .png, properties: [:]) {
             try? data.write(to: URL(fileURLWithPath: path))
         }
+    }
+}
+
+// NSWindow that honors a programmatically-restored frame verbatim, even on a
+// secondary display. AppKit's default `constrainFrameRect(_:to:)` keeps the
+// title bar on the "current" screen, which yanks a window saved on a secondary
+// monitor back onto the primary one as it's positioned/ordered at launch. The
+// floating-panels window is always placed from saved per-display-config
+// geometry that's been visibility-checked against the attached screens
+// (`frameIsVisible`), so the constraint only does harm here — opt out of it.
+final class UnconstrainedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
     }
 }
 
@@ -408,6 +505,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // per-project JSON hundreds of times per drag. Keyed by NSWindow identity
     // so two windows resized simultaneously don't share a timer.
     private var frameSaveTimers: [ObjectIdentifier: Timer] = [:]
+    // Floating panels: the separate tool-panel window for a project window,
+    // keyed by ObjectIdentifier(mainView). Its CellView is `.panels` and
+    // shares the main view's Desktop handle. Absent ⇒ panels are docked.
+    // See docs/floating-panels.md.
+    private var panels: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
+    // Standalone Settings windows, one per project window (keyed by the main
+    // view, like `panels`). Opened/closed by polling tk_desktop_settings_active
+    // each tick — the Mojo side opens Settings via the menu action and closes
+    // it via Esc / its Close button, so the host can't know without asking.
+    private var settingsWins: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -561,6 +668,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // idle frame is identical and needs no Core Text repaint.
                 if v.pollFrame() { v.needsDisplay = true; changed = true }
             }
+            // Panel windows share the main Desktop and don't tick (pollFrame on
+            // a `.panels` view only re-lays-out), so the main window's tick
+            // above already advanced the shared state — here we just detect
+            // whether the panel surface needs a repaint.
+            for pair in self.panels.values {
+                let pv = pair.view
+                guard let w = pv.window, w.isVisible,
+                      w.occlusionState.contains(.visible) else { continue }
+                if pv.pollFrame() { pv.needsDisplay = true; changed = true }
+            }
+            // Settings window lifecycle: the Mojo side opens Settings via the
+            // menu action and closes it via Esc / its Close button — poll the
+            // active flag and open/close the NSWindow on transitions.
+            for v in self.views where v.handle != 0 {
+                let id = ObjectIdentifier(v)
+                let active = tk_desktop_settings_active(v.handle) != 0
+                if active && self.settingsWins[id] == nil {
+                    self.showSettingsWindow(for: v); changed = true
+                } else if !active, self.settingsWins[id] != nil {
+                    self.closeSettingsWindow(for: v); changed = true
+                }
+            }
+            // Like the panel views, settings views share the main Desktop and
+            // don't tick — just detect whether the surface needs a repaint.
+            for pair in self.settingsWins.values {
+                let sv = pair.view
+                guard let w = sv.window, w.isVisible,
+                      w.occlusionState.contains(.visible) else { continue }
+                if sv.pollFrame() { sv.needsDisplay = true; changed = true }
+            }
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
         }
         RunLoop.current.add(t, forMode: .common)
@@ -583,12 +720,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let self,
                   let w = note.object as? NSWindow,
                   w.occlusionState.contains(.visible),
-                  let v = w.contentView as? CellView,
-                  self.views.contains(v) == true else { return }
+                  let v = w.contentView as? CellView else { return }
             self.idleTicks = 0
             v.invalidateFrame()
             v.needsDisplay = true
         }
+        // Display connect/disconnect / resolution change: re-evaluate every
+        // open project against the now-current configuration, floating or
+        // docking its panels per the saved per-config layout. This is what
+        // makes unplugging the external display fall back to docked.
+        nc.addObserver(self, selector: #selector(screenParametersChanged(_:)),
+                       name: NSApplication.didChangeScreenParametersNotification,
+                       object: nil)
 
         if let cap = ProcessInfo.processInfo.environment["TK_CAPTURE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -948,6 +1091,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case openProject = 4   // ACT_OPEN_PROJECT
         case newWindow   = 5   // ACT_NEW_WINDOW (also Project ▸ recent)
         case closeWindow = 6   // ACT_CLOSE_WINDOW (Close project)
+        case toggleFloatingPanels = 7  // ACT_TOGGLE_FLOATING_PANELS
     }
 
     // Generalized action-code dispatch. The source `sourceHandle` is the
@@ -998,6 +1142,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // it (same path as the red close button). The Project menu only
             // offers this when a project is open, so `view` is its window.
             if let v = view { closeWindow(v) }
+        case .toggleFloatingPanels:
+            // Resolve to the project window's view: the menu can fire while
+            // the panel window is key, in which case `view` is the `.panels`
+            // view and its `mainPeer` is the project window.
+            if let v = view {
+                toggleFloatingPanels(v.surface == .panels ? (v.mainPeer ?? v) : v)
+            }
         }
     }
 
@@ -1139,6 +1290,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // the in-grid menu bar and stops routing top-row mouse / Alt-letter
         // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
         tk_desktop_set_host_owns_menu(h, 1)
+        // Likewise the Settings view renders in its own native window (see
+        // settingsWins) — the main surface skips the in-grid overlay and
+        // stays interactive while Settings is open.
+        tk_desktop_set_settings_detached(h, 1)
         let view = CellView()
         view.handle = h
         let initial = frame ?? NSRect(x: 0, y: 0, width: 1000, height: 640)
@@ -1201,14 +1356,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.title = URL(fileURLWithPath: path).lastPathComponent
             win.representedURL = URL(fileURLWithPath: path)
         }
-        // If this project has a remembered window frame, resize/reposition to
-        // it. New-window-at-launch paths pre-apply via newWindow(frame:) so
-        // there's no visible flash; for Open Project… on an existing window
-        // this is the one that resizes mid-session.
-        if let saved = loadProjectFrame(path), let win = v.window,
-           !NSEqualRects(win.frame, saved) {
-            win.setFrame(saved, display: true)
-        }
+        // Apply the per-display-config layout: size the window and float or
+        // dock the tool panels per what was saved for the current set of
+        // screens. New-window-at-launch paths pre-apply the main frame via
+        // newWindow(frame:) so there's no visible resize flash; this also
+        // restores the floating panel window when the config calls for it.
+        applyGeometryForCurrentConfig(v)
         saveSession()
         v.needsDisplay = true
     }
@@ -1270,8 +1423,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // not segfaulting. `windowWillClose` is intentionally not implemented;
     // returning false here means it never fires.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Closing a panel window just docks the panels — the Desktop lives on
+        // the project window, which stays open. (Re-open via View ▸ Floating
+        // panels.)
+        if let entry = panels.first(where: { $0.value.window === sender }) {
+            if let mv = mainViewByObjectId(entry.key) { closePanelWindow(for: mv) }
+            return false
+        }
+        // Closing the Settings window via the red button closes the Settings
+        // view on the Mojo side too (the reverse of the active-flag poll that
+        // opened this window).
+        if let entry = settingsWins.first(where: { $0.value.window === sender }) {
+            if let mv = mainViewByObjectId(entry.key) {
+                tk_desktop_settings_close(mv.handle)
+                closeSettingsWindow(for: mv)
+            }
+            return false
+        }
         guard let idx = windows.firstIndex(of: sender) else { return false }
         let v = views[idx]
+        // Capture the final geometry (including floating state + panel frame)
+        // before teardown so the next open restores it, then drop the panel
+        // window — without double-freeing the shared Desktop handle.
+        if !isTerminating { saveGeometryFor(v) }
+        closePanelWindow(for: v, save: false)
+        closeSettingsWindow(for: v, focusMain: false)
         let h = v.handle
         v.handle = 0
         windows.remove(at: idx)
@@ -1309,6 +1485,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             chromeDesktop = 0
         }
         return .terminateNow
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        // SIGTERM every spawned child (run target, LSP servers, pty
+        // shells). The Rust shim has a dyld-terminator backstop for
+        // this, but NSApp.terminate exits via _exit(), which skips
+        // static terminators — without this explicit call a process
+        // running in the Run pane would survive Cmd+Q.
+        tk_terminate_all()
     }
 
     // MARK: app-level session (which windows + their projects)
@@ -1374,29 +1559,131 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return nativeWindowDir(project) + "/native_window.json"
     }
 
-    func loadProjectFrame(_ project: String) -> NSRect? {
-        let path = nativeWindowPath(project)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let frame = obj["frame"] as? [Any], frame.count == 4
-        else { return nil }
-        // Accept either integer or floating-point components — JSONSerialization
-        // gives NSNumber, which bridges to both Int and Double.
-        let nums = frame.compactMap { ($0 as? NSNumber)?.doubleValue }
+    // Per-display-configuration geometry. The window size/position AND the
+    // floating-vs-docked choice are remembered per display configuration, so a
+    // roaming setup (laptop ± external display) restores the layout that
+    // matched the screens it was last used with — and falls back to docked
+    // when it meets a configuration it hasn't floated under. See
+    // docs/floating-panels.md.
+    struct PanelConfigEntry {
+        var main: NSRect?       // project window frame for this config
+        var floating: Bool      // were panels floated under this config?
+        var panel: NSRect?      // panel window frame (when floating)
+    }
+    struct ProjectGeometry {
+        var last: NSRect?                       // fallback size for a new config
+        var configs: [String: PanelConfigEntry] // keyed by displayConfigKey()
+    }
+
+    // A stable key for the current set of attached displays: each screen's
+    // CGDisplay UUID (stable across disconnect/reconnect and reboot) plus its
+    // pixel resolution, sorted so the key is order-independent. Distinct
+    // setups (laptop-only vs laptop+4K vs laptop+ultrawide) get distinct keys.
+    func displayConfigKey() -> String {
+        var parts: [String] = []
+        for screen in NSScreen.screens {
+            var ident = "?"
+            if let num = (screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value {
+                let did = CGDirectDisplayID(num)
+                if let cf = CGDisplayCreateUUIDFromDisplayID(did) {
+                    ident = CFUUIDCreateString(nil, cf.takeRetainedValue()) as String
+                } else {
+                    ident = String(num)
+                }
+            }
+            let f = screen.frame, s = screen.backingScaleFactor
+            parts.append("\(ident)@\(Int(f.width * s))x\(Int(f.height * s))")
+        }
+        return parts.isEmpty ? "none" : parts.sorted().joined(separator: "|")
+    }
+
+    private func rectFromJSON(_ any: Any?) -> NSRect? {
+        guard let arr = any as? [Any] else { return nil }
+        let nums = arr.compactMap { ($0 as? NSNumber)?.doubleValue }
         guard nums.count == 4, nums[2] > 0, nums[3] > 0 else { return nil }
         return NSRect(x: nums[0], y: nums[1], width: nums[2], height: nums[3])
     }
 
-    func saveProjectFrame(_ project: String, _ frame: NSRect) {
+    private func jsonFromRect(_ r: NSRect) -> [Int] {
+        [Int(r.origin.x), Int(r.origin.y), Int(r.size.width), Int(r.size.height)]
+    }
+
+    func loadProjectGeometry(_ project: String) -> ProjectGeometry {
+        var geom = ProjectGeometry(last: nil, configs: [:])
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: nativeWindowPath(project))),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return geom }
+        // Legacy single-frame form ({"frame":[…]}) seeds `last` so existing
+        // projects open at their remembered size (docked) and start recording
+        // per-config state from there.
+        if let legacy = rectFromJSON(obj["frame"]) { geom.last = legacy }
+        if let last = rectFromJSON(obj["last"]) { geom.last = last }
+        if let cfgs = obj["configs"] as? [String: Any] {
+            for (k, v) in cfgs {
+                guard let d = v as? [String: Any] else { continue }
+                geom.configs[k] = PanelConfigEntry(
+                    main: rectFromJSON(d["main"]),
+                    floating: (d["floating"] as? Bool) ?? false,
+                    panel: rectFromJSON(d["panel"]))
+            }
+        }
+        return geom
+    }
+
+    func saveProjectGeometry(_ project: String, _ geom: ProjectGeometry) {
         try? FileManager.default.createDirectory(
             atPath: nativeWindowDir(project), withIntermediateDirectories: true)
-        let obj: [String: Any] = ["frame": [
-            Int(frame.origin.x), Int(frame.origin.y),
-            Int(frame.size.width), Int(frame.size.height),
-        ]]
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [])
-        else { return }
+        var obj: [String: Any] = [:]
+        if let last = geom.last { obj["last"] = jsonFromRect(last) }
+        var cfgs: [String: Any] = [:]
+        for (k, e) in geom.configs {
+            var d: [String: Any] = ["floating": e.floating]
+            if let m = e.main { d["main"] = jsonFromRect(m) }
+            if let p = e.panel { d["panel"] = jsonFromRect(p) }
+            cfgs[k] = d
+        }
+        obj["configs"] = cfgs
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? data.write(to: URL(fileURLWithPath: nativeWindowPath(project)), options: .atomic)
+    }
+
+    // Back-compat shim for the many call sites that just want a main-window
+    // frame to open at: the current config's saved frame, else the last-used
+    // size (else nil → caller's default).
+    func loadProjectFrame(_ project: String) -> NSRect? {
+        let geom = loadProjectGeometry(project)
+        if let e = geom.configs[displayConfigKey()], let m = e.main { return m }
+        return geom.last
+    }
+
+    // Read/modify/write the current config's entry, preserving every other
+    // config's saved layout. A docked save keeps the last-known panel frame so
+    // re-floating returns to the remembered size.
+    private func recordProjectGeometry(
+        _ project: String, main: NSRect, floating: Bool, panel: NSRect?) {
+        var geom = loadProjectGeometry(project)
+        geom.last = main
+        let key = displayConfigKey()
+        let keepPanel = floating ? panel : geom.configs[key]?.panel
+        geom.configs[key] = PanelConfigEntry(main: main, floating: floating, panel: keepPanel)
+        saveProjectGeometry(project, geom)
+    }
+
+    // Capture a project window's full geometry — main frame, whether its
+    // panels are currently floating, and the panel window frame — under the
+    // current display config.
+    private func saveGeometryFor(_ mainView: CellView) {
+        guard let project = mainView.project, let mainWin = mainView.window else { return }
+        let id = ObjectIdentifier(mainView)
+        let floating = panels[id] != nil
+        recordProjectGeometry(project, main: mainWin.frame,
+                              floating: floating, panel: panels[id]?.window.frame)
+    }
+
+    private func mainViewByObjectId(_ id: ObjectIdentifier) -> CellView? {
+        return views.first { ObjectIdentifier($0) == id }
     }
 
     // MARK: live resize/move persistence
@@ -1407,20 +1694,214 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // AppKit fires didResize/didMove on every frame of a live drag — debounce
     // to ~150 ms after the last event so we write once per gesture instead of
     // dozens of times. Cancelled-and-rescheduled rather than throttled so the
-    // *final* frame is what lands on disk.
+    // *final* frame is what lands on disk. Both the project window and its
+    // panel window route here; either resolves to the project's main view, and
+    // we snapshot the whole geometry (so moving the panel window records the
+    // panel frame, moving the main window records the main frame).
     private func scheduleFrameSave(_ note: Notification) {
-        guard let win = note.object as? NSWindow,
-              let idx = windows.firstIndex(of: win),
-              let project = views[idx].project else { return }
+        guard let win = note.object as? NSWindow else { return }
+        var mainView: CellView?
+        if let idx = windows.firstIndex(of: win) {
+            mainView = views[idx]
+        } else {
+            for (id, pair) in panels where pair.window === win {
+                mainView = mainViewByObjectId(id)
+            }
+        }
+        guard let mv = mainView, mv.project != nil else { return }
         let key = ObjectIdentifier(win)
         frameSaveTimers[key]?.invalidate()
-        let frame = win.frame
-        let proj  = project
-        let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
-            self?.saveProjectFrame(proj, frame)
+        let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) {
+            [weak self, weak mv] _ in
+            if let mv = mv { self?.saveGeometryFor(mv) }
             self?.frameSaveTimers.removeValue(forKey: key)
         }
         frameSaveTimers[key] = t
+    }
+
+    // MARK: floating panels — window, toggle, restore, fallback
+
+    // Build the panel window's CellView, sharing the project window's Desktop
+    // handle and rendering only the tool panels.
+    private func makePanelView(for mainView: CellView) -> CellView {
+        let v = CellView()
+        v.handle = mainView.handle
+        v.surface = .panels
+        v.mainPeer = mainView
+        return v
+    }
+
+    // Place the panel window beside the main window by default — to the right,
+    // overflowing onto an external display when there is one, since that's the
+    // common roaming target. Used only when no per-config panel frame is saved.
+    private func defaultPanelFrame(besides mainWin: NSWindow) -> NSRect {
+        let mf = mainWin.frame
+        let screen = mainWin.screen ?? NSScreen.main
+        let w: CGFloat = 720, h = mf.height
+        var x = mf.maxX + 20
+        var y = mf.origin.y
+        if let other = NSScreen.screens.first(where: { $0 !== screen }) {
+            // Prefer the secondary display's left edge.
+            x = other.frame.origin.x + 40
+            y = other.frame.origin.y + 40
+        }
+        return NSRect(x: x, y: y, width: w, height: h)
+    }
+
+    // True when `frame` is at least partly on some currently-attached screen —
+    // the test that makes a vanished display fall back to docked.
+    private func frameIsVisible(_ frame: NSRect) -> Bool {
+        for s in NSScreen.screens where s.frame.intersects(frame) { return true }
+        return false
+    }
+
+    // Open (or reposition) the panel window for a project window and flip the
+    // Desktop into detached mode.
+    private func showPanelWindow(for mainView: CellView, frame: NSRect?) {
+        guard let mainWin = mainView.window else { return }
+        let id = ObjectIdentifier(mainView)
+        let pv: CellView
+        let win: NSWindow
+        if let existing = panels[id] {
+            pv = existing.view; win = existing.window
+        } else {
+            pv = makePanelView(for: mainView)
+            win = UnconstrainedWindow(
+                contentRect: frame ?? defaultPanelFrame(besides: mainWin),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false)
+            win.delegate = self
+            win.contentView = pv
+            win.makeFirstResponder(pv)
+            win.acceptsMouseMovedEvents = true
+            win.title = (mainView.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "TurboKod") + " — Panels"
+            panels[id] = (window: win, view: pv)
+        }
+        if let f = frame { win.setFrame(f, display: false) }
+        tk_desktop_set_panels_detached(mainView.handle, 1)
+        // orderFront (not makeKey): toggling panels on shouldn't yank keyboard
+        // focus off the editor. The user clicks into the panel window when
+        // they want to drive the terminal/debugger there.
+        win.orderFront(nil)
+        mainView.invalidateFrame(); mainView.needsDisplay = true
+        pv.invalidateFrame(); pv.needsDisplay = true
+    }
+
+    // Tear the panel window down and re-dock the panels.
+    private func closePanelWindow(for mainView: CellView, save: Bool = true) {
+        let id = ObjectIdentifier(mainView)
+        guard let pair = panels[id] else {
+            tk_desktop_set_panels_detached(mainView.handle, 0)
+            return
+        }
+        panels.removeValue(forKey: id)
+        pair.view.handle = 0          // shared handle is owned by the main view
+        tk_desktop_set_panels_detached(mainView.handle, 0)
+        pair.window.orderOut(nil)     // see windowShouldClose (Sequoia teardown)
+        mainView.invalidateFrame(); mainView.needsDisplay = true
+        if save && !isTerminating { saveGeometryFor(mainView) }
+    }
+
+    // View ▸ Floating panels — flip the current project window between docked
+    // and floating, persisting the new choice under the current display config.
+    func toggleFloatingPanels(_ mainView: CellView) {
+        let id = ObjectIdentifier(mainView)
+        if panels[id] != nil {
+            closePanelWindow(for: mainView)
+        } else {
+            // Reuse the saved panel frame for this config if any.
+            let saved = mainView.project.flatMap {
+                loadProjectGeometry($0).configs[displayConfigKey()]?.panel
+            }
+            showPanelWindow(for: mainView, frame: saved)
+            saveGeometryFor(mainView)
+        }
+    }
+
+    // MARK: standalone Settings window
+
+    private func makeSettingsView(for mainView: CellView) -> CellView {
+        let v = CellView()
+        v.handle = mainView.handle    // shared Desktop, second surface
+        v.surface = .settings
+        v.mainPeer = mainView
+        return v
+    }
+
+    private func defaultSettingsFrame(over mainWin: NSWindow) -> NSRect {
+        // Centered over the project window; sized for the settings layout
+        // (left rail + right pane) without dwarfing the editor behind it —
+        // the whole point of the separate window is watching a theme change
+        // retint the workspace live.
+        let w: CGFloat = 110 * CELL_W, h: CGFloat = 34 * CELL_H
+        let mf = mainWin.frame
+        return NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2, width: w, height: h)
+    }
+
+    private func showSettingsWindow(for mainView: CellView) {
+        guard let mainWin = mainView.window else { return }
+        let id = ObjectIdentifier(mainView)
+        let sv: CellView
+        let win: NSWindow
+        if let existing = settingsWins[id] {
+            sv = existing.view; win = existing.window
+        } else {
+            sv = makeSettingsView(for: mainView)
+            win = UnconstrainedWindow(
+                contentRect: defaultSettingsFrame(over: mainWin),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered, defer: false)
+            win.delegate = self
+            win.contentView = sv
+            win.makeFirstResponder(sv)
+            win.acceptsMouseMovedEvents = true
+            win.title = "Settings"
+            settingsWins[id] = (window: win, view: sv)
+        }
+        win.makeKeyAndOrderFront(nil)
+        sv.invalidateFrame(); sv.needsDisplay = true
+    }
+
+    private func closeSettingsWindow(for mainView: CellView, focusMain: Bool = true) {
+        let id = ObjectIdentifier(mainView)
+        guard let pair = settingsWins[id] else { return }
+        settingsWins.removeValue(forKey: id)
+        pair.view.handle = 0          // shared handle is owned by the main view
+        pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
+        // Hand focus back to the project window so Esc-closing Settings
+        // drops the user straight back into the editor. Skipped when the
+        // project window itself is the one going away.
+        if focusMain { mainView.window?.makeKeyAndOrderFront(nil) }
+    }
+
+    // Apply the saved layout for the current display config to a project
+    // window: size the main window, and float or dock the panels. Called when
+    // a project opens and whenever the screen configuration changes. Falls back
+    // to docked whenever the current config has no floating entry, or the saved
+    // panel frame is no longer visible on any attached screen.
+    func applyGeometryForCurrentConfig(_ mainView: CellView) {
+        guard let project = mainView.project, let mainWin = mainView.window else { return }
+        let geom = loadProjectGeometry(project)
+        let entry = geom.configs[displayConfigKey()]
+        if let m = entry?.main ?? geom.last, !NSEqualRects(mainWin.frame, m) {
+            mainWin.setFrame(m, display: true)
+        }
+        let wantFloat = (entry?.floating ?? false)
+            && (entry?.panel.map { frameIsVisible($0) } ?? false)
+        if wantFloat {
+            showPanelWindow(for: mainView, frame: entry?.panel)
+        } else {
+            // Unknown config or the panel's display is gone → dock. Don't
+            // re-save here: the floating entry for the *other* config must
+            // survive so re-plugging restores it.
+            closePanelWindow(for: mainView, save: false)
+        }
+    }
+
+    // React to display connect/disconnect / resolution changes: re-evaluate
+    // every open project window against the now-current configuration.
+    @objc func screenParametersChanged(_ note: Notification) {
+        for v in views { applyGeometryForCurrentConfig(v) }
     }
 }
 

@@ -15,7 +15,7 @@ from std.io.file_descriptor import FileDescriptor
 
 from .canvas import Canvas
 from .cell import Cell, blank_cell
-from .colors import Attr, attr_to_sgr, default_attr
+from .colors import Attr, attr_to_sgr, attr_to_sgr_rgb, default_attr
 from .events import (
     DOUBLE_CLICK_MS,
     Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE,
@@ -187,6 +187,26 @@ def terminal_supports_extended_underline() -> Bool:
     return False
 
 
+def terminal_supports_truecolor() -> Bool:
+    """``True`` when the host terminal handles 24-bit ``SGR 38;2;r;g;b``.
+
+    The authoritative signal is ``COLORTERM`` (``truecolor`` / ``24bit``),
+    which nearly every modern terminal exports. Apple Terminal.app — the
+    notable holdout — sets neither and is 256-color only, so it correctly
+    falls through to the indexed ``38;5;N`` path. Any terminal we already
+    trust for the colored-underline extension also does truecolor, so that
+    set serves as a positive fallback when ``COLORTERM`` is absent.
+
+    When ``False`` the renderer emits palette *indices* and the user's own
+    terminal color scheme decides the RGB — a bundled theme then only fully
+    applies in the native macOS app.
+    """
+    var ct = getenv_value(String("COLORTERM"))
+    if ct == String("truecolor") or ct == String("24bit"):
+        return True
+    return terminal_supports_extended_underline()
+
+
 # --- Terminal driver --------------------------------------------------------
 
 
@@ -224,6 +244,13 @@ struct Terminal:
     var _last_press_y: Int
     var _last_press_button: UInt8
     var _consec_press_count: UInt8
+    # Active theme's 256-entry RGB palette, pushed by the app loop from
+    # ``Desktop.active_theme``. When ``_truecolor`` and this is populated,
+    # ``present`` emits 24-bit SGR resolved through it so the theme renders
+    # identically to the native app; otherwise it falls back to indexed
+    # ``38;5;N`` and the user's terminal scheme decides the RGB.
+    var _palette: List[UInt32]
+    var _truecolor: Bool
 
     def __init__(out self) raises:
         self._orig_termios = alloc_zero_buffer(TERMIOS_SIZE)
@@ -243,6 +270,21 @@ struct Terminal:
         self._last_press_y = 0
         self._last_press_button = UInt8(0)
         self._consec_press_count = UInt8(0)
+        self._palette = List[UInt32]()
+        self._truecolor = terminal_supports_truecolor()
+
+    def set_palette(mut self, palette: List[UInt32]):
+        """Push the active theme's 256-entry RGB palette. The app loop calls
+        this at startup and whenever ``Desktop.theme_version`` changes.
+
+        Forces a full repaint: ``present``'s diff runs in palette-*index*
+        space, but what's on the glass was resolved to RGB at write time —
+        after a swap, every cell whose indices didn't change would otherwise
+        keep its old theme's colors indefinitely."""
+        self._palette = palette.copy()
+        # Shrink the front canvas so the next ``present`` takes its
+        # size-mismatch path: clear screen + rewrite every cell.
+        self._front.resize(1, 1)
 
     def _trace(self, var line: String):
         """Write ``line`` to ``trace_fd`` if open. No newline added —
@@ -396,7 +438,12 @@ struct Terminal:
                     append_string_bytes(buf, move_cursor(x, y))
                 if (not last_attr_valid) or last_attr != nc.attr:
                     append_string_bytes(buf, CSI)
-                    append_string_bytes(buf, attr_to_sgr(nc.attr))
+                    if self._truecolor and len(self._palette) == 256:
+                        append_string_bytes(
+                            buf, attr_to_sgr_rgb(nc.attr, self._palette)
+                        )
+                    else:
+                        append_string_bytes(buf, attr_to_sgr(nc.attr))
                     buf.append(0x6D)  # 'm'
                     last_attr = nc.attr
                     last_attr_valid = True

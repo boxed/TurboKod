@@ -10,7 +10,7 @@ simple List-of-Cells rather than a packed 16-bit attribute buffer.
 from std.collections import List
 
 from .cell import Cell, blank_cell
-from .colors import Attr, BLACK, DARK_GRAY, default_attr
+from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
 
 
@@ -211,7 +211,7 @@ struct Canvas(Copyable, Movable):
         reads as faintly visible dim text, and a blank cell renders
         as a black square — the classic Turbo Vision look.
         """
-        var shadow = Attr(DARK_GRAY, BLACK)
+        var shadow = Attr(DARK_GRAY, PANE_BG)
         var clipped = rect.intersect(Rect(0, 0, self.width, self.height))
         for y in range(clipped.a.y, clipped.b.y):
             for x in range(clipped.a.x, clipped.b.x):

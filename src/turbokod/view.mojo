@@ -16,7 +16,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter
-from .colors import Attr, default_attr, WHITE, BLUE, BLACK, LIGHT_GRAY
+from .colors import Attr, default_attr, WHITE, BLUE, PANE_BG, PANE_FG
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
@@ -100,7 +100,7 @@ struct Fill(Copyable, Movable, Drawable):
 
     def __init__(out self):
         self.glyph = String(" ")
-        self.attr = Attr(LIGHT_GRAY, BLACK)
+        self.attr = Attr(PANE_FG, PANE_BG)
 
     def __init__(out self, var glyph: String, attr: Attr):
         self.glyph = glyph^

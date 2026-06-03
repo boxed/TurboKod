@@ -36,7 +36,7 @@ from .clipboard import (
     CLIP_COPY, CLIP_CUT, CLIP_PASTE, CLIP_SELECT_ALL, clipboard_chord,
     clipboard_copy, clipboard_paste,
 )
-from .colors import Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, CYAN, WHITE
 
 
 # Standard single-line input style, shared by every dialog. Cyan bg
@@ -763,8 +763,8 @@ struct TextField(Copyable, Movable):
     ):
         """Render ``self.text`` into ``rect`` (one row) using the
         standard input-field colors: cyan background, white-on-blue
-        selection. The cursor cell is painted in reverse-video
-        (LIGHT_GRAY on BLACK) when ``focused`` is True.
+        selection. The cursor cell is painted as the field colors
+        swapped (reverse-video) when ``focused`` is True.
 
         ``rect`` is the strip the text occupies — typically one row
         tall. Painting clips at ``rect.b.x`` so the field never
@@ -818,9 +818,12 @@ struct TextField(Copyable, Movable):
         if focused:
             var cur_x = rect.a.x + self.cursor_cell() - self._scroll
             if cur_x < rect.b.x and cur_x >= rect.a.x:
-                # Reverse-video block over the current cell. Inside
-                # a selection we still paint it — the user expects to
-                # see *where* their caret sits.
+                # Reverse-video block over the current cell: the field's own
+                # fg/bg swapped, so the caret contrasts with the field under
+                # every theme (a fixed color pair can land invisible when a
+                # theme darkens the field surface). Inside a selection we
+                # still paint it — the user expects to see *where* their
+                # caret sits.
                 var glyph: String
                 # Use the existing glyph at that cell if we painted one
                 # (so a selected char shows under the caret), else " ".
@@ -830,7 +833,7 @@ struct TextField(Copyable, Movable):
                     glyph = String(" ")
                 painter.set(
                     canvas, cur_x, rect.a.y,
-                    Cell(glyph, Attr(LIGHT_GRAY, BLACK), 1),
+                    Cell(glyph, Attr(attr.bg, attr.fg), 1),
                 )
 
     def _text_end_x(self, base_x: Int) -> Int:
