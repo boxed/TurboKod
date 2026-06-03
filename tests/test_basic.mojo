@@ -4911,6 +4911,75 @@ def test_settings_open_unknown_extension_falls_back_to_first() raises:
     assert_equal(s.selected_language, 0)
 
 
+def test_settings_font_section_requires_host_fonts() raises:
+    """The Font section only exists when the host registered font
+    options (the native macOS frontend). Without them — the terminal
+    frontend — the rail ends at Theme."""
+    var s = Settings()
+    s.open(List[OnSaveAction](), False)
+    var labels = s._labels()
+    assert_equal(len(labels), 5)
+    assert_equal(labels[4], String("Theme"))
+    s.close()
+    var fonts = List[String]()
+    fonts.append(String("IBM VGA 8x16 (built-in)"))
+    fonts.append(String("Menlo"))
+    fonts.append(String("Monaco"))
+    s.open(
+        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        String(""), True, True, String("Turbo C++ 3.0"),
+        String("Menlo"), fonts^,
+    )
+    labels = s._labels()
+    assert_equal(len(labels), 6)
+    assert_equal(labels[5], String("Font"))
+    # The active font row is pre-selected.
+    assert_equal(s.selected_font, 1)
+    assert_equal(s.font_choice, String("Menlo"))
+
+
+def test_settings_font_step_commits_and_marks_dirty() raises:
+    """Arrowing through the Font list commits the new choice and raises
+    ``dirty`` so the host applies + persists it — same live-preview
+    contract as the Theme list."""
+    var s = Settings()
+    var fonts = List[String]()
+    fonts.append(String("IBM VGA 8x16 (built-in)"))
+    fonts.append(String("Menlo"))
+    s.open(
+        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        String(""), True, True, String("Turbo C++ 3.0"),
+        String("IBM VGA 8x16 (built-in)"), fonts^,
+    )
+    assert_equal(s.selected_font, 0)
+    assert_false(s.dirty)
+    s._step_font(1)
+    assert_equal(s.selected_font, 1)
+    assert_equal(s.font_choice, String("Menlo"))
+    assert_true(s.dirty)
+    # Stepping past the end clamps without re-dirtying a fresh ack.
+    s.ack_dirty()
+    s._step_font(1)
+    assert_equal(s.selected_font, 1)
+    assert_false(s.dirty)
+
+
+def test_desktop_set_font_maps_default_label_to_empty() raises:
+    """``set_font`` stores the built-in default as the empty string (the
+    config file stays label-free) and bumps ``font_version`` on every
+    change so the Swift host refetches."""
+    var d = Desktop()
+    assert_equal(d.font_label(), String("IBM VGA 8x16 (built-in)"))
+    var v0 = d.font_version
+    d.set_font(String("Menlo"))
+    assert_equal(d.config.font, String("Menlo"))
+    assert_equal(d.font_label(), String("Menlo"))
+    assert_equal(d.font_version, v0 + 1)
+    d.set_font(String("IBM VGA 8x16 (built-in)"))
+    assert_equal(d.config.font, String(""))
+    assert_equal(d.font_version, v0 + 2)
+
+
 def test_settings_remove_language_override_marks_dirty() raises:
     """Removing the override for a custom language drops it from
     ``language_overrides``, marks ``dirty``, and rebuilds the view so
@@ -13605,6 +13674,54 @@ def test_floating_panel_top_border_does_not_self_resize() raises:
     assert_equal(d.debug_pane.dock.preferred_height, 14)
 
 
+def test_floating_panel_title_command_click_beats_splitter() raises:
+    """Clicking a title-strip command button (Stop / Restart / Clear) on
+    a panel that sits *below* another panel in the floating window must
+    fire the command — not start a splitter drag for the panel above.
+    The splitter check excludes the min/max chrome and must exclude the
+    command strip the same way. This was a real regression: the run
+    pane's Stop/Restart/Clear were dead whenever another panel sat
+    above it in the floating stack."""
+    var d = Desktop()
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    # Post-run hold on both panes keeps them visible through dap_tick
+    # and builds their command strips (Restart/Re-run + Clear).
+    d._run_output_held = True
+    d._test_output_held = True
+    d.dap_tick(screen)
+    # Paint the floating stack so the title rows latch their hit rects.
+    var canvas = Canvas(80, 40)
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, screen)
+    # The test pane is the lower panel; its title row is the splitter
+    # row for the debug pane above.
+    assert_true(len(d.test_pane.dock.last_cmd_hits) > 0)
+    var hit = d.test_pane.dock.last_cmd_hits[0].copy()
+    var pos = Point((hit.x_start + hit.x_end) // 2, hit.y)
+    _ = d.handle_panels_event(
+        Event.mouse_event(pos, MOUSE_BUTTON_LEFT, True, False), screen,
+    )
+    # The button latched its command; no splitter drag started.
+    assert_false(d.debug_pane.dock.is_resizing())
+    assert_equal(d.test_pane.dock.pending_command_id, hit.id)
+    _ = d.handle_panels_event(
+        Event.mouse_event(pos, MOUSE_BUTTON_LEFT, False, False), screen,
+    )
+    # A press on the same row but *off* the buttons still starts the
+    # splitter drag for the pane above.
+    var last = d.test_pane.dock.last_cmd_hits[
+        len(d.test_pane.dock.last_cmd_hits) - 1
+    ].copy()
+    _ = d.handle_panels_event(
+        Event.mouse_event(
+            Point(last.x_end + 2, last.y), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        screen,
+    )
+    assert_true(d.debug_pane.dock.is_resizing())
+
+
 def test_floating_panel_minimize_bottom_keeps_one_row() raises:
     """Minimizing the *bottom* panel in the floating window must collapse
     it to its single header row — the upper panel becomes the absorber and
@@ -16145,6 +16262,7 @@ def _run_chunk_00() raises:
     test_docked_panel_stack_min_on_max_sibling_clears_max()
     test_floating_panel_splitter_drag_resizes_upper_pane()
     test_floating_panel_top_border_does_not_self_resize()
+    test_floating_panel_title_command_click_beats_splitter()
     test_floating_panel_minimize_bottom_keeps_one_row()
     test_floating_panel_minimize_top_keeps_one_row()
     test_build_minimal_patch_keeps_only_target_plus_line()
@@ -16324,6 +16442,9 @@ def _run_chunk_02() raises:
     test_settings_languages_section_seeded()
     test_settings_open_selects_current_language()
     test_settings_open_unknown_extension_falls_back_to_first()
+    test_settings_font_section_requires_host_fonts()
+    test_settings_font_step_commits_and_marks_dirty()
+    test_desktop_set_font_maps_default_label_to_empty()
     test_settings_remove_language_override_marks_dirty()
     test_language_editor_save_emits_override()
     test_list_box_paint_never_overflows_bounds()

@@ -32,7 +32,7 @@ from turbokod.menu import Menu, MenuItem
 from turbokod.posix import (
     getenv_value, recover_user_path_for_gui_launch, setenv_value,
 )
-from turbokod.string_utils import codepoint_at
+from turbokod.string_utils import codepoint_at, split_lines_no_trailing
 from turbokod.theme import theme_by_name
 from turbokod.desktop import (
     Desktop,
@@ -419,6 +419,51 @@ def tk_theme_palette(h: Int, out_ptr: Int, cap: Int) -> Int:
         n = cap
     for i in range(n):
         op[i] = _desk(h)[].active_theme.palette[i]
+    return n
+
+
+@export
+def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int):
+    """Register the monospace font families the host can render cells
+    with — newline-separated UTF-8 family names. Their presence is what
+    makes the Settings Font section appear; the terminal frontend never
+    calls this. The built-in bitmap-font default row is added by the
+    Mojo side, so the host passes only real system families."""
+    if h == 0:
+        return
+    var text = _string_from(ptr, n)
+    var names = List[String]()
+    var lines = split_lines_no_trailing(text)
+    for i in range(len(lines)):
+        if len(lines[i].as_bytes()) > 0:
+            names.append(lines[i])
+    _desk(h)[].host_font_names = names^
+
+
+@export
+def tk_font_version(h: Int) -> Int:
+    """Monotonic counter that bumps whenever ``config.font`` changes.
+    The Swift host polls this each frame (like ``tk_theme_version``) and
+    refetches the font name + rebuilds its cell font only when it moves."""
+    if h == 0:
+        return 0
+    return _desk(h)[].font_version
+
+
+@export
+def tk_font_name(h: Int, out_ptr: Int, cap: Int) -> Int:
+    """Write the configured font family name (UTF-8) into the caller's
+    buffer and return the byte count. 0 means "use the built-in bitmap
+    font" — the config's empty-string default."""
+    if h == 0 or out_ptr == 0 or cap <= 0:
+        return 0
+    var bytes = _desk(h)[].config.font.as_bytes()
+    var n = len(bytes)
+    if n > cap:
+        n = cap
+    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[i] = bytes[i]
     return n
 
 

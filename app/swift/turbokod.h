@@ -77,4 +77,13 @@ int32_t tk_desktop_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t butto
 int64_t tk_theme_version(int64_t h);
 int64_t tk_theme_palette(int64_t h, int64_t out_ptr, int64_t cap);
 
+// Cell font (Settings ▸ Font): the host registers the system's monospace
+// font families once per Desktop (newline-separated UTF-8), which is what
+// makes the Font section appear. tk_font_version bumps whenever the user
+// switches font; the host polls it and refetches the family name via
+// tk_font_name (0 bytes = the built-in bitmap font) only when it changes.
+void    tk_desktop_set_font_options(int64_t h, int64_t ptr, int64_t n);
+int64_t tk_font_version(int64_t h);
+int64_t tk_font_name(int64_t h, int64_t out_ptr, int64_t cap);
+
 #endif

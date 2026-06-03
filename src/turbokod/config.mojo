@@ -49,6 +49,14 @@ def _config_path() -> String:
     return dir + String("/config.json")
 
 
+def default_font_label() -> String:
+    """Display label for the built-in bitmap font (the ``font`` config
+    field's empty-string default). Settings shows this as the first row
+    of the Font list; ``Desktop.set_font`` maps it back to the empty
+    string so the config file stays frontend-agnostic."""
+    return String("IBM VGA 8x16 (built-in)")
+
+
 def _ensure_dir(path: String):
     """Best-effort ``mkdir`` ignoring ``EEXIST``. We don't recurse; the
     caller attempts both ``~/.config`` and ``~/.config/turbokod`` to
@@ -174,6 +182,11 @@ struct TurbokodConfig(Copyable, Movable):
     # the classic ``"Turbo C++ 3.0"`` look; an unknown name (e.g. a config
     # written by a newer build) falls back to the default at load time.
     var theme: String
+    # Settings ▸ Font (native macOS frontend only). Family name of the
+    # monospace font the Swift host renders cells with. Empty means the
+    # bundled Px437 IBM VGA bitmap font. The terminal frontend ignores it
+    # — the terminal emulator owns the font there.
+    var font: String
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -204,6 +217,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.trim_trailing_whitespace = True
         self.ensure_final_newline = True
         self.theme = String("Turbo C++ 3.0")
+        self.font = String("")
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
@@ -221,6 +235,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.trim_trailing_whitespace = copy.trim_trailing_whitespace
         self.ensure_final_newline = copy.ensure_final_newline
         self.theme = copy.theme
+        self.font = copy.font
         self.recent_projects = copy.recent_projects.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
@@ -307,6 +322,7 @@ def load_config() -> TurbokodConfig:
         var theme_v = json_get_string(root, String("theme"))
         if len(theme_v.as_bytes()) > 0:
             cfg.theme = theme_v
+        cfg.font = json_get_string(root, String("font"))
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -389,6 +405,7 @@ def save_config(config: TurbokodConfig) -> Bool:
         json_bool(config.ensure_final_newline),
     )
     root.put(String("theme"), json_str(config.theme))
+    root.put(String("font"), json_str(config.font))
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))

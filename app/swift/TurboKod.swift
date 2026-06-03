@@ -19,7 +19,79 @@ func loadCellFont() -> NSFont {
     return NSFont(name: "Menlo", size: 13)
         ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 }
-let cellFont = loadCellFont()
+
+// Active cell font (Settings ▸ Font). Defaults to the bundled bitmap font;
+// `applyCellFont` swaps in a system monospace family and recomputes the cell
+// metrics — every CellView reads these globals per draw, so the whole grid
+// reflows on the next frame. `cellFontIsBitmap` gates the no-antialias path:
+// the Px437 bitmap must render crisp, vector fonts must not.
+var cellFont = loadCellFont()
+var cellFontIsBitmap = true
+var currentCellFontName = ""   // "" = the bundled default
+
+// Monospace families the user may pick from (Settings ▸ Font). A lazy
+// static (not a top-level let — those initialize eagerly in main-file
+// mode) enumerated once: NSFontManager probes every installed family,
+// which is too slow to run per window. Hidden system families (leading
+// ".") are skipped.
+enum FontCatalog {
+    static let monospaceFamilies: [String] = {
+        let fm = NSFontManager.shared
+        var out: [String] = []
+        for family in fm.availableFontFamilies {
+            if family.hasPrefix(".") { continue }
+            guard let members = fm.availableMembers(ofFontFamily: family),
+                  let first = members.first,
+                  let name = first[0] as? String,
+                  let f = NSFont(name: name, size: 13),
+                  f.isFixedPitch else { continue }
+            out.append(family)
+        }
+        return out.sorted()
+    }()
+}
+
+/// Read the configured cell-font family name out of a Mojo Desktop
+/// (empty = the bundled bitmap font).
+func fetchFontName(_ h: Int64) -> String {
+    var buf = [UInt8](repeating: 0, count: 256)
+    let n = buf.withUnsafeMutableBufferPointer { b -> Int in
+        Int(tk_font_name(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+    }
+    return n > 0 ? (String(bytes: buf[0..<n], encoding: .utf8) ?? "") : ""
+}
+
+/// Switch the cell font to `name` (a family from `monospaceFontFamilies`;
+/// empty = the bundled bitmap font) and recompute CELL_W/CELL_H from its
+/// metrics. No-op when `name` is already active.
+func applyCellFont(_ name: String) {
+    if name == currentCellFontName { return }
+    currentCellFontName = name
+    if name.isEmpty {
+        cellFont = loadCellFont()
+        cellFontIsBitmap = true
+        CELL_W = 8; CELL_H = 16
+        return
+    }
+    guard let f = NSFontManager.shared.font(withFamily: name, traits: [],
+                                            weight: 5, size: 13)
+        ?? NSFont(name: name, size: 13) else {
+        // Unknown family (e.g. config written on another machine): keep
+        // the bundled default rather than rendering nothing.
+        cellFont = loadCellFont()
+        cellFontIsBitmap = true
+        CELL_W = 8; CELL_H = 16
+        return
+    }
+    cellFont = f
+    cellFontIsBitmap = false
+    // Cell metrics: a monospace glyph advance for the width, the font's
+    // line height for the cell height — same numbers a terminal emulator
+    // would use for its grid.
+    let adv = ("0" as NSString).size(withAttributes: [.font: f]).width
+    CELL_W = max(1, ceil(adv))
+    CELL_H = max(1, ceil(f.ascender - f.descender + f.leading))
+}
 
 // MARK: - 256-color palette (mirrors render.rs / colors.mojo)
 
@@ -54,7 +126,7 @@ let KEY_F1: UInt32 = 0xE020
 
 let MOD_SHIFT: UInt8 = 1, MOD_ALT: UInt8 = 2, MOD_CTRL: UInt8 = 4, MOD_META: UInt8 = 8
 
-let CELL_W: CGFloat = 8, CELL_H: CGFloat = 16
+var CELL_W: CGFloat = 8, CELL_H: CGFloat = 16
 
 func nscolor(_ rgb: UInt32) -> NSColor {
     NSColor(srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255.0,
@@ -111,7 +183,25 @@ final class CellView: NSView {
     // refresh through.
     private var palette = buildPalette()
     private var themeVersion: Int64 = -1
-    private let font = cellFont
+    // Cell-font version mirror — like `themeVersion`, but for Settings ▸
+    // Font. When the Mojo counter moves we refetch the family name and
+    // swap the global `cellFont` + cell metrics. -1 forces the first
+    // check through (a no-op while the config holds the default).
+    private var fontVersion: Int64 = -1
+
+    /// Refetch the configured cell font if the Mojo core's font version has
+    /// moved. Returns true when the font actually changed (the grid metrics
+    /// are different, so everything must re-lay-out + redraw).
+    @discardableResult
+    private func refreshFontIfNeeded() -> Bool {
+        guard handle != 0 else { return false }
+        let v = tk_font_version(handle)
+        if v == fontVersion { return false }
+        fontVersion = v
+        let prev = currentCellFontName
+        applyCellFont(fetchFontName(handle))
+        return prev != currentCellFontName
+    }
 
     /// Refetch the active theme's palette if the Mojo core's theme version has
     /// moved. Returns true when the palette changed (so a redraw is warranted
@@ -223,6 +313,9 @@ final class CellView: NSView {
     @discardableResult
     func detectChange() -> Bool {
         guard handle != 0 else { return false }
+        // Font first — a swap changes CELL_W/CELL_H, and cols()/rows()
+        // below must already see the new grid metrics.
+        let fontChanged = refreshFontIfNeeded()
         let c = cols(), r = rows()
         ensureBuf(c * r)
         let n = layoutSurface(c, r, c * r)
@@ -231,7 +324,7 @@ final class CellView: NSView {
         // A theme swap changes only the palette, not the laid-out indices, so
         // force a frame through even when the buffer hash is unchanged.
         let themeChanged = refreshPaletteIfNeeded()
-        if hash == lastFrameHash && !themeChanged { return false }
+        if hash == lastFrameHash && !themeChanged && !fontChanged { return false }
         lastFrameHash = hash
         framePending = true
         return true
@@ -244,15 +337,19 @@ final class CellView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard handle != 0, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        refreshFontIfNeeded()
         refreshPaletteIfNeeded()
         // Px437 is a pixel font — render it crisp (no anti-aliasing / font
         // smoothing) or the bitmap glyphs come out blurred. Cells are on
         // integer pixel boundaries so hard-edged rasterization is exact.
-        ctx.setShouldAntialias(false)
-        ctx.setShouldSmoothFonts(false)
-        ctx.setAllowsAntialiasing(false)
-        ctx.setAllowsFontSmoothing(false)
-        NSGraphicsContext.current?.shouldAntialias = false
+        // Vector fonts (Settings ▸ Font) want the opposite: hard-edged
+        // rasterization makes them jagged, so antialias those.
+        let aa = !cellFontIsBitmap
+        ctx.setShouldAntialias(aa)
+        ctx.setShouldSmoothFonts(aa)
+        ctx.setAllowsAntialiasing(aa)
+        ctx.setAllowsFontSmoothing(aa)
+        NSGraphicsContext.current?.shouldAntialias = aa
         let c = cols(), r = rows()
         ensureBuf(c * r)
         let n: Int
@@ -274,7 +371,7 @@ final class CellView: NSView {
         ctx.setFillColor(cgcolor(palette[0]))
         ctx.fill(bounds)
 
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
         for i in 0..<n {
             let cp = buf[i * 3]
             let packed = buf[i * 3 + 1]
@@ -571,6 +668,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         chromeDesktop = tk_desktop_new()
         if chromeDesktop != 0 {
             tk_desktop_set_host_owns_menu(chromeDesktop, 1)
+            // The chrome Desktop loaded the user config — apply the saved
+            // cell font now so the first window opens with the right grid
+            // metrics instead of reflowing one frame in.
+            applyCellFont(fetchFontName(chromeDesktop))
         }
 
         let args = CommandLine.arguments
@@ -1375,6 +1476,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // settingsWins) — the main surface skips the in-grid overlay and
         // stays interactive while Settings is open.
         tk_desktop_set_settings_detached(h, 1)
+        // Register the system's monospace families so the Settings view
+        // grows its Font section (the terminal frontend never does this).
+        let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
+        let fb = Array(families.utf8)
+        fb.withUnsafeBufferPointer { b in
+            tk_desktop_set_font_options(h, Int64(Int(bitPattern: b.baseAddress)),
+                                        Int64(fb.count))
+        }
         let view = CellView()
         view.handle = h
         let initial = frame ?? NSRect(x: 0, y: 0, width: 1000, height: 640)

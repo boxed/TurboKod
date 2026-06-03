@@ -47,7 +47,7 @@ from .events import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
     OnSaveAction,
-    TurbokodConfig, load_config, record_recent_file,
+    TurbokodConfig, default_font_label, load_config, record_recent_file,
     record_recent_project, save_config,
 )
 from .diff import unified_diff
@@ -180,7 +180,7 @@ from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .window import (
     DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
-    compute_display_titles,
+    compute_display_titles, hit_title_command,
 )
 
 
@@ -654,6 +654,13 @@ struct Desktop(Movable):
     # the palette (cheap version check per frame).
     var active_theme: Theme
     var theme_version: Int
+    # Monospace font families the host can render cells with (native macOS
+    # frontend; the terminal frontend leaves this empty and the Font section
+    # never appears). ``font_version`` bumps whenever ``config.font`` changes
+    # so the Swift host knows to refetch the name and rebuild its cell font —
+    # same cheap version-poll pattern as ``theme_version``.
+    var host_font_names: List[String]
+    var font_version: Int
     var project: Optional[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
@@ -1031,6 +1038,8 @@ struct Desktop(Movable):
         self.bg_attr = Attr(EDITOR_FG, EDITOR_BG)
         self.active_theme = theme_by_name(String("Turbo C++ 3.0"))
         self.theme_version = 0
+        self.host_font_names = List[String]()
+        self.font_version = 0
         self.project = Optional[String]()
         self._project_menu_idx = -1
         self._window_menu_idx = -1
@@ -1717,6 +1726,23 @@ struct Desktop(Movable):
             return self.debug_pane.dock.chrome_hits.on_any(pos)
         return self.test_pane.dock.chrome_hits.on_any(pos)
 
+    def _panel_dock_command_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
+        """True when ``pos`` lands on one of the panel's title-command
+        buttons (Stop / Restart / Clear, …). The splitter check excludes
+        these the same way it excludes the min/max chrome — the command
+        strip lives on the same top-border row a splitter drag starts
+        from, and the buttons must win over the grab."""
+        var hit: String
+        if kind == PANEL_KIND_TERMINAL:
+            hit = hit_title_command(
+                self.terminal_panes[idx].dock.last_cmd_hits, pos,
+            )
+        elif kind == PANEL_KIND_DEBUG:
+            hit = hit_title_command(self.debug_pane.dock.last_cmd_hits, pos)
+        else:
+            hit = hit_title_command(self.test_pane.dock.last_cmd_hits, pos)
+        return len(hit.as_bytes()) > 0
+
     def _panel_dock_set_resizing(mut self, kind: Int, idx: Int, v: Bool):
         if kind == PANEL_KIND_TERMINAL:
             self.terminal_panes[idx].dock.resizing = v
@@ -1754,6 +1780,8 @@ struct Desktop(Movable):
                 if pos.y == lower.a.y \
                         and pos.x >= lower.a.x and pos.x < lower.b.x \
                         and not self._panel_dock_chrome_hit(
+                            slots[i].kind, slots[i].idx, pos) \
+                        and not self._panel_dock_command_hit(
                             slots[i].kind, slots[i].idx, pos) \
                         and self._panel_dock_normal(
                             slots[prev].kind, slots[prev].idx):
@@ -2354,6 +2382,12 @@ struct Desktop(Movable):
             if self.settings.theme_choice != self.config.theme:
                 var new_theme = self.settings.theme_choice.copy()
                 self.set_theme(new_theme)
+            # Same live-apply for a font change — ``set_font`` updates
+            # ``config.font`` and bumps ``font_version`` for the host.
+            if len(self.settings._font_names) > 0 \
+                    and self.settings.font_choice != self.font_label():
+                var new_font = self.settings.font_choice.copy()
+                self.set_font(new_font)
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
             self.settings.ack_dirty()
@@ -3173,6 +3207,25 @@ struct Desktop(Movable):
         self.config.theme = name
         self.active_theme = theme_by_name(name)
         self.theme_version += 1
+
+    def set_font(mut self, label: String):
+        """Switch the cell font (native macOS frontend). ``label`` is a row
+        from the Settings Font list; the built-in default maps back to the
+        empty string so the config file doesn't bake in a display label.
+        Bumps ``font_version`` so the Swift host refetches the name and
+        rebuilds its cell font + metrics."""
+        if label == default_font_label():
+            self.config.font = String("")
+        else:
+            self.config.font = label
+        self.font_version += 1
+
+    def font_label(self) -> String:
+        """The Settings-facing label for the active ``config.font`` —
+        the built-in default's empty string renders as its label."""
+        if len(self.config.font.as_bytes()) == 0:
+            return default_font_label()
+        return self.config.font
 
     def _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
@@ -4664,6 +4717,15 @@ struct Desktop(Movable):
                 cur_ext = extension_of(
                     self.windows.windows[fidx_settings].editor.file_path,
                 )
+            # Font list for the Settings Font section: built-in default
+            # first, then the host-registered monospace families. Left
+            # empty when the host registered none (terminal frontend),
+            # which hides the section.
+            var font_names = List[String]()
+            if len(self.host_font_names) > 0:
+                font_names.append(default_font_label())
+                for i in range(len(self.host_font_names)):
+                    font_names.append(self.host_font_names[i])
             self.settings.open(
                 self.config.on_save_actions.copy(),
                 self.config.auto_save,
@@ -4672,6 +4734,8 @@ struct Desktop(Movable):
                 self.config.trim_trailing_whitespace,
                 self.config.ensure_final_newline,
                 self.config.theme,
+                self.font_label(),
+                font_names^,
             )
             return Optional[String]()
         if action == EDITOR_NEW:

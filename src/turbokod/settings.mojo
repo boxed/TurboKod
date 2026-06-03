@@ -90,6 +90,7 @@ comptime _FOCUS_LANG_ADD      = UInt8(11)
 comptime _FOCUS_LANG_EDIT     = UInt8(12)
 comptime _FOCUS_LANG_REMOVE   = UInt8(13)
 comptime _FOCUS_THEME_LIST    = UInt8(16)
+comptime _FOCUS_FONT_LIST     = UInt8(17)
 
 
 # --- section indices ------------------------------------------------------
@@ -99,6 +100,7 @@ comptime _SECTION_EDITOR    = 1
 comptime _SECTION_SPELL     = 2
 comptime _SECTION_LANGUAGES = 3
 comptime _SECTION_THEME     = 4
+comptime _SECTION_FONT      = 5
 
 
 # --- layout ---------------------------------------------------------------
@@ -131,16 +133,20 @@ comptime _BTN_LANG_REMOVE  = 8
 comptime _SAVE_DD_W = 16
 
 
-def _section_labels() -> List[String]:
+def _section_labels(include_font: Bool) -> List[String]:
     """Section names rendered in the left rail. Add new section names
     here and a matching ``_paint_section_*`` / ``_handle_*`` branch
-    below; nothing else needs to change."""
+    below; nothing else needs to change. ``Font`` only exists when the
+    host registered font options (the native macOS frontend) — the
+    terminal emulator owns the font on the terminal frontend."""
     var out = List[String]()
     out.append(String("Actions on save"))
     out.append(String("Editor"))
     out.append(String("Spell check"))
     out.append(String("Languages"))
     out.append(String("Theme"))
+    if include_font:
+        out.append(String("Font"))
     return out^
 
 
@@ -254,6 +260,19 @@ struct Settings(Movable):
     """Row in ``_theme_names`` that's highlighted in the Theme pane."""
     var _theme_names: List[String]
     """Snapshot of the available theme names (``theme.theme_names()``)."""
+    var font_choice: String
+    """Working copy of the active font label — the Font section's
+    authoritative value. Index 0 of ``_font_names`` is the built-in
+    bitmap font's label; changing the selection commits here and raises
+    ``dirty``, and the host applies it live via ``Desktop.set_font``."""
+    var selected_font: Int
+    """Row in ``_font_names`` that's highlighted in the Font pane."""
+    var _font_names: List[String]
+    """Host-provided font labels (built-in default first, then the
+    system's monospace families). Empty on the terminal frontend, which
+    hides the Font section entirely."""
+    var _last_scroll_font: Int
+    """Counterpart of ``_last_scroll_action`` for ``selected_font``."""
     var detached: Bool
     """True when the host renders Settings in its own native window (the
     macOS frontend; see ``Desktop.set_settings_detached``). The dialog then
@@ -343,6 +362,10 @@ struct Settings(Movable):
         self.theme_choice = String("Turbo C++ 3.0")
         self.selected_theme = 0
         self._theme_names = theme_names()
+        self.font_choice = String("")
+        self.selected_font = 0
+        self._font_names = List[String]()
+        self._last_scroll_font = -2
         self.detached = False
         self.bounds = Rect(0, 0, 0, 0)
         self._moving = False
@@ -361,6 +384,8 @@ struct Settings(Movable):
         trim_trailing_whitespace: Bool = True,
         ensure_final_newline: Bool = True,
         theme: String = String("Turbo C++ 3.0"),
+        font: String = String(""),
+        var font_names: List[String] = List[String](),
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -377,6 +402,7 @@ struct Settings(Movable):
         self._last_scroll_action = -2
         self._last_scroll_dict = -2
         self._last_scroll_language = -2
+        self._last_scroll_font = -2
         self._save_dropdown = Dropdown(
             _save_behavior_options(), 1 if auto_save else 0,
         )
@@ -405,6 +431,15 @@ struct Settings(Movable):
         for i in range(len(self._theme_names)):
             if self._theme_names[i] == theme:
                 self.selected_theme = i
+                break
+        # Font section: host-provided labels (empty on the terminal
+        # frontend, which hides the section). Select the active font.
+        self._font_names = font_names^
+        self.font_choice = font
+        self.selected_font = 0
+        for i in range(len(self._font_names)):
+            if self._font_names[i] == font:
+                self.selected_font = i
                 break
 
     def _rebuild_languages_view(mut self):
@@ -630,6 +665,11 @@ struct Settings(Movable):
             return True
         return False
 
+    def _labels(self) -> List[String]:
+        """Section labels for this instance — the Font section only
+        exists when the host registered font options."""
+        return _section_labels(len(self._font_names) > 0)
+
     def _sections_rect(self, rect: Rect) -> Rect:
         """Inner area of the left rail (inside the framed border)."""
         return Rect(
@@ -650,7 +690,7 @@ struct Settings(Movable):
         var sub = painter.sub(inner)
         var body_attr = Attr(BLACK, CYAN)
         sub.fill(canvas, inner, String(" "), body_attr)
-        var labels = _section_labels()
+        var labels = self._labels()
         for i in range(len(labels)):
             var y = inner.a.y + i
             if y >= inner.b.y:
@@ -677,7 +717,7 @@ struct Settings(Movable):
         var sub = painter.sub(inner)
         var bg = Attr(BLACK, LIGHT_GRAY)
         # Header.
-        var labels = _section_labels()
+        var labels = self._labels()
         if 0 <= self.section and self.section < len(labels):
             _ = sub.put_text(
                 canvas, Point(inner.a.x, inner.a.y),
@@ -694,6 +734,64 @@ struct Settings(Movable):
             self._paint_languages_section(canvas, sub, inner)
         elif self.section == _SECTION_THEME:
             self._paint_theme_section(canvas, sub, inner)
+        elif self.section == _SECTION_FONT:
+            self._paint_font_section(canvas, sub, inner)
+
+    def _paint_font_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
+        """Scrollable list of the host's monospace font families (the
+        built-in bitmap font first). Selecting a row applies it live —
+        the whole UI re-renders in the new font, which *is* the preview
+        — so there's no separate sample pane like the Theme section's."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var list_top = inner.a.y + 2
+        var list_bottom = inner.b.y - 1
+        if list_bottom <= list_top:
+            return
+        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+        var visible = list_rect.height()
+        # Change-only viewport snap — see _paint_actions_list.
+        if self.selected_font >= 0 \
+                and self.selected_font != self._last_scroll_font:
+            if self.selected_font < self._list_scroll:
+                self._list_scroll = self.selected_font
+            elif self.selected_font >= self._list_scroll + visible:
+                self._list_scroll = self.selected_font - visible + 1
+        self._last_scroll_font = self.selected_font
+        if self._list_scroll < 0:
+            self._list_scroll = 0
+        var max_scroll = len(self._font_names) - visible
+        if max_scroll < 0:
+            max_scroll = 0
+        if self._list_scroll > max_scroll:
+            self._list_scroll = max_scroll
+        var body_attr = Attr(BLACK, CYAN)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
+        for r in range(visible):
+            var idx = self._list_scroll + r
+            if idx >= len(self._font_names):
+                break
+            var y = list_rect.a.y + r
+            var attr = body_attr
+            if idx == self.selected_font:
+                attr = (
+                    Attr(WHITE, BLUE) if self.focus == _FOCUS_FONT_LIST
+                    else Attr(BLACK, GREEN)
+                )
+                painter.fill(
+                    canvas, Rect(list_rect.a.x, y, list_rect.b.x, y + 1),
+                    String(" "), attr,
+                )
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, y),
+                self._font_names[idx], attr,
+            )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, inner.b.y),
+            String("↑↓ to preview live — change is saved automatically"),
+            hint,
+        )
 
     def _paint_theme_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1269,6 +1367,8 @@ struct Settings(Movable):
                 self._step_language(-1)
             elif self.focus == _FOCUS_THEME_LIST:
                 self._step_theme(-1)
+            elif self.focus == _FOCUS_FONT_LIST:
+                self._step_font(-1)
             return True
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
@@ -1281,6 +1381,8 @@ struct Settings(Movable):
                 self._step_language(1)
             elif self.focus == _FOCUS_THEME_LIST:
                 self._step_theme(1)
+            elif self.focus == _FOCUS_FONT_LIST:
+                self._step_font(1)
             elif self.focus == _FOCUS_SAVE_BEHAVIOR:
                 # Closed: open the popup. Forward the keystroke so
                 # the highlight starts on the committed row.
@@ -1339,6 +1441,10 @@ struct Settings(Movable):
             var hit = type_ahead_pick(self._type_ahead, self._theme_names, ch)
             if hit >= 0:
                 self._commit_theme(hit)
+        elif self.focus == _FOCUS_FONT_LIST:
+            var hit = type_ahead_pick(self._type_ahead, self._font_names, ch)
+            if hit >= 0:
+                self._commit_font(hit)
 
     def _sync_dropdown_commit(mut self, prev_idx: Int):
         """If the dropdown's committed index moved, propagate it back
@@ -1415,6 +1521,9 @@ struct Settings(Movable):
         elif self.section == _SECTION_THEME:
             if len(self._theme_names) > 0:
                 ordered.append(_FOCUS_THEME_LIST)
+        elif self.section == _SECTION_FONT:
+            if len(self._font_names) > 0:
+                ordered.append(_FOCUS_FONT_LIST)
         ordered.append(_FOCUS_CLOSE)
         var pos = -1
         for i in range(len(ordered)):
@@ -1429,7 +1538,7 @@ struct Settings(Movable):
         return ordered[(pos + 1) % n]
 
     def _step_section(mut self, delta: Int):
-        var labels = _section_labels()
+        var labels = self._labels()
         if len(labels) == 0:
             return
         var s = self.section + delta
@@ -1496,6 +1605,26 @@ struct Settings(Movable):
         if s >= len(self._theme_names):
             s = len(self._theme_names) - 1
         self._commit_theme(s)
+
+    def _commit_font(mut self, idx: Int):
+        """Select font row ``idx`` and, if it changed the choice, commit it
+        and raise ``dirty`` so the host applies + persists it."""
+        if idx < 0 or idx >= len(self._font_names):
+            return
+        self.selected_font = idx
+        if self._font_names[idx] != self.font_choice:
+            self.font_choice = self._font_names[idx]
+            self.dirty = True
+
+    def _step_font(mut self, delta: Int):
+        if len(self._font_names) == 0:
+            return
+        var s = self.selected_font + delta
+        if s < 0:
+            s = 0
+        if s >= len(self._font_names):
+            s = len(self._font_names) - 1
+        self._commit_font(s)
 
     def _add_language(mut self):
         var argvs = List[String]()
@@ -1772,7 +1901,7 @@ struct Settings(Movable):
         var sec = self._sections_rect(rect)
         if sec.contains(event.pos):
             var idx = event.pos.y - sec.a.y
-            var labels = _section_labels()
+            var labels = self._labels()
             if 0 <= idx and idx < len(labels):
                 if idx != self.section:
                     self._save_dropdown.close()
@@ -1830,6 +1959,16 @@ struct Settings(Movable):
                 var idx = event.pos.y - list_rect.a.y
                 self._commit_theme(idx)
                 self.focus = _FOCUS_THEME_LIST
+                return True
+        elif self.section == _SECTION_FONT:
+            var inner = self._right_rect(rect)
+            var list_rect = Rect(
+                inner.a.x, inner.a.y + 2, inner.b.x, inner.b.y - 1,
+            )
+            if list_rect.contains(event.pos):
+                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+                self._commit_font(idx)
+                self.focus = _FOCUS_FONT_LIST
                 return True
         return True
 
