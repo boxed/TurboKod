@@ -64,7 +64,7 @@ from .dropdown import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
+    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
@@ -99,6 +99,7 @@ comptime _FOCUS_FONT_LARGER   = UInt8(19)
 comptime _FOCUS_FONT_IDEAL    = UInt8(20)
 comptime _FOCUS_WRAP_MODE     = UInt8(21)
 comptime _FOCUS_COMPRESS_KW   = UInt8(22)
+comptime _FOCUS_COMMA_WRAP    = UInt8(23)
 
 
 # --- section indices ------------------------------------------------------
@@ -253,6 +254,15 @@ struct Settings(Movable):
     var _wrap_dd_anchor: Rect
     """Last-painted bounds of the Wrap dropdown strip (mouse hit-test
     cache, mirrors ``_save_dd_anchor``)."""
+    var smart_wrap_comma_text: String
+    """Working copy of ``TurbokodConfig.smart_wrap_comma_threshold`` as an
+    editable digit string — Editor ▸ "Smart wrap: break at commas". Empty
+    means "no comma trigger, only window width" (the ``-1`` sentinel). The
+    host reads the parsed value via ``comma_threshold_value`` on the next
+    config sync."""
+    var _comma_input_anchor: Rect
+    """Last-painted bounds of the comma-threshold input box (mouse hit-test
+    cache, mirrors ``_wrap_dd_anchor``)."""
     var _trim_cb: Checkbox
     """Editor ▸ "Trim trailing whitespace" toggle. ``on`` tracks
     ``trim_trailing_whitespace``; position is set each paint so the
@@ -412,6 +422,8 @@ struct Settings(Movable):
         self._save_dd_anchor = Rect(0, 0, 0, 0)
         self._wrap_dropdown = Dropdown(_wrap_mode_options(), 0)
         self._wrap_dd_anchor = Rect(0, 0, 0, 0)
+        self.smart_wrap_comma_text = String("")
+        self._comma_input_anchor = Rect(0, 0, 0, 0)
         self._trim_cb = Checkbox(
             String("Trim trailing whitespace"), 0, 0, False,
         )
@@ -464,6 +476,7 @@ struct Settings(Movable):
         font_effective_size: Int = 0,
         font_ideal_size: Int = 0,
         wrap_mode: Int = WRAP_NONE,
+        comma_threshold: Int = -1,
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -488,6 +501,12 @@ struct Settings(Movable):
             _save_behavior_options(), 1 if auto_save else 0,
         )
         self._wrap_dropdown = Dropdown(_wrap_mode_options(), wrap_mode)
+        # Negative sentinel renders as an empty field; any value >= 0 shows
+        # its digits.
+        if comma_threshold < 0:
+            self.smart_wrap_comma_text = String("")
+        else:
+            self.smart_wrap_comma_text = String(comma_threshold)
         self.dict_specs = built_in_downloadable_dictionaries()
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
         self.pending_dict_install_lang = String("")
@@ -1257,6 +1276,40 @@ struct Settings(Movable):
             String("Smart wrap breaks long calls one item per line (code files)."),
             hint,
         )
+        # Smart-wrap comma trigger: a small inline numeric field. Empty means
+        # "only window width breaks lines"; a number N means "also break a
+        # call with more than N commas even when it fits". Sits on its own row
+        # under the wrap hint; the trailing copy explains the empty case.
+        var comma_y = wrap_y + 3
+        var comma_label = String("Also break over:")
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, comma_y), comma_label, bg,
+        )
+        var box_x = inner.a.x + display_columns(comma_label) + 1
+        var box_w = 5
+        var box_attr = (
+            Attr(WHITE, BLUE) if self.focus == _FOCUS_COMMA_WRAP
+            else Attr(BLACK, CYAN)
+        )
+        var box_rect = Rect(box_x, comma_y, box_x + box_w, comma_y + 1)
+        self._comma_input_anchor = box_rect
+        painter.fill(canvas, box_rect, String(" "), box_attr)
+        # Field text is left-aligned with one column of padding. An empty
+        # field shows a faint "—" placeholder so the box doesn't read as a
+        # rendering glitch.
+        var shown = self.smart_wrap_comma_text
+        if len(shown.as_bytes()) == 0 and self.focus != _FOCUS_COMMA_WRAP:
+            _ = painter.put_text(
+                canvas, Point(box_x + 1, comma_y), String("—"), box_attr,
+            )
+        else:
+            _ = painter.put_text(
+                canvas, Point(box_x + 1, comma_y), shown, box_attr,
+            )
+        _ = painter.put_text(
+            canvas, Point(box_x + box_w + 1, comma_y),
+            String("commas (blank = window width only)"), hint,
+        )
         # On-save transform checkboxes. Both keep their glyph in lock-step
         # with the working-copy bools (the bools can be mutated directly
         # in tests, same contract as the dropdown's ``want_idx`` sync).
@@ -1642,6 +1695,12 @@ struct Settings(Movable):
             if self.focus == _FOCUS_COMPRESS_KW:
                 self._toggle_compress_kwargs()
                 return True
+        # Comma-threshold field owns digits + Backspace while focused, ahead
+        # of the type-to-jump fallthrough so the digits edit the value
+        # instead of leaking in as a list search prefix.
+        if self.focus == _FOCUS_COMMA_WRAP:
+            if self._comma_input_key(k):
+                return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
         # type "py" to land on the python row regardless of which
@@ -1728,6 +1787,43 @@ struct Settings(Movable):
         self._compress_cb.on = self.compress_kwargs
         self.dirty = True
 
+    def comma_threshold_value(self) -> Int:
+        """Parse ``smart_wrap_comma_text`` into the persisted int. Empty
+        input → ``-1`` (no comma trigger). The text only ever holds digits
+        (the key handler rejects everything else), so this never has to
+        cope with sign or stray characters."""
+        var bytes = self.smart_wrap_comma_text.as_bytes()
+        if len(bytes) == 0:
+            return -1
+        var v = 0
+        for i in range(len(bytes)):
+            var d = Int(bytes[i]) - 0x30
+            if d < 0 or d > 9:
+                return -1
+            v = v * 10 + d
+        return v
+
+    def _comma_input_key(mut self, k: UInt32) -> Bool:
+        """Edit the comma-threshold field. Digits append (capped at 3 so the
+        value stays sane and fits the box); Backspace removes the last digit.
+        Returns True when the keystroke was consumed."""
+        if k == KEY_BACKSPACE:
+            var bytes = self.smart_wrap_comma_text.as_bytes()
+            if len(bytes) > 0:
+                var keep = String("")
+                for i in range(len(bytes) - 1):
+                    keep += chr(Int(bytes[i]))
+                self.smart_wrap_comma_text = keep
+                self.dirty = True
+            return True
+        if k >= UInt32(0x30) and k <= UInt32(0x39):
+            if len(self.smart_wrap_comma_text.as_bytes()) >= 3:
+                return True
+            self.smart_wrap_comma_text += chr(Int(k))
+            self.dirty = True
+            return True
+        return False
+
     def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
         # otherwise Tab from the rail would land on Add/Edit even
@@ -1746,6 +1842,7 @@ struct Settings(Movable):
         elif self.section == _SECTION_EDITOR:
             ordered.append(_FOCUS_SAVE_BEHAVIOR)
             ordered.append(_FOCUS_WRAP_MODE)
+            ordered.append(_FOCUS_COMMA_WRAP)
             ordered.append(_FOCUS_TRIM_WS)
             ordered.append(_FOCUS_FINAL_NL)
             ordered.append(_FOCUS_COMPRESS_KW)
@@ -2179,6 +2276,12 @@ struct Settings(Movable):
                 if compress_status == BUTTON_FIRED:
                     self.focus = _FOCUS_COMPRESS_KW
                     self._toggle_compress_kwargs()
+                return True
+            # Click the comma-threshold box to focus it; editing is keyboard.
+            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                    and not event.motion \
+                    and self._comma_input_anchor.contains(event.pos):
+                self.focus = _FOCUS_COMMA_WRAP
                 return True
         if self._dispatch_buttons(event):
             return True

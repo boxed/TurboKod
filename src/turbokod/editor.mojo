@@ -914,6 +914,12 @@ struct Editor(Copyable, Movable):
     # ``Desktop._apply_view_config``.
     var line_numbers: Bool
     var wrap_mode: Int
+    # Smart-wrap (``WRAP_SMART``) extra break trigger: a bracketed call with
+    # *more than* this many top-level commas is broken one-item-per-line even
+    # when it fits the window width. ``-1`` disables it (window width is the
+    # only trigger). Set from Settings ▸ Editor via ``_apply_view_config``;
+    # ignored by ``WRAP_NONE`` / ``WRAP_SOFT``.
+    var smart_wrap_comma_threshold: Int
     # ``compress_kwargs`` (Settings ▸ Editor) renders redundant ``name=name``
     # call arguments with the label concealed on every line that doesn't hold
     # a caret — a paint-time effect only; the buffer is never modified. The
@@ -1187,6 +1193,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
+        self.smart_wrap_comma_threshold = -1
         self.compress_kwargs = False
         self.read_only = False
         self.blame_lines = List[BlameLine]()
@@ -1287,6 +1294,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
+        self.smart_wrap_comma_threshold = -1
         self.compress_kwargs = False
         self.read_only = False
         self.blame_lines = List[BlameLine]()
@@ -1415,6 +1423,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
         self.wrap_mode = copy.wrap_mode
+        self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self.compress_kwargs = copy.compress_kwargs
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
@@ -4539,6 +4548,7 @@ struct Editor(Copyable, Movable):
                     extension_of(self.file_path)
                 ),
                 start_line=self.scroll_y, max_rows=max_rows,
+                comma_threshold=self.smart_wrap_comma_threshold,
             )
         return wrap_lines(
             self.buffer.lines, w,
@@ -6517,7 +6527,13 @@ struct Editor(Copyable, Movable):
             self._collapse_extras_with_undo()
             self.paste_from_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
-        elif UInt32(0x20) <= k and k < UInt32(0x7F):
+        elif (UInt32(0x20) <= k and k < UInt32(0x7F)) \
+                or (UInt32(0xA0) <= k and k < UInt32(0xE000)):
+            # Printable text: ASCII (0x20–0x7E) plus non-ASCII codepoints
+            # (0xA0 up to the Private Use Area where our KEY_* specials
+            # live). This is what lets å/ä/ö and other Latin-1+ glyphs be
+            # typed; the C0/C1 control ranges (< 0x20, 0x7F, 0x80–0x9F) and
+            # the 0xE000+ special-key block stay excluded.
             # Modified letters are commands, not text — defer to whatever
             # the caller wants to do with them (e.g., a hotkey table).
             # MOD_SHIFT is fine: capitals already arrive with a different
@@ -7703,7 +7719,10 @@ struct Editor(Copyable, Movable):
             single.append(self.buffer.line(i))
             var v: List[VisualLine]
             if use_smart:
-                v = smart_wrap_lines(single, content_w, tab, line_comment=lc)
+                v = smart_wrap_lines(
+                    single, content_w, tab, line_comment=lc,
+                    comma_threshold=self.smart_wrap_comma_threshold,
+                )
             else:
                 v = wrap_lines(
                     single, content_w, indent_size=tab, word_aware=True,

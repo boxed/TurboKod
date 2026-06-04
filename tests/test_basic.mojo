@@ -12121,6 +12121,41 @@ def test_smart_wrap_lines_short_line_not_broken() raises:
     assert_equal(layout[0].indent_cells, 0)
 
 
+def test_smart_wrap_lines_comma_threshold_breaks_fitting_line() raises:
+    """With a comma threshold set, a line that fits the width is still
+    broken one-item-per-line when it has more than ``comma_threshold``
+    top-level commas. ``-1`` (default) leaves a fitting line whole."""
+    var line = String("f(a, b, c, d)")  # 3 top-level commas
+    var lines = List[String]()
+    lines.append(line)
+    # Default (-1): fits at width 40, stays one segment.
+    var off = smart_wrap_lines(lines, 40, 4)
+    assert_equal(len(off), 1)
+    # Threshold 2: 3 commas > 2 -> break even though it fits. head + 4 items.
+    var broken = smart_wrap_lines(lines, 40, 4, comma_threshold=2)
+    assert_equal(len(broken), 5)
+    _assert_layout_contiguous(line, broken)
+    # Threshold 3: 3 commas is NOT > 3 -> stays one segment.
+    var at = smart_wrap_lines(lines, 40, 4, comma_threshold=3)
+    assert_equal(len(at), 1)
+    # Threshold 0: any call with a comma breaks.
+    var zero = smart_wrap_lines(lines, 40, 4, comma_threshold=0)
+    assert_equal(len(zero), 5)
+
+
+def test_smart_wrap_lines_comma_threshold_no_structure_stays_whole() raises:
+    """The comma trigger only fires on real bracketed structure: a fitting
+    line with no breakable call is left whole even with a low threshold,
+    rather than being force-fed to the soft-wrap fallback."""
+    var line = String("a = b + c")  # no bracket group, no commas
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(lines, 40, 4, comma_threshold=0)
+    assert_equal(len(layout), 1)
+    assert_equal(layout[0].byte_start, 0)
+    assert_equal(layout[0].byte_end, len(line.as_bytes()))
+
+
 def test_smart_wrap_lines_falls_back_to_soft_wrap() raises:
     """A long line with no breakable bracket structure degrades to the
     exact word-aware soft-wrap layout (``wrap_lines``)."""
@@ -17588,6 +17623,8 @@ def _run_chunk_04() raises:
     test_text_view_wrap_lines_keeps_string_whole()
     test_smart_wrap_lines_breaks_call_one_item_per_line()
     test_smart_wrap_lines_short_line_not_broken()
+    test_smart_wrap_lines_comma_threshold_breaks_fitting_line()
+    test_smart_wrap_lines_comma_threshold_no_structure_stays_whole()
     test_smart_wrap_lines_falls_back_to_soft_wrap()
     test_smart_wrap_lines_ignores_commas_in_strings_and_nesting()
     test_smart_wrap_lines_comment_stops_structural_scan()

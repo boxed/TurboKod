@@ -173,6 +173,12 @@ struct TurbokodConfig(Copyable, Movable):
     # legacy configs that still carry ``soft_wrap: true`` migrate to
     # ``WRAP_SOFT`` on load.
     var wrap_mode: Int
+    # Settings ▸ Editor ▸ "Smart wrap: break at commas". Extra smart-wrap
+    # break trigger: a bracketed call with *more than* this many top-level
+    # commas is broken one-item-per-line even when it fits the window. ``-1``
+    # (the default, shown as an empty input) disables it — only window width
+    # triggers a break. Only consulted by ``WRAP_SMART``.
+    var smart_wrap_comma_threshold: Int
     var git_changes: Bool
     var tab_bar: Bool
     # Right-side minimap gutter: a fixed-height projection of the whole
@@ -242,6 +248,7 @@ struct TurbokodConfig(Copyable, Movable):
     def __init__(out self):
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
+        self.smart_wrap_comma_threshold = -1
         self.git_changes = False
         self.tab_bar = False
         self.minimap = True
@@ -262,6 +269,7 @@ struct TurbokodConfig(Copyable, Movable):
         # copy constructor refuses — spell it out using ``List.copy``.
         self.line_numbers = copy.line_numbers
         self.wrap_mode = copy.wrap_mode
+        self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
         self.minimap = copy.minimap
@@ -343,6 +351,10 @@ def load_config() -> TurbokodConfig:
         ) else WRAP_NONE
         cfg.wrap_mode = json_get_int(
             root, String("wrap_mode"), legacy_soft,
+        )
+        cfg.smart_wrap_comma_threshold = json_get_int(
+            root, String("smart_wrap_comma_threshold"),
+            cfg.smart_wrap_comma_threshold,
         )
         cfg.git_changes = json_get_bool(
             root, String("git_changes"), cfg.git_changes,
@@ -439,6 +451,10 @@ def save_config(config: TurbokodConfig) -> Bool:
     var root = json_object()
     root.put(String("line_numbers"), json_bool(config.line_numbers))
     root.put(String("wrap_mode"), json_int(config.wrap_mode))
+    root.put(
+        String("smart_wrap_comma_threshold"),
+        json_int(config.smart_wrap_comma_threshold),
+    )
     root.put(String("git_changes"), json_bool(config.git_changes))
     root.put(String("tab_bar"), json_bool(config.tab_bar))
     root.put(String("minimap"), json_bool(config.minimap))

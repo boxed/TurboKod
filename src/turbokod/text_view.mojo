@@ -276,6 +276,7 @@ def smart_wrap_lines(
     line_comment: String = String(""),
     start_line: Int = 0,
     max_rows: Int = -1,
+    comma_threshold: Int = -1,
 ) -> List[VisualLine]:
     """Smart-wrap a slice of ``lines``: a logical line that overflows
     ``content_w`` *and* has bracketed, comma-separated call structure is
@@ -297,6 +298,13 @@ def smart_wrap_lines(
     ``line_comment`` (e.g. ``"#"`` / ``"//"`` from
     ``line_comment_for_extension``) stops the structural scan at a trailing
     comment so brackets/commas inside it aren't mistaken for structure.
+
+    ``comma_threshold`` adds a second break trigger independent of width: a
+    line with *more than* ``comma_threshold`` top-level (depth-1) commas in
+    its outermost bracket group is broken one-item-per-line even when it
+    fits ``content_w``. ``-1`` (the default) disables this — only width
+    triggers a break, the original behavior. ``0`` breaks any bracketed call
+    that has a comma; ``2`` breaks calls with 3+ arguments; and so on.
 
     Byte coverage invariant (required by the editor's caret/selection
     code): a line's segments are byte-contiguous and cover it whole. We
@@ -330,7 +338,11 @@ def smart_wrap_lines(
         while kk < line_n:
             cols += 1
             kk += utf8_codepoint_size(Int(bytes[kk]))
-        if cols <= content_w:
+        var overflow = cols > content_w
+        # Fast path: line fits and the comma trigger is off — emit one row
+        # without scanning. When the trigger is on (>= 0) we must scan even a
+        # fitting line to count its commas.
+        if not overflow and comma_threshold < 0:
             out.append(VisualLine(br, 0, line_n, 0, cols, 0))
             br += 1
             continue
@@ -338,6 +350,7 @@ def smart_wrap_lines(
         var head_open = -1
         var close_idx = -1
         var item_starts = List[Int]()
+        var comma_count = 0
         var depth = 0
         var in_str = False
         var quote = 0
@@ -377,6 +390,7 @@ def smart_wrap_lines(
                 if depth == 0 and head_open >= 0 and close_idx < 0:
                     close_idx = i
             elif b == 0x2C and depth == 1 and head_open >= 0:  # ,
+                comma_count += 1
                 # Item boundary = first non-whitespace byte after the comma.
                 var j = i + 1
                 while j < line_n and (
@@ -402,12 +416,21 @@ def smart_wrap_lines(
         var breakable = (
             head_open >= 0 and len(item_starts) >= 1 and not in_str
         )
-        if not breakable:
-            # No usable structure — degrade to word-aware soft wrap.
-            _ = _wrap_one_line_into(
-                out, br, line, 0, line_n, content_w,
-                0, item_indent, 0, True, max_rows,
-            )
+        # A fitting line only breaks when the comma trigger fires; an
+        # overflowing line always wants to break (the original behavior).
+        var comma_trigger = (
+            comma_threshold >= 0 and comma_count > comma_threshold
+        )
+        if not breakable or not (overflow or comma_trigger):
+            if overflow:
+                # No usable structure — degrade to word-aware soft wrap.
+                _ = _wrap_one_line_into(
+                    out, br, line, 0, line_n, content_w,
+                    0, item_indent, 0, True, max_rows,
+                )
+            else:
+                # Fits and isn't being force-broken — emit one row as-is.
+                out.append(VisualLine(br, 0, line_n, 0, cols, 0))
             br += 1
             continue
         # Cut list: head ends after the opener; each item begins at its

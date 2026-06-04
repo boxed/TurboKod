@@ -2189,6 +2189,8 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
+            self.windows.windows[i].editor.smart_wrap_comma_threshold = \
+                self.config.smart_wrap_comma_threshold
             self.windows.windows[i].editor.compress_kwargs = \
                 self.config.compress_kwargs
             # Push the global on-save transforms in as editorconfig
@@ -2505,6 +2507,17 @@ struct Desktop(Movable):
             # buffer-row ↔ screen-row relationship changes with the mode.
             if self.settings.wrap_mode != self.config.wrap_mode:
                 self.config.wrap_mode = self.settings.wrap_mode
+                self._apply_view_config()
+                for i in range(len(self.windows.windows)):
+                    if self.windows.windows[i].is_editor:
+                        self.windows.windows[i].editor.reveal_cursor(
+                            self.windows.windows[i].interior(),
+                        )
+            # Smart-wrap comma trigger. Re-layout (and re-reveal cursors,
+            # since the row mapping shifts) on change, same as wrap mode.
+            var new_comma = self.settings.comma_threshold_value()
+            if new_comma != self.config.smart_wrap_comma_threshold:
+                self.config.smart_wrap_comma_threshold = new_comma
                 self._apply_view_config()
                 for i in range(len(self.windows.windows)):
                     if self.windows.windows[i].is_editor:
@@ -4910,6 +4923,7 @@ struct Desktop(Movable):
                 self.host_font_effective_size,
                 self.host_font_ideal_size,
                 self.config.wrap_mode,
+                self.config.smart_wrap_comma_threshold,
             )
             return Optional[String]()
         if action == EDITOR_NEW:
