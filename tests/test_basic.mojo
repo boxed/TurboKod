@@ -917,6 +917,11 @@ def test_editor_typing_non_ascii() raises:
     _ = ed.handle_key(_key(UInt32(0xE4)), _VIEW)   # ä
     assert_equal(ed.buffer.line(0), String("öxåä"))
     assert_equal(ed.selections[0].col, 7)
+    # Emoji (U+1F600) is above the BMP Private Use Area and 4 UTF-8 bytes;
+    # it must insert whole and advance the cursor by 4 (emoji-palette path).
+    _ = ed.handle_key(_key(UInt32(0x1F600)), _VIEW)
+    assert_equal(ed.buffer.line(0), String("öxåä😀"))
+    assert_equal(ed.selections[0].col, 11)
 
 
 def test_editor_word_movement() raises:

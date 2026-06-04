@@ -6528,12 +6528,15 @@ struct Editor(Copyable, Movable):
             self.paste_from_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif (UInt32(0x20) <= k and k < UInt32(0x7F)) \
-                or (UInt32(0xA0) <= k and k < UInt32(0xE000)):
-            # Printable text: ASCII (0x20–0x7E) plus non-ASCII codepoints
-            # (0xA0 up to the Private Use Area where our KEY_* specials
-            # live). This is what lets å/ä/ö and other Latin-1+ glyphs be
-            # typed; the C0/C1 control ranges (< 0x20, 0x7F, 0x80–0x9F) and
-            # the 0xE000+ special-key block stay excluded.
+                or (UInt32(0xA0) <= k and k < UInt32(0xE000)) \
+                or k > UInt32(0xF8FF):
+            # Printable text: ASCII (0x20–0x7E), non-ASCII BMP codepoints
+            # (0xA0 up to the Private Use Area), and everything above the BMP
+            # PUA (> 0xF8FF) — that last clause is what lets emoji (U+1F600…)
+            # through. Excluded: the C0/C1 control ranges (< 0x20, 0x7F,
+            # 0x80–0x9F) and the 0xE000–0xF8FF PUA block where our KEY_*
+            # special-key sentinels live. PUA glyphs (Nerd Font icons) can't
+            # be typed directly because of that collision, but still paste.
             # Modified letters are commands, not text — defer to whatever
             # the caller wants to do with them (e.g., a hotkey table).
             # MOD_SHIFT is fine: capitals already arrive with a different

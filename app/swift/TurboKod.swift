@@ -582,6 +582,22 @@ final class CellView: NSView {
         needsDisplay = true
     }
 
+    /// Forward inserted text — emoji palette / Character Viewer (which deliver
+    /// via NSTextInputClient.insertText, never keyDown) — to the Mojo core one
+    /// Unicode scalar at a time. The core's key path takes a single codepoint
+    /// per call and the editor buffer is byte-addressed, so feeding each scalar
+    /// in order reconstructs multi-scalar sequences (ZWJ emoji, flags) byte for
+    /// byte. mods=0: palette text carries no modifier semantics.
+    func insertScalars(_ s: String) {
+        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if s.isEmpty { return }
+        for scalar in s.unicodeScalars {
+            handleAction(keySurface(scalar.value, 0, cols(), rows()))
+        }
+        invalidateFrame()
+        needsDisplay = true
+    }
+
     override func flagsChanged(with event: NSEvent) {
         // See keyDown — scripted capture runs ignore live input.
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
@@ -698,6 +714,36 @@ final class CellView: NSView {
             try? data.write(to: URL(fileURLWithPath: path))
         }
     }
+}
+
+// Text-input client conformance exists solely so the macOS emoji palette /
+// Character Viewer have a valid client to deliver into — without it the palette
+// targets nothing and a double-clicked emoji is silently dropped. Regular keys
+// keep flowing through keyDown directly (we never call interpretKeyEvents), so
+// there's no double-insertion. We don't implement marked-text/IME composition;
+// the stubs report "no marked text" so AppKit treats every insertText as final.
+extension CellView: NSTextInputClient {
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        if let attr = string as? NSAttributedString { insertScalars(attr.string) }
+        else if let s = string as? String { insertScalars(s) }
+    }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {}
+    func unmarkText() {}
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func hasMarkedText() -> Bool { false }
+    func attributedSubstring(forProposedRange range: NSRange,
+                             actualRange: NSRangePointer?) -> NSAttributedString? { nil }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    func firstRect(forCharacterRange range: NSRange,
+                   actualRange: NSRangePointer?) -> NSRect {
+        // Best-effort caret anchor for any IME candidate window; the emoji
+        // palette positions itself and ignores this.
+        guard let win = window else { return .zero }
+        return win.convertToScreen(convert(NSRect(x: 0, y: 0, width: 1, height: CELL_H),
+                                           to: nil))
+    }
+    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
 }
 
 // NSWindow that honors a programmatically-restored frame verbatim, even on a
