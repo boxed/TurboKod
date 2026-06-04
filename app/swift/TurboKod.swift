@@ -505,9 +505,16 @@ final class CellView: NSView {
             }
             if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
                 let s = String(scalar) as NSString
-                var a = attrs
-                a[.foregroundColor] = nscolor(fg)
-                s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                if scalar.properties.isEmojiPresentation {
+                    // Color emoji fall back to Apple Color Emoji, which at the
+                    // cell-font point size overflows the fixed grid cell — draw
+                    // it shrunk to fit the box instead.
+                    drawEmoji(s, cellX: x, cellY: y)
+                } else {
+                    var a = attrs
+                    a[.foregroundColor] = nscolor(fg)
+                    s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                }
             }
             if style & STYLE_UNDERLINE != 0 {
                 let uw = buf[i * 3 + 2]
@@ -516,6 +523,25 @@ final class CellView: NSView {
                 ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))
             }
         }
+    }
+
+    /// Draw a color-emoji glyph shrunk to fit one fixed grid cell, centered.
+    /// Apple Color Emoji at the cell-font point size massively overflows the
+    /// 8×16 cell; emoji glyph metrics scale linearly with point size, so we
+    /// measure at a reference size and pick the size whose rendered glyph fits
+    /// within (CELL_W, CELL_H). Emoji are roughly square, so on the tall-narrow
+    /// cell the width is the binding constraint — the result is small, but a
+    /// fixed character grid leaves no other option.
+    private func drawEmoji(_ s: NSString, cellX x: CGFloat, cellY y: CGFloat) {
+        let ref: CGFloat = CELL_H
+        let probe = s.size(withAttributes: [.font: NSFont.systemFont(ofSize: ref)])
+        guard probe.width > 0, probe.height > 0 else { return }
+        let scale = min(CELL_W / probe.width, CELL_H / probe.height)
+        let font = NSFont.systemFont(ofSize: max(1, ref * scale))
+        let glyph = s.size(withAttributes: [.font: font])
+        s.draw(at: NSPoint(x: x + (CELL_W - glyph.width) / 2,
+                           y: y + (CELL_H - glyph.height) / 2),
+               withAttributes: [.font: font])
     }
 
     // MARK: input
