@@ -3,8 +3,10 @@
 In Python/Mojo it's idiomatic to forward locals by name — ``foo(a=a, b=b,
 c=c, d=4)`` — and the ``name=name`` repetition is pure visual noise. When the
 editor option is on, lines that don't hold the caret render the redundant
-labels concealed: ``foo(=a, =b, =c, d=4)``. Swift is identical with ``:`` in
-place of ``=`` (``foo(a: a)`` → ``foo(: a)``).
+labels concealed and the separator repainted as ``≡`` (identical-to, U+2261)
+so it reads as "value is its own name" rather than a half-finished assignment:
+``foo(≡a, ≡b, ≡c, d=4)``. Swift collapses ``foo(a: a)`` → ``foo(≡ a)`` the same
+way.
 
 This module is pure data (no TTY / AppKit) so it's unit-testable directly:
 
@@ -174,29 +176,51 @@ def _byte_slice(s: String, lo: Int, hi: Int) -> String:
 
 
 def build_concealed_segment(
-    seg: String, hide_ranges: List[Tuple[Int, Int]],
+    seg: String, hide_ranges: List[Tuple[Int, Int]], sep_glyph: String,
 ) -> Tuple[String, List[Int], Int]:
     """Render ``seg`` with ``hide_ranges`` (byte ranges, in *segment*
     coordinates) removed.
 
+    Each hide range covers ``[label_start, sep_pos)`` — the redundant label up
+    to (but not including) the separator. The single byte at ``sep_pos`` (the
+    first visible byte after a hidden range) is repainted as ``sep_glyph``
+    instead of the literal ``=`` / ``:`` — pass ``"≡"`` to get the
+    identical-to marker, or ``""`` to keep the original separator byte.
+
     Returns ``(display, byte_to_cell, cell_count)``. ``byte_to_cell`` has one
     entry per byte of ``seg`` (matching ``utf8_byte_to_cell``'s contract) so
     overlay passes can index it by raw buffer byte: hidden bytes collapse to
-    the current display cell (zero width), visible codepoints advance it.
-    ``cell_count`` is the cell just past the last glyph — the value overlays
-    use when a span reaches end-of-segment.
+    the current display cell (zero width), visible codepoints advance it. The
+    separator byte keeps its single ``byte_to_cell`` entry and advances one
+    cell even though ``sep_glyph`` may be multi-byte (``≡`` is 3 UTF-8 bytes,
+    one cell). ``cell_count`` is the cell just past the last glyph — the value
+    overlays use when a span reaches end-of-segment.
     """
     var bytes = seg.as_bytes()
     var n = len(bytes)
     var byte_to_cell = List[Int]()
     var disp = List[UInt8]()
+    var sep_bytes = sep_glyph.as_bytes()
     var cell = 0
     var i = 0
+    var prev_hidden = False
     while i < n:
         if _in_spans(i, hide_ranges):
             byte_to_cell.append(cell)  # collapsed — no glyph, no advance
             i += 1
+            prev_hidden = True
             continue
+        # The first visible byte after a concealed label is the separator;
+        # repaint it as the distinct marker (one cell, possibly multi-byte).
+        if prev_hidden and len(sep_bytes) > 0:
+            byte_to_cell.append(cell)
+            for sb in range(len(sep_bytes)):
+                disp.append(sep_bytes[sb])
+            cell += 1
+            i += 1
+            prev_hidden = False
+            continue
+        prev_hidden = False
         var b = Int(bytes[i])
         if b == 0x09:  # tab expands to the next TAB_WIDTH boundary
             byte_to_cell.append(cell)

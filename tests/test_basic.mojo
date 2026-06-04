@@ -7197,8 +7197,9 @@ def test_editor_paint_overlays_highlight_attr() raises:
 
 def test_editor_paint_compresses_kwargs_off_caret_line() raises:
     """With ``compress_kwargs`` on, a ``foo(a=a, d=4)`` line that doesn't
-    hold the caret renders ``foo(=a, d=4)`` (label concealed), while the
-    identical line *under* the caret keeps its real text."""
+    hold the caret renders ``foo(≡a, d=4)`` (label concealed, separator
+    repainted as the distinct ``≡`` marker), while the identical line *under*
+    the caret keeps its real text."""
     var path = _temp_path(String("_kwcompress.py"))
     assert_true(write_file(
         path, String("foo(a=a, d=4)\nfoo(a=a, d=4)\n"),
@@ -7216,9 +7217,9 @@ def test_editor_paint_compresses_kwargs_off_caret_line() raises:
     assert_equal(canvas.get(4, 0).glyph, String("a"))
     assert_equal(canvas.get(5, 0).glyph, String("="))
     assert_equal(canvas.get(6, 0).glyph, String("a"))
-    # Row 1 (no caret) is compressed: ``foo(=a, ...`` — the label ``a`` is
-    # gone, so ``=`` shifts left into its column.
-    assert_equal(canvas.get(4, 1).glyph, String("="))
+    # Row 1 (no caret) is compressed: ``foo(≡a, ...`` — the label ``a`` is
+    # gone, so the separator (repainted ``≡``) shifts left into its column.
+    assert_equal(canvas.get(4, 1).glyph, String("≡"))
     assert_equal(canvas.get(5, 1).glyph, String("a"))
     assert_equal(canvas.get(6, 1).glyph, String(","))
     # And with the option off, row 1 renders its real text again.
@@ -17829,19 +17830,25 @@ def test_kwarg_conceal_swift_colon() raises:
     assert_equal(hide[0][1], 5)
 
 def test_kwarg_conceal_build_segment_collapses_and_shifts() raises:
-    # Segment ``a=a`` with the leading ``a`` hidden renders ``=a`` and
-    # collapses byte 0 to cell 0 while bytes 1 ('=') and 2 ('a') shift left.
+    # Segment ``a=a`` with the leading ``a`` hidden renders ``≡a``: the
+    # separator '=' is repainted as the distinct marker, byte 0 collapses to
+    # cell 0 while bytes 1 (now '≡') and 2 ('a') shift left. The '≡' is 3
+    # UTF-8 bytes but still one display cell, so the byte→cell map is
+    # unchanged from the literal-'=' case.
     var seg = String("a=a")
     var hide = List[Tuple[Int, Int]]()
     hide.append((0, 1))
-    var built = build_concealed_segment(seg, hide)
-    assert_equal(built[0], String("=a"))
+    var built = build_concealed_segment(seg, hide, String("≡"))
+    assert_equal(built[0], String("≡a"))
     var cell_map = built[1].copy()
     assert_equal(len(cell_map), 3)  # one entry per raw byte
     assert_equal(cell_map[0], 0)    # hidden 'a' collapses to cell 0
-    assert_equal(cell_map[1], 0)    # '=' now at cell 0
+    assert_equal(cell_map[1], 0)    # separator now at cell 0
     assert_equal(cell_map[2], 1)    # 'a' now at cell 1
     assert_equal(built[2], 2)       # two display cells
+    # Empty sep_glyph keeps the literal separator byte (legacy behavior).
+    var plain = build_concealed_segment(seg, hide, String(""))
+    assert_equal(plain[0], String("=a"))
 
 def test_find_symbol_query_keeps_dot() raises:
     # The dot survives sanitization so the user can type a qualified

@@ -4872,7 +4872,9 @@ struct Editor(Copyable, Movable):
                     if chh > clo:
                         seg_hide.append((clo, chh))
                 if len(seg_hide) > 0:
-                    var built = build_concealed_segment(seg, seg_hide)
+                    var built = build_concealed_segment(
+                        seg, seg_hide, String("≡"),
+                    )
                     display_rows.append(built[0])
                     cell_maps.append(built[1].copy())
                     cell_counts.append(built[2])
