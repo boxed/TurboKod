@@ -59,7 +59,7 @@ from .events import (
 from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
-    codepoint_at, is_word_codepoint, leading_indent_bytes,
+    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
     prev_codepoint_start, word_char_step,
 )
 
@@ -1054,8 +1054,9 @@ def _utf8_cell_of_byte(text: String, byte_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and i < byte_col:
-        i += _utf8_codepoint_size(Int(bytes[i]))
-        cell += 1
+        var info = codepoint_at(text, i)
+        cell += char_width(info[0])
+        i += info[1]
     if byte_col > n:
         cell += byte_col - n
     return cell
@@ -1069,8 +1070,12 @@ def _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and cell < cell_col:
-        i += _utf8_codepoint_size(Int(bytes[i]))
-        cell += 1
+        var info = codepoint_at(text, i)
+        var w = char_width(info[0])
+        if cell + w > cell_col:
+            break
+        cell += w
+        i += info[1]
     return i
 
 

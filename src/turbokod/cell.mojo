@@ -12,6 +12,7 @@ default to 1 and leave width-detection as a TODO — see `cell_width()` below.
 """
 
 from .colors import Attr, default_attr
+from .string_utils import char_width, codepoint_at
 
 
 struct Cell(ImplicitlyCopyable, Movable):
@@ -45,14 +46,16 @@ struct Cell(ImplicitlyCopyable, Movable):
 
 
 def cell_width(glyph: String) -> Int:
-    """Best-effort terminal column width for a single grapheme.
+    """Terminal column width for a single grapheme: ``0`` for empty (the
+    continuation half of a wide glyph), ``2`` for emoji, ``1`` otherwise.
 
-    TODO: handle East-Asian wide characters and zero-width combiners properly.
-    For now: 1 for any non-empty glyph, 0 for empty.
+    Delegates to ``char_width`` on the first codepoint so widths stay
+    consistent with ``Canvas.put_text`` and the editor's cell maps.
+    East-Asian fullwidth and zero-width combiners are still unmodeled.
     """
     if glyph.byte_length() == 0:
         return 0
-    return 1
+    return char_width(codepoint_at(glyph, 0)[0])
 
 
 def blank_cell() -> Cell:

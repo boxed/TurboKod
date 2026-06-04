@@ -50,6 +50,7 @@ constants is the smoothest pattern available, and matches what
 from std.collections.list import List
 
 from .canvas import Canvas
+from .string_utils import char_width, codepoint_at
 from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
@@ -1263,7 +1264,7 @@ def _extract_python_traceback_links(line: String) -> List[_LinkHit]:
                     found_quote = True
                     break
                 if (pb & 0xC0) != 0x80:
-                    path_cell_count += 1
+                    path_cell_count += char_width(codepoint_at(line, p)[0])
                 p += 1
             if not found_quote:
                 # Drop out — no recognizable link starts here.
@@ -1321,9 +1322,10 @@ def _extract_python_traceback_links(line: String) -> List[_LinkHit]:
             cell = match_start_cell + span_cells
             i = p
             continue
-        # Default codepoint advance: one cell per UTF-8 leader byte.
+        # Default advance: one cell per narrow glyph, two for emoji,
+        # counted only on UTF-8 leader bytes.
         if (b & 0xC0) != 0x80:
-            cell += 1
+            cell += char_width(codepoint_at(line, i)[0])
         i += 1
     return out^
 

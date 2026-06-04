@@ -24,6 +24,7 @@ from .canvas import Canvas, TAB_WIDTH
 from .cell import Cell
 from .colors import Attr
 from .geometry import Point, Rect
+from .string_utils import char_width, codepoint_at
 
 
 def _codepoint_size(b: Int) -> Int:
@@ -87,8 +88,9 @@ struct Painter(Copyable, Movable):
                 x += TAB_WIDTH - (x % TAB_WIDTH)
                 i += 1
             else:
+                # Emoji advance two cells, matching ``Canvas.put_text``.
+                x += char_width(codepoint_at(text, i)[0])
                 i += _codepoint_size(b)
-                x += 1
         if i >= n:
             return 0
         if i == 0:

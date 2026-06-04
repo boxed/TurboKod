@@ -2211,8 +2211,12 @@ struct Desktop(Movable):
         # blinks once the user pauses. Both frontends repaint often enough
         # (terminal: ≤50 ms present loop; Swift: 50 ms pollFrame) to catch
         # each toggle, so no per-frontend timer is needed.
+        # Only blink when the focused editor is the live keyboard target —
+        # under an open dialog / popup menu / focused dock, keystrokes go
+        # elsewhere, so the caret stays steady (or unpainted) instead of
+        # blinking where typing won't land.
         var caret_on = True
-        if self.config.cursor_blink:
+        if self.config.cursor_blink and self._editor_keyboard_live():
             var since_input = monotonic_ms() - self._last_input_ms
             if since_input < 0:
                 since_input = 0
@@ -6503,6 +6507,32 @@ struct Desktop(Movable):
             if self.terminal_panes[i].focused:
                 return True
         return False
+
+    def _editor_keyboard_live(self) -> Bool:
+        """True when a keystroke would land in the focused editor —
+        i.e. no modal, popup menu, in-grid menu, or docked pane is
+        currently intercepting keyboard input. Mirrors the early-out
+        chain in ``handle_event``; kept in sync with it. Used to gate
+        the caret blink so the cursor only blinks where typing actually
+        goes (the focused editor), never under an open dialog."""
+        if self.spell_menu.active or self.breakpoint_error.active \
+                or self.breakpoint_menu.active or self.fill_dialog.active \
+                or self.git_gutter_menu.active or self.diagnostic_menu.active \
+                or self.lsp_status_menu.active or self.prompt.active \
+                or self.confirm_dialog.active or self.save_as_dialog.active \
+                or self.quick_open.active or self.symbol_pick.active \
+                or self.reference_pick.active or self.find_symbol.active \
+                or self.doc_pick.active or self.project_find.active \
+                or self.local_changes.active or self.targets_dialog.active \
+                or self.grammars_dialog.active:
+            return False
+        if self.settings.active and not self.settings_detached:
+            return False
+        if (not self.host_owns_menu) and self.menu_bar.is_open():
+            return False
+        if self._any_dock_focused():
+            return False
+        return True
 
     def _open_terminal_pane(mut self):
         """Append a fresh ``TerminalPane`` to the stack and route

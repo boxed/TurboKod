@@ -74,7 +74,7 @@ from .search_options import (
     SearchOptions, build_search_regex, default_search_options,
 )
 from .string_utils import (
-    codepoint_at, is_word_codepoint, leading_indent_bytes,
+    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
     prev_codepoint_start, utf8_codepoint_size, word_char_step,
 )
 from .text_view import (
@@ -430,9 +430,10 @@ def _utf8_step_backward(line: String, col: Int) -> Int:
 
 
 def _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
-    """Cell column for byte offset ``byte_col`` in ``line``. Past-EOL bytes
-    consume one virtual cell each so cursors parked to the right of the last
-    character stay distinguishable in vertical-movement bookkeeping."""
+    """Cell column for byte offset ``byte_col`` in ``line``. Emoji advance
+    two cells (``char_width``); past-EOL bytes consume one virtual cell each
+    so cursors parked to the right of the last character stay distinguishable
+    in vertical-movement bookkeeping."""
     if byte_col <= 0:
         return 0
     var bytes = line.as_bytes()
@@ -440,8 +441,9 @@ def _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and i < byte_col:
-        i += utf8_codepoint_size(Int(bytes[i]))
-        cell += 1
+        var info = codepoint_at(line, i)
+        cell += char_width(info[0])
+        i += info[1]
     if byte_col > n:
         cell += byte_col - n
     return cell
@@ -450,7 +452,9 @@ def _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
 def _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
     clamped to ``len(line)``. Used to translate a remembered cell column from
-    one row to another during vertical movement."""
+    one row to another during vertical movement. When ``cell_col`` lands on
+    the right half of a wide (emoji) glyph there is no codepoint to point at,
+    so we snap to the start of that glyph."""
     if cell_col <= 0:
         return 0
     var bytes = line.as_bytes()
@@ -458,8 +462,13 @@ def _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and cell < cell_col:
-        i += utf8_codepoint_size(Int(bytes[i]))
-        cell += 1
+        var info = codepoint_at(line, i)
+        var w = char_width(info[0])
+        if cell + w > cell_col:
+            # ``cell_col`` falls inside this wide glyph — snap to its start.
+            break
+        cell += w
+        i += info[1]
     return i
 
 

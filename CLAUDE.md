@@ -204,11 +204,19 @@ These are deliberate departures from C++ Turbo Vision. Don't "fix" them by rever
 - Dropdown / popup / dialog width that has to fit a label.
 - `put_text` start positions computed by subtracting label width from a right edge (status bar right-alignment, shortcut alignment in menus).
 - Title-bar offsets, tab widths, anywhere a label is centered or right-aligned.
-- Loops that paint a string cell-by-cell to apply per-character styling (hotkey-first coloring, etc.) — walk codepoints, not bytes; one cell per codepoint. See `MenuBar._paint_label_hotkey` for the canonical pattern.
+- Loops that paint a string cell-by-cell to apply per-character styling (hotkey-first coloring, etc.) — walk codepoints, not bytes, advancing by `char_width(cp)` per glyph (see the emoji section below). See `MenuBar._paint_label_hotkey` for the canonical pattern.
 
 `len(s.as_bytes())` is still correct for byte-level work: parsing, slicing into byte buffers, hashing, JSON encoding, `as_bytes()`-keyed comparisons. The distinction is *display column count vs. byte count*. If your `len(...as_bytes())` result is fed into a column index or a width reservation, it's wrong for any multi-byte glyph (an em dash counts as 3, ``ä`` as 2). The bug usually hides on ASCII-only test inputs and only shows up when a non-ASCII label slides in.
 
-East-Asian width is not modeled — both `put_text` and `display_columns` treat every codepoint as one cell. Wide CJK glyphs will visually over-advance the cursor; if that ever needs fixing, add it once in both places.
+### Emoji are two cells; CJK is still one
+
+`char_width(cp)` in `string_utils.mojo` is the **single source of truth** for how many cells a codepoint occupies: `2` for emoji (the standard `wcwidth` wide-emoji ranges), `1` for everything else. Every loop that converts between a byte/codepoint position and a screen column funnels through it — `Canvas.put_text`, `display_columns`, `utf8_byte_to_cell`/`utf8_codepoint_count`, the soft-wrap segmenter and `_row_cell_offset` (`text_view.mojo`), the editor's `_utf8_cell_of_byte`/`_utf8_byte_of_cell`, the `text_field` single-line equivalents, `kwarg_conceal`'s display map, the debug-pane link offsets, and the Swift renderer (which **ports the same ranges verbatim** in `charWidth` — the two MUST stay in sync). Because the editor already reasons in cells via those converters, making them width-aware keeps cursor movement, selection, soft-wrap, click hit-testing, and horizontal scroll aligned for free.
+
+A wide glyph occupies two cells: `put_text` writes the glyph cell with `width=2` followed by an **empty `width=0` continuation cell**. The terminal `present` skips continuation cells (the terminal advanced its own cursor across the glyph) and advances by `cell.width`; the Swift host packs the continuation as a space and draws the emoji across `2·CELL_W` (two-pass render: all backgrounds, then glyphs, so the next cell's bg fill can't erase the wide glyph's right half). A wide glyph that won't fit before the right edge isn't painted.
+
+When a cell column lands on the **right half** of a wide glyph, the cell→byte converters snap to the glyph's start — you can't park a cursor inside an emoji.
+
+East-Asian fullwidth (CJK) and zero-width combining marks are **still not modeled** — only emoji widen. Regional-indicator letters (flags) deliberately stay width 1 so a two-codepoint flag reserves two cells total, matching most terminals. If CJK ever needs real wide handling, extend `char_width` (and its Swift twin) — everything downstream already respects it. The regression test is `test_emoji_double_width` in `tests/test_basic.mojo`.
 
 ## Mojo-version sensitivity
 

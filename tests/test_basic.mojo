@@ -9,7 +9,9 @@ Run with::
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 
-from turbokod.canvas import Canvas, wrap_to_width
+from turbokod.canvas import (
+    Canvas, wrap_to_width, utf8_byte_to_cell, utf8_codepoint_count,
+)
 from turbokod.claude_detect import (
     CLAUDE_ACTIVE, CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
     claude_state_label, detect_claude_state,
@@ -104,7 +106,7 @@ from turbokod.debug_pane import (
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
-from turbokod.string_utils import slice_codepoints
+from turbokod.string_utils import slice_codepoints, char_width, display_columns
 from turbokod.targets_dialog import TargetsDialog
 from turbokod.text_field import TextField
 from turbokod.text_view import (
@@ -522,6 +524,48 @@ def test_canvas_put_text() raises:
     assert_equal(c.get(2, 1).glyph, String("h"))
     assert_equal(c.get(6, 1).glyph, String("o"))
     assert_equal(c.get(7, 1).glyph, String(" "))  # untouched
+
+
+def test_emoji_double_width() raises:
+    """Emoji occupy two cells end-to-end: ``char_width`` reports 2,
+    ``display_columns`` / ``utf8_byte_to_cell`` / ``utf8_codepoint_count``
+    all count two, and ``put_text`` paints the glyph plus an empty
+    width-0 continuation cell so following text stays aligned."""
+    assert_equal(char_width(0x1F680), 2)  # 🚀
+    assert_equal(char_width(0x2B50), 2)   # ⭐
+    assert_equal(char_width(ord("A")), 1)
+    # CJK is intentionally still narrow (East-Asian width not modeled).
+    assert_equal(char_width(0x65E5), 1)   # 日
+
+    assert_equal(display_columns(String("a🚀b")), 4)
+
+    # put_text: 'a' at 0, emoji (width 2) at 1, continuation (width 0,
+    # empty glyph) at 2, 'b' at 3 — advances by 4.
+    var c = Canvas(20, 1)
+    var n = c.put_text(Point(0, 0), String("a🚀b"), default_attr())
+    assert_equal(n, 4)
+    assert_equal(c.get(0, 0).glyph, String("a"))
+    assert_equal(c.get(1, 0).width, 2)
+    assert_equal(c.get(2, 0).width, 0)
+    assert_equal(c.get(2, 0).glyph, String(""))
+    assert_equal(c.get(3, 0).glyph, String("b"))
+
+    # The byte→cell map and cell count agree with put_text: bytes are
+    # a(1) + emoji(4) + b(1); 'b' lands at cell 3.
+    var s = String("a🚀b")
+    var cm = utf8_byte_to_cell(s)
+    assert_equal(len(cm), 6)
+    assert_equal(cm[0], 0)
+    assert_equal(cm[1], 1)
+    assert_equal(cm[5], 3)
+    assert_equal(utf8_codepoint_count(s), 4)
+
+    # A wide glyph that can't fit before ``max_x`` is dropped rather than
+    # painting a half glyph past the limit.
+    var c2 = Canvas(20, 1)
+    var n2 = c2.put_text(Point(0, 0), String("🚀"), default_attr(), 1)
+    assert_equal(n2, 0)
+    assert_equal(c2.get(0, 0).glyph, String(" "))
 
 
 def test_paint_title_commands_renders_separator_and_labels() raises:
@@ -17129,6 +17173,7 @@ def _run_chunk_00() raises:
     test_rect_helpers()
     test_attr()
     test_canvas_put_text()
+    test_emoji_double_width()
     test_paint_title_commands_renders_separator_and_labels()
     test_paint_title_commands_drops_clipped_label()
     test_hit_title_command_returns_id_under_cursor()

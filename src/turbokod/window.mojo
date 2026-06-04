@@ -233,19 +233,10 @@ struct TitleCommandHit(ImplicitlyCopyable, Movable):
 
 
 def _label_cell_count(s: String) -> Int:
-    """Codepoint count of ``s`` — matches the per-codepoint advance
-    ``Canvas.put_text`` uses, so a label's painted width equals this
-    when nothing was clipped."""
-    var b = s.as_bytes()
-    var n = len(b)
-    var cells = 0
-    var i = 0
-    while i < n:
-        var c = Int(b[i])
-        if (c & 0xC0) != 0x80:
-            cells += 1
-        i += 1
-    return cells
+    """Display-cell width of ``s`` — matches the per-glyph advance
+    ``Canvas.put_text`` uses (emoji count two), so a label's painted
+    width equals this when nothing was clipped."""
+    return display_columns(s)
 
 
 def paint_title_commands(

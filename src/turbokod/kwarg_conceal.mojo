@@ -24,6 +24,7 @@ that live on a single physical line.
 """
 
 from .canvas import TAB_WIDTH
+from .string_utils import char_width, codepoint_at
 
 
 def _is_ident_byte(b: Int) -> Bool:
@@ -241,11 +242,12 @@ def build_concealed_segment(
             seq_len = 1
         if i + seq_len > n:
             seq_len = n - i
+        var glyph_start = i
         for _ in range(seq_len):
             byte_to_cell.append(cell)
             disp.append(bytes[i])
             i += 1
-        cell += 1
+        cell += char_width(codepoint_at(seg, glyph_start)[0])
     var display: String
     if len(disp) == 0:
         display = String("")

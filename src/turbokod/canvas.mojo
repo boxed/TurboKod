@@ -12,6 +12,7 @@ from std.collections import List
 from .cell import Cell, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
+from .string_utils import char_width, codepoint_at
 
 
 # Number of cells a tab byte expands to. ``put_text`` aligns each tab
@@ -112,9 +113,13 @@ struct Canvas(Copyable, Movable):
         Codepoint-aligned: each codepoint occupies one cell carrying the
         full UTF-8 byte sequence as its glyph string. Callers that hold
         byte indices (the editor's overlay paths) need
-        ``utf8_byte_to_cell`` to translate. East-Asian width is *not*
-        modeled — every glyph advances by one cell — so wide characters
-        will overlap their right neighbour.
+        ``utf8_byte_to_cell`` to translate. Emoji (``char_width`` == 2)
+        occupy two cells: the glyph cell carries ``width=2`` and is
+        followed by an empty ``width=0`` continuation cell so the
+        frontends know to skip the right half. A wide glyph that would
+        straddle the right limit isn't painted (we stop) rather than
+        spilling a half-glyph past the edge. East-Asian fullwidth is
+        *not* modeled — only emoji widen.
         Tab bytes (``0x09``) are expanded to spaces here — emitting the
         raw ``\\t`` byte to the terminal would let the terminal advance
         the cursor by however many columns *it* chose, breaking every
@@ -178,10 +183,26 @@ struct Canvas(Copyable, Movable):
                 # rather than losing the column to silence.
                 glyph = String("?")
                 seq_len = 1
-            if x >= 0:
-                self.cells[self._index(x, y)] = Cell(glyph, attr, 1)
-            x += 1
-            advanced += 1
+            var w = char_width(codepoint_at(text, i)[0])
+            if w == 2:
+                # A wide glyph needs two cells. If the second would fall
+                # past the limit, stop instead of painting a half glyph
+                # that the frontend can't complete.
+                if x + 2 > limit:
+                    break
+                if x >= 0:
+                    self.cells[self._index(x, y)] = Cell(glyph, attr, 2)
+                if x + 1 >= 0:
+                    self.cells[self._index(x + 1, y)] = Cell(
+                        String(""), attr, 0,
+                    )
+                x += 2
+                advanced += 2
+            else:
+                if x >= 0:
+                    self.cells[self._index(x, y)] = Cell(glyph, attr, 1)
+                x += 1
+                advanced += 1
             i += seq_len
         return advanced
 
@@ -427,15 +448,24 @@ def wrap_to_width(text: String, width: Int) -> List[String]:
         # Walk forward up to ``width`` cells; remember the last space
         # we passed so we can fall back to a soft break. A ``\n``
         # ends the line immediately even when more budget is left.
+        # Emoji count two cells, so track the running cell total rather
+        # than the codepoint count — a glyph wider than the remaining
+        # budget ends the segment (but a single over-wide glyph on an
+        # empty segment is still placed so we always make progress).
         var end = pos
+        var cells_used = 0
         var last_space = -1
         var hard_break = False
-        while end < nc and end - pos < width:
+        while end < nc:
             if cps[end] == String("\n"):
                 hard_break = True
                 break
+            var cw = char_width(codepoint_at(cps[end], 0)[0])
+            if cells_used + cw > width and end > pos:
+                break
             if cps[end] == String(" "):
                 last_space = end
+            cells_used += cw
             end += 1
         if hard_break:
             var line = String("")
@@ -455,8 +485,9 @@ def wrap_to_width(text: String, width: Int) -> List[String]:
         if last_space > pos:
             break_at = last_space
         else:
-            # No space inside the budget — hard-break at ``width``.
-            break_at = pos + width
+            # No space inside the budget — hard-break at the cell budget
+            # boundary (``end``, the first glyph that didn't fit).
+            break_at = end
         var line = String("")
         for j in range(pos, break_at):
             line = line + cps[j]
@@ -510,7 +541,7 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
             seq_len = n - i
         for _ in range(seq_len):
             result.append(cell)
-        cell += 1
+        cell += char_width(codepoint_at(text, i)[0])
         i += seq_len
     return result^
 
@@ -546,6 +577,6 @@ def utf8_codepoint_count(text: String) -> Int:
             seq_len = 1
         if i + seq_len > n:
             seq_len = n - i
-        count += 1
+        count += char_width(codepoint_at(text, i)[0])
         i += seq_len
     return count

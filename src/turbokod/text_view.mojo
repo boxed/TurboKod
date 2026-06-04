@@ -40,7 +40,8 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import (
-    is_word_codepoint, leading_indent_bytes, utf8_codepoint_size,
+    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
+    utf8_codepoint_size,
 )
 
 
@@ -165,12 +166,21 @@ def _wrap_one_line_into(
         if seg_w < 1:
             seg_w = 1
         # Hard upper bound: at most ``seg_w`` cells from ``c``, walking
-        # codepoints so a multi-byte glyph is never split.
+        # codepoints so a multi-byte glyph is never split. Emoji take two
+        # cells; a glyph that would overflow ends the segment (but a
+        # single over-wide glyph on an empty segment is still taken so we
+        # make progress on a 1-cell-wide pane).
         var cells = 0
         var e_hard = c
-        while e_hard < hi and cells < seg_w:
-            e_hard += utf8_codepoint_size(Int(bytes[e_hard]))
-            cells += 1
+        while e_hard < hi:
+            var info = codepoint_at(line, e_hard)
+            var cw = char_width(info[0])
+            if cells + cw > seg_w and e_hard > c:
+                break
+            e_hard += info[1]
+            cells += cw
+            if cells >= seg_w:
+                break
         if e_hard > hi:
             e_hard = hi
         var e = e_hard
@@ -197,8 +207,9 @@ def _wrap_one_line_into(
             seg_cells = 0
             var k = c
             while k < e:
-                seg_cells += 1
-                k += utf8_codepoint_size(Int(bytes[k]))
+                var info = codepoint_at(line, k)
+                seg_cells += char_width(info[0])
+                k += info[1]
         out.append(VisualLine(
             line_idx, c, e, cell_offset, seg_cells, indent_cells,
         ))
@@ -332,12 +343,14 @@ def smart_wrap_lines(
             out.append(VisualLine(br, 0, 0, 0, 0, 0))
             br += 1
             continue
-        # Display width == codepoint count (no East-Asian width modeling).
+        # Display width in cells: emoji count two, everything else one
+        # (no East-Asian fullwidth modeling).
         var cols = 0
         var kk = 0
         while kk < line_n:
-            cols += 1
-            kk += utf8_codepoint_size(Int(bytes[kk]))
+            var info = codepoint_at(line, kk)
+            cols += char_width(info[0])
+            kk += info[1]
         var overflow = cols > content_w
         # Fast path: line fits and the comma trigger is off — emit one row
         # without scanning. When the trigger is on (>= 0) we must scan even a
@@ -1013,12 +1026,16 @@ struct TextLog(Copyable, Movable):
         if cell_in_seg > vrow.cell_count:
             cell_in_seg = vrow.cell_count
         var line = self.lines[vrow.line_idx]
-        var bytes = line.as_bytes()
         var b = vrow.byte_start
-        for _ in range(cell_in_seg):
-            if b >= vrow.byte_end:
+        var consumed = 0
+        while consumed < cell_in_seg and b < vrow.byte_end:
+            var info = codepoint_at(line, b)
+            var cw = char_width(info[0])
+            # A click on the right half of a wide glyph snaps to its start.
+            if consumed + cw > cell_in_seg:
                 break
-            b += utf8_codepoint_size(Int(bytes[b]))
+            consumed += cw
+            b += info[1]
         if b > vrow.byte_end:
             b = vrow.byte_end
         return (vrow.line_idx, b)
@@ -1141,12 +1158,12 @@ def _row_cell_offset(
     walk codepoints inside the segment until we reach the target."""
     if target_byte <= vrow.byte_start:
         return 0
-    var bytes = line.as_bytes()
     var b = vrow.byte_start
     var cells = 0
     while b < target_byte and b < vrow.byte_end:
-        cells += 1
-        b += utf8_codepoint_size(Int(bytes[b]))
+        var info = codepoint_at(line, b)
+        cells += char_width(info[0])
+        b += info[1]
     return cells
 
 

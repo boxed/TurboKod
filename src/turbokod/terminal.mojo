@@ -434,6 +434,13 @@ struct Terminal:
                 var oc = self._front.get(x, y)
                 if nc == oc:
                     continue
+                if nc.width == 0:
+                    # Right half of a wide (emoji) glyph painted in the
+                    # previous column — the terminal already advanced its
+                    # cursor across it when we wrote the glyph, so emit
+                    # nothing and just sync the front buffer.
+                    self._front.set(x, y, nc)
+                    continue
                 if cursor_known_x != x or cursor_known_y != y:
                     append_string_bytes(buf, move_cursor(x, y))
                 if (not last_attr_valid) or last_attr != nc.attr:
@@ -448,7 +455,9 @@ struct Terminal:
                     last_attr = nc.attr
                     last_attr_valid = True
                 append_string_bytes(buf, nc.glyph)
-                cursor_known_x = x + 1
+                # A wide glyph advances the terminal cursor by two columns;
+                # ``width`` is 1 for normal cells, 2 for emoji.
+                cursor_known_x = x + nc.width
                 cursor_known_y = y
                 self._front.set(x, y, nc)
         write_buffer(STDOUT_FD, buf)

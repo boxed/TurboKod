@@ -58,9 +58,123 @@ def split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
+def char_width(cp: Int) -> Int:
+    """Terminal columns a single codepoint occupies: ``2`` for emoji that
+    terminals and our Swift host render double-wide, ``1`` for everything
+    else.
+
+    This is the single source of truth for cell width. Every loop that
+    converts between a byte/codepoint position and a screen column — in
+    ``Canvas.put_text``, the soft-wrap segmenter, the editor's
+    byte↔cell converters, the overlay cell maps, and the Swift renderer
+    (which ports the same ranges) — funnels through it, so the layout
+    the editor reasons about always matches what is painted.
+
+    The wide set is the standard ``wcwidth`` "wide emoji" table — the
+    blocks where most terminal emulators advance the cursor by two. We
+    deliberately leave a few things at width 1 to *agree* with terminals
+    rather than be maximally pretty: regional-indicator letters
+    (``0x1F1E6..0x1F1FF``) stay 1 so a two-codepoint flag reserves two
+    cells total instead of four, and East-Asian fullwidth / combining
+    marks are still unmodeled (a known limitation, see ``CLAUDE.md``)."""
+    # Fast path: everything below the first wide codepoint (all ASCII,
+    # Latin, Cyrillic, CJK punctuation up to the angle brackets, …) is
+    # one cell.
+    if cp < 0x231A:
+        return 1
+    # --- BMP emoji that render wide ---
+    if cp == 0x231A or cp == 0x231B:
+        return 2
+    if cp == 0x2329 or cp == 0x232A:
+        return 2
+    if 0x23E9 <= cp and cp <= 0x23EC:
+        return 2
+    if cp == 0x23F0 or cp == 0x23F3:
+        return 2
+    if cp == 0x25FD or cp == 0x25FE:
+        return 2
+    if cp == 0x2614 or cp == 0x2615:
+        return 2
+    if 0x2648 <= cp and cp <= 0x2653:
+        return 2
+    if cp == 0x267F:
+        return 2
+    if cp == 0x2693:
+        return 2
+    if cp == 0x26A1:
+        return 2
+    if cp == 0x26AA or cp == 0x26AB:
+        return 2
+    if cp == 0x26BD or cp == 0x26BE:
+        return 2
+    if cp == 0x26C4 or cp == 0x26C5:
+        return 2
+    if cp == 0x26CE:
+        return 2
+    if cp == 0x26D4:
+        return 2
+    if cp == 0x26EA:
+        return 2
+    if cp == 0x26F2 or cp == 0x26F3:
+        return 2
+    if cp == 0x26F5:
+        return 2
+    if cp == 0x26FA:
+        return 2
+    if cp == 0x26FD:
+        return 2
+    if cp == 0x2705:
+        return 2
+    if cp == 0x270A or cp == 0x270B:
+        return 2
+    if cp == 0x2728:
+        return 2
+    if cp == 0x274C:
+        return 2
+    if cp == 0x274E:
+        return 2
+    if 0x2753 <= cp and cp <= 0x2755:
+        return 2
+    if cp == 0x2757:
+        return 2
+    if 0x2795 <= cp and cp <= 0x2797:
+        return 2
+    if cp == 0x27B0:
+        return 2
+    if cp == 0x27BF:
+        return 2
+    if cp == 0x2B1B or cp == 0x2B1C:
+        return 2
+    if cp == 0x2B50:
+        return 2
+    if cp == 0x2B55:
+        return 2
+    # --- SMP emoji blocks that render wide ---
+    if cp == 0x1F004:
+        return 2
+    if cp == 0x1F0CF:
+        return 2
+    if cp == 0x1F18E:
+        return 2
+    if 0x1F191 <= cp and cp <= 0x1F19A:
+        return 2
+    if 0x1F200 <= cp and cp <= 0x1F2FF:
+        return 2
+    if 0x1F300 <= cp and cp <= 0x1F64F:
+        return 2
+    if 0x1F680 <= cp and cp <= 0x1F6FF:
+        return 2
+    if 0x1F900 <= cp and cp <= 0x1F9FF:
+        return 2
+    if 0x1FA70 <= cp and cp <= 0x1FAFF:
+        return 2
+    return 1
+
+
 def display_columns(s: String) -> Int:
     """Count terminal cells ``s`` occupies when painted by
-    ``Canvas.put_text`` — i.e. one cell per UTF-8 codepoint.
+    ``Canvas.put_text`` — emoji count 2, everything else 1 (see
+    ``char_width``).
 
     Use this (not ``len(s.as_bytes())``) anywhere the result is fed
     into layout: dropdown widths, title-bar offsets, status-bar
@@ -70,25 +184,16 @@ def display_columns(s: String) -> Int:
     reserve too many cells for non-ASCII labels and — in the menu's
     per-byte paint loop — emit one cell per continuation byte.
 
-    East-Asian width is not modeled (``put_text`` itself doesn't),
-    so wide CJK glyphs still over-advance the cursor by one cell."""
+    East-Asian fullwidth is still not modeled (only emoji are
+    double-width), so wide CJK glyphs still over-advance by one cell."""
     var b = s.as_bytes()
     var n = len(b)
     var i = 0
     var cols = 0
     while i < n:
-        var c = Int(b[i])
-        if c < 0x80:
-            i += 1
-        elif (c & 0xE0) == 0xC0:
-            i += 2
-        elif (c & 0xF0) == 0xE0:
-            i += 3
-        elif (c & 0xF8) == 0xF0:
-            i += 4
-        else:
-            i += 1
-        cols += 1
+        var info = codepoint_at(s, i)
+        cols += char_width(info[0])
+        i += info[1]
     return cols
 
 

@@ -489,6 +489,23 @@ final class CellView: NSView {
         ctx.fill(bounds)
 
         let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
+        // Two passes: fill every cell background first, then draw glyphs and
+        // underlines on top. A wide emoji is painted across two cells, and a
+        // single-pass loop would let the *next* cell's background fill erase
+        // the emoji's right half. Separating the passes keeps wide glyphs intact.
+        for i in 0..<n {
+            let packed = buf[i * 3 + 1]
+            var fg = palette[Int(packed & 0xFF)]
+            var bg = palette[Int((packed >> 8) & 0xFF)]
+            let style = (packed >> 16) & 0xFF
+            if style & STYLE_REVERSE != 0 { swap(&fg, &bg) }
+            if bg != palette[0] {
+                let col = i % c, row = i / c
+                let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
+                ctx.setFillColor(cgcolor(bg))
+                ctx.fill(CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
+            }
+        }
         for i in 0..<n {
             let cp = buf[i * 3]
             let packed = buf[i * 3 + 1]
@@ -499,17 +516,14 @@ final class CellView: NSView {
             let col = i % c, row = i / c
             let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
 
-            if bg != palette[0] {
-                ctx.setFillColor(cgcolor(bg))
-                ctx.fill(CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
-            }
             if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
                 let s = String(scalar) as NSString
-                if scalar.properties.isEmojiPresentation {
+                if charWidth(cp) == 2 {
                     // Color emoji fall back to Apple Color Emoji, which at the
-                    // cell-font point size overflows the fixed grid cell — draw
-                    // it shrunk to fit the box instead.
-                    drawEmoji(s, cellX: x, cellY: y)
+                    // cell-font point size overflows the cell — draw it shrunk
+                    // to fit a two-cell box (the core reserved the next cell as
+                    // an empty continuation, so there's nothing to overdraw).
+                    drawEmoji(s, cellX: x, cellY: y, cellW: CELL_W * 2)
                 } else {
                     var a = attrs
                     a[.foregroundColor] = nscolor(fg)
@@ -525,21 +539,55 @@ final class CellView: NSView {
         }
     }
 
-    /// Draw a color-emoji glyph shrunk to fit one fixed grid cell, centered.
+    /// Display width of a codepoint in grid cells: 2 for the emoji blocks
+    /// terminals render double-wide, 1 otherwise. Ported verbatim from
+    /// `char_width` in `string_utils.mojo` — the two MUST agree, or the Mojo
+    /// core's cell layout and this renderer disagree on where glyphs land.
+    private func charWidth(_ cp: UInt32) -> Int {
+        if cp < 0x231A { return 1 }
+        switch cp {
+        case 0x231A, 0x231B, 0x2329, 0x232A,
+             0x23F0, 0x23F3,
+             0x25FD, 0x25FE, 0x2614, 0x2615,
+             0x267F, 0x2693, 0x26A1, 0x26AA, 0x26AB,
+             0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26D4, 0x26EA,
+             0x26F2, 0x26F3, 0x26F5, 0x26FA, 0x26FD,
+             0x2705, 0x270A, 0x270B, 0x2728, 0x274C, 0x274E,
+             0x2757, 0x27B0, 0x27BF,
+             0x2B1B, 0x2B1C, 0x2B50, 0x2B55,
+             0x1F004, 0x1F0CF, 0x1F18E:
+            return 2
+        default:
+            break
+        }
+        if (0x23E9...0x23EC).contains(cp) { return 2 }
+        if (0x2648...0x2653).contains(cp) { return 2 }
+        if (0x2753...0x2755).contains(cp) { return 2 }
+        if (0x2795...0x2797).contains(cp) { return 2 }
+        if (0x1F191...0x1F19A).contains(cp) { return 2 }
+        if (0x1F200...0x1F2FF).contains(cp) { return 2 }
+        if (0x1F300...0x1F64F).contains(cp) { return 2 }
+        if (0x1F680...0x1F6FF).contains(cp) { return 2 }
+        if (0x1F900...0x1F9FF).contains(cp) { return 2 }
+        if (0x1FA70...0x1FAFF).contains(cp) { return 2 }
+        return 1
+    }
+
+    /// Draw a color-emoji glyph shrunk to fit a `cellW`×`CELL_H` box, centered.
     /// Apple Color Emoji at the cell-font point size massively overflows the
-    /// 8×16 cell; emoji glyph metrics scale linearly with point size, so we
-    /// measure at a reference size and pick the size whose rendered glyph fits
-    /// within (CELL_W, CELL_H). Emoji are roughly square, so on the tall-narrow
-    /// cell the width is the binding constraint — the result is small, but a
-    /// fixed character grid leaves no other option.
-    private func drawEmoji(_ s: NSString, cellX x: CGFloat, cellY y: CGFloat) {
+    /// cell; emoji glyph metrics scale linearly with point size, so we measure
+    /// at a reference size and pick the size whose rendered glyph fits within
+    /// (cellW, CELL_H). Reserving two cells (cellW = 2·CELL_W) gives the glyph
+    /// a near-square box, so it renders far larger than in a single cell.
+    private func drawEmoji(_ s: NSString, cellX x: CGFloat, cellY y: CGFloat,
+                           cellW: CGFloat) {
         let ref: CGFloat = CELL_H
         let probe = s.size(withAttributes: [.font: NSFont.systemFont(ofSize: ref)])
         guard probe.width > 0, probe.height > 0 else { return }
-        let scale = min(CELL_W / probe.width, CELL_H / probe.height)
+        let scale = min(cellW / probe.width, CELL_H / probe.height)
         let font = NSFont.systemFont(ofSize: max(1, ref * scale))
         let glyph = s.size(withAttributes: [.font: font])
-        s.draw(at: NSPoint(x: x + (CELL_W - glyph.width) / 2,
+        s.draw(at: NSPoint(x: x + (cellW - glyph.width) / 2,
                            y: y + (CELL_H - glyph.height) / 2),
                withAttributes: [.font: font])
     }
