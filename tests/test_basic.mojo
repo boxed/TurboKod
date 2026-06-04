@@ -36,6 +36,10 @@ from turbokod.editorconfig import (
     EditorConfig, load_editorconfig_for_path, match_section, parse_editorconfig,
 )
 from turbokod.file_dialog import FileDialog
+from turbokod.kwarg_conceal import (
+    build_concealed_segment, kwarg_conceal_ranges,
+    kwarg_separator_for_extension,
+)
 from turbokod.find_symbol import (
     container_matches_qualifier, sanitize_symbol_query,
     _query_member, _query_qualifier,
@@ -55,7 +59,7 @@ from turbokod.view_state_store import (
 from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
-    EDITOR_FIND, EDITOR_GOTO, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
+    EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
     EDITOR_NEW, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
@@ -5254,7 +5258,7 @@ def test_settings_font_section_requires_host_fonts() raises:
     fonts.append(String("Monaco"))
     s.open(
         List[OnSaveAction](), False, List[LanguageServerOverride](),
-        String(""), True, True, String("Turbo C++ 3.0"),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
         String("Menlo"), fonts^,
     )
     labels = s._labels()
@@ -5275,7 +5279,7 @@ def test_settings_font_step_commits_and_marks_dirty() raises:
     fonts.append(String("Menlo"))
     s.open(
         List[OnSaveAction](), False, List[LanguageServerOverride](),
-        String(""), True, True, String("Turbo C++ 3.0"),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
     )
     assert_equal(s.selected_font, 0)
@@ -5316,7 +5320,7 @@ def test_settings_font_size_stepper_commits_and_marks_dirty() raises:
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     s.open(
         List[OnSaveAction](), False, List[LanguageServerOverride](),
-        String(""), True, True, String("Turbo C++ 3.0"),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
         0,    # font_size: default
         16,   # host-reported effective size
@@ -5355,7 +5359,7 @@ def test_settings_restore_ideal_font_size() raises:
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     s.open(
         List[OnSaveAction](), False, List[LanguageServerOverride](),
-        String(""), True, True, String("Turbo C++ 3.0"),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
         20, 20, 16,
     )
@@ -5445,6 +5449,44 @@ def test_language_editor_save_emits_override() raises:
     assert_equal(len(out.argvs[0]), 3)
     assert_equal(out.argvs[0][0], String("foo"))
     assert_equal(out.argvs[1][0], String("other"))
+
+
+def test_detached_settings_clipboard_chord_does_not_recurse() raises:
+    """Regression: a clipboard menu chord (⌘V / ⌘X / …) fired while the
+    *detached* native Settings window is open must not recurse forever.
+
+    On macOS the Edit menu's ⌘-key-equivalents land in
+    ``dispatch_action`` directly. ``_modal_owns_input`` is true (Settings
+    is open), so the action re-injects the chord — but the detached
+    Settings block in ``handle_event`` is gated ``not settings_detached``
+    and skips it, so the re-injected chord used to fall through to the
+    hotkey table, re-match ⌘V → EDITOR_PASTE → ``dispatch_action`` again,
+    and recurse until the stack overflowed (the app vanished with no
+    crash report). The chord must instead reach the Settings surface — so
+    a ⌘X with a selection in the language editor's argv strip cuts it.
+    """
+    var d = Desktop()
+    d.set_settings_detached(True)
+    d.settings.open(List[OnSaveAction](), False)
+    assert_true(d.settings.active)
+    # Open the language editor and focus its argv strip with a selection.
+    d.settings.language_editor.open(
+        String("lang"), List[String](), List[String](), False,
+    )
+    d.settings.language_editor._add_candidate()
+    d.settings.language_editor.argv_tf.set_text(String("pylsp --stdio"))
+    d.settings.language_editor.argv_tf.select_all()
+    assert_true(d.settings.language_editor.argv_tf.has_selection())
+    # Pre-fix this recursed to a stack overflow; post-fix it returns and
+    # the chord reaches the argv field (cut deletes the selection).
+    var maybe = d.dispatch_action(EDITOR_CUT, _SCREEN)
+    assert_false(Bool(maybe))
+    assert_equal(
+        len(d.settings.language_editor.argv_tf.text.as_bytes()), 0,
+    )
+    # A paste chord likewise returns rather than recursing.
+    var maybe2 = d.dispatch_action(EDITOR_PASTE, _SCREEN)
+    assert_false(Bool(maybe2))
 
 
 def test_list_box_paint_never_overflows_bounds() raises:
@@ -7125,6 +7167,42 @@ def test_editor_paint_overlays_highlight_attr() raises:
     assert_true(canvas.get(1, 0).attr == highlight_keyword_attr())
     # The space and the ``main`` identifier aren't keywords.
     assert_false(canvas.get(2, 0).attr == highlight_keyword_attr())
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_editor_paint_compresses_kwargs_off_caret_line() raises:
+    """With ``compress_kwargs`` on, a ``foo(a=a, d=4)`` line that doesn't
+    hold the caret renders ``foo(=a, d=4)`` (label concealed), while the
+    identical line *under* the caret keeps its real text."""
+    var path = _temp_path(String("_kwcompress.py"))
+    assert_true(write_file(
+        path, String("foo(a=a, d=4)\nfoo(a=a, d=4)\n"),
+    ))
+    var ed = Editor.from_file(path)
+    ed.compress_kwargs = True
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    # Caret stays at (0, 0) — row 0 is the active line.
+    ed.paint(canvas, Rect(0, 0, 40, 5), True)
+    # Row 0 (caret line) is expanded: real ``foo(a=a, ...``.
+    assert_equal(canvas.get(4, 0).glyph, String("a"))
+    assert_equal(canvas.get(5, 0).glyph, String("="))
+    assert_equal(canvas.get(6, 0).glyph, String("a"))
+    # Row 1 (no caret) is compressed: ``foo(=a, ...`` — the label ``a`` is
+    # gone, so ``=`` shifts left into its column.
+    assert_equal(canvas.get(4, 1).glyph, String("="))
+    assert_equal(canvas.get(5, 1).glyph, String("a"))
+    assert_equal(canvas.get(6, 1).glyph, String(","))
+    # And with the option off, row 1 renders its real text again.
+    ed.compress_kwargs = False
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    ed.paint(canvas, Rect(0, 0, 40, 5), True)
+    assert_equal(canvas.get(4, 1).glyph, String("a"))
+    assert_equal(canvas.get(5, 1).glyph, String("="))
+    assert_equal(canvas.get(6, 1).glyph, String("a"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -17169,6 +17247,7 @@ def _run_chunk_02() raises:
     test_desktop_set_font_size_clamps_and_bumps_version()
     test_settings_remove_language_override_marks_dirty()
     test_language_editor_save_emits_override()
+    test_detached_settings_clipboard_chord_does_not_recurse()
     test_list_box_paint_never_overflows_bounds()
     test_list_box_paint_empty_hint_clipped()
     test_list_box_mouse_wheel_clamps_to_item_count()
@@ -17233,6 +17312,7 @@ def _run_chunk_02() raises:
     test_embedded_language_extensions_skips_unknown_languages()
     test_editor_refreshes_highlights_after_edits()
     test_editor_paint_overlays_highlight_attr()
+    test_editor_paint_compresses_kwargs_off_caret_line()
     test_editor_meta_click_emits_definition_request()
     test_editor_meta_click_outside_identifier_is_silent()
     test_editor_alt_click_adds_extra_caret()
@@ -17616,6 +17696,79 @@ def _run_chunk_05() raises:
     test_find_symbol_query_keeps_dot()
     test_find_symbol_query_split()
     test_find_symbol_container_match()
+    test_kwarg_conceal_basic_python()
+    test_kwarg_conceal_skips_statement_and_mismatch()
+    test_kwarg_conceal_skips_strings_and_eq_eq()
+    test_kwarg_conceal_swift_colon()
+    test_kwarg_conceal_build_segment_collapses_and_shifts()
+
+def test_kwarg_conceal_basic_python() raises:
+    # ``foo(a=a, b=b, d=4)`` hides exactly the two redundant labels (the
+    # ``a`` before ``=a`` and the ``b`` before ``=b``); ``d=4`` is left
+    # alone because the value isn't the label.
+    # Separator selection by language: '=' for py/mojo, none for plain text.
+    assert_equal(kwarg_separator_for_extension(String("py")), 0x3D)
+    assert_equal(kwarg_separator_for_extension(String("mojo")), 0x3D)
+    assert_equal(kwarg_separator_for_extension(String("txt")), -1)
+    var line = String("foo(a=a, b=b, d=4)")
+    var hide = kwarg_conceal_ranges(line, 0x3D, List[Tuple[Int, Int]]())
+    assert_equal(len(hide), 2)
+    # ``a`` is at byte 4..5 (just before the first '='), ``b`` at 9..10.
+    assert_equal(hide[0][0], 4)
+    assert_equal(hide[0][1], 5)
+    assert_equal(hide[1][0], 9)
+    assert_equal(hide[1][1], 10)
+
+def test_kwarg_conceal_skips_statement_and_mismatch() raises:
+    # Statement-level ``x = x`` is at paren depth 0 → never compressed.
+    var stmt = kwarg_conceal_ranges(
+        String("x = x"), 0x3D, List[Tuple[Int, Int]](),
+    )
+    assert_equal(len(stmt), 0)
+    # Inside parens but the names differ → not compressed.
+    var diff = kwarg_conceal_ranges(
+        String("foo(a=b)"), 0x3D, List[Tuple[Int, Int]](),
+    )
+    assert_equal(len(diff), 0)
+
+def test_kwarg_conceal_skips_strings_and_eq_eq() raises:
+    # ``==`` comparison is not a keyword-arg separator.
+    var cmp = kwarg_conceal_ranges(
+        String("foo(a == a)"), 0x3D, List[Tuple[Int, Int]](),
+    )
+    assert_equal(len(cmp), 0)
+    # A ``name=name`` that lives inside a string span is masked out.
+    var line = String("foo('a=a')")
+    var spans = List[Tuple[Int, Int]]()
+    spans.append((4, 9))  # the quoted 'a=a'
+    var hidden = kwarg_conceal_ranges(line, 0x3D, spans)
+    assert_equal(len(hidden), 0)
+
+def test_kwarg_conceal_swift_colon() raises:
+    # Swift uses ':' — ``foo(a: a)`` hides the label ``a`` (byte 4..5),
+    # leaving ``: a``.
+    assert_equal(kwarg_separator_for_extension(String("swift")), 0x3A)
+    var hide = kwarg_conceal_ranges(
+        String("foo(a: a)"), 0x3A, List[Tuple[Int, Int]](),
+    )
+    assert_equal(len(hide), 1)
+    assert_equal(hide[0][0], 4)
+    assert_equal(hide[0][1], 5)
+
+def test_kwarg_conceal_build_segment_collapses_and_shifts() raises:
+    # Segment ``a=a`` with the leading ``a`` hidden renders ``=a`` and
+    # collapses byte 0 to cell 0 while bytes 1 ('=') and 2 ('a') shift left.
+    var seg = String("a=a")
+    var hide = List[Tuple[Int, Int]]()
+    hide.append((0, 1))
+    var built = build_concealed_segment(seg, hide)
+    assert_equal(built[0], String("=a"))
+    var cell_map = built[1].copy()
+    assert_equal(len(cell_map), 3)  # one entry per raw byte
+    assert_equal(cell_map[0], 0)    # hidden 'a' collapses to cell 0
+    assert_equal(cell_map[1], 0)    # '=' now at cell 0
+    assert_equal(cell_map[2], 1)    # 'a' now at cell 1
+    assert_equal(built[2], 2)       # two display cells
 
 def test_find_symbol_query_keeps_dot() raises:
     # The dot survives sanitization so the user can type a qualified

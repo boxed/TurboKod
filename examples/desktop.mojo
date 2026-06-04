@@ -54,10 +54,10 @@ from turbokod import (
     EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
+    EDITOR_TOGGLE_COMPRESS_KWARGS,
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS,
     EDITOR_TOGGLE_MINIMAP,
-    EDITOR_TOGGLE_SOFT_WRAP,
     EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
@@ -215,10 +215,6 @@ def main() raises:
             checkable=True,
         ))
         view_items.append(MenuItem(
-            String("Soft Wrap"), EDITOR_TOGGLE_SOFT_WRAP,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
             String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES,
             checkable=True,
         ))
@@ -228,6 +224,10 @@ def main() raises:
         ))
         view_items.append(MenuItem(
             String("Minimap"), EDITOR_TOGGLE_MINIMAP,
+            checkable=True,
+        ))
+        view_items.append(MenuItem(
+            String("Compress Keyword Args"), EDITOR_TOGGLE_COMPRESS_KWARGS,
             checkable=True,
         ))
         view_items.append(MenuItem.separator())

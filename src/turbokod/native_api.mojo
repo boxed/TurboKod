@@ -45,7 +45,8 @@ from turbokod.desktop import (
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_GIT_CHANGES,
+    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
+    EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     FILE_TREE_REVEAL,
@@ -154,6 +155,10 @@ def _build_menus(mut d: Desktop):
     v.append(MenuItem(String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES, checkable=True))
     v.append(MenuItem(String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR, checkable=True))
     v.append(MenuItem(String("Minimap"), EDITOR_TOGGLE_MINIMAP, checkable=True))
+    v.append(MenuItem(
+        String("Compress Keyword Args"), EDITOR_TOGGLE_COMPRESS_KWARGS,
+        checkable=True,
+    ))
     v.append(MenuItem.separator())
     # Three-way cycle (hidden → right → left); the label is re-stamped
     # from the live state every paint by ``_apply_view_config``, so this

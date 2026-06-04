@@ -242,6 +242,11 @@ comptime EDITOR_COMPLETE      = String("edit:complete")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
+# View-menu toggle for the keyword-argument "soft compress" display option
+# (``foo(a=a)`` → ``foo(=a)`` off the caret line). Display-only; the flag
+# lives on ``TurbokodConfig`` and is mirrored by the Settings ▸ Editor
+# checkbox. See ``kwarg_conceal.mojo``.
+comptime EDITOR_TOGGLE_COMPRESS_KWARGS = String("view:compress_kwargs")
 # View-menu toggle for the per-window tab strip rendered above the
 # status bar. Like the other view toggles, the flag lives on
 # ``TurbokodConfig`` so it survives across sessions.
@@ -2127,6 +2132,9 @@ struct Desktop(Movable):
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
+        self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_COMPRESS_KWARGS, self.config.compress_kwargs,
+        )
         # The file-tree item cycles three states instead of checking a
         # box, so its *label* carries the state.
         var tree_label = _TREE_LABEL_HIDDEN
@@ -2181,6 +2189,8 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
+            self.windows.windows[i].editor.compress_kwargs = \
+                self.config.compress_kwargs
             # Push the global on-save transforms in as editorconfig
             # fallbacks. ``trim`` off and final-newline off both map to a
             # value that leaves the file untouched (0 / -1) rather than
@@ -2464,6 +2474,11 @@ struct Desktop(Movable):
             self.config.ensure_final_newline = (
                 self.settings.ensure_final_newline
             )
+            # Keyword-arg compression is a pure display toggle — push it into
+            # every editor on change so the next paint reflects it.
+            if self.settings.compress_kwargs != self.config.compress_kwargs:
+                self.config.compress_kwargs = self.settings.compress_kwargs
+                self._apply_view_config()
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
@@ -4811,9 +4826,17 @@ struct Desktop(Movable):
         # editor behind it. Re-inject the equivalent chord through
         # ``handle_event`` so the dialog's text field handles it exactly
         # as a typed chord. The chord comes from the hotkey table so we
-        # don't duplicate the binding. ``_modal_owns_input`` guarantees
-        # ``handle_event`` consumes the event before its own hotkey
-        # lookup, so this can't recurse.
+        # don't duplicate the binding. For every in-grid modal,
+        # ``handle_event`` consumes the event in its modal block before its
+        # own hotkey lookup, so this can't recurse — *except* detached
+        # Settings (native macOS), whose modal block in ``handle_event`` is
+        # gated ``not settings_detached`` because the host's settings window
+        # owns those events. Routing a detached-settings chord through
+        # ``handle_event`` would fall past that gate to the hotkey table,
+        # re-match this same chord → EDITOR_PASTE → back here, recursing
+        # until the stack overflows. Route it straight into the settings
+        # surface instead (where it also belongs — the settings window is
+        # what's focused).
         if self._modal_owns_input() and (
             action == EDITOR_PASTE or action == EDITOR_CUT
             or action == EDITOR_COPY or action == EDITOR_UNDO
@@ -4825,10 +4848,13 @@ struct Desktop(Movable):
                     var ev = Event.key_event(
                         self._hotkeys[i].key, self._hotkeys[i].mods,
                     )
-                    try:
-                        _ = self.handle_event(ev, screen)
-                    except:
-                        pass
+                    if self.settings.active and self.settings_detached:
+                        self.handle_settings_event(ev, screen)
+                    else:
+                        try:
+                            _ = self.handle_event(ev, screen)
+                        except:
+                            pass
                     break
                 i -= 1
             # Swallow regardless of whether a chord was found — a
@@ -4876,6 +4902,7 @@ struct Desktop(Movable):
                 cur_ext,
                 self.config.trim_trailing_whitespace,
                 self.config.ensure_final_newline,
+                self.config.compress_kwargs,
                 self.config.theme,
                 self.font_label(),
                 font_names^,
@@ -5027,6 +5054,11 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
+        if action == EDITOR_TOGGLE_COMPRESS_KWARGS:
+            self.config.compress_kwargs = not self.config.compress_kwargs
             self._apply_view_config()
             _ = save_config(self.config)
             return Optional[String]()

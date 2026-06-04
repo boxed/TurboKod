@@ -26,6 +26,7 @@ from .colors import (
     LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
     STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
     CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
+    SYN_STRING, SYN_COMMENT,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeResult, diff3_merge, unified_diff
@@ -50,6 +51,10 @@ from .highlight import (
     highlight_for_extension, highlight_incremental, highlight_string_attr,
     line_comment_for_extension, word_at,
 )
+from .kwarg_conceal import (
+    build_concealed_segment, kwarg_conceal_ranges,
+    kwarg_separator_for_extension,
+)
 from .lsp_dispatch import (
     CodeAction, CodeActionFileEdit,
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
@@ -73,7 +78,7 @@ from .string_utils import (
     prev_codepoint_start, utf8_codepoint_size, word_char_step,
 )
 from .text_view import (
-    Selection, VisualLine, paint_selection_overlay, paint_text_segments,
+    Selection, VisualLine, paint_selection_overlay,
     smart_wrap_lines, wrap_lines,
 )
 from .config import WRAP_NONE, WRAP_SMART
@@ -690,6 +695,28 @@ struct Caret(ImplicitlyCopyable, Movable):
     var anchor_col: Int
 
 
+def _row_is_expanded(
+    buf_row: Int, carets: List[Caret], bracket_rows: List[Int],
+) -> Bool:
+    """True when ``buf_row`` must render its real text rather than the
+    concealed form: it holds a caret, falls inside a caret's selection, or is
+    one half of the highlighted bracket pair. Keyword-arg compression skips
+    these rows so the line you're editing always shows what's actually there
+    and cursor / selection / click math never touches a compressed row."""
+    for c in carets:
+        if c.row == buf_row:
+            return True
+        if not (c.row == c.anchor_row and c.col == c.anchor_col):
+            var lo = c.row if c.row < c.anchor_row else c.anchor_row
+            var hi = c.row if c.row > c.anchor_row else c.anchor_row
+            if buf_row >= lo and buf_row <= hi:
+                return True
+    for r in bracket_rows:
+        if r == buf_row:
+            return True
+    return False
+
+
 @fieldwise_init
 struct BreakpointMenuRequest(ImplicitlyCopyable, Movable):
     """Set by ``handle_mouse`` when the user right-clicks a breakpoint
@@ -887,6 +914,12 @@ struct Editor(Copyable, Movable):
     # ``Desktop._apply_view_config``.
     var line_numbers: Bool
     var wrap_mode: Int
+    # ``compress_kwargs`` (Settings ▸ Editor) renders redundant ``name=name``
+    # call arguments with the label concealed on every line that doesn't hold
+    # a caret — a paint-time effect only; the buffer is never modified. The
+    # caret's own line (and any line touched by a selection) always shows the
+    # real text. See ``kwarg_conceal.mojo``.
+    var compress_kwargs: Bool
     # ``read_only`` makes every mutating operation a no-op: typing,
     # backspace/delete, paste, cut, undo/redo, replace_all,
     # toggle_comment, toggle_case. Cursor movement, selection, copy,
@@ -1154,6 +1187,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
+        self.compress_kwargs = False
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1253,6 +1287,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
+        self.compress_kwargs = False
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1380,6 +1415,7 @@ struct Editor(Copyable, Movable):
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
         self.wrap_mode = copy.wrap_mode
+        self.compress_kwargs = copy.compress_kwargs
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
@@ -4749,6 +4785,85 @@ struct Editor(Copyable, Movable):
 
     # --- painting ----------------------------------------------------------
 
+    def _concealed_display_rows(
+        self,
+        layout: List[VisualLine],
+        hl_buckets: List[List[Int]],
+        vis_lo: Int,
+        carets: List[Caret],
+        bracket_rows: List[Int],
+    ) -> Tuple[List[String], List[List[Int]], List[Int]]:
+        """Per visual row: the string to paint, its ``byte → cell`` map, and
+        the display cell count.
+
+        When ``compress_kwargs`` is on, rows that don't hold a caret and sit
+        outside every selection (and aren't a bracket-match partner) get their
+        redundant ``name=name`` call arguments concealed via
+        ``kwarg_conceal``. Every other row — and every row when the feature is
+        off or the language has no keyword-arg separator — falls back to the
+        raw slice + ``utf8_byte_to_cell``, so the caller can index the arrays
+        unconditionally. String/comment spans are read from the row's syntax
+        highlights so separators inside literals never trigger a match."""
+        var display_rows = List[String]()
+        var cell_maps = List[List[Int]]()
+        var cell_counts = List[Int]()
+        var sep = -1
+        if self.compress_kwargs:
+            sep = kwarg_separator_for_extension(extension_of(self.file_path))
+        for vidx in range(len(layout)):
+            var vrow = layout[vidx]
+            var buf_row = vrow.line_idx
+            var line = self.buffer.line(buf_row)
+            var line_n = len(line.as_bytes())
+            var start_byte = vrow.byte_start
+            var end_byte = vrow.byte_end
+            var seg: String
+            if start_byte >= line_n:
+                seg = String("")
+            else:
+                seg = _slice(line, start_byte, end_byte)
+            var seg_n = len(seg.as_bytes())
+            var compress = sep >= 0 and seg_n > 0 \
+                and not _row_is_expanded(buf_row, carets, bracket_rows)
+            if compress:
+                # String/comment byte spans (line coordinates) from this
+                # row's highlight bucket.
+                var sc_spans = List[Tuple[Int, Int]]()
+                var bidx = buf_row - vis_lo
+                if bidx >= 0 and bidx < len(hl_buckets):
+                    ref bucket = hl_buckets[bidx]
+                    for bi in range(len(bucket)):
+                        ref hl = self.highlights[bucket[bi]]
+                        if hl.attr.fg == SYN_STRING \
+                                or hl.attr.fg == SYN_COMMENT:
+                            sc_spans.append((hl.col_start, hl.col_end))
+                var line_hide = kwarg_conceal_ranges(line, sep, sc_spans)
+                # Intersect line-coordinate hide ranges into this segment.
+                var seg_hide = List[Tuple[Int, Int]]()
+                for hi in range(len(line_hide)):
+                    var lo = line_hide[hi][0]
+                    var hh = line_hide[hi][1]
+                    if hh <= start_byte or lo >= end_byte:
+                        continue
+                    var clo = lo - start_byte
+                    var chh = hh - start_byte
+                    if clo < 0:
+                        clo = 0
+                    if chh > seg_n:
+                        chh = seg_n
+                    if chh > clo:
+                        seg_hide.append((clo, chh))
+                if len(seg_hide) > 0:
+                    var built = build_concealed_segment(seg, seg_hide)
+                    display_rows.append(built[0])
+                    cell_maps.append(built[1].copy())
+                    cell_counts.append(built[2])
+                    continue
+            display_rows.append(seg)
+            cell_maps.append(utf8_byte_to_cell(seg))
+            cell_counts.append(utf8_codepoint_count(seg))
+        return (display_rows^, cell_maps^, cell_counts^)
+
     def paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         # Nothing to draw when the host workspace has collapsed (e.g.
         # the debug pane is maximized and the editor area shrinks to
@@ -4889,21 +5004,67 @@ struct Editor(Copyable, Movable):
         # ``_minimap_attr_for_slice`` for the source registry.
         if right_gutter > 0:
             self._paint_right_gutter(canvas, painter, view, content_h)
-        # Text pass — single-source via ``paint_text_segments`` (used
-        # by ``TextLog`` too). ``layout`` already accounts for
-        # ``indent_cells``; the helper offsets each row's segment
-        # accordingly.
-        var text_view = Rect(text_x0, view.a.y, content_right, content_bottom)
-        paint_text_segments(
-            canvas, text_view, self.buffer.lines, layout,
-            0, len(layout), List[Attr](), attr,
-        )
-        # Per-row overlay loop. Highlights and spell-check sit
-        # between text and selection, so the visual order is text →
-        # syntax → spell → selection → cursor. ``visible_cell_map``
-        # is per-row state these overlays need; selection moved out
-        # to a separate pass below.
+        # Per-row state the text + overlay passes share. The syntax-highlight
+        # buckets and caret list are built up front because the keyword-arg
+        # conceal pre-pass needs them to decide what to hide.
         var all_carets_paint = self._all_carets_asc()
+        var hl_buckets = List[List[Int]]()
+        var vis_lo = 0
+        if len(layout) > 0:
+            vis_lo = layout[0].line_idx
+            var vis_hi = layout[0].line_idx
+            for li in range(len(layout)):
+                var r = layout[li].line_idx
+                if r < vis_lo:
+                    vis_lo = r
+                if r > vis_hi:
+                    vis_hi = r
+            for _ in range(vis_hi - vis_lo + 1):
+                hl_buckets.append(List[Int]())
+            for h in range(len(self.highlights)):
+                var r = self.highlights[h].row
+                if r >= vis_lo and r <= vis_hi:
+                    hl_buckets[r - vis_lo].append(h)
+        # Bracket-match partner rows stay expanded too, so the pair highlight
+        # lands on real geometry; same guard as the bracket overlay below.
+        var bracket_rows = List[Int]()
+        if focused and not self.has_extra_carets() \
+                and not self.has_selection():
+            var bm = self._find_bracket_match_at_cursor()
+            if bm:
+                var bp = bm.value()
+                bracket_rows.append(bp[0])
+                bracket_rows.append(bp[2])
+        # Conceal pre-pass: per visual row, the string to paint plus its
+        # byte→cell map and cell count — raw on caret/selection/bracket rows,
+        # keyword-arg-compressed elsewhere when ``compress_kwargs`` is on. The
+        # text pass and every overlay below index these so they stay aligned
+        # with what's actually drawn.
+        var _disp = self._concealed_display_rows(
+            layout, hl_buckets, vis_lo, all_carets_paint, bracket_rows,
+        )
+        var display_rows = _disp[0].copy()
+        var cell_maps = _disp[1].copy()
+        var cell_counts = _disp[2].copy()
+        # Text pass — paint each row's (possibly concealed) display string.
+        # ``layout`` already accounts for ``indent_cells``; clip to the text
+        # column so the gutters are left untouched.
+        var text_view = Rect(text_x0, view.a.y, content_right, content_bottom)
+        var text_painter = Painter(text_view)
+        for k in range(len(layout)):
+            _ = text_painter.put_text(
+                canvas,
+                Point(
+                    text_view.a.x + layout[k].indent_cells,
+                    text_view.a.y + k,
+                ),
+                display_rows[k], attr,
+            )
+        # Per-row overlay loop. Highlights and spell-check sit between text
+        # and selection, so the visual order is text → syntax → spell →
+        # selection → cursor. The per-row ``cell_maps`` / ``cell_counts``
+        # (built above) are what these overlays index; selection moved out
+        # to a separate pass below.
         # Match-highlight setup: when a non-trivial single-line
         # selection is active (and there are no multi-carets in
         # play), every byte-equal occurrence of the selected text in
@@ -4937,50 +5098,23 @@ struct Editor(Copyable, Movable):
                     match_needle_n = cand_n
                     match_sel_row = sel_norm[0]
                     match_sel_byte = sel_norm[1]
-        # Index syntax highlights by visible buffer row before the
-        # overlay loop. ``self.highlights`` spans the *whole* buffer
-        # (30k+ entries on a large file), so the old "scan the full list
-        # for every screen row" pattern was O(rows x all_highlights) and
-        # was, by profiling, ~95% of all paint time. Bucketing once is
-        # O(all_highlights + applied): each screen row then touches only
-        # the handful of highlights that actually fall on its row.
-        var hl_buckets = List[List[Int]]()
-        var vis_lo = 0
-        if len(layout) > 0:
-            vis_lo = layout[0].line_idx
-            var vis_hi = layout[0].line_idx
-            for li in range(len(layout)):
-                var r = layout[li].line_idx
-                if r < vis_lo:
-                    vis_lo = r
-                if r > vis_hi:
-                    vis_hi = r
-            for _ in range(vis_hi - vis_lo + 1):
-                hl_buckets.append(List[Int]())
-            for h in range(len(self.highlights)):
-                var r = self.highlights[h].row
-                if r >= vis_lo and r <= vis_hi:
-                    hl_buckets[r - vis_lo].append(h)
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row].line_idx
             var start_byte = layout[screen_row].byte_start
             var end_byte = layout[screen_row].byte_end
-            var indent_cells = layout[screen_row].indent_cells
-            var seg_x0 = text_x0 + indent_cells
+            var seg_x0 = text_x0 + layout[screen_row].indent_cells
             var line = self.buffer.line(buf_row)
-            var n = len(line.as_bytes())
-            var visible: String
-            if start_byte >= n:
-                visible = String("")
-            else:
-                visible = _slice(line, start_byte, end_byte)
-            var visible_cell_map = utf8_byte_to_cell(visible)
-            var visible_byte_count = len(visible.as_bytes())
-            var visible_cell_count = utf8_codepoint_count(visible)
+            # ``cell_maps`` / ``cell_counts`` come from the conceal pre-pass:
+            # the map has one entry per *raw* segment byte (so highlight byte
+            # offsets index it directly), and concealed bytes collapse to the
+            # display cell they sit in — overlays land on the painted text.
+            ref visible_cell_map = cell_maps[screen_row]
+            var visible_byte_count = len(visible_cell_map)
+            var visible_cell_count = cell_counts[screen_row]
             var sy_hl = view.a.y + screen_row
             # Syntax-highlight overlay: change the attr on cells covered by
             # any highlight that targets this buffer row. Glyphs come from
-            # ``paint_text_segments`` above; we only adjust attributes here.
+            # the text pass above; we only adjust attributes here.
             ref row_bucket = hl_buckets[buf_row - vis_lo]
             for hb in range(len(row_bucket)):
                 var hl = self.highlights[row_bucket[hb]]

@@ -198,6 +198,11 @@ struct TurbokodConfig(Copyable, Movable):
     #     trailing newline — that stays an editorconfig-only behavior).
     var trim_trailing_whitespace: Bool
     var ensure_final_newline: Bool
+    # Settings ▸ Editor ▸ "Compress keyword arguments". When on, lines that
+    # don't hold the caret render redundant ``name=name`` call arguments with
+    # the label concealed (``foo(a=a)`` → ``foo(=a)``); the buffer is
+    # untouched. Off by default. See ``kwarg_conceal.mojo``.
+    var compress_kwargs: Bool
     # Settings ▸ Theme. Name of the active color theme (see ``theme.mojo``).
     # Drives both syntax highlighting and the UI chrome palette. Defaults to
     # the classic ``"Turbo C++ 3.0"`` look; an unknown name (e.g. a config
@@ -243,6 +248,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.auto_save = True
         self.trim_trailing_whitespace = True
         self.ensure_final_newline = True
+        self.compress_kwargs = False
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
         self.font_size = 0
@@ -262,6 +268,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.auto_save = copy.auto_save
         self.trim_trailing_whitespace = copy.trim_trailing_whitespace
         self.ensure_final_newline = copy.ensure_final_newline
+        self.compress_kwargs = copy.compress_kwargs
         self.theme = copy.theme
         self.font = copy.font
         self.font_size = copy.font_size
@@ -353,6 +360,9 @@ def load_config() -> TurbokodConfig:
             root, String("ensure_final_newline"),
             cfg.ensure_final_newline,
         )
+        cfg.compress_kwargs = json_get_bool(
+            root, String("compress_kwargs"), cfg.compress_kwargs,
+        )
         var theme_v = json_get_string(root, String("theme"))
         if len(theme_v.as_bytes()) > 0:
             cfg.theme = theme_v
@@ -441,6 +451,7 @@ def save_config(config: TurbokodConfig) -> Bool:
         String("ensure_final_newline"),
         json_bool(config.ensure_final_newline),
     )
+    root.put(String("compress_kwargs"), json_bool(config.compress_kwargs))
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
     root.put(String("font_size"), json_int(config.font_size))

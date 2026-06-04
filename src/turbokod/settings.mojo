@@ -98,6 +98,7 @@ comptime _FOCUS_FONT_SMALLER  = UInt8(18)
 comptime _FOCUS_FONT_LARGER   = UInt8(19)
 comptime _FOCUS_FONT_IDEAL    = UInt8(20)
 comptime _FOCUS_WRAP_MODE     = UInt8(21)
+comptime _FOCUS_COMPRESS_KW   = UInt8(22)
 
 
 # --- section indices ------------------------------------------------------
@@ -216,6 +217,9 @@ struct Settings(Movable):
     var ensure_final_newline: Bool
     """Working copy of ``TurbokodConfig.ensure_final_newline`` — Editor
     ▸ "Ensure newline at end of files". Driven by ``_final_nl_cb``."""
+    var compress_kwargs: Bool
+    """Working copy of ``TurbokodConfig.compress_kwargs`` — Editor ▸
+    "Compress keyword arguments". Driven by ``_compress_cb``."""
     var section: Int
     """Index into ``_section_labels`` for the active section."""
     var selected_action: Int
@@ -256,6 +260,9 @@ struct Settings(Movable):
     var _final_nl_cb: Checkbox
     """Editor ▸ "Ensure newline at end of files" toggle. Mirrors
     ``ensure_final_newline``."""
+    var _compress_cb: Checkbox
+    """Editor ▸ "Compress keyword arguments" toggle. Mirrors
+    ``compress_kwargs``."""
     var dict_specs: List[DownloadableDictionary]
     """Catalog of downloadable spell-check dictionaries shown in the
     Spell-check pane. Snapshotted on ``open`` so the list and the
@@ -351,6 +358,7 @@ struct Settings(Movable):
         self.wrap_mode = WRAP_NONE
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
+        self.compress_kwargs = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -410,6 +418,9 @@ struct Settings(Movable):
         self._final_nl_cb = Checkbox(
             String("Ensure newline at end of files"), 0, 0, False,
         )
+        self._compress_cb = Checkbox(
+            String("Compress keyword arguments"), 0, 0, False,
+        )
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
@@ -445,6 +456,7 @@ struct Settings(Movable):
         current_language_ext: String = String(""),
         trim_trailing_whitespace: Bool = True,
         ensure_final_newline: Bool = True,
+        compress_kwargs: Bool = False,
         theme: String = String("Turbo C++ 3.0"),
         font: String = String(""),
         var font_names: List[String] = List[String](),
@@ -458,8 +470,10 @@ struct Settings(Movable):
         self.wrap_mode = wrap_mode
         self.trim_trailing_whitespace = trim_trailing_whitespace
         self.ensure_final_newline = ensure_final_newline
+        self.compress_kwargs = compress_kwargs
         self._trim_cb.on = trim_trailing_whitespace
         self._final_nl_cb.on = ensure_final_newline
+        self._compress_cb.on = compress_kwargs
         self.active = True
         self.dirty = False
         self.section = 0
@@ -536,6 +550,7 @@ struct Settings(Movable):
         self.auto_save = False
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
+        self.compress_kwargs = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -547,6 +562,8 @@ struct Settings(Movable):
         self._trim_cb.pressed_inside = False
         self._final_nl_cb.pressed = False
         self._final_nl_cb.pressed_inside = False
+        self._compress_cb.pressed = False
+        self._compress_cb.pressed_inside = False
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
@@ -1262,6 +1279,19 @@ struct Settings(Movable):
             String("Applied on every save unless a project .editorconfig overrides it."),
             hint,
         )
+        # Display-only toggle (not a save transform), so it sits below the
+        # save-behavior hint with its own one-liner.
+        self._compress_cb.on = self.compress_kwargs
+        self._compress_cb.move_to(inner.a.x, label_y + 13)
+        paint_checkbox(
+            canvas, self._compress_cb, chip, focus_attr,
+            self.focus == _FOCUS_COMPRESS_KW, inner.b.x,
+        )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, label_y + 14),
+            String("Hide redundant name=name call args off the caret line (Python/Mojo/Swift)."),
+            hint,
+        )
 
     def _paint_spell_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1609,6 +1639,9 @@ struct Settings(Movable):
             if self.focus == _FOCUS_FINAL_NL:
                 self._toggle_final_nl()
                 return True
+            if self.focus == _FOCUS_COMPRESS_KW:
+                self._toggle_compress_kwargs()
+                return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
         # type "py" to land on the python row regardless of which
@@ -1689,6 +1722,12 @@ struct Settings(Movable):
         self._final_nl_cb.on = self.ensure_final_newline
         self.dirty = True
 
+    def _toggle_compress_kwargs(mut self):
+        """Counterpart for the compress-keyword-arguments toggle."""
+        self.compress_kwargs = not self.compress_kwargs
+        self._compress_cb.on = self.compress_kwargs
+        self.dirty = True
+
     def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
         # otherwise Tab from the rail would land on Add/Edit even
@@ -1709,6 +1748,7 @@ struct Settings(Movable):
             ordered.append(_FOCUS_WRAP_MODE)
             ordered.append(_FOCUS_TRIM_WS)
             ordered.append(_FOCUS_FINAL_NL)
+            ordered.append(_FOCUS_COMPRESS_KW)
         elif self.section == _SECTION_SPELL:
             if len(self.dict_specs) > 0:
                 ordered.append(_FOCUS_DICT_LIST)
@@ -1953,6 +1993,9 @@ struct Settings(Movable):
         if self.focus == _FOCUS_FINAL_NL:
             self._toggle_final_nl()
             return True
+        if self.focus == _FOCUS_COMPRESS_KW:
+            self._toggle_compress_kwargs()
+            return True
         if self.focus == _FOCUS_DICT_INSTALL:
             self._request_dict_install()
             return True
@@ -2130,6 +2173,12 @@ struct Settings(Movable):
                 if nl_status == BUTTON_FIRED:
                     self.focus = _FOCUS_FINAL_NL
                     self._toggle_final_nl()
+                return True
+            var compress_status = self._compress_cb.handle_mouse(event)
+            if compress_status != BUTTON_NONE:
+                if compress_status == BUTTON_FIRED:
+                    self.focus = _FOCUS_COMPRESS_KW
+                    self._toggle_compress_kwargs()
                 return True
         if self._dispatch_buttons(event):
             return True
