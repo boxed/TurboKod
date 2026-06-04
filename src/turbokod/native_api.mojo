@@ -733,6 +733,29 @@ def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> In
 
 
 @export
+def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) -> Int32:
+    """Bare modifier-key transition (press/release of a lone modifier,
+    e.g. Option/Alt) from the AppKit host's ``flagsChanged``. The
+    terminal frontend synthesizes these from ``CSI ... z`` sequences;
+    the native host has to report them explicitly. Drives the editor's
+    Alt-tap (selection⇄column toggle) and tap-then-hold (column-draw)
+    gestures. ``mod_id`` is one of the ``MOD_KEY_*`` constants. The
+    Desktop routes this straight to the focused editor and ignores the
+    screen rect, so we pass an empty one."""
+    if h == 0:
+        return ACT_NONE
+    var action: Optional[String]
+    try:
+        action = _desk(h)[].handle_event(
+            Event.mod_key_event(mod_id, pressed != 0), Rect(0, 0, 0, 0),
+        )
+    except e:
+        print("turbokod: tk_desktop_mod_key:", String(e))
+        action = Optional[String]()
+    return _action_code(action)
+
+
+@export
 def tk_desktop_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int,

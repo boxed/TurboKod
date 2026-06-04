@@ -7205,6 +7205,134 @@ def test_editor_multi_caret_col0_backspace_joins_rows() raises:
     assert_equal(ed.caret_count(), 4)
 
 
+def test_editor_alt_drag_inserts_column_of_cursors() raises:
+    # Alt+press then drag-motion straight down: one caret per row from
+    # the press row to the row under the pointer, all parked at the same
+    # cell column, each clamped to its line's length.
+    var ed = Editor(String("hello world\nhi\ngoodbye"))
+    # Alt+press at row 0, cell column 3 (mods only sampled on press).
+    _ = ed.handle_mouse(
+        Event.mouse_event(
+            Point(3, 0), MOUSE_BUTTON_LEFT,
+            pressed=True, motion=False, mods=MOD_ALT,
+        ),
+        _VIEW,
+    )
+    # Drag-motion to row 2 at the same column. Motion events carry no
+    # MOD_ALT bit — the box drag must persist via internal state.
+    _ = ed.handle_mouse(
+        Event.mouse_event(
+            Point(3, 2), MOUSE_BUTTON_LEFT,
+            pressed=True, motion=True, mods=MOD_NONE,
+        ),
+        _VIEW,
+    )
+    var carets = ed._all_carets_asc()
+    assert_equal(len(carets), 3)
+    # Row 0: cell 3 lands mid-word at byte 3.
+    assert_equal(carets[0].row, 0)
+    assert_equal(carets[0].col, 3)
+    # Row 1 ("hi") is only 2 bytes — the caret clamps to end of line.
+    assert_equal(carets[1].row, 1)
+    assert_equal(carets[1].col, 2)
+    # Row 2 ("goodbye") is long enough — back to byte 3.
+    assert_equal(carets[2].row, 2)
+    assert_equal(carets[2].col, 3)
+    # Pure vertical drag → zero-width carets (cursors, no selection).
+    assert_false(ed.has_selection())
+    # Release clears the in-flight box-drag state.
+    _ = ed.handle_mouse(
+        Event.mouse_event(
+            Point(3, 2), MOUSE_BUTTON_LEFT,
+            pressed=False, motion=False, mods=MOD_NONE,
+        ),
+        _VIEW,
+    )
+    assert_false(ed._box_drag_active)
+
+
+def test_editor_alt_tap_toggles_selection_to_column_and_back() raises:
+    # Make a multi-line selection, then an Alt-tap (bare Alt press +
+    # release with nothing in between) collapses it into a vertical
+    # column of cursors at the selection's start column, clamped per
+    # line. A second Alt-tap toggles the original selection back.
+    from turbokod.events import MOD_KEY_ALT
+    var ed = Editor(String("hello\nhi\nworld"))
+    ed.move_to(0, 3, False)        # cursor + anchor at (0, 3)
+    ed.move_to(2, 3, True)         # extend → selection (0,3)..(2,3)
+    assert_true(ed.has_selection())
+    # Alt-tap: press then release, no key in between.
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, True))
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, False))
+    # → three zero-width carets, one per selected row, at cell col 3.
+    assert_equal(ed.caret_count(), 3)
+    assert_false(ed.has_selection())
+    var carets = ed._all_carets_asc()
+    assert_equal(carets[0].row, 0)
+    assert_equal(carets[0].col, 3)
+    # Row 1 ("hi") is too short — caret clamps to end of line.
+    assert_equal(carets[1].row, 1)
+    assert_equal(carets[1].col, 2)
+    assert_equal(carets[2].row, 2)
+    assert_equal(carets[2].col, 3)
+    # Second Alt-tap toggles the selection back.
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, True))
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, False))
+    assert_equal(ed.caret_count(), 1)
+    assert_true(ed.has_selection())
+    assert_equal(ed.selections[0].anchor_row, 0)
+    assert_equal(ed.selections[0].anchor_col, 3)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 3)
+
+
+def test_editor_alt_tap_hold_arrows_build_cursor_column() raises:
+    # Tap Alt, then tap-and-hold Alt (a second press inside the
+    # tap-then-hold window) enters column-draw mode; while Alt stays
+    # held, Up/Down stamps a fresh caret on the adjacent row.
+    from turbokod.events import MOD_KEY_ALT
+    var ed = Editor(String("alpha\nbeta\ngamma\ndelta"))
+    assert_equal(ed.caret_count(), 1)
+    # First tap: press + release (no selection → arms tap-then-hold).
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, True))
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, False))
+    # Hold: second press lands inside the window → column-draw mode.
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, True))
+    # Alt+Down twice stamps a caret on each row below.
+    _ = ed.handle_key(_key(KEY_DOWN, MOD_ALT), _VIEW)
+    _ = ed.handle_key(_key(KEY_DOWN, MOD_ALT), _VIEW)
+    assert_equal(ed.caret_count(), 3)
+    var carets = ed._all_carets_asc()
+    assert_equal(carets[0].row, 0)
+    assert_equal(carets[1].row, 1)
+    assert_equal(carets[2].row, 2)
+    # Releasing Alt ends column-draw mode.
+    _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, False))
+    assert_false(ed._column_mode)
+
+
+def test_desktop_routes_alt_tap_to_focused_editor() raises:
+    # The native frontend reports bare Alt transitions through
+    # tk_desktop_mod_key → Desktop.handle_event(EVENT_MOD_KEY) → the
+    # focused editor's handle_mod_key. This guards that routing so the
+    # native plumbing can't silently stop reaching the editor.
+    from turbokod.events import MOD_KEY_ALT
+    var path = _temp_path(String("_dalttap.txt"))
+    assert_true(write_file(path, String("alpha\nbeta\ngamma\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("dalttap.txt"), Rect(0, 1, 40, 12), path))
+    # Multi-line selection in the focused editor.
+    d.windows.windows[0].editor.move_to(0, 1, False)
+    d.windows.windows[0].editor.move_to(2, 1, True)
+    assert_true(d.windows.windows[0].editor.has_selection())
+    # Alt-tap (press + release) routed through the Desktop event entry.
+    _ = d.handle_event(Event.mod_key_event(MOD_KEY_ALT, True), _SCREEN)
+    _ = d.handle_event(Event.mod_key_event(MOD_KEY_ALT, False), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.caret_count(), 3)
+    assert_false(d.windows.windows[0].editor.has_selection())
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_gutter_click_emits_breakpoint_toggle() raises:
     # Line-number gutter on → 2 cells of gutter at the left edge. A
     # left-click there must surface as a pending breakpoint toggle for
@@ -11834,6 +11962,26 @@ def test_text_view_wrap_lines_word_aware_with_indent() raises:
     assert_true(len(rows) >= 2)
     assert_equal(rows[0].indent_cells, 0)
     assert_equal(rows[1].indent_cells, 8)
+
+
+def test_text_view_wrap_lines_keeps_string_whole() raises:
+    """Word-aware soft wrap treats a quoted string as one token: a break
+    that would land inside ``'foobar'`` instead falls back to the space
+    before the opening quote, so the literal is never split into
+    ``'`` + ``foobar'``."""
+    var line = String("aaa 'foobar'")   # 12 codepoints; quote span [4, 12)
+    var lines = List[String]()
+    lines.append(line)
+    var rows = wrap_lines(lines, 8, word_aware=True)
+    _assert_layout_contiguous(line, rows)
+    # The break lands before the opening quote, not inside the string.
+    assert_equal(len(rows), 2)
+    assert_equal(rows[0].byte_end, 4)
+    assert_equal(rows[1].byte_start, 4)
+    assert_equal(rows[1].byte_end, 12)
+    # No segment boundary lands strictly inside the quoted span [4, 12).
+    for r in rows:
+        assert_true(r.byte_start <= 4 or r.byte_start >= 12)
 
 
 def _assert_layout_contiguous(line: String, layout: List[VisualLine]) raises:
@@ -17089,6 +17237,10 @@ def _run_chunk_02() raises:
     test_editor_meta_click_outside_identifier_is_silent()
     test_editor_alt_click_adds_extra_caret()
     test_editor_multi_caret_col0_backspace_joins_rows()
+    test_editor_alt_drag_inserts_column_of_cursors()
+    test_editor_alt_tap_toggles_selection_to_column_and_back()
+    test_editor_alt_tap_hold_arrows_build_cursor_column()
+    test_desktop_routes_alt_tap_to_focused_editor()
     test_editor_gutter_click_emits_breakpoint_toggle()
     test_editor_text_click_does_not_toggle_breakpoint()
     test_editor_gutter_click_below_eof_is_ignored()
@@ -17353,6 +17505,7 @@ def _run_chunk_04() raises:
     test_debug_pane_click_on_traceback_link_sets_pending_open()
     test_text_view_wrap_lines_breaks_at_width()
     test_text_view_wrap_lines_word_aware_with_indent()
+    test_text_view_wrap_lines_keeps_string_whole()
     test_smart_wrap_lines_breaks_call_one_item_per_line()
     test_smart_wrap_lines_short_line_not_broken()
     test_smart_wrap_lines_falls_back_to_soft_wrap()

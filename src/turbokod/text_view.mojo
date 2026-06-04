@@ -68,6 +68,54 @@ struct VisualLine(ImplicitlyCopyable, Movable):
     var indent_cells: Int  # hanging-indent cells before the text starts
 
 
+def _string_spans(line: String) -> List[Tuple[Int, Int]]:
+    """Byte ranges ``[start, end)`` of *closed* quoted string literals in
+    ``line`` (``'`` / ``"`` / `` ` `` delimiters, backslash escapes the next
+    byte). Used by the word-aware wrap to treat a quoted string as a single
+    token — so ``'foo'`` is never broken into ``'`` + ``foo'``.
+
+    Only quotes that find a matching closer become spans; an unterminated
+    quote (e.g. the apostrophe in ``don't``) is left alone so prose still
+    wraps normally.
+    """
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var spans = List[Tuple[Int, Int]]()
+    var i = 0
+    while i < n:
+        var ch = Int(bytes[i])
+        if ch == 0x27 or ch == 0x22 or ch == 0x60:  # ' " `
+            var j = i + 1
+            var closed = False
+            while j < n:
+                var cj = Int(bytes[j])
+                if cj == 0x5C:  # backslash escapes the next byte
+                    j += 2
+                    continue
+                if cj == ch:
+                    closed = True
+                    j += 1
+                    break
+                j += 1
+            if closed:
+                spans.append((i, j))
+                i = j
+                continue
+        i += 1
+    return spans^
+
+
+def _splits_string(spans: List[Tuple[Int, Int]], p: Int) -> Bool:
+    """True when a break at byte ``p`` (left ends before ``p``) would land
+    *strictly inside* one of ``spans`` — i.e. ``s < p < t``. Breaking right
+    before the opening quote (``p == s``) or after the closer (``p == t``)
+    keeps the literal whole and is allowed."""
+    for span in spans:
+        if span[0] < p and p < span[1]:
+            return True
+    return False
+
+
 def _wrap_one_line_into(
     mut out: List[VisualLine],
     line_idx: Int,
@@ -104,6 +152,9 @@ def _wrap_one_line_into(
     if hi <= lo:
         out.append(VisualLine(line_idx, lo, lo, cell_offset, 0, first_indent))
         return cell_offset
+    # Quoted-string spans so the word-aware break never splits a literal
+    # (``'foo'`` stays whole instead of breaking into ``'`` + ``foo'``).
+    var spans = _string_spans(line) if word_aware else List[Tuple[Int, Int]]()
     var c = lo
     var first = True
     while c < hi:
@@ -129,7 +180,11 @@ def _wrap_one_line_into(
             var p = e_hard
             while p > c + 1:
                 var pb = Int(bytes[p - 1])
-                if pb < 0x80 and not is_word_codepoint(pb):
+                if (
+                    pb < 0x80
+                    and not is_word_codepoint(pb)
+                    and not _splits_string(spans, p)
+                ):
                     e = p
                     break
                 p -= 1

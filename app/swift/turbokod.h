@@ -27,6 +27,10 @@ int32_t tk_desktop_key(int64_t h, uint32_t key, uint8_t mods,
 int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                          uint8_t pressed, uint8_t motion, uint8_t mods,
                          int64_t cols, int64_t rows);
+// Bare modifier-key transition (e.g. Option/Alt press or release) from
+// the AppKit host's flagsChanged. mod_id is a MOD_KEY_* value (2 = Alt).
+// Drives the editor's Alt-tap and tap-then-hold multi-cursor gestures.
+int32_t tk_desktop_mod_key(int64_t h, uint32_t mod_id, uint8_t pressed);
 int32_t tk_desktop_pointer_shape(int64_t h, int64_t x, int64_t y,
                                  int64_t cols, int64_t rows);
 int32_t tk_desktop_has_project(int64_t h);

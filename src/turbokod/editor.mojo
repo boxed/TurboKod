@@ -1011,6 +1011,24 @@ struct Editor(Copyable, Movable):
     var _alt_armed: Bool
     var _last_alt_tap_ms: Int
     var _column_mode: Bool
+    # Alt+click-drag box selection. ``_box_drag_active`` is True between
+    # an Alt+left-press and its release; while set, every drag-motion
+    # event rebuilds a vertical run of carets from ``_box_anchor_row``
+    # (the press row) down/up to the row under the pointer, all parked at
+    # ``_box_anchor_cell`` .. current cell column (clamped per line). The
+    # mods bitmask is only sampled on press, so motion events never carry
+    # MOD_ALT — this flag is how we remember the gesture is in flight.
+    var _box_drag_active: Bool
+    var _box_anchor_row: Int
+    var _box_anchor_cell: Int
+    # Selection ⇄ column-cursors toggle. When an Alt-tap converts a
+    # multi-line selection into a column of carets, the original
+    # selection (a single primary ``Caret``) is stashed here so the next
+    # Alt-tap can toggle it back. Cleared by any keystroke or mouse
+    # interaction, so the toggle-back only applies to an immediate
+    # second Alt-tap — once the user edits or clicks, the saved
+    # selection is stale and abandoned.
+    var _block_edit_origin: Optional[Caret]
     # Hover-tooltip state. Originally minimap-only (hence the field
     # prefix), now also drives in-text hover popups for spell flags and
     # LSP diagnostic underlines: hovering over a misspelled word or a
@@ -1168,6 +1186,10 @@ struct Editor(Copyable, Movable):
         self._alt_armed = False
         self._last_alt_tap_ms = 0
         self._column_mode = False
+        self._box_drag_active = False
+        self._box_anchor_row = 0
+        self._box_anchor_cell = 0
+        self._block_edit_origin = Optional[Caret]()
         self._minimap_hover_kind = 0
         self._minimap_hover_buf_row = -1
         self._minimap_hover_word = String("")
@@ -1263,6 +1285,10 @@ struct Editor(Copyable, Movable):
         self._alt_armed = False
         self._last_alt_tap_ms = 0
         self._column_mode = False
+        self._box_drag_active = False
+        self._box_anchor_row = 0
+        self._box_anchor_cell = 0
+        self._block_edit_origin = Optional[Caret]()
         self._minimap_hover_kind = 0
         self._minimap_hover_buf_row = -1
         self._minimap_hover_word = String("")
@@ -1391,6 +1417,10 @@ struct Editor(Copyable, Movable):
         self._alt_armed = copy._alt_armed
         self._last_alt_tap_ms = copy._last_alt_tap_ms
         self._column_mode = copy._column_mode
+        self._box_drag_active = copy._box_drag_active
+        self._box_anchor_row = copy._box_anchor_row
+        self._box_anchor_cell = copy._box_anchor_cell
+        self._block_edit_origin = copy._block_edit_origin
         self._minimap_hover_kind = copy._minimap_hover_kind
         self._minimap_hover_buf_row = copy._minimap_hover_buf_row
         self._minimap_hover_word = copy._minimap_hover_word
@@ -5842,9 +5872,11 @@ struct Editor(Copyable, Movable):
 
         * **Alt tap**: press and release Alt with no other input in
           between. If a multi-line selection is live at release time,
-          collapse it into one caret per line at column 0 (block-edit
-          entry). Otherwise the tap arms the next Alt-press as the
-          "hold" half of a tap-then-hold.
+          collapse it into a vertical column of cursors at the
+          selection's start column (``_convert_selection_to_block_edit``)
+          and stash the selection so the *next* Alt-tap toggles it back.
+          With no selection (and no toggle pending) the tap instead arms
+          the next Alt-press as the "hold" half of a tap-then-hold.
 
         * **Tap-then-hold**: a second Alt-press that lands within
           ``_ALT_TAP_HOLD_MS`` of the prior tap-release enters column-
@@ -5873,8 +5905,20 @@ struct Editor(Copyable, Movable):
         # Alt released.
         if self._alt_armed:
             # No other input arrived between press and release → tap.
-            if self.has_selection() \
+            if self._block_edit_origin:
+                # Toggle back: a previous Alt-tap converted a selection
+                # into a column of cursors; this tap restores it.
+                var origin = self._block_edit_origin.value()
+                var only = List[Caret]()
+                only.append(origin)
+                self.selections = only^
+                self._block_edit_origin = Optional[Caret]()
+                self._last_alt_tap_ms = 0
+            elif self.has_selection() \
                     and self.selections[0].row != self.selections[0].anchor_row:
+                # Stash the selection so the next Alt-tap can toggle it
+                # back, then collapse it into a column of cursors.
+                self._block_edit_origin = Optional[Caret](self.selections[0])
                 self._convert_selection_to_block_edit()
                 self._last_alt_tap_ms = 0
             else:
@@ -5884,9 +5928,14 @@ struct Editor(Copyable, Movable):
         return True
 
     def _convert_selection_to_block_edit(mut self):
-        """Turn the current multi-line selection into one caret per
-        selected line at column 0. The primary caret lands on the
-        topmost selected row; extras cover every row below it.
+        """Turn the current multi-line selection into a vertical column
+        of zero-width carets — one per selected row, the selection
+        itself removed. The column sits at the cell column of the
+        selection's *start* (its top-most point) and each caret clamps
+        to its own row's length, so short rows park their caret at
+        end-of-line ("as far as possible"). ``handle_mod_key`` stashes
+        the original selection into ``_block_edit_origin`` before calling
+        this, so a second Alt-tap can toggle the selection back.
 
         A trailing row whose selection ends at column 0 is excluded —
         users select whole lines via Shift+Down, which lands the
@@ -5894,21 +5943,28 @@ struct Editor(Copyable, Movable):
         intuitively expect a caret on that uninvolved row."""
         var top: Int
         var bot: Int
+        var top_col: Int
         var bot_col: Int
         if self.selections[0].row < self.selections[0].anchor_row:
             top = self.selections[0].row
+            top_col = self.selections[0].col
             bot = self.selections[0].anchor_row
             bot_col = self.selections[0].anchor_col
         else:
             top = self.selections[0].anchor_row
+            top_col = self.selections[0].anchor_col
             bot = self.selections[0].row
             bot_col = self.selections[0].col
         if bot > top and bot_col == 0:
             bot -= 1
+        # Anchor the column on the selection start's cell column; each
+        # row resolves it back to a byte offset clamped to that row.
+        var col_cell = _utf8_cell_of_byte(self.buffer.line(top), top_col)
         var carets = List[Caret]()
-        carets.append(Caret(top, 0, 0, top, 0))
-        for r in range(top + 1, bot + 1):
-            carets.append(Caret(r, 0, 0, r, 0))
+        for r in range(top, bot + 1):
+            var line = self.buffer.line(r)
+            var b = _utf8_byte_of_cell(line, col_cell)
+            carets.append(Caret(r, b, _utf8_cell_of_byte(line, b), r, b))
         self._install_carets(carets^)
 
     def handle_key(mut self, event: Event, view: Rect) -> Bool:
@@ -5917,6 +5973,9 @@ struct Editor(Copyable, Movable):
         # Any key event breaks the "Alt was held alone" condition. A
         # subsequent Alt-release will no longer count as a tap.
         self._alt_armed = False
+        # …and abandons any pending selection⇄column toggle: once the
+        # user types or moves, the stashed selection is stale.
+        self._block_edit_origin = Optional[Caret]()
         # Any keystroke means the user has shifted attention away from
         # the hovered identifier — drop the dwell candidate and any
         # popup so it doesn't float over edits we're about to make.
@@ -6959,6 +7018,9 @@ struct Editor(Copyable, Movable):
         self._typing_active = False
         self._smart_select_stack = List[Caret]()
         self._alt_armed = False
+        # A mouse interaction also abandons any pending selection⇄column
+        # toggle — the stashed selection no longer reflects intent.
+        self._block_edit_origin = Optional[Caret]()
         # Clicks / drags / wheel scrolls all invalidate any in-flight
         # hover popup: the absolute screen anchor would be stale after
         # a scroll, and a click means the user is acting, not dwelling.
@@ -7027,6 +7089,7 @@ struct Editor(Copyable, Movable):
             if not event.motion:
                 self._dc_active = False
                 self._tc_active = False
+                self._box_drag_active = False
             return False
         # The gutter (debugger + line numbers + change bar + blame)
         # occupies the leftmost columns. A click there is a breakpoint
@@ -7138,7 +7201,16 @@ struct Editor(Copyable, Movable):
         # gesture and shouldn't promote into double-click word
         # selection.
         if (event.mods & MOD_ALT) != 0 and not event.motion:
-            self._add_caret(Caret(row, col, _utf8_cell_of_byte(line, col),
+            # Arm a box-selection drag: remember the press point so each
+            # subsequent motion event (which won't carry MOD_ALT) can
+            # rebuild the vertical caret run. We also stamp a caret here
+            # so a bare Alt+click with no drag keeps the long-standing
+            # "add a caret" behavior — the box rebuild on the first
+            # motion replaces it.
+            self._box_drag_active = True
+            self._box_anchor_row = row
+            self._box_anchor_cell = _utf8_cell_of_byte(line, col)
+            self._add_caret(Caret(row, col, self._box_anchor_cell,
                                    row, col))
             return True
         # Shift+click: extend the selection from the existing anchor (the
@@ -7155,6 +7227,14 @@ struct Editor(Copyable, Movable):
             self._scroll_to_cursor(view)
             return True
         if event.motion:
+            # Alt+drag box selection: rebuild a vertical run of carets
+            # from the press row to the row under the pointer. Takes
+            # priority over the multi-click snap modes — an Alt-press
+            # never starts those.
+            if self._box_drag_active:
+                self._update_box_drag(row, cell_x)
+                self._scroll_to_cursor(view)
+                return True
             # Drag-motion: extend the selection. While a multi-click
             # gesture is in progress, snap the moving end to whole-word
             # (double-click) or whole-line (triple-click) boundaries
@@ -7266,6 +7346,39 @@ struct Editor(Copyable, Movable):
             else:
                 self.move_to(ar, self.buffer.line_length(ar), False)
             self.move_to(row, 0, True)
+
+    def _update_box_drag(mut self, row: Int, target_cell: Int):
+        """Rebuild the Alt+drag box selection. Stamps one caret on every
+        row from ``_box_anchor_row`` (the press row) to ``row`` (the row
+        under the pointer), inclusive. Each caret's anchor sits at cell
+        column ``_box_anchor_cell`` and its cursor at ``target_cell``,
+        both translated to byte offsets clamped to that row's length —
+        so the run stays vertical and a short line simply stops at its
+        end ("as far as possible given line lengths"). When the two cell
+        columns coincide the carets are zero-width: a plain vertical
+        stack of cursors. ``_install_carets`` drops the topmost caret
+        into the primary slot, which is what the surrounding scroll /
+        paint code expects."""
+        var r0 = self._box_anchor_row
+        var step = 1
+        if row < r0:
+            step = -1
+        var carets = List[Caret]()
+        var r = r0
+        while True:
+            var line = self.buffer.line(r)
+            var anc_byte = _utf8_byte_of_cell(line, self._box_anchor_cell)
+            var cur_byte = _utf8_byte_of_cell(line, target_cell)
+            carets.append(
+                Caret(
+                    r, cur_byte, _utf8_cell_of_byte(line, cur_byte),
+                    r, anc_byte,
+                )
+            )
+            if r == row:
+                break
+            r += step
+        self._install_carets(carets^)
 
     # --- buffer-level helpers ---------------------------------------------
 

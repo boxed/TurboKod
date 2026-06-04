@@ -209,6 +209,8 @@ let KEY_PAGEDOWN: UInt32 = 0xE017, KEY_INSERT: UInt32 = 0xE018, KEY_DELETE: UInt
 let KEY_F1: UInt32 = 0xE020
 
 let MOD_SHIFT: UInt8 = 1, MOD_ALT: UInt8 = 2, MOD_CTRL: UInt8 = 4, MOD_META: UInt8 = 8
+// Modifier IDs for bare-transition events (EVENT_MOD_KEY) — see events.mojo.
+let MOD_KEY_ALT: UInt32 = 2
 
 var CELL_W: CGFloat = 8, CELL_H: CGFloat = 16
 
@@ -261,6 +263,10 @@ final class CellView: NSView {
     // and emit one notch per notch-worth of travel so scroll speed tracks
     // the gesture, not the raw event rate. See scrollWheel.
     private var scrollAccumY: CGFloat = 0
+    // Last-seen Option/Alt key state, so flagsChanged (which fires for any
+    // modifier transition) can detect Option's own up/down edges and report
+    // them as bare EVENT_MOD_KEY transitions for the Alt-tap gestures.
+    private var optionDown = false
     // Palette is the active theme's index→RGB table. Seeded with the classic
     // built-in palette and refreshed from the Mojo core whenever the theme
     // version changes (Settings ▸ Theme). `themeVersion = -1` forces the first
@@ -357,6 +363,15 @@ final class CellView: NSView {
         case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
+        }
+    }
+    private func modKeySurface(_ modId: UInt32, _ pressed: UInt8) -> Int32 {
+        // Editors only live on the main Desktop surface; the floating
+        // panels and Settings windows have no text editors, so a bare
+        // modifier transition there has nothing to drive.
+        switch surface {
+        case .main: return tk_desktop_mod_key(handle, modId, pressed)
+        default:    return 0
         }
     }
     private func mouseSurface(_ col: Int64, _ row: Int64, _ button: UInt8,
@@ -562,6 +577,20 @@ final class CellView: NSView {
         }
         if key == 0 { return }
         let action = keySurface(key, mods(event), cols(), rows())
+        handleAction(action)
+        invalidateFrame()
+        needsDisplay = true
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        // See keyDown — scripted capture runs ignore live input.
+        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        // flagsChanged fires for *every* modifier transition; isolate
+        // Option's own up/down edges by diffing against the last state.
+        let nowDown = event.modifierFlags.contains(.option)
+        if nowDown == optionDown { return }   // some other modifier moved
+        optionDown = nowDown
+        let action = modKeySurface(MOD_KEY_ALT, nowDown ? 1 : 0)
         handleAction(action)
         invalidateFrame()
         needsDisplay = true
