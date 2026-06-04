@@ -52,6 +52,7 @@ int32_t tk_desktop_take_attention(int64_t h);
 // panels render on a separate host window via the _panels entry points; the
 // main window keeps using the functions above.
 void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
+int64_t tk_desktop_panels_visible_count(int64_t h);
 int64_t tk_desktop_layout_panels(int64_t h, int64_t cols, int64_t rows,
                                  int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_panels_key(int64_t h, uint32_t key, uint8_t mods,

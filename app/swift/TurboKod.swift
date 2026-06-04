@@ -955,6 +955,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // whether the panel surface needs a repaint.
             for pair in self.panels.values {
                 let pv = pair.view
+                // Auto-hide: with no tool panels open the floating window has
+                // nothing to show, so order it out (the Desktop stays detached
+                // — floating mode is still on). Show it again the moment a
+                // panel reopens. orderFront, not makeKey, to avoid yanking
+                // focus off the editor. See docs/floating-panels.md.
+                let hasPanels = pv.handle != 0
+                    && tk_desktop_panels_visible_count(pv.handle) > 0
+                if hasPanels {
+                    if !pair.window.isVisible { pair.window.orderFront(nil); changed = true }
+                } else if pair.window.isVisible {
+                    pair.window.orderOut(nil); changed = true; continue
+                }
                 guard let w = pv.window, w.isVisible,
                       w.occlusionState.contains(.visible) else { continue }
                 if pv.pollFrame() { pv.needsDisplay = true; changed = true }
@@ -2152,8 +2164,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         tk_desktop_set_panels_detached(mainView.handle, 1)
         // orderFront (not makeKey): toggling panels on shouldn't yank keyboard
         // focus off the editor. The user clicks into the panel window when
-        // they want to drive the terminal/debugger there.
-        win.orderFront(nil)
+        // they want to drive the terminal/debugger there. Skip the show when
+        // there are no panels yet — the tick-loop auto-hide owns visibility,
+        // and ordering an empty window front here would flash it for one tick.
+        if tk_desktop_panels_visible_count(mainView.handle) > 0 {
+            win.orderFront(nil)
+        }
         mainView.invalidateFrame(); mainView.needsDisplay = true
         pv.invalidateFrame(); pv.needsDisplay = true
     }
