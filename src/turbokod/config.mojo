@@ -209,6 +209,12 @@ struct TurbokodConfig(Copyable, Movable):
     # the label concealed (``foo(a=a)`` → ``foo(=a)``); the buffer is
     # untouched. Off by default. See ``kwarg_conceal.mojo``.
     var compress_kwargs: Bool
+    # Settings ▸ Editor ▸ "Blinking cursor". When on, the editor caret
+    # blinks (~530 ms half-cycle) instead of showing as a steady block; it
+    # snaps back to solid on any keystroke / click so it's never mid-blink
+    # right when you start typing. On by default — matches the classic
+    # text-mode cursor and keeps the caret easy to spot.
+    var cursor_blink: Bool
     # Settings ▸ Theme. Name of the active color theme (see ``theme.mojo``).
     # Drives both syntax highlighting and the UI chrome palette. Defaults to
     # the classic ``"Turbo C++ 3.0"`` look; an unknown name (e.g. a config
@@ -256,6 +262,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.trim_trailing_whitespace = True
         self.ensure_final_newline = True
         self.compress_kwargs = False
+        self.cursor_blink = True
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
         self.font_size = 0
@@ -277,6 +284,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.trim_trailing_whitespace = copy.trim_trailing_whitespace
         self.ensure_final_newline = copy.ensure_final_newline
         self.compress_kwargs = copy.compress_kwargs
+        self.cursor_blink = copy.cursor_blink
         self.theme = copy.theme
         self.font = copy.font
         self.font_size = copy.font_size
@@ -375,6 +383,9 @@ def load_config() -> TurbokodConfig:
         cfg.compress_kwargs = json_get_bool(
             root, String("compress_kwargs"), cfg.compress_kwargs,
         )
+        cfg.cursor_blink = json_get_bool(
+            root, String("cursor_blink"), cfg.cursor_blink,
+        )
         var theme_v = json_get_string(root, String("theme"))
         if len(theme_v.as_bytes()) > 0:
             cfg.theme = theme_v
@@ -468,6 +479,7 @@ def save_config(config: TurbokodConfig) -> Bool:
         json_bool(config.ensure_final_newline),
     )
     root.put(String("compress_kwargs"), json_bool(config.compress_kwargs))
+    root.put(String("cursor_blink"), json_bool(config.cursor_blink))
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
     root.put(String("font_size"), json_int(config.font_size))

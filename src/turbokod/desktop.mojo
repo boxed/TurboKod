@@ -430,6 +430,10 @@ comptime DOCK_TEST_PANE   = UInt8(4)
 # the editor feel near-instant, and slow enough that we don't run two
 # stat() calls per paint frame on idle.
 comptime _GIT_POLL_INTERVAL_MS = 1000
+# Caret-blink half-cycle in ms (solid for this long, then hidden for the
+# same): the full blink period is twice this. 530 ms matches the common
+# editor default. Only consulted when ``config.cursor_blink`` is on.
+comptime _CARET_BLINK_HALF_MS = 530
 
 # When ESC fires at the top level (no menu open, no prompt active), the
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
@@ -1031,6 +1035,13 @@ struct Desktop(Movable):
     # yet", so the first observation only seeds the cache.
     var _git_state_mtimes: GitStateMtimes
     var _last_git_state_check_ms: Int
+    # Wall-clock (monotonic ms) of the last key / mouse event routed
+    # through ``handle_event``. The caret-blink phase is measured from
+    # here so the caret is solid the instant the user types or clicks
+    # and only starts blinking after it goes idle (see
+    # ``_apply_view_config``). Frontend-agnostic — both frontends route
+    # input through ``handle_event``.
+    var _last_input_ms: Int
     # Last-seen focused editor's ``file_path`` for the per-window
     # save-on-focus-loss path. Updated every frame in ``paint``; when
     # it changes and ``config.auto_save`` is on, the editor for the
@@ -1175,6 +1186,7 @@ struct Desktop(Movable):
         self._nav_pos = -1
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
         self._last_git_state_check_ms = 0
+        self._last_input_ms = 0
         self._last_focused_editor_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
@@ -2192,10 +2204,24 @@ struct Desktop(Movable):
                                 and not self.windows.windows[j].editor.read_only:
                             self.windows.windows[j].editor.invalidate_git_changes()
                 self._git_state_mtimes = current
+        # Caret-blink phase, computed once for the whole frame. When
+        # blinking is off the caret is always shown. When on, the caret
+        # is solid for the first half of each ~530 ms cycle measured from
+        # the last input, so it reads as steady while typing and only
+        # blinks once the user pauses. Both frontends repaint often enough
+        # (terminal: ≤50 ms present loop; Swift: 50 ms pollFrame) to catch
+        # each toggle, so no per-frontend timer is needed.
+        var caret_on = True
+        if self.config.cursor_blink:
+            var since_input = monotonic_ms() - self._last_input_ms
+            if since_input < 0:
+                since_input = 0
+            caret_on = (since_input // _CARET_BLINK_HALF_MS) % 2 == 0
         debug_log(String("[_apply_view_config] entering per-window loop"))
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
+            self.windows.windows[i].editor.caret_visible = caret_on
             debug_log(String("[_apply_view_config] window ") + String(i))
             if self.windows.windows[i].editor.read_only:
                 self.windows.windows[i].editor.line_numbers = False
@@ -2494,6 +2520,9 @@ struct Desktop(Movable):
             if self.settings.compress_kwargs != self.config.compress_kwargs:
                 self.config.compress_kwargs = self.settings.compress_kwargs
                 self._apply_view_config()
+            # Caret blink: a pure paint toggle — the next frame's
+            # ``_apply_view_config`` reads the new value, no extra apply.
+            self.config.cursor_blink = self.settings.cursor_blink
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
@@ -4156,6 +4185,10 @@ struct Desktop(Movable):
         action the Desktop doesn't claim is returned verbatim for the
         caller to dispatch.
         """
+        # Reset the caret-blink clock on real input so the caret is solid
+        # the moment the user types or clicks (it only blinks once idle).
+        if event.kind == EVENT_KEY or event.kind == EVENT_MOUSE:
+            self._last_input_ms = monotonic_ms()
         # The first resize after a session restore is typically the
         # host terminal pushing its real dimensions. Re-apply the saved
         # rects against the now-correct workspace so windows that were
@@ -4937,6 +4970,7 @@ struct Desktop(Movable):
                 self.host_font_ideal_size,
                 self.config.wrap_mode,
                 self.config.smart_wrap_comma_threshold,
+                self.config.cursor_blink,
             )
             return Optional[String]()
         if action == EDITOR_NEW:

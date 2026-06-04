@@ -926,6 +926,11 @@ struct Editor(Copyable, Movable):
     # caret's own line (and any line touched by a selection) always shows the
     # real text. See ``kwarg_conceal.mojo``.
     var compress_kwargs: Bool
+    # Blink gate for the caret block. Driven by the Desktop every paint from
+    # ``config.cursor_blink`` + a clock (see ``Desktop._apply_view_config``):
+    # ``True`` paints the caret, ``False`` is the dark half of a blink cycle.
+    # Always ``True`` when blinking is disabled, so the caret is steady.
+    var caret_visible: Bool
     # ``read_only`` makes every mutating operation a no-op: typing,
     # backspace/delete, paste, cut, undo/redo, replace_all,
     # toggle_comment, toggle_case. Cursor movement, selection, copy,
@@ -1195,6 +1200,7 @@ struct Editor(Copyable, Movable):
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
         self.compress_kwargs = False
+        self.caret_visible = True
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1296,6 +1302,7 @@ struct Editor(Copyable, Movable):
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
         self.compress_kwargs = False
+        self.caret_visible = True
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1425,6 +1432,7 @@ struct Editor(Copyable, Movable):
         self.wrap_mode = copy.wrap_mode
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self.compress_kwargs = copy.compress_kwargs
+        self.caret_visible = copy.caret_visible
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
@@ -5333,8 +5341,10 @@ struct Editor(Copyable, Movable):
         # when the editor is focused. The primary and any extras paint
         # identically — the user reads "this line is the focus" from
         # the cursor's color, not from any difference between primary
-        # and secondary carets.
-        if focused:
+        # and secondary carets. ``caret_visible`` is the blink gate
+        # (always True when blinking is off) — the dark half of a blink
+        # cycle simply skips the block so the underlying cell shows.
+        if focused and self.caret_visible:
             for ci in range(len(all_carets_paint)):
                 var c = all_carets_paint[ci]
                 self._paint_one_caret(

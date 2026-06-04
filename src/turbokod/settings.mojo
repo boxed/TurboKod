@@ -100,6 +100,7 @@ comptime _FOCUS_FONT_IDEAL    = UInt8(20)
 comptime _FOCUS_WRAP_MODE     = UInt8(21)
 comptime _FOCUS_COMPRESS_KW   = UInt8(22)
 comptime _FOCUS_COMMA_WRAP    = UInt8(23)
+comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
 
 
 # --- section indices ------------------------------------------------------
@@ -221,6 +222,9 @@ struct Settings(Movable):
     var compress_kwargs: Bool
     """Working copy of ``TurbokodConfig.compress_kwargs`` — Editor ▸
     "Compress keyword arguments". Driven by ``_compress_cb``."""
+    var cursor_blink: Bool
+    """Working copy of ``TurbokodConfig.cursor_blink`` — Editor ▸
+    "Blinking cursor". Driven by ``_blink_cb``."""
     var section: Int
     """Index into ``_section_labels`` for the active section."""
     var selected_action: Int
@@ -273,6 +277,8 @@ struct Settings(Movable):
     var _compress_cb: Checkbox
     """Editor ▸ "Compress keyword arguments" toggle. Mirrors
     ``compress_kwargs``."""
+    var _blink_cb: Checkbox
+    """Editor ▸ "Blinking cursor" toggle. Mirrors ``cursor_blink``."""
     var dict_specs: List[DownloadableDictionary]
     """Catalog of downloadable spell-check dictionaries shown in the
     Spell-check pane. Snapshotted on ``open`` so the list and the
@@ -369,6 +375,7 @@ struct Settings(Movable):
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
         self.compress_kwargs = False
+        self.cursor_blink = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -433,6 +440,9 @@ struct Settings(Movable):
         self._compress_cb = Checkbox(
             String("Compress keyword arguments"), 0, 0, False,
         )
+        self._blink_cb = Checkbox(
+            String("Blinking cursor"), 0, 0, False,
+        )
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
@@ -477,6 +487,7 @@ struct Settings(Movable):
         font_ideal_size: Int = 0,
         wrap_mode: Int = WRAP_NONE,
         comma_threshold: Int = -1,
+        cursor_blink: Bool = True,
     ):
         self.actions = actions^
         self.auto_save = auto_save
@@ -484,9 +495,11 @@ struct Settings(Movable):
         self.trim_trailing_whitespace = trim_trailing_whitespace
         self.ensure_final_newline = ensure_final_newline
         self.compress_kwargs = compress_kwargs
+        self.cursor_blink = cursor_blink
         self._trim_cb.on = trim_trailing_whitespace
         self._final_nl_cb.on = ensure_final_newline
         self._compress_cb.on = compress_kwargs
+        self._blink_cb.on = cursor_blink
         self.active = True
         self.dirty = False
         self.section = 0
@@ -570,6 +583,7 @@ struct Settings(Movable):
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
         self.compress_kwargs = False
+        self.cursor_blink = False
         self.section = 0
         self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
@@ -583,6 +597,8 @@ struct Settings(Movable):
         self._final_nl_cb.pressed_inside = False
         self._compress_cb.pressed = False
         self._compress_cb.pressed_inside = False
+        self._blink_cb.pressed = False
+        self._blink_cb.pressed_inside = False
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
@@ -1345,6 +1361,19 @@ struct Settings(Movable):
             String("Hide redundant name=name call args off the caret line (Python/Mojo/Swift)."),
             hint,
         )
+        # Caret blink toggle — like compress, a pure display preference, so
+        # it sits below with its own one-liner.
+        self._blink_cb.on = self.cursor_blink
+        self._blink_cb.move_to(inner.a.x, label_y + 16)
+        paint_checkbox(
+            canvas, self._blink_cb, chip, focus_attr,
+            self.focus == _FOCUS_BLINK_CURSOR, inner.b.x,
+        )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, label_y + 17),
+            String("Blink the text cursor when idle; it stays solid while you type."),
+            hint,
+        )
 
     def _paint_spell_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1695,6 +1724,9 @@ struct Settings(Movable):
             if self.focus == _FOCUS_COMPRESS_KW:
                 self._toggle_compress_kwargs()
                 return True
+            if self.focus == _FOCUS_BLINK_CURSOR:
+                self._toggle_blink_cursor()
+                return True
         # Comma-threshold field owns digits + Backspace while focused, ahead
         # of the type-to-jump fallthrough so the digits edit the value
         # instead of leaking in as a list search prefix.
@@ -1787,6 +1819,12 @@ struct Settings(Movable):
         self._compress_cb.on = self.compress_kwargs
         self.dirty = True
 
+    def _toggle_blink_cursor(mut self):
+        """Counterpart for the blinking-cursor toggle."""
+        self.cursor_blink = not self.cursor_blink
+        self._blink_cb.on = self.cursor_blink
+        self.dirty = True
+
     def comma_threshold_value(self) -> Int:
         """Parse ``smart_wrap_comma_text`` into the persisted int. Empty
         input → ``-1`` (no comma trigger). The text only ever holds digits
@@ -1846,6 +1884,7 @@ struct Settings(Movable):
             ordered.append(_FOCUS_TRIM_WS)
             ordered.append(_FOCUS_FINAL_NL)
             ordered.append(_FOCUS_COMPRESS_KW)
+            ordered.append(_FOCUS_BLINK_CURSOR)
         elif self.section == _SECTION_SPELL:
             if len(self.dict_specs) > 0:
                 ordered.append(_FOCUS_DICT_LIST)
@@ -2093,6 +2132,9 @@ struct Settings(Movable):
         if self.focus == _FOCUS_COMPRESS_KW:
             self._toggle_compress_kwargs()
             return True
+        if self.focus == _FOCUS_BLINK_CURSOR:
+            self._toggle_blink_cursor()
+            return True
         if self.focus == _FOCUS_DICT_INSTALL:
             self._request_dict_install()
             return True
@@ -2276,6 +2318,12 @@ struct Settings(Movable):
                 if compress_status == BUTTON_FIRED:
                     self.focus = _FOCUS_COMPRESS_KW
                     self._toggle_compress_kwargs()
+                return True
+            var blink_status = self._blink_cb.handle_mouse(event)
+            if blink_status != BUTTON_NONE:
+                if blink_status == BUTTON_FIRED:
+                    self.focus = _FOCUS_BLINK_CURSOR
+                    self._toggle_blink_cursor()
                 return True
             # Click the comma-threshold box to focus it; editing is keyboard.
             if event.button == MOUSE_BUTTON_LEFT and event.pressed \
