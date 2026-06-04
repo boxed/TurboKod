@@ -1642,6 +1642,19 @@ struct Desktop(Movable):
     # top-to-bottom stack layout rather than the bottom-dock geometry the main
     # surface uses. See docs/floating-panels.md.
 
+    def panels_visible_count(self) -> Int:
+        """How many tool panels are currently open (terminal + debug + test).
+
+        Drives the native host's auto-hide of the floating panel window: when
+        this drops to zero the host orders the window out, and shows it again
+        when a panel reopens. See docs/floating-panels.md."""
+        var n = len(self.terminal_panes)
+        if self.debug_pane.visible:
+            n += 1
+        if self.test_pane.visible:
+            n += 1
+        return n
+
     def _panel_window_slots(self, screen: Rect) -> List[PanelSlot]:
         """Placement of every visible tool panel inside the panel window.
 

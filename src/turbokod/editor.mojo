@@ -6579,11 +6579,19 @@ struct Editor(Copyable, Movable):
                     self._push_undo()
                 if self.has_selection():
                     self._delete_selection()
+                # Cursor columns are byte offsets into the line, so advance
+                # by the inserted codepoint's UTF-8 byte length — not a bare
+                # +1. ASCII is 1 byte (unchanged), but å/ä/ö are 2 bytes; a
+                # +1 there left the cursor mid-codepoint and the next keypress
+                # spliced bytes inside the glyph.
+                var inserted = chr(Int(k))
                 self.buffer.insert(
-                    self.selections[0].row, self.selections[0].col, chr(Int(k)),
+                    self.selections[0].row, self.selections[0].col, inserted,
                 )
                 self.move_to(
-                    self.selections[0].row, self.selections[0].col + 1, False,
+                    self.selections[0].row,
+                    self.selections[0].col + len(inserted.as_bytes()),
+                    False,
                 )
                 self._typing_active = True
                 self._typing_last_ms = now

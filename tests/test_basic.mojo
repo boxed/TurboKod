@@ -899,6 +899,26 @@ def test_editor_typing_and_arrows() raises:
     assert_equal(ed.selections[0].col, 0)
 
 
+def test_editor_typing_non_ascii() raises:
+    # Swedish å/ä/ö encode to 2 UTF-8 bytes each. Cursor columns are byte
+    # offsets, so typing one must advance the cursor by 2 — a bare +1 left
+    # the caret mid-codepoint and the next keystroke spliced bytes inside the
+    # glyph. Regression for the macOS Swedish-keyboard report.
+    var ed = Editor(String(""))
+    _ = ed.handle_key(_key(UInt32(0xF6)), _VIEW)   # ö
+    assert_equal(ed.buffer.line(0), String("ö"))
+    assert_equal(ed.selections[0].col, 2)          # 2 bytes, not 1
+    _ = ed.handle_key(_key(UInt32(ord("x"))), _VIEW)
+    # x lands after the ö, not inside it.
+    assert_equal(ed.buffer.line(0), String("öx"))
+    assert_equal(ed.selections[0].col, 3)
+    # Consecutive multi-byte inserts chain correctly.
+    _ = ed.handle_key(_key(UInt32(0xE5)), _VIEW)   # å
+    _ = ed.handle_key(_key(UInt32(0xE4)), _VIEW)   # ä
+    assert_equal(ed.buffer.line(0), String("öxåä"))
+    assert_equal(ed.selections[0].col, 7)
+
+
 def test_editor_word_movement() raises:
     var ed = Editor(String("hello world foo"))
     # Ctrl+Right from start: lands at start of "world" (col 6).
@@ -17127,6 +17147,7 @@ def _run_chunk_00() raises:
     test_scrollbar_horizontal_paints_arrows_on_axis()
     test_text_buffer_split_and_join()
     test_editor_typing_and_arrows()
+    test_editor_typing_non_ascii()
     test_editor_word_movement()
     test_editor_word_movement_across_lines()
     test_editor_shift_arrow_extends_selection()

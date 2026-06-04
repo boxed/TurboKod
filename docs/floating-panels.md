@@ -111,9 +111,19 @@ the lower panel's chrome buttons; the upper must be `NORMAL`), starts its
 `pointer_shape_panels` shows `ns-resize` over a splitter or during a drag. A lone
 panel fills the window and has no splitter, so it's correctly non-resizable.
 
-If **no** tool panels are visible, the panel window paints an empty fill with a
-hint line ("No panels open — open a terminal with Cmd+Shift+T"). The host keeps the
-window open (an empty panel window is normal and expected while floating is on).
+If **no** tool panels are visible, the host **orders the panel window out**
+(hides it) while leaving floating mode on — `panels_detached` stays true and the
+window object lives on in `panels[id]`, it's just not on screen. The moment a
+panel reopens (a terminal, the debug pane, the test pane) the window is ordered
+front again. This is driven by polling `tk_desktop_panels_visible_count` once per
+tick: `count == 0` → `orderOut`, `count > 0` while hidden → `orderFront` (not
+`makeKey`, so reopening a panel doesn't yank focus off the editor). The
+toggle/restore paths skip the initial `orderFront` when the count is zero so an
+empty window never flashes for a tick before the auto-hide catches it.
+
+`paint_panels` still has its empty-state hint ("No panels open — open a terminal
+with Cmd+Shift+T") as a defensive fallback, but with auto-hide the floating
+window is never on screen while empty, so the hint isn't normally seen.
 
 ### Menu surface
 

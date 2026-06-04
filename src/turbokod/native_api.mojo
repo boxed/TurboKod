@@ -524,6 +524,17 @@ def tk_desktop_set_panels_detached(h: Int, on: Int):
 
 
 @export
+def tk_desktop_panels_visible_count(h: Int) -> Int:
+    """Number of tool panels currently open (terminal + debug + test).
+
+    The host polls this to auto-hide the floating panel window when the last
+    panel closes and re-show it when one reopens. See docs/floating-panels.md."""
+    if h == 0:
+        return 0
+    return _desk(h)[].panels_visible_count()
+
+
+@export
 def tk_desktop_layout_panels(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) -> Int:
