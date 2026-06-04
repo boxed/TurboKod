@@ -5,9 +5,9 @@ here so the editor still works on a fresh checkout with no config file
 present, and any failure (missing file, malformed JSON, missing keys)
 silently falls back to the defaults rather than refusing to start.
 
-Currently persists the View-menu toggles — line numbers and soft wrap.
-Other settings can join later by extending ``TurbokodConfig`` plus the
-load/save round-trip.
+Persists editor preferences — line numbers, wrap mode, on-save actions,
+theme, font, and more. Other settings can join later by extending
+``TurbokodConfig`` plus the load/save round-trip.
 """
 
 from std.ffi import external_call
@@ -20,6 +20,15 @@ from .json import (
 )
 from .posix import getenv_value
 
+
+# Wrap mode (Settings ▸ Editor). Persisted as ``TurbokodConfig.wrap_mode``
+# and pushed into every editor as ``Editor.wrap_mode``. ``WRAP_NONE`` is
+# horizontal-scroll; ``WRAP_SOFT`` is word-aware soft wrap; ``WRAP_SMART``
+# breaks long bracketed calls one-item-per-line (falling back to soft wrap
+# for unsupported languages / lines with no structure).
+comptime WRAP_NONE = 0
+comptime WRAP_SOFT = 1
+comptime WRAP_SMART = 2
 
 # Most-recently-opened project paths kept in the config. Anything past
 # this is dropped when ``_set_project`` records a new entry, so the
@@ -159,7 +168,11 @@ struct OnSaveAction(Copyable, Movable):
 struct TurbokodConfig(Copyable, Movable):
     """Global preferences. Defaults match the pre-config behavior."""
     var line_numbers: Bool
-    var soft_wrap: Bool
+    # Wrap mode: ``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART`` (see the
+    # module-level constants). Replaces the old binary ``soft_wrap`` bool;
+    # legacy configs that still carry ``soft_wrap: true`` migrate to
+    # ``WRAP_SOFT`` on load.
+    var wrap_mode: Int
     var git_changes: Bool
     var tab_bar: Bool
     # Right-side minimap gutter: a fixed-height projection of the whole
@@ -223,7 +236,7 @@ struct TurbokodConfig(Copyable, Movable):
 
     def __init__(out self):
         self.line_numbers = False
-        self.soft_wrap = False
+        self.wrap_mode = WRAP_NONE
         self.git_changes = False
         self.tab_bar = False
         self.minimap = True
@@ -242,7 +255,7 @@ struct TurbokodConfig(Copyable, Movable):
         # ``List[String]`` isn't implicitly copyable, so the synthesized
         # copy constructor refuses — spell it out using ``List.copy``.
         self.line_numbers = copy.line_numbers
-        self.soft_wrap = copy.soft_wrap
+        self.wrap_mode = copy.wrap_mode
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
         self.minimap = copy.minimap
@@ -316,8 +329,13 @@ def load_config() -> TurbokodConfig:
         cfg.line_numbers = json_get_bool(
             root, String("line_numbers"), cfg.line_numbers,
         )
-        cfg.soft_wrap = json_get_bool(
-            root, String("soft_wrap"), cfg.soft_wrap,
+        # ``wrap_mode`` (int) is authoritative; fall back to the legacy
+        # ``soft_wrap`` bool so configs written by older builds still wrap.
+        var legacy_soft = WRAP_SOFT if json_get_bool(
+            root, String("soft_wrap"), False,
+        ) else WRAP_NONE
+        cfg.wrap_mode = json_get_int(
+            root, String("wrap_mode"), legacy_soft,
         )
         cfg.git_changes = json_get_bool(
             root, String("git_changes"), cfg.git_changes,
@@ -410,7 +428,7 @@ def save_config(config: TurbokodConfig) -> Bool:
     _ensure_dir(_config_dir())
     var root = json_object()
     root.put(String("line_numbers"), json_bool(config.line_numbers))
-    root.put(String("soft_wrap"), json_bool(config.soft_wrap))
+    root.put(String("wrap_mode"), json_int(config.wrap_mode))
     root.put(String("git_changes"), json_bool(config.git_changes))
     root.put(String("tab_bar"), json_bool(config.tab_bar))
     root.put(String("minimap"), json_bool(config.minimap))

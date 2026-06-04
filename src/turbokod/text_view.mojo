@@ -68,6 +68,91 @@ struct VisualLine(ImplicitlyCopyable, Movable):
     var indent_cells: Int  # hanging-indent cells before the text starts
 
 
+def _wrap_one_line_into(
+    mut out: List[VisualLine],
+    line_idx: Int,
+    line: String,
+    seg_lo: Int,
+    seg_hi: Int,
+    content_w: Int,
+    first_indent: Int,
+    cont_indent: Int,
+    cell_offset_base: Int,
+    word_aware: Bool,
+    max_rows: Int,
+) -> Int:
+    """Word-aware wrap of the byte range ``[seg_lo, seg_hi)`` of ``line``,
+    appending one ``VisualLine`` per painted row to ``out``. Returns the
+    next ``cell_start`` so callers can chain sub-ranges of the same line.
+
+    The first emitted row uses ``first_indent`` hanging-indent cells, each
+    continuation uses ``cont_indent``. Both ``wrap_lines`` (whole line,
+    ``first_indent = 0``) and ``smart_wrap_lines`` (per delimiter-bounded
+    item) share this so the delicate codepoint-walk / word-break / cell
+    accounting lives in exactly one place. An empty range emits a single
+    zero-width row so it still occupies a screen line. Multibyte glyphs are
+    never split. ``max_rows`` (when ``>= 0``) caps total rows in ``out``.
+    """
+    var bytes = line.as_bytes()
+    var lo = seg_lo
+    if lo < 0:
+        lo = 0
+    var hi = seg_hi
+    if hi > len(bytes):
+        hi = len(bytes)
+    var cell_offset = cell_offset_base
+    if hi <= lo:
+        out.append(VisualLine(line_idx, lo, lo, cell_offset, 0, first_indent))
+        return cell_offset
+    var c = lo
+    var first = True
+    while c < hi:
+        if max_rows >= 0 and len(out) >= max_rows:
+            break
+        var indent_cells = first_indent if first else cont_indent
+        var seg_w = content_w - indent_cells
+        if seg_w < 1:
+            seg_w = 1
+        # Hard upper bound: at most ``seg_w`` cells from ``c``, walking
+        # codepoints so a multi-byte glyph is never split.
+        var cells = 0
+        var e_hard = c
+        while e_hard < hi and cells < seg_w:
+            e_hard += utf8_codepoint_size(Int(bytes[e_hard]))
+            cells += 1
+        if e_hard > hi:
+            e_hard = hi
+        var e = e_hard
+        # Word-aware wrap: walk back to the last non-word ASCII boundary
+        # inside ``[c, e_hard)``. Skipped when the caller hard-breaks.
+        if word_aware and e_hard < hi:
+            var p = e_hard
+            while p > c + 1:
+                var pb = Int(bytes[p - 1])
+                if pb < 0x80 and not is_word_codepoint(pb):
+                    e = p
+                    break
+                p -= 1
+        # Codepoint count for this segment — needed for ``cell_count`` in
+        # word-aware mode where we walked back past the cells we counted.
+        var seg_cells: Int
+        if e == e_hard:
+            seg_cells = cells
+        else:
+            seg_cells = 0
+            var k = c
+            while k < e:
+                seg_cells += 1
+                k += utf8_codepoint_size(Int(bytes[k]))
+        out.append(VisualLine(
+            line_idx, c, e, cell_offset, seg_cells, indent_cells,
+        ))
+        cell_offset += seg_cells
+        c = e
+        first = False
+    return cell_offset
+
+
 def wrap_lines(
     lines: List[String],
     content_w: Int,
@@ -109,8 +194,7 @@ def wrap_lines(
         if max_rows >= 0 and len(out) >= max_rows:
             break
         var line = lines[br]
-        var bytes = line.as_bytes()
-        var line_n = len(bytes)
+        var line_n = len(line.as_bytes())
         if line_n == 0:
             out.append(VisualLine(br, 0, 0, 0, 0, 0))
             br += 1
@@ -122,55 +206,183 @@ def wrap_lines(
                 cont_indent = content_w - 1
             if cont_indent < 0:
                 cont_indent = 0
-        var c = 0
-        var first = True
+        _ = _wrap_one_line_into(
+            out, br, line, 0, line_n, content_w,
+            0, cont_indent, 0, word_aware, max_rows,
+        )
+        br += 1
+    return out^
+
+
+def smart_wrap_lines(
+    lines: List[String],
+    content_w: Int,
+    indent_size: Int,
+    line_comment: String = String(""),
+    start_line: Int = 0,
+    max_rows: Int = -1,
+) -> List[VisualLine]:
+    """Smart-wrap a slice of ``lines``: a logical line that overflows
+    ``content_w`` *and* has bracketed, comma-separated call structure is
+    rendered one-item-per-line, e.g.::
+
+        main_image = models.ImageField(
+            upload_to='page/images/',
+            default='x.png',
+            null=True,
+            blank=True)
+
+    The break is **visual only** — the buffer keeps the single physical
+    line. A line that already fits emits one ``VisualLine`` (no break,
+    even with structure). A line with no breakable structure — no
+    top-level bracket, no depth-1 comma, or still inside a string at
+    end-of-line — falls back to word-aware soft wrap (``_wrap_one_line_into``
+    with the same hanging-indent rule as ``wrap_lines``).
+
+    ``line_comment`` (e.g. ``"#"`` / ``"//"`` from
+    ``line_comment_for_extension``) stops the structural scan at a trailing
+    comment so brackets/commas inside it aren't mistaken for structure.
+
+    Byte coverage invariant (required by the editor's caret/selection
+    code): a line's segments are byte-contiguous and cover it whole. We
+    enforce it by emitting ``[cuts[i], cuts[i+1])`` from a sorted cut list
+    ``[0, head_open+1, item_starts…, n]`` — the whitespace after a comma
+    rides the *end* of the previous segment so item lines render flush
+    with no leading space and no dropped bytes.
+    """
+    var out = List[VisualLine]()
+    if content_w < 1:
+        return out^
+    var br = start_line
+    if br < 0:
+        br = 0
+    var n_lines = len(lines)
+    var lc_bytes = line_comment.as_bytes()
+    var lc_n = len(lc_bytes)
+    while br < n_lines:
+        if max_rows >= 0 and len(out) >= max_rows:
+            break
+        var line = lines[br]
+        var bytes = line.as_bytes()
+        var line_n = len(bytes)
+        if line_n == 0:
+            out.append(VisualLine(br, 0, 0, 0, 0, 0))
+            br += 1
+            continue
+        # Display width == codepoint count (no East-Asian width modeling).
+        var cols = 0
+        var kk = 0
+        while kk < line_n:
+            cols += 1
+            kk += utf8_codepoint_size(Int(bytes[kk]))
+        if cols <= content_w:
+            out.append(VisualLine(br, 0, line_n, 0, cols, 0))
+            br += 1
+            continue
+        # Scan once for the outermost bracket group's structure.
+        var head_open = -1
+        var close_idx = -1
+        var item_starts = List[Int]()
+        var depth = 0
+        var in_str = False
+        var quote = 0
+        var i = 0
+        while i < line_n:
+            var b = Int(bytes[i])
+            if in_str:
+                if b == 0x5C:  # backslash escape — skip the next byte
+                    i += 2
+                    continue
+                if b == quote:
+                    in_str = False
+                i += 1
+                continue
+            # Line comment outside strings stops structural scanning.
+            if lc_n > 0 and i + lc_n <= line_n:
+                var matched = True
+                var m = 0
+                while m < lc_n:
+                    if Int(bytes[i + m]) != Int(lc_bytes[m]):
+                        matched = False
+                        break
+                    m += 1
+                if matched:
+                    break
+            if b == 0x22 or b == 0x27:  # " or '
+                in_str = True
+                quote = b
+                i += 1
+                continue
+            if b == 0x28 or b == 0x5B or b == 0x7B:  # ( [ {
+                if depth == 0 and head_open < 0:
+                    head_open = i
+                depth += 1
+            elif b == 0x29 or b == 0x5D or b == 0x7D:  # ) ] }
+                depth -= 1
+                if depth == 0 and head_open >= 0 and close_idx < 0:
+                    close_idx = i
+            elif b == 0x2C and depth == 1 and head_open >= 0:  # ,
+                # Item boundary = first non-whitespace byte after the comma.
+                var j = i + 1
+                while j < line_n and (
+                    Int(bytes[j]) == 0x20 or Int(bytes[j]) == 0x09
+                ):
+                    j += 1
+                if j < line_n:
+                    item_starts.append(j)
+            i += 1
+        # Drop item boundaries at/after the close (e.g. a trailing comma
+        # ``foo(a, b,)``) so we don't open an empty item line.
+        if close_idx >= 0:
+            var filtered = List[Int]()
+            for z in range(len(item_starts)):
+                if item_starts[z] < close_idx:
+                    filtered.append(item_starts[z])
+            item_starts = filtered^
+        var item_indent = leading_indent_bytes(line) + indent_size
+        if item_indent > content_w - 1:
+            item_indent = content_w - 1
+        if item_indent < 0:
+            item_indent = 0
+        var breakable = (
+            head_open >= 0 and len(item_starts) >= 1 and not in_str
+        )
+        if not breakable:
+            # No usable structure — degrade to word-aware soft wrap.
+            _ = _wrap_one_line_into(
+                out, br, line, 0, line_n, content_w,
+                0, item_indent, 0, True, max_rows,
+            )
+            br += 1
+            continue
+        # Cut list: head ends after the opener; each item begins at its
+        # first non-ws byte; the final segment runs to end-of-line so the
+        # close bracket + any trailing tail ride the last item's row.
+        var cuts = List[Int]()
+        cuts.append(0)
+        cuts.append(head_open + 1)
+        for z in range(len(item_starts)):
+            cuts.append(item_starts[z])
+        cuts.append(line_n)
         var cell_offset = 0
-        while c < line_n:
+        var seg = 0
+        while seg + 1 < len(cuts):
             if max_rows >= 0 and len(out) >= max_rows:
                 break
-            var indent_cells = 0 if first else cont_indent
-            var seg_w = content_w - indent_cells
-            if seg_w < 1:
-                seg_w = 1
-            # Hard upper bound: at most ``seg_w`` cells from ``c``,
-            # walking codepoints so a multi-byte glyph is never split.
-            var cells = 0
-            var e_hard = c
-            while e_hard < line_n and cells < seg_w:
-                e_hard += utf8_codepoint_size(Int(bytes[e_hard]))
-                cells += 1
-            if e_hard > line_n:
-                e_hard = line_n
-            var e = e_hard
-            # Word-aware wrap: walk back to the last non-word ASCII
-            # boundary inside ``[c, e_hard)``. Skipped entirely when the
-            # caller didn't ask for it (the output panel hard-breaks).
-            if word_aware and e_hard < line_n:
-                var p = e_hard
-                while p > c + 1:
-                    var pb = Int(bytes[p - 1])
-                    if pb < 0x80 and not is_word_codepoint(pb):
-                        e = p
-                        break
-                    p -= 1
-            # Codepoint count for this segment — needed for ``cell_count``
-            # in word-aware mode where we walked back past the cells we
-            # already counted.
-            var seg_cells: Int
-            if e == e_hard:
-                seg_cells = cells
-            else:
-                seg_cells = 0
-                var k = c
-                while k < e:
-                    seg_cells += 1
-                    k += utf8_codepoint_size(Int(bytes[k]))
-            out.append(VisualLine(
-                br, c, e, cell_offset, seg_cells, indent_cells,
-            ))
-            cell_offset += seg_cells
-            c = e
-            first = False
+            var lo = cuts[seg]
+            var hi = cuts[seg + 1]
+            if hi <= lo:
+                seg += 1
+                continue
+            # Head's first row sits at the original column (indent 0);
+            # everything else (and any continuation of an over-wide item
+            # or head) hangs at ``item_indent``.
+            var first_ind = 0 if seg == 0 else item_indent
+            cell_offset = _wrap_one_line_into(
+                out, br, line, lo, hi, content_w,
+                first_ind, item_indent, cell_offset, True, max_rows,
+            )
+            seg += 1
         br += 1
     return out^
 

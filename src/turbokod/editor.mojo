@@ -74,8 +74,9 @@ from .string_utils import (
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay, paint_text_segments,
-    wrap_lines,
+    smart_wrap_lines, wrap_lines,
 )
+from .config import WRAP_NONE, WRAP_SMART
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -878,12 +879,14 @@ struct Editor(Copyable, Movable):
     var pending_conflict_diff: Optional[String]
     # View options. ``line_numbers`` paints a right-aligned line-number
     # gutter to the right of the debugger gutter; its width is derived
-    # from ``buffer.line_count()`` at paint time. ``soft_wrap`` forces
-    # ``scroll_x = 0`` and breaks long lines across multiple screen rows
-    # at the text-area's right edge. Both default off and are toggled
-    # via the View menu.
+    # from ``buffer.line_count()`` at paint time. ``wrap_mode`` is one of
+    # ``WRAP_NONE`` (horizontal scroll), ``WRAP_SOFT`` (word-aware soft
+    # wrap), or ``WRAP_SMART`` (break long bracketed calls one item per
+    # line); any wrapping mode forces ``scroll_x = 0`` and breaks long
+    # lines across multiple screen rows. Set from Settings ▸ Editor via
+    # ``Desktop._apply_view_config``.
     var line_numbers: Bool
-    var soft_wrap: Bool
+    var wrap_mode: Int
     # ``read_only`` makes every mutating operation a no-op: typing,
     # backspace/delete, paste, cut, undo/redo, replace_all,
     # toggle_comment, toggle_case. Cursor movement, selection, copy,
@@ -1132,7 +1135,7 @@ struct Editor(Copyable, Movable):
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
-        self.soft_wrap = False
+        self.wrap_mode = WRAP_NONE
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1227,7 +1230,7 @@ struct Editor(Copyable, Movable):
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.pending_conflict_diff = Optional[String]()
         self.line_numbers = False
-        self.soft_wrap = False
+        self.wrap_mode = WRAP_NONE
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1350,7 +1353,7 @@ struct Editor(Copyable, Movable):
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
         self.pending_conflict_diff = copy.pending_conflict_diff
         self.line_numbers = copy.line_numbers
-        self.soft_wrap = copy.soft_wrap
+        self.wrap_mode = copy.wrap_mode
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
@@ -2031,6 +2034,20 @@ struct Editor(Copyable, Movable):
                 var n = self.buffer.line_length(c.row)
                 if c.col >= n:
                     return False
+        return True
+
+    def _all_carets_col0(self) -> Bool:
+        """Returns True iff every caret sits at column 0 with no
+        selection. This is the pre-condition for the multi-caret
+        backspace *join* path (``_multi_join_backward``): each caret
+        merges its row into the row above. A caret mid-line or carrying
+        a selection means a plain inline delete instead, which the
+        ``_all_carets_inline_safe`` fast path already covers."""
+        var carets = self._all_carets_asc()
+        for i in range(len(carets)):
+            var c = carets[i]
+            if c.col != 0 or c.anchor_col != 0 or c.row != c.anchor_row:
+                return False
         return True
 
     def undo(mut self) -> Bool:
@@ -3346,12 +3363,36 @@ struct Editor(Copyable, Movable):
                 return True
         return False
 
-    def toggle_soft_wrap(mut self):
-        self.soft_wrap = not self.soft_wrap
-        if self.soft_wrap:
-            # Soft wrap forces a left-aligned visible area: keep the
-            # invariant that scroll_x == 0 by snapping it back here.
-            self.scroll_x = 0
+    def _is_wrapping(self) -> Bool:
+        """True when any wrapping mode is active (``WRAP_SOFT`` or
+        ``WRAP_SMART``). Both reflow vertically and force ``scroll_x = 0``;
+        only ``WRAP_NONE`` keeps horizontal scroll."""
+        return self.wrap_mode != WRAP_NONE
+
+    def _smart_wrap_supported(self) -> Bool:
+        """Whether ``WRAP_SMART`` attempts delimiter breaking for this
+        buffer's language. Smart wrap targets python-style / algol-style
+        languages that use ``call(arg, arg)`` syntax; markup, prose, and
+        config formats fall back to soft wrap instead. Gated by extension
+        so the layout decision is cheap and frontend-agnostic."""
+        var ext = extension_of(self.file_path)
+        return (
+            ext == String("py") or ext == String("pyi")
+            or ext == String("mojo") or ext == String("🔥")
+            or ext == String("js") or ext == String("jsx")
+            or ext == String("ts") or ext == String("tsx")
+            or ext == String("mjs") or ext == String("cjs")
+            or ext == String("c") or ext == String("h")
+            or ext == String("cpp") or ext == String("cc")
+            or ext == String("cxx") or ext == String("hpp")
+            or ext == String("hh") or ext == String("hxx")
+            or ext == String("rs") or ext == String("go")
+            or ext == String("java") or ext == String("kt")
+            or ext == String("kts") or ext == String("swift")
+            or ext == String("cs") or ext == String("php")
+            or ext == String("scala") or ext == String("dart")
+            or ext == String("rb") or ext == String("zig")
+        )
 
     def _line_number_gutter(self) -> Int:
         """Width of the line-number gutter in cells, including a trailing
@@ -4389,14 +4430,19 @@ struct Editor(Copyable, Movable):
     ) -> List[VisualLine]:
         """Per-screen-row visual layout for the painted window.
 
-        Soft-wrap on: delegates to ``text_view.wrap_lines`` with the
-        editor's word-aware / hanging-indent options enabled. The same
-        primitive the DebugPane uses with indent_size=0.
+        ``WRAP_NONE``: synthesizes one ``VisualLine`` per visible buffer
+        row covering ``[scroll_x, line_length)`` — preserves the editor's
+        horizontal-scroll semantics (``scroll_x``) which the shared wrap
+        primitives don't model.
 
-        Soft-wrap off: synthesizes one ``VisualLine`` per visible
-        buffer row covering ``[scroll_x, line_length)`` — preserves
-        the editor's horizontal-scroll semantics (``scroll_x``) which
-        the shared wrap primitive doesn't model.
+        ``WRAP_SOFT``: delegates to ``text_view.wrap_lines`` with the
+        editor's word-aware / hanging-indent options enabled (the same
+        primitive the DebugPane uses with indent_size=0).
+
+        ``WRAP_SMART``: for supported languages, delegates to
+        ``smart_wrap_lines`` (break long bracketed calls one item per
+        line, falling back to soft wrap per-line); for unsupported
+        languages, behaves exactly like ``WRAP_SOFT``.
         """
         # Clamp ``content_h`` to non-negative. ``wrap_lines`` reads
         # negative values as "unbounded" (the DebugPane idiom) and
@@ -4407,7 +4453,7 @@ struct Editor(Copyable, Movable):
             max_rows = 0
         var n_lines = self.buffer.line_count()
         var br = self.scroll_y
-        if not self.soft_wrap:
+        if self.wrap_mode == WRAP_NONE:
             var out = List[VisualLine]()
             while br < n_lines and len(out) < max_rows:
                 var n = self.buffer.line_length(br)
@@ -4420,6 +4466,14 @@ struct Editor(Copyable, Movable):
         var tab = self.editorconfig.effective_indent_size()
         if tab < 1:
             tab = 4
+        if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
+            return smart_wrap_lines(
+                self.buffer.lines, w, tab,
+                line_comment=line_comment_for_extension(
+                    extension_of(self.file_path)
+                ),
+                start_line=self.scroll_y, max_rows=max_rows,
+            )
         return wrap_lines(
             self.buffer.lines, w,
             indent_size=tab, word_aware=True,
@@ -4734,9 +4788,9 @@ struct Editor(Copyable, Movable):
                         Cell(String(" "), gutter_attr, 1),
                     )
                 # Each layout entry is the *first* visual segment of its
-                # buffer row when either soft-wrap is off (one segment per
+                # buffer row when either wrapping is off (one segment per
                 # row) or this segment starts at byte 0 of the row.
-                var is_first_seg = (not self.soft_wrap) or (seg_start == 0)
+                var is_first_seg = (self.wrap_mode == WRAP_NONE) or (seg_start == 0)
                 if ln_gutter > 0 and is_first_seg:
                     var num_str = String(buf_row + 1)
                     var num_w = len(num_str.as_bytes())
@@ -5296,6 +5350,40 @@ struct Editor(Copyable, Movable):
                 Caret(c.row, new_col, new_desired, c.row, new_col),
             )
             row_shift += n_text - (actual_ec - actual_sc)
+        self._install_carets(new_carets^)
+
+    def _multi_join_backward(mut self):
+        """Multi-caret backspace at column 0: each caret merges its row
+        into the row above (deletes the preceding newline) and lands at
+        the join column — the end of what used to be the previous row.
+
+        Carets are processed in ascending row order with a ``removed``
+        accumulator, because every join pops one row and shifts every
+        row below it up by one. A run of consecutive col-0 carets thus
+        collapses those rows into a single line, leaving one caret per
+        original line break. A caret on row 0 has nothing above it, so
+        it stays put at (0, 0).
+
+        Pre-condition: ``_all_carets_col0()`` is True."""
+        var carets = self._all_carets_asc()
+        var new_carets = List[Caret]()
+        var removed = 0
+        for i in range(len(carets)):
+            var row = carets[i].row - removed
+            if row <= 0:
+                new_carets.append(Caret(0, 0, 0, 0, 0))
+                continue
+            var prev_len = self.buffer.line_length(row - 1)
+            self.buffer.lines[row - 1] = self.buffer.line(row - 1) \
+                + self.buffer.line(row)
+            _ = self.buffer.lines.pop(row)
+            removed += 1
+            var desired = _utf8_cell_of_byte(
+                self.buffer.line(row - 1), prev_len,
+            )
+            new_carets.append(
+                Caret(row - 1, prev_len, desired, row - 1, prev_len),
+            )
         self._install_carets(new_carets^)
 
     def apply_fill_strings(mut self, texts: List[String]) -> Bool:
@@ -6027,6 +6115,21 @@ struct Editor(Copyable, Movable):
                 self._multi_edit_inline(String(""), 1)
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi)
+            elif self.has_extra_carets() and self._all_carets_col0():
+                # Every caret sits at column 0: backspace joins each
+                # caret's row into the row above. A run of consecutive
+                # col-0 carets collapses those rows into one line. Lands
+                # here rather than the inline path above because col-0
+                # carets fail _all_carets_inline_safe(1). The highlight
+                # floor drops one row — the join touches the row above
+                # the topmost caret.
+                self._push_undo()
+                self._multi_join_backward()
+                self.dirty = True
+                var hl_row = pre_dirty_row_multi - 1
+                if hl_row < 0:
+                    hl_row = 0
+                self._mark_hl_dirty(hl_row)
             else:
                 # Single-caret fallback. Push once, capturing extras
                 # if any, so a single undo restores the multi-caret
@@ -7283,7 +7386,7 @@ struct Editor(Copyable, Movable):
             self.scroll_y = self.selections[0].row
         elif self.selections[0].row >= self.scroll_y + h:
             self.scroll_y = self.selections[0].row - h + 1
-        if self.soft_wrap:
+        if self._is_wrapping():
             # No horizontal scroll on the wrap path: text reflows
             # vertically instead. Walk wrapped segments to make sure the
             # cursor's screen row fits inside the view; if the buffer
@@ -7328,7 +7431,7 @@ struct Editor(Copyable, Movable):
         var content_h = view.height()
         if content_h < 1:
             return 0
-        if not self.soft_wrap:
+        if not self._is_wrapping():
             var m = n_lines - content_h
             return 0 if m < 0 else m
         var total_gutter = self._total_gutter()
@@ -7339,14 +7442,25 @@ struct Editor(Copyable, Movable):
         var tab = self.editorconfig.effective_indent_size()
         if tab < 1:
             tab = 4
+        # Measure each line with the SAME wrap routine ``_layout_lines``
+        # would paint with, or the scrollbar/wheel range desyncs from
+        # what's on screen.
+        var use_smart = (
+            self.wrap_mode == WRAP_SMART and self._smart_wrap_supported()
+        )
+        var lc = line_comment_for_extension(extension_of(self.file_path))
         var rows = 0
         var i = n_lines - 1
         while i >= 0:
             var single = List[String]()
             single.append(self.buffer.line(i))
-            var v = wrap_lines(
-                single, content_w, indent_size=tab, word_aware=True,
-            )
+            var v: List[VisualLine]
+            if use_smart:
+                v = smart_wrap_lines(single, content_w, tab, line_comment=lc)
+            else:
+                v = wrap_lines(
+                    single, content_w, indent_size=tab, word_aware=True,
+                )
             var line_rows = len(v)
             if line_rows < 1:
                 line_rows = 1
@@ -7371,7 +7485,7 @@ struct Editor(Copyable, Movable):
         stay positive and hide leading characters that the user can no
         longer scroll back to. Vertical axis is clamped symmetrically.
         """
-        if self.soft_wrap:
+        if self._is_wrapping():
             self.scroll_x = 0
         else:
             var total_gutter = self._total_gutter()
@@ -7429,7 +7543,7 @@ struct Editor(Copyable, Movable):
             self.scroll_y = bottom - h + 1
         if self.scroll_y < 0:
             self.scroll_y = 0
-        if self.soft_wrap:
+        if self._is_wrapping():
             self.scroll_x = 0
             var layout = self._layout_lines(h, w)
             if self._cursor_screen_row(layout) < 0:

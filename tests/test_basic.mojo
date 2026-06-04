@@ -103,7 +103,9 @@ from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import slice_codepoints
 from turbokod.targets_dialog import TargetsDialog
 from turbokod.text_field import TextField
-from turbokod.text_view import Selection, TextLog, VisualLine, wrap_lines
+from turbokod.text_view import (
+    Selection, TextLog, VisualLine, smart_wrap_lines, wrap_lines,
+)
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.install_runner import InstallResult, InstallRunner, _last_lines
 from turbokod.doc_config import (
@@ -7177,6 +7179,32 @@ def test_editor_alt_click_adds_extra_caret() raises:
     assert_false(Bool(req))
 
 
+def test_editor_multi_caret_col0_backspace_joins_rows() raises:
+    # Carets on column 0 of several consecutive rows: backspace joins
+    # each row into the row above, collapsing the run into one line.
+    # The topmost caret (row 0) has nothing above it, so it stays put;
+    # the others land at the join columns.
+    var ed = Editor(String("a\nb\nc\nd"))
+    ed.add_caret_below()
+    ed.add_caret_below()
+    ed.add_caret_below()
+    assert_equal(ed.caret_count(), 4)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line_count(), 1)
+    assert_equal(ed.buffer.line(0), String("abcd"))
+    # One caret per original line break, plus the stranded row-0 caret.
+    var carets = ed._all_carets_asc()
+    assert_equal(len(carets), 4)
+    assert_equal(carets[0].col, 0)
+    assert_equal(carets[1].col, 1)
+    assert_equal(carets[2].col, 2)
+    assert_equal(carets[3].col, 3)
+    # Undo restores the four separate rows and the multi-caret state.
+    _ = ed.undo()
+    assert_equal(ed.buffer.line_count(), 4)
+    assert_equal(ed.caret_count(), 4)
+
+
 def test_editor_gutter_click_emits_breakpoint_toggle() raises:
     # Line-number gutter on → 2 cells of gutter at the left edge. A
     # left-click there must surface as a pending breakpoint toggle for
@@ -11806,6 +11834,121 @@ def test_text_view_wrap_lines_word_aware_with_indent() raises:
     assert_true(len(rows) >= 2)
     assert_equal(rows[0].indent_cells, 0)
     assert_equal(rows[1].indent_cells, 8)
+
+
+def _assert_layout_contiguous(line: String, layout: List[VisualLine]) raises:
+    """Every byte of ``line`` belongs to exactly one segment, in order:
+    first segment starts at byte 0, each starts where the previous ended,
+    the last ends at the line length. This is the invariant the editor's
+    caret / selection / mouse mapping depends on."""
+    var n = len(line.as_bytes())
+    assert_equal(len(layout) >= 1, True)
+    assert_equal(layout[0].byte_start, 0)
+    for i in range(len(layout)):
+        if i > 0:
+            assert_equal(layout[i].byte_start, layout[i - 1].byte_end)
+        assert_true(layout[i].byte_end >= layout[i].byte_start)
+    assert_equal(layout[len(layout) - 1].byte_end, n)
+
+
+def test_smart_wrap_lines_breaks_call_one_item_per_line() raises:
+    """A long bracketed call overflowing the width breaks one item per
+    line: head ends after the opener at indent 0, each item hangs at
+    leading-indent + indent_size, the close rides the last item, and no
+    item line starts with whitespace."""
+    var line = String(
+        "    img = Field(upload='a', default='b', null=True, blank=True)"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(lines, 30, 4)
+    # head + four items (close rides the last item).
+    assert_equal(len(layout), 5)
+    _assert_layout_contiguous(line, layout)
+    # Head sits at the original column; items hang at 4 + 4 = 8.
+    assert_equal(layout[0].indent_cells, 0)
+    for i in range(1, 5):
+        assert_equal(layout[i].indent_cells, 8)
+    var bytes = line.as_bytes()
+    # Head ends right after the '(' (so the opener is the head's last cell).
+    assert_equal(Int(bytes[layout[0].byte_end - 1]), Int(ord("(")))
+    # Each item begins on a non-space byte at its expected first char.
+    assert_true(Int(bytes[layout[1].byte_start]) != 0x20)
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("u")))  # upload
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("d")))  # default
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("n")))  # null
+    assert_equal(Int(bytes[layout[4].byte_start]), Int(ord("b")))  # blank
+    # The close bracket lands on the last segment.
+    assert_equal(Int(bytes[layout[4].byte_end - 1]), Int(ord(")")))
+
+
+def test_smart_wrap_lines_short_line_not_broken() raises:
+    """A line that already fits the width is one segment even when it
+    has bracket/comma structure — smart wrap only breaks overflow."""
+    var line = String("f(a, b, c)")
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(lines, 40, 4)
+    assert_equal(len(layout), 1)
+    assert_equal(layout[0].byte_start, 0)
+    assert_equal(layout[0].byte_end, len(line.as_bytes()))
+    assert_equal(layout[0].indent_cells, 0)
+
+
+def test_smart_wrap_lines_falls_back_to_soft_wrap() raises:
+    """A long line with no breakable bracket structure degrades to the
+    exact word-aware soft-wrap layout (``wrap_lines``)."""
+    var line = String(
+        "the quick brown fox jumps over the lazy dog and keeps running"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var smart = smart_wrap_lines(lines, 20, 4)
+    var soft = wrap_lines(lines, 20, indent_size=4, word_aware=True)
+    assert_equal(len(smart), len(soft))
+    for i in range(len(smart)):
+        assert_equal(smart[i].byte_start, soft[i].byte_start)
+        assert_equal(smart[i].byte_end, soft[i].byte_end)
+        assert_equal(smart[i].indent_cells, soft[i].indent_cells)
+
+
+def test_smart_wrap_lines_ignores_commas_in_strings_and_nesting() raises:
+    """Only depth-1 commas outside strings are item boundaries: commas
+    inside a string literal and inside a nested call stay put."""
+    var line = String(
+        "    g(x=\"a, b\", inner(c, d), e=1, pad_here=2)"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(lines, 28, 4)
+    _assert_layout_contiguous(line, layout)
+    # head + 4 items: x=..., inner(...), e=1, padding...
+    assert_equal(len(layout), 5)
+    var bytes = line.as_bytes()
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("x")))      # x=
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("i")))      # inner
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("e")))      # e=1
+    assert_equal(Int(bytes[layout[4].byte_start]), Int(ord("p")))      # padding
+
+
+def test_smart_wrap_lines_comment_stops_structural_scan() raises:
+    """A line whose only brackets/commas live inside a trailing comment
+    has no real structure — it falls back to soft wrap (one segment when
+    it fits)."""
+    var line = String("x = 1  # call(a, b, c) mentioned in a comment here")
+    var lines = List[String]()
+    lines.append(line)
+    # Width that the line fits within -> single segment regardless.
+    var layout = smart_wrap_lines(lines, 80, 4, line_comment=String("#"))
+    assert_equal(len(layout), 1)
+    # Narrow width -> soft-wrap fallback (not a delimiter break at the
+    # comment's commas), so continuations carry the hanging indent.
+    var narrow = smart_wrap_lines(lines, 18, 4, line_comment=String("#"))
+    var soft = wrap_lines(lines, 18, indent_size=4, word_aware=True)
+    assert_equal(len(narrow), len(soft))
+    for i in range(len(narrow)):
+        assert_equal(narrow[i].byte_start, soft[i].byte_start)
+        assert_equal(narrow[i].byte_end, soft[i].byte_end)
 
 
 def test_text_view_selection_extracts_text() raises:
@@ -16945,6 +17088,7 @@ def _run_chunk_02() raises:
     test_editor_meta_click_emits_definition_request()
     test_editor_meta_click_outside_identifier_is_silent()
     test_editor_alt_click_adds_extra_caret()
+    test_editor_multi_caret_col0_backspace_joins_rows()
     test_editor_gutter_click_emits_breakpoint_toggle()
     test_editor_text_click_does_not_toggle_breakpoint()
     test_editor_gutter_click_below_eof_is_ignored()
@@ -17209,6 +17353,11 @@ def _run_chunk_04() raises:
     test_debug_pane_click_on_traceback_link_sets_pending_open()
     test_text_view_wrap_lines_breaks_at_width()
     test_text_view_wrap_lines_word_aware_with_indent()
+    test_smart_wrap_lines_breaks_call_one_item_per_line()
+    test_smart_wrap_lines_short_line_not_broken()
+    test_smart_wrap_lines_falls_back_to_soft_wrap()
+    test_smart_wrap_lines_ignores_commas_in_strings_and_nesting()
+    test_smart_wrap_lines_comment_stops_structural_scan()
 
 
 def _run_chunk_05() raises:

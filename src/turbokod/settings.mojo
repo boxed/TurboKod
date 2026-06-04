@@ -47,6 +47,7 @@ from .colors import (
 from .theme import theme_names
 from .config import (
     LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
+    WRAP_NONE,
 )
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
@@ -96,6 +97,7 @@ comptime _FOCUS_FONT_LIST     = UInt8(17)
 comptime _FOCUS_FONT_SMALLER  = UInt8(18)
 comptime _FOCUS_FONT_LARGER   = UInt8(19)
 comptime _FOCUS_FONT_IDEAL    = UInt8(20)
+comptime _FOCUS_WRAP_MODE     = UInt8(21)
 
 
 # --- section indices ------------------------------------------------------
@@ -168,6 +170,17 @@ def _save_behavior_options() -> List[String]:
     return out^
 
 
+def _wrap_mode_options() -> List[String]:
+    """Dropdown options for the Editor ▸ Wrap picker. Index order is in
+    lock-step with the ``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``
+    constants (0 / 1 / 2)."""
+    var out = List[String]()
+    out.append(String("No wrap"))
+    out.append(String("Soft wrap"))
+    out.append(String("Smart wrap"))
+    return out^
+
+
 @fieldwise_init
 struct _PlacedButton(ImplicitlyCopyable, Movable):
     var button: ShadowButton
@@ -192,6 +205,11 @@ struct Settings(Movable):
     """Working copy of ``TurbokodConfig.auto_save`` — Editor ▸ Save
     behavior. ``False`` means Manual (Ctrl+S only), ``True`` means
     Automatic. Driven by ``_save_dropdown``."""
+    var wrap_mode: Int
+    """Working copy of ``TurbokodConfig.wrap_mode`` — Editor ▸ Wrap
+    (``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``). Driven by
+    ``_wrap_dropdown``; the host applies + persists it on the next config
+    sync when it differs from ``config.wrap_mode``."""
     var trim_trailing_whitespace: Bool
     """Working copy of ``TurbokodConfig.trim_trailing_whitespace`` —
     Editor ▸ "Trim trailing whitespace". Driven by ``_trim_cb``."""
@@ -225,6 +243,12 @@ struct Settings(Movable):
     """Last-painted bounds of the dropdown strip. Cached so mouse
     events arriving between paints can hit-test against the same
     rectangle the user just clicked."""
+    var _wrap_dropdown: Dropdown
+    """Stateful Wrap-mode picker. Index is in lock-step with
+    ``wrap_mode`` (0 = No wrap, 1 = Soft wrap, 2 = Smart wrap)."""
+    var _wrap_dd_anchor: Rect
+    """Last-painted bounds of the Wrap dropdown strip (mouse hit-test
+    cache, mirrors ``_save_dd_anchor``)."""
     var _trim_cb: Checkbox
     """Editor ▸ "Trim trailing whitespace" toggle. ``on`` tracks
     ``trim_trailing_whitespace``; position is set each paint so the
@@ -324,6 +348,7 @@ struct Settings(Movable):
         self.dirty = False
         self.actions = List[OnSaveAction]()
         self.auto_save = False
+        self.wrap_mode = WRAP_NONE
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
         self.section = 0
@@ -377,6 +402,8 @@ struct Settings(Movable):
         ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
+        self._wrap_dropdown = Dropdown(_wrap_mode_options(), 0)
+        self._wrap_dd_anchor = Rect(0, 0, 0, 0)
         self._trim_cb = Checkbox(
             String("Trim trailing whitespace"), 0, 0, False,
         )
@@ -424,9 +451,11 @@ struct Settings(Movable):
         font_size: Int = 0,
         font_effective_size: Int = 0,
         font_ideal_size: Int = 0,
+        wrap_mode: Int = WRAP_NONE,
     ):
         self.actions = actions^
         self.auto_save = auto_save
+        self.wrap_mode = wrap_mode
         self.trim_trailing_whitespace = trim_trailing_whitespace
         self.ensure_final_newline = ensure_final_newline
         self._trim_cb.on = trim_trailing_whitespace
@@ -444,6 +473,7 @@ struct Settings(Movable):
         self._save_dropdown = Dropdown(
             _save_behavior_options(), 1 if auto_save else 0,
         )
+        self._wrap_dropdown = Dropdown(_wrap_mode_options(), wrap_mode)
         self.dict_specs = built_in_downloadable_dictionaries()
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
         self.pending_dict_install_lang = String("")
@@ -512,6 +542,7 @@ struct Settings(Movable):
         self._list_scroll = 0
         self.editor.close()
         self._save_dropdown.close()
+        self._wrap_dropdown.close()
         self._trim_cb.pressed = False
         self._trim_cb.pressed_inside = False
         self._final_nl_cb.pressed = False
@@ -571,6 +602,10 @@ struct Settings(Movable):
         if self.section == _SECTION_EDITOR and self._save_dropdown.is_open:
             self._save_dropdown.paint_popup(
                 canvas, self._save_dd_anchor, screen,
+            )
+        if self.section == _SECTION_EDITOR and self._wrap_dropdown.is_open:
+            self._wrap_dropdown.paint_popup(
+                canvas, self._wrap_dd_anchor, screen,
             )
         # Editor floats on top.
         if self.editor.active:
@@ -1177,6 +1212,34 @@ struct Settings(Movable):
             String("Manual: save with Ctrl+S. Automatic: save on focus changes."),
             hint,
         )
+        # Wrap-mode dropdown, anchored after its label the same way the
+        # Save-behavior strip is. Index stays in lock-step with
+        # ``self.wrap_mode`` (mutable directly in tests, same contract).
+        var wrap_label = String("Wrap:")
+        var wrap_y = label_y + 4
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, wrap_y), wrap_label, bg,
+        )
+        var wrap_dd_x = inner.a.x + display_columns(wrap_label) + 1
+        var wrap_dd_w = _SAVE_DD_W
+        if wrap_dd_x + wrap_dd_w > inner.b.x:
+            wrap_dd_w = inner.b.x - wrap_dd_x
+        if wrap_dd_w >= 4:
+            var wrap_rect = Rect(
+                wrap_dd_x, wrap_y, wrap_dd_x + wrap_dd_w, wrap_y + 1,
+            )
+            self._wrap_dd_anchor = wrap_rect
+            if self._wrap_dropdown.index != self.wrap_mode:
+                self._wrap_dropdown.index = self.wrap_mode
+            self._wrap_dropdown.paint(
+                canvas, wrap_rect, self.focus == _FOCUS_WRAP_MODE,
+                Attr(WHITE, BLUE), Attr(BLACK, CYAN),
+            )
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, wrap_y + 2),
+            String("Smart wrap breaks long calls one item per line (code files)."),
+            hint,
+        )
         # On-save transform checkboxes. Both keep their glyph in lock-step
         # with the working-copy bools (the bools can be mutated directly
         # in tests, same contract as the dropdown's ``want_idx`` sync).
@@ -1184,18 +1247,18 @@ struct Settings(Movable):
         self._final_nl_cb.on = self.ensure_final_newline
         var chip = Attr(BLACK, CYAN)
         var focus_attr = Attr(WHITE, BLUE)
-        self._trim_cb.move_to(inner.a.x, label_y + 4)
+        self._trim_cb.move_to(inner.a.x, label_y + 8)
         paint_checkbox(
             canvas, self._trim_cb, chip, focus_attr,
             self.focus == _FOCUS_TRIM_WS, inner.b.x,
         )
-        self._final_nl_cb.move_to(inner.a.x, label_y + 5)
+        self._final_nl_cb.move_to(inner.a.x, label_y + 9)
         paint_checkbox(
             canvas, self._final_nl_cb, chip, focus_attr,
             self.focus == _FOCUS_FINAL_NL, inner.b.x,
         )
         _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y + 7),
+            canvas, Point(inner.a.x, label_y + 11),
             String("Applied on every save unless a project .editorconfig overrides it."),
             hint,
         )
@@ -1481,6 +1544,12 @@ struct Settings(Movable):
             _ = self._save_dropdown.handle_key(event)
             self._sync_dropdown_commit(prev_idx)
             return True
+        if (self.focus == _FOCUS_WRAP_MODE
+                and self._wrap_dropdown.is_open):
+            var prev_idx = self._wrap_dropdown.index
+            _ = self._wrap_dropdown.handle_key(event)
+            self._sync_wrap_commit(prev_idx)
+            return True
         var k = event.key
         if k == KEY_ESC:
             self.close()
@@ -1524,6 +1593,10 @@ struct Settings(Movable):
                 var prev_idx = self._save_dropdown.index
                 _ = self._save_dropdown.handle_key(event)
                 self._sync_dropdown_commit(prev_idx)
+            elif self.focus == _FOCUS_WRAP_MODE:
+                var prev_idx = self._wrap_dropdown.index
+                _ = self._wrap_dropdown.handle_key(event)
+                self._sync_wrap_commit(prev_idx)
             return True
         # Space toggles a focused Editor-section checkbox (matches the
         # cluster-item behavior in the modal dialogs). Intercepted ahead
@@ -1593,6 +1666,16 @@ struct Settings(Movable):
             self.auto_save = new_auto
             self.dirty = True
 
+    def _sync_wrap_commit(mut self, prev_idx: Int):
+        """If the Wrap dropdown's committed index moved, propagate it to
+        ``wrap_mode`` and raise ``dirty`` (the index *is* the
+        ``WRAP_*`` value). Mirrors ``_sync_dropdown_commit``."""
+        if self._wrap_dropdown.index == prev_idx:
+            return
+        if self._wrap_dropdown.index != self.wrap_mode:
+            self.wrap_mode = self._wrap_dropdown.index
+            self.dirty = True
+
     def _toggle_trim_ws(mut self):
         """Flip the trailing-whitespace toggle, keep the checkbox glyph
         in sync, and raise ``dirty`` so the host persists it."""
@@ -1623,6 +1706,7 @@ struct Settings(Movable):
                 ordered.append(_FOCUS_REMOVE)
         elif self.section == _SECTION_EDITOR:
             ordered.append(_FOCUS_SAVE_BEHAVIOR)
+            ordered.append(_FOCUS_WRAP_MODE)
             ordered.append(_FOCUS_TRIM_WS)
             ordered.append(_FOCUS_FINAL_NL)
         elif self.section == _SECTION_SPELL:
@@ -1687,9 +1771,10 @@ struct Settings(Movable):
             s = len(labels) - 1
         if s != self.section:
             # Switching sections invalidates dropdown popup state from
-            # the previous section — close it so a stale popup doesn't
+            # the previous section — close them so a stale popup doesn't
             # paint over the new pane.
             self._save_dropdown.close()
+            self._wrap_dropdown.close()
             # Drop any in-flight type-to-jump prefix so the first
             # keystroke after the jump starts a fresh search.
             self._type_ahead.reset()
@@ -1857,6 +1942,11 @@ struct Settings(Movable):
             self._save_dropdown.toggle()
             self._sync_dropdown_commit(prev_idx)
             return True
+        if self.focus == _FOCUS_WRAP_MODE:
+            var prev_idx = self._wrap_dropdown.index
+            self._wrap_dropdown.toggle()
+            self._sync_wrap_commit(prev_idx)
+            return True
         if self.focus == _FOCUS_TRIM_WS:
             self._toggle_trim_ws()
             return True
@@ -2015,6 +2105,17 @@ struct Settings(Movable):
             # ``DROPDOWN_HIT_OUTSIDE`` and ``DROPDOWN_HIT_NONE`` both
             # fall through to the regular dispatch; the popup has
             # already auto-closed in the OUTSIDE case.
+            # Wrap-mode dropdown — same first-crack treatment.
+            var prev_wrap = self._wrap_dropdown.index
+            var wrap_hit = self._wrap_dropdown.handle_mouse(
+                self._wrap_dd_anchor, screen, event,
+            )
+            self._sync_wrap_commit(prev_wrap)
+            if wrap_hit == DROPDOWN_HIT_BODY:
+                self.focus = _FOCUS_WRAP_MODE
+                return True
+            if wrap_hit == DROPDOWN_HIT_POPUP:
+                return True
             # On-save transform checkboxes. Each runs the shared press /
             # drag / release state machine; we own the toggle so it only
             # flips on a release that lands back on the chip.
@@ -2053,6 +2154,7 @@ struct Settings(Movable):
             if 0 <= idx and idx < len(labels):
                 if idx != self.section:
                     self._save_dropdown.close()
+                    self._wrap_dropdown.close()
                 self.section = idx
                 self.focus = _FOCUS_SECTIONS
             return True

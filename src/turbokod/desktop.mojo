@@ -47,8 +47,8 @@ from .events import (
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    TurbokodConfig, default_font_label, load_config, record_recent_file,
-    record_recent_project, save_config,
+    TurbokodConfig, WRAP_NONE, default_font_label,
+    load_config, record_recent_file, record_recent_project, save_config,
 )
 from .diff import unified_diff
 from .file_io import (
@@ -242,7 +242,6 @@ comptime EDITOR_COMPLETE      = String("edit:complete")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
-comptime EDITOR_TOGGLE_SOFT_WRAP    = String("view:soft_wrap")
 # View-menu toggle for the per-window tab strip rendered above the
 # status bar. Like the other view toggles, the flag lives on
 # ``TurbokodConfig`` so it survives across sessions.
@@ -2120,9 +2119,6 @@ struct Desktop(Movable):
             EDITOR_TOGGLE_LINE_NUMBERS, self.config.line_numbers,
         )
         self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_SOFT_WRAP, self.config.soft_wrap,
-        )
-        self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_GIT_CHANGES, self.config.git_changes,
         )
         self.menu_bar.set_item_checked(
@@ -2184,7 +2180,7 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.line_numbers = False
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
-            self.windows.windows[i].editor.soft_wrap = self.config.soft_wrap
+            self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
             # Push the global on-save transforms in as editorconfig
             # fallbacks. ``trim`` off and final-newline off both map to a
             # value that leaves the file untouched (0 / -1) rather than
@@ -2194,8 +2190,8 @@ struct Desktop(Movable):
                 1 if self.config.trim_trailing_whitespace else 0
             self.windows.windows[i].editor.default_insert_final_newline = \
                 1 if self.config.ensure_final_newline else -1
-            if self.config.soft_wrap:
-                # Soft-wrap forces a left-aligned visible area; keep the
+            if self.config.wrap_mode != WRAP_NONE:
+                # Any wrap mode forces a left-aligned visible area; keep the
                 # invariant even if the host poked ``scroll_x`` directly.
                 self.windows.windows[i].editor.scroll_x = 0
             # Git-changes column. Read-only editors (the docs viewer)
@@ -2489,6 +2485,17 @@ struct Desktop(Movable):
                     and self.settings.font_size_choice \
                         != self.config.font_size:
                 self.set_font_size(self.settings.font_size_choice)
+            # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
+            # into every editor and re-reveals each cursor, since the
+            # buffer-row ↔ screen-row relationship changes with the mode.
+            if self.settings.wrap_mode != self.config.wrap_mode:
+                self.config.wrap_mode = self.settings.wrap_mode
+                self._apply_view_config()
+                for i in range(len(self.windows.windows)):
+                    if self.windows.windows[i].is_editor:
+                        self.windows.windows[i].editor.reveal_cursor(
+                            self.windows.windows[i].interior(),
+                        )
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
             self.settings.ack_dirty()
@@ -4875,6 +4882,7 @@ struct Desktop(Movable):
                 self.config.font_size,
                 self.host_font_effective_size,
                 self.host_font_ideal_size,
+                self.config.wrap_mode,
             )
             return Optional[String]()
         if action == EDITOR_NEW:
@@ -5020,19 +5028,6 @@ struct Desktop(Movable):
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
             self._apply_view_config()
-            _ = save_config(self.config)
-            return Optional[String]()
-        if action == EDITOR_TOGGLE_SOFT_WRAP:
-            self.config.soft_wrap = not self.config.soft_wrap
-            self._apply_view_config()
-            # Soft-wrap changes the relationship between buffer rows
-            # and screen rows; re-scroll every editor so its cursor
-            # stays visible after the layout change.
-            for i in range(len(self.windows.windows)):
-                if self.windows.windows[i].is_editor:
-                    self.windows.windows[i].editor.reveal_cursor(
-                        self.windows.windows[i].interior(),
-                    )
             _ = save_config(self.config)
             return Optional[String]()
         if action == EDITOR_TOGGLE_GIT_CHANGES:

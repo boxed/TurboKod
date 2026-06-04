@@ -46,7 +46,7 @@ from turbokod.desktop import (
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_GIT_CHANGES,
-    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP, EDITOR_TOGGLE_SOFT_WRAP,
+    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
@@ -151,7 +151,6 @@ def _build_menus(mut d: Desktop):
     d.menu_bar.add(Menu(String("Edit"), _build_edit_items(False)))
     var v = List[MenuItem]()
     v.append(MenuItem(String("Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS, checkable=True))
-    v.append(MenuItem(String("Soft Wrap"), EDITOR_TOGGLE_SOFT_WRAP, checkable=True))
     v.append(MenuItem(String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES, checkable=True))
     v.append(MenuItem(String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR, checkable=True))
     v.append(MenuItem(String("Minimap"), EDITOR_TOGGLE_MINIMAP, checkable=True))

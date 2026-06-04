@@ -1322,9 +1322,9 @@ struct Window(Copyable, Movable):
         )
 
     def _h_scrollbar(self) -> HScrollbar:
-        """Horizontal scrollbar value. Soft-wrap mode and too-narrow
+        """Horizontal scrollbar value. Any wrap mode and too-narrow
         windows produce a degenerate bar (``right < left``)."""
-        if not self.is_editor or self.editor.soft_wrap \
+        if not self.is_editor or self.editor._is_wrapping() \
                 or self.rect.width() < 14 or self.rect.height() < 2:
             return HScrollbar(0, 0, -1, 0, 0, 0)
         var pos_text = String(self.editor.selections[0].row + 1) \
