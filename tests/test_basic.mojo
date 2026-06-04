@@ -17762,6 +17762,7 @@ def _run_chunk_05() raises:
     test_kwarg_conceal_basic_python()
     test_kwarg_conceal_skips_statement_and_mismatch()
     test_kwarg_conceal_skips_strings_and_eq_eq()
+    test_kwarg_conceal_skips_annotation_default()
     test_kwarg_conceal_swift_colon()
     test_kwarg_conceal_build_segment_collapses_and_shifts()
 
@@ -17806,6 +17807,15 @@ def test_kwarg_conceal_skips_strings_and_eq_eq() raises:
     spans.append((4, 9))  # the quoted 'a=a'
     var hidden = kwarg_conceal_ranges(line, 0x3D, spans)
     assert_equal(len(hidden), 0)
+
+def test_kwarg_conceal_skips_annotation_default() raises:
+    # ``def f(request, name: str | None = None):`` must NOT conceal the
+    # ``None`` before ``=``. That ``None`` is part of the type annotation
+    # ``str | None`` — preceded by '|', not a keyword-argument boundary — so
+    # comparing it against the default ``None`` is wrong.
+    var line = String("def impersonate(request, name: str | None = None):")
+    var hide = kwarg_conceal_ranges(line, 0x3D, List[Tuple[Int, Int]]())
+    assert_equal(len(hide), 0)
 
 def test_kwarg_conceal_swift_colon() raises:
     # Swift uses ':' — ``foo(a: a)`` hides the label ``a`` (byte 4..5),

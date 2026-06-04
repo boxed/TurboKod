@@ -96,18 +96,25 @@ def kwarg_conceal_ranges(
         if depth < 1 or not _is_ident_byte(b):
             i += 1
             continue
-        # Left boundary: the byte before the label must start a new
-        # argument — '(' / ',' / whitespace. Rejects attribute targets
-        # ("x.y=") and the tail of a longer identifier.
+        # Left boundary: walking back over any whitespace, the byte that
+        # opens this argument must be '(' or ','. Rejects attribute targets
+        # ("x.y="), the tail of a longer identifier, and — crucially — an
+        # identifier that's only part of a larger expression, e.g. the
+        # ``None`` in ``name: str | None = None`` (preceded by '|', not a
+        # real keyword-argument boundary).
         if i > 0:
-            var prev = Int(bytes[i - 1])
-            if not (prev == 0x28 or prev == 0x2C or _is_space_byte(prev)):
-                # Not an argument start — skip this identifier run.
-                var s = i + 1
-                while s < n and _is_ident_byte(Int(bytes[s])):
-                    s += 1
-                i = s
-                continue
+            var w = i - 1
+            while w >= 0 and _is_space_byte(Int(bytes[w])):
+                w -= 1
+            if w >= 0:
+                var prev = Int(bytes[w])
+                if not (prev == 0x28 or prev == 0x2C):
+                    # Not an argument start — skip this identifier run.
+                    var s = i + 1
+                    while s < n and _is_ident_byte(Int(bytes[s])):
+                        s += 1
+                    i = s
+                    continue
         # Read the label identifier.
         var label_start = i
         var j = i
