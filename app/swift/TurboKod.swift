@@ -1055,6 +1055,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // waiting on TK_CAPTURE_WHEN=debug-stopped would otherwise stall
             // until the watchdog kills the session.
             let capturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
+            // Only the key window's Desktop should animate its caret — with
+            // several projects open each runs its own Desktop, and a blink
+            // in a background window reads as a second live cursor. Stamp
+            // every view's focus state so background editors fall back to a
+            // steady caret.
+            let keyWin = NSApp.isActive ? NSApp.keyWindow : nil
+            for v in self.views where v.handle != 0 {
+                tk_desktop_set_host_focused(v.handle, (v.window === keyWin) ? 1 : 0)
+            }
             for v in self.views {
                 guard let w = v.window, w.isVisible,
                       capturing || w.occlusionState.contains(.visible) else {

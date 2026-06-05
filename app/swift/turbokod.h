@@ -35,6 +35,7 @@ int32_t tk_desktop_pointer_shape(int64_t h, int64_t x, int64_t y,
                                  int64_t cols, int64_t rows);
 int32_t tk_desktop_has_project(int64_t h);
 void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
+void    tk_desktop_set_host_focused(int64_t h, int64_t on);
 int64_t tk_desktop_menu_snapshot(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_menu_invoke(int64_t h, int64_t action_ptr, int64_t action_len,
                                int64_t cols, int64_t rows);

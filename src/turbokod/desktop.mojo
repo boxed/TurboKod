@@ -610,6 +610,13 @@ struct Desktop(Movable):
     # Only ever set by a host frontend (the Swift app); the terminal frontend
     # leaves it False and always renders docked. See docs/floating-panels.md.
     var panels_detached: Bool
+    # True when this Desktop's host window currently owns the OS keyboard
+    # focus (is the key window). Multiple projects each run their own
+    # Desktop in their own native window; only the key one should animate
+    # its caret, so the blink is gated on this. The Swift host updates it
+    # per-frame via ``tk_desktop_set_host_focused``. The terminal frontend
+    # has a single window and leaves it True.
+    var host_focused: Bool
     var windows: WindowManager
     var status_bar: StatusBar
     var tab_bar: TabBar
@@ -1056,6 +1063,7 @@ struct Desktop(Movable):
         self.menu_bar = MenuBar()
         self.host_owns_menu = False
         self.panels_detached = False
+        self.host_focused = True
         self.windows = WindowManager()
         self.status_bar = StatusBar()
         self.tab_bar = TabBar()
@@ -6497,15 +6505,23 @@ struct Desktop(Movable):
             )
 
     def _any_dock_focused(self) -> Bool:
-        """True when any docked pane currently owns keyboard focus —
-        used to dim the editor-window chrome so the visible focus
-        matches the keyboard target."""
-        if self.file_tree.focused or self.debug_pane.focused \
-                or self.test_pane.focused:
+        """True when a dock *on the main surface* currently owns keyboard
+        focus — used to dim the editor-window chrome (and hide its caret)
+        so the visible focus matches the keyboard target.
+
+        The file tree always lives in the main window. The tool panels
+        (terminal / debug / test) only count while docked: when
+        ``panels_detached`` they render on a separate host window, so a
+        focused floating pane must not dim the main editor — that's a
+        cross-window focus shift the host tracks via ``host_focused``."""
+        if self.file_tree.focused:
             return True
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].focused:
+        if not self.panels_detached:
+            if self.debug_pane.focused or self.test_pane.focused:
                 return True
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].focused:
+                    return True
         return False
 
     def _editor_keyboard_live(self) -> Bool:
@@ -6514,7 +6530,10 @@ struct Desktop(Movable):
         currently intercepting keyboard input. Mirrors the early-out
         chain in ``handle_event``; kept in sync with it. Used to gate
         the caret blink so the cursor only blinks where typing actually
-        goes (the focused editor), never under an open dialog."""
+        goes (the focused editor), never under an open dialog — and
+        never in a background window when several projects are open."""
+        if not self.host_focused:
+            return False
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
                 or self.git_gutter_menu.active or self.diagnostic_menu.active \

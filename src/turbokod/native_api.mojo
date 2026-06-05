@@ -826,6 +826,23 @@ def tk_desktop_set_host_owns_menu(h: Int, on: Int):
     _desk(h)[].host_owns_menu = on != 0
 
 
+@export
+def tk_desktop_set_host_focused(h: Int, on: Int):
+    """Tell the Desktop whether its host window currently owns the OS
+    keyboard focus (is the key window).
+
+    Each open project runs its own Desktop in its own native window; the
+    caret should only blink in the key window. The host calls this
+    per-frame for every view with ``on=1`` for the key window and ``0``
+    for the rest, so background projects show a steady (non-blinking)
+    caret. Defaults to focused, so the terminal frontend (single window)
+    need not call it.
+    """
+    if h == 0:
+        return
+    _desk(h)[].host_focused = on != 0
+
+
 def _b(v: Bool) -> String:
     return String("1") if v else String("0")
 
