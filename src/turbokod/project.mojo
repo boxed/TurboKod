@@ -429,11 +429,23 @@ struct FileIndexer(Movable):
         # whatever happened to be at offset 0 of its unallocated buffer.
         var scratch = alloc_zero_buffer(65536)
         var total = 0
+        var saw_eof = False
         while total < 1024 * 1024:
             if not poll_stdin(self.proc.stdout_fd, Int32(0)):
                 break
             var grew = read_into(self.proc.stdout_fd, scratch, 65536)
             if grew <= 0:
+                # ``read`` returning 0 is EOF: the child closed its stdout,
+                # which only happens once it has written everything and is
+                # exiting. That — not ``waitpid`` reporting the child gone —
+                # is the real "no more data" signal: a process can write its
+                # final batch into the pipe buffer and exit before we read
+                # it, so keying "done" off the exit would drop whatever is
+                # still buffered (the *tail* of ``git ls-files`` output —
+                # e.g. ``pyproject.toml`` / ``settings.py`` near the end).
+                # A negative ``grew`` is an unrecoverable read error; treat
+                # it as end-of-stream too.
+                saw_eof = True
                 break
             for i in range(grew):
                 self.buf.append(scratch[i])
@@ -462,12 +474,18 @@ struct FileIndexer(Movable):
             for i in range(start, len(self.buf)):
                 tail.append(self.buf[i])
             self.buf = tail^
-        # Detect child exit. ``waitpid_nohang`` returns (0, 0) while the
-        # child is still running; once it exits we get its pid back and
-        # a non-zero status. Either way, when EOF lands on the pipe and
-        # the process is reaped, mark ourselves done.
+        # Reap the child if it has already exited (best-effort, avoids a
+        # lingering zombie); the shim's atexit reaper catches it otherwise.
+        # Crucially this does NOT decide doneness — only EOF on the pipe
+        # does. Keying "done" off ``waitpid`` here used to race: the child
+        # could exit with its last NUL-terminated paths still unread in the
+        # pipe, we'd flip ``alive`` to False, and the next ``poll`` would
+        # early-return without ever draining them — silently dropping the
+        # tail of the file list.
         var ws = waitpid_nohang(self.proc.pid)
         if Int(ws[0]) != 0:
+            self.proc.alive = False
+        if saw_eof:
             self.alive = False
             self.proc.alive = False
         return new_paths^

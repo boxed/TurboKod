@@ -4807,6 +4807,77 @@ def test_file_indexer_ignored_mode_skips_directory_entries() raises:
     _ = capture_command(rm)
 
 
+def test_file_indexer_drains_full_stream_to_eof() raises:
+    """The async ``FileIndexer`` must return *every* file git enumerates,
+    not just whatever happened to be read before the child exited.
+
+    Regression for a tail-drop race: ``poll`` used to flip ``alive`` to
+    False as soon as ``waitpid`` reported the child gone — but a process
+    can write its final batch into the pipe buffer and exit before we read
+    it, so keying "done" off the exit silently dropped the *tail* of the
+    listing (in a real project, the last-emitted paths like
+    ``pyproject.toml`` / ``settings.py``, which then never showed up in
+    Quick Open). The fix keys completion off pipe EOF instead.
+
+    Triggering it needs output larger than one pipe buffer (~64 KiB) so
+    git produces it in multiple bursts, plus a small inter-poll delay to
+    widen the window where the child finishes mid-drain. We run several
+    times and assert the count is the full set every time — with the bug
+    this dropped entries on a sizeable fraction of runs."""
+    var root = _temp_path(String("_indexer_eof"))
+    var init = List[String]()
+    init.append(String("git"))
+    init.append(String("init"))
+    init.append(String("-q"))
+    init.append(root)
+    var cap = capture_command(init)
+    if Int(cap.status) != 0:
+        return  # no git available
+    # ~1600 files under a long-named dir so the NUL stream comfortably
+    # exceeds a 64 KiB pipe buffer (avg path ~55 bytes ⇒ ~88 KiB). One
+    # `sh` invocation keeps repo creation cheap.
+    var sub = String("a_directory_with_a_deliberately_long_name_for_padding")
+    var mk = List[String]()
+    mk.append(String("sh"))
+    mk.append(String("-c"))
+    mk.append(
+        String("cd ") + root + String(" && mkdir -p ") + sub
+        + String(" && for i in $(seq 1 1600); do : > ")
+        + sub + String("/source_file_number_$i.txt; done")
+    )
+    if Int(capture_command(mk).status) != 0:
+        var rm0 = List[String]()
+        rm0.append(String("rm"))
+        rm0.append(String("-rf"))
+        rm0.append(root)
+        _ = capture_command(rm0)
+        return
+    var expected = 1600
+
+    var ok = True
+    for _ in range(6):
+        var idx_opt = FileIndexer.start(root)
+        assert_true(Bool(idx_opt))
+        var count = 0
+        for _ in range(5000):
+            var batch = idx_opt.value().poll(root)
+            count += len(batch)
+            if not idx_opt.value().alive:
+                break
+            _ = external_call["usleep", Int32](Int32(1000))   # 1 ms
+        # Once drained, no entries may be lost: alive must only flip after
+        # EOF, so the full set is always returned.
+        if count != expected:
+            ok = False
+    assert_true(ok)
+
+    var rm = List[String]()
+    rm.append(String("rm"))
+    rm.append(String("-rf"))
+    rm.append(root)
+    _ = capture_command(rm)
+
+
 def _hl_lines(*texts: String) -> List[String]:
     var out = List[String]()
     for t in texts:
@@ -17806,6 +17877,7 @@ def _run_chunk_01() raises:
     test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs()
     test_walk_project_files_git_fast_path_includes_ignored_files()
     test_file_indexer_ignored_mode_skips_directory_entries()
+    test_file_indexer_drains_full_stream_to_eof()
     test_downloadable_grammar_registry_has_elm()
     test_downloadable_grammar_registry_misses_unknown()
     test_grammar_install_command_targets_user_config()
