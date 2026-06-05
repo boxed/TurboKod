@@ -12,9 +12,11 @@ unsafe_from_address=h)`` — this is how persistent Mojo state survives across
 C-ABI calls (Mojo has no module-level mutable globals).
 
 Strings cross as ``(ptr: Int, len: Int)`` UTF-8 byte buffers; the cell grid
-crosses as a caller-provided ``UInt32`` buffer, 3 words per cell:
-``[codepoint, fg | bg<<8 | style<<16, underline_color (0xFFFFFFFF = use fg)]``
-— the same packing the (now-retired) Rust path used.
+crosses as a caller-provided ``UInt32`` buffer, 5 words per cell:
+``[codepoint, fg | bg<<8 | style<<16 | color_mode<<24,
+   underline_color (0xFFFFFFFF = use fg), fg_rgb, bg_rgb]``.
+``color_mode`` bit0/bit1 mark fg/bg as 24-bit truecolor — when set the host
+reads ``fg_rgb`` / ``bg_rgb`` (``0xRRGGBB``) instead of the palette index.
 """
 
 from std.ffi import external_call
@@ -369,11 +371,11 @@ def tk_desktop_tick(h: Int, cols: Int, rows: Int):
 
 
 def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
-    """Pack a laid-out canvas into the caller's ``UInt32`` buffer, 3 words
-    per cell (``[codepoint, fg|bg<<8|style<<16, underline]``). Returns the
-    number of cells written (clamped to ``cap``). Shared by the main and the
-    floating-panels layout entry points so the packing format stays in one
-    place."""
+    """Pack a laid-out canvas into the caller's ``UInt32`` buffer, 5 words
+    per cell (``[codepoint, fg|bg<<8|style<<16|color_mode<<24, underline,
+    fg_rgb, bg_rgb]``). Returns the number of cells written (clamped to
+    ``cap``). Shared by the main and the floating-panels layout entry points
+    so the packing format stays in one place."""
     var op = UnsafePointer[UInt32, MutExternalOrigin](unsafe_from_address=out_ptr)
     var n = cols * rows
     if n > cap:
@@ -386,15 +388,18 @@ def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: I
         var attr = cell.attr
         var w1 = UInt32(Int(attr.fg)) \
             | (UInt32(Int(attr.bg)) << 8) \
-            | (UInt32(Int(attr.style)) << 16)
+            | (UInt32(Int(attr.style)) << 16) \
+            | (UInt32(Int(attr.color_mode)) << 24)
         var w2: UInt32
         if attr.underline_color < 0:
             w2 = UInt32(0xFFFFFFFF)
         else:
             w2 = UInt32(Int(attr.underline_color))
-        op[i * 3] = UInt32(cp)
-        op[i * 3 + 1] = w1
-        op[i * 3 + 2] = w2
+        op[i * 5] = UInt32(cp)
+        op[i * 5 + 1] = w1
+        op[i * 5 + 2] = w2
+        op[i * 5 + 3] = attr.fg_rgb
+        op[i * 5 + 4] = attr.bg_rgb
     return n
 
 

@@ -102,6 +102,17 @@ comptime STYLE_STRIKE          = UInt8(1 << 5)
 # ``terminal_supports_extended_underline``).
 comptime STYLE_UNDERLINE_CURLY = UInt8(1 << 6)
 
+# --- Color-mode bits ---------------------------------------------------------
+#
+# ``Attr`` normally carries 8-bit palette indices for fg/bg. When a cell wants a
+# 24-bit truecolor instead — only pty-sourced terminal-pane cells do today — the
+# matching bit in ``color_mode`` is set and the real ``0xRRGGBB`` lives in
+# ``fg_rgb`` / ``bg_rgb``. The index field still holds the nearest-256 fold (see
+# ``with_fg_rgb`` / ``with_bg_rgb``), so the 256-color terminal path degrades for
+# free with no extra branching.
+comptime FG_TRUECOLOR = UInt8(1 << 0)
+comptime BG_TRUECOLOR = UInt8(1 << 1)
+
 
 struct Attr(ImplicitlyCopyable, Movable):
     """Visual attributes for a single cell.
@@ -119,54 +130,96 @@ struct Attr(ImplicitlyCopyable, Movable):
     var bg: UInt8
     var style: UInt8
     var underline_color: Int16
+    # See the color-mode bits above. ``color_mode`` is a bitfield of
+    # ``FG_TRUECOLOR`` / ``BG_TRUECOLOR``; ``fg_rgb`` / ``bg_rgb`` hold the
+    # ``0xRRGGBB`` value for whichever channel has its bit set (``0`` otherwise).
+    var color_mode: UInt8
+    var fg_rgb: UInt32
+    var bg_rgb: UInt32
 
     def __init__(out self):
         self.fg = LIGHT_GRAY
         self.bg = BLACK
         self.style = STYLE_NONE
         self.underline_color = -1
+        self.color_mode = 0
+        self.fg_rgb = 0
+        self.bg_rgb = 0
 
     def __init__(out self, fg: UInt8, bg: UInt8):
         self.fg = fg
         self.bg = bg
         self.style = STYLE_NONE
         self.underline_color = -1
+        self.color_mode = 0
+        self.fg_rgb = 0
+        self.bg_rgb = 0
 
     def __init__(out self, fg: UInt8, bg: UInt8, style: UInt8):
         self.fg = fg
         self.bg = bg
         self.style = style
         self.underline_color = -1
+        self.color_mode = 0
+        self.fg_rgb = 0
+        self.bg_rgb = 0
 
     def with_fg(self, fg: UInt8) -> Attr:
-        var a = Attr(fg, self.bg, self.style)
-        a.underline_color = self.underline_color
+        # Setting an explicit palette index means "not truecolor" for fg.
+        var a = self
+        a.fg = fg
+        a.color_mode = a.color_mode & ~FG_TRUECOLOR
+        a.fg_rgb = 0
         return a
 
     def with_bg(self, bg: UInt8) -> Attr:
-        var a = Attr(self.fg, bg, self.style)
-        a.underline_color = self.underline_color
+        var a = self
+        a.bg = bg
+        a.color_mode = a.color_mode & ~BG_TRUECOLOR
+        a.bg_rgb = 0
         return a
 
     def with_style(self, style: UInt8) -> Attr:
-        var a = Attr(self.fg, self.bg, style)
-        a.underline_color = self.underline_color
+        var a = self
+        a.style = style
         return a
 
     def add_style(self, bits: UInt8) -> Attr:
-        var a = Attr(self.fg, self.bg, self.style | bits)
-        a.underline_color = self.underline_color
+        var a = self
+        a.style = a.style | bits
         return a
 
     def with_underline_color(self, color: Int16) -> Attr:
-        var a = Attr(self.fg, self.bg, self.style)
+        var a = self
         a.underline_color = color
+        return a
+
+    def with_fg_rgb(self, rgb: UInt32) -> Attr:
+        # 24-bit foreground. We also bake the nearest-256 fold into ``fg`` so
+        # the 256-color terminal path renders without inspecting ``color_mode``.
+        var a = self
+        a.color_mode = a.color_mode | FG_TRUECOLOR
+        a.fg_rgb = rgb
+        a.fg = _rgb_to_256(
+            Int((rgb >> 16) & 0xFF), Int((rgb >> 8) & 0xFF), Int(rgb & 0xFF)
+        )
+        return a
+
+    def with_bg_rgb(self, rgb: UInt32) -> Attr:
+        var a = self
+        a.color_mode = a.color_mode | BG_TRUECOLOR
+        a.bg_rgb = rgb
+        a.bg = _rgb_to_256(
+            Int((rgb >> 16) & 0xFF), Int((rgb >> 8) & 0xFF), Int(rgb & 0xFF)
+        )
         return a
 
     def __eq__(self, other: Attr) -> Bool:
         return self.fg == other.fg and self.bg == other.bg \
             and self.style == other.style \
-            and self.underline_color == other.underline_color
+            and self.underline_color == other.underline_color \
+            and self.color_mode == other.color_mode \
+            and self.fg_rgb == other.fg_rgb and self.bg_rgb == other.bg_rgb
 
     def __ne__(self, other: Attr) -> Bool:
         return not (self == other)
@@ -236,10 +289,16 @@ def attr_to_sgr_rgb(attr: Attr, palette: List[UInt32]) -> String:
     if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
     if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
     var n = len(palette)
-    var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
-    var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
-    s += String(";38;2;") + _rgb_triplet(palette[fg_i])
-    s += String(";48;2;") + _rgb_triplet(palette[bg_i])
+    if (attr.color_mode & FG_TRUECOLOR) != 0:
+        s += String(";38;2;") + _rgb_triplet(attr.fg_rgb)
+    else:
+        var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
+        s += String(";38;2;") + _rgb_triplet(palette[fg_i])
+    if (attr.color_mode & BG_TRUECOLOR) != 0:
+        s += String(";48;2;") + _rgb_triplet(attr.bg_rgb)
+    else:
+        var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
+        s += String(";48;2;") + _rgb_triplet(palette[bg_i])
     if attr.underline_color >= 0:
         var uc = Int(attr.underline_color)
         if uc < n:
@@ -264,6 +323,11 @@ def _sgr_channel(v: Int) -> Int:
     if v < 115:
         return 1
     return (v - 35) // 40
+
+
+def _pack_rgb(r: Int, g: Int, b: Int) -> UInt32:
+    """Pack three 8-bit channels into a ``0xRRGGBB`` value."""
+    return (UInt32(r & 0xFF) << 16) | (UInt32(g & 0xFF) << 8) | UInt32(b & 0xFF)
 
 
 def _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
@@ -323,9 +387,9 @@ def _apply_sgr(cur: Attr, base: Attr, params: List[Int]) -> Attr:
                 a = a.with_fg(UInt8(params[i + 2] & 0xFF))
                 i += 2
             elif i + 4 < n and params[i + 1] == 2:
-                a = a.with_fg(
-                    _rgb_to_256(params[i + 2], params[i + 3], params[i + 4])
-                )
+                a = a.with_fg_rgb(_pack_rgb(
+                    params[i + 2], params[i + 3], params[i + 4]
+                ))
                 i += 4
         elif p == 39:
             a = a.with_fg(base.fg)
@@ -336,9 +400,9 @@ def _apply_sgr(cur: Attr, base: Attr, params: List[Int]) -> Attr:
                 a = a.with_bg(UInt8(params[i + 2] & 0xFF))
                 i += 2
             elif i + 4 < n and params[i + 1] == 2:
-                a = a.with_bg(
-                    _rgb_to_256(params[i + 2], params[i + 3], params[i + 4])
-                )
+                a = a.with_bg_rgb(_pack_rgb(
+                    params[i + 2], params[i + 3], params[i + 4]
+                ))
                 i += 4
         elif p == 49:
             a = a.with_bg(base.bg)

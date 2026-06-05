@@ -196,9 +196,19 @@ func buildPalette() -> [UInt32] {
 }
 
 // Style bits (colors.mojo)
+let STYLE_BOLD: UInt32 = 1 << 0
+let STYLE_DIM: UInt32 = 1 << 1
 let STYLE_UNDERLINE: UInt32 = 1 << 3
 let STYLE_REVERSE: UInt32 = 1 << 4
 let STYLE_UNDERLINE_CURLY: UInt32 = 1 << 6
+
+// color_mode bits (colors.mojo): fg/bg carry 24-bit truecolor in the
+// per-cell fg_rgb / bg_rgb words instead of a palette index.
+let FG_TRUECOLOR: UInt32 = 1 << 0
+let BG_TRUECOLOR: UInt32 = 1 << 1
+// Per-cell word stride of the layout buffer (native_api.mojo _pack_canvas):
+// [codepoint, fg|bg<<8|style<<16|color_mode<<24, underline, fg_rgb, bg_rgb].
+let CELL_WORDS = 5
 
 // turbokod key constants (events.mojo private-use codes)
 let KEY_ENTER: UInt32 = 0xE001, KEY_TAB: UInt32 = 0xE002, KEY_BACKSPACE: UInt32 = 0xE003
@@ -249,7 +259,7 @@ final class CellView: NSView {
     // window. nil for `.main` views.
     weak var mainPeer: CellView?
     var project: String?      // set when a project is opened; drives session save
-    private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: 3)
+    private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var bufCells = 1
     // Last cell a passive (no-button) mouse move was dispatched for. macOS
     // delivers bare motion at the display refresh rate (60–120 Hz), but the
@@ -400,7 +410,7 @@ final class CellView: NSView {
     private func ensureBuf(_ cells: Int) {
         if cells > bufCells {
             buf.deallocate()
-            buf = UnsafeMutablePointer<UInt32>.allocate(capacity: cells * 3)
+            buf = UnsafeMutablePointer<UInt32>.allocate(capacity: cells * CELL_WORDS)
             bufCells = cells
         }
     }
@@ -443,7 +453,7 @@ final class CellView: NSView {
         ensureBuf(c * r)
         let n = layoutSurface(c, r, c * r)
         frameCols = c; frameRows = r; frameN = n
-        let hash = hashBuf(n * 3)
+        let hash = hashBuf(n * CELL_WORDS)
         // A theme swap changes only the palette, not the laid-out indices, so
         // force a frame through even when the buffer hash is unchanged.
         let themeChanged = refreshPaletteIfNeeded()
@@ -457,6 +467,42 @@ final class CellView: NSView {
     /// handlers call this because a key/mouse event mutates the Desktop, making
     /// any frame an earlier `pollFrame` left behind stale.
     func invalidateFrame() { framePending = false }
+
+    /// Resolve a cell's foreground/background to 24-bit ``0xRRGGBB``, honoring
+    /// the ``color_mode`` truecolor bits (real RGB from the per-cell fg_rgb /
+    /// bg_rgb words) and the ``STYLE_REVERSE`` fg/bg swap. Non-truecolor
+    /// channels look up the theme palette by index, as before.
+    private func cellColors(_ i: Int) -> (fg: UInt32, bg: UInt32, style: UInt32) {
+        let packed = buf[i * CELL_WORDS + 1]
+        let mode = (packed >> 24) & 0xFF
+        let style = (packed >> 16) & 0xFF
+        var fgIdx = Int(packed & 0xFF)
+        // Bold (SGR 1) brightens the 8 base ANSI colors to their bright
+        // variants (0..7 -> 8..15) — the classic terminal behavior, and how
+        // bold reads here since the Px437 bitmap cell font has no heavier
+        // weight. Truecolor / already-bright / 256-cube fg are left as-is.
+        if style & STYLE_BOLD != 0 && (mode & FG_TRUECOLOR) == 0 && fgIdx < 8 {
+            fgIdx += 8
+        }
+        var fg = (mode & FG_TRUECOLOR) != 0 ? buf[i * CELL_WORDS + 3]
+                                            : palette[fgIdx]
+        var bg = (mode & BG_TRUECOLOR) != 0 ? buf[i * CELL_WORDS + 4]
+                                            : palette[Int((packed >> 8) & 0xFF)]
+        if style & STYLE_REVERSE != 0 { swap(&fg, &bg) }
+        // Faint (SGR 2): scale the foreground toward black. Claude Code paints
+        // ghost/suggestion text dim, and without this it'd be indistinguishable
+        // from normal input. Foreground only — faint never touches the bg.
+        if style & STYLE_DIM != 0 { fg = dimmed(fg) }
+        return (fg, bg, style)
+    }
+
+    /// Scale a packed ``0xRRGGBB`` toward black for SGR-2 faint text.
+    private func dimmed(_ rgb: UInt32) -> UInt32 {
+        let r = UInt32(Double((rgb >> 16) & 0xFF) * 0.6)
+        let g = UInt32(Double((rgb >> 8) & 0xFF) * 0.6)
+        let b = UInt32(Double(rgb & 0xFF) * 0.6)
+        return (r << 16) | (g << 8) | b
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard handle != 0, let ctx = NSGraphicsContext.current?.cgContext else { return }
@@ -486,7 +532,7 @@ final class CellView: NSView {
             // Keep the change detector in sync with what we actually present so
             // the next pollFrame compares against this frame.
             frameCols = c; frameRows = r; frameN = n
-            lastFrameHash = hashBuf(n * 3)
+            lastFrameHash = hashBuf(n * CELL_WORDS)
         }
         framePending = false
 
@@ -500,11 +546,7 @@ final class CellView: NSView {
         // single-pass loop would let the *next* cell's background fill erase
         // the emoji's right half. Separating the passes keeps wide glyphs intact.
         for i in 0..<n {
-            let packed = buf[i * 3 + 1]
-            var fg = palette[Int(packed & 0xFF)]
-            var bg = palette[Int((packed >> 8) & 0xFF)]
-            let style = (packed >> 16) & 0xFF
-            if style & STYLE_REVERSE != 0 { swap(&fg, &bg) }
+            let (_, bg, _) = cellColors(i)
             if bg != palette[0] {
                 let col = i % c, row = i / c
                 let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
@@ -513,12 +555,8 @@ final class CellView: NSView {
             }
         }
         for i in 0..<n {
-            let cp = buf[i * 3]
-            let packed = buf[i * 3 + 1]
-            var fg = palette[Int(packed & 0xFF)]
-            var bg = palette[Int((packed >> 8) & 0xFF)]
-            let style = (packed >> 16) & 0xFF
-            if style & STYLE_REVERSE != 0 { swap(&fg, &bg) }
+            let cp = buf[i * CELL_WORDS]
+            let (fg, _, style) = cellColors(i)
             let col = i % c, row = i / c
             let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
 
@@ -537,7 +575,7 @@ final class CellView: NSView {
                 }
             }
             if style & STYLE_UNDERLINE != 0 {
-                let uw = buf[i * 3 + 2]
+                let uw = buf[i * CELL_WORDS + 2]
                 let uc = uw == 0xFFFFFFFF ? fg : palette[Int(uw & 0xFF)]
                 ctx.setFillColor(cgcolor(uc))
                 ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))

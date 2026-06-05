@@ -42,7 +42,7 @@ from .claude_detect import (
     ClaudeStateTracker, claude_state_label,
 )
 from .clipboard import clipboard_copy
-from .colors import Attr, PANE_BG, WHITE
+from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR, PANE_BG, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
@@ -1184,4 +1184,14 @@ def _invert_attr(a: Attr) -> Attr:
     visual either way and saves the parity branch."""
     var r = Attr(a.bg, a.fg, a.style)
     r.underline_color = a.underline_color
+    # Swap truecolor channels too: a selected/cursored truecolor cell must
+    # invert its real RGB, not just the folded index.
+    r.fg_rgb = a.bg_rgb
+    r.bg_rgb = a.fg_rgb
+    var mode = UInt8(0)
+    if (a.color_mode & BG_TRUECOLOR) != 0:
+        mode = mode | FG_TRUECOLOR
+    if (a.color_mode & FG_TRUECOLOR) != 0:
+        mode = mode | BG_TRUECOLOR
+    r.color_mode = mode
     return r

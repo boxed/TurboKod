@@ -1356,43 +1356,40 @@ struct Vt(Copyable, Movable):
             elif p == 29:
                 a.style = a.style & ~STYLE_STRIKE
             elif p >= 30 and p <= 37:
-                a.fg = _ansi_color(p - 30)
+                a = a.with_fg(_ansi_color(p - 30))
             elif p == 38:
                 # Extended fg color: 38;5;N (256) or 38;2;R;G;B (truecolor).
-                # We collapse truecolor → nearest 256-color slot, but for
-                # now just consume the params and use 256-mode index when
-                # available.
                 if i + 2 < len(self._csi_params) and self._csi_params[i + 1] == 5:
-                    a.fg = UInt8(self._csi_params[i + 2] & 0xFF)
+                    a = a.with_fg(UInt8(self._csi_params[i + 2] & 0xFF))
                     i += 2
                 elif i + 4 < len(self._csi_params) and self._csi_params[i + 1] == 2:
-                    a.fg = _rgb_to_256(
+                    a = a.with_fg_rgb(_pack_rgb24(
                         self._csi_params[i + 2],
                         self._csi_params[i + 3],
                         self._csi_params[i + 4],
-                    )
+                    ))
                     i += 4
             elif p == 39:
-                a.fg = Attr().fg
+                a = a.with_fg(Attr().fg)
             elif p >= 40 and p <= 47:
-                a.bg = _ansi_color(p - 40)
+                a = a.with_bg(_ansi_color(p - 40))
             elif p == 48:
                 if i + 2 < len(self._csi_params) and self._csi_params[i + 1] == 5:
-                    a.bg = UInt8(self._csi_params[i + 2] & 0xFF)
+                    a = a.with_bg(UInt8(self._csi_params[i + 2] & 0xFF))
                     i += 2
                 elif i + 4 < len(self._csi_params) and self._csi_params[i + 1] == 2:
-                    a.bg = _rgb_to_256(
+                    a = a.with_bg_rgb(_pack_rgb24(
                         self._csi_params[i + 2],
                         self._csi_params[i + 3],
                         self._csi_params[i + 4],
-                    )
+                    ))
                     i += 4
             elif p == 49:
-                a.bg = Attr().bg
+                a = a.with_bg(Attr().bg)
             elif p >= 90 and p <= 97:
-                a.fg = _ansi_color(p - 90 + 8)
+                a = a.with_fg(_ansi_color(p - 90 + 8))
             elif p >= 100 and p <= 107:
-                a.bg = _ansi_color(p - 100 + 8)
+                a = a.with_bg(_ansi_color(p - 100 + 8))
             i += 1
         self.current_attr = a
 
@@ -1586,20 +1583,11 @@ def _make_grid(cols: Int, rows: Int) -> List[Cell]:
     return g^
 
 
-def _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
-    """Collapse 24-bit RGB to the nearest 256-color palette index.
-    Used by ``SGR 38;2;…`` / ``48;2;…`` when truecolor is sent but
-    we only store an 8-bit palette index. Standard xterm formula:
-    the 6×6×6 color cube lives at indices 16..231; we map each
-    channel to a 0..5 cell index using the boundaries (0, 95, 135,
-    175, 215, 255)."""
-    return UInt8(16 + 36 * _rgb_step(r) + 6 * _rgb_step(g) + _rgb_step(b))
-
-
-def _rgb_step(v: Int) -> Int:
-    if v < 48: return 0
-    if v < 115: return 1
-    return (v - 35) // 40
+def _pack_rgb24(r: Int, g: Int, b: Int) -> UInt32:
+    """Pack a ``SGR 38;2;r;g;b`` / ``48;2;r;g;b`` triple into ``0xRRGGBB``.
+    The nearest-256 fold for degraded rendering happens inside
+    ``Attr.with_fg_rgb`` / ``with_bg_rgb``."""
+    return (UInt32(r & 0xFF) << 16) | (UInt32(g & 0xFF) << 8) | UInt32(b & 0xFF)
 
 
 def _b64_decode(var s: String) -> String:

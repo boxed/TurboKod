@@ -24,6 +24,7 @@ from turbokod.colors import (
     LIGHT_GREEN, LIGHT_RED, RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
     BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, PANE_BG,
+    FG_TRUECOLOR, BG_TRUECOLOR, _rgb_to_256,
     attr_to_sgr, attr_to_sgr_rgb, default_attr, parse_sgr,
 )
 from turbokod.theme import (
@@ -7059,6 +7060,19 @@ def test_attr_to_sgr_rgb_resolves_palette() raises:
     # SYN_IDENT = 0x00FF00 -> fg 0;255;0 ; EDITOR_BG = 0x0021AA -> bg 0;33;170.
     assert_true(sgr.find(String("38;2;0;255;0")) >= 0)
     assert_true(sgr.find(String("48;2;0;33;170")) >= 0)
+
+
+def test_attr_to_sgr_rgb_emits_truecolor_channels() raises:
+    """When a channel is truecolor (e.g. a pty cell painted by
+    ``ESC[38;2;…``), ``attr_to_sgr_rgb`` emits the cell's own ``fg_rgb`` /
+    ``bg_rgb`` directly rather than looking the folded index up in the
+    palette — so truecolor terminals get the exact color, not the 256
+    approximation."""
+    var d = theme_by_name(String("Turbo C++ 3.0"))
+    var a = Attr().with_fg_rgb(0x123456).with_bg_rgb(0xAB12FF)
+    var sgr = attr_to_sgr_rgb(a, d.palette)
+    assert_true(sgr.find(String("38;2;18;52;86")) >= 0)    # 0x12,0x34,0x56
+    assert_true(sgr.find(String("48;2;171;18;255")) >= 0)  # 0xAB,0x12,0xFF
 
 
 def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
@@ -17372,6 +17386,37 @@ def test_vt_decset_1004_focus_events_round_trip() raises:
     assert_equal(vt.take_reply(), String("\x1b[O"))
 
 
+def test_vt_truecolor_fg_keeps_rgb_and_folds_index() raises:
+    """``ESC[38;2;r;g;b m`` must preserve the exact 24-bit RGB on the
+    cell's attr (``FG_TRUECOLOR`` set, ``fg_rgb`` = the packed value) so
+    truecolor terminals / the native app render it faithfully — while
+    still baking the nearest-256 fold into ``fg`` so 256-color terminals
+    degrade without extra logic."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b[38;2;10;20;30mX"))
+    var cell = vt.cell_at(0, 0)
+    assert_equal(cell.glyph, String("X"))
+    assert_true((cell.attr.color_mode & FG_TRUECOLOR) != 0)
+    assert_equal(Int(cell.attr.fg_rgb), 0x0A141E)
+    # Degrade path: the palette index is the rgb→256 fold, not raw RGB.
+    assert_equal(cell.attr.fg, _rgb_to_256(10, 20, 30))
+    # A subsequent indexed color clears the truecolor flag (no stale RGB).
+    vt.feed_string(String("\x1b[31mY"))
+    var cell2 = vt.cell_at(0, 1)
+    assert_true((cell2.attr.color_mode & FG_TRUECOLOR) == 0)
+    assert_equal(Int(cell2.attr.fg_rgb), 0)
+    assert_equal(cell2.attr.fg, RED)
+
+
+def test_vt_truecolor_bg_keeps_rgb() raises:
+    """``ESC[48;2;r;g;b m`` preserves the background RGB the same way."""
+    var vt = Vt(80, 24)
+    vt.feed_string(String("\x1b[48;2;200;100;50mZ"))
+    var cell = vt.cell_at(0, 0)
+    assert_true((cell.attr.color_mode & BG_TRUECOLOR) != 0)
+    assert_equal(Int(cell.attr.bg_rgb), 0xC86432)
+
+
 def test_vt_osc_52_decodes_base64_to_clipboard() raises:
     """OSC 52 ``c;<base64>`` decodes to bytes the pane can hand to
     the system clipboard. ``aGVsbG8=`` is the canonical 'hello' test
@@ -17741,6 +17786,7 @@ def _run_chunk_02() raises:
     test_default_theme_matches_classic_look()
     test_theme_lookup_and_distinctness()
     test_attr_to_sgr_rgb_resolves_palette()
+    test_attr_to_sgr_rgb_emits_truecolor_channels()
     test_textmate_all_bundled_grammars_load()
     test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()
@@ -18241,6 +18287,8 @@ def _run_chunk_05() raises:
     test_text_field_ctrl_letter_does_not_insert()
     test_text_field_paints_visible_window_after_scroll()
     test_vt_osc_52_decodes_base64_to_clipboard()
+    test_vt_truecolor_fg_keeps_rgb_and_folds_index()
+    test_vt_truecolor_bg_keeps_rgb()
     test_find_symbol_query_keeps_dot()
     test_find_symbol_query_split()
     test_find_symbol_container_match()
