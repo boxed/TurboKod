@@ -49,6 +49,11 @@ int32_t tk_desktop_debug_stopped(int64_t h);
 // in the background each batch bounces the Dock icon and bumps the badge.
 int32_t tk_desktop_take_attention(int64_t h);
 
+// One-shot: returns 1 once after the user explicitly opens a new terminal pane,
+// 0 otherwise. With the tool panels floating on their own window, the host uses
+// this to make that window key so the fresh shell is typeable without a click.
+int32_t tk_desktop_take_panel_focus_request(int64_t h);
+
 // Floating panels (native macOS) — see docs/floating-panels.md. The tool
 // panels render on a separate host window via the _panels entry points; the
 // main window keeps using the functions above.

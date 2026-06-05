@@ -410,24 +410,39 @@ def test_claude_state_label_round_trip() raises:
 
 
 def test_terminal_pane_attention_on_working_to_waiting() raises:
-    """Working → waiting fires exactly one attention event; the
-    intermediate ``active`` wobble neither fires nor disarms."""
+    """Working → waiting fires exactly one attention event once the
+    done-debounce window elapses; the intermediate ``active`` wobble
+    neither fires nor disarms, and a working flare inside the window
+    cancels the pending done."""
     var pane = TerminalPane()
-    pane._note_claude_state(CLAUDE_WORKING)
+    pane._note_claude_state(CLAUDE_WORKING, 0)
     assert_equal(pane.take_attention(), 0)
-    pane._note_claude_state(CLAUDE_ACTIVE)       # between-turns wobble
+    pane._note_claude_state(CLAUDE_ACTIVE, 100)       # between-turns wobble
     assert_equal(pane.take_attention(), 0)
-    pane._note_claude_state(CLAUDE_WAITING)
+    # First waiting only starts the debounce timer — no event yet.
+    pane._note_claude_state(CLAUDE_WAITING, 200)
+    assert_equal(pane.take_attention(), 0)
+    # Still inside the 1s window: no event.
+    pane._note_claude_state(CLAUDE_WAITING, 900)
+    assert_equal(pane.take_attention(), 0)
+    # Past the window: fires exactly one.
+    pane._note_claude_state(CLAUDE_WAITING, 1300)
     assert_equal(pane.take_attention(), 1)
     # Disarmed: staying in waiting doesn't keep firing.
-    pane._note_claude_state(CLAUDE_WAITING)
+    pane._note_claude_state(CLAUDE_WAITING, 1400)
     assert_equal(pane.take_attention(), 0)
-    # Claude exiting after a working stint counts as "done".
-    pane._note_claude_state(CLAUDE_WORKING)
-    pane._note_claude_state(CLAUDE_NONE)
+    # A transient working flare inside the debounce window cancels the
+    # pending done — a spinner-frame dropout produces no spurious event.
+    pane._note_claude_state(CLAUDE_WORKING, 2000)
+    pane._note_claude_state(CLAUDE_NONE, 2100)        # candidate armed
+    pane._note_claude_state(CLAUDE_WORKING, 2200)     # resumed — cancels
+    pane._note_claude_state(CLAUDE_NONE, 2300)        # candidate re-armed
+    assert_equal(pane.take_attention(), 0)            # not yet 1s held
+    # Claude exiting after a working stint counts as "done" once held.
+    pane._note_claude_state(CLAUDE_NONE, 3400)
     assert_equal(pane.take_attention(), 1)
     # Waiting without ever having been working is not attention-worthy.
-    pane._note_claude_state(CLAUDE_WAITING)
+    pane._note_claude_state(CLAUDE_WAITING, 3500)
     assert_equal(pane.take_attention(), 0)
 
 
@@ -437,8 +452,9 @@ def test_desktop_take_attention_drains_panes_and_dap() raises:
     var d = Desktop()
     d.attention_events = 1                       # as bumped by dap_tick
     d.terminal_panes.append(TerminalPane())
-    d.terminal_panes[0]._note_claude_state(CLAUDE_WORKING)
-    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WORKING, 0)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 0)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 2000)
     assert_equal(d.take_attention_events(), 2)
     assert_equal(d.take_attention_events(), 0)   # drained
 

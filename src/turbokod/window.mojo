@@ -540,6 +540,13 @@ struct BottomDockedPanel(Copyable, Movable):
         self.pending_command_id = String("")
         return s^
 
+    def request_close(mut self):
+        """Latch the close command, exactly as clicking the ``[■]`` button
+        does — the keyboard path (Cmd+W) and the chrome click share one
+        exit. No-op when the panel has no close button configured."""
+        if len(self.close_button_id.as_bytes()) > 0:
+            self.pending_command_id = self.close_button_id
+
     def effective_height(self, screen: Rect, bottom_chrome_h: Int) -> Int:
         """Rendered height accounting for the state machine.
         NORMAL → ``preferred_height``. MINIMIZED → 1 (header only).

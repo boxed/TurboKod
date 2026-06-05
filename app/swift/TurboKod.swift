@@ -1080,6 +1080,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let keyWin = NSApp.isActive ? NSApp.keyWindow : nil
             for v in self.views where v.handle != 0 {
                 tk_desktop_set_host_focused(v.handle, (v.window === keyWin) ? 1 : 0)
+                // The user just explicitly opened a new terminal pane. When the
+                // tool panels float on their own window, in-process focus isn't
+                // enough — make that window key so the shell is typeable without
+                // a click. Always drain (even when docked, where focus already
+                // works in-core) so the one-shot flag can't fire stale later.
+                if tk_desktop_take_panel_focus_request(v.handle) != 0 {
+                    if let pair = self.panels[ObjectIdentifier(v)] {
+                        pair.window.makeKeyAndOrderFront(nil); changed = true
+                    }
+                }
             }
             for v in self.views {
                 guard let w = v.window, w.isVisible,

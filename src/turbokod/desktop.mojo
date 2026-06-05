@@ -924,6 +924,17 @@ struct Desktop(Movable):
     via ``take_attention_events``. The macOS host polls each tick and,
     when the app isn't frontmost, bounces the Dock icon and bumps the
     badge; the terminal frontend currently ignores them."""
+    var panel_focus_request: Bool
+    """One-shot: the user just explicitly opened a new terminal pane
+    (File → New terminal pane / Cmd+Shift+T), so keyboard focus should
+    land on it. The docked frontends already route keys to the focused
+    pane in-process; this flag only matters when the tool panels float
+    on the macOS host's separate window (``panels_detached``), where the
+    auto-show poll deliberately ``orderFront``s without ``makeKey`` so a
+    passively-reopened pane (e.g. tests spawning the debug pane) doesn't
+    yank focus. An *explicit* new terminal does want focus, so the host
+    drains this via ``consume_panel_focus_request`` and makes the panel
+    window key. The terminal frontend never reads it."""
     # Latched current-execution location. Painted as ``▶`` in the gutter
     # of whichever editor has a matching ``file_path``. Cleared on
     # ``continued`` / ``terminated`` events.
@@ -1188,6 +1199,7 @@ struct Desktop(Movable):
         self.debug_pane = DebugPane()
         self.terminal_panes = List[TerminalPane]()
         self.attention_events = 0
+        self.panel_focus_request = False
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self._dap_current_frame_id = -1
@@ -5496,6 +5508,11 @@ struct Desktop(Movable):
             self.windows.restore_all()
             return Optional[String]()
         if action == WINDOW_CLOSE:
+            # window:close targets whatever has focus. A focused tool pane
+            # (terminal / debug / test) closes itself — same exit as its
+            # [■] button; otherwise the focused editor window closes.
+            if self._request_focused_pane_close():
+                return Optional[String]()
             self._capture_view_state_for_window(self.windows.focused)
             _ = self.windows.close_focused()
             return Optional[String]()
@@ -6311,6 +6328,13 @@ struct Desktop(Movable):
         var cmd = self.debug_pane.consume_command_id()
         if len(cmd.as_bytes()) > 0:
             _ = self.dispatch_action(cmd^, screen)
+        # Test pane shares the same title-strip / [■] command channel
+        # (Stop / Re-run / Clear / close). It's held open after the run
+        # exits, so consume here in dap_tick — which runs every frame —
+        # rather than test_tick, which early-outs once the session ends.
+        var tcmd = self.test_pane.consume_command_id()
+        if len(tcmd.as_bytes()) > 0:
+            _ = self.dispatch_action(tcmd^, screen)
         if self.dap.has_stack():
             var frames = self._mark_subtle_frames(self.dap.take_stack())
             if len(frames) > 0:
@@ -6656,6 +6680,14 @@ struct Desktop(Movable):
             n += self.terminal_panes[i].take_attention()
         return n
 
+    def consume_panel_focus_request(mut self) -> Bool:
+        """Drain the one-shot ``panel_focus_request`` flag. True exactly
+        once after an explicit new-terminal action; the macOS host uses
+        it to make the floating panel window key. See the field doc."""
+        var req = self.panel_focus_request
+        self.panel_focus_request = False
+        return req
+
     def _focus_dock(mut self, kind: UInt8, idx: Int = 0):
         """Single source of truth for which docked pane owns keyboard
         focus. Sets the matching pane's ``focused`` flag and clears
@@ -6671,6 +6703,25 @@ struct Desktop(Movable):
             self.terminal_panes[i].focused = (
                 kind == DOCK_TERMINAL and i == idx
             )
+
+    def _request_focused_pane_close(mut self) -> Bool:
+        """If a tool pane (terminal / debug / test) owns keyboard focus,
+        latch its close command — the same channel its [■] button uses —
+        and return True; the per-frame tick consumers (``terminal_tick`` /
+        ``dap_tick``) then tear it down and drop focus. Returns False when
+        no pane is focused, so window:close falls through to the focused
+        editor window."""
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused:
+                self.terminal_panes[i].dock.request_close()
+                return True
+        if self.debug_pane.focused:
+            self.debug_pane.dock.request_close()
+            return True
+        if self.test_pane.focused:
+            self.test_pane.dock.request_close()
+            return True
+        return False
 
     def _any_dock_focused(self) -> Bool:
         """True when a dock *on the main surface* currently owns keyboard
@@ -6741,6 +6792,11 @@ struct Desktop(Movable):
         pane.open()
         self.terminal_panes.append(pane^)
         self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
+        # When the panels float on the host's own window, in-process
+        # focus isn't enough — ask the host to make that window key so
+        # the new shell is typeable without a click. See
+        # ``panel_focus_request``.
+        self.panel_focus_request = True
 
     def _build_debug_pane_commands(self) -> List[TitleCommand]:
         """Title-strip buttons for the debug pane.

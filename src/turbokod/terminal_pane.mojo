@@ -77,6 +77,16 @@ clicked. Public so the host (``Desktop.terminal_tick``) can recognize
 the click and remove the pane from its list — the pane can't pop
 itself off a container it doesn't know about."""
 
+comptime _DONE_DEBOUNCE_MS = 1000
+"""Debounce window for the attention ("done") event. A done-worthy
+state (``waiting`` / ``clean`` / ``none``) must persist for this long
+before an armed pane fires its attention event. The Claude-state
+detector is a tail-scan that can momentarily mis-read a spinner frame
+as ``waiting`` even past the tracker's working-stickiness window; without
+the debounce that transient dropout fires a spurious "done", and a
+working→waiting→working→waiting wobble fires several. Requiring the
+state to hold for a second collapses each turn to exactly one event."""
+
 
 struct TerminalPane(Copyable, Movable):
     """Single bottom-docked terminal. Owns one pty child, a ``Vt``
@@ -137,6 +147,16 @@ struct TerminalPane(Copyable, Movable):
     event fires and the flag disarms. ``CLAUDE_ACTIVE`` (indeterminate
     mid-conversation) neither fires nor disarms, so a brief
     working→active→waiting wobble still produces exactly one event."""
+    var _done_pending: Bool
+    """True while a done-worthy state is being debounced — we've seen
+    ``waiting`` / ``clean`` / ``none`` on an armed pane but haven't yet
+    held it for ``_DONE_DEBOUNCE_MS``. A ``working`` flare clears it
+    (Claude resumed; the dropout was transient)."""
+    var _done_candidate_ms: Int
+    """Monotonic-ms reading when ``_done_pending`` was raised. The
+    attention event fires once ``now_ms`` is at least
+    ``_DONE_DEBOUNCE_MS`` past this. Meaningless when
+    ``_done_pending`` is False."""
     var attention_events: Int
     """Count of attention-worthy Claude transitions since the host
     last drained via ``take_attention``. The macOS host turns these
@@ -168,6 +188,8 @@ struct TerminalPane(Copyable, Movable):
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
         self._attn_armed = False
+        self._done_pending = False
+        self._done_candidate_ms = 0
         self.attention_events = 0
 
     def __copyinit__(mut self, copy: Self):
@@ -193,6 +215,8 @@ struct TerminalPane(Copyable, Movable):
         self._last_panel_top = copy._last_panel_top
         self._claude_tracker = copy._claude_tracker
         self._attn_armed = copy._attn_armed
+        self._done_pending = copy._done_pending
+        self._done_candidate_ms = copy._done_candidate_ms
         self.attention_events = copy.attention_events
 
     # --- chrome forwarders ---------------------------------------------
@@ -333,23 +357,42 @@ struct TerminalPane(Copyable, Movable):
         # shell costs nothing; while armed we must keep polling because
         # the tracker's working-stickiness can expire with no new bytes.
         if total > 0 or self._attn_armed:
-            self._note_claude_state(self._claude_tracker.classify(
-                self.vt.tail_rows(20), monotonic_ms(),
-            ))
+            var now = monotonic_ms()
+            self._note_claude_state(
+                self._claude_tracker.classify(self.vt.tail_rows(20), now),
+                now,
+            )
 
-    def _note_claude_state(mut self, state: UInt8):
+    def _note_claude_state(mut self, state: UInt8, now_ms: Int):
         """Arm on ``working``; fire one attention event when an armed
         pane reaches ``waiting`` (turn finished / permission prompt),
-        ``clean`` (cleared), or ``none`` (Claude exited — done)."""
+        ``clean`` (cleared), or ``none`` (Claude exited — done).
+
+        The done-worthy state is debounced by ``_DONE_DEBOUNCE_MS``:
+        the first such state on an armed pane only starts the timer;
+        the event fires only once the state has held for the whole
+        window. A ``working`` flare inside the window cancels the
+        pending done (Claude resumed — the dropout was a transient
+        spinner-frame mis-read), so a working↔waiting wobble produces
+        exactly one event per real turn instead of several. ``active``
+        (indeterminate mid-conversation) neither fires, arms, nor
+        cancels."""
         if state == CLAUDE_WORKING:
             self._attn_armed = True
+            self._done_pending = False
             return
         if not self._attn_armed:
             return
         if state == CLAUDE_WAITING or state == CLAUDE_CLEAN \
                 or state == CLAUDE_NONE:
-            self.attention_events += 1
-            self._attn_armed = False
+            if not self._done_pending:
+                self._done_pending = True
+                self._done_candidate_ms = now_ms
+                return
+            if now_ms - self._done_candidate_ms >= _DONE_DEBOUNCE_MS:
+                self.attention_events += 1
+                self._attn_armed = False
+                self._done_pending = False
 
     def take_attention(mut self) -> Int:
         """Drain and return the pending attention-event count."""
@@ -817,6 +860,11 @@ struct TerminalPane(Copyable, Movable):
                 self._write_to_pty(event.text)
             return True
         if event.kind != EVENT_KEY:
+            return False
+        # Decline Cmd+W so it isn't encoded to the shell — it falls
+        # through to the global window:close binding, which closes the
+        # focused pane (see Desktop's WINDOW_CLOSE handler).
+        if event.key == UInt32(ord("w")) and event.mods == MOD_META:
             return False
         # ESC routes through the chrome ladder first (collapses any
         # in-flight resize / focus state); only if the chrome doesn't

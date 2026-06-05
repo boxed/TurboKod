@@ -658,6 +658,19 @@ def tk_desktop_take_attention(h: Int) -> Int32:
 
 
 @export
+def tk_desktop_take_panel_focus_request(h: Int) -> Int32:
+    """Drain the one-shot "focus the panel window" request. Returns 1
+    exactly once after the user explicitly opens a new terminal pane,
+    0 otherwise. When the tool panels float on their own window the host
+    uses this to make that window key so the fresh shell is typeable
+    without a click (the auto-show poll only ``orderFront``s). Harmless
+    to poll while docked — the flag just clears."""
+    if h == 0:
+        return Int32(0)
+    return Int32(1) if _desk(h)[].consume_panel_focus_request() else Int32(0)
+
+
+@export
 def tk_desktop_debug_stopped(h: Int) -> Int32:
     """1 while a DAP session is active and paused (stopped event received,
     not yet resumed). Backs ``TK_CAPTURE_WHEN=debug-stopped`` — the host's
