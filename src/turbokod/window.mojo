@@ -1431,6 +1431,26 @@ struct Window(Copyable, Movable):
             and not self.close_button_hit(p) \
             and not self.maximize_button_hit(p)
 
+    def title_text_hit(self, p: Point, display_title: String) -> Bool:
+        """Whether ``p`` lands on the painted title label itself (the
+        filename), not just anywhere on the top border row. Mirrors the
+        centering math and width gate used to paint the editor title
+        (``" " + display_title + " "`` centred via ``paint_window_title``,
+        gated by ``rect.width() >= padded_len + 6``) and excludes the one
+        cell of padding on each side, so the full-path tooltip arms only
+        over the name the user is pointing at."""
+        if p.y != self.rect.a.y:
+            return False
+        if len(display_title.as_bytes()) == 0:
+            return False
+        var padded_len = display_columns(String(" ") + display_title + String(" "))
+        if self.rect.width() < padded_len + 6:
+            return False
+        var tx = self.rect.a.x + (self.rect.width() - padded_len) // 2
+        var name_start = tx + 1
+        var name_len = display_columns(display_title)
+        return name_start <= p.x and p.x < name_start + name_len
+
     def resize_edges_hit(self, p: Point) -> Tuple[Bool, Bool, Bool]:
         """Which edges of the border ``p`` is on: ``(left, right, bottom)``.
 
@@ -1944,17 +1964,18 @@ struct WindowManager(Movable):
                 if self.windows[j].is_editor and j != hit:
                     self.windows[j].editor.clear_minimap_hover()
             # Title-bar full-path tooltip: arm only when the pointer is
-            # on the topmost window's title row AND that window is a
-            # file-backed editor. The body forwards to handle_mouse_in_body
-            # below for minimap-hover state, so the two trackers stay
-            # independent.
+            # on the topmost window's title *label* (the filename itself,
+            # not the whole title row) AND that window is a file-backed
+            # editor. The body forwards to handle_mouse_in_body below for
+            # minimap-hover state, so the two trackers stay independent.
             self._title_hover_idx = -1
             if hit >= 0 and self.windows[hit].is_editor \
-                    and self.windows[hit].title_bar_hit(event.pos) \
                     and len(self.windows[hit].editor.file_path.as_bytes()) > 0:
-                self._title_hover_idx = hit
-                self._title_hover_x = event.pos.x
-                self._title_hover_y = event.pos.y
+                var dtitles = compute_display_titles(self.windows)
+                if self.windows[hit].title_text_hit(event.pos, dtitles[hit]):
+                    self._title_hover_idx = hit
+                    self._title_hover_x = event.pos.x
+                    self._title_hover_y = event.pos.y
             if hit >= 0 and self.windows[hit].is_editor:
                 _ = self.windows[hit].handle_mouse_in_body(event)
             return True
