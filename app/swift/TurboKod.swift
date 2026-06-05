@@ -819,6 +819,171 @@ final class CellView: NSView {
             options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect], owner: self))
     }
 
+    // --- Drag-and-drop -----------------------------------------------------
+    // Dropping file(s) inserts their path(s) where they land. Over a *terminal
+    // pane* the paths go in shell-escaped, as a bracketed paste — the gesture a
+    // terminal emulator supports, so a shell / Claude session receives them as
+    // if typed. Over an *editor body* a small menu offers full path / filename
+    // / project-relative path, and the chosen form is inserted verbatim at the
+    // drop point. The Mojo core owns the hit-test (tk_desktop_drop_target); the
+    // host just routes by its answer. Settings windows don't accept drops.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil && (surface == .main || surface == .panels) {
+            registerForDraggedTypes([.fileURL])
+        }
+    }
+
+    /// Drop cell under the drag/drop location, mapped the same way as sendMouse.
+    private func dropCell(_ sender: NSDraggingInfo) -> (Int64, Int64) {
+        let p = convert(sender.draggingLocation, from: nil)
+        return (Int64(max(0, p.x) / CELL_W), Int64(max(0, p.y) / CELL_H))
+    }
+
+    private func droppedURLs(_ sender: NSDraggingInfo) -> [URL] {
+        return (sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+
+    /// 0 = nothing droppable, 1 = terminal pane, 2 = editor body.
+    private func dropTargetSurface(_ col: Int64, _ row: Int64) -> Int32 {
+        switch surface {
+        case .main:   return tk_desktop_drop_target(handle, col, row, Int64(cols()), Int64(rows()))
+        case .panels: return tk_desktop_panels_drop_target(handle, col, row, Int64(cols()), Int64(rows()))
+        default:      return 0
+        }
+    }
+
+    // Show the copy cursor only over a real target (terminal pane or editor) so
+    // dragging over the file tree / chrome reads as "no drop", not a false +.
+    private func dragOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard handle != 0, !droppedURLs(sender).isEmpty else { return [] }
+        let (col, row) = dropCell(sender)
+        return dropTargetSurface(col, row) != 0 ? .copy : []
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return dragOperation(sender)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return dragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard handle != 0 else { return false }
+        let urls = droppedURLs(sender)
+        guard !urls.isEmpty else { return false }
+        let (col, row) = dropCell(sender)
+        let consumed: Bool
+        switch dropTargetSurface(col, row) {
+        case 1:  consumed = dropOnTerminal(urls, col, row)
+        case 2:  consumed = dropOnEditor(urls, col, row, at: sender.draggingLocation)
+        default: return false
+        }
+        guard consumed else { return false }
+        invalidateFrame()
+        needsDisplay = true
+        return true
+    }
+
+    /// Terminal pane: hand the raw paths to the core, which shell-escapes and
+    /// pastes them (full path, the terminal drag convention — no menu).
+    private func dropOnTerminal(_ urls: [URL], _ col: Int64, _ row: Int64) -> Bool {
+        let bytes = Array(urls.map { $0.path }.joined(separator: "\n").utf8)
+        let r = bytes.withUnsafeBufferPointer { b -> Int32 in
+            let ptr = Int64(Int(bitPattern: b.baseAddress)), len = Int64(bytes.count)
+            switch surface {
+            case .main:   return tk_desktop_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
+            case .panels: return tk_desktop_panels_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
+            default:      return 0
+            }
+        }
+        return r != 0
+    }
+
+    // The editor format-choice menu: dropChoice is stamped by the menu action
+    // (which fires synchronously inside NSMenu.popUp) and read back after.
+    private var dropChoice: Int32 = -1
+    @objc private func chooseDropFormat(_ sender: NSMenuItem) { dropChoice = Int32(sender.tag) }
+
+    /// Pop the path-format menu at `point` (view coords) and return the chosen
+    /// tag (0 = full path, 1 = filename, 2 = project-relative) or -1 if the
+    /// user dismissed it. popUp is modal, so chooseDropFormat has fired by the
+    /// time it returns. Shared by drag-drop and file-paste into editors.
+    private func choosePathFormat(at point: NSPoint) -> Int32 {
+        let menu = NSMenu()
+        for (title, tag) in [("Insert full path", 0), ("Insert filename", 1)] {
+            let mi = NSMenuItem(title: title, action: #selector(chooseDropFormat(_:)), keyEquivalent: "")
+            mi.target = self; mi.tag = tag; menu.addItem(mi)
+        }
+        // Relative path only makes sense with a project open; otherwise it
+        // would just duplicate "full path".
+        if project != nil {
+            let mi = NSMenuItem(title: "Insert path relative to project",
+                                action: #selector(chooseDropFormat(_:)), keyEquivalent: "")
+            mi.target = self; mi.tag = 2; menu.addItem(mi)
+        }
+        dropChoice = -1
+        menu.popUp(positioning: nil, at: point, in: self)
+        return dropChoice
+    }
+
+    /// Editor body: pick a format and insert the result verbatim at the drop
+    /// point (the core moves the caret there first).
+    private func dropOnEditor(_ urls: [URL], _ col: Int64, _ row: Int64,
+                              at location: NSPoint) -> Bool {
+        let fmt = choosePathFormat(at: convert(location, from: nil))
+        guard fmt >= 0 else { return false }   // dismissed without choosing
+        let text = urls.map { formatPath($0, fmt) }.joined(separator: " ")
+        let bytes = Array(text.utf8)
+        let r = bytes.withUnsafeBufferPointer { b -> Int32 in
+            tk_desktop_insert_text(handle, col, row,
+                                   Int64(Int(bitPattern: b.baseAddress)),
+                                   Int64(bytes.count), Int64(cols()), Int64(rows()))
+        }
+        return r != 0
+    }
+
+    /// Cmd+V / Edit▸Paste of file(s) on the clipboard (e.g. copied in Finder):
+    /// offer the same format menu as a drop and insert the chosen form at the
+    /// caret. Returns true when it handled the paste (including a cancelled
+    /// menu); false to let the normal text paste proceed — no file on the
+    /// clipboard, or the focus isn't an editor.
+    func pasteFilesWithMenu() -> Bool {
+        guard surface == .main, handle != 0,
+              tk_desktop_paste_target_is_editor(handle) != 0 else { return false }
+        guard let urls = NSPasteboard.general.readObjects(
+                forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return false }
+        // No caret rect is exposed, so anchor the menu at the pointer.
+        let anchor: NSPoint = window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) }
+            ?? NSPoint(x: bounds.midX, y: bounds.midY)
+        let fmt = choosePathFormat(at: anchor)
+        guard fmt >= 0 else { return true }   // cancelled — swallow, don't text-paste
+        let text = urls.map { formatPath($0, fmt) }.joined(separator: " ")
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { b in
+            tk_desktop_paste_text(handle, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+        }
+        invalidateFrame()
+        needsDisplay = true
+        return true
+    }
+
+    private func formatPath(_ url: URL, _ fmt: Int32) -> String {
+        switch fmt {
+        case 1: return url.lastPathComponent
+        case 2:
+            if let p = project {
+                let base = p.hasSuffix("/") ? p : p + "/"
+                if url.path.hasPrefix(base) { return String(url.path.dropFirst(base.count)) }
+            }
+            return url.path   // no project, or file outside it → full path
+        default: return url.path
+        }
+    }
+
     // AppKit may only invalidate the newly-exposed strip during a live resize,
     // leaving the rest of the view with stale (stretched) content. Force a
     // full redraw on every size change so the Desktop reflows live.
@@ -1599,6 +1764,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// existing handler (Open/Quit/etc.).
     @objc func menuActionFired(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? String else { return }
+        // Paste of a file (e.g. copied in Finder) offers the same full-path /
+        // filename / relative menu as a drop, inserting the chosen form at the
+        // caret. Only kicks in for an editor with a file on the clipboard;
+        // otherwise falls through to the normal text paste below.
+        if action == "edit:paste",
+           let v = (NSApp.keyWindow?.contentView as? CellView) ?? views.first,
+           v.pasteFilesWithMenu() {
+            return
+        }
         // Dispatch through whatever Desktop is currently driving the menu
         // (key window's, any open window's, or the chrome desktop when no
         // windows exist) — same handle `refreshMenu` snapshotted from, so

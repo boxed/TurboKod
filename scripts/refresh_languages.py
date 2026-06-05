@@ -57,7 +57,7 @@ INSTALL_HINTS: dict[str, str] = {
     "terraform":  "see https://github.com/hashicorp/terraform-ls",
     "dockerfile": "npm install -g dockerfile-language-server-nodejs",
     "toml":       "cargo install taplo-cli --features lsp",
-    "markdown":   "npm install -g marksman  # or see github.com/artempyanykh/marksman",
+    "markdown":   "brew install marksman  # or see github.com/artempyanykh/marksman/releases",
     "vue":        "npm install -g @vue/language-server",
     "svelte":     "npm install -g svelte-language-server",
     "astro":      "npm install -g @astrojs/language-server",

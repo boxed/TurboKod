@@ -58,6 +58,46 @@ def split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
+def shell_escape_path(path: String) -> String:
+    """Backslash-escape the shell-significant ASCII characters in ``path`` so a
+    file path dragged onto a terminal pane reaches the program running there
+    intact — the same transformation a terminal emulator applies on
+    drag-to-insert. Only the ASCII metacharacters are escaped; multi-byte
+    UTF-8 bytes (>= 0x80) pass through untouched."""
+    var specials = String(" \t\n\\'\"`$()[]{}<>|;&#*?!~").as_bytes()
+    var b = path.as_bytes()
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        var special = False
+        for j in range(len(specials)):
+            if specials[j] == b[i]:
+                special = True
+                break
+        if special:
+            out.append(0x5C)  # backslash
+        out.append(b[i])
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def escape_drop_paths(paths: String) -> String:
+    """Turn a newline-separated list of dropped file paths into the text a
+    terminal pane should receive: each path shell-escaped (``shell_escape_path``),
+    joined by single spaces, with a trailing space — matching a terminal
+    emulator's drop, which leaves the cursor ready for the next token. Blank
+    entries are skipped; an all-blank input yields the empty string."""
+    var out = String("")
+    var lines = split_lines_no_trailing(paths)
+    for ref p in lines:
+        if len(p.as_bytes()) == 0:
+            continue
+        if len(out.as_bytes()) > 0:
+            out += " "
+        out += shell_escape_path(p)
+    if len(out.as_bytes()) > 0:
+        out += " "
+    return out
+
+
 def char_width(cp: Int) -> Int:
     """Terminal columns a single codepoint occupies: ``2`` for emoji that
     terminals and our Swift host render double-wide, ``1`` for everything

@@ -1563,7 +1563,7 @@
         ]
       }
     ],
-    "install_hint": "npm install -g marksman  # or see github.com/artempyanykh/marksman",
+    "install_hint": "brew install marksman  # or see github.com/artempyanykh/marksman/releases",
     "comment_token": ""
   },
   {

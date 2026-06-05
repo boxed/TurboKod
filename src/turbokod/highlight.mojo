@@ -17,8 +17,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .colors import (
-    Attr, STYLE_NONE,
-    EDITOR_BG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
+    Attr, STYLE_NONE, STYLE_BOLD, STYLE_ITALIC, STYLE_UNDERLINE,
+    EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
     SYN_IDENT, SYN_DECORATOR, SYN_OPERATOR,
 )
 from .grammar_install import (
@@ -107,13 +107,9 @@ def highlight_for_extension(
     if tm_opt:
         hls = tm_opt.value().copy()
     else:
-        var spec_opt = _lang_spec_for_ext(ext)
-        if spec_opt:
-            hls = _highlight_generic(lines, spec_opt.value())
-        else:
-            hls = List[Highlight]()
+        hls = _fallback_for_extension(ext, lines)
     var injection_registry = GrammarRegistry()
-    _apply_intellij_injections(lines, hls, injection_registry)
+    _apply_intellij_injections(ext, lines, hls, injection_registry)
     return hls^
 
 
@@ -437,7 +433,7 @@ def highlight_incremental(
     var cache_key = resolved.cache_key
     if len(path.as_bytes()) == 0:
         var fb = _fallback_for_extension(ext, lines)
-        _apply_intellij_injections(lines, fb, registry)
+        _apply_intellij_injections(ext, lines, fb, registry)
         return fb^
 
     # Grammar load — registry hit if the cache_key is already known,
@@ -457,7 +453,7 @@ def highlight_incremental(
             grammar_idx = len(registry.keys) - 1
         except:
             var fb = _fallback_for_extension(ext, lines)
-            _apply_intellij_injections(lines, fb, registry)
+            _apply_intellij_injections(ext, lines, fb, registry)
             return fb^
 
     # Per-Editor state: invalidate when the cache key changes (either
@@ -482,9 +478,9 @@ def highlight_incremental(
         )
         if len(hls) == 0 and _has_nonempty_line(lines):
             var fb = _fallback_for_extension(ext, lines)
-            _apply_intellij_injections(lines, fb, registry)
+            _apply_intellij_injections(ext, lines, fb, registry)
             return fb^
-        _apply_intellij_injections(lines, hls, registry)
+        _apply_intellij_injections(ext, lines, hls, registry)
         return hls^
 
     # Incremental path. Start state = post-state at end of line
@@ -534,9 +530,9 @@ def highlight_incremental(
 
     if len(out) == 0 and _has_nonempty_line(lines):
         var fb = _fallback_for_extension(ext, lines)
-        _apply_intellij_injections(lines, fb, registry)
+        _apply_intellij_injections(ext, lines, fb, registry)
         return fb^
-    _apply_intellij_injections(lines, out, registry)
+    _apply_intellij_injections(ext, lines, out, registry)
     return out^
 
 
@@ -561,6 +557,8 @@ def _fallback_for_extension(
     incremental + non-incremental cached entry points: defer to
     the generic per-language tokenizer registry, then return
     empty if even that doesn't cover the extension."""
+    if _is_markdown_ext(ext):
+        return _highlight_markdown(lines)
     var spec_opt = _lang_spec_for_ext(ext)
     if spec_opt:
         return _highlight_generic(lines, spec_opt.value())
@@ -1136,6 +1134,338 @@ def _spec_toml() -> Optional[LangSpec]:
     )
 
 
+# --- Markdown -------------------------------------------------------------
+#
+# Markdown isn't keyword/comment/string-shaped, so the generic ``LangSpec``
+# tokenizer produces nothing useful for it, and the vscode TextMate grammar
+# leans on ``while``-rules our runtime doesn't implement (which is why
+# ``.md`` rendered uncolored before this). This is a small bespoke
+# tokenizer covering the constructs that actually carry meaning in a
+# ``.md`` file: fenced code blocks (the one cross-line state), ATX
+# headings, blockquotes, list markers, thematic breaks, and the inline run
+# of ``code``, ``**bold**``, ``*italic*``, and ``[links](url)``. Spans are
+# byte offsets like every other highlighter here.
+
+
+def _is_markdown_ext(ext: String) -> Bool:
+    return (ext == String("md") or ext == String("markdown")
+            or ext == String("mdown") or ext == String("mkd")
+            or ext == String("mkdn") or ext == String("mdx"))
+
+
+def _md_heading_attr()   -> Attr: return Attr(SYN_KEYWORD, EDITOR_BG, STYLE_BOLD)
+def _md_code_attr()      -> Attr: return Attr(SYN_STRING,  EDITOR_BG, STYLE_NONE)
+def _md_fence_attr()     -> Attr: return Attr(SYN_COMMENT, EDITOR_BG, STYLE_NONE)
+def _md_quote_attr()     -> Attr: return Attr(SYN_COMMENT, EDITOR_BG, STYLE_ITALIC)
+def _md_marker_attr()    -> Attr: return Attr(SYN_OPERATOR, EDITOR_BG, STYLE_NONE)
+def _md_bold_attr()      -> Attr: return Attr(EDITOR_FG,   EDITOR_BG, STYLE_BOLD)
+def _md_italic_attr()    -> Attr: return Attr(EDITOR_FG,   EDITOR_BG, STYLE_ITALIC)
+def _md_link_text_attr() -> Attr: return Attr(SYN_IDENT,   EDITOR_BG, STYLE_UNDERLINE)
+def _md_link_url_attr()  -> Attr: return Attr(SYN_STRING,  EDITOR_BG, STYLE_NONE)
+
+
+@fieldwise_init
+struct _MdRun(Copyable, Movable):
+    """A run of identical bytes: which byte, and how many."""
+    var char: UInt8
+    var length: Int
+
+
+def _md_fence_run(line: String, start: Int) -> _MdRun:
+    """Run of backticks/tildes at ``start`` — the fence opener shape.
+    ``length`` is 0 when ``start`` isn't a backtick or tilde."""
+    var b = line.as_bytes()
+    var n = len(b)
+    if start >= n:
+        return _MdRun(0, 0)
+    var c = b[start]
+    if c != 0x60 and c != 0x7E:  # ` or ~
+        return _MdRun(c, 0)
+    var i = start
+    while i < n and b[i] == c:
+        i += 1
+    return _MdRun(c, i - start)
+
+
+def _md_only_ws_after(line: String, frm: Int) -> Bool:
+    """Is everything from ``frm`` to end-of-line whitespace? Used to
+    validate a closing fence (no info string allowed after it)."""
+    var b = line.as_bytes()
+    var k = frm
+    while k < len(b):
+        if b[k] != 0x20 and b[k] != 0x09:
+            return False
+        k += 1
+    return True
+
+
+def _md_is_hr(line: String, indent: Int) -> Bool:
+    """Thematic break: 3+ of ``-``/``*``/``_`` and nothing else but
+    spaces (e.g. ``---``, ``* * *``)."""
+    var b = line.as_bytes()
+    var n = len(b)
+    if indent >= n:
+        return False
+    var c = b[indent]
+    if c != 0x2D and c != 0x2A and c != 0x5F:  # - * _
+        return False
+    var count = 0
+    var k = indent
+    while k < n:
+        var ch = b[k]
+        if ch == c:
+            count += 1
+        elif ch != 0x20 and ch != 0x09:
+            return False
+        k += 1
+    return count >= 3
+
+
+def _md_list_marker_len(line: String, indent: Int) -> Int:
+    """Length of the list marker at ``indent`` (the ``-``/``*``/``+`` or
+    the ``1.``/``2)`` run, not counting the required trailing space), or
+    0 when there's no marker."""
+    var b = line.as_bytes()
+    var n = len(b)
+    if indent >= n:
+        return 0
+    var c = b[indent]
+    # Bullet: - * + then a space/tab.
+    if c == 0x2D or c == 0x2A or c == 0x2B:
+        if indent + 1 < n and (b[indent + 1] == 0x20 or b[indent + 1] == 0x09):
+            return 1
+        return 0
+    # Ordered: digits then . or ) then a space/tab.
+    if _is_digit(c):
+        var k = indent
+        while k < n and _is_digit(b[k]):
+            k += 1
+        if k < n and (b[k] == 0x2E or b[k] == 0x29):  # . or )
+            var mk = k + 1
+            if mk < n and (b[mk] == 0x20 or b[mk] == 0x09):
+                return mk - indent
+    return 0
+
+
+def _md_find_tick_close(line: String, frm: Int, ticks: Int) -> Int:
+    """Index of the next run of exactly ``ticks`` backticks at/after
+    ``frm`` (the inline-code closer), or -1."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var i = frm
+    while i < n:
+        if b[i] == 0x60:
+            var run = 0
+            var k = i
+            while k < n and b[k] == 0x60:
+                run += 1
+                k += 1
+            if run == ticks:
+                return i
+            i = k
+        else:
+            i += 1
+    return -1
+
+
+def _md_try_emphasis(
+    line: String, row: Int, i: Int, mut out: List[Highlight],
+) -> Int:
+    """Try to color a ``*``/``_`` emphasis span starting at ``i``. Two
+    markers → bold, one → italic. Returns bytes consumed, or 0 if it
+    isn't a well-formed span (no closer, or wraps whitespace)."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var c = b[i]
+    var run = 0
+    var k = i
+    while k < n and b[k] == c:
+        run += 1
+        k += 1
+    var marker = 2 if run >= 2 else 1
+    var open_end = i + marker
+    # An opener can't be followed by whitespace (``* not emphasis``).
+    if open_end >= n or b[open_end] == 0x20 or b[open_end] == 0x09:
+        return 0
+    var j = open_end
+    while j < n:
+        if b[j] == 0x5C and j + 1 < n:  # backslash escape
+            j += 2
+            continue
+        if b[j] == c:
+            var crun = 0
+            var m = j
+            while m < n and b[m] == c:
+                crun += 1
+                m += 1
+            # A closer can't be preceded by whitespace.
+            if crun >= marker and b[j - 1] != 0x20 and b[j - 1] != 0x09:
+                var attr = _md_bold_attr() if marker == 2 else _md_italic_attr()
+                out.append(Highlight(row, i, j + marker, attr))
+                return (j + marker) - i
+            j = m
+            continue
+        j += 1
+    return 0
+
+
+def _md_try_link(
+    line: String, row: Int, i: Int, mut out: List[Highlight],
+) -> Int:
+    """Try to color a ``[text](url)`` or ``![alt](url)`` link starting at
+    ``i``: link text gets the link-text attr, the URL the url attr.
+    Returns bytes consumed, or 0 if the shape doesn't match."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var p = i
+    if b[p] == 0x21:  # ! (image)
+        p += 1
+    if p >= n or b[p] != 0x5B:  # [
+        return 0
+    var text_start = p + 1
+    var q = text_start
+    var depth = 1
+    while q < n:
+        if b[q] == 0x5C and q + 1 < n:
+            q += 2
+            continue
+        if b[q] == 0x5B:
+            depth += 1
+        elif b[q] == 0x5D:  # ]
+            depth -= 1
+            if depth == 0:
+                break
+        q += 1
+    if q >= n or b[q] != 0x5D:
+        return 0
+    var text_end = q
+    var paren = q + 1
+    if paren >= n or b[paren] != 0x28:  # (
+        return 0
+    var url_start = paren + 1
+    var r = url_start
+    while r < n and b[r] != 0x29:  # )
+        r += 1
+    if r >= n:
+        return 0
+    if text_end > text_start:
+        out.append(Highlight(row, text_start, text_end, _md_link_text_attr()))
+    if r > url_start:
+        out.append(Highlight(row, url_start, r, _md_link_url_attr()))
+    return (r + 1) - i
+
+
+def _md_inline(
+    line: String, row: Int, start: Int, mut out: List[Highlight],
+):
+    """Scan the inline span ``[start, eol)`` for code, emphasis, and
+    links. Plain text is left uncolored (the editor paints it as the
+    default foreground)."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var i = start
+    while i < n:
+        var c = b[i]
+        if c == 0x5C and i + 1 < n:  # backslash escape
+            i += 2
+            continue
+        if c == 0x60:  # inline code `...`
+            var ticks = 0
+            var k = i
+            while k < n and b[k] == 0x60:
+                ticks += 1
+                k += 1
+            var close = _md_find_tick_close(line, k, ticks)
+            if close >= 0:
+                out.append(Highlight(row, i, close + ticks, _md_code_attr()))
+                i = close + ticks
+                continue
+            i = k
+            continue
+        if c == 0x5B or (c == 0x21 and i + 1 < n and b[i + 1] == 0x5B):
+            var used = _md_try_link(line, row, i, out)
+            if used > 0:
+                i += used
+                continue
+        if c == 0x2A or c == 0x5F:  # * or _
+            var used = _md_try_emphasis(line, row, i, out)
+            if used > 0:
+                i += used
+                continue
+        i += 1
+
+
+def _highlight_markdown(lines: List[String]) -> List[Highlight]:
+    """Bespoke Markdown highlighter — see the section comment above."""
+    var out = List[Highlight]()
+    var in_fence = False
+    var fence_char = UInt8(0)
+    var fence_len = 0
+    for row in range(len(lines)):
+        var line = lines[row]
+        var b = line.as_bytes()
+        var n = len(b)
+
+        var indent = 0
+        while indent < n and (b[indent] == 0x20 or b[indent] == 0x09):
+            indent += 1
+
+        var fc = _md_fence_run(line, indent)
+
+        # Inside a fenced code block: every line is code until the
+        # matching closing fence (same char, length >= opener, only
+        # whitespace after).
+        if in_fence:
+            if (fc.char == fence_char and fc.length >= fence_len
+                    and _md_only_ws_after(line, indent + fc.length)):
+                in_fence = False
+                fence_char = 0
+                fence_len = 0
+                if n > 0:
+                    out.append(Highlight(row, 0, n, _md_fence_attr()))
+            elif n > 0:
+                out.append(Highlight(row, 0, n, _md_code_attr()))
+            continue
+
+        # Opening fence (``` or ~~~, optionally with an info string).
+        if fc.length >= 3:
+            in_fence = True
+            fence_char = fc.char
+            fence_len = fc.length
+            if n > 0:
+                out.append(Highlight(row, 0, n, _md_fence_attr()))
+            continue
+
+        # ATX heading: 1-6 '#' then a space or end-of-line.
+        if indent < n and b[indent] == 0x23:  # '#'
+            var h = indent
+            while h < n and b[h] == 0x23:
+                h += 1
+            var hashes = h - indent
+            if hashes <= 6 and (h >= n or b[h] == 0x20 or b[h] == 0x09):
+                out.append(Highlight(row, 0, n, _md_heading_attr()))
+                continue
+
+        # Thematic break (checked before list markers so ``* * *`` and
+        # ``---`` don't read as a bullet).
+        if _md_is_hr(line, indent):
+            out.append(Highlight(row, 0, n, _md_fence_attr()))
+            continue
+
+        # Blockquote: whole line tinted; quoted markup still reads.
+        if indent < n and b[indent] == 0x3E:  # '>'
+            out.append(Highlight(row, 0, n, _md_quote_attr()))
+            continue
+
+        # List marker, then inline scan over the rest.
+        var content_start = indent
+        var ml = _md_list_marker_len(line, indent)
+        if ml > 0:
+            out.append(Highlight(row, indent, indent + ml, _md_marker_attr()))
+            content_start = indent + ml
+
+        _md_inline(line, row, content_start, out)
+    return out^
 
 
 def _highlight_generic(
@@ -1367,14 +1697,20 @@ struct _StringBody(ImplicitlyCopyable, Movable):
 
 
 def _apply_intellij_injections(
-    lines: List[String], mut hls: List[Highlight],
+    ext: String, lines: List[String], mut hls: List[Highlight],
     mut registry: GrammarRegistry,
 ):
     """Scan ``lines`` for IntelliJ-style ``language=NAME`` markers and
     re-tokenize the next string literal's body with the named
     grammar. Multiple markers per buffer are honored; each marker
     consumes the string it points at, so a marker can't double-apply
-    to a string already injected by a prior marker."""
+    to a string already injected by a prior marker.
+
+    For Markdown buffers we additionally run the fenced-code-block
+    injection pass — same overlay mechanism, keyed off the ```` ``` ````
+    fence info string instead of a marker comment."""
+    if _is_markdown_ext(ext):
+        _apply_markdown_fence_injections(lines, hls, registry)
     var n = len(lines)
     var i = 0
     while i < n:
@@ -1397,6 +1733,75 @@ def _apply_intellij_injections(
                 # body can't re-trigger.
                 i = body.end_row
         i += 1
+
+
+def _md_fence_info(line: String, start: Int) -> String:
+    """The first whitespace-delimited token of a fence's info string
+    (the language in ```` ```lang ````), or empty when the fence has
+    none. Handles trailing attributes like ``js title="x"`` by taking
+    only the leading word."""
+    var b = line.as_bytes()
+    var n = len(b)
+    var i = start
+    while i < n and (b[i] == 0x20 or b[i] == 0x09):
+        i += 1
+    var s = i
+    while i < n and b[i] != 0x20 and b[i] != 0x09:
+        i += 1
+    if i <= s:
+        return String("")
+    return String(StringSlice(unsafe_from_utf8=b[s:i]))
+
+
+def _apply_markdown_fence_injections(
+    lines: List[String], mut hls: List[Highlight],
+    mut registry: GrammarRegistry,
+):
+    """For each fenced code block that carries an info string
+    (```` ```python ````), re-tokenize its body with that language's
+    grammar and overlay the result, replacing the uniform code-color
+    paint underneath. Same overlay path as the IntelliJ ``language=``
+    injection, keyed off the fence info string. Fences whose language
+    has no bundled (or installed) grammar are left as plain code."""
+    var n = len(lines)
+    var row = 0
+    while row < n:
+        var indent = 0
+        var b = lines[row].as_bytes()
+        var ln = len(b)
+        while indent < ln and (b[indent] == 0x20 or b[indent] == 0x09):
+            indent += 1
+        var fc = _md_fence_run(lines[row], indent)
+        if fc.length < 3:
+            row += 1
+            continue
+
+        # Opening fence — its info string names the embedded language.
+        var info = _md_fence_info(lines[row], indent + fc.length)
+
+        # Find the matching close (same char, length >= opener, only
+        # whitespace after). Unterminated fences run to end-of-buffer.
+        var close = -1
+        var r = row + 1
+        while r < n:
+            var bb = lines[r].as_bytes()
+            var ind2 = 0
+            while ind2 < len(bb) and (bb[ind2] == 0x20 or bb[ind2] == 0x09):
+                ind2 += 1
+            var fc2 = _md_fence_run(lines[r], ind2)
+            if (fc2.char == fc.char and fc2.length >= fc.length
+                    and _md_only_ws_after(lines[r], ind2 + fc2.length)):
+                close = r
+                break
+            r += 1
+        var body_last = (close - 1) if close >= 0 else (n - 1)
+
+        if len(info.as_bytes()) > 0 and body_last >= row + 1:
+            var last_len = len(lines[body_last].as_bytes())
+            var body = _StringBody(row + 1, 0, body_last, last_len)
+            _inject_grammar(_to_lower_ascii(info), lines, body, hls, registry)
+
+        row = (close + 1) if close >= 0 else n
 
 
 def _find_language_marker(line: String) -> Optional[_LangMarker]:

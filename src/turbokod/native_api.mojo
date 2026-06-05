@@ -34,7 +34,9 @@ from turbokod.menu import Menu, MenuItem
 from turbokod.posix import (
     getenv_value, recover_user_path_for_gui_launch, setenv_value,
 )
-from turbokod.string_utils import codepoint_at, split_lines_no_trailing
+from turbokod.string_utils import (
+    codepoint_at, escape_drop_paths, split_lines_no_trailing,
+)
 from turbokod.theme import theme_by_name
 from turbokod.desktop import (
     Desktop,
@@ -617,6 +619,37 @@ def tk_desktop_panels_pointer_shape(
     return Int32(0)
 
 
+@export
+def tk_desktop_panels_drop_paths(
+    h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
+) -> Int32:
+    """Host drag-and-drop onto the detached floating-panels window. Mirrors
+    ``tk_desktop_drop_paths`` but routes through ``drop_text_on_panel`` (the
+    panel-window layout)."""
+    if h == 0:
+        return Int32(0)
+    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
+    if len(text.as_bytes()) == 0:
+        return Int32(0)
+    if _desk(h)[].drop_text_on_panel(text, Point(x, y), Rect(0, 0, cols, rows)):
+        return Int32(1)
+    return Int32(0)
+
+
+@export
+def tk_desktop_panels_drop_target(
+    h: Int, x: Int, y: Int, cols: Int, rows: Int,
+) -> Int32:
+    """Classify a drag-and-drop on the detached floating-panels window: 1 =
+    terminal pane, 0 = nothing (the panels window has no editors, so never 2).
+    Companion to ``tk_desktop_drop_target``."""
+    if h == 0:
+        return Int32(0)
+    return Int32(
+        _desk(h)[].drop_target_panel_at(Point(x, y), Rect(0, 0, cols, rows))
+    )
+
+
 # --- Settings window surface -------------------------------------------------
 #
 # The macOS host renders Settings in its own native window (like the floating
@@ -904,6 +937,90 @@ def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> In
         return Int32(1)
     if shape == String("pointer"):
         return Int32(2)
+    return Int32(0)
+
+
+@export
+def tk_desktop_drop_paths(
+    h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
+) -> Int32:
+    """Host drag-and-drop of one or more files onto the *main* window.
+    ``paths`` is a newline-separated list of absolute file paths. If a terminal
+    pane sits under cell ``(x, y)``, the paths are shell-escaped, space-joined
+    (``escape_drop_paths``) and injected as a bracketed paste — so a shell or
+    Claude session running in that pane receives them exactly as a terminal
+    emulator's drag-to-insert would. Returns 1 when a pane consumed the drop,
+    else 0 (the host then leaves the OS drag unhandled)."""
+    if h == 0:
+        return Int32(0)
+    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
+    if len(text.as_bytes()) == 0:
+        return Int32(0)
+    if _desk(h)[].drop_text_on_pane(text, Point(x, y), Rect(0, 0, cols, rows)):
+        return Int32(1)
+    return Int32(0)
+
+
+@export
+def tk_desktop_drop_target(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
+    """Classify a drag-and-drop landing at cell ``(x, y)`` on the *main*
+    window: 1 = terminal pane, 2 = editor window body, 0 = nothing droppable.
+    The host polls this during the drag (to set the copy/no-drop cursor) and on
+    drop (to choose between the terminal paste path and the editor format-choice
+    menu)."""
+    if h == 0:
+        return Int32(0)
+    return Int32(_desk(h)[].drop_target_at(Point(x, y), Rect(0, 0, cols, rows)))
+
+
+@export
+def tk_desktop_insert_text(
+    h: Int, x: Int, y: Int, text_ptr: Int, text_len: Int, cols: Int, rows: Int,
+) -> Int32:
+    """Insert ``text`` verbatim into the editor window under cell ``(x, y)``,
+    placing the caret at the drop point first. Backs the editor branch of
+    drag-and-drop: the host has already formatted the dropped path (full path /
+    filename / project-relative) per the menu choice, so no escaping happens
+    here. Returns 1 when an editor consumed it, else 0."""
+    if h == 0:
+        return Int32(0)
+    var text = _string_from(text_ptr, text_len)
+    if len(text.as_bytes()) == 0:
+        return Int32(0)
+    try:
+        if _desk(h)[].drop_text_on_editor(text, Point(x, y), Rect(0, 0, cols, rows)):
+            return Int32(1)
+    except e:
+        print("turbokod: tk_desktop_insert_text:", String(e))
+    return Int32(0)
+
+
+@export
+def tk_desktop_paste_target_is_editor(h: Int) -> Int32:
+    """1 when a paste should go to an editor (an editor window is focused and
+    no terminal pane / file tree has keyboard focus). The host checks this
+    before offering the file-path paste menu — see ``tk_desktop_paste_text``."""
+    if h == 0:
+        return Int32(0)
+    return Int32(1) if _desk(h)[].paste_target_is_editor() else Int32(0)
+
+
+@export
+def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
+    """Insert ``text`` verbatim at the focused editor's caret. Backs the
+    file-path paste menu (Cmd+V of a file copied in Finder): the host has
+    formatted the path per the menu choice, like the editor drop branch but at
+    the current cursor rather than a drop point. Returns 1 when handled."""
+    if h == 0:
+        return Int32(0)
+    var text = _string_from(text_ptr, text_len)
+    if len(text.as_bytes()) == 0:
+        return Int32(0)
+    try:
+        if _desk(h)[].insert_text_focused_editor(text):
+            return Int32(1)
+    except e:
+        print("turbokod: tk_desktop_paste_text:", String(e))
     return Int32(0)
 
 

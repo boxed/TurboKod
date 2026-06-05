@@ -1692,6 +1692,141 @@ struct Desktop(Movable):
                 return i
         return -1
 
+    def drop_text_on_pane(
+        mut self, text: String, pos: Point, screen: Rect,
+    ) -> Bool:
+        """Inject ``text`` (file path[s] from a host drag-and-drop) into the
+        terminal pane under ``pos`` on the *main* surface, as a paste. Focuses
+        the pane first so its ``handle_key`` accepts the event, then routes a
+        synthetic ``EVENT_PASTE`` — the pane wraps it in bracketed-paste markers
+        when the child enabled them, so a shell / Claude session receives the
+        paths exactly as a terminal emulator's drop would. Returns True when a
+        pane consumed the drop. A no-op when the panels are detached (the main
+        window then paints no terminal panes — see ``drop_text_on_panel``)."""
+        if self.panels_detached:
+            return False
+        var idx = self._terminal_pane_at(pos, screen)
+        if idx < 0:
+            return False
+        self._focus_dock(DOCK_TERMINAL, idx)
+        return self.terminal_panes[idx].handle_key(Event.paste_event(text))
+
+    def drop_text_on_panel(
+        mut self, text: String, pos: Point, screen: Rect,
+    ) -> Bool:
+        """Companion to ``drop_text_on_pane`` for the detached floating-panels
+        window: finds the terminal pane slot under ``pos`` via the panel-window
+        layout and injects the dropped paths as a paste. A no-op unless the
+        panels are detached (only then does that window exist)."""
+        if not self.panels_detached:
+            return False
+        var slots = self._panel_window_slots(screen)
+        for ref s in slots:
+            if s.kind != PANEL_KIND_TERMINAL or s.rect.is_empty():
+                continue
+            if s.rect.contains(pos):
+                self._focus_dock(DOCK_TERMINAL, s.idx)
+                return self.terminal_panes[s.idx].handle_key(
+                    Event.paste_event(text)
+                )
+        return False
+
+    def _editor_window_at(self, pos: Point) -> Int:
+        """Index of the top-most editor window whose editable interior contains
+        ``pos``, or ``-1``. Border / title / scroll-bar hits don't count — only
+        the body, which is where a dropped path should land."""
+        var k = len(self.windows.z_order) - 1
+        while k >= 0:
+            var i = self.windows.z_order[k]
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].interior().contains(pos):
+                return i
+            k -= 1
+        return -1
+
+    def drop_target_at(self, pos: Point, screen: Rect) -> Int:
+        """Classify what a drag-and-drop would land on at ``pos`` on the main
+        surface: ``1`` = terminal pane, ``2`` = editor window body, ``0`` =
+        nothing droppable. The host uses this to set the drag cursor and to
+        decide whether to pop the filename-vs-path choice menu (editor only).
+        Terminal panes only live here while *not* detached."""
+        if not self.panels_detached:
+            if self._terminal_pane_at(pos, screen) >= 0:
+                return 1
+        if self._editor_window_at(pos) >= 0:
+            return 2
+        return 0
+
+    def drop_target_panel_at(self, pos: Point, screen: Rect) -> Int:
+        """``1`` when a terminal pane sits under ``pos`` in the detached panels
+        window, else ``0`` — that window has no editors, so it never returns
+        ``2`` (companion to ``drop_target_at``)."""
+        if not self.panels_detached:
+            return 0
+        var slots = self._panel_window_slots(screen)
+        for ref s in slots:
+            if s.kind == PANEL_KIND_TERMINAL and not s.rect.is_empty() \
+                    and s.rect.contains(pos):
+                return 1
+        return 0
+
+    def drop_text_on_editor(
+        mut self, text: String, pos: Point, screen: Rect,
+    ) raises -> Bool:
+        """Insert ``text`` literally into the editor window under ``pos`` (a
+        host drag-and-drop of a path the host already formatted as full /
+        filename / relative). Positions the caret at the drop point by routing
+        a synthetic click — which also focuses + raises that window — then
+        inserts via ``paste_text`` and reveals the cursor. Returns True when an
+        editor consumed the drop. Unlike the terminal panes, the text is taken
+        verbatim (it's source text, not a shell command, so no escaping)."""
+        if self._editor_window_at(pos) < 0:
+            return False
+        var workspace = self.workspace_rect(screen)
+        # A press places the caret (and focuses + raises the window); the
+        # matching release ends the synthetic drag so no selection lingers.
+        _ = self.windows.handle_mouse(
+            Event.mouse_event(pos, MOUSE_BUTTON_LEFT, True, False, MOD_NONE,
+                              UInt8(1)),
+            workspace,
+        )
+        _ = self.windows.handle_mouse(
+            Event.mouse_event(pos, MOUSE_BUTTON_LEFT, False, False, MOD_NONE,
+                              UInt8(0)),
+            workspace,
+        )
+        var idx = self.windows.focused
+        if idx < 0 or not self.windows.windows[idx].is_editor:
+            return False
+        self.windows.windows[idx].editor.paste_text(text)
+        self.windows.windows[idx].editor.reveal_cursor(
+            self.windows.windows[idx].interior(),
+        )
+        return True
+
+    def paste_target_is_editor(self) -> Bool:
+        """True when a paste should land in an editor: an editor window holds
+        focus and no tool dock (terminal pane / file tree) has grabbed keyboard
+        focus. The host checks this before offering the file-path paste menu —
+        if a terminal pane is focused, a file paste belongs to the shell, not
+        an editor (and goes through the normal paste path)."""
+        if self._any_dock_focused():
+            return False
+        return self.windows.focused_is_editor()
+
+    def insert_text_focused_editor(mut self, text: String) raises -> Bool:
+        """Insert ``text`` verbatim at the focused editor's current caret — the
+        file-path-paste-with-menu path, the caret-stationary sibling of
+        ``drop_text_on_editor``. Returns True when an editor consumed it."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return False
+        self.windows.windows[idx].editor.paste_text(text)
+        self.windows.windows[idx].editor.reveal_cursor(
+            self.windows.windows[idx].interior(),
+        )
+        return True
+
     def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""

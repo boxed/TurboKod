@@ -33,6 +33,30 @@ int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
 int32_t tk_desktop_mod_key(int64_t h, uint32_t mod_id, uint8_t pressed);
 int32_t tk_desktop_pointer_shape(int64_t h, int64_t x, int64_t y,
                                  int64_t cols, int64_t rows);
+// Host drag-and-drop of file(s) onto the main window. paths is a
+// newline-separated UTF-8 list of absolute paths. When a terminal pane sits
+// under cell (x,y) the paths are shell-escaped + injected as a bracketed
+// paste. Returns 1 when a pane consumed the drop, else 0.
+int32_t tk_desktop_drop_paths(int64_t h, int64_t x, int64_t y,
+                              int64_t paths_ptr, int64_t paths_len,
+                              int64_t cols, int64_t rows);
+// Classify a drop at cell (x,y) on the main window: 1 = terminal pane,
+// 2 = editor body, 0 = nothing droppable. Polled during the drag (cursor)
+// and on drop (terminal paste vs editor format-choice menu).
+int32_t tk_desktop_drop_target(int64_t h, int64_t x, int64_t y,
+                               int64_t cols, int64_t rows);
+// Insert text verbatim into the editor under cell (x,y), caret at the drop
+// point. The host formats the dropped path (full/filename/relative) first.
+// Returns 1 when an editor consumed it.
+int32_t tk_desktop_insert_text(int64_t h, int64_t x, int64_t y,
+                               int64_t text_ptr, int64_t text_len,
+                               int64_t cols, int64_t rows);
+// 1 when a paste should go to an editor (editor focused, no terminal/file-tree
+// dock focused). Host checks this before offering the file-path paste menu.
+int32_t tk_desktop_paste_target_is_editor(int64_t h);
+// Insert text verbatim at the focused editor's caret. Backs the file-path
+// paste menu (Cmd+V of a file): host formats the path per the menu choice.
+int32_t tk_desktop_paste_text(int64_t h, int64_t text_ptr, int64_t text_len);
 int32_t tk_desktop_has_project(int64_t h);
 void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
 void    tk_desktop_set_host_focused(int64_t h, int64_t on);
@@ -68,6 +92,15 @@ int32_t tk_desktop_panels_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                 int64_t cols, int64_t rows, uint8_t click_count);
 int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
                                         int64_t cols, int64_t rows);
+// Drag-and-drop onto the detached floating-panels window. Mirrors
+// tk_desktop_drop_paths but routes through the panel-window layout.
+int32_t tk_desktop_panels_drop_paths(int64_t h, int64_t x, int64_t y,
+                                     int64_t paths_ptr, int64_t paths_len,
+                                     int64_t cols, int64_t rows);
+// Classify a drop on the detached panels window: 1 = terminal pane, 0 = none
+// (no editors there). Companion to tk_desktop_drop_target.
+int32_t tk_desktop_panels_drop_target(int64_t h, int64_t x, int64_t y,
+                                      int64_t cols, int64_t rows);
 
 // Settings window: like the floating panels, the macOS host renders the
 // Settings view in its own native window. The host sets _set_settings_detached

@@ -21,9 +21,11 @@ from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY,
-    LIGHT_GREEN, LIGHT_RED, RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
+    LIGHT_GREEN, LIGHT_RED, RED, STYLE_BOLD, STYLE_UNDERLINE,
+    STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
-    BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, PANE_BG,
+    BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
+    SYN_KEYWORD, PANE_BG,
     FG_TRUECOLOR, BG_TRUECOLOR, _rgb_to_256,
     attr_to_sgr, attr_to_sgr_rgb, default_attr, parse_sgr,
 )
@@ -110,7 +112,10 @@ from turbokod.debug_pane import (
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
-from turbokod.string_utils import slice_codepoints, char_width, display_columns
+from turbokod.string_utils import (
+    slice_codepoints, char_width, display_columns,
+    shell_escape_path, escape_drop_paths,
+)
 from turbokod.project_settings import ProjectSettings
 from turbokod.project_on_save import (
     load_project_on_save, on_save_equal, write_project_on_save,
@@ -592,6 +597,36 @@ def test_emoji_double_width() raises:
     var n2 = c2.put_text(Point(0, 0), String("🚀"), default_attr(), 1)
     assert_equal(n2, 0)
     assert_equal(c2.get(0, 0).glyph, String(" "))
+
+
+def test_shell_escape_path_escapes_metacharacters() raises:
+    """``shell_escape_path`` backslash-escapes the ASCII shell metacharacters
+    so a dropped path survives the shell intact, and leaves plain characters
+    (and multi-byte UTF-8) untouched."""
+    assert_equal(shell_escape_path(String("/tmp/plain.txt")),
+                 String("/tmp/plain.txt"))
+    assert_equal(shell_escape_path(String("/tmp/My File.txt")),
+                 String("/tmp/My\\ File.txt"))
+    assert_equal(shell_escape_path(String("a(b)c&d;e")),
+                 String("a\\(b\\)c\\&d\\;e"))
+    assert_equal(shell_escape_path(String("a'b\"c`d$e")),
+                 String("a\\'b\\\"c\\`d\\$e"))
+    # Multi-byte UTF-8 (here an em dash) passes through unescaped.
+    assert_equal(shell_escape_path(String("/tmp/a—b.txt")),
+                 String("/tmp/a—b.txt"))
+
+
+def test_escape_drop_paths_joins_and_trails() raises:
+    """``escape_drop_paths`` splits a newline-separated drop list, escapes each
+    path, space-joins them, and appends a trailing space (terminal-emulator
+    drop convention). Blank entries are skipped; all-blank yields empty."""
+    assert_equal(escape_drop_paths(String("/a/b.txt")),
+                 String("/a/b.txt "))
+    assert_equal(escape_drop_paths(String("/a b.txt\n/c d.txt")),
+                 String("/a\\ b.txt /c\\ d.txt "))
+    # Empty / whitespace-only input contributes no token and no trailing space.
+    assert_equal(escape_drop_paths(String("")), String(""))
+    assert_equal(escape_drop_paths(String("\n")), String(""))
 
 
 def test_paint_title_commands_renders_separator_and_labels() raises:
@@ -14298,6 +14333,82 @@ def test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
     assert_true(saw_range)
 
 
+def test_markdown_highlights_headings_code_and_emphasis() raises:
+    """The bespoke Markdown highlighter colors ATX headings (keyword),
+    fenced + inline code (string), and ``**bold**`` (bold style), where
+    the generic fallback used to produce nothing at all."""
+    var lines = _hl_lines(
+        String("# Title"),
+        String("Some **bold** and `code` text."),
+        String("```"),
+        String("x = 1"),
+        String("```"),
+        String("- item"),
+        String("[link](http://example.com)"),
+    )
+    var hls = highlight_for_extension(String("md"), lines)
+    # Heading: whole row 0 painted as keyword.
+    var saw_heading = False
+    var saw_bold = False
+    var saw_inline_code = False
+    var saw_fence_body = False
+    var saw_list_marker = False
+    var saw_link_url = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 0 and h.attr.fg == SYN_KEYWORD \
+                and (h.attr.style & STYLE_BOLD) != 0:
+            saw_heading = True
+        if h.row == 1 and h.col_start == 5 and (h.attr.style & STYLE_BOLD) != 0:
+            saw_bold = True
+        if h.row == 1 and h.attr == highlight_string_attr() and h.col_start > 12:
+            saw_inline_code = True
+        # Row 3 ("x = 1") is inside the fence → whole-line code color.
+        if h.row == 3 and h.col_start == 0 and h.col_end == 5 \
+                and h.attr == highlight_string_attr():
+            saw_fence_body = True
+        if h.row == 5 and h.col_start == 0 and h.col_end == 1 \
+                and h.attr == highlight_operator_attr():
+            saw_list_marker = True
+        if h.row == 6 and h.attr == highlight_string_attr():
+            saw_link_url = True
+    assert_true(saw_heading)
+    assert_true(saw_bold)
+    assert_true(saw_inline_code)
+    assert_true(saw_fence_body)
+    assert_true(saw_list_marker)
+    assert_true(saw_link_url)
+
+
+def test_markdown_fenced_code_uses_embedded_grammar() raises:
+    """A ```` ```python ```` fence tokenizes its body with the Python
+    TextMate grammar (same injection path as ``# language=`` markers),
+    so ``def``/``return`` in the body come out as keywords and the
+    literal ``1`` as a number — not the uniform fence-code color."""
+    var lines = _hl_lines(
+        String("Intro paragraph."),
+        String("```python"),
+        String("def f():"),
+        String("    return 1"),
+        String("```"),
+    )
+    var hls = highlight_for_extension(String("md"), lines)
+    var saw_def_keyword = False
+    var saw_number = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        # ``def`` on row 2: keyword color from the Python grammar.
+        if h.row == 2 and h.col_start == 0 and h.col_end == 3 \
+                and h.attr == highlight_keyword_attr():
+            saw_def_keyword = True
+        # The ``1`` on row 3: number color, proving the body was
+        # tokenized as Python rather than painted as flat code.
+        if h.row == 3 and h.attr == highlight_number_attr():
+            saw_number = True
+    assert_true(saw_def_keyword)
+    assert_true(saw_number)
+
+
 def test_diff_identical_inputs_have_no_hunks() raises:
     """Two identical inputs produce only the file headers — no ``@@``."""
     var same = String("alpha\nbeta\ngamma\n")
@@ -17501,6 +17612,8 @@ def _run_chunk_00() raises:
     test_prompt_wrap_empty_returns_empty_list()
     test_prompt_paint_clamps_long_label_inside_dialog()
     test_diff_grammar_paints_inserted_deleted_and_hunk_header()
+    test_markdown_highlights_headings_code_and_emphasis()
+    test_markdown_fenced_code_uses_embedded_grammar()
     test_diff_identical_inputs_have_no_hunks()
     test_diff_lines_pure_insert()
     test_diff_lines_pure_delete()
@@ -17545,6 +17658,8 @@ def _run_chunk_00() raises:
     test_attr()
     test_canvas_put_text()
     test_emoji_double_width()
+    test_shell_escape_path_escapes_metacharacters()
+    test_escape_drop_paths_joins_and_trails()
     test_paint_title_commands_renders_separator_and_labels()
     test_paint_title_commands_drops_clipped_label()
     test_hit_title_command_returns_id_under_cursor()
