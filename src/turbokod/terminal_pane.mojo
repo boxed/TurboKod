@@ -128,6 +128,15 @@ struct TerminalPane(Copyable, Movable):
     "inherit the parent's cwd" (which is usually the directory the
     editor was launched from). Honored on every ``ensure_started`` —
     Restart also lands you back in the project dir."""
+    var startup_command: String
+    """Optional command typed into the shell right after spawn. Empty
+    means "just drop the user at a prompt" (the plain New-terminal
+    path). Set to ``claude`` by the Cmd+Alt+C "New Claude pane" path so
+    the pane boots straight into a Claude session. We feed it through
+    the shell's stdin (rather than ``exec``-ing it directly) so the
+    user's full interactive environment — PATH, rc files, shell
+    functions — is in place before it runs, and so the prompt returns
+    when the command exits instead of the pane dying."""
 
     # --- paint-time hit-test bookkeeping -------------------------------
     var _last_body: Rect
@@ -184,6 +193,7 @@ struct TerminalPane(Copyable, Movable):
         self.sel_focus_r = 0
         self.sel_focus_c = 0
         self.cwd = String("")
+        self.startup_command = String("")
         self._last_body = Rect.empty()
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
@@ -211,6 +221,7 @@ struct TerminalPane(Copyable, Movable):
         self.sel_focus_r = copy.sel_focus_r
         self.sel_focus_c = copy.sel_focus_c
         self.cwd = copy.cwd
+        self.startup_command = copy.startup_command
         self._last_body = copy._last_body
         self._last_panel_top = copy._last_panel_top
         self._claude_tracker = copy._claude_tracker
@@ -288,6 +299,13 @@ struct TerminalPane(Copyable, Movable):
             argv, cwd=self.cwd,
             cols=self.vt.cols, rows=self.vt.rows,
         )
+        if len(self.startup_command.as_bytes()) > 0:
+            # Queue the command on the shell's stdin. The bytes sit in
+            # the pty input buffer until the shell finishes sourcing its
+            # rc files and starts reading, so this runs after the
+            # environment is fully set up. ``\r`` is what Enter sends on
+            # a real terminal; the pty's cooked mode maps it to newline.
+            self._write_to_pty(self.startup_command + String("\r"))
 
     def restart(mut self):
         """Kill the current shell and spawn a fresh one. Useful when

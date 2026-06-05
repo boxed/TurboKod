@@ -384,6 +384,10 @@ comptime FILE_TREE_REVEAL        = String("file_tree:reveal")
 # the most recently created pane.
 comptime TERMINAL_NEW            = String("terminal:new")
 comptime TERMINAL_FOCUS          = String("terminal:focus")
+# Cmd+Alt+C — open a new terminal pane that boots straight into a
+# ``claude`` session instead of a bare shell prompt. Same pane
+# machinery as ``NEW``; only the spawned-shell startup command differs.
+comptime TERMINAL_CLAUDE         = String("terminal:claude")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
 comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
@@ -1380,6 +1384,12 @@ struct Desktop(Movable):
         # to advertise this binding (mirroring the debug pane's "9").
         self._hotkeys.append(Hotkey(
             UInt32(ord("t")), MOD_META | MOD_SHIFT, TERMINAL_NEW,
+        ))
+        # Cmd+Alt+C opens a new terminal pane already running ``claude``
+        # — same pane, but the shell auto-runs a Claude session on
+        # spawn. Mirrored by the File → "New Claude pane" menu item.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("c")), MOD_META | MOD_ALT, TERMINAL_CLAUDE,
         ))
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
         self._hotkeys.append(Hotkey(
@@ -5768,6 +5778,9 @@ struct Desktop(Movable):
         if action == TERMINAL_NEW:
             self._open_terminal_pane()
             return Optional[String]()
+        if action == TERMINAL_CLAUDE:
+            self._open_terminal_pane(String("claude"))
+            return Optional[String]()
         if action == TERMINAL_FOCUS:
             # Land focus on the most recently created pane — the one
             # the user is most likely to be looking at after pressing
@@ -6910,7 +6923,7 @@ struct Desktop(Movable):
             return False
         return True
 
-    def _open_terminal_pane(mut self):
+    def _open_terminal_pane(mut self, startup_command: String = String("")):
         """Append a fresh ``TerminalPane`` to the stack and route
         focus to it through ``_focus_dock`` so the new pane is
         keyboard-live immediately and every other dock + sibling
@@ -6920,10 +6933,15 @@ struct Desktop(Movable):
         open — that's the cwd the user almost always wants. With no
         project we leave ``pane.cwd`` empty so the child inherits the
         editor's launch directory (just like double-clicking a
-        terminal from any other tool would)."""
+        terminal from any other tool would).
+
+        ``startup_command`` (e.g. ``claude`` from the Cmd+Alt+C path)
+        is typed into the shell right after spawn; empty drops the user
+        at a bare prompt."""
         var pane = TerminalPane()
         if self.project:
             pane.cwd = self.project.value()
+        pane.startup_command = startup_command
         pane.open()
         self.terminal_panes.append(pane^)
         self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)

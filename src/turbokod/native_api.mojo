@@ -56,7 +56,8 @@ from turbokod.desktop import (
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
-    TARGET_RUN, TARGET_TEST, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL,
+    TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
+    WINDOW_CLOSE, WINDOW_CLOSE_ALL,
 )
 
 
@@ -144,6 +145,7 @@ def _build_menus(mut d: Desktop):
         (String("New"), EDITOR_NEW),
         (String("New window"), NEW_WINDOW),
         (String("New terminal pane"), TERMINAL_NEW),
+        (String("New Claude pane"), TERMINAL_CLAUDE),
         (String("Open..."), EDITOR_OPEN),
         (String("Open project..."), PROJECT_OPEN),
         (String("Quick open..."), EDITOR_QUICK_OPEN),
