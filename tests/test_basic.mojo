@@ -29,7 +29,10 @@ from turbokod.colors import (
 from turbokod.theme import (
     Theme, built_in_themes, default_theme_name, theme_by_name, theme_names,
 )
-from turbokod.diff import MergeResult, diff3_merge, diff_lines, unified_diff
+from turbokod.diff import (
+    MergeRegion, MergeResult, REGION_CONFLICT, REGION_STABLE,
+    diff3_merge, diff3_regions, diff_lines, unified_diff,
+)
 from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor, TextBuffer,
@@ -223,6 +226,9 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
+from turbokod.merge_view import (
+    CHOICE_BOTH, CHOICE_DISK, CHOICE_LOCAL, MergeView,
+)
 from turbokod.prompt import (
     Prompt, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
 )
@@ -2330,6 +2336,121 @@ def test_diff3_merge_conflict_when_both_edit_same_line() raises:
     assert_equal(m.first_conflict_row, open_idx)
 
 
+def _conflict_count(regions: List[MergeRegion]) -> Int:
+    var n = 0
+    for i in range(len(regions)):
+        if regions[i].kind == REGION_CONFLICT:
+            n += 1
+    return n
+
+
+def test_diff3_regions_all_stable_when_only_ours_changed() raises:
+    """Only ours diverged from base → one STABLE region == ours, no
+    conflicts."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nB\nc\n"))
+    var theirs = _lines_from(String("a\nb\nc\n"))
+    var regions = diff3_regions(base, ours, theirs)
+    assert_equal(_conflict_count(regions), 0)
+    # Reassemble the stable text and compare to ours.
+    var got = List[String]()
+    for i in range(len(regions)):
+        assert_equal(regions[i].kind, REGION_STABLE)
+        for j in range(len(regions[i].lines)):
+            got.append(regions[i].lines[j])
+    assert_equal(len(got), len(ours))
+    for i in range(len(ours)):
+        assert_equal(got[i], ours[i])
+
+
+def test_diff3_regions_conflict_boundaries() raises:
+    """Both sides edit the same middle line → STABLE [a], CONFLICT,
+    STABLE [c, ''] (trailing empty line from the final newline)."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nOURS\nc\n"))
+    var theirs = _lines_from(String("a\nTHEIRS\nc\n"))
+    var regions = diff3_regions(base, ours, theirs)
+    assert_equal(_conflict_count(regions), 1)
+    assert_equal(len(regions), 3)
+    # Leading stable run.
+    assert_equal(regions[0].kind, REGION_STABLE)
+    assert_equal(len(regions[0].lines), 1)
+    assert_equal(regions[0].lines[0], String("a"))
+    # Conflict carries both sides + base.
+    assert_equal(regions[1].kind, REGION_CONFLICT)
+    assert_equal(len(regions[1].ours_lines), 1)
+    assert_equal(regions[1].ours_lines[0], String("OURS"))
+    assert_equal(len(regions[1].theirs_lines), 1)
+    assert_equal(regions[1].theirs_lines[0], String("THEIRS"))
+    assert_equal(len(regions[1].base_lines), 1)
+    assert_equal(regions[1].base_lines[0], String("b"))
+    # Trailing stable run: "c" then the empty final line.
+    assert_equal(regions[2].kind, REGION_STABLE)
+    assert_equal(len(regions[2].lines), 2)
+    assert_equal(regions[2].lines[0], String("c"))
+    assert_equal(regions[2].lines[1], String(""))
+
+
+def test_diff3_regions_multiple_conflicts() raises:
+    """Two separated conflicts keep the stable text between them."""
+    var base = _lines_from(String("a\nb\nc\nd\ne\n"))
+    var ours = _lines_from(String("a\nB1\nc\nD1\ne\n"))
+    var theirs = _lines_from(String("a\nB2\nc\nD2\ne\n"))
+    var regions = diff3_regions(base, ours, theirs)
+    assert_equal(_conflict_count(regions), 2)
+    # Find the stable region sitting between the two conflicts and
+    # confirm it preserved the shared "c" line.
+    var saw_c_between = False
+    var seen_first_conflict = False
+    for i in range(len(regions)):
+        if regions[i].kind == REGION_CONFLICT:
+            if not seen_first_conflict:
+                seen_first_conflict = True
+            continue
+        if seen_first_conflict:
+            for j in range(len(regions[i].lines)):
+                if regions[i].lines[j] == String("c"):
+                    saw_c_between = True
+    assert_true(saw_c_between)
+
+
+def _single_conflict_view() raises -> MergeView:
+    """A MergeView seeded from one conflict: base a/b/c, ours edits b to
+    OURS, theirs edits b to THEIRS."""
+    var base = _lines_from(String("a\nb\nc\n"))
+    var ours = _lines_from(String("a\nOURS\nc\n"))
+    var theirs = _lines_from(String("a\nTHEIRS\nc\n"))
+    var regions = diff3_regions(base, ours, theirs)
+    var mv = MergeView()
+    mv.open(regions^, 0, String("f.txt"))
+    return mv^
+
+
+def test_merge_view_resolved_text_all_local() raises:
+    """Resolving every conflict to Local reproduces ours verbatim."""
+    var mv = _single_conflict_view()
+    assert_equal(mv.conflict_count, 1)
+    for i in range(len(mv.states)):
+        mv.states[i].choice = CHOICE_LOCAL
+    assert_equal(mv.resolved_text(), String("a\nOURS\nc\n"))
+
+
+def test_merge_view_resolved_text_all_disk() raises:
+    """Resolving every conflict to Disk reproduces theirs verbatim."""
+    var mv = _single_conflict_view()
+    for i in range(len(mv.states)):
+        mv.states[i].choice = CHOICE_DISK
+    assert_equal(mv.resolved_text(), String("a\nTHEIRS\nc\n"))
+
+
+def test_merge_view_resolved_text_both() raises:
+    """Both keeps ours then theirs, surrounded by the stable lines."""
+    var mv = _single_conflict_view()
+    for i in range(len(mv.states)):
+        mv.states[i].choice = CHOICE_BOTH
+    assert_equal(mv.resolved_text(), String("a\nOURS\nTHEIRS\nc\n"))
+
+
 def test_editor_external_change_clean_reload_when_buffer_clean() raises:
     """Buffer is clean: an external write triggers a verbatim reload."""
     var path = _temp_path(String("_ext_clean.txt"))
@@ -2406,8 +2527,8 @@ def test_editor_external_change_auto_merges_disjoint_edits() raises:
     assert_equal(ed.buffer.line(4), String("EEE"))
     # Buffer differs from disk now (disk lacks our 'X'), so still dirty.
     assert_true(ed.dirty)
-    # No conflict diff queued.
-    assert_false(ed.consume_conflict_diff())
+    # No merge pending — the auto-merge resolved cleanly.
+    assert_false(ed.merge_pending)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -2432,10 +2553,10 @@ def test_editor_external_change_clears_dirty_when_disk_already_has_our_edits() r
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-def test_editor_external_change_conflict_inserts_markers() raises:
-    """Both buffer and disk modified the same line → conflict markers
-    are embedded, cursor jumps to the first marker, and a pre-rendered
-    diff is queued for the host to display."""
+def test_editor_external_change_conflict_stashes_regions() raises:
+    """Both buffer and disk modified the same line → the buffer is left
+    untouched (no markers jammed in), and the structured merge regions
+    are stashed for the host to resolve via a MergeView."""
     var path = _temp_path(String("_ext_conflict.txt"))
     assert_true(write_file(path, String("a\nb\nc\n")))
     var ed = Editor.from_file(path)
@@ -2454,32 +2575,69 @@ def test_editor_external_change_conflict_inserts_markers() raises:
     var status = ed.check_for_external_change()
     assert_equal(status, EXT_CHANGE_CONFLICT)
     assert_true(ed.dirty)
-    # First conflict marker present and the cursor sits on it.
-    var found_open = False
+    assert_true(ed.merge_pending)
+    # Buffer is untouched: still our local edits, no conflict markers.
+    assert_equal(ed.buffer.line(1), String("OURS"))
     for i in range(ed.buffer.line_count()):
-        if ed.buffer.line(i).find(String("<<<<<<<")) >= 0:
-            found_open = True
-            assert_equal(ed.selections[0].row, i)
-            break
-    assert_true(found_open)
-    # Both versions appear in the buffer.
+        assert_true(ed.buffer.line(i).find(String("<<<<<<<")) < 0)
+    # The stashed regions carry exactly one conflict with both sides.
+    var regions = ed.consume_merge_regions()
+    assert_false(ed.merge_pending)
+    var nconf = 0
     var saw_ours = False
     var saw_theirs = False
-    for i in range(ed.buffer.line_count()):
-        if ed.buffer.line(i) == String("OURS"):
-            saw_ours = True
-        elif ed.buffer.line(i) == String("THEIRS"):
-            saw_theirs = True
+    for i in range(len(regions)):
+        if regions[i].kind == REGION_CONFLICT:
+            nconf += 1
+            for j in range(len(regions[i].ours_lines)):
+                if regions[i].ours_lines[j] == String("OURS"):
+                    saw_ours = True
+            for j in range(len(regions[i].theirs_lines)):
+                if regions[i].theirs_lines[j] == String("THEIRS"):
+                    saw_theirs = True
+    assert_equal(nconf, 1)
     assert_true(saw_ours)
     assert_true(saw_theirs)
-    # The host-facing diff is queued (consumed on first read).
-    var diff = ed.consume_conflict_diff()
-    assert_true(diff)
-    var diff_text = diff.value()
-    # Must contain both old- and new-disk markers from unified_diff.
-    assert_true(diff_text.find(String("@@")) >= 0)
-    # consume_conflict_diff is one-shot.
-    assert_false(ed.consume_conflict_diff())
+    # consume_merge_regions is one-shot.
+    var again = ed.consume_merge_regions()
+    assert_equal(len(again), 0)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_editor_merge_resolve_writes_disk() raises:
+    """End-to-end (no UI loop): a conflict is detected, the regions are
+    fed to a MergeView, the user resolves them, and apply_resolved_merge
+    lands the result in both the buffer and on disk."""
+    var path = _temp_path(String("_ext_merge_resolve.txt"))
+    assert_true(write_file(path, String("a\nb\nc\n")))
+    var ed = Editor.from_file(path)
+    # Local: replace "b" with "OURS".
+    ed.move_to(1, 0, False)
+    ed.move_to(1, 1, True)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("O"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("U"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("R"))), _VIEW)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("S"))), _VIEW)
+    # External: same line replaced differently → conflict.
+    assert_true(write_file(path, String("a\nTHEIRS\nc\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_CONFLICT)
+    # Resolve the conflict by keeping both sides.
+    var regions = ed.consume_merge_regions()
+    var mv = MergeView()
+    mv.open(regions^, 0, path)
+    for i in range(len(mv.states)):
+        mv.states[i].choice = CHOICE_BOTH
+    var text = mv.resolved_text()
+    assert_true(ed.apply_resolved_merge(text^))
+    assert_false(ed.dirty)
+    assert_false(ed.merge_pending)
+    # Buffer holds the merged result...
+    assert_equal(ed.buffer.line(0), String("a"))
+    assert_equal(ed.buffer.line(1), String("OURS"))
+    assert_equal(ed.buffer.line(2), String("THEIRS"))
+    assert_equal(ed.buffer.line(3), String("c"))
+    # ...and so does the on-disk file.
+    assert_equal(read_file(path), String("a\nOURS\nTHEIRS\nc\n"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -17287,11 +17445,18 @@ def _run_chunk_01() raises:
     test_diff3_merge_clean_when_changes_disjoint()
     test_diff3_merge_identical_changes_dont_conflict()
     test_diff3_merge_conflict_when_both_edit_same_line()
+    test_diff3_regions_all_stable_when_only_ours_changed()
+    test_diff3_regions_conflict_boundaries()
+    test_diff3_regions_multiple_conflicts()
+    test_merge_view_resolved_text_all_local()
+    test_merge_view_resolved_text_all_disk()
+    test_merge_view_resolved_text_both()
     test_editor_external_change_clean_reload_when_buffer_clean()
     test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
-    test_editor_external_change_conflict_inserts_markers()
+    test_editor_external_change_conflict_stashes_regions()
+    test_editor_merge_resolve_writes_disk()
     test_editor_replace_all()
     test_editorconfig_parse_basic()
     test_editorconfig_match_section()

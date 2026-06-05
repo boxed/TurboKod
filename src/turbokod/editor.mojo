@@ -29,7 +29,7 @@ from .colors import (
     SYN_STRING, SYN_COMMENT,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
-from .diff import MergeResult, diff3_merge, unified_diff
+from .diff import MergeRegion, REGION_CONFLICT, diff3_regions
 from .events import (
     Event, EVENT_KEY, EVENT_MOD_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -680,9 +680,10 @@ comptime EXT_CHANGE_MERGED = 2
 cleanly (no conflict regions)."""
 
 comptime EXT_CHANGE_CONFLICT = 3
-"""Buffer was dirty; merge produced conflicts. The buffer now contains
-``<<<<<<< / ======= / >>>>>>>`` markers and the cursor sits on the
-first ``<<<<<<<`` line. Caller should surface a diff view."""
+"""Buffer was dirty; merge produced conflicts. The buffer is left
+untouched; the structured merge regions are stashed in
+``pending_merge_regions`` (``merge_pending`` set). The caller resolves
+them interactively via ``consume_merge_regions`` + a ``MergeView``."""
 
 
 @fieldwise_init
@@ -907,12 +908,17 @@ struct Editor(Copyable, Movable):
     # can paste it into a search engine, chat, or bug tracker.
     var pending_diagnostic_menu: Optional[DiagnosticMenuRequest]
     # Set by ``check_for_external_change`` when a 3-way merge against a
-    # changed-on-disk file produces conflicts. Holds a pre-rendered
-    # unified diff (previous on-disk content vs. current on-disk
-    # content) so the host can open a side-by-side diff view without
-    # the Editor needing to know about windows. ``consume_conflict_diff``
-    # returns and clears the slot.
-    var pending_conflict_diff: Optional[String]
+    # changed-on-disk file produces conflicts. Rather than mutate the
+    # buffer with marker lines, we stash the structured merge regions
+    # and let the host open the interactive ``MergeView`` modal.
+    # ``merge_pending`` gates the host's poll; ``pending_merge_regions``
+    # carries the stable/conflict runs. The buffer and ``disk_baseline``
+    # are left untouched (the user's local edits stay put) until the
+    # user resolves the merge; only ``file_size``/``file_mtime`` are
+    # advanced so the next tick doesn't re-fire on the same write.
+    # ``consume_merge_regions`` returns the regions and clears the flag.
+    var merge_pending: Bool
+    var pending_merge_regions: List[MergeRegion]
     # View options. ``line_numbers`` paints a right-aligned line-number
     # gutter to the right of the debugger gutter; its width is derived
     # from ``buffer.line_count()`` at paint time. ``wrap_mode`` is one of
@@ -1204,7 +1210,8 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
-        self.pending_conflict_diff = Optional[String]()
+        self.merge_pending = False
+        self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
@@ -1306,7 +1313,8 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
-        self.pending_conflict_diff = Optional[String]()
+        self.merge_pending = False
+        self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
@@ -1436,7 +1444,8 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
         self.pending_git_revert = copy.pending_git_revert
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
-        self.pending_conflict_diff = copy.pending_conflict_diff
+        self.merge_pending = copy.merge_pending
+        self.pending_merge_regions = copy.pending_merge_regions.copy()
         self.line_numbers = copy.line_numbers
         self.wrap_mode = copy.wrap_mode
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
@@ -2838,16 +2847,34 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(bs)
 
-    def consume_conflict_diff(mut self) -> Optional[String]:
-        """Return any pending merge-conflict diff text and clear the
-        slot. Populated by ``check_for_external_change`` whenever it
-        returns ``EXT_CHANGE_CONFLICT``; the host wraps the text in a
-        read-only diff window so the user can see what changed
-        externally while resolving the conflict markers in the buffer.
+    def consume_merge_regions(mut self) -> List[MergeRegion]:
+        """Return the structured merge regions stashed by
+        ``check_for_external_change`` on an ``EXT_CHANGE_CONFLICT`` and
+        clear the pending flag. The host feeds these to a ``MergeView``
+        modal for interactive resolution.
         """
-        var d = self.pending_conflict_diff
-        self.pending_conflict_diff = Optional[String]()
-        return d
+        var r = self.pending_merge_regions.copy()
+        self.pending_merge_regions = List[MergeRegion]()
+        self.merge_pending = False
+        return r^
+
+    def apply_resolved_merge(mut self, var text: String) raises -> Bool:
+        """Replace the buffer with the user's resolved merge ``text`` and
+        write it to disk in one step (the merge view's "save on finish"
+        behavior). Clears any pending-merge state and returns whatever
+        ``save`` returns. Snapshots undo first so a stray resolution is
+        recoverable with Ctrl+Z."""
+        self._push_undo()
+        self.buffer = TextBuffer(text^)
+        self.clear_diagnostics()
+        self._last_known_line_count = self.buffer.line_count()
+        self._clamp_cursor_after_reload()
+        self.selections[0].anchor_row = self.selections[0].row
+        self.selections[0].anchor_col = self.selections[0].col
+        self.merge_pending = False
+        self.pending_merge_regions = List[MergeRegion]()
+        self.refresh_highlights()
+        return self.save()
 
     def check_for_external_change(mut self) raises -> Int:
         """Re-stat the backing file and react to any out-of-band write.
@@ -2860,13 +2887,16 @@ struct Editor(Copyable, Movable):
         * ``EXT_CHANGE_MERGED`` — buffer was dirty; 3-way merge against
           ``disk_baseline`` produced a clean result and was applied.
         * ``EXT_CHANGE_CONFLICT`` — buffer was dirty; merge produced
-          conflicts. The buffer now has standard ``<<<<<<< / ======= /
-          >>>>>>>`` markers, the cursor sits on the first marker line,
-          and the caller should surface a diff view.
+          conflicts. The buffer is left untouched; the structured merge
+          regions are stashed in ``pending_merge_regions`` (with
+          ``merge_pending`` set) for the host to resolve interactively
+          via ``consume_merge_regions`` + a ``MergeView`` modal.
 
-        After any non-``NONE`` return the stat info and ``disk_baseline``
-        are updated so the next tick won't re-trigger on the same
-        external write.
+        The stat info is updated on every non-``NONE`` return so the next
+        tick won't re-trigger on the same write. ``disk_baseline`` is
+        updated on reload and clean merge, but deliberately left at the
+        previous content on a conflict so the stashed regions stay valid
+        until the user resolves the merge.
         """
         if len(self.file_path.as_bytes()) == 0:
             return EXT_CHANGE_NONE
@@ -2898,39 +2928,41 @@ struct Editor(Copyable, Movable):
         var base_lines = _split_buffer_lines(self.disk_baseline)
         var ours_lines = self.buffer.lines.copy()
         var theirs_lines = _split_buffer_lines(text)
-        var merge = diff3_merge(
-            base_lines, ours_lines, theirs_lines,
-            String("local edits"), String("on disk"),
-        )
+        var regions = diff3_regions(base_lines, ours_lines, theirs_lines)
+        var conflicts = 0
+        for i in range(len(regions)):
+            if regions[i].kind == REGION_CONFLICT:
+                conflicts += 1
+        if conflicts > 0:
+            # Conflicting merge: leave the buffer and ``disk_baseline``
+            # untouched — the user's local edits stay exactly as they
+            # are. Stash the structured regions for the host to resolve
+            # interactively in a ``MergeView`` and advance the stat so
+            # the next tick doesn't re-fire on the same write. Keeping
+            # ``disk_baseline`` at the previous on-disk content means the
+            # stashed regions stay valid until the user resolves them.
+            self.pending_merge_regions = regions^
+            self.merge_pending = True
+            self.file_size = info.size
+            self.file_mtime = info.mtime_sec
+            return EXT_CHANGE_CONFLICT
+        # Clean merge: every region is STABLE, so concatenating them
+        # yields the merged buffer (identical to the no-conflict output
+        # of a marker-style diff3).
+        var merged = List[String]()
+        for i in range(len(regions)):
+            for j in range(len(regions[i].lines)):
+                merged.append(regions[i].lines[j])
         # Snapshot for undo before mutating — gives the user a single
         # Ctrl+Z to back out of the merge if they don't like it.
         self._push_undo()
-        self.buffer.lines = merge.lines.copy()
+        self.buffer.lines = merged^
         # Same reasoning as the clean-reload branch.
         self.clear_diagnostics()
         self._last_known_line_count = self.buffer.line_count()
-        # Pre-render the previous-on-disk vs. current-on-disk diff
-        # *before* we overwrite ``disk_baseline`` so the host can open
-        # a diff view that shows what changed externally.
-        if merge.conflicts > 0:
-            self.pending_conflict_diff = Optional[String](unified_diff(
-                self.disk_baseline,
-                text,
-                String("on disk (previous)"),
-                String("on disk (current)"),
-            ))
         self.disk_baseline = text^
         self.file_size = info.size
         self.file_mtime = info.mtime_sec
-        if merge.conflicts > 0:
-            self.selections[0].row = merge.first_conflict_row
-            self.selections[0].col = 0
-            self.selections[0].anchor_row = self.selections[0].row
-            self.selections[0].anchor_col = self.selections[0].col
-            self.selections[0].desired_col = 0
-            self.dirty = True
-            self.refresh_highlights()
-            return EXT_CHANGE_CONFLICT
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)

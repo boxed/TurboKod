@@ -53,7 +53,7 @@ from .config import (
 from .diff import unified_diff
 from .file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
-    read_file, stat_file,
+    read_file, stat_file, write_file,
 )
 from .git_blame import compute_blame
 from .git_changes import (
@@ -146,6 +146,7 @@ from .breakpoint_dialog import (
     BreakpointConditionErrorDialog, BreakpointMenu,
 )
 from .confirm_dialog import ConfirmDialog
+from .merge_view import MergeView
 from .fill_dialog import FillDialog
 from .prompt import (
     Prompt,
@@ -623,6 +624,12 @@ struct Desktop(Movable):
     var file_tree: FileTree
     var prompt: Prompt
     var confirm_dialog: ConfirmDialog
+    # Interactive three-way merge modal, opened when an external write
+    # conflicts with unsaved local edits. Single-instance; the
+    # ``pending_merge_queue`` holds the indices of other editor windows
+    # whose merges are waiting their turn.
+    var merge_view: MergeView
+    var pending_merge_queue: List[Int]
     var quick_open: QuickOpen
     var save_as_dialog: SaveAsDialog
     var symbol_pick: SymbolPick
@@ -1070,6 +1077,8 @@ struct Desktop(Movable):
         self.file_tree = FileTree()
         self.prompt = Prompt()
         self.confirm_dialog = ConfirmDialog()
+        self.merge_view = MergeView()
+        self.pending_merge_queue = List[Int]()
         self.quick_open = QuickOpen()
         self.save_as_dialog = SaveAsDialog()
         self.symbol_pick = SymbolPick()
@@ -2040,6 +2049,8 @@ struct Desktop(Movable):
             return String("default")
         if self.confirm_dialog.active:
             return String("default")
+        if self.merge_view.active:
+            return String("default")
         if self.save_as_dialog.active:
             if self.save_as_dialog.is_input_at(pos, screen):
                 return String("text")
@@ -2469,6 +2480,7 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
         self.confirm_dialog.paint(canvas, screen)
+        self.merge_view.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
@@ -2840,6 +2852,7 @@ struct Desktop(Movable):
         # deferred wins — once a prompt is queued, opening another
         # unsupported language while still modal doesn't bump it.
         if self.prompt.active or self.confirm_dialog.active \
+                or self.merge_view.active \
                 or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
@@ -2892,6 +2905,7 @@ struct Desktop(Movable):
             if self._grammar_install_prompted[i] == spec.language_id:
                 return
         if self.prompt.active or self.confirm_dialog.active \
+                or self.merge_view.active \
                 or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
@@ -3296,40 +3310,85 @@ struct Desktop(Movable):
     def process_external_changes(mut self, screen: Rect) raises:
         """Re-stat every editor window and react to any out-of-band
         write. Clean reloads and clean 3-way merges happen silently
-        inside the editors themselves; for every window where the
-        merge produced conflicts, open a read-only diff window
-        showing what changed externally so the user can see it
-        alongside the now-marked-up buffer they need to resolve.
+        inside the editors themselves; a window whose merge produced
+        conflicts gets an interactive ``MergeView`` opened over it — one
+        at a time, with the rest queued in ``pending_merge_queue``.
         """
         var conflicts = self.windows.check_external_changes()
-        if len(conflicts) == 0:
-            return
-        var workspace = self.workspace_rect(screen)
-        var was_max = self._frontmost_maximized()
         for k in range(len(conflicts)):
             var idx = conflicts[k]
+            var dup = False
+            for q in range(len(self.pending_merge_queue)):
+                if self.pending_merge_queue[q] == idx:
+                    dup = True
+            if not dup:
+                self.pending_merge_queue.append(idx)
+        self._open_next_merge(screen)
+
+    def _open_next_merge(mut self, screen: Rect):
+        """Pop the next queued conflicting window and open the merge view
+        on it. No-op while a merge is already on screen."""
+        if self.merge_view.active:
+            return
+        while len(self.pending_merge_queue) > 0:
+            var idx = self.pending_merge_queue[0]
+            _ = self.pending_merge_queue.pop(0)
             if idx < 0 or idx >= len(self.windows.windows):
                 continue
-            var diff_opt = \
-                self.windows.windows[idx].editor.consume_conflict_diff()
-            if not diff_opt:
+            # The window may have been resolved, closed, or saved since
+            # it was queued — the merge_pending flag is the source of
+            # truth.
+            if not self.windows.windows[idx].editor.merge_pending:
                 continue
-            var src_title = self.windows.windows[idx].title
-            var rect = self._default_window_rect(workspace)
-            var title = String("Conflict: ") + src_title
-            self.windows.add(Window.editor_window(
-                title^, rect, diff_opt.value(),
-            ))
-            self._open_count += 1
-            var new_idx = len(self.windows.windows) - 1
-            self.windows.windows[new_idx].editor.read_only = True
-            self.windows.windows[new_idx].editor.line_numbers = False
-            # Synthetic .diff path so the diff TextMate grammar paints
-            # the +/-/@@ lines. Same trick as _open_compare_with_clipboard.
-            self.windows.windows[new_idx].editor.file_path = \
-                String("conflict.diff")
-            if was_max:
-                self.windows.windows[new_idx].toggle_maximize(workspace)
+            var regions = self.windows.windows[idx].editor.consume_merge_regions()
+            var fp = self.windows.windows[idx].editor.file_path
+            self.merge_view.open(regions^, idx, fp^)
+            self.merge_view._ensure_current_visible(screen)
+            return
+
+    def _relocate_merge_target(self) -> Int:
+        """Find the window the open merge view targets. The seeded index
+        is the fast path; if windows were reordered/closed while the view
+        was up, fall back to matching by file path. Returns -1 if the
+        window is gone."""
+        var idx = self.merge_view.target_idx
+        if 0 <= idx and idx < len(self.windows.windows) \
+                and self.windows.windows[idx].is_editor \
+                and self.windows.windows[idx].editor.file_path \
+                    == self.merge_view.file_path:
+            return idx
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.file_path \
+                        == self.merge_view.file_path:
+                return i
+        return -1
+
+    def _on_merge_done(mut self, screen: Rect) raises:
+        var idx = self._relocate_merge_target()
+        var text = self.merge_view.resolved_text()
+        if idx >= 0:
+            _ = self.windows.windows[idx].editor.apply_resolved_merge(text^)
+        else:
+            # The window vanished while the user was resolving — still
+            # land the result on disk so their work isn't lost (skips the
+            # editorconfig transforms ``save`` would apply; acceptable
+            # for this edge case).
+            _ = write_file(self.merge_view.file_path, text^)
+        self.merge_view.close()
+        self._open_next_merge(screen)
+
+    def _on_merge_cancel(mut self, screen: Rect):
+        # Leave the local edits intact: the buffer was never touched and
+        # ``disk_baseline`` still holds the pre-conflict content. The
+        # stat was already advanced when the conflict was detected, so it
+        # won't auto-re-fire; the user keeps editing and a later save
+        # overwrites the on-disk version.
+        var idx = self._relocate_merge_target()
+        if idx >= 0:
+            self.windows.windows[idx].editor.merge_pending = False
+        self.merge_view.close()
+        self._open_next_merge(screen)
 
     # --- dynamic Window menu -----------------------------------------------
 
@@ -4323,6 +4382,18 @@ struct Desktop(Movable):
                 # handler runs once and reads ``submit_kind``.
                 return self._on_prompt_submit()
             return Optional[String]()
+        if self.merge_view.active:
+            if event.kind == EVENT_KEY:
+                _ = self.merge_view.handle_key(event)
+                # Keep the focused conflict on screen after navigation.
+                self.merge_view._ensure_current_visible(screen)
+            else:
+                _ = self.merge_view.handle_mouse(event, screen)
+            if self.merge_view.done:
+                self._on_merge_done(screen)
+            elif self.merge_view.cancelled:
+                self._on_merge_cancel(screen)
+            return Optional[String]()
         if self.confirm_dialog.active:
             if event.kind == EVENT_KEY:
                 _ = self.confirm_dialog.handle_key(event)
@@ -4872,7 +4943,8 @@ struct Desktop(Movable):
             or self.breakpoint_menu.active or self.fill_dialog.active \
             or self.git_gutter_menu.active or self.diagnostic_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
-            or self.confirm_dialog.active or self.save_as_dialog.active \
+            or self.confirm_dialog.active or self.merge_view.active \
+            or self.save_as_dialog.active \
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
@@ -6538,7 +6610,8 @@ struct Desktop(Movable):
                 or self.breakpoint_menu.active or self.fill_dialog.active \
                 or self.git_gutter_menu.active or self.diagnostic_menu.active \
                 or self.lsp_status_menu.active or self.prompt.active \
-                or self.confirm_dialog.active or self.save_as_dialog.active \
+                or self.confirm_dialog.active or self.merge_view.active \
+                or self.save_as_dialog.active \
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
                 or self.doc_pick.active or self.project_find.active \
@@ -8767,6 +8840,7 @@ struct Desktop(Movable):
                 )
                 return
         if self.prompt.active or self.confirm_dialog.active \
+                or self.merge_view.active \
                 or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
@@ -8812,6 +8886,7 @@ struct Desktop(Movable):
         if self.install_runner.is_active():
             return False
         if self.prompt.active or self.confirm_dialog.active \
+                or self.merge_view.active \
                 or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \

@@ -288,6 +288,28 @@ struct MergeResult(Copyable, Movable):
     var first_conflict_row: Int
 
 
+comptime REGION_STABLE   = 0
+comptime REGION_CONFLICT = 1
+
+
+@fieldwise_init
+struct MergeRegion(Copyable, Movable):
+    """One run in a structured 3-way merge (see ``diff3_regions``).
+
+    ``REGION_STABLE``: ``lines`` holds the agreed (auto-merged) text;
+    the ours/theirs/base fields are empty. ``REGION_CONFLICT``:
+    ``ours_lines`` and ``theirs_lines`` are the two competing versions
+    of the chunk, ``base_lines`` the common-ancestor slice. This struct
+    is UI-state-free — no resolution choice lives here; that's the
+    ``MergeView``'s job.
+    """
+    var kind: Int
+    var lines: List[String]
+    var ours_lines: List[String]
+    var theirs_lines: List[String]
+    var base_lines: List[String]
+
+
 def _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
     """For each index ``i`` in the ``a`` input of a Myers diff, return
     the matching index in ``b`` (when ``ops`` contains a kind==0 op for
@@ -406,3 +428,106 @@ def diff3_merge(
         ti_prev = ti
         i += 1
     return MergeResult(out_lines^, conflicts, first_conflict_row)
+
+
+def diff3_regions(
+    base: List[String],
+    ours: List[String],
+    theirs: List[String],
+) -> List[MergeRegion]:
+    """Structured 3-way merge.
+
+    Same anchor-walk as ``diff3_merge``, but instead of emitting
+    ``<<<<<<<`` marker lines it returns a list of ``MergeRegion``s:
+    agreed chunks (and the anchors between them) coalesce into
+    ``REGION_STABLE`` runs; a chunk that both sides changed differently
+    becomes a ``REGION_CONFLICT`` carrying the two competing slices and
+    the base slice. Reassembling the stable runs with the *ours* (resp.
+    *theirs*) slice of each conflict reproduces ``ours`` (resp.
+    ``theirs``); the regression tests pin this to ``diff3_merge``.
+    """
+    var ops_ours = diff_lines(base, ours)
+    var ops_theirs = diff_lines(base, theirs)
+    var match_ours = _equal_match_map(ops_ours, len(base))
+    var match_theirs = _equal_match_map(ops_theirs, len(base))
+
+    var out = List[MergeRegion]()
+    # Accumulator for the current run of agreed text; flushed as one
+    # STABLE region whenever a conflict interrupts it or at the end.
+    var pending = List[String]()
+
+    var i_prev = -1
+    var oi_prev = -1
+    var ti_prev = -1
+    var i = 0
+    var n = len(base)
+    while i <= n:
+        var is_anchor = False
+        var oi = 0
+        var ti = 0
+        if i == n:
+            is_anchor = True
+            oi = len(ours)
+            ti = len(theirs)
+        elif match_ours[i] >= 0 and match_theirs[i] >= 0:
+            is_anchor = True
+            oi = match_ours[i]
+            ti = match_theirs[i]
+        if not is_anchor:
+            i += 1
+            continue
+        var b_lo = i_prev + 1
+        var b_hi = i
+        var o_lo = oi_prev + 1
+        var o_hi = oi
+        var t_lo = ti_prev + 1
+        var t_hi = ti
+        var ours_changed = not _slice_eq(ours, o_lo, o_hi, base, b_lo, b_hi)
+        var theirs_changed = not _slice_eq(theirs, t_lo, t_hi, base, b_lo, b_hi)
+        if not ours_changed and not theirs_changed:
+            for k in range(b_lo, b_hi):
+                pending.append(base[k])
+        elif not ours_changed:
+            for k in range(t_lo, t_hi):
+                pending.append(theirs[k])
+        elif not theirs_changed:
+            for k in range(o_lo, o_hi):
+                pending.append(ours[k])
+        elif _slice_eq(ours, o_lo, o_hi, theirs, t_lo, t_hi):
+            for k in range(o_lo, o_hi):
+                pending.append(ours[k])
+        else:
+            # Genuine conflict — flush the pending stable run first so
+            # region order matches document order.
+            if len(pending) > 0:
+                out.append(MergeRegion(
+                    REGION_STABLE, pending^,
+                    List[String](), List[String](), List[String](),
+                ))
+                pending = List[String]()
+            var ours_slice = List[String]()
+            for k in range(o_lo, o_hi):
+                ours_slice.append(ours[k])
+            var theirs_slice = List[String]()
+            for k in range(t_lo, t_hi):
+                theirs_slice.append(theirs[k])
+            var base_slice = List[String]()
+            for k in range(b_lo, b_hi):
+                base_slice.append(base[k])
+            out.append(MergeRegion(
+                REGION_CONFLICT, List[String](),
+                ours_slice^, theirs_slice^, base_slice^,
+            ))
+        # The anchor line itself is agreed text.
+        if i < n:
+            pending.append(base[i])
+        i_prev = i
+        oi_prev = oi
+        ti_prev = ti
+        i += 1
+    if len(pending) > 0:
+        out.append(MergeRegion(
+            REGION_STABLE, pending^,
+            List[String](), List[String](), List[String](),
+        ))
+    return out^
