@@ -45,7 +45,8 @@ from .canvas import Canvas, paint_drop_shadow, utf8_byte_to_cell, utf8_codepoint
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG,
-    LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED, WHITE, YELLOW,
+    GREEN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA, LIGHT_RED,
+    LIGHT_YELLOW, MAGENTA, WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -463,6 +464,31 @@ def _author_abbrev(author: String) -> String:
         first = _take_first_char(words[0])
         second = _take_first_char(words[len(words) - 1])
     return _ascii_upper_str(first) + _ascii_upper_str(second)
+
+
+def _author_color(author: String) -> UInt8:
+    """Stable palette index for ``author`` — same name always maps to the
+    same color, so a committer's rows are visually grouped down the log.
+
+    The ten candidates are all named ANSI-16 constants (so a theme remaps
+    them with the rest of the chrome) and all read with high contrast against
+    the default blue editor background — blues are deliberately excluded. The
+    set is wider than the two-letter abbreviation can be distinct, so two
+    authors who share initials (``AH``) still get told apart by color.
+
+    FNV-1a over the raw bytes (the full name, not the abbreviation, so
+    distinct people don't collide on shared initials), folded into the
+    palette. UInt32 arithmetic wraps on overflow, which is what FNV relies on.
+    """
+    var palette = [
+        LIGHT_CYAN, LIGHT_GREEN, LIGHT_YELLOW, LIGHT_MAGENTA, LIGHT_RED,
+        CYAN, GREEN, YELLOW, MAGENTA, WHITE,
+    ]
+    var b = author.as_bytes()
+    var h = UInt32(2166136261)
+    for i in range(len(b)):
+        h = (h ^ UInt32(b[i])) * UInt32(16777619)
+    return palette[Int(h % UInt32(len(palette)))]
 
 
 def _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
@@ -1878,7 +1904,6 @@ struct LocalChanges(Movable):
         # signal of "what would I lose if this branch went away."
         var sha_pushed   = Attr(LIGHT_GREEN, EDITOR_BG)
         var sha_local    = Attr(LIGHT_RED, EDITOR_BG)
-        var author_attr = Attr(CYAN, EDITOR_BG)
         var subject_attr = Attr(EDITOR_FG, EDITOR_BG)
         for i in range(height):
             var idx = self.scroll_commits + i
@@ -1894,7 +1919,9 @@ struct LocalChanges(Movable):
             )
             var co = self.commits[idx]
             var seg_sha    = sha_pushed if co.is_pushed else sha_local
-            var seg_author = author_attr
+            # Per-committer color so the same author's rows stand out down
+            # the log; suppressed by ``row_attr`` on the selected row below.
+            var seg_author = Attr(_author_color(co.author), EDITOR_BG)
             var seg_subj   = subject_attr
             if is_sel:
                 seg_sha = row_attr

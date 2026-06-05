@@ -26,7 +26,7 @@ int32_t tk_desktop_key(int64_t h, uint32_t key, uint8_t mods,
                        int64_t cols, int64_t rows);
 int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                          uint8_t pressed, uint8_t motion, uint8_t mods,
-                         int64_t cols, int64_t rows);
+                         int64_t cols, int64_t rows, uint8_t click_count);
 // Bare modifier-key transition (e.g. Option/Alt press or release) from
 // the AppKit host's flagsChanged. mod_id is a MOD_KEY_* value (2 = Alt).
 // Drives the editor's Alt-tap and tap-then-hold multi-cursor gestures.
@@ -60,7 +60,7 @@ int32_t tk_desktop_panels_key(int64_t h, uint32_t key, uint8_t mods,
                               int64_t cols, int64_t rows);
 int32_t tk_desktop_panels_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                 uint8_t pressed, uint8_t motion, uint8_t mods,
-                                int64_t cols, int64_t rows);
+                                int64_t cols, int64_t rows, uint8_t click_count);
 int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
                                         int64_t cols, int64_t rows);
 
@@ -78,7 +78,7 @@ int32_t tk_desktop_settings_key(int64_t h, uint32_t key, uint8_t mods,
                                 int64_t cols, int64_t rows);
 int32_t tk_desktop_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                   uint8_t pressed, uint8_t motion, uint8_t mods,
-                                  int64_t cols, int64_t rows);
+                                  int64_t cols, int64_t rows, uint8_t click_count);
 
 // Project Settings view in its own native window — twin of the Settings
 // surface above (On save / Targets / Grammars). Same host protocol:
@@ -94,7 +94,7 @@ int32_t tk_desktop_project_settings_key(int64_t h, uint32_t key, uint8_t mods,
                                         int64_t cols, int64_t rows);
 int32_t tk_desktop_project_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                           uint8_t pressed, uint8_t motion, uint8_t mods,
-                                          int64_t cols, int64_t rows);
+                                          int64_t cols, int64_t rows, uint8_t click_count);
 
 // Color theme: the host resolves cell color indices through the active
 // theme's 256-entry RGB palette. tk_theme_version bumps whenever the user

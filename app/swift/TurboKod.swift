@@ -380,12 +380,12 @@ final class CellView: NSView {
     }
     private func mouseSurface(_ col: Int64, _ row: Int64, _ button: UInt8,
                               _ pressed: UInt8, _ motion: UInt8, _ m: UInt8,
-                              _ c: Int, _ r: Int) -> Int32 {
+                              _ c: Int, _ r: Int, _ cc: UInt8) -> Int32 {
         switch surface {
-        case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
-        case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
-        case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
-        case .projectSettings: return tk_desktop_project_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
+        case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .projectSettings: return tk_desktop_project_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         }
     }
     private func pointerShapeSurface(_ col: Int64, _ row: Int64, _ c: Int, _ r: Int) -> Int32 {
@@ -708,8 +708,16 @@ final class CellView: NSView {
             // it out. Reset so the next bare move always re-dispatches.
             lastPassiveCol = -1; lastPassiveRow = -1
         }
+        // Consecutive-press count for double-click detection. AppKit already
+        // tracks this against the system double-click speed; the Mojo core
+        // expects it stamped only on genuine button presses (0 for motion /
+        // release / wheel), matching the terminal frontend's contract. Read
+        // e.clickCount only for real mouse buttons (1–3) — AppKit raises if
+        // it's read on a scroll-wheel event (which reaches here as button 4/5).
+        let cc: UInt8 = (pressed == 1 && motion == 0 && button >= 1 && button <= 3)
+            ? UInt8(min(255, max(0, e.clickCount))) : 0
         let action = mouseSurface(col, row, button, pressed, motion,
-                                  mods(e), cols(), rows())
+                                  mods(e), cols(), rows(), cc)
         handleAction(action)
         // Cursor hint.
         let shape = pointerShapeSurface(col, row, cols(), rows())

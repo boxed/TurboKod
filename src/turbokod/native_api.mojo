@@ -578,7 +578,7 @@ def tk_desktop_panels_key(
 @export
 def tk_desktop_panels_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
 ) -> Int32:
     """Route a mouse event from the panel window into the tool panels.
     Mirrors ``tk_desktop_mouse`` but dispatches through
@@ -586,7 +586,7 @@ def tk_desktop_panels_mouse(
     if h == 0:
         return ACT_NONE
     var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods,
+        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
     )
     var action: Optional[String]
     try:
@@ -717,13 +717,13 @@ def tk_desktop_settings_key(
 @export
 def tk_desktop_settings_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
 ) -> Int32:
     """Route a mouse event from the settings window into the Settings view."""
     if h == 0:
         return ACT_NONE
     var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods,
+        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
     )
     _desk(h)[].handle_settings_event(ev, Rect(0, 0, cols, rows))
     return ACT_NONE
@@ -803,13 +803,13 @@ def tk_desktop_project_settings_key(
 @export
 def tk_desktop_project_settings_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
 ) -> Int32:
     """Route a mouse event from the Project Settings window into the view."""
     if h == 0:
         return ACT_NONE
     var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods,
+        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
     )
     _desk(h)[].handle_project_settings_event(ev, Rect(0, 0, cols, rows))
     return ACT_NONE
@@ -860,12 +860,12 @@ def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) -> Int32:
 @export
 def tk_desktop_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
 ) -> Int32:
     if h == 0:
         return ACT_NONE
     var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods,
+        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
     )
     var action: Optional[String]
     try:
