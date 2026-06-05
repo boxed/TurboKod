@@ -665,6 +665,42 @@ def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
             new_start = v
 
 
+def _first_change_line(diff_text: String) -> Int:
+    """1-based line in the *after* file of the first added or removed
+    line in ``diff_text`` — where a double-click on a file *name* (the
+    panel banner or a Files-pane row) should land the cursor, mirroring
+    the per-row jump that ``_populate_diff_panel`` computes for body
+    rows. Returns 0 when there's no usable change position (binary diff,
+    empty diff, or a change with no corresponding new-file line), which
+    the caller treats as "open at the top"."""
+    var src_lines = split_lines_no_trailing(diff_text)
+    var new_line: Int = -1
+    var old_line: Int = -1
+    for i in range(len(src_lines)):
+        var ln = src_lines[i]
+        var b = ln.as_bytes()
+        if len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40:
+            _parse_hunk_starts(ln, old_line, new_line)
+            continue
+        if _is_skip_diff_header(ln):
+            continue
+        if len(b) == 0:
+            if new_line > 0:
+                new_line += 1
+            if old_line > 0:
+                old_line += 1
+            continue
+        var c0 = Int(b[0])
+        if c0 == 0x2B or c0 == 0x2D:    # first ``+``/``-`` line
+            return new_line if new_line > 0 else 0
+        if c0 == 0x20:
+            if new_line > 0:
+                new_line += 1
+            if old_line > 0:
+                old_line += 1
+    return 0
+
+
 def _emit_panel_highlights(
     mut panel: RightPanel,
     side_text: String,
@@ -759,7 +795,14 @@ def _populate_diff_panel(
     file or fetch failure → no after) — those rows just paint without
     a syntax overlay."""
     var src_lines = split_lines_no_trailing(diff_text)
+    var banner_idx = len(panel.lines)
     _emit_filename_banner(panel, file_path, banner_width)
+    # Make the file-name banner double-clickable: point it at the first
+    # change so the editor lands there rather than the top of the file.
+    var first_chg = _first_change_line(diff_text)
+    if first_chg > 0:
+        panel.file_path[banner_idx] = file_path
+        panel.file_line[banner_idx] = first_chg
     _emit_blank(panel)
     # Per-display-row mapping into each side's full file. -1 means "no
     # corresponding line on this side" — banners, blanks, and the
@@ -2514,9 +2557,7 @@ struct LocalChanges(Movable):
             if self.focus == _PANE_FILES \
                     and 0 <= self.sel_file \
                     and self.sel_file < len(self.files):
-                self.selected_path = self.files[self.sel_file].path
-                self.selected_line = 0
-                self.submitted = True
+                self._submit_selected_file()
             return True
         return False
 
@@ -3094,6 +3135,21 @@ struct LocalChanges(Movable):
         self.submitted = True
         return True
 
+    def _submit_selected_file(mut self):
+        """Open the currently-selected Files-pane row, landing on its
+        first change rather than the top of the file. Shared by the
+        Enter key and the double-click handler. Prefers the worktree
+        diff, falling back to the staged diff when a file is only
+        staged."""
+        if not (0 <= self.sel_file and self.sel_file < len(self.files)):
+            return
+        self.selected_path = self.files[self.sel_file].path
+        var diff = self.files[self.sel_file].unstaged_diff
+        if len(diff.as_bytes()) == 0:
+            diff = self.files[self.sel_file].staged_diff
+        self.selected_line = _first_change_line(diff)
+        self.submitted = True
+
     def handle_mouse(
         mut self, event: Event, screen: Rect,
         mut registry: GrammarRegistry,
@@ -3254,8 +3310,6 @@ struct LocalChanges(Movable):
                     and Int(event.click_count) >= 2 \
                     and 0 <= self.sel_file \
                     and self.sel_file < len(self.files):
-                self.selected_path = self.files[self.sel_file].path
-                self.selected_line = 0
-                self.submitted = True
+                self._submit_selected_file()
             return True
         return False
