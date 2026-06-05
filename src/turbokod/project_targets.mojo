@@ -463,6 +463,239 @@ def _ends_with(s: String, suffix: String) -> Bool:
     return True
 
 
+def _split_lines(s: String) -> List[String]:
+    """Split on ``\\n`` (trailing ``\\r`` trimmed); no trailing empty."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var out = List[String]()
+    var start = 0
+    for i in range(n):
+        if Int(b[i]) == 0x0A:
+            var end = i
+            if end > start and Int(b[end - 1]) == 0x0D:
+                end -= 1
+            out.append(String(StringSlice(
+                ptr=b.unsafe_ptr() + start, length=end - start,
+            )))
+            start = i + 1
+    if start < n:
+        out.append(String(StringSlice(
+            ptr=b.unsafe_ptr() + start, length=n - start,
+        )))
+    return out^
+
+
+def _leading_ws(s: String) -> Int:
+    var b = s.as_bytes()
+    var i = 0
+    while i < len(b) and (Int(b[i]) == 0x20 or Int(b[i]) == 0x09):
+        i += 1
+    return i
+
+
+def _strip(s: String) -> String:
+    var b = s.as_bytes()
+    var n = len(b)
+    var lo = 0
+    while lo < n and (Int(b[lo]) == 0x20 or Int(b[lo]) == 0x09
+            or Int(b[lo]) == 0x0D):
+        lo += 1
+    var hi = n
+    while hi > lo and (Int(b[hi - 1]) == 0x20 or Int(b[hi - 1]) == 0x09
+            or Int(b[hi - 1]) == 0x0D):
+        hi -= 1
+    if hi <= lo:
+        return String("")
+    return String(StringSlice(ptr=b.unsafe_ptr() + lo, length=hi - lo))
+
+
+def _split_ws(s: String) -> List[String]:
+    """Whitespace-split, dropping empties — turns a glob run like
+    ``test_*.py *_test.py`` into individual patterns."""
+    var b = s.as_bytes()
+    var out = List[String]()
+    var start = -1
+    for i in range(len(b)):
+        var c = Int(b[i])
+        var ws = c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D
+        if ws:
+            if start >= 0:
+                out.append(String(StringSlice(
+                    ptr=b.unsafe_ptr() + start, length=i - start,
+                )))
+                start = -1
+        elif start < 0:
+            start = i
+    if start >= 0:
+        out.append(String(StringSlice(
+            ptr=b.unsafe_ptr() + start, length=len(b) - start,
+        )))
+    return out^
+
+
+def _is_section_header(stripped: String) -> Bool:
+    var b = stripped.as_bytes()
+    return len(b) >= 2 and Int(b[0]) == 0x5B \
+        and Int(b[len(b) - 1]) == 0x5D  # [ ... ]
+
+
+def _key_before_sep(line: String) -> Tuple[String, Int]:
+    """Find the first ``=`` or ``:`` in ``line``. Returns the stripped key
+    before it and the separator's byte index, or ``("", -1)`` if none."""
+    var b = line.as_bytes()
+    for i in range(len(b)):
+        if Int(b[i]) == 0x3D or Int(b[i]) == 0x3A:  # '=' or ':'
+            return (_strip(String(StringSlice(
+                ptr=b.unsafe_ptr(), length=i,
+            ))), i)
+    return (String(""), -1)
+
+
+def _ini_python_files(text: String, section: String) -> List[String]:
+    """Pull the ``python_files`` value out of an INI-style ``[section]``,
+    supporting configparser's indented multi-line continuation (each glob
+    on its own line, as dryft's setup.cfg writes it)."""
+    var lines = _split_lines(text)
+    var out = List[String]()
+    var in_section = False
+    var collecting = False
+    var key_indent = 0
+    for li in range(len(lines)):
+        var line = lines[li]
+        var stripped = _strip(line)
+        var indent = _leading_ws(line)
+        if _is_section_header(stripped):
+            if stripped == section:
+                in_section = True
+                collecting = False
+            elif in_section:
+                break  # left our section
+            continue
+        if not in_section:
+            continue
+        if collecting:
+            # Continuation: indented past the key, non-blank, not a comment.
+            if indent > key_indent and len(stripped.as_bytes()) > 0 \
+                    and Int(stripped.as_bytes()[0]) != 0x23 \
+                    and Int(stripped.as_bytes()[0]) != 0x3B:
+                for t in _split_ws(stripped):
+                    out.append(t)
+                continue
+            collecting = False  # fall through — this line may be a new key
+        if len(stripped.as_bytes()) == 0:
+            continue
+        if Int(stripped.as_bytes()[0]) == 0x23 \
+                or Int(stripped.as_bytes()[0]) == 0x3B:  # '#' / ';' comment
+            continue
+        var kv = _key_before_sep(line)
+        if kv[1] >= 0 and kv[0] == String("python_files"):
+            var b = line.as_bytes()
+            var val = String(StringSlice(
+                ptr=b.unsafe_ptr() + kv[1] + 1, length=len(b) - kv[1] - 1,
+            ))
+            for t in _split_ws(val):
+                out.append(t)
+            key_indent = indent
+            collecting = True
+    return out^
+
+
+def _toml_quoted_tokens(s: String) -> List[String]:
+    """Extract the contents of every ``'...'`` / ``"..."`` in ``s`` — the
+    glob entries of a TOML ``python_files = ["test_*.py", ...]`` array."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var out = List[String]()
+    var i = 0
+    while i < n:
+        var c = Int(b[i])
+        if c == 0x22 or c == 0x27:  # opening quote
+            var j = i + 1
+            while j < n and Int(b[j]) != c:
+                j += 1
+            if j < n:
+                out.append(String(StringSlice(
+                    ptr=b.unsafe_ptr() + i + 1, length=j - i - 1,
+                )))
+                i = j + 1
+                continue
+        i += 1
+    return out^
+
+
+def _toml_python_files(text: String) -> List[String]:
+    """Pull ``python_files`` out of ``[tool.pytest.ini_options]`` in a
+    pyproject.toml (single-line array or quoted string)."""
+    var lines = _split_lines(text)
+    var out = List[String]()
+    var in_section = False
+    for li in range(len(lines)):
+        var stripped = _strip(lines[li])
+        if _is_section_header(stripped):
+            in_section = stripped == String("[tool.pytest.ini_options]")
+            continue
+        if not in_section:
+            continue
+        var kv = _key_before_sep(lines[li])
+        if kv[1] >= 0 and kv[0] == String("python_files"):
+            var b = lines[li].as_bytes()
+            var val = _strip(String(StringSlice(
+                ptr=b.unsafe_ptr() + kv[1] + 1, length=len(b) - kv[1] - 1,
+            )))
+            var quoted = _toml_quoted_tokens(val)
+            for t in quoted:
+                out.append(t)
+            return out^
+    return out^
+
+
+def _read_or_empty(path: String) -> String:
+    """Read ``path``, returning empty on any error — keeps the config probe
+    non-raising and treats a missing/unreadable file as "no config here"."""
+    try:
+        return read_file(path)
+    except:
+        return String("")
+
+
+def pytest_python_files(project_root: String) -> List[String]:
+    """The project's pytest ``python_files`` globs (which files pytest
+    collects), or empty when unconfigured — then callers use pytest's
+    built-in defaults. Reads, in pytest's config precedence: ``pytest.ini``
+    ``[pytest]`` → ``pyproject.toml`` ``[tool.pytest.ini_options]`` →
+    ``tox.ini`` ``[pytest]`` → ``setup.cfg`` ``[tool:pytest]``.
+
+    This is why the gutter run-icons show up for projects like dryft that
+    set ``python_files = ... *__tests.py`` instead of the default."""
+    var out = List[String]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var r = _ini_python_files(
+        _read_or_empty(join_path(project_root, String("pytest.ini"))),
+        String("[pytest]"),
+    )
+    if len(r) > 0:
+        return r^
+    var r2 = _toml_python_files(
+        _read_or_empty(join_path(project_root, String("pyproject.toml"))),
+    )
+    if len(r2) > 0:
+        return r2^
+    var r3 = _ini_python_files(
+        _read_or_empty(join_path(project_root, String("tox.ini"))),
+        String("[pytest]"),
+    )
+    if len(r3) > 0:
+        return r3^
+    var r4 = _ini_python_files(
+        _read_or_empty(join_path(project_root, String("setup.cfg"))),
+        String("[tool:pytest]"),
+    )
+    if len(r4) > 0:
+        return r4^
+    return out^
+
+
 def resolve_python_interpreter(
     project_root: String, program: String,
 ) -> String:

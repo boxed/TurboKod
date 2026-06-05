@@ -65,7 +65,7 @@ from .desktop import (
     EDITOR_UNDO,
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
-    Hotkey, PROJECT_CLOSE_ACTION, PROJECT_CONFIG_TARGETS,
+    Hotkey, PROJECT_CLOSE_ACTION, PROJECT_SETTINGS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_OPEN_RECENT,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX, TARGET_TEST,
@@ -164,7 +164,7 @@ from .project_targets import (
     load_project_targets, resolve_python_interpreter, resolved_cwd,
     resolved_program, save_project_targets, write_all_targets,
 )
-from .targets_dialog import TargetsDialog
+from .project_settings import ProjectSettings
 from .run_manager import (
     RunOutput, RunSession, drain_run_output, poll_run_exit,
 )

@@ -729,6 +729,92 @@ def tk_desktop_settings_mouse(
     return ACT_NONE
 
 
+# --- Project Settings window surface -----------------------------------------
+#
+# Twin of the Settings surface above: the macOS host renders Project Settings
+# (On save / Targets / Grammars) in its own native window. The host polls
+# ``tk_desktop_project_settings_active`` each tick and opens/closes the NSWindow
+# on transitions. Keep this block in lock-step with the Settings block above.
+
+
+@export
+def tk_desktop_set_project_settings_detached(h: Int, on: Int):
+    """Tell the Desktop the Project Settings view renders on a separate host
+    window. The terminal frontend never sets this — there it's a
+    movable/resizable in-grid dialog."""
+    if h == 0:
+        return
+    _desk(h)[].set_project_settings_detached(on != 0)
+
+
+@export
+def tk_desktop_project_settings_active(h: Int) -> Int32:
+    """1 while the Project Settings view is open. The host polls this per tick
+    and shows/hides its window on transitions."""
+    if h == 0:
+        return Int32(0)
+    if _desk(h)[].project_settings.active:
+        return Int32(1)
+    return Int32(0)
+
+
+@export
+def tk_desktop_project_settings_close(h: Int):
+    """Close the Project Settings view — the host calls this when the user
+    closes the window via its native close button."""
+    if h == 0:
+        return
+    _desk(h)[].project_settings.close()
+
+
+@export
+def tk_desktop_layout_project_settings(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) -> Int:
+    """Paint the Project Settings view into the host's window and pack it into
+    the caller's buffer (same 3-u32-per-cell format as ``tk_desktop_layout``).
+    Returns the number of cells written."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = Canvas(cols, rows)
+    canvas.clear(default_attr())
+    _desk(h)[].paint_project_settings(canvas, Rect(0, 0, cols, rows))
+    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_project_settings_key(
+    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a keystroke from the Project Settings window into the view.
+    Project Settings never produces host actions, so this returns ACT_NONE."""
+    if h == 0:
+        return ACT_NONE
+    var k = key
+    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
+        if k >= UInt32(0x41) and k <= UInt32(0x5A):
+            k = k + UInt32(0x20)
+    _desk(h)[].handle_project_settings_event(
+        Event.key_event(k, mods), Rect(0, 0, cols, rows),
+    )
+    return ACT_NONE
+
+
+@export
+def tk_desktop_project_settings_mouse(
+    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, cols: Int, rows: Int,
+) -> Int32:
+    """Route a mouse event from the Project Settings window into the view."""
+    if h == 0:
+        return ACT_NONE
+    var ev = Event.mouse_event(
+        Point(x, y), button, pressed != 0, motion != 0, mods,
+    )
+    _desk(h)[].handle_project_settings_event(ev, Rect(0, 0, cols, rows))
+    return ACT_NONE
+
+
 @export
 def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int32:
     if h == 0:

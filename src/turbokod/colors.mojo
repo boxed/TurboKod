@@ -176,6 +176,17 @@ def default_attr() -> Attr:
     return Attr(LIGHT_GRAY, BLACK, STYLE_NONE)
 
 
+@fieldwise_init
+struct ColorRun(ImplicitlyCopyable, Movable):
+    """A sub-line span ``[start, end)`` (byte offsets into the *clean*,
+    escape-stripped text) that paints with ``attr`` instead of the line's
+    base attribute. Produced by ``parse_sgr`` from ANSI SGR color runs —
+    the segmented-color counterpart to a single per-line ``Attr``."""
+    var start: Int
+    var end: Int
+    var attr: Attr
+
+
 def attr_to_sgr(attr: Attr) -> String:
     """Render an `Attr` as a CSI SGR escape sequence (no leading ESC[)."""
     var s = String("0")  # reset first; simpler than diffing previous attr
@@ -234,3 +245,176 @@ def attr_to_sgr_rgb(attr: Attr, palette: List[UInt32]) -> String:
         if uc < n:
             s += String(";58;2;") + _rgb_triplet(palette[uc])
     return s
+
+
+# --- SGR (incoming) decoding -------------------------------------------------
+#
+# ``parse_sgr`` is the inverse of ``attr_to_sgr``: it reads ANSI SGR color
+# escapes out of a *child process's* output stream and turns colored spans into
+# ``ColorRun``s over the escape-free text. The terminal frontend's ``present``
+# already speaks SGR going *out* to the user's terminal; this is the missing
+# *in* direction so tool panes can colorize e.g. ``pytest --color=yes`` instead
+# of showing raw escape bytes.
+
+
+def _sgr_channel(v: Int) -> Int:
+    """Map an 8-bit color channel to its 0..5 index in the xterm 6x6x6 cube."""
+    if v < 48:
+        return 0
+    if v < 115:
+        return 1
+    return (v - 35) // 40
+
+
+def _rgb_to_256(r: Int, g: Int, b: Int) -> UInt8:
+    """Approximate a 24-bit RGB triple with the nearest xterm-256 index:
+    the 232..255 gray ramp for gray triples, else the 16..231 color cube.
+    Truecolor SGR (``38;2;r;g;b``) folds into our 256-color ``Attr`` here."""
+    if r == g and g == b:
+        if r < 8:
+            return UInt8(16)
+        if r > 248:
+            return UInt8(231)
+        return UInt8(232 + ((r - 8) * 24) // 247)
+    var idx = 16 + 36 * _sgr_channel(r) + 6 * _sgr_channel(g) + _sgr_channel(b)
+    return UInt8(idx)
+
+
+def _apply_sgr(cur: Attr, base: Attr, params: List[Int]) -> Attr:
+    """Fold one SGR parameter list onto ``cur``. ``base`` is the fallback
+    for reset (``0``) and default fg/bg (``39`` / ``49``) — for a tool pane
+    that's the per-stream color, so a ``\\x1b[0m`` returns to it rather than
+    to a hardcoded gray-on-black."""
+    if len(params) == 0:
+        return base
+    var a = cur
+    var i = 0
+    var n = len(params)
+    while i < n:
+        var p = params[i]
+        if p == 0:
+            a = base
+        elif p == 1:
+            a = a.add_style(STYLE_BOLD)
+        elif p == 2:
+            a = a.add_style(STYLE_DIM)
+        elif p == 3:
+            a = a.add_style(STYLE_ITALIC)
+        elif p == 4:
+            a = a.add_style(STYLE_UNDERLINE)
+        elif p == 7:
+            a = a.add_style(STYLE_REVERSE)
+        elif p == 9:
+            a = a.add_style(STYLE_STRIKE)
+        elif p == 22:
+            a = a.with_style(a.style & ~(STYLE_BOLD | STYLE_DIM))
+        elif p == 23:
+            a = a.with_style(a.style & ~STYLE_ITALIC)
+        elif p == 24:
+            a = a.with_style(a.style & ~STYLE_UNDERLINE)
+        elif p == 27:
+            a = a.with_style(a.style & ~STYLE_REVERSE)
+        elif p == 29:
+            a = a.with_style(a.style & ~STYLE_STRIKE)
+        elif p >= 30 and p <= 37:
+            a = a.with_fg(UInt8(p - 30))
+        elif p == 38:
+            if i + 2 < n and params[i + 1] == 5:
+                a = a.with_fg(UInt8(params[i + 2] & 0xFF))
+                i += 2
+            elif i + 4 < n and params[i + 1] == 2:
+                a = a.with_fg(
+                    _rgb_to_256(params[i + 2], params[i + 3], params[i + 4])
+                )
+                i += 4
+        elif p == 39:
+            a = a.with_fg(base.fg)
+        elif p >= 40 and p <= 47:
+            a = a.with_bg(UInt8(p - 40))
+        elif p == 48:
+            if i + 2 < n and params[i + 1] == 5:
+                a = a.with_bg(UInt8(params[i + 2] & 0xFF))
+                i += 2
+            elif i + 4 < n and params[i + 1] == 2:
+                a = a.with_bg(
+                    _rgb_to_256(params[i + 2], params[i + 3], params[i + 4])
+                )
+                i += 4
+        elif p == 49:
+            a = a.with_bg(base.bg)
+        elif p >= 90 and p <= 97:
+            a = a.with_fg(UInt8(p - 90 + 8))
+        elif p >= 100 and p <= 107:
+            a = a.with_bg(UInt8(p - 100 + 8))
+        # Unrecognized codes (e.g. 5 blink) are ignored.
+        i += 1
+    return a
+
+
+def parse_sgr(text: String, base_attr: Attr) -> Tuple[String, List[ColorRun]]:
+    """Decode CSI-SGR color escapes in ``text``. Returns the escape-free
+    text plus a ``ColorRun`` for every span whose attribute differs from
+    ``base_attr`` (gaps fall back to ``base_attr`` at paint time, so an
+    all-default line yields zero runs).
+
+    Handles reset, the 16 ANSI fg/bg codes, default fg/bg (39/49), the
+    common style bits, 256-color (``38;5;n`` / ``48;5;n``) and truecolor
+    (``38;2;r;g;b``, nearest-mapped). Non-SGR escapes — cursor moves,
+    ``\\x1b[K``, OSC, a lone ESC — are stripped from the clean text."""
+    var src = text.as_bytes()
+    var n = len(src)
+    var clean = List[UInt8]()
+    var runs = List[ColorRun]()
+    var cur = base_attr
+    var run_start = 0
+    var i = 0
+    while i < n:
+        if Int(src[i]) == 0x1B:  # ESC
+            if i + 1 < n and Int(src[i + 1]) == 0x5B:  # '[' → CSI
+                # Scan to the final byte (0x40..0x7E ends a CSI sequence).
+                var j = i + 2
+                while j < n and not (
+                    Int(src[j]) >= 0x40 and Int(src[j]) <= 0x7E
+                ):
+                    j += 1
+                if j < n and Int(src[j]) == 0x6D:  # 'm' → SGR
+                    # Parse the ';'-separated params between '[' and 'm',
+                    # taking only the leading int of each ':'-subparam chunk.
+                    var params = List[Int]()
+                    var k = i + 2
+                    while k <= j:
+                        var val = 0
+                        while k < j and Int(src[k]) != 0x3B:  # until ';'
+                            var c = Int(src[k])
+                            if c >= 0x30 and c <= 0x39:
+                                val = val * 10 + (c - 0x30)
+                            elif c == 0x3A:  # ':' subparam — skip the rest
+                                while k < j and Int(src[k]) != 0x3B:
+                                    k += 1
+                                break
+                            k += 1
+                        params.append(val)
+                        if k >= j:
+                            break
+                        k += 1  # skip the ';'
+                    var new = _apply_sgr(cur, base_attr, params)
+                    if new != cur:
+                        if len(clean) > run_start and cur != base_attr:
+                            runs.append(ColorRun(run_start, len(clean), cur))
+                        run_start = len(clean)
+                        cur = new
+                i = j + 1 if j < n else n
+                continue
+            else:
+                i += 1  # lone ESC / non-CSI escape: drop just the ESC byte
+                continue
+        clean.append(src[i])
+        i += 1
+    if len(clean) > run_start and cur != base_attr:
+        runs.append(ColorRun(run_start, len(clean), cur))
+    var clean_str = String("")
+    if len(clean) > 0:
+        clean_str = String(
+            StringSlice(ptr=clean.unsafe_ptr(), length=len(clean))
+        )
+    return (clean_str^, runs^)

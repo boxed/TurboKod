@@ -80,6 +80,22 @@ int32_t tk_desktop_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t butto
                                   uint8_t pressed, uint8_t motion, uint8_t mods,
                                   int64_t cols, int64_t rows);
 
+// Project Settings view in its own native window — twin of the Settings
+// surface above (On save / Targets / Grammars). Same host protocol:
+// _set_project_settings_detached once, poll _project_settings_active each tick,
+// drive with _layout_project_settings + _project_settings_key/mouse,
+// _project_settings_close for the native red-button close.
+void    tk_desktop_set_project_settings_detached(int64_t h, int64_t on);
+int32_t tk_desktop_project_settings_active(int64_t h);
+void    tk_desktop_project_settings_close(int64_t h);
+int64_t tk_desktop_layout_project_settings(int64_t h, int64_t cols, int64_t rows,
+                                           int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_project_settings_key(int64_t h, uint32_t key, uint8_t mods,
+                                        int64_t cols, int64_t rows);
+int32_t tk_desktop_project_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
+                                          uint8_t pressed, uint8_t motion, uint8_t mods,
+                                          int64_t cols, int64_t rows);
+
 // Color theme: the host resolves cell color indices through the active
 // theme's 256-entry RGB palette. tk_theme_version bumps whenever the user
 // switches theme (Settings ▸ Theme); the host polls it and refetches the

@@ -32,7 +32,7 @@ from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
-from .colors import Attr, BLACK, CYAN
+from .colors import Attr, BLACK, CYAN, ColorRun, parse_sgr
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
@@ -115,6 +115,25 @@ def _splits_string(spans: List[Tuple[Int, Int]], p: Int) -> Bool:
         if span[0] < p and p < span[1]:
             return True
     return False
+
+
+def _slice_runs(runs: List[ColorRun], lo: Int, hi: Int) -> List[ColorRun]:
+    """Return the ``runs`` overlapping the half-open byte window ``[lo, hi)``,
+    clamped to the window and rebased so offsets are relative to ``lo``. Used
+    to split a whole-chunk run list into per-line run lists when ``append``
+    breaks the chunk on newlines."""
+    var out = List[ColorRun]()
+    for r in runs:
+        var s = r.start
+        var e = r.end
+        if e <= lo or s >= hi:
+            continue
+        if s < lo:
+            s = lo
+        if e > hi:
+            e = hi
+        out.append(ColorRun(s - lo, e - lo, r.attr))
+    return out^
 
 
 def _wrap_one_line_into(
@@ -554,6 +573,21 @@ struct Selection(ImplicitlyCopyable, Movable):
 # --- paint helpers (shared by Editor and TextLog) -------------------------
 
 
+def _cells_for_bytes(line: String, lo: Int, hi: Int) -> Int:
+    """Display columns spanned by ``line``'s bytes ``[lo, hi)`` — walks
+    codepoints summing ``char_width`` so wide glyphs (emoji) count as two.
+    Used to find a color run's starting cell within a painted row."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = lo
+    var cells = 0
+    while i < hi and i < n:
+        var dec = codepoint_at(line, i)
+        cells += char_width(dec[0])
+        i += dec[1]
+    return cells
+
+
 def paint_text_segments(
     mut canvas: Canvas,
     view: Rect,
@@ -563,19 +597,21 @@ def paint_text_segments(
     visible: Int,
     line_attrs: List[Attr],
     default_attr: Attr,
+    line_runs: List[List[ColorRun]],
 ):
     """Paint the text content of every visible visual row.
 
     For row ``k``, slices ``lines[layout[first+k].line_idx]`` from
     ``byte_start`` to ``byte_end`` and ``put_text``s it at
     ``view.a.x + layout[k].indent_cells`` on row ``view.a.y + k``.
-    The row's ``Attr`` comes from ``line_attrs[line_idx]`` if that
+    The row's base ``Attr`` comes from ``line_attrs[line_idx]`` if that
     index is in range, else ``default_attr``. ``view.b.x`` clips
     text that extends past the right margin.
 
-    Used by both ``TextLog.paint`` and the Editor's paint loop —
-    everything else (syntax overlay, gutters, cursors) is layered on
-    top by the caller after this returns.
+    ``line_runs`` (parallel to ``lines``) overlays sub-line color: after
+    the base row is drawn, each run intersecting the row is re-``put_text``
+    on top with its own ``Attr`` — gaps keep the base color. Pass an empty
+    list for a plain single-color view.
     """
     if visible <= 0:
         return
@@ -593,20 +629,43 @@ def paint_text_segments(
         var line = lines[vrow.line_idx]
         var bytes = line.as_bytes()
         var n = len(bytes)
+        var lo = vrow.byte_start
+        var hi = vrow.byte_end
+        if hi > n:
+            hi = n
         var seg = String("")
-        if vrow.byte_start < n and vrow.byte_end > vrow.byte_start:
-            var hi = vrow.byte_end
-            if hi > n:
-                hi = n
+        if lo < n and hi > lo:
             seg = String(StringSlice(
-                ptr=bytes.unsafe_ptr() + vrow.byte_start,
-                length=hi - vrow.byte_start,
+                ptr=bytes.unsafe_ptr() + lo,
+                length=hi - lo,
             ))
         _ = painter.put_text(
             canvas,
             Point(view.a.x + vrow.indent_cells, view.a.y + k),
             seg, attr,
         )
+        # Overlay SGR color runs falling on this row, on top of the base.
+        if vrow.line_idx < len(line_runs) and lo < hi:
+            var lr = line_runs[vrow.line_idx].copy()
+            for ri in range(len(lr)):
+                var rs = lr[ri].start
+                var rce = lr[ri].end
+                if rce <= lo or rs >= hi:
+                    continue
+                if rs < lo:
+                    rs = lo
+                if rce > hi:
+                    rce = hi
+                var cellx = vrow.indent_cells + _cells_for_bytes(line, lo, rs)
+                var sub = String(StringSlice(
+                    ptr=bytes.unsafe_ptr() + rs,
+                    length=rce - rs,
+                ))
+                _ = painter.put_text(
+                    canvas,
+                    Point(view.a.x + cellx, view.a.y + k),
+                    sub, lr[ri].attr,
+                )
 
 
 def paint_selection_overlay(
@@ -717,6 +776,13 @@ struct TextLog(Copyable, Movable):
     """Parallel to ``lines`` — caller-provided per-line color (e.g.
     stderr red, console gray). When ``len(line_attrs) <= i`` we fall
     back to ``default_attr`` for line ``i``."""
+    var line_runs: List[List[ColorRun]]
+    """Parallel to ``lines`` — sub-line color spans decoded from ANSI SGR
+    escapes in the appended text (``parse_sgr``). The line's ``line_attrs``
+    entry is the base color; these runs override it over byte ranges
+    (offsets into the *clean*, escape-free ``lines[i]``). Empty list ⇒ a
+    plain single-color line. This is what makes ``pytest --color=yes``
+    output render colored instead of as raw escape bytes."""
     var default_attr: Attr
     var max_lines: Int
     """Backlog cap. Trims from the front when exceeded; selection line
@@ -760,6 +826,7 @@ struct TextLog(Copyable, Movable):
     def __init__(out self, default_attr: Attr, max_lines: Int = 500):
         self.lines = List[String]()
         self.line_attrs = List[Attr]()
+        self.line_runs = List[List[ColorRun]]()
         self.default_attr = default_attr
         self.max_lines = max_lines
         self.selection = Selection.empty()
@@ -777,6 +844,7 @@ struct TextLog(Copyable, Movable):
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.line_attrs = copy.line_attrs.copy()
+        self.line_runs = copy.line_runs.copy()
         self.default_attr = copy.default_attr
         self.max_lines = copy.max_lines
         self.selection = copy.selection
@@ -812,8 +880,18 @@ struct TextLog(Copyable, Movable):
         var resolved = self.default_attr
         if attr:
             resolved = attr.value()
-        var b = text.as_bytes()
+        # Decode ANSI SGR over the *whole* chunk first so color state can
+        # flow across embedded newlines, then split the escape-free text
+        # into rows and hand each row only the runs that fall on it. The
+        # base for resets / default-fg is the resolved per-stream attr, so
+        # a ``\\x1b[0m`` returns to (say) the stderr red rather than gray.
+        var parsed = parse_sgr(text, resolved)
+        var clean = parsed[0]
+        var runs = parsed[1].copy()
+        var b = clean.as_bytes()
         if len(b) == 0:
+            # An all-escape chunk (e.g. a lone ``\\x1b[2K``) cleans to
+            # nothing — append no row and leave the open-line state alone.
             return
         # The first emitted segment continues the previous open line
         # only when both that line and this append are streaming.
@@ -825,30 +903,39 @@ struct TextLog(Copyable, Movable):
                 var seg = String(StringSlice(
                     ptr=b.unsafe_ptr() + start, length=i - start,
                 ))
+                var seg_runs = _slice_runs(runs, start, i)
                 if first and continue_open:
-                    self._extend_last(seg^)
+                    self._extend_last(seg^, seg_runs^)
                 else:
-                    self._push_line(seg^, resolved)
+                    self._push_line(seg^, resolved, seg_runs^)
                 first = False
                 start = i + 1
         if start < len(b):
             var seg = String(StringSlice(
                 ptr=b.unsafe_ptr() + start, length=len(b) - start,
             ))
+            var seg_runs = _slice_runs(runs, start, len(b))
             if first and continue_open:
-                self._extend_last(seg^)
+                self._extend_last(seg^, seg_runs^)
             else:
-                self._push_line(seg^, resolved)
+                self._push_line(seg^, resolved, seg_runs^)
         # Line stays "open" only for a streaming chunk that didn't end
         # on a newline; anything else closes the current row so a later
         # streaming append starts fresh rather than gluing onto it.
         self._open = streaming and b[len(b) - 1] != 0x0A
 
-    def _extend_last(mut self, var seg: String):
+    def _extend_last(mut self, var seg: String, var runs: List[ColorRun]):
         """Glue ``seg`` onto the last (open) line in place, keeping the
         incremental layout cache valid by re-wrapping just that one
-        logical line — never the full backlog."""
+        logical line — never the full backlog. ``runs`` are segment-relative
+        color spans; they're rebased onto the existing clean length so they
+        line up with the glued-on text."""
         var idx = len(self.lines) - 1
+        var base_len = len(self.lines[idx].as_bytes())
+        for r in runs:
+            self.line_runs[idx].append(
+                ColorRun(r.start + base_len, r.end + base_len, r.attr)
+            )
         self.lines[idx] = self.lines[idx] + seg^
         if self._layout_w >= 0:
             # Drop the mutated line's stale visual rows, then re-append
@@ -868,6 +955,7 @@ struct TextLog(Copyable, Movable):
         """Drop all lines and any selection. Scroll resets to top."""
         self.lines = List[String]()
         self.line_attrs = List[Attr]()
+        self.line_runs = List[List[ColorRun]]()
         self.selection = Selection.empty()
         self.scroll = 0
         self.autoscroll = True
@@ -875,9 +963,11 @@ struct TextLog(Copyable, Movable):
         self._open = False
         self._layout_w = -1
 
-    def _push_line(mut self, var line: String, attr: Attr):
+    def _push_line(mut self, var line: String, attr: Attr,
+                   var runs: List[ColorRun]):
         self.lines.append(line^)
         self.line_attrs.append(attr)
+        self.line_runs.append(runs^)
         # Incremental cache update: wrap just the newly-appended line
         # and tack its rows onto ``last_visual``. Full re-wraps happen
         # only when the width changes (handled in ``paint``). Without
@@ -897,11 +987,14 @@ struct TextLog(Copyable, Movable):
             var drop = len(self.lines) - self.max_lines
             var trimmed = List[String]()
             var tattrs = List[Attr]()
+            var truns = List[List[ColorRun]]()
             for k in range(drop, len(self.lines)):
                 trimmed.append(self.lines[k])
                 tattrs.append(self.line_attrs[k])
+                truns.append(self.line_runs[k].copy())
             self.lines = trimmed^
             self.line_attrs = tattrs^
+            self.line_runs = truns^
             # Trim the layout cache symmetrically: drop visual rows for
             # the dropped logical lines, renumber the survivors. Track
             # how many visual rows were dropped so a manually-scrolled
@@ -997,6 +1090,7 @@ struct TextLog(Copyable, Movable):
         paint_text_segments(
             canvas, view, self.lines, self.last_visual,
             first, visible, self.line_attrs, self.default_attr,
+            self.line_runs,
         )
         paint_selection_overlay(
             canvas, view, self.lines, self.last_visual,

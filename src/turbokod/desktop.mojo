@@ -65,6 +65,9 @@ from .git_gutter_menu import (
     GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
     GitGutterMenu,
 )
+from .test_gutter_menu import (
+    TEST_ACTION_DEBUG, TEST_ACTION_RUN, TestGutterMenu,
+)
 from .diagnostic_menu import (
     DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
 )
@@ -133,6 +136,7 @@ from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
     detect_project_language,
+    pytest_python_files,
     python_venv_dir,
     resolve_python_interpreter, resolved_cwd, resolved_program,
     save_project_targets,
@@ -140,6 +144,9 @@ from .project_targets import (
 )
 from .project_grammars import (
     GrammarOverride, load_project_grammar_overrides, write_grammar_overrides,
+)
+from .project_on_save import (
+    load_project_on_save, on_save_equal, write_project_on_save,
 )
 from .breakpoint_dialog import (
     BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY,
@@ -169,8 +176,7 @@ from .view_state_store import (
 from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
-from .targets_dialog import TargetsDialog
-from .grammars_dialog import GrammarsDialog
+from .project_settings import ProjectSettings
 from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
 from .find_symbol import (
@@ -294,8 +300,7 @@ comptime PROJECT_FIND         = String("edit:project_find")
 comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
-comptime PROJECT_CONFIG_TARGETS = String("project:configure_targets")
-comptime PROJECT_CONFIG_GRAMMARS = String("project:configure_grammars")
+comptime PROJECT_SETTINGS = String("project:settings")
 # Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
 # + <index>`` encodes the slot in ``config.recent_projects`` so the
 # dispatcher can route the click without a parallel lookup table.
@@ -661,13 +666,22 @@ struct Desktop(Movable):
     var _find_symbol_qualifier: String
     var project_find: ProjectFind
     var local_changes: LocalChanges
-    var targets_dialog: TargetsDialog
-    var grammars_dialog: GrammarsDialog
+    # Project Settings view (Project ▸ Project Settings...). Second-surface
+    # screen — native window on macOS, in-grid dialog in the terminal —
+    # consolidating per-project on-save actions, run/debug targets, and
+    # grammar overrides. Edits sync back to disk per-section on every paint
+    # while a section's dirty flag is set.
+    var project_settings: ProjectSettings
+    var project_settings_detached: Bool
+    # Cached copy of the open project's enabled on-save actions
+    # (``.turbokod/on_save.json``). Loaded in ``_set_project`` and refreshed
+    # by the Project-Settings sync; ``_run_on_save_actions`` walks this, not
+    # the global library in ``config.on_save_actions``.
+    var project_on_save: List[OnSaveAction]
     # Fullscreen Settings view (hamburger ▸ Settings). Independent of
     # the modal stack — paints over the workspace but leaves the menu
-    # bar and status bar untouched. Edits to ``settings.actions`` are
-    # mirrored back into ``self.config.on_save_actions`` and persisted
-    # whenever ``settings.dirty`` is True.
+    # bar and status bar untouched. Edits are mirrored back into
+    # ``self.config`` and persisted whenever ``settings.dirty`` is True.
     var settings: Settings
     # True when the host renders Settings in its own native window (macOS
     # frontend) — the main surface then skips the in-grid settings overlay
@@ -702,6 +716,12 @@ struct Desktop(Movable):
     var host_font_effective_size: Int
     var host_font_ideal_size: Int
     var project: Optional[String]
+    # The project's pytest ``python_files`` globs (which files pytest
+    # collects), parsed from setup.cfg / pyproject.toml / pytest.ini /
+    # tox.ini in ``_set_project``. Pushed to each editor every paint so the
+    # test-gutter run-icons appear on the project's actual test files (e.g.
+    # ``*__tests.py``), not just pytest's defaults. Empty ⇒ defaults.
+    var _pytest_file_globs: List[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
     # Path to open in a new host window on the next ``take_pending_new_window_project``
@@ -773,6 +793,11 @@ struct Desktop(Movable):
     # action; surfaced from ``Editor.consume_git_revert_request`` after
     # mouse dispatch and routed input-first like ``spell_menu``.
     var git_gutter_menu: GitGutterMenu
+    # Popup that opens when the user clicks the gutter run-icon next to a
+    # detected test — Run / Debug the single test. Surfaced from
+    # ``Editor.consume_test_run_request`` and routed input-first like
+    # ``git_gutter_menu``.
+    var test_gutter_menu: TestGutterMenu
     # Popup that opens when the user right-clicks a diagnostic squiggle
     # in the editor text area. Single ``Copy message`` action pushes
     # the LSP message onto the system clipboard. Surfaced from
@@ -1092,8 +1117,9 @@ struct Desktop(Movable):
         self._find_symbol_qualifier = String("")
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
-        self.targets_dialog = TargetsDialog()
-        self.grammars_dialog = GrammarsDialog()
+        self.project_settings = ProjectSettings()
+        self.project_settings_detached = False
+        self.project_on_save = List[OnSaveAction]()
         self.settings = Settings()
         self.settings_detached = False
         self.bg_pattern = String("▒")
@@ -1105,6 +1131,7 @@ struct Desktop(Movable):
         self.host_font_effective_size = 0
         self.host_font_ideal_size = 0
         self.project = Optional[String]()
+        self._pytest_file_globs = List[String]()
         self._project_menu_idx = -1
         self._window_menu_idx = -1
         self._pending_action = String("")
@@ -1131,6 +1158,7 @@ struct Desktop(Movable):
         self.speller = Speller()
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
+        self.test_gutter_menu = TestGutterMenu()
         self.diagnostic_menu = DiagnosticMenu()
         self._diag_menu_editor_idx = -1
         self._diag_menu_actions = List[CodeAction]()
@@ -2008,6 +2036,37 @@ struct Desktop(Movable):
         elif event.kind == EVENT_MOUSE:
             _ = self.settings.handle_mouse(event, screen)
 
+    # NOTE: keep these three in lock-step with the Settings twins above —
+    # the native frontend mirrors the same second-surface plumbing.
+    def set_project_settings_detached(mut self, on: Bool):
+        """Tell the Desktop the Project Settings view renders in a separate
+        host window (macOS). Mirrors ``set_settings_detached``."""
+        self.project_settings_detached = on
+        self.project_settings.detached = on
+
+    def paint_project_settings(mut self, mut canvas: Canvas, screen: Rect):
+        """Paint Project Settings to fill the host's separate window.
+        Mirrors ``paint_settings``."""
+        if not self.project_settings.active:
+            Painter(screen).fill(
+                canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        self.project_settings.paint(canvas, screen)
+
+    def handle_project_settings_event(
+        mut self, event: Event, screen: Rect,
+    ):
+        """Route a key/mouse event from the host's Project Settings window.
+        Mirrors ``handle_settings_event``."""
+        if not self.project_settings.active:
+            return
+        if event.kind == EVENT_KEY:
+            _ = self.project_settings.handle_key(event)
+        elif event.kind == EVENT_MOUSE:
+            _ = self.project_settings.handle_mouse(event, screen)
+        self._sync_project_settings()
+
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
         chrome read fine with the default arrow; the one exception is a
@@ -2079,12 +2138,8 @@ struct Desktop(Movable):
             return String("default")
         if self.local_changes.active:
             return String("default")
-        if self.targets_dialog.active:
-            if self.targets_dialog.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.grammars_dialog.active:
-            if self.grammars_dialog.is_input_at(pos, screen):
+        if self.project_settings.active and not self.project_settings_detached:
+            if self.project_settings.is_input_at(pos, screen):
                 return String("text")
             return String("default")
         # Resize edges of the docked side panels — checked before the
@@ -2396,6 +2451,12 @@ struct Desktop(Movable):
             if self.windows.windows[i].is_editor:
                 debug_log(String("[paint] flush_highlights for window ")
                     + String(i))
+                # Push the project's pytest file globs so the test gutter
+                # detects this project's test files; cheap + idempotent
+                # (only re-runs detection on an actual change).
+                self.windows.windows[i].editor.set_test_file_globs(
+                    self._pytest_file_globs,
+                )
                 self.windows.windows[i].editor.flush_highlights(
                     self.grammar_registry, self.speller,
                 )
@@ -2489,13 +2550,12 @@ struct Desktop(Movable):
         self.doc_pick.paint(canvas, screen)
         self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen, self.grammar_registry)
-        self.targets_dialog.paint(canvas, screen)
-        self.grammars_dialog.paint(canvas, screen)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
+        self.test_gutter_menu.paint(canvas, screen)
         self.diagnostic_menu.paint(canvas, screen)
         self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
@@ -2517,6 +2577,12 @@ struct Desktop(Movable):
         # because the main surface's paint is the per-frame persistence hook.
         if not self.settings_detached:
             self.settings.paint(canvas, screen)
+        # Project Settings overlay — same second-surface treatment as
+        # Settings. In-grid it paints over the workspace; detached the
+        # host's window paints it, but the dirty-sync below still runs here.
+        if not self.project_settings_detached:
+            self.project_settings.paint(canvas, screen)
+        self._sync_project_settings()
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
         # cursor has been resting on the message rect long enough for
@@ -2531,7 +2597,6 @@ struct Desktop(Movable):
                 self.host_font_effective_size, self.host_font_ideal_size,
             )
         if self.settings.active and self.settings.dirty:
-            self.config.on_save_actions = self.settings.actions.copy()
             self.config.auto_save = self.settings.auto_save
             self.config.trim_trailing_whitespace = (
                 self.settings.trim_trailing_whitespace
@@ -3571,6 +3636,7 @@ struct Desktop(Movable):
         # scroll positions would never make it to disk.
         self._save_view_states_if_changed()
         self.project = Optional[String]()
+        self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
         self.file_tree.close()
         # Reset the project menu to its no-project state. The helper
@@ -3695,6 +3761,11 @@ struct Desktop(Movable):
         var canonical = resolved if len(resolved.as_bytes()) > 0 else path
         debug_log(String("[_set_project] canonical=") + canonical)
         self.project = Optional[String](canonical)
+        # Parse the project's pytest ``python_files`` config once here so
+        # the test-gutter run-icons match this project's test-file naming
+        # (e.g. ``*__tests.py``) rather than only pytest's defaults. Pushed
+        # to editors in the paint loop.
+        self._pytest_file_globs = pytest_python_files(canonical)
         # Reset the external-git polling cache so the new project's
         # ``.git`` mtimes seed fresh on its first paint instead of
         # comparing against whatever the previous project was at.
@@ -3709,10 +3780,7 @@ struct Desktop(Movable):
         debug_log(String("[_set_project] after save_config"))
         var items = List[MenuItem]()
         items.append(MenuItem(
-            String("Configure targets..."), PROJECT_CONFIG_TARGETS,
-        ))
-        items.append(MenuItem(
-            String("Configure project grammars..."), PROJECT_CONFIG_GRAMMARS,
+            String("Project Settings..."), PROJECT_SETTINGS,
         ))
         # Inline recent-project list lives between the project-specific
         # actions and Close project — always present (no "..." picker)
@@ -3748,6 +3816,27 @@ struct Desktop(Movable):
         debug_log(
             String("[_set_project] after load_project_grammar_overrides"),
         )
+        # Per-project on-save actions (``.turbokod/on_save.json``). These
+        # are the actions that actually run after a save here — frozen
+        # copies of library entries the project enabled. Cache them for the
+        # save hot-path (``_run_on_save_actions``).
+        self.project_on_save = load_project_on_save(canonical)
+        # Back-fill: any project on-save action the global library has never
+        # seen joins the library, so the library is the union of everything
+        # ever seen. Dedup is structural (``on_save_equal``).
+        var backfilled = False
+        for i in range(len(self.project_on_save)):
+            var pa = self.project_on_save[i].copy()
+            var known = False
+            for j in range(len(self.config.on_save_actions)):
+                if on_save_equal(pa, self.config.on_save_actions[j]):
+                    known = True
+                    break
+            if not known:
+                self.config.on_save_actions.append(pa^)
+                backfilled = True
+        if backfilled:
+            _ = save_config(self.config)
         # Swap the speller's per-project bucket to this project's
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
@@ -4350,6 +4439,16 @@ struct Desktop(Movable):
             if self.git_gutter_menu.submitted:
                 self._on_git_gutter_menu_submit()
             return Optional[String]()
+        if self.test_gutter_menu.active:
+            # Click on the gutter run-icon opens this Run/Debug menu; same
+            # input-first routing as ``git_gutter_menu``.
+            if event.kind == EVENT_KEY:
+                _ = self.test_gutter_menu.handle_key(event)
+            else:
+                _ = self.test_gutter_menu.handle_mouse(event, screen)
+            if self.test_gutter_menu.submitted:
+                self._on_test_gutter_menu_submit()
+            return Optional[String]()
         if self.diagnostic_menu.active:
             # Right-click on a diagnostic squiggle opens this single-row
             # menu; same input-first routing as ``git_gutter_menu``.
@@ -4560,21 +4659,14 @@ struct Desktop(Movable):
                 else:
                     self.open_file(abs, screen)
             return Optional[String]()
-        if self.targets_dialog.active:
+        if self.project_settings.active and not self.project_settings_detached:
+            # In-grid Project Settings is modal over the workspace; the
+            # per-section dirty-sync runs after the event is handled.
             if event.kind == EVENT_KEY:
-                _ = self.targets_dialog.handle_key(event)
+                _ = self.project_settings.handle_key(event)
             else:
-                _ = self.targets_dialog.handle_mouse(event, screen)
-            if self.targets_dialog.submitted:
-                self._on_targets_dialog_submit()
-            return Optional[String]()
-        if self.grammars_dialog.active:
-            if event.kind == EVENT_KEY:
-                _ = self.grammars_dialog.handle_key(event)
-            else:
-                _ = self.grammars_dialog.handle_mouse(event, screen)
-            if self.grammars_dialog.submitted:
-                self._on_grammars_dialog_submit()
+                _ = self.project_settings.handle_mouse(event, screen)
+            self._sync_project_settings()
             return Optional[String]()
         if self.settings.active and not self.settings_detached:
             # In-grid Settings is modal over the workspace. Detached, the
@@ -4754,6 +4846,10 @@ struct Desktop(Movable):
         # ``pending_git_revert`` on the focused editor — surface the popup
         # before the next paint so it lands on this same frame.
         self._maybe_open_git_gutter_menu()
+        # A click on the gutter run-icon stamps a ``pending_test_run`` on
+        # the focused editor — surface the Run/Debug popup before the next
+        # paint so it lands on this same frame.
+        self._maybe_open_test_gutter_menu()
         # Right-click on a diagnostic squiggle stamps a pending menu
         # request on the focused editor — surface the popup before the
         # next paint so it lands on this same frame.
@@ -4941,15 +5037,16 @@ struct Desktop(Movable):
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
-            or self.git_gutter_menu.active or self.diagnostic_menu.active \
+            or self.git_gutter_menu.active or self.test_gutter_menu.active \
+            or self.diagnostic_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
             or self.confirm_dialog.active or self.merge_view.active \
             or self.save_as_dialog.active \
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
-            or self.local_changes.active or self.targets_dialog.active \
-            or self.grammars_dialog.active \
+            or self.local_changes.active \
+            or self.project_settings.active \
             or self.settings.active
 
     def dispatch_action(
@@ -4991,7 +5088,10 @@ struct Desktop(Movable):
                     var ev = Event.key_event(
                         self._hotkeys[i].key, self._hotkeys[i].mods,
                     )
-                    if self.settings.active and self.settings_detached:
+                    if self.project_settings.active \
+                            and self.project_settings_detached:
+                        self.handle_project_settings_event(ev, screen)
+                    elif self.settings.active and self.settings_detached:
                         self.handle_settings_event(ev, screen)
                     else:
                         try:
@@ -5016,11 +5116,8 @@ struct Desktop(Movable):
         if action == PROJECT_TREE_ACTION:
             self._cycle_file_tree()
             return Optional[String]()
-        if action == PROJECT_CONFIG_TARGETS:
-            self._open_targets_config()
-            return Optional[String]()
-        if action == PROJECT_CONFIG_GRAMMARS:
-            self._open_grammars_config()
+        if action == PROJECT_SETTINGS:
+            self._open_project_settings()
             return Optional[String]()
         if action == APP_SETTINGS:
             var cur_ext = String("")
@@ -5039,7 +5136,6 @@ struct Desktop(Movable):
                 for i in range(len(self.host_font_names)):
                     font_names.append(self.host_font_names[i])
             self.settings.open(
-                self.config.on_save_actions.copy(),
                 self.config.auto_save,
                 self.config.language_servers.copy(),
                 cur_ext,
@@ -6608,15 +6704,17 @@ struct Desktop(Movable):
             return False
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
-                or self.git_gutter_menu.active or self.diagnostic_menu.active \
+                or self.git_gutter_menu.active or self.test_gutter_menu.active \
+                or self.diagnostic_menu.active \
                 or self.lsp_status_menu.active or self.prompt.active \
                 or self.confirm_dialog.active or self.merge_view.active \
                 or self.save_as_dialog.active \
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
                 or self.doc_pick.active or self.project_find.active \
-                or self.local_changes.active or self.targets_dialog.active \
-                or self.grammars_dialog.active:
+                or self.local_changes.active:
+            return False
+        if self.project_settings.active and not self.project_settings_detached:
             return False
         if self.settings.active and not self.settings_detached:
             return False
@@ -7102,71 +7200,70 @@ struct Desktop(Movable):
 
     # --- target run / debug ----------------------------------------------
 
-    def _open_targets_config(mut self):
-        """Open the structured targets-configuration dialog.
-
-        Editing happens against a private copy inside ``TargetsDialog``;
-        the host's ``self.targets`` is only updated on Save (handled
-        in ``handle_event``'s modal-dispatch path).
-        """
+    def _open_project_settings(mut self):
+        """Open the Project Settings screen (On save / Targets / Grammars).
+        Snapshots the per-project state into the view; edits persist on
+        change via ``_sync_project_settings``."""
         if not self.project:
             self.status_bar.set_message(
-                String("Configure targets: open a project first"),
+                String("Project Settings: open a project first"),
                 Attr(BLACK, LIGHT_GRAY),
             )
             return
-        # Make a copy so the dialog's snapshot can't alias our state
-        # before the user saves. ``ProjectTargets`` opts out of
-        # ImplicitlyCopyable (it carries a single mutable ``active``
-        # index meant to live in one place at a time), so the copy
-        # is explicit.
+        var root = self.project.value()
+        # Targets snapshot — ``ProjectTargets`` opts out of
+        # ImplicitlyCopyable, so the copy is explicit.
         var snapshot = ProjectTargets()
         snapshot.targets = self.targets.targets.copy()
         snapshot.active = self.targets.active
-        self.targets_dialog.open(snapshot^)
-
-    def _on_targets_dialog_submit(mut self):
-        """Copy the dialog's edited list back into the host and
-        persist it. Called from the modal-dispatch loop when the
-        user clicks Save / hits Enter on the Save button."""
-        if not self.project:
-            self.targets_dialog.close()
-            return
-        self.targets = self.targets_dialog.into_targets()
-        _ = write_all_targets(self.project.value(), self.targets)
-        self.targets_dialog.close()
-
-    def _open_grammars_config(mut self):
-        """Open the per-project grammar-override editor. Edits a private
-        copy seeded from the live registry; persisted only on Save (see
-        ``_on_grammars_dialog_submit``)."""
-        if not self.project:
-            self.status_bar.set_message(
-                String("Configure project grammars: open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
+        var cur_ext = String("")
+        var fidx = self._focused_editor_idx()
+        if fidx >= 0:
+            cur_ext = extension_of(
+                self.windows.windows[fidx].editor.file_path,
             )
-            return
-        self.grammars_dialog.open(self.grammar_registry.overrides.copy())
+        self.project_settings.open(
+            root,
+            snapshot^,
+            self.grammar_registry.overrides.copy(),
+            self.config.on_save_actions.copy(),
+            self.project_on_save.copy(),
+            cur_ext,
+        )
 
-    def _on_grammars_dialog_submit(mut self):
-        """Persist the edited overrides, refresh the registry (which
-        drops the compiled-grammar cache so open editors re-tokenize
-        against the new mapping on the next paint), and offer to
-        download any mapped grammar that isn't installed yet."""
-        if not self.project:
-            self.grammars_dialog.close()
+    def _sync_project_settings(mut self):
+        """Per-frame persistence hook for Project Settings, mirroring the
+        ``settings.dirty`` block. Each section writes to disk only when its
+        own dirty flag is set."""
+        if not self.project_settings.active or not self.project:
             return
-        var overrides = self.grammars_dialog.into_overrides()
-        _ = write_grammar_overrides(self.project.value(), overrides)
-        # Apply before prompting so ``_maybe_prompt_grammar_install`` sees
-        # the new mapping when it resolves the focused editor's extension.
-        self.grammar_registry.set_overrides(overrides.copy())
-        self.grammars_dialog.close()
-        # If any mapping points at a downloadable-but-uninstalled grammar
-        # (the django-html case), nudge the user to fetch it — otherwise
-        # the override silently falls back to the default grammar.
-        for i in range(len(overrides)):
-            self._maybe_prompt_grammar_install(overrides[i].ext)
+        var root = self.project.value()
+        if self.project_settings.on_save_dirty:
+            # The project file is the enabled set (frozen copies); the
+            # global library is the catalog you pick from.
+            _ = write_project_on_save(root, self.project_settings.project_actions)
+            self.project_on_save = self.project_settings.project_actions.copy()
+            self.config.on_save_actions = self.project_settings.library.copy()
+            _ = save_config(self.config)
+            self.project_settings.ack_on_save_dirty()
+        if self.project_settings.targets_dirty:
+            self.targets = self.project_settings.targets_value()
+            _ = write_all_targets(root, self.targets)
+            self.project_settings.ack_targets_dirty()
+        if self.project_settings.grammars_dirty:
+            var overrides = self.project_settings.grammars_value()
+            _ = write_grammar_overrides(root, overrides)
+            # Apply before prompting so ``_maybe_prompt_grammar_install``
+            # sees the new mapping when it resolves the focused extension.
+            self.grammar_registry.set_overrides(overrides.copy())
+            # Nudge to download any just-picked grammar that isn't installed.
+            # Copy the queue out first — ``_maybe_prompt_grammar_install``
+            # takes ``mut self``, which can't alias a read of a field on it.
+            var checks = self.project_settings.grammars_install_check.copy()
+            self.project_settings.grammars_install_check = List[String]()
+            self.project_settings.ack_grammars_dirty()
+            for i in range(len(checks)):
+                self._maybe_prompt_grammar_install(checks[i])
 
     def _target_run(mut self):
         """Cmd+R: spawn the active target's ``run_command``.
@@ -7340,8 +7437,12 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
-    def _target_test(mut self):
+    def _target_test(mut self, node_id: String = String("")):
         """Cmd+T: run the project's test suite.
+
+        When ``node_id`` is non-empty (a pytest node id like
+        ``/abs/test_x.py::Class::method``, from a gutter run-icon click)
+        only that single test runs; empty means the whole suite.
 
         Unlike ``_target_run`` / ``_target_debug``, this doesn't read
         ``program`` / ``args`` off the active target — the user just
@@ -7396,6 +7497,12 @@ struct Desktop(Movable):
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
+        # Force color: the child runs on a pipe (not a pty), so pytest's
+        # isatty() is false and it would strip color — the pane now decodes
+        # SGR, so opt back in.
+        args.append(String("--color=yes"))
+        if len(node_id.as_bytes()) > 0:
+            args.append(node_id)
         # Stop only the *previous test run* — the run/debug session is a
         # separate slot and is left untouched (a dev server keeps
         # serving while tests run).
@@ -7423,9 +7530,13 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
 
-    def _target_test_debug(mut self):
+    def _target_test_debug(mut self, node_id: String = String("")):
         """Cmd+Shift+D: run the project's test suite under the DAP
         debugger, so breakpoints fire inside the tests.
+
+        When ``node_id`` is non-empty (a pytest node id from a gutter
+        run-icon "Debug" pick) only that single test runs under the
+        debugger; empty means the whole suite.
 
         Mirrors ``_target_test`` for picking the runner (currently
         ``python -m pytest`` in the project root, swapping ``python``
@@ -7474,6 +7585,9 @@ struct Desktop(Movable):
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
+        args.append(String("--color=yes"))
+        if len(node_id.as_bytes()) > 0:
+            args.append(node_id)
         var venv_dir = python_venv_dir(project_root)
         var spec = python_debugger_spec_for_venv(
             self.dap_specs[deb_idx], venv_dir,
@@ -8221,9 +8335,11 @@ struct Desktop(Movable):
         warning when its reap lands. Spawn errors (program missing,
         etc.) are reported synchronously here.
         """
-        if len(self.config.on_save_actions) == 0:
+        # On-save actions are per-project now — only the project's own
+        # enabled (frozen) copies run, not the global library.
+        if len(self.project_on_save) == 0:
             return
-        var actions = self.config.on_save_actions.copy()
+        var actions = self.project_on_save.copy()
         var ext = extension_of(saved_path)
         var lang_idx = find_language_for_extension(self.lsp_specs, ext)
         var lang = String("")
@@ -9271,6 +9387,34 @@ struct Desktop(Movable):
             return
         var req = req_opt.value()
         self.git_gutter_menu.open(req.row, Point(req.anchor_x, req.anchor_y))
+
+    def _maybe_open_test_gutter_menu(mut self):
+        """Drain ``Editor.consume_test_run_request`` on the focused window
+        and open the Run/Debug popup at the clicked cell. The request
+        carries the pytest node id, so the menu can hand it straight back
+        on resolve."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx] \
+            .editor.consume_test_run_request()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        self.test_gutter_menu.open(
+            req.node_id, Point(req.anchor_x, req.anchor_y),
+        )
+
+    def _on_test_gutter_menu_submit(mut self):
+        """Resolve the Run/Debug pick: spawn the single test (or run it
+        under the debugger) for the node id captured at open time."""
+        var act = self.test_gutter_menu.action
+        var node = self.test_gutter_menu.node_id
+        self.test_gutter_menu.close()
+        if act == TEST_ACTION_RUN:
+            self._target_test(node)
+        elif act == TEST_ACTION_DEBUG:
+            self._target_test_debug(node)
 
     def _on_git_gutter_menu_submit(mut self):
         """Resolve the revert pick: recompute the change block against

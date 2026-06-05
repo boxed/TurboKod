@@ -236,7 +236,9 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 // `.settings` is the standalone Settings window — like `.panels` it shares the
 // main view's Desktop handle and never ticks; it renders via the `_settings`
 // C ABI and is opened/closed by polling tk_desktop_settings_active.
-enum CellSurface { case main, panels, settings }
+// `.projectSettings` is the twin standalone Project Settings window (On save /
+// Targets / Grammars), driven by the `_project_settings` C ABI.
+enum CellSurface { case main, panels, settings, projectSettings }
 
 final class CellView: NSView {
     var handle: Int64 = 0
@@ -353,6 +355,7 @@ final class CellView: NSView {
         case .main:     return Int(tk_desktop_layout(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .projectSettings: return Int(tk_desktop_layout_project_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
         }
     }
     private func tickSurface(_ c: Int, _ r: Int) {
@@ -363,6 +366,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
+        case .projectSettings: return tk_desktop_project_settings_key(handle, key, m, Int64(c), Int64(r))
         }
     }
     private func modKeySurface(_ modId: UInt32, _ pressed: UInt8) -> Int32 {
@@ -381,6 +385,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
+        case .projectSettings: return tk_desktop_project_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r))
         }
     }
     private func pointerShapeSurface(_ col: Int64, _ row: Int64, _ c: Int, _ r: Int) -> Int32 {
@@ -388,6 +393,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
         case .settings: return 0   // default arrow everywhere in Settings
+        case .projectSettings: return 0   // default arrow everywhere here
         }
     }
 
@@ -871,6 +877,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // each tick — the Mojo side opens Settings via the menu action and closes
     // it via Esc / its Close button, so the host can't know without asking.
     private var settingsWins: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
+    // Standalone Project Settings windows — twin of `settingsWins`, polled via
+    // tk_desktop_project_settings_active. Keep the two in lock-step.
+    private var projectSettingsWins: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -1115,6 +1124,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Like the panel views, settings views share the main Desktop and
             // don't tick — just detect whether the surface needs a repaint.
             for pair in self.settingsWins.values {
+                let sv = pair.view
+                guard let w = sv.window, w.isVisible,
+                      w.occlusionState.contains(.visible) else { continue }
+                if sv.pollFrame() { sv.needsDisplay = true; changed = true }
+            }
+            // Project Settings window lifecycle — twin of the Settings block.
+            for v in self.views where v.handle != 0 {
+                let id = ObjectIdentifier(v)
+                let active = tk_desktop_project_settings_active(v.handle) != 0
+                if active && self.projectSettingsWins[id] == nil {
+                    self.showProjectSettingsWindow(for: v); changed = true
+                } else if !active, self.projectSettingsWins[id] != nil {
+                    self.closeProjectSettingsWindow(for: v); changed = true
+                }
+            }
+            for pair in self.projectSettingsWins.values {
                 let sv = pair.view
                 guard let w = sv.window, w.isVisible,
                       w.occlusionState.contains(.visible) else { continue }
@@ -1798,6 +1823,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // settingsWins) — the main surface skips the in-grid overlay and
         // stays interactive while Settings is open.
         tk_desktop_set_settings_detached(h, 1)
+        // Project Settings likewise renders in its own native window.
+        tk_desktop_set_project_settings_detached(h, 1)
         // Register the system's monospace families so the Settings view
         // grows its Font section (the terminal frontend never does this).
         let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
@@ -1952,6 +1979,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             return false
         }
+        // Same for the Project Settings window (twin of the Settings arm).
+        if let entry = projectSettingsWins.first(where: { $0.value.window === sender }) {
+            if let mv = mainViewByObjectId(entry.key) {
+                tk_desktop_project_settings_close(mv.handle)
+                closeProjectSettingsWindow(for: mv)
+            }
+            return false
+        }
         guard let idx = windows.firstIndex(of: sender) else { return false }
         let v = views[idx]
         // Capture the final geometry (including floating state + panel frame)
@@ -1960,6 +1995,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if !isTerminating { saveGeometryFor(v) }
         closePanelWindow(for: v, save: false)
         closeSettingsWindow(for: v, focusMain: false)
+        closeProjectSettingsWindow(for: v, focusMain: false)
         let h = v.handle
         v.handle = 0
         windows.remove(at: idx)
@@ -2387,6 +2423,55 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Hand focus back to the project window so Esc-closing Settings
         // drops the user straight back into the editor. Skipped when the
         // project window itself is the one going away.
+        if focusMain { mainView.window?.makeKeyAndOrderFront(nil) }
+    }
+
+    // --- Project Settings window (twin of the Settings window above) ---------
+
+    private func makeProjectSettingsView(for mainView: CellView) -> CellView {
+        let v = CellView()
+        v.handle = mainView.handle    // shared Desktop, second surface
+        v.surface = .projectSettings
+        v.mainPeer = mainView
+        return v
+    }
+
+    private func defaultProjectSettingsFrame(over mainWin: NSWindow) -> NSRect {
+        let w: CGFloat = 100 * CELL_W, h: CGFloat = 32 * CELL_H
+        let mf = mainWin.frame
+        return NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2, width: w, height: h)
+    }
+
+    private func showProjectSettingsWindow(for mainView: CellView) {
+        guard let mainWin = mainView.window else { return }
+        let id = ObjectIdentifier(mainView)
+        let sv: CellView
+        let win: NSWindow
+        if let existing = projectSettingsWins[id] {
+            sv = existing.view; win = existing.window
+        } else {
+            sv = makeProjectSettingsView(for: mainView)
+            win = UnconstrainedWindow(
+                contentRect: defaultProjectSettingsFrame(over: mainWin),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered, defer: false)
+            win.delegate = self
+            win.contentView = sv
+            win.makeFirstResponder(sv)
+            win.acceptsMouseMovedEvents = true
+            win.title = "Project Settings"
+            projectSettingsWins[id] = (window: win, view: sv)
+        }
+        win.makeKeyAndOrderFront(nil)
+        sv.invalidateFrame(); sv.needsDisplay = true
+    }
+
+    private func closeProjectSettingsWindow(for mainView: CellView, focusMain: Bool = true) {
+        let id = ObjectIdentifier(mainView)
+        guard let pair = projectSettingsWins[id] else { return }
+        projectSettingsWins.removeValue(forKey: id)
+        pair.view.handle = 0          // shared handle is owned by the main view
+        pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
         if focusMain { mainView.window?.makeKeyAndOrderFront(nil) }
     }
 

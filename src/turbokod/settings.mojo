@@ -19,7 +19,7 @@ Sections live in a left-rail list. The right pane changes per
 section. Adding a new section is two entries (a string label in
 ``_section_labels`` and a ``_paint_section_*`` arm).
 
-Edits commit immediately to ``self.actions`` / ``self.auto_save``.
+Edits commit immediately to the working copies (``self.auto_save`` etc).
 The host syncs them back into ``TurbokodConfig`` on every paint when
 ``self.dirty`` is True and writes the updated config to disk.
 
@@ -31,7 +31,6 @@ user can still see context. Esc closes (same as the [Close] button).
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .action_editor import ActionEditor
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton,
     paint_checkbox, paint_shadow_button,
@@ -46,7 +45,7 @@ from .colors import (
 )
 from .theme import theme_names
 from .config import (
-    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
+    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE,
     WRAP_NONE,
 )
 from .dictionary_install import (
@@ -77,10 +76,6 @@ from .window import paint_window_title
 # --- focus discriminants --------------------------------------------------
 
 comptime _FOCUS_SECTIONS      = UInt8(0)
-comptime _FOCUS_LIST          = UInt8(1)
-comptime _FOCUS_ADD           = UInt8(2)
-comptime _FOCUS_EDIT          = UInt8(3)
-comptime _FOCUS_REMOVE        = UInt8(4)
 comptime _FOCUS_CLOSE         = UInt8(5)
 comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
 comptime _FOCUS_TRIM_WS       = UInt8(14)
@@ -105,12 +100,11 @@ comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
 
 # --- section indices ------------------------------------------------------
 
-comptime _SECTION_ACTIONS   = 0
-comptime _SECTION_EDITOR    = 1
-comptime _SECTION_SPELL     = 2
-comptime _SECTION_LANGUAGES = 3
-comptime _SECTION_THEME     = 4
-comptime _SECTION_FONT      = 5
+comptime _SECTION_EDITOR    = 0
+comptime _SECTION_SPELL     = 1
+comptime _SECTION_LANGUAGES = 2
+comptime _SECTION_THEME     = 3
+comptime _SECTION_FONT      = 4
 
 
 # --- layout ---------------------------------------------------------------
@@ -128,18 +122,15 @@ comptime _SETTINGS_MIN_H = 16
 # the press latches survive across paints and section switches. The names
 # below are the canonical mapping; callers should not hand-write the ints.
 
-comptime _BTN_ADD          = 0
-comptime _BTN_EDIT         = 1
-comptime _BTN_REMOVE       = 2
-comptime _BTN_CLOSE        = 3
-comptime _BTN_DICT_INSTALL = 4
-comptime _BTN_DICT_REMOVE  = 5
-comptime _BTN_LANG_ADD     = 6
-comptime _BTN_LANG_EDIT    = 7
-comptime _BTN_LANG_REMOVE  = 8
-comptime _BTN_FONT_SMALLER = 9
-comptime _BTN_FONT_LARGER  = 10
-comptime _BTN_FONT_IDEAL   = 11
+comptime _BTN_CLOSE        = 0
+comptime _BTN_DICT_INSTALL = 1
+comptime _BTN_DICT_REMOVE  = 2
+comptime _BTN_LANG_ADD     = 3
+comptime _BTN_LANG_EDIT    = 4
+comptime _BTN_LANG_REMOVE  = 5
+comptime _BTN_FONT_SMALLER = 6
+comptime _BTN_FONT_LARGER  = 7
+comptime _BTN_FONT_IDEAL   = 8
 
 # Width of the inline dropdown strip in the Editor section. Wide enough
 # for "Automatic" plus the right-edge ``▼`` indicator.
@@ -153,7 +144,6 @@ def _section_labels(include_font: Bool) -> List[String]:
     host registered font options (the native macOS frontend) — the
     terminal emulator owns the font on the terminal frontend."""
     var out = List[String]()
-    out.append(String("Actions on save"))
     out.append(String("Editor"))
     out.append(String("Spell check"))
     out.append(String("Languages"))
@@ -197,13 +187,9 @@ struct _PlacedButton(ImplicitlyCopyable, Movable):
 struct Settings(Movable):
     var active: Bool
     var dirty: Bool
-    """Set when ``actions`` or ``auto_save`` has been mutated. Host
-    watches this flag and writes ``TurbokodConfig`` to disk;
-    ``ack_dirty`` clears it after a successful write."""
-    var actions: List[OnSaveAction]
-    """Working copy of the on-save actions. Host snapshots into this
-    on ``open``; mutations are immediate (no per-edit commit step).
-    """
+    """Set when a setting has been mutated. Host watches this flag and
+    writes ``TurbokodConfig`` to disk; ``ack_dirty`` clears it after a
+    successful write."""
     var auto_save: Bool
     """Working copy of ``TurbokodConfig.auto_save`` — Editor ▸ Save
     behavior. ``False`` means Manual (Ctrl+S only), ``True`` means
@@ -227,22 +213,15 @@ struct Settings(Movable):
     "Blinking cursor". Driven by ``_blink_cb``."""
     var section: Int
     """Index into ``_section_labels`` for the active section."""
-    var selected_action: Int
-    """Row in ``actions`` that's highlighted in the right pane."""
     var focus: UInt8
-    var editor: ActionEditor
     var _list_scroll: Int
-    var _last_scroll_action: Int
-    """Last ``selected_action`` value snapped into view by paint. The
-    actions-list paint only scrolls to the selection when this differs
-    from ``selected_action`` — so wheel-scrolling moves the viewport
-    independently and isn't snapped back on the next frame."""
     var _last_scroll_dict: Int
     """Counterpart for ``selected_dict``."""
     var _last_scroll_language: Int
     """Counterpart for ``selected_language``."""
     var _buttons: List[_PlacedButton]
-    """Persistent button table — Add / Edit / Remove / Close, in order."""
+    """Persistent button table — Close first, then the per-section
+    Spell / Languages / Font buttons."""
     var _save_dropdown: Dropdown
     """Stateful Save-behavior picker. Index is in lock-step with
     ``auto_save`` (0 = Manual, 1 = Automatic) and the popup state
@@ -327,7 +306,7 @@ struct Settings(Movable):
     system's monospace families). Empty on the terminal frontend, which
     hides the Font section entirely."""
     var _last_scroll_font: Int
-    """Counterpart of ``_last_scroll_action`` for ``selected_font``."""
+    """Counterpart of ``_last_scroll_dict`` for ``selected_font``."""
     var font_size_choice: Int
     """Working copy of ``TurbokodConfig.font_size`` — 0 means "the
     font's default size", anything else is an explicit point size. The
@@ -369,7 +348,6 @@ struct Settings(Movable):
     def __init__(out self):
         self.active = False
         self.dirty = False
-        self.actions = List[OnSaveAction]()
         self.auto_save = False
         self.wrap_mode = WRAP_NONE
         self.trim_trailing_whitespace = False
@@ -377,23 +355,11 @@ struct Settings(Movable):
         self.compress_kwargs = False
         self.cursor_blink = False
         self.section = 0
-        self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
-        self.editor = ActionEditor()
         self._list_scroll = 0
-        self._last_scroll_action = -2
         self._last_scroll_dict = -2
         self._last_scroll_language = -2
         self._buttons = List[_PlacedButton]()
-        self._buttons.append(_PlacedButton(
-            ShadowButton(String(" + Add "), 0, 0), _FOCUS_ADD, True,
-        ))
-        self._buttons.append(_PlacedButton(
-            ShadowButton(String(" Edit "), 0, 0), _FOCUS_EDIT, True,
-        ))
-        self._buttons.append(_PlacedButton(
-            ShadowButton(String(" - Remove "), 0, 0), _FOCUS_REMOVE, True,
-        ))
         self._buttons.append(_PlacedButton(
             ShadowButton(String(" Close "), 0, 0), _FOCUS_CLOSE, True,
         ))
@@ -473,7 +439,7 @@ struct Settings(Movable):
         self._type_ahead = TypeAhead()
 
     def open(
-        mut self, var actions: List[OnSaveAction], auto_save: Bool,
+        mut self, auto_save: Bool,
         var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
         current_language_ext: String = String(""),
         trim_trailing_whitespace: Bool = True,
@@ -489,7 +455,6 @@ struct Settings(Movable):
         comma_threshold: Int = -1,
         cursor_blink: Bool = True,
     ):
-        self.actions = actions^
         self.auto_save = auto_save
         self.wrap_mode = wrap_mode
         self.trim_trailing_whitespace = trim_trailing_whitespace
@@ -503,10 +468,8 @@ struct Settings(Movable):
         self.active = True
         self.dirty = False
         self.section = 0
-        self.selected_action = 0 if len(self.actions) > 0 else -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
-        self._last_scroll_action = -2
         self._last_scroll_dict = -2
         self._last_scroll_language = -2
         self._last_scroll_font = -2
@@ -578,17 +541,14 @@ struct Settings(Movable):
         # the next open reuses the user's size + position.
         self._moving = False
         self._resizing = False
-        self.actions = List[OnSaveAction]()
         self.auto_save = False
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
         self.compress_kwargs = False
         self.cursor_blink = False
         self.section = 0
-        self.selected_action = -1
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
-        self.editor.close()
         self._save_dropdown.close()
         self._wrap_dropdown.close()
         self._trim_cb.pressed = False
@@ -613,7 +573,7 @@ struct Settings(Movable):
             self._buttons[i].button.pressed_inside = False
 
     def ack_dirty(mut self):
-        """Host calls this after persisting ``self.actions`` to disk."""
+        """Host calls this after persisting the config to disk."""
         self.dirty = False
 
     # --- painting ---------------------------------------------------
@@ -660,8 +620,6 @@ struct Settings(Movable):
                 canvas, self._wrap_dd_anchor, screen,
             )
         # Editor floats on top.
-        if self.editor.active:
-            self.editor.paint(canvas, screen)
         if self.language_editor.active:
             self.language_editor.paint(canvas, screen)
 
@@ -864,9 +822,7 @@ struct Settings(Movable):
                 labels[self.section], bg,
             )
         # Section content.
-        if self.section == _SECTION_ACTIONS:
-            self._paint_actions_section(canvas, sub, inner)
-        elif self.section == _SECTION_EDITOR:
+        if self.section == _SECTION_EDITOR:
             self._paint_editor_section(canvas, sub, inner)
         elif self.section == _SECTION_SPELL:
             self._paint_spell_section(canvas, sub, inner)
@@ -1132,98 +1088,6 @@ struct Settings(Movable):
             cx3 += painter.put_text(canvas, Point(cx3, ry), String("return "),
                                     ky)
             _ = painter.put_text(canvas, Point(cx3, ry), String("42"), nu)
-
-    def _paint_actions_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """List of configured on-save actions plus the action-row of
-        buttons. The list draws on a cyan strip; the buttons live on
-        the dialog body (light gray) below it."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var list_top = inner.a.y + 2
-        var list_bottom = inner.b.y - 5
-        if list_bottom <= list_top:
-            return
-        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        if len(self.actions) == 0:
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
-                String("(no actions configured — press [+ Add])"),
-                hint,
-            )
-        else:
-            self._paint_actions_list(canvas, painter, list_rect)
-        # Helper line under the list.
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, list_bottom),
-            String("Runs after a successful save when language matches."),
-            hint,
-        )
-        # Buttons row anchored just below the list. ``_paint_buttons``
-        # repositions in place so the press latches survive across
-        # paints.
-        var btn_y = list_bottom + 2
-        var add_x = inner.a.x
-        self._buttons[_BTN_ADD].button.move_to(add_x, btn_y)
-        var edit_x = add_x + self._buttons[_BTN_ADD].button.total_width() + 1
-        self._buttons[_BTN_EDIT].button.move_to(edit_x, btn_y)
-        var rm_x = edit_x + self._buttons[_BTN_EDIT].button.total_width() + 1
-        self._buttons[_BTN_REMOVE].button.move_to(rm_x, btn_y)
-        var has_sel = (self.selected_action >= 0
-                       and self.selected_action < len(self.actions))
-        self._buttons[_BTN_EDIT].enabled = has_sel
-        self._buttons[_BTN_REMOVE].enabled = has_sel
-        self._paint_button(canvas, _BTN_ADD)
-        self._paint_button(canvas, _BTN_EDIT)
-        self._paint_button(canvas, _BTN_REMOVE)
-
-    def _paint_actions_list(
-        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
-    ):
-        var visible = list_rect.height()
-        # Only snap the viewport to the selection when the selection
-        # has actually changed since the previous paint — otherwise the
-        # mouse wheel could never move the viewport without immediately
-        # being snapped back.
-        if self.selected_action >= 0 \
-                and self.selected_action != self._last_scroll_action:
-            if self.selected_action < self._list_scroll:
-                self._list_scroll = self.selected_action
-            elif self.selected_action >= self._list_scroll + visible:
-                self._list_scroll = self.selected_action - visible + 1
-        self._last_scroll_action = self.selected_action
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.actions) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        var body_attr = Attr(BLACK, CYAN)
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.actions):
-                break
-            var act = self.actions[idx].copy()
-            var attr = body_attr
-            if idx == self.selected_action:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas,
-                    Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
-            var line = _format_action(act)
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr,
-            )
 
     def _paint_editor_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1636,11 +1500,6 @@ struct Settings(Movable):
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False
-        # Editor on top eats events first.
-        if self.editor.active:
-            _ = self.editor.handle_key(event)
-            self._maybe_consume_editor()
-            return True
         if self.language_editor.active:
             _ = self.language_editor.handle_key(event)
             self._maybe_consume_language_editor()
@@ -1675,8 +1534,6 @@ struct Settings(Movable):
         if k == KEY_UP:
             if self.focus == _FOCUS_SECTIONS:
                 self._step_section(-1)
-            elif self.focus == _FOCUS_LIST:
-                self._step_action(-1)
             elif self.focus == _FOCUS_DICT_LIST:
                 self._step_dict(-1)
             elif self.focus == _FOCUS_LANG_LIST:
@@ -1689,8 +1546,6 @@ struct Settings(Movable):
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
                 self._step_section(1)
-            elif self.focus == _FOCUS_LIST:
-                self._step_action(1)
             elif self.focus == _FOCUS_DICT_LIST:
                 self._step_dict(1)
             elif self.focus == _FOCUS_LANG_LIST:
@@ -1748,14 +1603,7 @@ struct Settings(Movable):
         and update the focused list's selection. No-op when focus is
         on a non-list widget; the keystroke is still consumed by the
         caller so it doesn't leak back to the underlying workspace."""
-        if self.focus == _FOCUS_LIST:
-            var labels = List[String]()
-            for i in range(len(self.actions)):
-                labels.append(_format_action(self.actions[i]))
-            var hit = type_ahead_pick(self._type_ahead, labels, ch)
-            if hit >= 0:
-                self.selected_action = hit
-        elif self.focus == _FOCUS_DICT_LIST:
+        if self.focus == _FOCUS_DICT_LIST:
             var labels = List[String]()
             for i in range(len(self.dict_specs)):
                 labels.append(self.dict_specs[i].display)
@@ -1868,16 +1716,7 @@ struct Settings(Movable):
         # when Editor is selected.
         var ordered = List[UInt8]()
         ordered.append(_FOCUS_SECTIONS)
-        if self.section == _SECTION_ACTIONS:
-            # Skip Edit / Remove when there's no selection — same
-            # disabled logic the buttons use.
-            if len(self.actions) > 0:
-                ordered.append(_FOCUS_LIST)
-            ordered.append(_FOCUS_ADD)
-            if self.selected_action >= 0:
-                ordered.append(_FOCUS_EDIT)
-                ordered.append(_FOCUS_REMOVE)
-        elif self.section == _SECTION_EDITOR:
+        if self.section == _SECTION_EDITOR:
             ordered.append(_FOCUS_SAVE_BEHAVIOR)
             ordered.append(_FOCUS_WRAP_MODE)
             ordered.append(_FOCUS_COMMA_WRAP)
@@ -1955,16 +1794,6 @@ struct Settings(Movable):
             # keystroke after the jump starts a fresh search.
             self._type_ahead.reset()
         self.section = s
-
-    def _step_action(mut self, delta: Int):
-        if len(self.actions) == 0:
-            return
-        var s = self.selected_action + delta
-        if s < 0:
-            s = 0
-        if s >= len(self.actions):
-            s = len(self.actions) - 1
-        self.selected_action = s
 
     def _step_dict(mut self, delta: Int):
         if len(self.dict_specs) == 0:
@@ -2098,20 +1927,8 @@ struct Settings(Movable):
         self.focus = _FOCUS_LANG_LIST
 
     def _activate_focus(mut self) -> Bool:
-        if self.focus == _FOCUS_ADD:
-            self._add_new()
-            return True
-        if self.focus == _FOCUS_EDIT:
-            self._edit_selected()
-            return True
-        if self.focus == _FOCUS_REMOVE:
-            self._remove_selected()
-            return True
         if self.focus == _FOCUS_CLOSE:
             self.close()
-            return True
-        if self.focus == _FOCUS_LIST:
-            self._edit_selected()
             return True
         if self.focus == _FOCUS_SAVE_BEHAVIOR:
             var prev_idx = self._save_dropdown.index
@@ -2205,58 +2022,11 @@ struct Settings(Movable):
         """Host calls this after performing the remove."""
         self.pending_dict_remove_lang = String("")
 
-    def _add_new(mut self):
-        var fresh = OnSaveAction()
-        self.editor.open(fresh^, -1)
-
-    def _edit_selected(mut self):
-        if self.selected_action < 0 or self.selected_action >= len(self.actions):
-            return
-        self.editor.open(
-            self.actions[self.selected_action].copy(), self.selected_action,
-        )
-
-    def _remove_selected(mut self):
-        if self.selected_action < 0 or self.selected_action >= len(self.actions):
-            return
-        var rebuilt = List[OnSaveAction]()
-        for i in range(len(self.actions)):
-            if i == self.selected_action:
-                continue
-            rebuilt.append(self.actions[i].copy())
-        self.actions = rebuilt^
-        self.dirty = True
-        if len(self.actions) == 0:
-            self.selected_action = -1
-            self.focus = _FOCUS_ADD
-        elif self.selected_action >= len(self.actions):
-            self.selected_action = len(self.actions) - 1
-
-    def _maybe_consume_editor(mut self):
-        if not self.editor.submitted:
-            return
-        var idx = self.editor.edit_index
-        var entry = self.editor.value()
-        self.editor.close()
-        if idx < 0:
-            self.actions.append(entry^)
-            self.selected_action = len(self.actions) - 1
-        else:
-            if 0 <= idx and idx < len(self.actions):
-                self.actions[idx] = entry^
-                self.selected_action = idx
-        self.dirty = True
-        self.focus = _FOCUS_LIST
-
     # --- mouse ------------------------------------------------------
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
         if not self.active:
             return False
-        if self.editor.active:
-            _ = self.editor.handle_mouse(event, screen)
-            self._maybe_consume_editor()
-            return True
         if self.language_editor.active:
             _ = self.language_editor.handle_mouse(event, screen)
             self._maybe_consume_language_editor()
@@ -2358,20 +2128,9 @@ struct Settings(Movable):
                 self.section = idx
                 self.focus = _FOCUS_SECTIONS
             return True
-        # Right pane list — both the actions list and the dictionaries
-        # list share geometry; dispatch by section.
-        if self.section == _SECTION_ACTIONS:
-            var list_top = rect.a.y + 2 + 2
-            var list_bottom = rect.b.y - 2 - 5
-            var inner = self._right_rect(rect)
-            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-            if list_rect.contains(event.pos):
-                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-                if 0 <= idx and idx < len(self.actions):
-                    self.selected_action = idx
-                self.focus = _FOCUS_LIST
-                return True
-        elif self.section == _SECTION_SPELL:
+        # Right pane list — the dictionaries / languages / theme / font
+        # lists share geometry; dispatch by section.
+        if self.section == _SECTION_SPELL:
             var list_top = rect.a.y + 2 + 2
             var list_bottom = rect.b.y - 2 - 5
             var inner = self._right_rect(rect)
@@ -2447,8 +2206,6 @@ struct Settings(Movable):
     def _button_active_for_section(self, idx: Int) -> Bool:
         if idx == _BTN_CLOSE:
             return True
-        if self.section == _SECTION_ACTIONS:
-            return idx == _BTN_ADD or idx == _BTN_EDIT or idx == _BTN_REMOVE
         if self.section == _SECTION_SPELL:
             return idx == _BTN_DICT_INSTALL or idx == _BTN_DICT_REMOVE
         if self.section == _SECTION_LANGUAGES:
@@ -2550,17 +2307,3 @@ def _shell_quote(s: String) -> String:
     return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
 
-def _format_action(act: OnSaveAction) -> String:
-    """One-line label: ``<lang>  <program> <args>``. Empty language
-    renders as ``(any)`` so the user can tell why an action fires for
-    every save."""
-    var lang = act.language_id if len(act.language_id.as_bytes()) > 0 \
-        else String("(any)")
-    var line = lang + String("  ") + act.program
-    if len(act.args) > 0:
-        line = line + String(" ")
-        for i in range(len(act.args)):
-            if i > 0:
-                line = line + String(" ")
-            line = line + act.args[i]
-    return line^

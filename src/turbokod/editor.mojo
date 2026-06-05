@@ -739,6 +739,107 @@ struct BreakpointMenuRequest(ImplicitlyCopyable, Movable):
     var anchor_y: Int
 
 
+@fieldwise_init
+struct TestRunRequest(ImplicitlyCopyable, Movable):
+    """Set by ``handle_mouse`` when the user clicks the gutter run-icon
+    next to a detected test. ``row`` is the buffer row clicked; ``node_id``
+    is the pytest node id to run (e.g. ``/abs/test_x.py::Class::method``);
+    ``anchor_x``/``anchor_y`` are the clicked screen cell so the host can
+    open the Run/Debug popup under the cursor."""
+    var row: Int
+    var node_id: String
+    var anchor_x: Int
+    var anchor_y: Int
+
+
+def _lit_at(s: String, off: Int, lit: String) -> Bool:
+    """True if ``s``'s bytes at ``off`` equal ``lit`` exactly (bounds-safe)."""
+    var b = s.as_bytes()
+    var p = lit.as_bytes()
+    if off < 0 or off + len(p) > len(b):
+        return False
+    for k in range(len(p)):
+        if b[off + k] != p[k]:
+            return False
+    return True
+
+
+def _glob_match(name: String, pat: String) -> Bool:
+    """fnmatch-style wildcard match for ``*`` and ``?`` (case-sensitive),
+    matching how pytest applies its ``python_files`` patterns. Iterative
+    backtracking so ``*__tests.py`` etc. work without recursion."""
+    var nb = name.as_bytes()
+    var pb = pat.as_bytes()
+    var n = len(nb)
+    var m = len(pb)
+    var i = 0
+    var j = 0
+    var star_j = -1
+    var star_i = 0
+    while i < n:
+        if j < m and (nb[i] == pb[j] or Int(pb[j]) == 0x3F):  # exact or '?'
+            i += 1
+            j += 1
+        elif j < m and Int(pb[j]) == 0x2A:  # '*'
+            star_j = j
+            star_i = i
+            j += 1
+        elif star_j >= 0:  # backtrack: let the last '*' swallow one more byte
+            j = star_j + 1
+            star_i += 1
+            i = star_i
+        else:
+            return False
+    while j < m and Int(pb[j]) == 0x2A:
+        j += 1
+    return j == m
+
+
+def _file_is_test(path: String, globs: List[String]) -> Bool:
+    """True if ``path``'s basename matches one of pytest's ``python_files``
+    patterns (``globs``). Empty ``globs`` falls back to pytest's built-in
+    defaults (``test_*.py`` / ``*_test.py``) so detection still works before
+    a project's config is known. Files pytest wouldn't collect get no
+    run-icons, so a mismatched icon never appears."""
+    var b = path.as_bytes()
+    var n = len(b)
+    if n == 0:
+        return False
+    var bn = 0
+    for i in range(n):
+        if Int(b[i]) == 0x2F:  # '/'
+            bn = i + 1
+    var base = String(StringSlice(ptr=b.unsafe_ptr() + bn, length=n - bn))
+    if len(globs) == 0:
+        return _glob_match(base, String("test_*.py")) \
+            or _glob_match(base, String("*_test.py"))
+    for k in range(len(globs)):
+        if _glob_match(base, globs[k]):
+            return True
+    return False
+
+
+def _test_ident_at(s: String, off_in: Int) -> String:
+    """Read the Python identifier at/after ``off_in`` (skipping leading
+    spaces). Empty string if there's no identifier there."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var off = off_in
+    while off < n and Int(b[off]) == 0x20:
+        off += 1
+    var start = off
+    while off < n:
+        var c = Int(b[off])
+        var ok = (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A) \
+            or (c >= 0x30 and c <= 0x39) or c == 0x5F
+        if not ok:
+            break
+        off += 1
+    if off <= start:
+        return String("")
+    return String(StringSlice(ptr=b.unsafe_ptr() + start, length=off - start))
+
+
 struct EditorSnapshot(Copyable, Movable):
     """One reversible step. Captures everything ``undo`` needs to restore:
     the buffer contents and the full caret list. Scroll position is
@@ -907,6 +1008,23 @@ struct Editor(Copyable, Movable):
     # copies the captured message to the system clipboard so the user
     # can paste it into a search engine, chat, or bug tracker.
     var pending_diagnostic_menu: Optional[DiagnosticMenuRequest]
+    # Detected pytest tests for the gutter run-icon. ``test_rows`` are the
+    # buffer rows that get a ▶; ``test_nodes`` is the parallel pytest node
+    # id per row. Recomputed lazily from ``_tests_dirty`` (set by edits)
+    # in ``flush_highlights`` — only for files pytest would collect
+    # (``test_*.py`` / ``*_test.py``); empty otherwise. ``pending_test_run``
+    # is set by ``handle_mouse`` on a run-icon click and drained by the
+    # host (``consume_test_run_request``) to open the Run/Debug popup.
+    var test_rows: List[Int]
+    var test_nodes: List[String]
+    var _tests_dirty: Bool
+    var pending_test_run: Optional[TestRunRequest]
+    # pytest ``python_files`` globs for this buffer's project (e.g.
+    # ``test_*.py``, ``*__tests.py``, ``helpers.py``). Pushed by the host
+    # from the project's setup.cfg / pyproject.toml / pytest.ini / tox.ini.
+    # Empty ⇒ pytest's built-in defaults. ``set_test_file_globs`` re-runs
+    # detection when these change (e.g. once the project config loads).
+    var test_file_globs: List[String]
     # Set by ``check_for_external_change`` when a 3-way merge against a
     # changed-on-disk file produces conflicts. Rather than mutate the
     # buffer with marker lines, we stash the structured merge regions
@@ -1210,6 +1328,11 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
+        self.test_rows = List[Int]()
+        self.test_nodes = List[String]()
+        self._tests_dirty = True
+        self.pending_test_run = Optional[TestRunRequest]()
+        self.test_file_globs = List[String]()
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
@@ -1313,6 +1436,11 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
+        self.test_rows = List[Int]()
+        self.test_nodes = List[String]()
+        self._tests_dirty = True
+        self.pending_test_run = Optional[TestRunRequest]()
+        self.test_file_globs = List[String]()
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
@@ -1444,6 +1572,11 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
         self.pending_git_revert = copy.pending_git_revert
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
+        self.test_rows = copy.test_rows.copy()
+        self.test_nodes = copy.test_nodes.copy()
+        self._tests_dirty = copy._tests_dirty
+        self.pending_test_run = copy.pending_test_run
+        self.test_file_globs = copy.test_file_globs.copy()
         self.merge_pending = copy.merge_pending
         self.pending_merge_regions = copy.pending_merge_regions.copy()
         self.line_numbers = copy.line_numbers
@@ -1539,6 +1672,12 @@ struct Editor(Copyable, Movable):
         stay slightly stale between an edit and the next paint.
         Tests that need synchronous highlights call this directly.
         """
+        # Refresh the gutter run-icons first — cheap line scan, and
+        # independent of syntax tokenizing, so it runs even when the
+        # highlight pass below early-returns.
+        if self._tests_dirty:
+            self._recompute_tests()
+            self._tests_dirty = False
         if not self._highlights_dirty:
             return
         var ext = extension_of(self.file_path)
@@ -1553,6 +1692,79 @@ struct Editor(Copyable, Movable):
         self._hl_dirty_row = self.buffer.line_count()
         speller.load_default()
         self._refresh_spell(speller)
+
+    def _node_id(self, enclosing: List[String], leaf: String) -> String:
+        """Build a pytest node id ``<file>::<Class>::…::<leaf>`` from the
+        enclosing Test-class chain and the leaf class/function name. pytest
+        accepts an absolute path, so ``self.file_path`` is used verbatim —
+        no project-root resolution needed."""
+        var s = self.file_path
+        for k in range(len(enclosing)):
+            s = s + String("::") + enclosing[k]
+        s = s + String("::") + leaf
+        return s
+
+    def _recompute_tests(mut self):
+        """Scan the buffer for pytest-collectable tests — ``def test*``
+        and ``class Test*`` — recording each one's buffer row and pytest
+        node id so the gutter can paint a clickable run-icon.
+
+        Tracks the enclosing Test-class stack by indentation to build
+        ``file::Class::method`` ids and to honor pytest's collection rules:
+        a ``test*`` def is collected only at module level or directly
+        inside a ``Test*`` class (not nested in a function or a non-Test
+        class). A deliberate line-convention scan rather than the LSP —
+        synchronous, no language server needed, and pytest discovery is
+        itself name-based."""
+        self.test_rows = List[Int]()
+        self.test_nodes = List[String]()
+        if not _file_is_test(self.file_path, self.test_file_globs):
+            return
+        # Enclosing collectable Test classes: parallel (indent, name).
+        var stk_indent = List[Int]()
+        var stk_name = List[String]()
+        var n = self.buffer.line_count()
+        for i in range(n):
+            var line = self.buffer.line(i)
+            var b = line.as_bytes()
+            var m = len(b)
+            var indent = 0
+            while indent < m and (
+                Int(b[indent]) == 0x20 or Int(b[indent]) == 0x09
+            ):
+                indent += 1
+            if indent >= m:
+                continue  # blank / whitespace-only line
+            # Pop classes we've dedented back out of.
+            while len(stk_indent) > 0 \
+                    and indent <= stk_indent[len(stk_indent) - 1]:
+                _ = stk_indent.pop()
+                _ = stk_name.pop()
+            # pytest collects only at module level (indent 0, no enclosing
+            # class) or directly inside an enclosing Test class.
+            var collectable: Bool
+            if len(stk_indent) == 0:
+                collectable = indent == 0
+            else:
+                collectable = indent > stk_indent[len(stk_indent) - 1]
+            if _lit_at(line, indent, String("class ")):
+                var cname = _test_ident_at(line, indent + 6)
+                if collectable and _lit_at(cname, 0, String("Test")):
+                    self.test_rows.append(i)
+                    self.test_nodes.append(self._node_id(stk_name, cname))
+                    stk_indent.append(indent)
+                    stk_name.append(cname^)
+            else:
+                var doff = -1
+                if _lit_at(line, indent, String("async def ")):
+                    doff = indent + 10
+                elif _lit_at(line, indent, String("def ")):
+                    doff = indent + 4
+                if doff >= 0:
+                    var fname = _test_ident_at(line, doff)
+                    if collectable and _lit_at(fname, 0, String("test")):
+                        self.test_rows.append(i)
+                        self.test_nodes.append(self._node_id(stk_name, fname))
 
     def _refresh_spell(mut self, speller: Speller):
         """Rebuild ``spell_highlights`` and ``spell_lines`` from the
@@ -1828,6 +2040,7 @@ struct Editor(Copyable, Movable):
         # we don't need to thread a separate "buffer changed" signal
         # to every edit handler.
         self._git_changes_dirty = True
+        self._tests_dirty = True
         self._lsp_dirty = True
         self._lsp_dirty_stamp_ms = monotonic_ms()
         # Speculatively keep per-row diagnostics aligned with the
@@ -2797,6 +3010,30 @@ struct Editor(Copyable, Movable):
         self.pending_git_revert = Optional[GitRevertRequest]()
         return req
 
+    def consume_test_run_request(mut self) -> Optional[TestRunRequest]:
+        """Return any pending gutter run-icon click and clear the slot.
+        Set by ``handle_mouse`` when the user clicks the ▶ next to a
+        detected test; the host opens the Run/Debug popup from it."""
+        var req = self.pending_test_run
+        self.pending_test_run = Optional[TestRunRequest]()
+        return req
+
+    def set_test_file_globs(mut self, globs: List[String]):
+        """Set the pytest ``python_files`` globs (from the host's project
+        config) used to decide whether this buffer is a test file. Only
+        re-triggers detection on an actual change, so the host can call it
+        every frame cheaply — the first call after a project loads flips
+        the gutter on without churning on idle frames."""
+        var same = len(globs) == len(self.test_file_globs)
+        if same:
+            for k in range(len(globs)):
+                if globs[k] != self.test_file_globs[k]:
+                    same = False
+                    break
+        if not same:
+            self.test_file_globs = globs.copy()
+            self._tests_dirty = True
+
     def consume_diagnostic_menu_request(
         mut self,
     ) -> Optional[DiagnosticMenuRequest]:
@@ -3540,6 +3777,16 @@ struct Editor(Copyable, Movable):
         if not self.git_changes_visible:
             return 0
         if len(self.git_change_lines) == 0:
+            return 0
+        return 1
+
+    def _test_gutter(self) -> Int:
+        """Width of the test run-icon gutter in cells. One column,
+        immediately left of the text, shown only when this buffer has
+        detected pytest tests (``_recompute_tests`` populated
+        ``test_rows``). Sits at the right end of the gutter so it doesn't
+        shift the breakpoint / line-number / git / blame columns."""
+        if len(self.test_rows) == 0:
             return 0
         return 1
 
@@ -4547,7 +4794,8 @@ struct Editor(Copyable, Movable):
 
     def _total_gutter(self) -> Int:
         return self.gutter_width + self._line_number_gutter() \
-            + self._git_changes_gutter() + self._blame_gutter()
+            + self._git_changes_gutter() + self._blame_gutter() \
+            + self._test_gutter()
 
     def _layout_lines(
         self, content_h: Int, text_width: Int,
@@ -4960,8 +5208,10 @@ struct Editor(Copyable, Movable):
         var ln_gutter = self._line_number_gutter()
         var gc_gutter = self._git_changes_gutter()
         var bl_gutter = self._blame_gutter()
+        var tst_gutter = self._test_gutter()
         var right_gutter = self._right_gutter()
-        var total_gutter = dap_gutter + ln_gutter + gc_gutter + bl_gutter
+        var total_gutter = dap_gutter + ln_gutter + gc_gutter + bl_gutter \
+            + tst_gutter
         var text_x0 = view.a.x + total_gutter
         var content_right = view.b.x - right_gutter
         var content_bottom = view.b.y
@@ -5059,6 +5309,19 @@ struct Editor(Copyable, Movable):
                     _ = bl_p.put_text(
                         canvas, Point(ax, sy_g), bl.author, ln_attr,
                     )
+                # Test run-icon: green ▶ at the right end of the gutter
+                # (just left of the text) on each detected-test row. Green
+                # distinguishes it from the yellow exec-arrow above.
+                if tst_gutter > 0 and is_first_seg:
+                    for k in range(len(self.test_rows)):
+                        if self.test_rows[k] == buf_row:
+                            var tx = view.a.x + ln_gutter + dap_gutter \
+                                + gc_gutter + bl_gutter
+                            painter.set(
+                                canvas, tx, sy_g,
+                                Cell(String("▶"), Attr(LIGHT_GREEN, EDITOR_BG), 1),
+                            )
+                            break
         # Right-side gutter: a fixed-height projection of the whole
         # file, independent of ``scroll_y``. ``_paint_right_gutter``
         # handles slicing + per-source priority — see
@@ -7369,7 +7632,30 @@ struct Editor(Copyable, Movable):
                     row >= 0 and row < len(self.git_change_lines)
                     and self.git_change_lines[row] != GIT_CHANGE_NONE
                 )
-                if on_gc and has_change:
+                # Test run-icon column (right end of the gutter): a click on
+                # a detected-test row stashes a run request for the host's
+                # Run/Debug popup. Clicks on the column over a non-test row
+                # fall through to the breakpoint toggle like the rest.
+                var tst_w = self._test_gutter()
+                var tst_x0 = self.gutter_width + self._line_number_gutter() \
+                    + self._git_changes_gutter() + self._blame_gutter()
+                var on_test = (
+                    tst_w > 0 and rel_x >= tst_x0 and rel_x < tst_x0 + tst_w
+                )
+                var test_idx = -1
+                if on_test:
+                    for k in range(len(self.test_rows)):
+                        if self.test_rows[k] == row:
+                            test_idx = k
+                            break
+                if test_idx >= 0:
+                    self.pending_test_run = Optional[TestRunRequest](
+                        TestRunRequest(
+                            row, self.test_nodes[test_idx],
+                            event.pos.x, event.pos.y,
+                        )
+                    )
+                elif on_gc and has_change:
                     self.pending_git_revert = Optional[GitRevertRequest](
                         GitRevertRequest(row, event.pos.x, event.pos.y)
                     )

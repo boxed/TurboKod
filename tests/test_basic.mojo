@@ -21,10 +21,10 @@ from turbokod.painter import Painter
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY,
-    LIGHT_GREEN, LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
+    LIGHT_GREEN, LIGHT_RED, RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
     BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, PANE_BG,
-    attr_to_sgr, attr_to_sgr_rgb, default_attr,
+    attr_to_sgr, attr_to_sgr_rgb, default_attr, parse_sgr,
 )
 from turbokod.theme import (
     Theme, built_in_themes, default_theme_name, theme_by_name, theme_names,
@@ -68,7 +68,7 @@ from turbokod.desktop import (
     EDITOR_NEW, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
     Hotkey, NavPoint,
-    PROJECT_CLOSE_ACTION, PROJECT_CONFIG_GRAMMARS, PROJECT_CONFIG_TARGETS,
+    PROJECT_CLOSE_ACTION, PROJECT_SETTINGS,
     PROJECT_FIND,
     PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
@@ -110,7 +110,10 @@ from turbokod.debug_pane import (
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import slice_codepoints, char_width, display_columns
-from turbokod.targets_dialog import TargetsDialog
+from turbokod.project_settings import ProjectSettings
+from turbokod.project_on_save import (
+    load_project_on_save, on_save_equal, write_project_on_save,
+)
 from turbokod.text_field import TextField
 from turbokod.text_view import (
     Selection, TextLog, VisualLine, smart_wrap_lines, wrap_lines,
@@ -1838,18 +1841,15 @@ def test_desktop_project_lifecycle() raises:
     # Label stays "Project" — the project name lives in the window
     # title bar, not the menu label.
     assert_equal(d.menu_bar.menus[idx].label, String("Project"))
-    # Active-project items: configure-targets, configure-grammars,
-    # separator (no other recents survive — ``_append_recent_project_items``
-    # skips the active one), close. (The file-tree cycle lives in the
-    # host's View menu, not here.) ``_set_project`` drops the orphan
-    # separator only when the recents block is entirely empty; with a
-    # single matching-active recent we still see one separator (between
-    # the project actions and Close project). Separators carry no action.
+    # Active-project items: Project Settings..., separator (no other
+    # recents survive — ``_append_recent_project_items`` skips the active
+    # one), close. (The file-tree cycle lives in the host's View menu, not
+    # here.) ``_set_project`` drops the orphan separator only when the
+    # recents block is entirely empty; with a single matching-active recent
+    # we still see one separator (between the project actions and Close
+    # project). Separators carry no action.
     assert_equal(
-        d.menu_bar.menus[idx].items[0].action, PROJECT_CONFIG_TARGETS,
-    )
-    assert_equal(
-        d.menu_bar.menus[idx].items[1].action, PROJECT_CONFIG_GRAMMARS,
+        d.menu_bar.menus[idx].items[0].action, PROJECT_SETTINGS,
     )
     var last = len(d.menu_bar.menus[idx].items) - 1
     assert_equal(
@@ -5067,29 +5067,52 @@ def test_on_save_action_copy_preserves_args() raises:
     assert_equal(len(a.args), 2)
 
 
+def _ps_open(
+    var lib: List[OnSaveAction], var pa: List[OnSaveAction],
+) -> ProjectSettings:
+    """Open a ProjectSettings view on an in-memory on-save library +
+    project-enabled set (no disk). The project root is a dummy — these
+    unit tests assert on the in-memory working state, not persistence."""
+    var ps = ProjectSettings()
+    ps.open(
+        String("/tmp/turbokod_ps_unit"), ProjectTargets(),
+        List[GrammarOverride](), lib^, pa^,
+    )
+    return ps^
+
+
 def test_settings_open_seeds_state() raises:
-    """``open`` snapshots the host list and parks the selection on
-    row 0 (or -1 when the list is empty). Focus starts on the section
-    rail so arrow keys move sections rather than rows."""
+    """Settings ``open`` parks focus on the section rail (arrow keys move
+    sections) and starts not-dirty."""
     var s = Settings()
-    var actions = List[OnSaveAction]()
-    actions.append(OnSaveAction(
-        String("python"), String("/usr/bin/black"),
-        List[String](), String(""),
-    ))
-    actions.append(OnSaveAction(
-        String("rust"), String("/usr/bin/rustfmt"),
-        List[String](), String(""),
-    ))
-    s.open(actions^, False)
+    s.open(False)
     assert_true(s.active)
-    assert_equal(len(s.actions), 2)
-    assert_equal(s.selected_action, 0)
     assert_equal(s.section, 0)
     assert_false(s.dirty)
     s.close()
     assert_false(s.active)
-    assert_equal(len(s.actions), 0)
+
+
+def test_project_settings_on_save_seeds_state() raises:
+    """Project Settings seeds the On-save section: the union(library,
+    project_actions) display list parks selection on row 0, and an enabled
+    project copy reads back as ticked."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    var pa = List[OnSaveAction]()
+    pa.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    var ps = _ps_open(lib^, pa^)
+    assert_true(ps.active)
+    assert_equal(ps.section, 0)
+    assert_equal(len(ps._os_union()), 1)
+    assert_equal(ps.selected_os, 0)
+    assert_true(ps._os_is_enabled(ps._os_union()[0]))
 
 
 def test_settings_windowed_default_is_centered_dialog() raises:
@@ -5098,7 +5121,7 @@ def test_settings_windowed_default_is_centered_dialog() raises:
     change retints it live. The first paint establishes the default
     bounds inside the workspace (rows 1..h-1, menu/status excluded)."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     var c = Canvas(100, 40)
     c.clear(default_attr())
     s.paint(c, Rect(0, 0, 100, 40))
@@ -5121,7 +5144,7 @@ def test_settings_windowed_move_and_resize() raises:
     corner resizes it (mirrors WindowStack's chrome). The drag owns events
     until release, and sizes clamp to the minimums."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     var screen = Rect(0, 0, 100, 40)
     var c = Canvas(100, 40)
     s.paint(c, screen)   # establish default bounds
@@ -5156,7 +5179,7 @@ def test_settings_windowed_move_and_resize() raises:
     # Bounds survive close + reopen (session-persistent size/position).
     var kept = s.bounds
     s.close()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     s.paint(c, screen)
     assert_equal(s.bounds.a.x, kept.a.x)
     assert_equal(s.bounds.width(), kept.width())
@@ -5168,7 +5191,7 @@ def test_settings_detached_fills_surface() raises:
     provides the title bar, close button, and move/resize instead."""
     var s = Settings()
     s.detached = True
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     var c = Canvas(80, 24)
     c.clear(default_attr())
     s.paint(c, Rect(0, 0, 80, 24))
@@ -5183,7 +5206,7 @@ def test_settings_detached_fills_surface() raises:
     assert_false(title_found)
     # In-grid still draws its own chrome.
     var s2 = Settings()
-    s2.open(List[OnSaveAction](), False)
+    s2.open(False)
     var c2 = Canvas(80, 24)
     c2.clear(default_attr())
     s2.paint(c2, Rect(0, 0, 80, 24))
@@ -5191,75 +5214,78 @@ def test_settings_detached_fills_surface() raises:
 
 
 def test_settings_open_empty_parks_selection_at_minus_one() raises:
-    """Opening with no actions: selection = -1 so ``Edit`` / ``Remove``
-    skip themselves in the focus walk and the right pane shows the
-    "(no actions configured)" hint."""
-    var s = Settings()
-    s.open(List[OnSaveAction](), False)
-    assert_true(s.active)
-    assert_equal(len(s.actions), 0)
-    assert_equal(s.selected_action, -1)
+    """Project Settings on-save with an empty library: selection = -1 so
+    Edit / Remove skip themselves in the focus walk."""
+    var ps = _ps_open(List[OnSaveAction](), List[OnSaveAction]())
+    assert_true(ps.active)
+    assert_equal(len(ps._os_union()), 0)
+    assert_equal(ps.selected_os, -1)
 
 
 def test_settings_remove_marks_dirty() raises:
-    """Removing the highlighted entry must (a) shrink the list,
-    (b) raise ``dirty`` so the host knows to persist, (c) keep the
-    selection on a valid row (or move to -1 when the list empties)."""
-    var s = Settings()
-    var actions = List[OnSaveAction]()
-    actions.append(OnSaveAction(
+    """Removing the highlighted library entry shrinks the library, raises
+    ``on_save_dirty``, and moves the selection to -1 when it empties."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
         String("python"), String("/usr/bin/black"),
         List[String](), String(""),
     ))
-    s.open(actions^, False)
-    s._remove_selected()
-    assert_equal(len(s.actions), 0)
-    assert_equal(s.selected_action, -1)
-    assert_true(s.dirty)
+    var ps = _ps_open(lib^, List[OnSaveAction]())
+    ps.selected_os = 0
+    ps._os_remove()
+    assert_equal(len(ps.library), 0)
+    assert_equal(ps.selected_os, -1)
+    assert_true(ps.on_save_dirty)
 
 
 def test_settings_editor_submit_appends_new_entry() raises:
-    """The full Add → Edit → Save round-trip: opening Add starts the
-    editor with ``edit_index = -1``; setting fields and flipping
-    ``submitted`` then driving ``_maybe_consume_editor`` must append
-    the new entry to ``actions`` and raise ``dirty``."""
-    var s = Settings()
-    s.open(List[OnSaveAction](), False)
-    s._add_new()
-    assert_true(s.editor.active)
-    assert_equal(s.editor.edit_index, -1)
-    s.editor.entry.language_id = String("python")
-    s.editor.form.set_text(UInt8(1), String("/usr/bin/black"))
-    s.editor.submitted = True
-    s._maybe_consume_editor()
-    assert_false(s.editor.active)
-    assert_equal(len(s.actions), 1)
-    assert_equal(s.actions[0].language_id, String("python"))
-    assert_equal(s.actions[0].program, String("/usr/bin/black"))
-    assert_equal(s.selected_action, 0)
-    assert_true(s.dirty)
+    """Add → edit fields → submit appends to the library *and* enables it
+    for the project (a copy into project_actions), raising on_save_dirty."""
+    var ps = _ps_open(List[OnSaveAction](), List[OnSaveAction]())
+    ps._os_add()
+    assert_true(ps.editor.active)
+    ps.editor.entry.language_id = String("python")
+    ps.editor.form.set_text(UInt8(1), String("/usr/bin/black"))
+    ps.editor.submitted = True
+    ps._maybe_consume_editor()
+    assert_false(ps.editor.active)
+    assert_equal(len(ps.library), 1)
+    assert_equal(ps.library[0].language_id, String("python"))
+    assert_equal(ps.library[0].program, String("/usr/bin/black"))
+    assert_equal(len(ps.project_actions), 1)
+    assert_true(ps.on_save_dirty)
 
 
 def test_settings_editor_submit_replaces_existing_entry() raises:
-    """``edit_index >= 0`` triggers an in-place replace, not an append.
-    The selection stays on the edited row so the user keeps their place
-    in the list."""
-    var s = Settings()
-    var actions = List[OnSaveAction]()
-    actions.append(OnSaveAction(
+    """Editing a library entry replaces it in place. With frozen-snapshot
+    semantics an already-enabled project copy is left untouched, so the
+    edited entry surfaces as a fresh (unticked) suggestion row alongside
+    the still-ticked original."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
         String("python"), String("/usr/bin/black"),
         List[String](), String(""),
     ))
-    s.open(actions^, False)
-    s.selected_action = 0
-    s._edit_selected()
-    s.editor.form.set_text(UInt8(1), String("/opt/bin/black-edge"))
-    s.editor.submitted = True
-    s._maybe_consume_editor()
-    assert_equal(len(s.actions), 1)
-    assert_equal(s.actions[0].program, String("/opt/bin/black-edge"))
-    assert_equal(s.selected_action, 0)
-    assert_true(s.dirty)
+    var pa = List[OnSaveAction]()
+    pa.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    var ps = _ps_open(lib^, pa^)
+    ps.selected_os = 0
+    ps._os_edit()
+    ps.editor.form.set_text(UInt8(1), String("/opt/bin/black-edge"))
+    ps.editor.submitted = True
+    ps._maybe_consume_editor()
+    # Library entry replaced…
+    assert_equal(len(ps.library), 1)
+    assert_equal(ps.library[0].program, String("/opt/bin/black-edge"))
+    # …project's frozen copy untouched (still the original black)…
+    assert_equal(len(ps.project_actions), 1)
+    assert_equal(ps.project_actions[0].program, String("/usr/bin/black"))
+    # …so the union shows both: edited library row + frozen original.
+    assert_equal(len(ps._os_union()), 2)
+    assert_true(ps.on_save_dirty)
 
 
 def test_settings_open_seeds_save_behavior_dropdown() raises:
@@ -5267,11 +5293,11 @@ def test_settings_open_seeds_save_behavior_dropdown() raises:
     and the dropdown's index so the painted strip and the persisted
     value agree on first paint."""
     var s = Settings()
-    s.open(List[OnSaveAction](), True)
+    s.open(True)
     assert_true(s.auto_save)
     assert_equal(s._save_dropdown.index, 1)
     s.close()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     assert_false(s.auto_save)
     assert_equal(s._save_dropdown.index, 0)
 
@@ -5281,7 +5307,7 @@ def test_settings_save_behavior_commit_marks_dirty() raises:
     new value into ``auto_save``, and raises ``dirty`` so the host
     persists ``TurbokodConfig.auto_save`` on the next paint."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     # Simulate the user opening the popup, moving to "Automatic", and
     # pressing Enter — same final state ``Dropdown.handle_key`` lands
     # on, observed by ``_sync_dropdown_commit``.
@@ -5297,7 +5323,7 @@ def test_settings_save_behavior_no_change_no_dirty() raises:
     ``dirty`` — otherwise the host would write the config on every
     open/close cycle even when nothing changed."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     var prev_idx = s._save_dropdown.index
     # Index unchanged — the dropdown closed without committing a new
     # value (Esc, click-outside, or Enter on the same row).
@@ -5312,7 +5338,7 @@ def test_settings_open_seeds_editor_toggles() raises:
     to on)."""
     var s = Settings()
     s.open(
-        List[OnSaveAction](), True,
+        True,
         List[LanguageServerOverride](), String(""),
         True, True,
     )
@@ -5322,7 +5348,7 @@ def test_settings_open_seeds_editor_toggles() raises:
     assert_true(s._final_nl_cb.on)
     s.close()
     s.open(
-        List[OnSaveAction](), True,
+        True,
         List[LanguageServerOverride](), String(""),
         False, False,
     )
@@ -5337,7 +5363,7 @@ def test_settings_editor_toggle_marks_dirty() raises:
     checkbox glyph in sync, and raises ``dirty`` so the host persists it."""
     var s = Settings()
     s.open(
-        List[OnSaveAction](), True,
+        True,
         List[LanguageServerOverride](), String(""),
         True, True,
     )
@@ -5437,7 +5463,7 @@ def test_settings_languages_section_seeded() raises:
     )
     var overrides = List[LanguageServerOverride]()
     overrides.append(ov^)
-    s.open(List[OnSaveAction](), False, overrides^)
+    s.open(False, overrides^)
     assert_equal(len(s.language_overrides), 1)
     # ``xyzlang`` should appear in the effective view.
     var found = False
@@ -5454,7 +5480,7 @@ def test_settings_open_selects_current_language() raises:
     lands on the language they're editing — and the scroll-snap in
     ``_paint_languages_list`` brings that row into view."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False, List[LanguageServerOverride](),
+    s.open(False, List[LanguageServerOverride](),
            String("py"))
     var selected_id = s.languages_view[s.selected_language].language_id
     assert_equal(selected_id, String("python"))
@@ -5464,7 +5490,7 @@ def test_settings_open_unknown_extension_falls_back_to_first() raises:
     """An unrecognized extension shouldn't strand the selection on
     -1 — the user can still navigate the list. Fall back to row 0."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False, List[LanguageServerOverride](),
+    s.open(False, List[LanguageServerOverride](),
            String("zzzunknownext"))
     assert_equal(s.selected_language, 0)
 
@@ -5474,23 +5500,23 @@ def test_settings_font_section_requires_host_fonts() raises:
     options (the native macOS frontend). Without them — the terminal
     frontend — the rail ends at Theme."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     var labels = s._labels()
-    assert_equal(len(labels), 5)
-    assert_equal(labels[4], String("Theme"))
+    assert_equal(len(labels), 4)
+    assert_equal(labels[3], String("Theme"))
     s.close()
     var fonts = List[String]()
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     fonts.append(String("Menlo"))
     fonts.append(String("Monaco"))
     s.open(
-        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("Menlo"), fonts^,
     )
     labels = s._labels()
-    assert_equal(len(labels), 6)
-    assert_equal(labels[5], String("Font"))
+    assert_equal(len(labels), 5)
+    assert_equal(labels[4], String("Font"))
     # The active font row is pre-selected.
     assert_equal(s.selected_font, 1)
     assert_equal(s.font_choice, String("Menlo"))
@@ -5505,7 +5531,7 @@ def test_settings_font_step_commits_and_marks_dirty() raises:
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     fonts.append(String("Menlo"))
     s.open(
-        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
     )
@@ -5546,7 +5572,7 @@ def test_settings_font_size_stepper_commits_and_marks_dirty() raises:
     var fonts = List[String]()
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     s.open(
-        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
         0,    # font_size: default
@@ -5585,7 +5611,7 @@ def test_settings_restore_ideal_font_size() raises:
     var fonts = List[String]()
     fonts.append(String("IBM VGA 8x16 (built-in)"))
     s.open(
-        List[OnSaveAction](), False, List[LanguageServerOverride](),
+        False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
         20, 20, 16,
@@ -5643,7 +5669,7 @@ def test_settings_remove_language_override_marks_dirty() raises:
     )
     var overrides = List[LanguageServerOverride]()
     overrides.append(ov^)
-    s.open(List[OnSaveAction](), False, overrides^)
+    s.open(False, overrides^)
     # Find and select the custom row.
     for i in range(len(s.languages_view)):
         if s.languages_view[i].language_id == String("xyzlang"):
@@ -5694,7 +5720,7 @@ def test_detached_settings_clipboard_chord_does_not_recurse() raises:
     """
     var d = Desktop()
     d.set_settings_detached(True)
-    d.settings.open(List[OnSaveAction](), False)
+    d.settings.open(False)
     assert_true(d.settings.active)
     # Open the language editor and focus its argv strip with a selection.
     d.settings.language_editor.open(
@@ -5868,7 +5894,7 @@ def test_settings_languages_list_type_to_jump() raises:
     first language whose id starts with the typed prefix — no
     explicit hookup per list, the framework helper drives it."""
     var s = Settings()
-    s.open(List[OnSaveAction](), False)
+    s.open(False)
     # Park the user on the Languages section list.
     s.section = 3
     s.focus = UInt8(10)  # _FOCUS_LANG_LIST
@@ -5894,29 +5920,27 @@ def test_settings_languages_list_type_to_jump() raises:
 
 
 def test_settings_actions_list_type_to_jump() raises:
-    """Same framework feature in the Actions section: typing a letter
-    moves ``selected_action`` to the first row whose label
-    (language id + program) starts with that letter."""
-    var s = Settings()
-    var actions = List[OnSaveAction]()
-    actions.append(OnSaveAction(
+    """Type-to-jump in the Project Settings On-save list: typing a letter
+    moves ``selected_os`` to the first row whose label (language id +
+    program) starts with that letter."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
         String("python"), String("/usr/bin/black"),
         List[String](), String(""),
     ))
-    actions.append(OnSaveAction(
+    lib.append(OnSaveAction(
         String("rust"), String("/usr/bin/rustfmt"),
         List[String](), String(""),
     ))
-    s.open(actions^, False)
-    s.section = 0  # Actions on save
-    s.focus = UInt8(1)  # _FOCUS_LIST
-    # The action label format starts with the language id.
-    _ = s.handle_key(_key(UInt32(ord("r"))))
-    assert_equal(s.selected_action, 1)
+    var ps = _ps_open(lib^, List[OnSaveAction]())
+    ps.section = 0  # On save
+    ps.focus = UInt8(2)  # _FOCUS_OS_LIST
+    _ = ps.handle_key(_key(UInt32(ord("r"))))
+    assert_equal(ps.selected_os, 1)
     # No-match keystroke: selection survives.
-    s._type_ahead.reset()
-    _ = s.handle_key(_key(UInt32(ord("z"))))
-    assert_equal(s.selected_action, 1)
+    ps._type_ahead.reset()
+    _ = ps.handle_key(_key(UInt32(ord("z"))))
+    assert_equal(ps.selected_os, 1)
 
 
 def test_language_editor_list_type_to_jump() raises:
@@ -6206,7 +6230,9 @@ def test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
     # eaten by the *outer* sh -c when single-quoted strings are
     # concatenated; use printf with a literal arg to dodge that.
     args.append(String("printf %s world > $FilePath$"))
-    d.config.on_save_actions.append(OnSaveAction(
+    # On-save actions are per-project now — ``_run_on_save_actions`` walks
+    # the project's cached enabled set, not the global library.
+    d.project_on_save.append(OnSaveAction(
         String(""), String("/bin/sh"), args^, String(""),
     ))
     var maybe = d.dispatch_action(EDITOR_SAVE, _SCREEN)
@@ -12757,11 +12783,20 @@ def test_debug_pane_plain_click_clears_selection() raises:
     assert_equal(pane.selected_text(), String(""))
 
 
+def _ps_open_targets(var src: ProjectTargets) -> ProjectSettings:
+    var ps = ProjectSettings()
+    ps.open(
+        String("/tmp/turbokod_ps_unit"), src^, List[GrammarOverride](),
+        List[OnSaveAction](), List[OnSaveAction](),
+    )
+    ps.section = 1  # Targets
+    return ps^
+
+
 def test_targets_dialog_edit_and_submit() raises:
-    """A dialog round-trip: open with two existing targets, type a
-    new name into the focused input, then add a third target — the
-    final ``into_targets`` must reflect both edits and place the
-    active marker on the original active row."""
+    """Project Settings Targets section: open with two targets, type into
+    the focused Name field — ``targets_value`` reflects the edit, raises
+    ``targets_dirty``, and keeps the active marker on the original row."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("alpha")
@@ -12774,76 +12809,193 @@ def test_targets_dialog_edit_and_submit() raises:
     t2.args.append(String("b"))
     src.targets.append(t2^)
     src.active = 1
-    var dlg = TargetsDialog()
-    dlg.open(src^)
-    assert_true(dlg.active)
-    assert_equal(len(dlg.entries), 2)
-    # ``selected`` honors ``active`` — index 1 (beta).
-    assert_equal(dlg.selected, 1)
-    # Tab from list focus to the Name input, then append "X".
-    _ = dlg.handle_key(Event.key_event(KEY_TAB))
-    _ = dlg.handle_key(Event.key_event(UInt32(ord("X"))))
-    var rebuilt = dlg.into_targets()
+    var ps = _ps_open_targets(src^)
+    assert_true(ps.active)
+    assert_equal(len(ps.targets.targets), 2)
+    # ``selected_tg`` honors ``active`` — index 1 (beta).
+    assert_equal(ps.selected_tg, 1)
+    ps.focus = UInt8(7)  # _FOCUS_TG_NAME
+    _ = ps.handle_key(_key(UInt32(ord("X"))))
+    var rebuilt = ps.targets_value()
     assert_equal(rebuilt.targets[1].name, String("betaX"))
-    # Active marker still points at the renamed row (we tracked it
-    # by ``active_name`` set at open).
     assert_equal(rebuilt.targets[rebuilt.active].name, String("betaX"))
+    assert_true(ps.targets_dirty)
 
 
 def test_targets_dialog_add_and_remove() raises:
-    """Adding then removing yields the original list (modulo empty
-    ``run`` field on the new entry, which is fine for this test —
-    we never persist it)."""
+    """Add then remove a target in the Targets section returns to the
+    original list."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("only")
     t1.program = String("echo")
     src.targets.append(t1^)
     src.active = 0
-    var dlg = TargetsDialog()
-    dlg.open(src^)
-    # _activate_focus on Add — focus is on the list initially, walk
-    # there via direct slot manipulation. Slot 6 = Add, 7 = Remove.
-    dlg._focus.focus_force(6)
-    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
-    assert_equal(len(dlg.entries), 2)
-    assert_equal(dlg.selected, 1)
-    # Selected is now the new "new" target. Switch focus to Remove
-    # and activate.
-    dlg._focus.focus_force(7)
-    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
-    assert_equal(len(dlg.entries), 1)
-    assert_equal(dlg.entries[0].name, String("only"))
+    var ps = _ps_open_targets(src^)
+    ps.focus = UInt8(12)  # _FOCUS_TG_ADD
+    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(len(ps.targets.targets), 2)
+    assert_equal(ps.selected_tg, 1)
+    ps.focus = UInt8(13)  # _FOCUS_TG_REMOVE
+    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(len(ps.targets.targets), 1)
+    assert_equal(ps.targets.targets[0].name, String("only"))
 
 
 def test_targets_dialog_save_button_submits() raises:
+    """Persist-on-change: any target edit raises ``targets_dirty`` (the
+    host writes targets.json on the next paint — there's no Save button)."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("only")
     src.targets.append(t1^)
     src.active = 0
-    var dlg = TargetsDialog()
-    dlg.open(src^)
-    dlg._focus.focus_force(8)  # Save slot
-    _ = dlg.handle_key(Event.key_event(KEY_ENTER))
-    assert_true(dlg.submitted)
+    var ps = _ps_open_targets(src^)
+    assert_false(ps.targets_dirty)
+    ps.focus = UInt8(12)  # _FOCUS_TG_ADD
+    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_true(ps.targets_dirty)
 
 
 def test_targets_dialog_esc_discards_edits() raises:
+    """Esc closes the Project Settings view."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("a")
     src.targets.append(t1^)
     src.active = 0
-    var dlg = TargetsDialog()
-    dlg.open(src^)
-    # Move to name input, type something, then ESC. Dialog should
-    # close *and* not be submitted.
-    _ = dlg.handle_key(Event.key_event(KEY_TAB))
-    _ = dlg.handle_key(Event.key_event(UInt32(ord("Z"))))
-    _ = dlg.handle_key(Event.key_event(KEY_ESC))
-    assert_false(dlg.active)
-    assert_false(dlg.submitted)
+    var ps = _ps_open_targets(src^)
+    _ = ps.handle_key(_key(KEY_ESC))
+    assert_false(ps.active)
+
+
+def test_project_on_save_round_trip() raises:
+    """``write_project_on_save`` then ``load_project_on_save`` round-trips
+    the enabled set through ``<project>/.turbokod/on_save.json``."""
+    var root = _temp_path(String("_psroot"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var args = List[String]()
+    args.append(String("--quiet"))
+    var actions = List[OnSaveAction]()
+    actions.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"), args^, String(""),
+    ))
+    assert_true(write_project_on_save(root, actions))
+    var loaded = load_project_on_save(root)
+    assert_equal(len(loaded), 1)
+    assert_equal(loaded[0].language_id, String("python"))
+    assert_equal(loaded[0].program, String("/usr/bin/black"))
+    assert_equal(len(loaded[0].args), 1)
+    assert_equal(loaded[0].args[0], String("--quiet"))
+
+
+def test_on_save_equal_matching() raises:
+    """``on_save_equal`` is structural across all four fields — the identity
+    used for checkbox state, enable/disable, and library back-fill dedup."""
+    var a = OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    )
+    var b = OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    )
+    assert_true(on_save_equal(a, b))
+    assert_false(on_save_equal(a, OnSaveAction(
+        String("rust"), String("/usr/bin/black"),
+        List[String](), String(""),
+    )))
+    assert_false(on_save_equal(a, OnSaveAction(
+        String("python"), String("/opt/black"),
+        List[String](), String(""),
+    )))
+    var with_arg = OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    )
+    with_arg.args.append(String("--x"))
+    assert_false(on_save_equal(a, with_arg))
+
+
+def test_project_settings_on_save_enable_disable() raises:
+    """Ticking a library row copies it into ``project_actions`` (enable);
+    unticking removes the matching copy (disable). Both raise dirty."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    var ps = _ps_open(lib^, List[OnSaveAction]())
+    assert_equal(len(ps.project_actions), 0)
+    ps._os_toggle(0)
+    assert_equal(len(ps.project_actions), 1)
+    assert_true(ps._os_is_enabled(ps._os_union()[0]))
+    assert_true(ps.on_save_dirty)
+    ps._os_toggle(0)
+    assert_equal(len(ps.project_actions), 0)
+
+
+def test_project_settings_grammars_add_remove() raises:
+    """Project Settings Grammars section: add a mapping, type an extension,
+    then remove it — each step raises ``grammars_dirty``."""
+    var ps = ProjectSettings()
+    ps.open(
+        String("/tmp/turbokod_ps_unit"), ProjectTargets(),
+        List[GrammarOverride](), List[OnSaveAction](), List[OnSaveAction](),
+    )
+    ps.section = 2  # Grammars
+    ps.focus = UInt8(17)  # _FOCUS_GR_ADD
+    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(len(ps.grammars), 1)
+    assert_true(ps.grammars_dirty)
+    ps.focus = UInt8(15)  # _FOCUS_GR_EXT
+    _ = ps.handle_key(_key(UInt32(ord("h"))))
+    _ = ps.handle_key(_key(UInt32(ord("t"))))
+    _ = ps.handle_key(_key(UInt32(ord("m"))))
+    _ = ps.handle_key(_key(UInt32(ord("l"))))
+    assert_equal(ps.grammars[0].ext, String("html"))
+    ps.focus = UInt8(18)  # _FOCUS_GR_REMOVE
+    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(len(ps.grammars), 0)
+
+
+def test_project_settings_paint_smoke() raises:
+    """Paint each Project Settings section (in-grid + detached) onto a
+    canvas — exercises the layout / sub-painter math that the logic-only
+    tests skip. A crash or out-of-bounds write fails the test."""
+    var lib = List[OnSaveAction]()
+    lib.append(OnSaveAction(
+        String("python"), String("/usr/bin/black"),
+        List[String](), String(""),
+    ))
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("tests")
+    t1.program = String("pytest")
+    src.targets.append(t1^)
+    src.active = 0
+    var grammars = List[GrammarOverride]()
+    grammars.append(GrammarOverride(String("html"), String("django-html")))
+    var ps = ProjectSettings()
+    ps.open(
+        String("/tmp/turbokod_ps_unit"), src^, grammars^, lib^,
+        List[OnSaveAction](),
+    )
+    var screen = Rect(0, 0, 100, 40)
+    for sec in range(3):
+        ps.section = sec
+        var c = Canvas(100, 40)
+        c.clear(default_attr())
+        ps.paint(c, screen)
+    # Detached fills the whole surface (native window path).
+    ps.detached = True
+    for sec in range(3):
+        ps.section = sec
+        var c2 = Canvas(100, 40)
+        c2.clear(default_attr())
+        ps.paint(c2, screen)
 
 
 def test_run_session_lifecycle() raises:
@@ -17493,6 +17645,7 @@ def _run_chunk_01() raises:
     test_on_save_action_default_is_empty()
     test_on_save_action_copy_preserves_args()
     test_settings_open_seeds_state()
+    test_project_settings_on_save_seeds_state()
 
 
 def _run_chunk_02() raises:
@@ -17867,7 +18020,107 @@ def _run_chunk_04() raises:
     test_smart_wrap_lines_comment_stops_structural_scan()
 
 
+def test_sgr_parse() raises:
+    """``parse_sgr`` decodes ANSI color into clean text + ColorRuns — the
+    in-direction counterpart to ``attr_to_sgr`` that lets the test/run
+    panes colorize ``pytest --color=yes`` output instead of showing raw
+    escape bytes."""
+    var base = Attr(LIGHT_GRAY, BLACK)
+    var esc = String("\x1b")
+    # ESC[31m FAIL ESC[0m ok → clean "FAIL ok", one red run over [0,4).
+    var parsed = parse_sgr(
+        esc + String("[31mFAIL") + esc + String("[0m ok"), base,
+    )
+    assert_equal(parsed[0], String("FAIL ok"))
+    var runs = parsed[1].copy()
+    assert_equal(len(runs), 1)
+    assert_equal(runs[0].start, 0)
+    assert_equal(runs[0].end, 4)
+    assert_equal(Int(runs[0].attr.fg), Int(RED))
+    # 256-color extended form.
+    var p2 = parse_sgr(esc + String("[38;5;208mX"), base)
+    assert_equal(p2[0], String("X"))
+    var r2 = p2[1].copy()
+    assert_equal(len(r2), 1)
+    assert_equal(Int(r2[0].attr.fg), 208)
+    # Plain text → unchanged, no runs.
+    var p3 = parse_sgr(String("plain"), base)
+    assert_equal(p3[0], String("plain"))
+    assert_equal(len(p3[1]), 0)
+
+
+def test_detect_pytest_tests() raises:
+    """Editor's gutter test detection finds ``def test*`` / ``class Test*``
+    with correct pytest node ids, honoring class nesting and pytest's
+    collection rules (no methods of non-Test classes)."""
+    var src = String(
+        "import pytest\n"
+        "\n"
+        "def test_top():\n"
+        "    pass\n"
+        "\n"
+        "class TestThing:\n"
+        "    def test_method(self):\n"
+        "        pass\n"
+        "\n"
+        "class Helper:\n"
+        "    def test_not_collected(self):\n"
+        "        pass\n"
+        "\n"
+        "async def test_async():\n"
+        "    pass\n"
+    )
+    var ed = Editor(src)
+    ed.file_path = String("/x/test_foo.py")
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.test_rows), 4)
+    assert_equal(ed.test_nodes[0], String("/x/test_foo.py::test_top"))
+    assert_equal(ed.test_nodes[1], String("/x/test_foo.py::TestThing"))
+    assert_equal(
+        ed.test_nodes[2], String("/x/test_foo.py::TestThing::test_method")
+    )
+    assert_equal(ed.test_nodes[3], String("/x/test_foo.py::test_async"))
+
+
+def test_detect_skips_non_test_file() raises:
+    """A file pytest wouldn't collect (not ``test_*.py`` / ``*_test.py``)
+    gets no run-icons, even with ``test_*`` functions."""
+    var ed = Editor(String("def test_top():\n    pass\n"))
+    ed.file_path = String("/x/helpers.py")
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.test_rows), 0)
+
+
+def test_detect_custom_python_files_glob() raises:
+    """A project's pytest ``python_files`` globs (e.g. ``*__tests.py``)
+    drive detection: a file the defaults would skip becomes a test file
+    once the project's globs are pushed via ``set_test_file_globs``."""
+    var ed = Editor(String("def test_round():\n    assert True\n"))
+    ed.file_path = String("/x/utils__tests.py")
+    # With pytest defaults this isn't a test file.
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.test_rows), 0)
+    # Push the project's globs → now it's collectable.
+    var globs = List[String]()
+    globs.append(String("test_*.py"))
+    globs.append(String("*__tests.py"))
+    ed.set_test_file_globs(globs)
+    ed.flush_highlights(registry, speller)
+    assert_equal(len(ed.test_rows), 1)
+    assert_equal(ed.test_nodes[0], String("/x/utils__tests.py::test_round"))
+
+
 def _run_chunk_05() raises:
+    test_sgr_parse()
+    test_detect_pytest_tests()
+    test_detect_skips_non_test_file()
+    test_detect_custom_python_files_glob()
     test_text_view_selection_extracts_text()
     test_string_utils_slice_codepoints_handles_multibyte()
     test_debug_pane_close_button_dispatches()
@@ -17883,6 +18136,11 @@ def _run_chunk_05() raises:
     test_targets_dialog_add_and_remove()
     test_targets_dialog_save_button_submits()
     test_targets_dialog_esc_discards_edits()
+    test_project_on_save_round_trip()
+    test_on_save_equal_matching()
+    test_project_settings_on_save_enable_disable()
+    test_project_settings_grammars_add_remove()
+    test_project_settings_paint_smoke()
     test_run_session_lifecycle()
     test_session_round_trip()
     test_session_per_user_path()
