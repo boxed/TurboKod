@@ -42,7 +42,7 @@ from .events import (
     KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
-    MOUSE_BUTTON_RIGHT,
+    MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
 )
 from .clipboard import clipboard_copy, clipboard_paste
 from .config import (
@@ -4711,7 +4711,14 @@ struct Desktop(Movable):
         """
         # Reset the caret-blink clock on real input so the caret is solid
         # the moment the user types or clicks (it only blinks once idle).
-        if event.kind == EVENT_KEY or event.kind == EVENT_MOUSE:
+        # Bare hover motion (no button held) is NOT input — it streams in at
+        # the display refresh rate while the pointer moves, and resetting the
+        # clock on each one pins the caret solid for as long as the mouse is
+        # waved around. A drag (button held + motion) still counts.
+        var passive_hover = event.button == MOUSE_BUTTON_NONE and event.motion
+        if event.kind == EVENT_KEY or (
+            event.kind == EVENT_MOUSE and not passive_hover
+        ):
             self._last_input_ms = monotonic_ms()
         # The first resize after a session restore is typically the
         # host terminal pushing its real dimensions. Re-apply the saved
