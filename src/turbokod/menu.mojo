@@ -437,15 +437,26 @@ struct MenuBar(Movable):
         """Indices of visible menus in painted left-to-right order: the
         system menu (if any) first, then rank-sorted left-aligned menus,
         then right-aligned menus reversed so the leftmost-visible
-        (last-inserted) right menu comes first."""
+        (last-inserted) right menu comes first, and finally the Help menu.
+
+        Help is pinned dead last (even after the right-aligned Project
+        menu) so the native frontend, which appends menus to the NSMenu
+        bar in this order, follows the macOS standard of Help being the
+        rightmost menu. In the terminal frontend menu *positions* come
+        from ``_layout`` (left/right clusters), so this only governs the
+        keyboard-nav sweep there."""
         var system = -1
         var left = List[Int]()
         var right = List[Int]()
+        var help = -1
         for i in range(len(self.menus)):
             if not self.menus[i].visible:
                 continue
             if self.menus[i].is_system:
                 system = i
+            elif self.menus[i].label == String("Help") \
+                    and not self.menus[i].right_aligned:
+                help = i
             elif self.menus[i].right_aligned:
                 right.append(i)
             else:
@@ -470,6 +481,8 @@ struct MenuBar(Movable):
         while k >= 0:
             order.append(right[k])
             k -= 1
+        if help >= 0:
+            order.append(help)
         return order^
 
     def _step_item(mut self, delta: Int):

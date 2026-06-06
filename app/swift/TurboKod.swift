@@ -1602,6 +1602,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func installMenu(from text: String) {
         let mainMenu = NSMenu()
         var sawSystem = false
+        // Cleared up front so a rebuild that omits Help can't leave a
+        // dangling reference to the previous menu's submenu.
+        NSApp.helpMenu = nil
 
         var curSubmenu: NSMenu? = nil
         var curIsSystem = false
@@ -1634,6 +1637,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 item.submenu = submenu
                 mainMenu.addItem(item)
                 curSubmenu = submenu
+                // Designating the "Help" submenu as the app's help menu is
+                // what makes AppKit add its built-in search field (which
+                // searches every menu item across the bar). The Mojo core
+                // places Help rightmost via `_menu_rank`.
+                if !curIsSystem && label == "Help" {
+                    NSApp.helpMenu = submenu
+                }
             case "I":
                 // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>
                 guard let menu = curSubmenu, parts.count >= 7 else { continue }

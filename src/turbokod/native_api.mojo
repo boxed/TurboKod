@@ -55,6 +55,7 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
+    HELP_HOTKEYS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
     WINDOW_CLOSE, WINDOW_CLOSE_ALL,
@@ -195,6 +196,15 @@ def _build_menus(mut d: Desktop):
     dbg.append(MenuItem(String("Add Watch..."), DEBUG_ADD_WATCH))
     dbg.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
     d.menu_bar.add(Menu(String("Debug"), dbg^))
+    # Help — rank 100, so it lands rightmost (see ``_menu_rank``). The
+    # native frontend turns a menu titled "Help" into the standard macOS
+    # Help menu (with the built-in menu-search field); see ``installMenu``
+    # in TurboKod.swift. "Keyboard Shortcuts" opens the read-only
+    # reference covering every binding, including the editor-level chords
+    # (Cmd+Up/Down, …) that have no menu item of their own.
+    d.menu_bar.add(_mk_menu(String("Help"),
+        (String("Keyboard Shortcuts"), HELP_HOTKEYS),
+    ))
 
 
 def _refresh_menu_visibility(mut d: Desktop):

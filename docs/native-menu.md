@@ -57,6 +57,7 @@ Swift's 50 ms render timer calls `refreshMenu()`. The TSV is hashed (FNV-1a); re
 
 - **App menu slot**: Mojo's `≡` system menu (with Settings + Quit) lands in the macOS app-menu slot. `installMenu` prepends "About TurboKod" + a separator there, since macOS convention expects it.
 - **Shortcuts**: Mojo emits `"Cmd+Shift+S"`-style display strings; `applyShortcut` parses them into `NSEvent.ModifierFlags` + `keyEquivalent`. Letters: lowercase by default, kept uppercase when Shift is in the mask. Special keys: Up/Down/Left/Right/Home/End/PgUp/PgDn/Tab/Enter/Esc/Space/BkSp/Del/F1-F12 → corresponding `NSEvent` function-key codepoints.
+- **Help menu + search**: the Mojo core adds a `Help` menu (rank 100 in `_menu_rank`, so it sorts rightmost) in `_build_menus`, holding "Keyboard Shortcuts" → `HELP_HOTKEYS`. When `installMenu` builds a submenu titled `Help` it assigns it to `NSApp.helpMenu`, which is what makes AppKit attach its built-in search field (searches every menu item across the bar). `helpMenu` is reset to `nil` at the top of each rebuild so a snapshot without a Help menu can't leave a dangling reference. The `HELP_HOTKEYS` action opens a read-only editor buffer (see `Desktop._open_hotkeys_help`) listing every binding, including the editor-level chords (Cmd+Up/Down smart-select, Cmd+Left/Right, Ctrl+Alt+Up/Down multi-caret, …) that are handled directly in `Editor.handle_key` and so have no menu item — the registry-backed rows resolve their shortcut through `_shortcut_for_action` so they reflect rebindings.
 
 ## Adding a new menu item
 

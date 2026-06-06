@@ -70,6 +70,7 @@ from turbokod.desktop import (
     EDITOR_CUT, EDITOR_FIND, EDITOR_GOTO, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
     EDITOR_NEW, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REPLACE,
     EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT,
+    HELP_HOTKEYS,
     Hotkey, NavPoint,
     PROJECT_CLOSE_ACTION, PROJECT_SETTINGS,
     PROJECT_FIND,
@@ -463,6 +464,32 @@ def test_desktop_take_attention_drains_panes_and_dap() raises:
     d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 2000)
     assert_equal(d.take_attention_events(), 2)
     assert_equal(d.take_attention_events(), 0)   # drained
+
+
+def test_help_hotkeys_opens_readonly_reference() raises:
+    """Help ▸ Keyboard Shortcuts opens a single read-only window whose
+    body documents the editor-level chords that have no menu item.
+    Dispatching again refocuses rather than stacking duplicates."""
+    var d = Desktop()
+    var screen = Rect(0, 0, 120, 40)
+    var before = len(d.windows.windows)
+    _ = d.dispatch_action(HELP_HOTKEYS, screen)
+    assert_equal(len(d.windows.windows), before + 1)
+    var idx = len(d.windows.windows) - 1
+    assert_equal(d.windows.windows[idx].title, String("Keyboard Shortcuts"))
+    assert_true(d.windows.windows[idx].editor.read_only)
+    assert_true(not d.windows.windows[idx].editor.line_numbers)
+    # Body joins to one string; check both a registry-backed binding and
+    # an editor-only chord that no menu surfaces.
+    var body = String("")
+    for r in range(d.windows.windows[idx].editor.buffer.line_count()):
+        body = body + d.windows.windows[idx].editor.buffer.line(r) + String("\n")
+    assert_true(_contains(body, String("Grow selection")))
+    assert_true(_contains(body, String("Cmd+Up")))
+    assert_true(_contains(body, String("Save")))
+    # Second dispatch must not open a duplicate.
+    _ = d.dispatch_action(HELP_HOTKEYS, screen)
+    assert_equal(len(d.windows.windows), before + 1)
 
 
 def test_point_arithmetic() raises:
@@ -1831,6 +1858,29 @@ def test_menu_layout_pins_file_edit_window_help() raises:
     # The menus list itself must NOT be reordered (cached indices rely on it).
     assert_equal(bar.menus[0].label, String("Help"))
     assert_equal(bar.menus[5].label, String("Edit"))
+
+
+def test_display_order_pins_help_after_right_aligned() raises:
+    """``_display_order_indices`` (which drives the native NSMenu bar
+    order) must place a left-aligned Help menu dead last — after the
+    right-aligned Project menu — so the native frontend follows the
+    macOS convention of Help being the rightmost menu."""
+    var bar = MenuBar()
+    var sys_items = List[MenuItem]()
+    sys_items.append(MenuItem(String("Quit"), String("quit")))
+    bar.add(Menu(String("≡"), sys_items^, is_system=True))
+    bar.add(_empty_menu(String("File")))
+    bar.add(Menu(String("Project"), List[MenuItem](), right_aligned=True))
+    bar.add(_empty_menu(String("Debug")))
+    bar.add(_empty_menu(String("Help")))
+    var order = bar._display_order_indices()
+    var labels = List[String]()
+    for i in range(len(order)):
+        labels.append(bar.menus[order[i]].label)
+    # System first, Help last, Project immediately before it.
+    assert_equal(labels[0], String("≡"))
+    assert_equal(labels[len(labels) - 1], String("Help"))
+    assert_equal(labels[len(labels) - 2], String("Project"))
 
 
 def test_system_menu_pins_to_left_edge() raises:
@@ -17667,6 +17717,7 @@ def _run_chunk_00() raises:
     test_claude_state_label_round_trip()
     test_terminal_pane_attention_on_working_to_waiting()
     test_desktop_take_attention_drains_panes_and_dap()
+    test_help_hotkeys_opens_readonly_reference()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()
@@ -17812,6 +17863,7 @@ def _run_chunk_01() raises:
     test_basename()
     test_find_git_project()
     test_menu_layout_pins_file_edit_window_help()
+    test_display_order_pins_help_after_right_aligned()
     test_system_menu_pins_to_left_edge()
     test_right_aligned_menu_layout()
     test_desktop_project_lifecycle()

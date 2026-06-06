@@ -63,6 +63,7 @@ from turbokod import (
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
+    HELP_HOTKEYS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TERMINAL_NEW,
     WINDOW_CLOSE, WINDOW_CLOSE_ALL,
@@ -258,6 +259,9 @@ def main() raises:
         debug_items.append(MenuItem(String("Add Watch..."),           DEBUG_ADD_WATCH))
         debug_items.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
         desktop.menu_bar.add(Menu(String("Debug"), debug_items^))
+        desktop.menu_bar.add(_mk_menu(String("Help"),
+            (String("Keyboard Shortcuts"), HELP_HOTKEYS),
+        ))
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
 

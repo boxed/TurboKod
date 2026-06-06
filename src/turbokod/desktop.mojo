@@ -449,6 +449,10 @@ comptime _CARET_BLINK_HALF_MS = 530
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
 comptime APP_QUIT_ACTION      = String("quit")
 
+# Help ▸ Keyboard Shortcuts — opens a read-only buffer listing every
+# binding (including the editor-level chords that have no menu item).
+comptime HELP_HOTKEYS         = String("help:hotkeys")
+
 # View-menu file-tree item labels — the label encodes the current state
 # of the three-way cycle (hidden → docked right → docked left) and is
 # re-stamped every paint by ``_apply_view_config``.
@@ -1516,6 +1520,11 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             KEY_RIGHT, MOD_META | MOD_ALT, EDITOR_NAV_FORWARD,
+        ))
+        # Cmd+? (Cmd+Shift+/) — the macOS-standard Help binding. Opens the
+        # Keyboard Shortcuts reference; the page documents its own shortcut.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("/")), MOD_META | MOD_SHIFT, HELP_HOTKEYS,
         ))
 
     def _bottom_chrome_height(self, screen: Rect) -> Int:
@@ -5309,6 +5318,9 @@ struct Desktop(Movable):
                 self.config.smart_wrap_comma_threshold,
                 self.config.cursor_blink,
             )
+            return Optional[String]()
+        if action == HELP_HOTKEYS:
+            self._open_hotkeys_help(screen)
             return Optional[String]()
         if action == EDITOR_NEW:
             self.new_file(screen)
@@ -9538,6 +9550,147 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
         return True
+
+    def _hk_row(self, label: String, shortcut: String) -> String:
+        """One aligned ``label … shortcut`` line for the Keyboard
+        Shortcuts page. Labels are ASCII, so byte length is column
+        count. A blank shortcut still renders (a few entries are
+        purely informational)."""
+        var pad = 30 - len(label.as_bytes())
+        if pad < 2:
+            pad = 2
+        var spaces = String("")
+        for _ in range(pad):
+            spaces = spaces + String(" ")
+        return String("  ") + label + spaces + shortcut + String("\n")
+
+    def _hk_reg(self, label: String, action: String) -> String:
+        """A row whose shortcut is pulled live from the hotkey registry,
+        so it reflects any rebinding done in the action editor."""
+        return self._hk_row(label, self._shortcut_for_action(action))
+
+    def _hotkeys_help_text(self) -> String:
+        """Build the Keyboard Shortcuts reference document.
+
+        Registry-backed rows resolve their shortcut through
+        ``_shortcut_for_action`` (live, rebinding-aware); the editor
+        movement section is hardcoded because those chords are handled
+        directly in ``Editor.handle_key`` and never enter the registry —
+        they're exactly the bindings that have no menu item to surface
+        them, which is the reason this page exists."""
+        var t = String("Keyboard Shortcuts\n")
+        t = t + String("==================\n\n")
+
+        t = t + String("Files\n")
+        t = t + self._hk_reg(String("New"), EDITOR_NEW)
+        t = t + self._hk_reg(String("New window"), _HOST_NEW_WINDOW_ACTION)
+        t = t + self._hk_reg(String("New terminal pane"), TERMINAL_NEW)
+        t = t + self._hk_reg(String("New Claude pane"), TERMINAL_CLAUDE)
+        t = t + self._hk_reg(String("Open..."), EDITOR_OPEN)
+        t = t + self._hk_reg(String("Open project..."), PROJECT_OPEN)
+        t = t + self._hk_reg(String("Quick open..."), EDITOR_QUICK_OPEN)
+        t = t + self._hk_reg(String("Open recent..."), EDITOR_OPEN_RECENT)
+        t = t + self._hk_reg(String("Close window"), WINDOW_CLOSE)
+        t = t + self._hk_reg(String("Save"), EDITOR_SAVE)
+        t = t + String("\n")
+
+        t = t + String("Edit\n")
+        t = t + self._hk_reg(String("Undo"), EDITOR_UNDO)
+        t = t + self._hk_reg(String("Redo"), EDITOR_REDO)
+        t = t + self._hk_reg(String("Cut"), EDITOR_CUT)
+        t = t + self._hk_reg(String("Copy"), EDITOR_COPY)
+        t = t + self._hk_reg(String("Paste"), EDITOR_PASTE)
+        t = t + self._hk_row(String("Select all"), String("Ctrl+A"))
+        t = t + self._hk_reg(String("Toggle comment"), EDITOR_TOGGLE_COMMENT)
+        t = t + String("\n")
+
+        t = t + String("Find & navigate\n")
+        t = t + self._hk_reg(String("Find"), EDITOR_FIND)
+        t = t + self._hk_reg(String("Replace"), EDITOR_REPLACE)
+        t = t + self._hk_reg(String("Find next"), EDITOR_FIND_NEXT)
+        t = t + self._hk_reg(String("Find previous"), EDITOR_FIND_PREV)
+        t = t + self._hk_reg(String("Find in project"), PROJECT_FIND)
+        t = t + self._hk_reg(String("Replace in project"), PROJECT_REPLACE)
+        t = t + self._hk_reg(String("Go to line..."), EDITOR_GOTO)
+        t = t + self._hk_reg(String("Go to symbol..."), EDITOR_GOTO_SYMBOL)
+        t = t + self._hk_reg(String("Find symbol (project)"), EDITOR_FIND_SYMBOL)
+        t = t + self._hk_reg(String("Look up in docs"), EDITOR_LOOKUP_DOCS)
+        t = t + self._hk_reg(String("Navigate back"), EDITOR_NAV_BACK)
+        t = t + self._hk_reg(String("Navigate forward"), EDITOR_NAV_FORWARD)
+        t = t + String("\n")
+
+        t = t + String("Editor movement & selection\n")
+        t = t + self._hk_row(String("Grow selection"), String("Cmd+Up"))
+        t = t + self._hk_row(String("Shrink selection"), String("Cmd+Down"))
+        t = t + self._hk_row(String("Jump to end of line"), String("Cmd+Right"))
+        t = t + self._hk_row(String("Jump to start of line"), String("Cmd+Left"))
+        t = t + self._hk_row(String("Word left / right"), String("Alt+Left / Alt+Right"))
+        t = t + self._hk_row(String("Extend selection"), String("Shift + any move"))
+        t = t + self._hk_row(String("Add caret above"), String("Ctrl+Alt+Up"))
+        t = t + self._hk_row(String("Add caret below"), String("Ctrl+Alt+Down"))
+        t = t + self._hk_row(String("Column select"), String("tap Alt, hold + Up/Down"))
+        t = t + self._hk_reg(String("Code completion"), EDITOR_COMPLETE)
+        t = t + String("\n")
+
+        t = t + String("Windows & panes\n")
+        t = t + self._hk_row(String("Focus window 1-9"), String("Ctrl+1 .. Ctrl+9"))
+        t = t + self._hk_row(String("Focus file tree"), String("Ctrl+0"))
+        t = t + self._hk_reg(String("Focus debug pane"), DEBUG_FOCUS_PANE)
+        t = t + self._hk_reg(String("Next window"), WINDOW_ROTATE_NEXT)
+        t = t + self._hk_reg(String("Previous window"), WINDOW_ROTATE_PREV)
+        t = t + self._hk_row(String("Next / previous tab"),
+                             String("Cmd+Shift+Right / Left"))
+        t = t + String("\n")
+
+        t = t + String("Run & debug\n")
+        t = t + self._hk_reg(String("Run target"), TARGET_RUN)
+        t = t + self._hk_reg(String("Debug target"), TARGET_DEBUG)
+        t = t + self._hk_reg(String("Test target"), TARGET_TEST)
+        t = t + self._hk_reg(String("Test under debugger"), TARGET_TEST_DEBUG)
+        t = t + self._hk_reg(String("Start / Continue"), DEBUG_START_OR_CONTINUE)
+        t = t + self._hk_reg(String("Stop"), DEBUG_STOP)
+        t = t + self._hk_reg(String("Step over"), DEBUG_STEP_OVER)
+        t = t + self._hk_reg(String("Step into"), DEBUG_STEP_IN)
+        t = t + self._hk_reg(String("Step out"), DEBUG_STEP_OUT)
+        t = t + self._hk_reg(String("Run to cursor"), DEBUG_RUN_TO_CURSOR)
+        t = t + self._hk_reg(String("Toggle breakpoint"), DEBUG_TOGGLE_BREAKPOINT)
+        t = t + self._hk_reg(String("Conditional breakpoint"), DEBUG_CONDITIONAL_BP)
+        t = t + String("\n")
+
+        t = t + String("Git\n")
+        t = t + self._hk_reg(String("Show diff viewer"), GIT_LOCAL_CHANGES)
+        t = t + String("\n")
+
+        t = t + String("Application\n")
+        t = t + self._hk_reg(String("Settings"), APP_SETTINGS)
+        t = t + self._hk_reg(String("Keyboard Shortcuts"), HELP_HOTKEYS)
+        t = t + self._hk_reg(String("Quit"), APP_QUIT_ACTION)
+        return t
+
+    def _open_hotkeys_help(mut self, screen: Rect):
+        """Open the Keyboard Shortcuts reference in a read-only editor
+        window. Mirrors ``_open_doc_entry``: reusing the editor surface
+        gives scroll, in-page search (Cmd+F), and copy for free, on both
+        the terminal and native frontends. If the page is already open,
+        just refocus it instead of stacking duplicates."""
+        var title = String("Keyboard Shortcuts")
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].title == title \
+                    and self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.read_only:
+                self.windows.focus_by_index(i)
+                return
+        var text = self._hotkeys_help_text()
+        var workspace = self.workspace_rect(screen)
+        var rect = self._default_window_rect(workspace)
+        var was_max = self._frontmost_maximized()
+        self.windows.add(Window.editor_window(title^, rect, text^))
+        self._open_count += 1
+        var idx = len(self.windows.windows) - 1
+        self.windows.windows[idx].editor.read_only = True
+        self.windows.windows[idx].editor.line_numbers = False
+        if was_max:
+            self.windows.windows[idx].toggle_maximize(workspace)
 
     def _open_doc_entry(
         mut self, entry_idx: Int, display: String, screen: Rect,
