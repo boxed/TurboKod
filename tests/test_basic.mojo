@@ -487,9 +487,46 @@ def test_help_hotkeys_opens_readonly_reference() raises:
     assert_true(_contains(body, String("Grow selection")))
     assert_true(_contains(body, String("Cmd+Up")))
     assert_true(_contains(body, String("Save")))
+    # Aliases sharing one help string merge into a single row.
+    assert_true(_contains(body, String("Ctrl+Space / Ctrl+J / F2")))
     # Second dispatch must not open a duplicate.
     _ = d.dispatch_action(HELP_HOTKEYS, screen)
     assert_equal(len(d.windows.windows), before + 1)
+
+
+def test_hotkeys_page_is_generated_from_registry() raises:
+    """The page is built by looping the global hotkey registry, so every
+    binding that carries a group + help is guaranteed to appear — this is
+    the property that keeps the docs from drifting. Assert it directly:
+    each documented hotkey's help string is present in the rendered text,
+    and ``doc_only`` rows (editor-handled chords) are never dispatched."""
+    var d = Desktop()
+    var text = d._hotkeys_help_text()
+    var documented = 0
+    var doc_only_seen = 0
+    for i in range(len(d._hotkeys)):
+        if d._hotkeys[i].doc_only:
+            doc_only_seen += 1
+        if len(d._hotkeys[i].help.as_bytes()) == 0:
+            continue
+        documented += 1
+        assert_true(_contains(text, d._hotkeys[i].help))
+    # Sanity: the registry actually carries documented + doc_only entries
+    # (guards against the loop silently doing nothing).
+    assert_true(documented > 20)
+    assert_true(doc_only_seen > 0)
+    # A doc_only chord (Cmd+Up smart-select) must NOT be dispatched by the
+    # desktop hotkey table — the editor owns it. dispatch_action is only
+    # reached on a registry match, so a Cmd+Up key event must fall through
+    # the hotkey loop (returns the unhandled forwarding path, not a
+    # smart-select). We assert the table contains it as doc_only.
+    var found_cmd_up_doc_only = False
+    for i in range(len(d._hotkeys)):
+        if d._hotkeys[i].key == KEY_UP \
+                and d._hotkeys[i].mods == MOD_META \
+                and d._hotkeys[i].doc_only:
+            found_cmd_up_doc_only = True
+    assert_true(found_cmd_up_doc_only)
 
 
 def test_point_arithmetic() raises:
@@ -17718,6 +17755,7 @@ def _run_chunk_00() raises:
     test_terminal_pane_attention_on_working_to_waiting()
     test_desktop_take_attention_drains_panes_and_dap()
     test_help_hotkeys_opens_readonly_reference()
+    test_hotkeys_page_is_generated_from_registry()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()
