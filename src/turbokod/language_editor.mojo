@@ -27,7 +27,6 @@ priority list. For user-added languages everything is editable and
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
@@ -42,11 +41,11 @@ from .events import (
     MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .geometry import Point, Rect, compute_dialog_rect
+from .geometry import Point, Rect
 from .list_box import ListBox
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
-from .view import RowCursor
+from .view import DraggableDialog, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -142,10 +141,6 @@ def _build_layout(rect: Rect) -> _Layout:
     )
 
 
-def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
-
-
 @fieldwise_init
 struct _PlacedButton(ImplicitlyCopyable, Movable):
     var button: ShadowButton
@@ -173,8 +168,8 @@ struct LanguageEditor(Movable):
     the widget itself."""
     var argv_tf: TextField
     var focus: UInt8
-    var pos: Optional[Point]
-    var _drag: Optional[Point]
+    var _dlg: DraggableDialog
+    """Auto-center placement + title-bar move-by-drag."""
     var _buttons: List[_PlacedButton]
     var _type_ahead: TypeAhead
     """Type-to-jump prefix buffer for the candidates list. Reset on
@@ -191,8 +186,7 @@ struct LanguageEditor(Movable):
         self._list = ListBox()
         self.argv_tf = TextField()
         self.focus = _FOCUS_LANG
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg = DraggableDialog()
         self._type_ahead = TypeAhead()
         self._buttons = List[_PlacedButton]()
         self._buttons.append(_PlacedButton(
@@ -241,8 +235,7 @@ struct LanguageEditor(Movable):
         self.focus = (
             _FOCUS_LIST if is_existing else _FOCUS_LANG
         )
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._type_ahead.reset()
 
     def close(mut self):
@@ -255,8 +248,7 @@ struct LanguageEditor(Movable):
         self._list.reset()
         self.argv_tf = TextField()
         self.focus = _FOCUS_LANG
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
             self._buttons[i].button.pressed = False
@@ -284,7 +276,7 @@ struct LanguageEditor(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -557,34 +549,20 @@ struct LanguageEditor(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Buttons first.
         if self._dispatch_buttons(event):
             return True
         # Drag.
-        if self._drag:
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and event.motion:
-                var off = self._drag.value()
-                self.pos = Optional[Point](Point(
-                    event.pos.x - off.x, event.pos.y - off.y,
-                ))
-                return True
-            if not event.pressed:
-                self._drag = Optional[Point]()
+        if self._dlg.handle_drag_continue(event):
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
             self.close()
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion and event.pos.y == rect.a.y \
-                and rect.a.x <= event.pos.x and event.pos.x < rect.b.x:
-            self._drag = Optional[Point](Point(
-                event.pos.x - rect.a.x, event.pos.y - rect.a.y,
-            ))
+        if self._dlg.handle_drag_start(event, rect):
             return True
         # Wheel scrolls the candidate list when the cursor is over it.
         # ``handle_mouse_press`` clamps scroll to the item count so the

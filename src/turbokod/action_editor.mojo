@@ -27,7 +27,6 @@ sees ``submitted``.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
@@ -50,10 +49,10 @@ from .events import (
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
-from .geometry import Point, Rect, compute_dialog_rect
+from .geometry import Point, Rect
 from .language_config import built_in_servers
 from .text_field import Form
-from .view import RowCursor
+from .view import DraggableDialog, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -79,10 +78,6 @@ comptime _BROWSE_BTN_W = 9
 """Width of the Browse button (face " Browse " = 8 cols + 1-col
 shadow). Used to carve out space at the right edge of the Program
 row so the editable strip doesn't overrun the button."""
-
-
-def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 @fieldwise_init
@@ -166,8 +161,8 @@ struct ActionEditor(Movable):
     being replaced). Carried verbatim so the host can re-find the
     record without keeping its own pending state."""
     var focus: UInt8
-    var pos: Optional[Point]
-    var _drag: Optional[Point]
+    var _dlg: DraggableDialog
+    """Auto-center placement + title-bar move-by-drag."""
     var file_dialog: FileDialog
     """Inline browse picker. When ``file_dialog.active`` is True it
     eats all events on top of this dialog; ``handle_*`` route to it
@@ -200,8 +195,7 @@ struct ActionEditor(Movable):
         self.entry = OnSaveAction()
         self.edit_index = -1
         self.focus = _FOCUS_LANG
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg = DraggableDialog()
         self.file_dialog = FileDialog()
         self.lang_dropdown = _build_lang_dropdown(String(""))
         self.form = Form()
@@ -234,8 +228,7 @@ struct ActionEditor(Movable):
         self.active = True
         self.submitted = False
         self.focus = _FOCUS_LANG
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self.lang_dropdown = _build_lang_dropdown(seed_lang^)
         self.form = Form()
         self.form.add(_FOCUS_PROGRAM)
@@ -251,8 +244,7 @@ struct ActionEditor(Movable):
         self.entry = OnSaveAction()
         self.edit_index = -1
         self.focus = _FOCUS_LANG
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self.file_dialog.close()
         self.lang_dropdown = _build_lang_dropdown(String(""))
         self.form = Form()
@@ -282,7 +274,7 @@ struct ActionEditor(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -520,7 +512,7 @@ struct ActionEditor(Movable):
             return True
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Open dropdown popup gets first dibs on the click — same as
         # the keyboard branch. ``handle_mouse`` toggles open on body
@@ -541,28 +533,14 @@ struct ActionEditor(Movable):
         # Buttons first so a click on a button focused elsewhere works.
         if self._dispatch_buttons(event):
             return True
-        if self._drag:
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and event.motion:
-                var off = self._drag.value()
-                self.pos = Optional[Point](Point(
-                    event.pos.x - off.x, event.pos.y - off.y,
-                ))
-                return True
-            if not event.pressed:
-                self._drag = Optional[Point]()
+        if self._dlg.handle_drag_continue(event):
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
             self.close()
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion and event.pos.y == rect.a.y \
-                and rect.a.x <= event.pos.x and event.pos.x < rect.b.x:
-            self._drag = Optional[Point](Point(
-                event.pos.x - rect.a.x, event.pos.y - rect.a.y,
-            ))
+        if self._dlg.handle_drag_start(event, rect):
             return True
         # All input-field mouse handling lives inside the ``Form``
         # widget — drag tracking, click counting, motion / release

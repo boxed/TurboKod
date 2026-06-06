@@ -24,7 +24,7 @@ that live on a single physical line.
 """
 
 from .canvas import TAB_WIDTH
-from .string_utils import char_width, codepoint_at
+from .string_utils import char_width, codepoint_at, utf8_codepoint_size
 
 
 def _is_ident_byte(b: Int) -> Bool:
@@ -229,17 +229,7 @@ def build_concealed_segment(
             cell += TAB_WIDTH - (cell % TAB_WIDTH)
             i += 1
             continue
-        var seq_len: Int
-        if b < 0x80:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
+        var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
         var glyph_start = i

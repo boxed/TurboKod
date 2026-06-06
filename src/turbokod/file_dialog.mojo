@@ -34,8 +34,8 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import join_path
-from .geometry import Point, Rect, compute_dialog_rect
-from .view import RowCursor
+from .geometry import Point, Rect
+from .view import DraggableDialog, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -47,10 +47,6 @@ comptime _LIST_HEIGHT = _DIALOG_H - 7
 """Visible rows in the directory listing. The -7 budget covers:
 1 top border + 1 current-dir + 1 gap above list + 1 gap below list +
 1 button face + 1 button shadow + 1 hint/bottom-border."""
-
-
-def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 @fieldwise_init
@@ -86,16 +82,10 @@ struct FileDialog(Movable):
     var submitted: Bool
     var selected_path: String
     var browser: DirBrowser
-    var pos: Optional[Point]
-    """Top-left of the dialog, or ``None`` to let ``_dialog_rect``
-    auto-center. Stays unset until the user drags the title bar —
-    each call to ``open`` resets it so a freshly-opened dialog
-    always starts centered, even if the previous run was moved."""
-    var _drag: Optional[Point]
-    """Cursor offset within the dialog at drag-start. ``None`` =
-    not currently dragging. Stored as offset rather than as a
-    starting absolute point so the move tracks the cursor exactly,
-    not relative to where the press happened on screen."""
+    var _dlg: DraggableDialog
+    """Auto-center placement + title-bar move-by-drag. Reset on every
+    ``open`` so a freshly-opened dialog starts centered even if the
+    previous run was dragged elsewhere."""
     var dirs_only: Bool
     """Directory-pick mode. When True the listing is filtered to
     directories (so the user can browse without files cluttering
@@ -118,8 +108,7 @@ struct FileDialog(Movable):
         self.submitted = False
         self.selected_path = String("")
         self.browser = DirBrowser(False)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg = DraggableDialog()
         self.dirs_only = False
         self.title = String(" Open File ")
         self._open_button = ShadowButton(String(" Open Project "), 0, 0)
@@ -132,8 +121,7 @@ struct FileDialog(Movable):
         self.title = String(" Open File ")
         self.browser = DirBrowser(False)
         self.browser.open(start_dir^)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
 
     def open_directory(
         mut self,
@@ -156,8 +144,7 @@ struct FileDialog(Movable):
         self.title = title^
         self.browser = DirBrowser(True)
         self.browser.open(start_dir^)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._open_button = ShadowButton(button_label^, 0, 0)
 
     def set_project(mut self, project: Optional[String]):
@@ -174,8 +161,7 @@ struct FileDialog(Movable):
         self.dirs_only = False
         self.title = String(" Open File ")
         self.browser = DirBrowser(False)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._open_button = ShadowButton(String(" Open Project "), 0, 0)
 
     # --- painting ----------------------------------------------------------
@@ -190,7 +176,7 @@ struct FileDialog(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Drop shadow first — it darkens cells *outside* ``rect`` so
         # whatever workspace content sits behind the dialog reads as
@@ -299,25 +285,13 @@ struct FileDialog(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # --- title-bar drag: start / continue / end ---------------
         # Resolved before any other mouse handling so a click that
         # *starts* on the title row never also triggers list / button
         # behaviour even if the cursor crosses into them mid-drag.
-        if self._drag:
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and event.motion:
-                var off = self._drag.value()
-                self.pos = Optional[Point](Point(
-                    event.pos.x - off.x, event.pos.y - off.y,
-                ))
-                return True
-            if not event.pressed:
-                # Release ends the drag regardless of position.
-                self._drag = Optional[Point]()
-                return True
-            # In-progress drag swallows everything else.
+        if self._dlg.handle_drag_continue(event):
             return True
         # Close button [■] dismisses the dialog. Checked before the
         # title-bar drag-start below so a click on the close glyph
@@ -327,12 +301,7 @@ struct FileDialog(Movable):
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
             self.close()
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion and event.pos.y == rect.a.y \
-                and rect.a.x <= event.pos.x and event.pos.x < rect.b.x:
-            self._drag = Optional[Point](Point(
-                event.pos.x - rect.a.x, event.pos.y - rect.a.y,
-            ))
+        if self._dlg.handle_drag_start(event, rect):
             return True
         # Directory-pick mode's submit button shares the buttons row.
         # Route the event through it before the jump-button strip so a

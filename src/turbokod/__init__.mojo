@@ -180,6 +180,8 @@ from .status import StatusBar, StatusItem, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .terminal import Terminal
 from .text_field import TextFieldKeyResult
-from .view import Drawable, EventHandler, Fill, Frame, Label, centered
+from .view import (
+    DraggableDialog, Drawable, Fill, FocusGroup, Frame, Label, centered,
+)
 from .vt import Vt
 from .window import Window, WindowManager

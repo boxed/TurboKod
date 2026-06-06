@@ -60,7 +60,7 @@ from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
     char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
-    prev_codepoint_start, word_char_step,
+    prev_codepoint_start, utf8_codepoint_size, word_char_step,
 )
 
 
@@ -1012,24 +1012,12 @@ def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
 # --- UTF-8 boundary helpers (mirrors editor.mojo) -----------------------
 
 
-def _utf8_codepoint_size(b: Int) -> Int:
-    if b < 0x80:
-        return 1
-    if (b & 0xE0) == 0xC0:
-        return 2
-    if (b & 0xF0) == 0xE0:
-        return 3
-    if (b & 0xF8) == 0xF0:
-        return 4
-    return 1
-
-
 def _utf8_step_forward(text: String, col: Int) -> Int:
     var bytes = text.as_bytes()
     var n = len(bytes)
     if col >= n:
         return n
-    var step = _utf8_codepoint_size(Int(bytes[col]))
+    var step = utf8_codepoint_size(Int(bytes[col]))
     var nxt = col + step
     if nxt > n:
         nxt = n

@@ -12,7 +12,7 @@ from std.collections import List
 from .cell import Cell, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
-from .string_utils import char_width, codepoint_at
+from .string_utils import char_width, codepoint_at, utf8_codepoint_size
 
 
 # Number of cells a tab byte expands to. ``put_text`` aligns each tab
@@ -155,7 +155,7 @@ struct Canvas(Copyable, Movable):
                 i += 1
                 continue
             var glyph: String
-            var seq_len: Int
+            var seq_len = utf8_codepoint_size(b)
             if b < 0x80:
                 # ASCII control bytes (0x00..0x1F minus 0x09 tab, which
                 # the loop's earlier tab branch already handled; 0x0A
@@ -168,16 +168,8 @@ struct Canvas(Copyable, Movable):
                     glyph = _control_picture_glyph(b)
                 else:
                     glyph = chr(b)
-                seq_len = 1
-            elif (b & 0xE0) == 0xC0 and i + 2 <= n:
-                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+2]))
-                seq_len = 2
-            elif (b & 0xF0) == 0xE0 and i + 3 <= n:
-                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+3]))
-                seq_len = 3
-            elif (b & 0xF8) == 0xF0 and i + 4 <= n:
-                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+4]))
-                seq_len = 4
+            elif seq_len > 1 and i + seq_len <= n:
+                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len]))
             else:
                 # Stray continuation or truncated tail — show ``?``
                 # rather than losing the column to silence.
@@ -419,17 +411,7 @@ def wrap_to_width(text: String, width: Int) -> List[String]:
             cps.append(String(" "))
             i += 1
             continue
-        var seq_len: Int
-        if b < 0x80:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
+        var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
         cps.append(String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len])))
@@ -526,17 +508,7 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
             cell += TAB_WIDTH - (cell % TAB_WIDTH)
             i += 1
             continue
-        var seq_len: Int
-        if b < 0x80:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
+        var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
         for _ in range(seq_len):
@@ -564,17 +536,7 @@ def utf8_codepoint_count(text: String) -> Int:
             count += TAB_WIDTH - (count % TAB_WIDTH)
             i += 1
             continue
-        var seq_len: Int
-        if b < 0x80:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
+        var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
         count += char_width(codepoint_at(text, i)[0])

@@ -24,22 +24,7 @@ from .canvas import Canvas, TAB_WIDTH
 from .cell import Cell
 from .colors import Attr
 from .geometry import Point, Rect
-from .string_utils import char_width, codepoint_at
-
-
-def _codepoint_size(b: Int) -> Int:
-    """Byte length of the UTF-8 codepoint that begins with lead byte ``b``.
-    Returns 1 for invalid leads so a stray continuation byte never traps
-    a forward walk."""
-    if b < 0x80:
-        return 1
-    if (b & 0xE0) == 0xC0:
-        return 2
-    if (b & 0xF0) == 0xE0:
-        return 3
-    if (b & 0xF8) == 0xF0:
-        return 4
-    return 1
+from .string_utils import char_width, codepoint_at, utf8_codepoint_size
 
 
 struct Painter(Copyable, Movable):
@@ -90,7 +75,7 @@ struct Painter(Copyable, Movable):
             else:
                 # Emoji advance two cells, matching ``Canvas.put_text``.
                 x += char_width(codepoint_at(text, i)[0])
-                i += _codepoint_size(b)
+                i += utf8_codepoint_size(b)
         if i >= n:
             return 0
         if i == 0:

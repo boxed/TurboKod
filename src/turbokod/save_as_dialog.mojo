@@ -36,9 +36,9 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import basename, join_path, parent_path
-from .geometry import Point, Rect, compute_dialog_rect
+from .geometry import Point, Rect
 from .text_field import TextField
-from .view import FocusGroup, RowCursor
+from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     hit_close_button, paint_close_button, paint_window_title,
 )
@@ -55,10 +55,6 @@ comptime _LIST_HEIGHT = _DIALOG_H - 9
 # and the directory listing. Slot order is the Tab order.
 comptime _SLOT_INPUT   = 0
 comptime _SLOT_LISTING = 1
-
-
-def _dialog_rect(screen: Rect, pos: Optional[Point]) -> Rect:
-    return compute_dialog_rect(screen, pos, _DIALOG_W, _DIALOG_H)
 
 
 comptime _SAVE_BUTTON_LABEL = String(" Save ")
@@ -127,13 +123,9 @@ struct SaveAsDialog(Movable):
     var selected_path: String     # populated on submit
     var _focus: FocusGroup        # 2 slots: input + listing
     var browser: DirBrowser       # dirs-only listing
-    var pos: Optional[Point]
-    """Top-left of the dialog after a title-bar drag, or ``None`` to
-    auto-center. Reset on every ``open`` so a freshly-invoked dialog
-    starts in the middle of the screen."""
-    var _drag: Optional[Point]
-    """Cursor offset within the dialog at drag-start; ``None`` means
-    not currently dragging."""
+    var _dlg: DraggableDialog
+    """Auto-center placement + title-bar move-by-drag. Reset on every
+    ``open`` so a freshly-invoked dialog starts centered."""
     var _save_button: ShadowButton
     """Persistent " Save " button on the input row. Press-latch state
     lives here so the button can't drop a captured press between
@@ -147,8 +139,7 @@ struct SaveAsDialog(Movable):
         self._focus = FocusGroup(2)
         self._focus.focus_force(_SLOT_INPUT)
         self.browser = DirBrowser(True)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg = DraggableDialog()
         self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
 
     def open(mut self, var start_path: String):
@@ -170,8 +161,7 @@ struct SaveAsDialog(Movable):
         self.selected_path = String("")
         self._focus.focus_force(_SLOT_INPUT)
         self.browser.open(dir^)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
 
     def set_project(mut self, project: Optional[String]):
@@ -189,8 +179,7 @@ struct SaveAsDialog(Movable):
         self.selected_path = String("")
         self._focus.focus_force(_SLOT_INPUT)
         self.browser = DirBrowser(True)
-        self.pos = Optional[Point]()
-        self._drag = Optional[Point]()
+        self._dlg.reset()
         self._save_button = ShadowButton(_SAVE_BUTTON_LABEL, 0, 0)
 
     # --- painting ----------------------------------------------------------
@@ -204,7 +193,7 @@ struct SaveAsDialog(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
@@ -338,7 +327,7 @@ struct SaveAsDialog(Movable):
         if not self.active:
             return False
         return _build_layout(
-            _dialog_rect(screen, self.pos),
+            self._dlg.rect(screen, _DIALOG_W, _DIALOG_H),
         ).input_rect.contains(pos)
 
     def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
@@ -346,24 +335,14 @@ struct SaveAsDialog(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = _dialog_rect(screen, self.pos)
+        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
-        # Title-bar drag: same handling as ``FileDialog`` — a press on
-        # the title row begins a move, motion repositions, release
-        # ends. Resolved before any input/listing dispatch so a click
-        # that *starts* on the title can never also activate widgets
-        # the cursor crosses while moving.
-        if self._drag:
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and event.motion:
-                var off = self._drag.value()
-                self.pos = Optional[Point](Point(
-                    event.pos.x - off.x, event.pos.y - off.y,
-                ))
-                return True
-            if not event.pressed:
-                self._drag = Optional[Point]()
-                return True
+        # Title-bar drag: a press on the title row begins a move,
+        # motion repositions, release ends. Resolved before any
+        # input/listing dispatch so a click that *starts* on the title
+        # can never also activate widgets the cursor crosses while
+        # moving.
+        if self._dlg.handle_drag_continue(event):
             return True
         # Close button [■] dismisses the dialog. Resolved before the
         # title-bar drag so a click on the glyph doesn't begin a move.
@@ -372,12 +351,7 @@ struct SaveAsDialog(Movable):
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
             self.close()
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion and event.pos.y == rect.a.y \
-                and rect.a.x <= event.pos.x and event.pos.x < rect.b.x:
-            self._drag = Optional[Point](Point(
-                event.pos.x - rect.a.x, event.pos.y - rect.a.y,
-            ))
+        if self._dlg.handle_drag_start(event, rect):
             return True
         # Save button — same press/drag/release state machine as the
         # jump buttons. Routed before the input-strip click handler

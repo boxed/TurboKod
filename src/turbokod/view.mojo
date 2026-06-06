@@ -13,6 +13,7 @@ state-bearing widget structs.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .painter import Painter
@@ -20,18 +21,21 @@ from .colors import Attr, default_attr, WHITE, BLUE, PANE_BG, PANE_FG
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, compute_dialog_rect
 from .string_utils import display_columns
 
 
 trait Drawable:
-    """Anything that can paint itself into a Canvas at a given rect."""
+    """Anything that can paint itself into a Canvas at a given rect.
+
+    Conformed by the immediate-mode demo widgets below (``Label`` /
+    ``Frame`` / ``Fill``) that ``examples/`` builds on. The larger
+    stateful widgets (editor, dialogs, panels) deliberately do *not*
+    conform: each needs extra paint inputs (focus flag, item list,
+    body attr) and a richer return contract than a single trait can
+    capture, so they expose concrete ``paint`` methods instead.
+    """
     def paint(self, mut canvas: Canvas, bounds: Rect): ...
-
-
-trait EventHandler:
-    """Anything that can react to an event. Returns True if handled."""
-    def handle(mut self, event: Event) -> Bool: ...
 
 
 # --- Concrete widgets -------------------------------------------------------
@@ -341,3 +345,102 @@ struct FocusGroup(Movable):
         if self.focused < 0 or self.focused >= len(self.slots) \
                 or not self.slots[self.focused].visitable:
             self.cycle()
+
+
+# --- Title-bar drag + placement --------------------------------------------
+
+
+struct DraggableDialog(ImplicitlyCopyable, Movable):
+    """Auto-centering placement + title-bar move-by-drag for a modal
+    in-grid dialog.
+
+    Every movable dialog (file picker, save-as, action editor, …) was
+    carrying a byte-identical copy of the same two fields and the same
+    press-on-title / motion / release state machine — the comments
+    literally read *"same handling as FileDialog"*. This bundles them so
+    a dialog just owns one ``DraggableDialog``, asks it for the placed
+    ``rect``, and routes mouse events through it.
+
+    Two fields:
+
+    * ``pos`` — the user-chosen top-left after a drag, or unset to
+      auto-center. ``reset()`` (call from ``open``/``close``) returns to
+      centered so a freshly-opened dialog never reuses a stale offset.
+    * ``_drag`` — the cursor's offset within the dialog at drag-start,
+      or unset when no drag is in flight. Stored as an offset (not the
+      press point) so the move tracks the cursor exactly.
+
+    Usage in the host's ``handle_mouse`` (after the modal ``if event.kind
+    != EVENT_MOUSE: return True`` guard):
+
+    ```
+    var rect = self._dlg.rect(screen, WIDTH, HEIGHT)
+    if self._dlg.handle_drag_continue(event):
+        return True
+    if <close-button hit>: ...        # checked between continue and start
+    if self._dlg.handle_drag_start(event, rect):
+        return True
+    # ... normal list/button routing ...
+    ```
+
+    The close-button check sits *between* the two calls on purpose: a
+    press on the close glyph must dismiss rather than start a move.
+    """
+    var pos: Optional[Point]
+    var _drag: Optional[Point]
+
+    def __init__(out self):
+        self.pos = Optional[Point]()
+        self._drag = Optional[Point]()
+
+    def reset(mut self):
+        """Forget any dragged position and in-flight drag. Call from the
+        host's ``open`` and ``close`` so the dialog re-centers."""
+        self.pos = Optional[Point]()
+        self._drag = Optional[Point]()
+
+    def rect(self, screen: Rect, width: Int, height: Int) -> Rect:
+        """Placed rect: the dragged ``pos`` when set (clamped on-screen
+        by ``compute_dialog_rect``), else auto-centered in ``screen``."""
+        return compute_dialog_rect(screen, self.pos, width, height)
+
+    def is_dragging(self) -> Bool:
+        return Bool(self._drag)
+
+    def handle_drag_continue(mut self, event: Event) -> Bool:
+        """Advance or end an in-progress title-bar drag. Returns True
+        iff the event was consumed — call at the top of the mouse
+        handler so an in-flight drag swallows every event until release.
+
+        Returns False (not dragging) immediately when no drag is active,
+        letting the caller fall through to its normal routing."""
+        if not self._drag:
+            return False
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and event.motion:
+            var off = self._drag.value()
+            self.pos = Optional[Point](Point(
+                event.pos.x - off.x, event.pos.y - off.y,
+            ))
+            return True
+        if not event.pressed:
+            # Release ends the drag regardless of position.
+            self._drag = Optional[Point]()
+            return True
+        # In-progress drag swallows everything else.
+        return True
+
+    def handle_drag_start(mut self, event: Event, rect: Rect) -> Bool:
+        """Begin a move-by-drag when ``event`` is a left-press (not
+        motion) landing on the dialog's title row (``rect.a.y``).
+        Returns True iff a drag was started. Call *after* the host's
+        own close-button check so a press on the close glyph dismisses
+        instead of starting a move."""
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion and event.pos.y == rect.a.y \
+                and rect.a.x <= event.pos.x and event.pos.x < rect.b.x:
+            self._drag = Optional[Point](Point(
+                event.pos.x - rect.a.x, event.pos.y - rect.a.y,
+            ))
+            return True
+        return False

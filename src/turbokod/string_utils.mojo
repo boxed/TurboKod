@@ -428,15 +428,7 @@ def slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
     var i = 0
     while i < n:
         var b = Int(bytes[i])
-        var seq_len = 1
-        if (b & 0x80) == 0:
-            seq_len = 1
-        elif (b & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (b & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (b & 0xF8) == 0xF0:
-            seq_len = 4
+        var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = 1
         if not found_lo and cell == lo:
