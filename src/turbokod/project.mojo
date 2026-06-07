@@ -148,41 +148,44 @@ def _glob_match(pattern: String, text: String) -> Bool:
 
 
 def _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
+    # Iterative two-pointer matcher with single-slot star backtracking — the
+    # earlier recursive form branched per text position at each '*', so a
+    # pattern like ``a*a*a*…b`` against a long component backtracked
+    # exponentially (and .gitignore patterns are user-editable). ``*`` matches
+    # a run of non-slash bytes and ``?`` one non-slash byte; a literal byte
+    # (including ``/``) matches itself.
     var pb = pattern.as_bytes()
     var tb = text.as_bytes()
-    var p = pi
-    var t = ti
-    while p < len(pb):
-        var c = pb[p]
-        if c == 0x2A:  # '*' — any (possibly empty) run of non-slash bytes.
-            while p < len(pb) and pb[p] == 0x2A:
-                p += 1
-            if p >= len(pb):
-                while t < len(tb):
-                    if tb[t] == 0x2F:
-                        return False
-                    t += 1
-                return True
-            while t <= len(tb):
-                if _glob_match_at(pattern, p, text, t):
-                    return True
-                if t == len(tb):
-                    return False
-                if tb[t] == 0x2F:
-                    return False
-                t += 1
-            return False
-        if c == 0x3F:  # '?'
-            if t >= len(tb) or tb[t] == 0x2F:
-                return False
-            p += 1
-            t += 1
+    var i = ti
+    var j = pi
+    var star_after = -1  # pattern index right after the last '*' run
+    var match_i = 0      # text index the '*' is currently matched up to
+    while i < len(tb):
+        if j < len(pb) and pb[j] == 0x2A:
+            while j < len(pb) and pb[j] == 0x2A:
+                j += 1
+            star_after = j
+            match_i = i
             continue
-        if t >= len(tb) or tb[t] != c:
-            return False
-        p += 1
-        t += 1
-    return t == len(tb)
+        if j < len(pb) and tb[i] != 0x2F \
+                and (pb[j] == 0x3F or pb[j] == tb[i]):
+            i += 1
+            j += 1
+            continue
+        if j < len(pb) and pb[j] == tb[i]:  # literal match (covers '/')
+            i += 1
+            j += 1
+            continue
+        # Mismatch: extend the last '*' by one more non-slash byte.
+        if star_after != -1 and tb[match_i] != 0x2F:
+            match_i += 1
+            i = match_i
+            j = star_after
+            continue
+        return False
+    while j < len(pb) and pb[j] == 0x2A:
+        j += 1
+    return j == len(pb)
 
 
 def _has_byte(s: String, b: UInt8) -> Bool:
