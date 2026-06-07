@@ -210,6 +210,7 @@ from turbokod.project_grammars import (
 from turbokod.action_editor import ActionEditor
 from turbokod.config import (
     LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
+    WRAP_NONE, WRAP_SMART, WRAP_SOFT,
 )
 from turbokod.dropdown import Dropdown
 from turbokod.settings import Settings
@@ -1066,6 +1067,65 @@ def test_editor_typing_and_arrows() raises:
     assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(KEY_HOME), _VIEW)
     assert_equal(ed.selections[0].col, 0)
+
+
+def test_softwrap_visual_updown() raises:
+    # In soft-wrap modes, up/down must move one *visual* row at a time —
+    # stepping through a long line's wrapped segments instead of jumping
+    # the whole logical line — so navigation feels the same whether code
+    # is hard-wrapped onto several lines or soft-wrapped onto several
+    # visual rows. Regression for visual vertical navigation.
+    var view = Rect(0, 0, 24, 10)
+    var long = String("")
+    for _ in range(80):
+        long += "x"
+    var ed = Editor(long + "\n" + "short")
+    ed.wrap_mode = WRAP_SOFT
+    var cw = ed._content_width(view)
+    var segs = ed._wrap_one_logical_line(0, cw)
+    assert_true(len(segs) >= 3)   # the long line genuinely wraps
+
+    # From the very start, one DOWN stays on logical row 0 and lands at
+    # the head of the 2nd visual row — it does NOT skip to "short".
+    ed.move_to(0, 0, False)
+    _ = ed.handle_key(_key(KEY_DOWN), view)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, segs[1].byte_start)
+
+    # Continuing DOWN walks every remaining wrap segment, then crosses to
+    # the next logical line exactly once they're exhausted.
+    for i in range(2, len(segs)):
+        _ = ed.handle_key(_key(KEY_DOWN), view)
+        assert_equal(ed.selections[0].row, 0)
+        assert_equal(ed.selections[0].col, segs[i].byte_start)
+    _ = ed.handle_key(_key(KEY_DOWN), view)
+    assert_equal(ed.selections[0].row, 1)
+
+    # UP from "short" returns into the wrapped line's LAST visual row.
+    _ = ed.handle_key(_key(KEY_UP), view)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, segs[len(segs) - 1].byte_start)
+
+    # The desired *screen* column is preserved across a visual step:
+    # parking mid-segment-0 and pressing DOWN lands at the same screen
+    # column on segment 1 (its hanging indent included in the math).
+    ed.move_to(0, 5, False)        # screen column 5 on the first row
+    _ = ed.handle_key(_key(KEY_DOWN), view)
+    assert_equal(ed.selections[0].row, 0)
+    # segment 1 starts at hanging indent ``indent_cells``; screen col 5
+    # there is ``5 - indent_cells`` bytes past its start (all-ASCII line).
+    assert_equal(
+        ed.selections[0].col,
+        segs[1].byte_start + (5 - segs[1].indent_cells),
+    )
+
+    # WRAP_NONE keeps the original logical-line behavior: DOWN jumps
+    # straight to the next buffer line regardless of width.
+    var ed2 = Editor(long + "\n" + "short")
+    ed2.wrap_mode = WRAP_NONE
+    ed2.move_to(0, 0, False)
+    _ = ed2.handle_key(_key(KEY_DOWN), view)
+    assert_equal(ed2.selections[0].row, 1)
 
 
 def test_editor_typing_non_ascii() raises:
@@ -17844,6 +17904,7 @@ def _run_chunk_00() raises:
     test_scrollbar_horizontal_paints_arrows_on_axis()
     test_text_buffer_split_and_join()
     test_editor_typing_and_arrows()
+    test_softwrap_visual_updown()
     test_editor_typing_non_ascii()
     test_editor_word_movement()
     test_editor_word_movement_across_lines()

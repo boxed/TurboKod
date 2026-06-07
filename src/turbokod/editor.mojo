@@ -472,6 +472,47 @@ def _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     return i
 
 
+def _seg_cell_offset(
+    line: String, seg_start: Int, seg_end: Int, target_byte: Int,
+) -> Int:
+    """Content cells (no hanging-indent) from a wrap segment's
+    ``seg_start`` to ``target_byte``, walking codepoints so emoji count
+    two. ``target_byte`` is clamped into ``[seg_start, seg_end]``. The
+    visual-vmove path adds the segment's ``indent_cells`` to turn this
+    into a screen column."""
+    if target_byte <= seg_start:
+        return 0
+    var b = seg_start
+    var cells = 0
+    while b < target_byte and b < seg_end:
+        var info = codepoint_at(line, b)
+        cells += char_width(info[0])
+        b += info[1]
+    return cells
+
+
+def _seg_byte_of_cell(
+    line: String, seg_start: Int, seg_end: Int, want_cells: Int,
+) -> Int:
+    """Inverse of ``_seg_cell_offset``: byte offset inside
+    ``[seg_start, seg_end]`` at content-cell column ``want_cells``,
+    clamped to ``seg_end``. A column that lands on the right half of a
+    wide (emoji) glyph snaps to that glyph's start — mirrors
+    ``_utf8_byte_of_cell`` but scoped to one wrap segment."""
+    if want_cells <= 0:
+        return seg_start
+    var b = seg_start
+    var cells = 0
+    while b < seg_end and cells < want_cells:
+        var info = codepoint_at(line, b)
+        var w = char_width(info[0])
+        if cells + w > want_cells:
+            break
+        cells += w
+        b += info[1]
+    return b
+
+
 # --- TextBuffer -------------------------------------------------------------
 
 
@@ -1053,6 +1094,16 @@ struct Editor(Copyable, Movable):
     # only trigger). Set from Settings ▸ Editor via ``_apply_view_config``;
     # ignored by ``WRAP_NONE`` / ``WRAP_SOFT``.
     var smart_wrap_comma_threshold: Int
+    # Vertical-movement streak flag for soft-wrap visual up/down. While
+    # ``True`` the primary caret's ``desired_col`` holds a *screen* column
+    # (hanging-indent included) carried across visual rows, so repeated
+    # up/down keeps the cursor under the same screen x even across short
+    # wrapped rows. Reset to ``False`` by any horizontal/positional move
+    # (``move_to(sticky_col=True)``) and by paging; the next vertical move
+    # then re-derives the screen column from the caret's actual position.
+    # Only consulted by the wrapped (``WRAP_SOFT``/``WRAP_SMART``) path;
+    # ``WRAP_NONE`` keeps ``desired_col`` as a logical cell column.
+    var _vmove_streak: Bool
     # ``compress_kwargs`` (Settings ▸ Editor) renders redundant ``name=name``
     # call arguments with the label concealed on every line that doesn't hold
     # a caret — a paint-time effect only; the buffer is never modified. The
@@ -1338,6 +1389,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
+        self._vmove_streak = False
         self.compress_kwargs = False
         self.caret_visible = True
         self.read_only = False
@@ -1446,6 +1498,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = False
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
+        self._vmove_streak = False
         self.compress_kwargs = False
         self.caret_visible = True
         self.read_only = False
@@ -1582,6 +1635,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = copy.line_numbers
         self.wrap_mode = copy.wrap_mode
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
+        self._vmove_streak = copy._vmove_streak
         self.compress_kwargs = copy.compress_kwargs
         self.caret_visible = copy.caret_visible
         self.read_only = copy.read_only
@@ -3632,6 +3686,9 @@ struct Editor(Copyable, Movable):
         self.selections[0].col = col
         if sticky_col:
             self.selections[0].desired_col = _utf8_cell_of_byte(self.buffer.line(row), col)
+            # A horizontal/positional move ends any vertical streak, so the
+            # next up/down re-derives its screen column from here.
+            self._vmove_streak = False
         if not extend:
             self.selections[0].anchor_row = row
             self.selections[0].anchor_col = col
@@ -5709,12 +5766,14 @@ struct Editor(Copyable, Movable):
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
     def _dispatch_move_one(
-        mut self, kind: Int, extend: Bool, page_height: Int,
+        mut self, kind: Int, extend: Bool, page_height: Int, content_w: Int,
     ):
         """Single-caret movement step. ``kind`` selects the operation;
         the existing ``_move_*`` / ``move_to`` helpers each operate on
         the primary caret, so the multi-caret iterator can call this
-        once per caret with the primary already swapped in."""
+        once per caret with the primary already swapped in. ``content_w``
+        is the editor text width — used by the soft-wrap-aware up/down
+        (kinds 4/5) to step visual rows."""
         if kind == 0:
             self._move_left(extend)
         elif kind == 1:
@@ -5724,9 +5783,9 @@ struct Editor(Copyable, Movable):
         elif kind == 3:
             self._move_word_right(extend)
         elif kind == 4:
-            self._move_up(extend)
+            self._move_up(extend, content_w)
         elif kind == 5:
-            self._move_down(extend)
+            self._move_down(extend, content_w)
         elif kind == 6:
             self.move_to(self.selections[0].row, 0, extend)
         elif kind == 7:
@@ -5736,12 +5795,14 @@ struct Editor(Copyable, Movable):
                 extend,
             )
         elif kind == 8:
+            self._vmove_streak = False
             var nr = self.selections[0].row - page_height
             if nr < 0:
                 nr = 0
             var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
             self.move_to(nr, nc, extend, False)
         elif kind == 9:
+            self._vmove_streak = False
             var nr = self.selections[0].row + page_height
             var max_row = self.buffer.line_count() - 1
             if nr > max_row:
@@ -5757,7 +5818,7 @@ struct Editor(Copyable, Movable):
             self.move_to(self.selections[0].row, target, extend)
 
     def _multi_move(
-        mut self, kind: Int, extend: Bool, page_height: Int,
+        mut self, kind: Int, extend: Bool, page_height: Int, content_w: Int,
     ):
         """Apply a movement to every caret. With no extras the primary
         is moved in place (no list churn). The two-pass design — collect
@@ -5765,13 +5826,19 @@ struct Editor(Copyable, Movable):
         keeps the existing single-caret movement code as the only
         source of truth for what each direction does."""
         if not self.has_extra_carets():
-            self._dispatch_move_one(kind, extend, page_height)
+            self._dispatch_move_one(kind, extend, page_height, content_w)
             return
         var carets = self._all_carets_asc()
         var new_carets = List[Caret]()
+        # ``_vmove_streak`` (soft-wrap visual up/down) is editor-wide, but the
+        # first caret's move flips it — restore the pre-move value before each
+        # caret so every one decides "reuse carried column vs re-derive" from
+        # the same starting state instead of inheriting the prior caret's.
+        var streak_before = self._vmove_streak
         for i in range(len(carets)):
+            self._vmove_streak = streak_before
             self._apply_caret(carets[i])
-            self._dispatch_move_one(kind, extend, page_height)
+            self._dispatch_move_one(kind, extend, page_height, content_w)
             new_carets.append(self.primary_caret())
         self._install_carets(new_carets^)
 
@@ -6558,11 +6625,11 @@ struct Editor(Copyable, Movable):
         if (event.mods == MOD_META or event.mods == (MOD_META | MOD_SHIFT)):
             var extend_line = (event.mods & MOD_SHIFT) != 0
             if k == KEY_RIGHT:
-                self._multi_move(7, extend_line, view.height())
+                self._multi_move(7, extend_line, view.height(), self._content_width(view))
                 self._scroll_to_cursor(view)
                 return True
             if k == KEY_LEFT:
-                self._multi_move(10, extend_line, view.height())
+                self._multi_move(10, extend_line, view.height(), self._content_width(view))
                 self._scroll_to_cursor(view)
                 return True
         if has_ctrl and has_alt and k == KEY_UP:
@@ -6601,26 +6668,26 @@ struct Editor(Copyable, Movable):
                 pre_dirty_row_multi = c.anchor_row
         if k == KEY_LEFT:
             if word:
-                self._multi_move(2, extend, view.height())
+                self._multi_move(2, extend, view.height(), self._content_width(view))
             else:
-                self._multi_move(0, extend, view.height())
+                self._multi_move(0, extend, view.height(), self._content_width(view))
         elif k == KEY_RIGHT:
             if word:
-                self._multi_move(3, extend, view.height())
+                self._multi_move(3, extend, view.height(), self._content_width(view))
             else:
-                self._multi_move(1, extend, view.height())
+                self._multi_move(1, extend, view.height(), self._content_width(view))
         elif k == KEY_UP:
-            self._multi_move(4, extend, view.height())
+            self._multi_move(4, extend, view.height(), self._content_width(view))
         elif k == KEY_DOWN:
-            self._multi_move(5, extend, view.height())
+            self._multi_move(5, extend, view.height(), self._content_width(view))
         elif k == KEY_HOME:
-            self._multi_move(6, extend, view.height())
+            self._multi_move(6, extend, view.height(), self._content_width(view))
         elif k == KEY_END:
-            self._multi_move(7, extend, view.height())
+            self._multi_move(7, extend, view.height(), self._content_width(view))
         elif k == KEY_PAGEUP:
-            self._multi_move(8, extend, view.height())
+            self._multi_move(8, extend, view.height(), self._content_width(view))
         elif k == KEY_PAGEDOWN:
-            self._multi_move(9, extend, view.height())
+            self._multi_move(9, extend, view.height(), self._content_width(view))
         elif k == KEY_BACKSPACE:
             if self.read_only:
                 return True
@@ -7919,17 +7986,185 @@ struct Editor(Copyable, Movable):
         elif self.selections[0].row + 1 < self.buffer.line_count():
             self.move_to(self.selections[0].row + 1, 0, extend)
 
-    def _move_up(mut self, extend: Bool):
-        if self.selections[0].row > 0:
-            var nr = self.selections[0].row - 1
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
-            self.move_to(nr, nc, extend, False)
+    def _content_width(self, view: Rect) -> Int:
+        """Text columns available to the editor body — view width minus
+        the left gutters and the right (minimap/scrollbar) gutter. The
+        same value ``_layout_lines`` wraps to; clamped to >= 1 so a
+        collapsed view still wraps deterministically. Threaded into the
+        vertical-movement path so visual up/down wraps lines the same way
+        ``paint`` does."""
+        var w = view.width() - self._total_gutter() - self._right_gutter()
+        if w < 1:
+            w = 1
+        return w
 
-    def _move_down(mut self, extend: Bool):
-        if self.selections[0].row + 1 < self.buffer.line_count():
-            var nr = self.selections[0].row + 1
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
-            self.move_to(nr, nc, extend, False)
+    def _wrap_one_logical_line(
+        self, row: Int, content_w: Int,
+    ) -> List[VisualLine]:
+        """Visual segments of a single logical line, independent of
+        ``scroll_y`` and the painted height (the line can wrap to more
+        rows than fit on screen). Mirrors ``_layout_lines``'s mode
+        dispatch but for one line so visual up/down can step segment by
+        segment. ``WRAP_NONE`` callers don't use this — they keep the
+        logical-line path — but it still returns one full-line segment
+        for completeness."""
+        var w = content_w
+        if w < 1:
+            w = 1
+        var one = List[String]()
+        one.append(self.buffer.line(row))
+        var segs: List[VisualLine]
+        if self.wrap_mode == WRAP_NONE:
+            segs = List[VisualLine]()
+            segs.append(VisualLine(0, 0, self.buffer.line_length(row), 0, 0, 0))
+        else:
+            var tab = self.editorconfig.effective_indent_size()
+            if tab < 1:
+                tab = 4
+            if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
+                segs = smart_wrap_lines(
+                    one, w, tab,
+                    line_comment=line_comment_for_extension(
+                        extension_of(self.file_path)
+                    ),
+                    start_line=0, max_rows=-1,
+                    comma_threshold=self.smart_wrap_comma_threshold,
+                )
+            else:
+                segs = wrap_lines(
+                    one, w, indent_size=tab, word_aware=True,
+                    start_line=0, max_rows=-1,
+                )
+        # ``one`` is a single-element list, so every segment carries
+        # ``line_idx == 0``; rebase to the real buffer row.
+        var out = List[VisualLine]()
+        for i in range(len(segs)):
+            var s = segs[i]
+            out.append(VisualLine(
+                row, s.byte_start, s.byte_end,
+                s.cell_start, s.cell_count, s.indent_cells,
+            ))
+        return out^
+
+    def _seg_index_for_col(
+        self, segs: List[VisualLine], col: Int,
+    ) -> Int:
+        """Index of the segment hosting byte ``col`` (segments all belong
+        to one logical line). Matches ``_screen_row_for``'s tie-break: a
+        caret parked exactly on a wrap boundary belongs to the *next*
+        segment (start of the next visual row)."""
+        var n = len(segs)
+        if n == 0:
+            return 0
+        for i in range(n):
+            if col < segs[i].byte_start:
+                continue
+            if col < segs[i].byte_end:
+                return i
+            if i + 1 >= n:
+                return i
+            # col >= byte_end and not last: belongs to a later segment.
+        return n - 1
+
+    def _visual_vmove(mut self, down: Bool, extend: Bool, content_w: Int):
+        """Move the primary caret one *visual* row (soft-wrap aware).
+
+        When a logical line wraps across several screen rows, down/up step
+        between those segments instead of jumping the whole logical line,
+        so navigation behaves the same whether code is hard-wrapped into
+        multiple lines or soft-wrapped into multiple visual rows.
+
+        The desired screen column (hanging indent included) is carried in
+        ``desired_col`` for the duration of a vertical streak
+        (``_vmove_streak``); a fresh streak re-derives it from the caret's
+        actual position. Landing on a shorter row clamps to that row's end
+        but keeps the wanted column, so passing through a short row and
+        continuing restores the original column."""
+        var row = self.selections[0].row
+        var col = self.selections[0].col
+        var line = self.buffer.line(row)
+        var segs = self._wrap_one_logical_line(row, content_w)
+        if len(segs) == 0:
+            return
+        var ci = self._seg_index_for_col(segs, col)
+        # Wanted screen column: reuse the streak's carried column, else
+        # derive it from where the caret actually sits right now.
+        var vcol: Int
+        if self._vmove_streak:
+            vcol = self.selections[0].desired_col
+        else:
+            vcol = segs[ci].indent_cells + _seg_cell_offset(
+                line, segs[ci].byte_start, segs[ci].byte_end, col,
+            )
+        # Resolve the target visual row: the adjacent segment of this line
+        # when there is one, otherwise the first/last segment of the
+        # neighbouring logical line.
+        var trow = row
+        var tsegs = segs^
+        var tci: Int
+        if down:
+            if ci + 1 < len(tsegs):
+                tci = ci + 1
+            elif row + 1 < self.buffer.line_count():
+                trow = row + 1
+                tsegs = self._wrap_one_logical_line(trow, content_w)
+                tci = 0
+            else:
+                # Last visual row of the last line — nowhere to go; keep
+                # the carried column so a later up/down still tracks it.
+                self.selections[0].desired_col = vcol
+                self._vmove_streak = True
+                return
+        else:
+            if ci > 0:
+                tci = ci - 1
+            elif row > 0:
+                trow = row - 1
+                tsegs = self._wrap_one_logical_line(trow, content_w)
+                tci = len(tsegs) - 1
+            else:
+                self.selections[0].desired_col = vcol
+                self._vmove_streak = True
+                return
+        var tline = line if trow == row else self.buffer.line(trow)
+        var tseg = tsegs[tci]
+        var want = vcol - tseg.indent_cells
+        if want < 0:
+            want = 0
+        var tbyte = _seg_byte_of_cell(
+            tline, tseg.byte_start, tseg.byte_end, want,
+        )
+        # On a non-final segment, ``byte_end`` is the wrap boundary, which
+        # renders at the *start* of the next visual row. Stepping back one
+        # codepoint keeps an over-long column parked on this row instead
+        # of silently dropping down a line.
+        var is_last_seg = (tci + 1 >= len(tsegs))
+        if tbyte >= tseg.byte_end and not is_last_seg \
+                and tseg.byte_end > tseg.byte_start:
+            tbyte = _utf8_step_backward(tline, tseg.byte_end)
+        self.move_to(trow, tbyte, extend, sticky_col=False)
+        self.selections[0].desired_col = vcol
+        self._vmove_streak = True
+
+    def _move_up(mut self, extend: Bool, content_w: Int):
+        if self.wrap_mode == WRAP_NONE:
+            self._vmove_streak = False
+            if self.selections[0].row > 0:
+                var nr = self.selections[0].row - 1
+                var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+                self.move_to(nr, nc, extend, False)
+        else:
+            self._visual_vmove(False, extend, content_w)
+
+    def _move_down(mut self, extend: Bool, content_w: Int):
+        if self.wrap_mode == WRAP_NONE:
+            self._vmove_streak = False
+            if self.selections[0].row + 1 < self.buffer.line_count():
+                var nr = self.selections[0].row + 1
+                var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+                self.move_to(nr, nc, extend, False)
+        else:
+            self._visual_vmove(True, extend, content_w)
 
     def _move_word_right(mut self, extend: Bool):
         var p = self._next_word_pos(self.selections[0].row, self.selections[0].col)
