@@ -685,6 +685,14 @@ long enough that a swipe across the code doesn't spam the server with
 requests it'll only cancel."""
 
 
+comptime _COPY_FLASH_DURATION_MS = 100
+"""Lifetime of the whole-line copy flash (ms). The line overlay is
+shown solidly for this long, then stops painting — a single brief
+flash rather than a pulsing blink. Both frontends repaint ≤50 ms, so
+this still guarantees a couple of painted frames; kept short so it
+reads as a quick blip, not a lingering highlight."""
+
+
 comptime _HOVER_POPUP_WIDTH_MAX = 70
 """Maximum width of the LSP hover popup (cells). Longer lines wrap to
 the next line; the popup grows vertically up to the view height."""
@@ -1115,6 +1123,15 @@ struct Editor(Copyable, Movable):
     # ``True`` paints the caret, ``False`` is the dark half of a blink cycle.
     # Always ``True`` when blinking is disabled, so the caret is steady.
     var caret_visible: Bool
+    # Whole-line copy flash. When ``copy_to_clipboard`` grabs the
+    # current line with no selection, ``_copy_flash_line`` is the logical
+    # line index and ``_copy_flash_start_ms`` the ``monotonic_ms()`` at
+    # copy time. ``paint`` overlays that whole line (across all its
+    # soft/smart-wrapped visual rows) with a blinking highlight for
+    # ``_COPY_FLASH_DURATION_MS`` so the user sees exactly what was
+    # copied. ``-1`` means no flash is pending.
+    var _copy_flash_line: Int
+    var _copy_flash_start_ms: Int
     # ``read_only`` makes every mutating operation a no-op: typing,
     # backspace/delete, paste, cut, undo/redo, replace_all,
     # toggle_comment, toggle_case. Cursor movement, selection, copy,
@@ -1392,6 +1409,8 @@ struct Editor(Copyable, Movable):
         self._vmove_streak = False
         self.compress_kwargs = False
         self.caret_visible = True
+        self._copy_flash_line = -1
+        self._copy_flash_start_ms = 0
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1501,6 +1520,8 @@ struct Editor(Copyable, Movable):
         self._vmove_streak = False
         self.compress_kwargs = False
         self.caret_visible = True
+        self._copy_flash_line = -1
+        self._copy_flash_start_ms = 0
         self.read_only = False
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
@@ -1638,6 +1659,8 @@ struct Editor(Copyable, Movable):
         self._vmove_streak = copy._vmove_streak
         self.compress_kwargs = copy.compress_kwargs
         self.caret_visible = copy.caret_visible
+        self._copy_flash_line = copy._copy_flash_line
+        self._copy_flash_start_ms = copy._copy_flash_start_ms
         self.read_only = copy.read_only
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
@@ -5671,6 +5694,31 @@ struct Editor(Copyable, Movable):
                 0, len(layout), caret_sel, sel_attr,
                 extend_past_eol=True,
             )
+        # Whole-line copy flash: a brief green overlay on the line that
+        # ``copy_to_clipboard`` just grabbed with no selection. Spans every
+        # visual row of the line, so under soft/smart wrap the user sees the
+        # full extent of what was copied. Timed from ``monotonic_ms()`` here
+        # (both frontends repaint ≤50 ms, the same cadence the caret blink
+        # relies on) and stops painting once the lifetime elapses; the stale
+        # ``_copy_flash_line`` is harmless.
+        if self._copy_flash_line >= 0:
+            var flash_elapsed = monotonic_ms() - self._copy_flash_start_ms
+            if flash_elapsed >= 0 \
+                    and flash_elapsed < _COPY_FLASH_DURATION_MS \
+                    and self._copy_flash_line < len(self.buffer.lines):
+                var flash_line_n = len(
+                    self.buffer.lines[self._copy_flash_line].as_bytes()
+                )
+                var flash_sel = Selection(
+                    True, False,
+                    self._copy_flash_line, 0,
+                    self._copy_flash_line, flash_line_n,
+                )
+                paint_selection_overlay(
+                    canvas, text_view, self.buffer.lines, layout,
+                    0, len(layout), flash_sel, Attr(BLACK, LIGHT_GREEN),
+                    extend_past_eol=False,
+                )
         # Bracket-match overlay: when the primary caret sits on / right
         # after a bracket and the matching one exists, recolour both
         # with ``bracket_attr``. White-on-magenta + bold is distinct
@@ -7076,7 +7124,7 @@ struct Editor(Copyable, Movable):
         self.dirty = True
         self._mark_hl_dirty(pre_dirty_row)
 
-    def copy_to_clipboard(self):
+    def copy_to_clipboard(mut self):
         """Copy the current selection to the system clipboard. With no
         selection, copy the whole current line including its trailing
         newline — matches the behavior in VS Code/Sublime/JetBrains
@@ -7084,7 +7132,14 @@ struct Editor(Copyable, Movable):
         if self.has_selection():
             clipboard_copy(self.selection_text())
         else:
-            clipboard_copy(self.buffer.line(self.selections[0].row) + String("\n"))
+            var r = self.selections[0].row
+            clipboard_copy(self.buffer.line(r) + String("\n"))
+            # No selection means nothing on screen marks what was grabbed,
+            # so flash the whole copied line — most useful under soft/smart
+            # wrap, where the line spans several visual rows. ``paint``
+            # reads these two fields and blinks the overlay.
+            self._copy_flash_line = r
+            self._copy_flash_start_ms = monotonic_ms()
 
     def cut_to_clipboard(mut self):
         """Copy the selection to the clipboard, then remove it from the
