@@ -557,7 +557,14 @@ struct Terminal:
                     ev.click_count = self._update_click_count(ev)
                 self._queue.append(ev)
             pos += consumed
-        if len(self._pending) > 64:
+        # Drop a never-completing partial sequence so a lone ESC keypress
+        # can't grow ``_pending`` without bound. The cap must clear the
+        # longest legitimate inbound escape — the wrapper's
+        # ``OSC 2;__mvc_open:<path> BEL`` carries a full filesystem path
+        # (up to PATH_MAX), so 64 bytes truncated those across a read
+        # boundary and lost the open-file event. A few KB is safely past
+        # any real path while still bounding a stray ESC.
+        if len(self._pending) > 8192:
             self._pending = List[UInt8]()
         if self._queue_head >= len(self._queue):
             self._trace(String("    poll_event:exit None\n"))
