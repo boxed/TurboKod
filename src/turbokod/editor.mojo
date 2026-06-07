@@ -3334,7 +3334,10 @@ struct Editor(Copyable, Movable):
         elif ifn == 0 and has_trailing_newline:
             # Drop the trailing empty line.
             emit_count = n - 1
-        var out = String("")
+        # Accumulate into a byte buffer (same O(N) reason as
+        # ``text_snapshot``): ``out = out + line`` reallocates the whole
+        # payload per line, which is O(N²) on a large file at save time.
+        var buf = List[UInt8]()
         for i in range(emit_count):
             var line: String
             if i < n:
@@ -3344,9 +3347,9 @@ struct Editor(Copyable, Movable):
             if trim:
                 line = _rtrim(line)
             if i > 0:
-                out = out + sep
-            out = out + line
-        return out
+                append_string_bytes(buf, sep)
+            append_string_bytes(buf, line)
+        return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
     def save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the
