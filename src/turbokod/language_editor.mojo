@@ -438,11 +438,8 @@ struct LanguageEditor(Movable):
         # argv text field below it still consumes letters as text
         # input rather than as a search prefix.
         if self._focus.is_focused(Int(_FOCUS_LIST)) and is_printable_ascii(k):
-            var labels = List[String]()
-            for i in range(len(self.candidates)):
-                labels.append(self.candidates[i])
             var hit = type_ahead_pick(
-                self._type_ahead, labels, chr(Int(k)),
+                self._type_ahead, self.candidates, chr(Int(k)),
             )
             if hit >= 0:
                 self._list.selected = hit
