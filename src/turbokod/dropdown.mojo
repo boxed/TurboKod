@@ -408,8 +408,15 @@ struct Dropdown(Copyable, Movable):
                     # Highlight the row under the cursor + arm
                     # tracking; commit happens on release.
                     var row = event.pos.y - (pr.a.y + 1)
+                    var nrows = len(self.options)
+                    if nrows > _MAX_POPUP_ROWS:
+                        nrows = _MAX_POPUP_ROWS
                     var idx = self._scroll + row
-                    if 0 <= idx and idx < len(self.options):
+                    # ``row < 0`` is the top border; ``row >= nrows`` the
+                    # bottom border — neither maps to a painted option, but
+                    # with ``_scroll > 0`` the idx-only guard let them through.
+                    if 0 <= row and row < nrows \
+                            and 0 <= idx and idx < len(self.options):
                         self.highlight = idx
                         self._tracking = True
                     return DROPDOWN_HIT_POPUP
@@ -431,8 +438,12 @@ struct Dropdown(Copyable, Movable):
             # The popup stays open so the user can keep navigating.
             return DROPDOWN_HIT_POPUP
         var row = event.pos.y - (pr.a.y + 1)
+        var nrows = len(self.options)
+        if nrows > _MAX_POPUP_ROWS:
+            nrows = _MAX_POPUP_ROWS
         var idx = self._scroll + row
-        if 0 <= idx and idx < len(self.options):
+        if 0 <= row and row < nrows \
+                and 0 <= idx and idx < len(self.options):
             self.highlight = idx
             self.index = idx
             self.close()
