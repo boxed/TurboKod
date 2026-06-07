@@ -386,6 +386,12 @@ struct DapManager(Copyable, Movable):
     # the user as a condition error.
     var _inflight_set_breakpoints_seqs: List[Int]
     var _inflight_set_breakpoints_paths: List[String]
+    # The exact line list (in adapter array order) we sent with each
+    # inflight request, parallel to ``_seqs``/``_paths``. The response demux
+    # MUST use this rather than re-deriving from the live BP arrays: those
+    # can change (toggle/enable/remove) between send and response, which
+    # would mis-align a ``verified=false`` rejection with the wrong line.
+    var _inflight_set_breakpoints_lines: List[List[Int]]
     # Buffer of breakpoint errors surfaced via ``take_breakpoint_errors``.
     # Single drain per frame; entries describe one rejected BP each.
     var _bp_errors: List[DapBreakpointError]
@@ -538,6 +544,7 @@ struct DapManager(Copyable, Movable):
         self._bp_armed = List[Bool]()
         self._inflight_set_breakpoints_seqs = List[Int]()
         self._inflight_set_breakpoints_paths = List[String]()
+        self._inflight_set_breakpoints_lines = List[List[Int]]()
         self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
@@ -608,6 +615,7 @@ struct DapManager(Copyable, Movable):
         self._bp_armed = List[Bool]()
         self._inflight_set_breakpoints_seqs = List[Int]()
         self._inflight_set_breakpoints_paths = List[String]()
+        self._inflight_set_breakpoints_lines = List[List[Int]]()
         self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
@@ -902,6 +910,7 @@ struct DapManager(Copyable, Movable):
         self._bp_armed = rearmed^
         self._inflight_set_breakpoints_seqs = List[Int]()
         self._inflight_set_breakpoints_paths = List[String]()
+        self._inflight_set_breakpoints_lines = List[List[Int]]()
         self._bp_errors = List[DapBreakpointError]()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
@@ -1309,9 +1318,10 @@ struct DapManager(Copyable, Movable):
             )
             self._inflight_set_breakpoints_seqs.append(seq)
             self._inflight_set_breakpoints_paths.append(path)
-            # ``_handle_set_breakpoints_response`` re-derives lines from
-            # the live arrays, so we don't need to stash sent_lines.
-            _ = sent_lines^
+            # Stash the exact lines we sent (in adapter array order) so the
+            # response demux maps rejections by position without re-deriving
+            # from the live arrays, which may have changed since.
+            self._inflight_set_breakpoints_lines.append(sent_lines^)
         except e:
             print("dap: setBreakpoints", path, ":", String(e))
         # Mirror to the attached subprocess if any — without this, a
@@ -2229,35 +2239,25 @@ struct DapManager(Copyable, Movable):
         Any ``verified == false`` entry produces a ``DapBreakpointError``
         for the host to surface."""
         var path = self._inflight_set_breakpoints_paths[idx]
+        # The exact lines sent with THIS request (adapter array order),
+        # captured at send time. Re-deriving from the live arrays would
+        # misalign if the user toggled/enabled/removed a BP for this path
+        # while the request was in flight. A ``-1`` entry is the oneshot
+        # "run to cursor" row (no user-visible BP).
+        var sent_lines = self._inflight_set_breakpoints_lines[idx].copy()
         # Compact inflight tables.
         var new_seqs = List[Int]()
         var new_paths = List[String]()
+        var new_lines = List[List[Int]]()
         for k in range(len(self._inflight_set_breakpoints_seqs)):
             if k == idx:
                 continue
             new_seqs.append(self._inflight_set_breakpoints_seqs[k])
             new_paths.append(self._inflight_set_breakpoints_paths[k])
+            new_lines.append(self._inflight_set_breakpoints_lines[k].copy())
         self._inflight_set_breakpoints_seqs = new_seqs^
         self._inflight_set_breakpoints_paths = new_paths^
-        # Re-derive the lines we sent in order — same filter rule as
-        # ``_send_set_breakpoints``: same path, enabled. Then append
-        # the oneshot if it would have stitched in. Lines past the end
-        # of this list correspond to the trailing oneshot row.
-        var sent_lines = List[Int]()
-        var have_oneshot_match = False
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] != path:
-                continue
-            if not self._bp_enabled[i]:
-                continue
-            sent_lines.append(self._bp_line[i])
-            if self._oneshot_bp_path == path \
-                    and self._bp_line[i] == self._oneshot_bp_line:
-                have_oneshot_match = True
-        if self._oneshot_bp_path == path \
-                and self._oneshot_bp_line >= 0 \
-                and not have_oneshot_match:
-            sent_lines.append(-1)   # oneshot — no user-visible BP
+        self._inflight_set_breakpoints_lines = new_lines^
         if not msg.body or not msg.body.value().is_object():
             return
         var b = msg.body.value().copy()
