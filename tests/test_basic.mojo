@@ -160,6 +160,7 @@ from turbokod.lsp_dispatch import (
     TextEditEntry, _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
     _parse_hover_result, _parse_references_result,
+    _uri_to_path,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -9453,6 +9454,24 @@ def test_json_surrogate_pair_decodes_to_astral_utf8() raises:
     assert_equal(lone.as_str(), String("�x"))
 
 
+def test_uri_to_path_percent_decodes() raises:
+    """Server-originated file URIs percent-encode spaces / non-ASCII; the
+    path must be decoded or it won't match open docs or files on disk."""
+    assert_equal(
+        _uri_to_path(String("file:///tmp/my%20dir/a%2Bb.txt")),
+        String("/tmp/my dir/a+b.txt"),
+    )
+    # UTF-8 bytes (C3 A4 == ä) decode back to the original characters.
+    assert_equal(
+        _uri_to_path(String("file:///tmp/caf%C3%A9.txt")),
+        String("/tmp/café.txt"),
+    )
+    # A malformed trailing % is left literal, no crash.
+    assert_equal(_uri_to_path(String("file:///tmp/a%")), String("/tmp/a%"))
+    # Non-file strings pass through untouched.
+    assert_equal(_uri_to_path(String("/plain/path")), String("/plain/path"))
+
+
 def test_json_parse_errors_raise() raises:
     var ok = True
     try:
@@ -18342,6 +18361,7 @@ def _run_chunk_04() raises:
     test_json_round_trip_lsp_envelope()
     test_json_string_escapes()
     test_json_surrogate_pair_decodes_to_astral_utf8()
+    test_uri_to_path_percent_decodes()
     test_json_parse_errors_raise()
     test_json_floats_round_trip_as_text()
     test_language_registry_loads_from_bundled_json()

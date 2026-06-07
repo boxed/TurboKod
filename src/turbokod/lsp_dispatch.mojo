@@ -2784,22 +2784,55 @@ def _trim_trailing_newline(s: String) -> String:
     return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
 
 
+def _uri_hex_nibble(n: Int) -> UInt8:
+    if n < 10:
+        return UInt8(0x30 + n)          # '0'..'9'
+    return UInt8(0x41 + n - 10)         # 'A'..'F'
+
+
+def _uri_hex_val(b: Int) -> Int:
+    if 0x30 <= b and b <= 0x39:
+        return b - 0x30
+    if 0x41 <= b and b <= 0x46:
+        return b - 0x41 + 10
+    if 0x61 <= b and b <= 0x66:
+        return b - 0x61 + 10
+    return -1
+
+
 def _path_to_uri(path: String) -> String:
     """``/abs/path`` → ``file:///abs/path``. Resolves through realpath when
-    possible so the server sees the same canonical form across calls."""
+    possible so the server sees the same canonical form across calls.
+    Percent-encodes bytes outside the RFC 3986 unreserved set (keeping
+    ``/``) so paths with spaces / non-ASCII round-trip through
+    ``_uri_to_path`` and match what spec-compliant servers expect."""
     var resolved = realpath(path)
     var p = resolved if len(resolved.as_bytes()) > 0 else path
     var b = p.as_bytes()
-    if len(b) > 0 and b[0] == 0x2F:
-        return String("file://") + p
-    # Relative path: best-effort; the server may still find it via rootUri.
-    return String("file://") + p
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        var c = Int(b[i])
+        var unreserved = (0x41 <= c and c <= 0x5A) \
+            or (0x61 <= c and c <= 0x7A) \
+            or (0x30 <= c and c <= 0x39) \
+            or c == 0x2D or c == 0x5F or c == 0x2E or c == 0x7E \
+            or c == 0x2F
+        if unreserved:
+            out.append(b[i])
+        else:
+            out.append(0x25)            # '%'
+            out.append(_uri_hex_nibble((c >> 4) & 0xF))
+            out.append(_uri_hex_nibble(c & 0xF))
+    return String("file://") + String(StringSlice(
+        ptr=out.unsafe_ptr(), length=len(out),
+    ))
 
 
 def _uri_to_path(uri: String) -> String:
-    """Strip the ``file://`` scheme. (We deliberately don't URL-decode
-    yet — typical mojo-lsp-server responses send unencoded ASCII paths,
-    and adding a decoder is more risk than reward right now.)"""
+    """Strip the ``file://`` scheme and percent-decode ``%XX`` escapes
+    (spec-compliant servers encode spaces / non-ASCII in path bytes; an
+    undecoded ``%20`` wouldn't match a ``_doc_paths`` entry or open on
+    disk). A malformed ``%`` is left as a literal byte."""
     var prefix = String("file://")
     var pb = prefix.as_bytes()
     var ub = uri.as_bytes()
@@ -2808,6 +2841,16 @@ def _uri_to_path(uri: String) -> String:
     for i in range(len(pb)):
         if ub[i] != pb[i]:
             return uri
-    return String(StringSlice(
-        ptr=ub.unsafe_ptr() + len(pb), length=len(ub) - len(pb),
-    ))
+    var out = List[UInt8]()
+    var i = len(pb)
+    while i < len(ub):
+        if ub[i] == 0x25 and i + 2 < len(ub):   # '%XX'
+            var hi = _uri_hex_val(Int(ub[i + 1]))
+            var lo = _uri_hex_val(Int(ub[i + 2]))
+            if hi >= 0 and lo >= 0:
+                out.append(UInt8((hi << 4) | lo))
+                i += 3
+                continue
+        out.append(ub[i])
+        i += 1
+    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
