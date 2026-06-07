@@ -2086,6 +2086,19 @@ struct LocalChanges(Movable):
         painter.fill(canvas, area, String(" "), body_bg)
         var pane_focused = (self.focus == pane)
         var height = area.height()
+        # Bucket highlights by visible-row offset once, instead of
+        # rescanning the whole ``panel.highlights`` list for every body
+        # row. ``hl_buckets[i]`` holds the indices into ``panel.highlights``
+        # whose ``row`` lands on visible offset ``i`` (absolute line
+        # ``panel.scroll + i``); empty buckets let the row loop skip the
+        # per-row ``utf8_byte_to_cell`` allocation entirely.
+        var hl_buckets = List[List[Int]]()
+        for _i in range(height):
+            hl_buckets.append(List[Int]())
+        for h in range(len(panel.highlights)):
+            var bo = panel.highlights[h].row - panel.scroll
+            if 0 <= bo and bo < height:
+                hl_buckets[bo].append(h)
         # Gutter occupies a single column at the panel's left edge for
         # diff body rows; banners / blanks / info rows render with no
         # gutter and start at the panel edge.
@@ -2197,14 +2210,12 @@ struct LocalChanges(Movable):
             # tokenization, ``+`` and context rows pull from the
             # after-file — the populate step already routed them to
             # the right side via ``display_to_*_row``.
-            if has_gutter:
+            if has_gutter and len(hl_buckets[i]) > 0:
                 var byte_to_cell = utf8_byte_to_cell(line)
                 var byte_count = len(bytes)
                 var cell_count = utf8_codepoint_count(line)
-                for h in range(len(panel.highlights)):
-                    var hl = panel.highlights[h]
-                    if hl.row != idx:
-                        continue
+                for bi in range(len(hl_buckets[i])):
+                    var hl = panel.highlights[hl_buckets[i][bi]]
                     var hl_byte_lo = hl.col_start - panel.scroll_x
                     var hl_byte_hi = hl.col_end - panel.scroll_x
                     if hl_byte_lo < 0:
