@@ -56,6 +56,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .painter import Painter
+from .picker_input import scroll_to_reveal
 
 
 struct ListBox(Copyable, Movable):
@@ -125,10 +126,7 @@ struct ListBox(Copyable, Movable):
         if visible <= 0:
             return
         if self.selected >= 0 and self.selected != self._last_scroll_sel:
-            if self.selected < self._scroll:
-                self._scroll = self.selected
-            elif self.selected >= self._scroll + visible:
-                self._scroll = self.selected - visible + 1
+            self._scroll = scroll_to_reveal(self._scroll, self.selected, visible)
         self._last_scroll_sel = self.selected
         if self._scroll < 0:
             self._scroll = 0

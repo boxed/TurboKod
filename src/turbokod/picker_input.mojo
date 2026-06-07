@@ -25,6 +25,25 @@ comptime _PAGE_STEP: Int = 10
 comptime _WHEEL_STEP: Int = 3
 
 
+def scroll_to_reveal(scroll: Int, target: Int, window: Int) -> Int:
+    """Return ``scroll`` adjusted so row ``target`` is visible in a
+    ``window``-row viewport: scroll up to ``target`` when it's above the
+    window, down to ``target - window + 1`` when below, never past 0.
+
+    The "keep the selected row on screen" arithmetic shared by
+    ``ListBox`` and the ``Dropdown`` popup, which each used to inline the
+    same if/elif. Does NOT clamp to a maximum scroll — that needs the
+    item count, so the caller applies its own upper bound afterward."""
+    var s = scroll
+    if target < s:
+        s = target
+    elif target >= s + window:
+        s = target - window + 1
+    if s < 0:
+        s = 0
+    return s
+
+
 def picker_nav_key(k: UInt32, matched_len: Int, mut selected: Int) -> Bool:
     """Apply UP / DOWN / PAGEUP / PAGEDOWN to ``selected``, clamped to
     ``[0, matched_len)``. Returns ``True`` iff ``k`` was one of those

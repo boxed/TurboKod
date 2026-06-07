@@ -37,6 +37,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .picker_input import scroll_to_reveal
 from .string_utils import display_columns
 from .type_ahead import (
     TypeAhead, is_printable_ascii, starts_with_ci, type_ahead_pick,
@@ -226,13 +227,9 @@ struct Dropdown(Copyable, Movable):
         return Rect(x, y, x + width, y + height)
 
     def _scroll_to_highlight(mut self):
-        if self.highlight < self._scroll:
-            self._scroll = self.highlight
-            return
-        if self.highlight >= self._scroll + _MAX_POPUP_ROWS:
-            self._scroll = self.highlight - _MAX_POPUP_ROWS + 1
-        if self._scroll < 0:
-            self._scroll = 0
+        self._scroll = scroll_to_reveal(
+            self._scroll, self.highlight, _MAX_POPUP_ROWS,
+        )
 
     # --- painting -----------------------------------------------------
 
