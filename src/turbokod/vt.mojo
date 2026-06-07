@@ -49,6 +49,7 @@ from .colors import (
     STYLE_BOLD, STYLE_DIM, STYLE_ITALIC, STYLE_NONE, STYLE_REVERSE,
     STYLE_STRIKE, STYLE_UNDERLINE,
 )
+from .string_utils import char_width, codepoint_at
 
 
 # --- parser states --------------------------------------------------------
@@ -786,12 +787,29 @@ struct Vt(Copyable, Movable):
             # Clamp — should be rare since wrap_pending handles the
             # normal case, but defensive against direct CUF past EOL.
             self.cur_c = self.cols - 1
+        # Width from the single source of truth (emoji = 2 cells), so the
+        # grid agrees with what both frontends paint and the cursor advance
+        # matches the real terminal's.
+        var w = char_width(codepoint_at(glyph, 0)[0])
+        if w == 2 and self.cur_c >= self.cols - 1 and self.auto_wrap:
+            # A double-wide glyph can't straddle the right margin — wrap to
+            # the next row first (xterm behavior) so it lands whole.
+            self.cur_c = 0
+            self._cursor_down_or_scroll()
         var idx = self._idx(self.cur_r, self.cur_c)
-        self._grid_ref_set(idx, Cell(glyph, self.current_attr, 1))
-        if self.cur_c == self.cols - 1:
+        self._grid_ref_set(idx, Cell(glyph, self.current_attr, w))
+        if w == 2 and self.cur_c < self.cols - 1:
+            # Empty continuation cell over the glyph's right half (mirrors
+            # Canvas.put_text) so a later single-cell write to it is clean.
+            self._grid_ref_set(
+                self._idx(self.cur_r, self.cur_c + 1),
+                Cell(String(""), self.current_attr, 0),
+            )
+        if self.cur_c + w >= self.cols:
+            self.cur_c = self.cols - 1
             self.wrap_pending = True
         else:
-            self.cur_c += 1
+            self.cur_c += w
 
     def _line_feed(mut self):
         """LF behavior: move down one row, scrolling if the cursor is
