@@ -1565,12 +1565,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // before snapshotting so the snapshot reflects "no editor
         // focused" state.
         if h == chromeDesktop { tk_desktop_tick(h, 80, 24) }
-        // Snapshot into the existing buffer; grow once if it was too small.
+        // Snapshot into the existing buffer; grow and retry until it fits.
+        // A single grow could still truncate a menu more than 2x the buffer,
+        // so loop (n == count signals the snapshot filled the whole buffer).
         var n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
             Int(tk_desktop_menu_snapshot(h,
                 Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
         }
-        if n == menuBuf.count {
+        while n == menuBuf.count {
             menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
             n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
                 Int(tk_desktop_menu_snapshot(h,
