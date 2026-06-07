@@ -30,7 +30,7 @@ font issue.
 
 from .canvas import Canvas
 from .cell import Cell
-from .colors import Attr, BLACK, PANE_BG
+from .colors import Attr, PANE_BG
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
 from .string_utils import display_columns
@@ -243,7 +243,7 @@ def paint_shadow_button(
         # Sunken state: overpaint shadow cells with the dialog body
         # so a previous frame's shadow can't linger across the
         # press → flush transition.
-        var body = Cell(String(" "), Attr(BLACK, shadow_bg), 1)
+        var body = Cell(String(" "), Attr(PANE_BG, shadow_bg), 1)
         if max_x < 0 or right_x < max_x:
             canvas.set(right_x, button.y, body)
         for sx in range(button.x + 1, sx_end):
