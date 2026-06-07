@@ -219,6 +219,51 @@ def list_directory(path: String) -> List[String]:
     return out^
 
 
+def list_directory_typed(path: String) -> List[Tuple[String, Bool]]:
+    """Names in ``path`` paired with ``is_dir``. Empty list on error.
+
+    Same ``tk_listdir`` / ``tk_listdir_get_name`` / ``tk_listdir_done``
+    dance as ``list_directory``, but also pulls each entry's raw dirent
+    ``d_type`` via ``tk_listdir_get_type`` so we avoid a per-entry
+    ``stat`` syscall. ``DT_DIR`` answers ``is_dir`` directly;
+    ``DT_UNKNOWN`` / ``DT_LNK`` (and anything else ambiguous) fall back
+    to ``stat_file`` so a symlink-to-dir still counts as a dir."""
+    var out = List[Tuple[String, Bool]]()
+    var c_path = path + String("\0")
+    var n_entries = Int(external_call["tk_listdir", Int32](
+        c_path.unsafe_ptr(),
+    ))
+    if n_entries < 0:
+        return out^
+    var name_buf = List[UInt8]()
+    for _ in range(4096):
+        name_buf.append(0)
+    for i in range(n_entries):
+        var got = Int(external_call["tk_listdir_get_name", Int32](
+            Int32(i),
+            name_buf.unsafe_ptr(),
+            Int32(4096),
+        ))
+        if got > 0:
+            var name = String(StringSlice(
+                ptr=name_buf.unsafe_ptr(), length=got,
+            ))
+            var dtype = Int(external_call["tk_listdir_get_type", Int32](
+                Int32(i),
+            ))
+            var is_dir: Bool
+            if dtype == 4:                    # DT_DIR
+                is_dir = True
+            elif dtype == 0 or dtype == 10:   # DT_UNKNOWN / DT_LNK
+                var info = stat_file(join_path(path, name))
+                is_dir = info.is_dir() if info.ok else False
+            else:
+                is_dir = False
+            out.append((name^, is_dir))
+    _ = external_call["tk_listdir_done", NoneType]()
+    return out^
+
+
 def join_path(dir: String, name: String) -> String:
     """Join ``dir`` and ``name`` with a single ``/`` separator."""
     var d = dir

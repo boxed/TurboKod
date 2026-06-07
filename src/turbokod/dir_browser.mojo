@@ -31,8 +31,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .file_io import (
-    join_path, list_directory, parent_path, sort_directory_listing,
-    stat_file,
+    join_path, list_directory_typed, parent_path, sort_directory_listing,
 )
 from .geometry import Point, Rect
 from .painter import Painter
@@ -198,13 +197,12 @@ struct DirBrowser(Movable):
         """
         var names = List[String]()
         var is_dirs = List[Bool]()
-        var raw = list_directory(self.dir)
+        var raw = list_directory_typed(self.dir)
         for i in range(len(raw)):
-            var name = raw[i]
+            var name = raw[i][0]
+            var is_dir = raw[i][1]
             if name == String(".") or name == String(".."):
                 continue
-            var info = stat_file(join_path(self.dir, name))
-            var is_dir = info.is_dir() if info.ok else False
             if self.dirs_only and not is_dir:
                 continue
             names.append(name)

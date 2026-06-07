@@ -428,6 +428,7 @@ pub unsafe extern "C" fn tk_debug_log_open(path: *const c_char) -> c_int {
 
 struct ListdirState {
     names: Vec<Vec<u8>>,
+    types: Vec<u8>,
 }
 
 static LISTDIR: Mutex<Option<ListdirState>> = Mutex::new(None);
@@ -451,6 +452,11 @@ pub unsafe extern "C" fn tk_listdir(path: *const c_char) -> c_int {
         return -1;
     }
     let mut names: Vec<Vec<u8>> = Vec::new();
+    // Parallel to ``names``: each entry's raw dirent ``d_type``
+    // (DT_DIR=4, DT_LNK=10, DT_UNKNOWN=0, …). Surfaced via
+    // ``tk_listdir_get_type`` so the Mojo side can skip a per-entry
+    // ``stat`` just to learn ``is_dir``.
+    let mut types: Vec<u8> = Vec::new();
     loop {
         // ``readdir`` returns a pointer into the DIR's internal
         // buffer; valid until the next ``readdir`` or ``closedir``.
@@ -466,11 +472,12 @@ pub unsafe extern "C" fn tk_listdir(path: *const c_char) -> c_int {
             continue;
         }
         names.push(nb.to_vec());
+        types.push((*entry).d_type);
     }
     libc::closedir(dir);
     let count = names.len() as c_int;
     if let Ok(mut g) = LISTDIR.lock() {
-        *g = Some(ListdirState { names });
+        *g = Some(ListdirState { names, types });
     }
     count
 }
@@ -509,6 +516,26 @@ pub unsafe extern "C" fn tk_listdir_get_name(
     std::ptr::copy_nonoverlapping(name.as_ptr(), out as *mut u8, name.len());
     *out.add(name.len()) = 0;
     name.len() as c_int
+}
+
+/// Return the raw dirent ``d_type`` of the ``idx``-th entry
+/// (DT_DIR=4, DT_LNK=10, DT_UNKNOWN=0, …), or -1 on out-of-range /
+/// no cached listing. Lets the Mojo side classify entries without a
+/// per-entry ``stat`` syscall.
+#[no_mangle]
+pub extern "C" fn tk_listdir_get_type(idx: c_int) -> c_int {
+    let guard = match LISTDIR.lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let state = match guard.as_ref() {
+        Some(s) => s,
+        None => return -1,
+    };
+    if idx < 0 || (idx as usize) >= state.types.len() {
+        return -1;
+    }
+    state.types[idx as usize] as c_int
 }
 
 /// Drop the cached listing. Idempotent.
