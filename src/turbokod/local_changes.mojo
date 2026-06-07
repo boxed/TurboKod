@@ -76,7 +76,12 @@ from .git_changes import (
     stage_file, unstage_file,
 )
 from .install_runner import InstallRunner
-from .string_utils import display_columns, split_lines_no_trailing, starts_with
+from .string_utils import (
+    display_columns,
+    split_lines_no_trailing,
+    starts_with,
+    tail_to_columns,
+)
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
@@ -1789,15 +1794,15 @@ struct LocalChanges(Movable):
         var avail = right_excl - x
         if avail <= 0:
             return
-        var bytes = text.as_bytes()
-        if len(bytes) <= avail:
+        if display_columns(text) <= avail:
             _ = canvas.put_text(Point(x, y), text, attr, right_excl)
             return
         canvas.set(x, y, Cell(String("…"), attr, 1))
-        var start = len(bytes) - avail + 1
+        # The ellipsis took one column; fit the codepoint-aligned tail of
+        # ``text`` into the remaining ``avail - 1`` columns.
         _ = canvas.put_text(
             Point(x + 1, y),
-            String(StringSlice(unsafe_from_utf8=bytes[start:len(bytes)])),
+            tail_to_columns(text, avail - 1),
             attr, right_excl,
         )
 
