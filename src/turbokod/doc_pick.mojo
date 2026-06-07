@@ -8,11 +8,6 @@ rendered HTML body in a read-only editor pane.
 
 The match algorithm is borrowed from ``quick_open_match`` so users get
 the same fuzzy-with-word-boundary feel as Quick Open / Go to Symbol.
-
-A two-line preview of the rendered body is painted under each row so
-the user can disambiguate ``str.find`` from ``re.find`` without opening
-each one. The preview is computed lazily on selection change to avoid
-rendering thousands of HTML bodies up front.
 """
 
 from std.collections.list import List
@@ -21,7 +16,7 @@ from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
-from .doc_store import DocEntry, html_to_text
+from .doc_store import DocEntry
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC,
