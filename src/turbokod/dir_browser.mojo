@@ -103,6 +103,19 @@ def jump_shortcuts(
     return out^
 
 
+def jump_button_x(labels: List[ShadowButton], i: Int, start_x: Int) -> Int:
+    """Column where button ``i`` starts, laid out left-to-right from
+    ``start_x``. Pure arithmetic over the persistent button labels so
+    paint / click-mapping don't have to rebuild the whole shortcut row
+    (with its ``$HOME`` FFI lookup and List allocations) per frame.
+
+    Mirrors the offset accumulation in ``jump_shortcuts``: each button
+    claims its label width plus one column for the right-edge shadow
+    plus one column of separation before the next."""
+    var x = start_x
+    for j in range(i):
+        x += display_columns(labels[j].label) + 2
+    return x
 
 
 struct DirBrowser(Movable):
@@ -249,13 +262,11 @@ struct DirBrowser(Movable):
         sees the press registered.
         """
         var face = Attr(BLACK, GREEN)
-        var layout = jump_shortcuts(row.a.x, self.project)
         for i in range(len(self._jump_buttons)):
-            if i >= len(layout):
+            var bx = jump_button_x(self._jump_buttons, i, row.a.x)
+            if bx >= row.b.x:
                 break
-            if layout[i].x >= row.b.x:
-                break
-            self._jump_buttons[i].move_to(layout[i].x, row.a.y)
+            self._jump_buttons[i].move_to(bx, row.a.y)
             paint_shadow_button(
                 canvas, self._jump_buttons[i], face, LIGHT_GRAY, row.b.x,
             )
@@ -276,22 +287,25 @@ struct DirBrowser(Movable):
         # Ensure the buttons' hit rects line up with the row before
         # dispatching — the host may invoke ``handle_jump_click``
         # without a fresh paint (e.g. a release event arriving
-        # between frames).
-        var layout = jump_shortcuts(row.a.x, self.project)
+        # between frames). The x-offsets are pure arithmetic over the
+        # persistent labels, so no per-event layout allocation.
         for i in range(len(self._jump_buttons)):
-            if i >= len(layout):
-                break
-            self._jump_buttons[i].move_to(layout[i].x, row.a.y)
+            self._jump_buttons[i].move_to(
+                jump_button_x(self._jump_buttons, i, row.a.x), row.a.y,
+            )
         for i in range(len(self._jump_buttons)):
-            if i >= len(layout):
-                break
-            if layout[i].x >= row.b.x:
+            if jump_button_x(self._jump_buttons, i, row.a.x) >= row.b.x:
                 break
             var status = self._jump_buttons[i].handle_mouse(event)
             if status == BUTTON_NONE:
                 continue
             if status == BUTTON_FIRED:
-                self.jump_to(layout[i].path)
+                # Resolve the destination path lazily — only the fired
+                # button needs ``$HOME`` resolved, so the FFI lookup
+                # happens here rather than per paint / motion.
+                var layout = jump_shortcuts(row.a.x, self.project)
+                if i < len(layout):
+                    self.jump_to(layout[i].path)
             return True
         return False
 
