@@ -44,6 +44,10 @@ struct DocPick(Movable):
     var display: String          # docset name shown in title ("Python 3.12")
     var query: TextField
     var entries: List[DocEntry]
+    # Precomputed ``type_name.name`` (or bare ``name``) match haystacks,
+    # parallel to ``entries`` — built once in ``open`` so ``_refilter``
+    # doesn't reconcatenate per entry on every keystroke.
+    var _haystacks: List[String]
     var matched: List[Int]
     var selected: Int
     var scroll: Int
@@ -63,6 +67,7 @@ struct DocPick(Movable):
         self.display = String("")
         self.query = TextField()
         self.entries = List[DocEntry]()
+        self._haystacks = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
@@ -76,6 +81,17 @@ struct DocPick(Movable):
         """Open the picker with ``entries`` already loaded."""
         self.display = display^
         self.entries = entries^
+        # Precompute the ``type_name.name`` haystacks once so ``_refilter``
+        # is a pure per-entry match with no string concatenation.
+        self._haystacks = List[String]()
+        for i in range(len(self.entries)):
+            if len(self.entries[i].type_name.as_bytes()) > 0:
+                self._haystacks.append(
+                    self.entries[i].type_name + String(".")
+                    + self.entries[i].name
+                )
+            else:
+                self._haystacks.append(self.entries[i].name)
         self.query = TextField()
         self.active = True
         self.submitted = False
@@ -93,6 +109,7 @@ struct DocPick(Movable):
         self.display = String("")
         self.query = TextField()
         self.entries = List[DocEntry]()
+        self._haystacks = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
@@ -108,12 +125,17 @@ struct DocPick(Movable):
             for i in range(len(self.entries)):
                 self.matched.append(i)
         else:
+            # Match against the precomputed ``type.name`` haystacks so the
+            # user can type a section prefix (e.g. ``stdt`` for ``str.find``
+            # under "Standard Types") to narrow nested entries. Fall back to
+            # computing inline if the cache is somehow out of sync with
+            # ``entries`` (it shouldn't be — ``open`` builds both together).
+            var cached = len(self._haystacks) == len(self.entries)
             for i in range(len(self.entries)):
-                # Match against ``type.name`` so the user can type a
-                # section prefix (e.g. ``stdt`` for ``str.find`` under
-                # "Standard Types") to narrow nested entries.
                 var hay: String
-                if len(self.entries[i].type_name.as_bytes()) > 0:
+                if cached:
+                    hay = self._haystacks[i]
+                elif len(self.entries[i].type_name.as_bytes()) > 0:
                     hay = self.entries[i].type_name + String(".") \
                         + self.entries[i].name
                 else:
