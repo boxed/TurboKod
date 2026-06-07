@@ -2402,6 +2402,16 @@ def test_write_file_round_trip() raises:
     # Empty payload writes a zero-byte file.
     assert_true(write_file(path, String("")))
     assert_equal(read_file(path), String(""))
+    # Multibyte content round-trips byte-for-byte (atomic rename preserves bytes).
+    var mb = String("smörgåsbord — café 🚀\n")
+    assert_true(write_file(path, mb))
+    assert_equal(read_file(path), mb)
+    # A payload larger than a typical single write exercises the short-write loop.
+    var big = String("")
+    for _ in range(5000):
+        big += String("0123456789abcdef\n")
+    assert_true(write_file(path, big))
+    assert_equal(read_file(path), big)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 

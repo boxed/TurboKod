@@ -12,7 +12,6 @@ target platform — the offsets *will* differ.
 from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
-from std.io.file_descriptor import FileDescriptor
 from std.memory.span import Span
 from std.sys.info import CompilationTarget
 
@@ -99,24 +98,55 @@ def read_file(path: String) raises -> String:
 
 
 def write_file(path: String, content: String) -> Bool:
-    """Write ``content`` to ``path``, replacing any existing file. Returns
-    True on success.
+    """Write ``content`` to ``path`` atomically. Returns True on success.
 
-    Uses ``creat(2)`` — equivalent to ``open(O_WRONLY|O_CREAT|O_TRUNC, 0644)``
-    but non-variadic, so it works through Mojo's ``external_call``. We then
-    write via ``FileDescriptor.write_bytes`` because ``external_call["write"]``
-    collides with a stdlib registration of the same symbol.
+    Writes to a sibling temp file, fsyncs, then ``rename(2)`` over the
+    target — so a crash, full disk, or partial write can never leave the
+    original truncated or empty (the old content stays intact until the
+    rename succeeds). The write itself loops to handle short writes and
+    reports failure: previously the ``write_bytes`` result was discarded, so
+    an ``ENOSPC``/short write returned success and let ``Editor.save`` clear
+    the dirty flag over an incomplete file.
+
+    ``creat(2)`` is used (not ``open``) because it's non-variadic and so
+    works through Mojo's ``external_call``. If the directory isn't writable
+    but the file itself is, the temp create fails and we fall back to an
+    in-place (non-atomic) write so saving still works in that rare case.
     """
-    var c_path = path + String("\0")
-    var fd = external_call["creat", Int32](c_path.unsafe_ptr(), Int32(0o644))
-    if fd < 0:
-        return False
     var bytes = content.as_bytes()
-    if len(bytes) > 0:
-        var f = FileDescriptor(Int(fd))
-        f.write_bytes(bytes)
+    var total = len(bytes)
+    var ptr = bytes.unsafe_ptr()
+    var c_path = path + String("\0")
+
+    var c_tmp = path + String(".tk-tmp") + String("\0")
+    var fd = external_call["creat", Int32](c_tmp.unsafe_ptr(), Int32(0o644))
+    var atomic = fd >= 0
+    if not atomic:
+        fd = external_call["creat", Int32](c_path.unsafe_ptr(), Int32(0o644))
+        if fd < 0:
+            return False
+
+    var written = 0
+    var ok = True
+    while written < total:
+        var n = external_call["write", Int](
+            Int(fd), ptr + written, UInt(total - written),
+        )
+        if n <= 0:
+            ok = False
+            break
+        written += n
+    _ = external_call["fsync", Int32](fd)
     _ = external_call["close", Int32](fd)
-    return True
+
+    if not atomic:
+        return ok
+    if ok and external_call["rename", Int32](
+        c_tmp.unsafe_ptr(), c_path.unsafe_ptr()
+    ) == Int32(0):
+        return True
+    _ = external_call["unlink", Int32](c_tmp.unsafe_ptr())
+    return False
 
 
 # --- Directory listing -----------------------------------------------------
