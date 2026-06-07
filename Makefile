@@ -1,4 +1,4 @@
-.PHONY: build app tui test screenshots update-lsp-list
+.PHONY: build shim app tui test screenshots update-lsp-list
 .DEFAULT_GOAL := build
 
 # ``make`` (default) — build both frontends without launching either.
@@ -9,7 +9,23 @@
 # docs/app-bundle.md "Gotcha: relaunching the .app skips the bundle sync").
 #
 # Both halves use mtime caches — re-running is a no-op when nothing changed.
-build: app tui
+#
+# ``app`` and ``tui`` are independent ``mojo build`` invocations (separate
+# outputs — the dylib vs the terminal binary), so we recurse into a ``-j2``
+# sub-make to compile them concurrently. On a full rebuild that roughly
+# halves wall time: each frontend is ~9s, so sequential ~20s drops to ~11s.
+# The Rust shim both scripts link is built first as a serial prerequisite,
+# so the two parallel halves never race ``cargo`` against the same target
+# dir; once it's cached the ``shim`` step is a near-instant no-op.
+build: shim
+	@$(MAKE) --no-print-directory -j2 app tui
+
+# Build the Rust shim staticlib up front (cargo's own mtime check makes
+# this a no-op when nothing in the crate changed). Pulling it out of the
+# parallel step keeps app+tui from both triggering a cold ``cargo build``
+# against the shared target dir at the same time.
+shim:
+	@cd app/turbokod-shim && cargo build --release -q
 
 # Build .build/TurboKod.app — Rust shim + Mojo dylib + Swift binary,
 # then assemble the bundle. Does NOT launch (use ``./run_swift.sh``
