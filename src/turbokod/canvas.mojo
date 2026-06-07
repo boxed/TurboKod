@@ -100,7 +100,14 @@ struct Canvas(Copyable, Movable):
         for y in range(clipped.a.y, clipped.b.y):
             var x = clipped.a.x
             while x < clipped.b.x:
+                if w == 2 and x + 1 >= clipped.b.x:
+                    break  # wide glyph won't fit before the right edge
                 self.cells[self._index(x, y)] = cell
+                if w == 2:
+                    # Empty continuation cell over the glyph's right half, so
+                    # a leftover normal cell can't render a spurious glyph
+                    # (mirrors put_text).
+                    self.cells[self._index(x + 1, y)] = Cell(String(""), attr, 0)
                 x += w
 
     def put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
