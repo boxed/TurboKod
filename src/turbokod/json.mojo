@@ -439,6 +439,26 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
                 for k in range(4):
                     cp = (cp << 4) | _hex_value(Int(bytes[p + 2 + k]))
                 p += 6
+                # Combine a UTF-16 surrogate pair into one codepoint, else a
+                # non-BMP char (``😀``) would emit two 3-byte WTF-8
+                # sequences instead of the 4-byte UTF-8 for U+1F600. An
+                # unpaired surrogate degrades to U+FFFD.
+                if 0xD800 <= cp and cp <= 0xDBFF:
+                    if p + 5 < len(bytes) \
+                            and bytes[p] == 0x5C and bytes[p + 1] == 0x75:
+                        var lo = 0
+                        for k in range(4):
+                            lo = (lo << 4) | _hex_value(Int(bytes[p + 2 + k]))
+                        if 0xDC00 <= lo and lo <= 0xDFFF:
+                            cp = 0x10000 + ((cp - 0xD800) << 10) \
+                                + (lo - 0xDC00)
+                            p += 6
+                        else:
+                            cp = 0xFFFD
+                    else:
+                        cp = 0xFFFD
+                elif 0xDC00 <= cp and cp <= 0xDFFF:
+                    cp = 0xFFFD
                 _emit_utf8(cp, out)
             else:
                 raise Error("bad string escape")
@@ -456,8 +476,13 @@ def _emit_utf8(cp: Int, mut out: List[UInt8]):
     elif cp < 0x800:
         out.append(UInt8(0xC0 | (cp >> 6)))
         out.append(UInt8(0x80 | (cp & 0x3F)))
-    else:
+    elif cp < 0x10000:
         out.append(UInt8(0xE0 | (cp >> 12)))
+        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+    else:
+        out.append(UInt8(0xF0 | (cp >> 18)))
+        out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
         out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
         out.append(UInt8(0x80 | (cp & 0x3F)))
 

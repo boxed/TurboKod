@@ -9437,6 +9437,22 @@ def test_json_string_escapes() raises:
     assert_equal(dec.as_str(), raw)
 
 
+def test_json_surrogate_pair_decodes_to_astral_utf8() raises:
+    """A UTF-16 surrogate pair (``\\uD83D\\uDE00``) must combine into one
+    codepoint and emit the 4-byte UTF-8 for U+1F600 (😀), not two 3-byte
+    WTF-8 sequences. An unpaired surrogate degrades to U+FFFD."""
+    var dec = parse_json(String("\"\\uD83D\\uDE00\""))
+    assert_true(dec.is_string())
+    assert_equal(dec.as_str(), String("😀"))
+    # Round-trips back through the parser unchanged.
+    var again = parse_json(encode_json(dec))
+    assert_equal(again.as_str(), String("😀"))
+    # Unpaired high surrogate → replacement character, no crash.
+    var lone = parse_json(String("\"\\uD83Dx\""))
+    assert_true(lone.is_string())
+    assert_equal(lone.as_str(), String("�x"))
+
+
 def test_json_parse_errors_raise() raises:
     var ok = True
     try:
@@ -18325,6 +18341,7 @@ def _run_chunk_04() raises:
     test_window_v_scroll_drag_to_end()
     test_json_round_trip_lsp_envelope()
     test_json_string_escapes()
+    test_json_surrogate_pair_decodes_to_astral_utf8()
     test_json_parse_errors_raise()
     test_json_floats_round_trip_as_text()
     test_language_registry_loads_from_bundled_json()
