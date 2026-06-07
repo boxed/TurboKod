@@ -57,6 +57,61 @@ comptime BUTTON_CANCELED = UInt8(3)
 dragged away to back out. Latch cleared, no action."""
 
 
+@fieldwise_init
+struct ButtonLatch(ImplicitlyCopyable, Movable):
+    """One step of the press/drag/release machine: the updated latch
+    state (``pressed`` / ``pressed_inside``) plus the ``BUTTON_*``
+    status to hand back to the host."""
+    var pressed: Bool
+    var pressed_inside: Bool
+    var status: UInt8
+
+
+def button_mouse_step(
+    pressed: Bool, pressed_inside: Bool, hit: Rect, event: Event,
+) -> ButtonLatch:
+    """The shared press / drag-track / release-fire state machine that
+    ``ShadowButton``, ``OptionToggle`` and ``Checkbox`` all run.
+
+    Takes the button's current latch and its ``hit`` rect; returns the
+    next latch + the status to return. Pure (no ``self``) so the three
+    button types stay one-line forwarders and the capture semantics —
+    press latches, drag re-points ``pressed_inside``, release fires
+    only inside, a stale latch from a dropped release is discarded —
+    live in exactly one place.
+
+    The button only ever consumes left-button events; everything else
+    returns ``BUTTON_NONE`` with the latch untouched so callers keep
+    their dispatch order. Once latched it consumes every left-button
+    event until release, wherever the cursor went."""
+    if event.kind != EVENT_MOUSE or event.button != MOUSE_BUTTON_LEFT:
+        return ButtonLatch(pressed, pressed_inside, BUTTON_NONE)
+    # Press (initial click, not drag-motion). A second press without an
+    # intervening release means the host dropped a release somewhere —
+    # the no-hit path returns a cleared latch, discarding the stale one.
+    if event.pressed and not event.motion:
+        if hit.contains(event.pos):
+            return ButtonLatch(True, True, BUTTON_CAPTURED)
+        return ButtonLatch(False, False, BUTTON_NONE)
+    # Drag motion: only consume while we hold capture. ``pressed_inside``
+    # tracks whether the cursor is over the hit rect so paint can flip
+    # the shadow back on the moment the user drags off (and flush on
+    # re-entry).
+    if event.pressed and event.motion:
+        if not pressed:
+            return ButtonLatch(pressed, pressed_inside, BUTTON_NONE)
+        return ButtonLatch(True, hit.contains(event.pos), BUTTON_CAPTURED)
+    # Release. Meaningful only when we hold capture; the release
+    # position — not the cached ``pressed_inside`` — decides FIRED vs
+    # CANCELED, since terminals don't always send a motion before
+    # release.
+    if not pressed:
+        return ButtonLatch(pressed, pressed_inside, BUTTON_NONE)
+    if hit.contains(event.pos):
+        return ButtonLatch(False, False, BUTTON_FIRED)
+    return ButtonLatch(False, False, BUTTON_CANCELED)
+
+
 struct ShadowButton(ImplicitlyCopyable, Movable):
     """One placed button. Construct with a label + top-left cell;
     the rest is derived.
@@ -141,49 +196,12 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         captured (``self.pressed = True``) the button consumes
         every left-button event until release, regardless of where
         the cursor went."""
-        if event.kind != EVENT_MOUSE:
-            return BUTTON_NONE
-        if event.button != MOUSE_BUTTON_LEFT:
-            return BUTTON_NONE
-        # Press (initial click, not drag-motion).
-        if event.pressed and not event.motion:
-            # A second press without an intervening release means the
-            # host dropped a release event somewhere — discard the
-            # stale latch rather than getting stuck in a permanent
-            # "pressed" state. Then re-arm if this press hits.
-            if self.pressed:
-                self.pressed = False
-                self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                self.pressed = True
-                self.pressed_inside = True
-                return BUTTON_CAPTURED
-            return BUTTON_NONE
-        # Drag motion: only consume while we hold capture. The
-        # ``pressed_inside`` flag tracks whether the cursor is
-        # currently over the hit rect so the paint can flip the
-        # shadow back on the moment the user drags off (and back to
-        # flush on re-entry — same as native buttons).
-        if event.pressed and event.motion:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed_inside = self.hit_rect().contains(event.pos)
-            return BUTTON_CAPTURED
-        # Release. Only meaningful when we hold capture; spurious
-        # releases (no press preceded) are not ours to consume. The
-        # release position is what decides FIRED vs CANCELED, not
-        # the cached ``pressed_inside`` — terminals don't always
-        # interleave a motion event before release, and "did the
-        # mouse come up over me?" is the question that matters.
-        if not event.pressed:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed = False
-            self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                return BUTTON_FIRED
-            return BUTTON_CANCELED
-        return BUTTON_NONE
+        var r = button_mouse_step(
+            self.pressed, self.pressed_inside, self.hit_rect(), event,
+        )
+        self.pressed = r.pressed
+        self.pressed_inside = r.pressed_inside
+        return r.status
 
 
 def paint_shadow_button(
@@ -310,31 +328,12 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
         # ``MOUSE_BUTTON_NONE`` with ``motion=True`` — that's the
         # signal we use to pop the tooltip.
         self.hovered = self.hit_rect().contains(event.pos)
-        if event.button != MOUSE_BUTTON_LEFT:
-            return BUTTON_NONE
-        if event.pressed and not event.motion:
-            if self.pressed:
-                self.pressed = False
-                self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                self.pressed = True
-                self.pressed_inside = True
-                return BUTTON_CAPTURED
-            return BUTTON_NONE
-        if event.pressed and event.motion:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed_inside = self.hit_rect().contains(event.pos)
-            return BUTTON_CAPTURED
-        if not event.pressed:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed = False
-            self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                return BUTTON_FIRED
-            return BUTTON_CANCELED
-        return BUTTON_NONE
+        var r = button_mouse_step(
+            self.pressed, self.pressed_inside, self.hit_rect(), event,
+        )
+        self.pressed = r.pressed
+        self.pressed_inside = r.pressed_inside
+        return r.status
 
 
 def paint_option_toggle(
@@ -415,33 +414,12 @@ struct Checkbox(ImplicitlyCopyable, Movable):
         caller is responsible for calling ``toggle()`` (so a host
         that needs to veto a toggle, e.g. on a disabled row, can
         skip it without re-implementing the state machine)."""
-        if event.kind != EVENT_MOUSE:
-            return BUTTON_NONE
-        if event.button != MOUSE_BUTTON_LEFT:
-            return BUTTON_NONE
-        if event.pressed and not event.motion:
-            if self.pressed:
-                self.pressed = False
-                self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                self.pressed = True
-                self.pressed_inside = True
-                return BUTTON_CAPTURED
-            return BUTTON_NONE
-        if event.pressed and event.motion:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed_inside = self.hit_rect().contains(event.pos)
-            return BUTTON_CAPTURED
-        if not event.pressed:
-            if not self.pressed:
-                return BUTTON_NONE
-            self.pressed = False
-            self.pressed_inside = False
-            if self.hit_rect().contains(event.pos):
-                return BUTTON_FIRED
-            return BUTTON_CANCELED
-        return BUTTON_NONE
+        var r = button_mouse_step(
+            self.pressed, self.pressed_inside, self.hit_rect(), event,
+        )
+        self.pressed = r.pressed
+        self.pressed_inside = r.pressed_inside
+        return r.status
 
 
 def paint_checkbox(
