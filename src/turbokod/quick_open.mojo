@@ -29,7 +29,7 @@ from .events import (
     KEY_ENTER, KEY_ESC,
     MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import center_in, Point, Rect
 from .picker_input import (
     picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
 )
@@ -449,13 +449,7 @@ struct QuickOpen(Movable):
     # --- geometry ---------------------------------------------------------
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = 70
-        var height = 20
-        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
-        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, 70, 20)
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Find:`` query row."""

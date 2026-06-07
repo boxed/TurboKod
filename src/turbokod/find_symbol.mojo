@@ -38,7 +38,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import ci_less
-from .geometry import Point, Rect
+from .geometry import center_in, Point, Rect
 from .lsp import LspProcess
 from .picker_input import (
     picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
@@ -500,13 +500,7 @@ struct FindSymbol(Movable):
     # --- geometry ---------------------------------------------------------
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = 80
-        var height = 22
-        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
-        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, 80, 22)
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         if not self.active:
