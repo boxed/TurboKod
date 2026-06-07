@@ -40,7 +40,9 @@ from .events import (
 from .file_io import ci_less
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .picker_input import picker_nav_key, picker_wheel_scroll
+from .picker_input import (
+    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+)
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import starts_with
 from .text_field import TextField
@@ -734,11 +736,7 @@ struct FindSymbol(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        var visible = 16
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, 16)
 
 
 # --- helpers ---------------------------------------------------------------

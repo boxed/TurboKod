@@ -28,7 +28,9 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect, center_in
-from .picker_input import picker_nav_key, picker_wheel_scroll
+from .picker_input import (
+    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+)
 from .quick_open import quick_open_match
 from .string_utils import display_columns
 from .text_field import TextField
@@ -303,8 +305,4 @@ struct DocPick(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        var visible = 16
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, 16)

@@ -30,7 +30,9 @@ from .events import (
     MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
-from .picker_input import picker_nav_key, picker_wheel_scroll
+from .picker_input import (
+    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+)
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .text_field import TextField
 from .view import RowCursor
@@ -635,11 +637,7 @@ struct QuickOpen(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        var visible = 14
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, 14)
 
 
 # --- match algorithm ---------------------------------------------------------

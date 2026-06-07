@@ -23,7 +23,9 @@ from .events import (
 from .file_io import basename
 from .geometry import Point, Rect, center_in
 from .lsp_dispatch import DefinitionResolved
-from .picker_input import picker_nav_key, picker_wheel_scroll
+from .picker_input import (
+    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+)
 from .string_utils import display_columns, starts_with
 from .window import close_button_clicked, paint_close_button, paint_window_title
 
@@ -237,11 +239,7 @@ struct ReferencePick(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        var visible = 14
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, 14)
 
 
 def _ends_with_slash(s: String) -> Bool:
