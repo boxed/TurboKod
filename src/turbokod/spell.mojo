@@ -399,9 +399,11 @@ struct Speller(Movable):
         var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
+        self.loaded = True
+        if self._has(lw):
+            return True  # already known — don't grow the bucket / dup the file
         var b = _bucket(lw)
         self.buckets[b].append(lw)
-        self.loaded = True
         var path = user_dict_path()
         if len(path.as_bytes()) == 0:
             return False
@@ -420,6 +422,8 @@ struct Speller(Movable):
         var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
+        if self._has(lw):
+            return True  # already known — don't grow the bucket / dup the file
         var b = _bucket(lw)
         self.project_buckets[b].append(lw)
         var path = project_dict_path(self.project_root)
