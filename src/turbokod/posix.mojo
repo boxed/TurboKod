@@ -446,6 +446,18 @@ def waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     return (rc, status.unsafe_ptr().bitcast[Int32]()[0])
 
 
+def exit_code_from_status(status: Int) -> Int:
+    """Decode a ``waitpid(2)`` status into a presentable exit code.
+
+    Returns the normal ``WEXITSTATUS`` (``(status >> 8) & 0xFF``) for a child
+    that exited, but ``128 + signal`` for one killed by a signal — otherwise a
+    crashed / SIGTERM'd child computes 0 and is misreported as a clean exit."""
+    var sig = status & 0x7F
+    if sig != 0:
+        return 128 + sig
+    return (status >> 8) & 0xFF
+
+
 def kill_pid(pid: Int32, sig: Int32) -> Int32:
     """``kill(pid, sig)`` — signal-delivery only, doesn't reap. Caller is
     responsible for the subsequent ``waitpid``."""

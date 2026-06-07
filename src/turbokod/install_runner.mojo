@@ -29,8 +29,8 @@ from .lsp import LspProcess
 from .string_utils import display_columns
 from .window import paint_window_title_at
 from .posix import (
-    alloc_zero_buffer, close_fd, monotonic_ms, poll_stdin, read_into,
-    untrack_child, waitpid_nohang,
+    alloc_zero_buffer, close_fd, exit_code_from_status, monotonic_ms,
+    poll_stdin, read_into, untrack_child, waitpid_nohang,
 )
 
 
@@ -54,17 +54,17 @@ comptime _LAST_LINES: Int = 5
 struct InstallResult(ImplicitlyCopyable, Movable):
     """Outcome of one install run, surfaced to the host on completion.
 
-    ``status`` is the raw ``waitpid`` value — exit code is
-    ``(status >> 8) & 0xFF`` on POSIX. ``output`` is the combined
-    stdout+stderr capture (last ``_OUTPUT_CAP`` bytes if the child
-    was chatty)."""
+    ``status`` is the raw ``waitpid`` value — decoded via
+    ``exit_code_from_status`` (WEXITSTATUS, or 128 + signal on a signal
+    death). ``output`` is the combined stdout+stderr capture (last
+    ``_OUTPUT_CAP`` bytes if the child was chatty)."""
     var label: String
     var command: String
     var status: Int32
     var output: String
 
     def exit_code(self) -> Int:
-        return (Int(self.status) >> 8) & 0xFF
+        return exit_code_from_status(Int(self.status))
 
     def ok(self) -> Bool:
         return self.exit_code() == 0
