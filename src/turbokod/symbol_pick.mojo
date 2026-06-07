@@ -46,6 +46,10 @@ struct SymbolPick(Movable):
     var path: String        # the file the symbols belong to
     var query: TextField
     var entries: List[SymbolItem]
+    # Precomputed ``container.name`` (or bare ``name``) match haystacks,
+    # parallel to ``entries`` — built once in ``set_entries`` so
+    # ``_refilter`` doesn't reconcatenate per entry on every keystroke.
+    var _haystacks: List[String]
     var matched: List[Int]
     var selected: Int
     var scroll: Int
@@ -65,6 +69,7 @@ struct SymbolPick(Movable):
         self.path = String("")
         self.query = TextField()
         self.entries = List[SymbolItem]()
+        self._haystacks = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
@@ -82,6 +87,7 @@ struct SymbolPick(Movable):
         self.loading = True
         self.submitted = False
         self.entries = List[SymbolItem]()
+        self._haystacks = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
@@ -95,6 +101,17 @@ struct SymbolPick(Movable):
         Refilters with the current query in case the user typed while we
         were waiting."""
         self.entries = items^
+        # Precompute the ``container.name`` haystacks once so ``_refilter``
+        # is a pure per-entry match with no string concatenation.
+        self._haystacks = List[String]()
+        for i in range(len(self.entries)):
+            if len(self.entries[i].container.as_bytes()) > 0:
+                self._haystacks.append(
+                    self.entries[i].container + String(".")
+                    + self.entries[i].name
+                )
+            else:
+                self._haystacks.append(self.entries[i].name)
         self.loading = False
         self._refilter()
 
@@ -105,6 +122,7 @@ struct SymbolPick(Movable):
         self.path = String("")
         self.query = TextField()
         self.entries = List[SymbolItem]()
+        self._haystacks = List[String]()
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
@@ -119,11 +137,17 @@ struct SymbolPick(Movable):
             for i in range(len(self.entries)):
                 self.matched.append(i)
         else:
+            # Match against the precomputed ``container.name`` haystacks so
+            # users can type a parent-class prefix to narrow nested methods.
+            # Fall back to computing inline if the cache is somehow out of
+            # sync with ``entries`` (it shouldn't be — ``set_entries`` builds
+            # both together).
+            var cached = len(self._haystacks) == len(self.entries)
             for i in range(len(self.entries)):
-                # Match against ``container.name`` so users can type a
-                # parent-class prefix to narrow nested methods.
                 var hay: String
-                if len(self.entries[i].container.as_bytes()) > 0:
+                if cached:
+                    hay = self._haystacks[i]
+                elif len(self.entries[i].container.as_bytes()) > 0:
                     hay = self.entries[i].container + String(".") \
                         + self.entries[i].name
                 else:
