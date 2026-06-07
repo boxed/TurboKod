@@ -655,7 +655,7 @@ def paint_bottom_dock_chrome(
     var hint_cells = 0
     var hint_bytes = hotkey_label.as_bytes()
     if len(hint_bytes) > 0:
-        hint_cells = len(hint_bytes) + 1  # ` X`
+        hint_cells = display_columns(hotkey_label) + 1  # ` X`
     var cmd_max = panel.b.x - 9 - hint_cells
     if cmd_max < cmd_x:
         cmd_max = cmd_x
@@ -680,13 +680,13 @@ def paint_bottom_dock_chrome(
         if pane_w >= 12:
             _ = painter.put_text(
                 canvas,
-                Point(panel.b.x - 1 - len(hint_bytes), top),
+                Point(panel.b.x - 1 - display_columns(hotkey_label), top),
                 String(" ") + hotkey_label, title_attr,
             )
         elif pane_w >= 6:
             _ = painter.put_text(
                 canvas,
-                Point(panel.b.x - len(hint_bytes), top),
+                Point(panel.b.x - display_columns(hotkey_label), top),
                 hotkey_label, title_attr,
             )
     if dock.state == PANEL_STATE_MINIMIZED:
