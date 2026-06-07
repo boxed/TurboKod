@@ -230,8 +230,32 @@ struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
     so the first call to ``classify`` doesn't trigger a spurious
     sticky window before any working signal has fired."""
 
+    # --- pure-function cache for the raw detector ----------------------
+    # ``detect_claude_state`` lower-cases and concatenates the whole
+    # ~20-row tail on every call, and ``classify`` runs at paint cadence
+    # (often several times per frame across ``tick``/``paint``/ESC). The
+    # detector is pure — its output depends only on ``lines`` — so when
+    # the tail is byte-identical to the previous call we skip the rescan
+    # and reuse the cached raw state. No invalidation beyond the input-
+    # equality check. We key on the rows joined with ``\n`` (a single
+    # ``String``, so the struct stays ``ImplicitlyCopyable`` and the
+    # equality test is one byte-compare); a row count change or any byte
+    # change produces a different key.
+    var _cached_key: String
+    """The ``\\n``-joined ``lines`` from the last raw-detector run."""
+    var _cached_raw: UInt8
+    """``detect_claude_state`` for that input — the raw (pre-stickiness)
+    state."""
+    var _cache_valid: Bool
+    """False until the first ``classify`` populates the cache (an empty
+    ``_cached_key`` would otherwise spuriously match a genuinely empty
+    tail)."""
+
     def __init__(out self):
         self._last_working_ms = 0
+        self._cached_key = String("")
+        self._cached_raw = CLAUDE_NONE
+        self._cache_valid = False
 
     def classify(mut self, lines: List[String], now_ms: Int) -> UInt8:
         """Run the raw detector and apply the working-state stickiness.
@@ -239,7 +263,15 @@ struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
         kept as a parameter (rather than calling the syscall inside)
         so tests can inject specific timestamps without timing
         flakiness."""
-        var raw = detect_claude_state(lines)
+        var key = _join_lines(lines)
+        var raw: UInt8
+        if self._cache_valid and self._cached_key == key:
+            raw = self._cached_raw
+        else:
+            raw = detect_claude_state(lines)
+            self._cached_key = key
+            self._cached_raw = raw
+            self._cache_valid = True
         if raw == CLAUDE_WORKING:
             self._last_working_ms = now_ms
             return raw
@@ -251,6 +283,22 @@ struct ClaudeStateTracker(ImplicitlyCopyable, Movable):
 
 
 # --- helpers --------------------------------------------------------------
+
+
+def _join_lines(lines: List[String]) -> String:
+    """Join ``lines`` with ``\\n`` separators into a single cache key.
+    Used by ``ClaudeStateTracker`` to short-circuit the raw detector
+    when the tail it's handed is byte-identical to the previous call.
+    The separator keeps row boundaries significant (so re-splitting two
+    rows into one can't alias)."""
+    var out = List[UInt8]()
+    for i in range(len(lines)):
+        if i > 0:
+            out.append(UInt8(0x0A))
+        var rb = lines[i].as_bytes()
+        for k in range(len(rb)):
+            out.append(rb[k])
+    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
 
 
 def _contains(haystack: String, needle: String) -> Bool:
