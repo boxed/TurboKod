@@ -238,7 +238,14 @@ struct StatusBar(Movable):
                 else:
                     attr = Attr(BLACK, LIGHT_GRAY)
                 _ = painter.put_text(canvas, Point(x, y), rendered, attr)
-                self._tab_hits.append(_TabHit(x, x + w, i))
+                # Clip the recorded hit rect to the bar width — a tab whose
+                # end overruns is painted clipped, but a full-width hit rect
+                # would claim cells it never painted (and steal clicks from
+                # the right-aligned message). Mirrors tab_bar's cap.
+                var end = x + w
+                if end > container_bounds.b.x:
+                    end = container_bounds.b.x
+                self._tab_hits.append(_TabHit(x, end, i))
                 x += w + 1
         # Right-aligned status message — clamped so it never collides with
         # the F-key list on narrow terminals (left side wins). When the
