@@ -133,6 +133,9 @@ struct MergeView(Movable):
     var regions: List[MergeRegion]
     var states: List[ConflictState]
     """One entry per CONFLICT region, in conflict order."""
+    var _rows_cache: List[RenderRow]
+    """Cached output of ``_build_rows``; rebuilt only when ``_rows_dirty``."""
+    var _rows_dirty: Bool
     var conflict_count: Int
     var current: Int
     """Which conflict (0-based ordinal) the keyboard actions target."""
@@ -154,6 +157,8 @@ struct MergeView(Movable):
         self.cancelled = False
         self.regions = List[MergeRegion]()
         self.states = List[ConflictState]()
+        self._rows_cache = List[RenderRow]()
+        self._rows_dirty = True
         self.conflict_count = 0
         self.current = 0
         self.scroll = 0
@@ -180,6 +185,7 @@ struct MergeView(Movable):
                 states.append(ConflictState(CHOICE_NONE, List[String]()))
         self.regions = regions^
         self.states = states^
+        self._rows_dirty = True
         self.file_path = file_path^
         self.target_idx = target_idx
         self.active = True
@@ -202,6 +208,7 @@ struct MergeView(Movable):
         self.cancelled = False
         self.regions = List[MergeRegion]()
         self.states = List[ConflictState]()
+        self._rows_dirty = True
         self.conflict_count = 0
         self.current = 0
         self.scroll = 0
@@ -260,6 +267,14 @@ struct MergeView(Movable):
         return text^
 
     # --- virtual layout --------------------------------------------------
+
+    def _ensure_rows(mut self):
+        """Refresh ``_rows_cache`` from ``_build_rows`` only when one of its
+        inputs (regions / states / conflict_count) changed. Navigation, edit
+        cursor, and scroll do not invalidate it."""
+        if self._rows_dirty:
+            self._rows_cache = self._build_rows()
+            self._rows_dirty = False
 
     def _build_rows(self) -> List[RenderRow]:
         var rows = List[RenderRow]()
@@ -350,19 +365,20 @@ struct MergeView(Movable):
             self.scroll = 0
 
     def _ensure_current_visible(mut self, container_bounds: Rect):
-        var rows = self._build_rows()
         var content = self._content_rect(self._layout(container_bounds))
         var visible = content.height()
         if visible < 1:
             return
-        var hv = self._header_vrow_of(rows, self.current)
+        self._ensure_rows()
+        var hv = self._header_vrow_of(self._rows_cache, self.current)
+        var nrows = len(self._rows_cache)
         if hv < 0:
             return
         if hv < self.scroll:
             self.scroll = hv
         elif hv >= self.scroll + visible:
             self.scroll = hv - visible + 1
-        self._clamp_scroll(len(rows), visible)
+        self._clamp_scroll(nrows, visible)
 
     # --- paint -----------------------------------------------------------
 
@@ -382,8 +398,9 @@ struct MergeView(Movable):
         var content = self._content_rect(rect)
         var visible = content.height()
         var content_x = content.a.x
-        var rows = self._build_rows()
-        self._clamp_scroll(len(rows), visible)
+        self._ensure_rows()
+        self._clamp_scroll(len(self._rows_cache), visible)
+        ref rows = self._rows_cache
 
         var cp = Painter(content)
         for vy in range(visible):
@@ -496,6 +513,7 @@ struct MergeView(Movable):
             self._enter_edit_mode()
             return
         self.states[self.current].choice = action
+        self._rows_dirty = True
 
     def _enter_edit_mode(mut self):
         if self.conflict_count == 0:
@@ -518,6 +536,7 @@ struct MergeView(Movable):
             seed.append(String(""))
         self.states[ci].edited_lines = seed^
         self.states[ci].choice = CHOICE_EDIT
+        self._rows_dirty = True
         self.edit_mode = True
         self.edit_row = 0
         self.edit_col = 0
@@ -660,6 +679,7 @@ struct MergeView(Movable):
         var tail = String(StringSlice(unsafe_from_utf8=b[self.edit_col:len(b)]))
         self.states[ci].edited_lines[self.edit_row] = head + s + tail
         self.edit_col += len(s.as_bytes())
+        self._rows_dirty = True
 
     def _edit_backspace(mut self):
         var ci = self.current
@@ -679,6 +699,7 @@ struct MergeView(Movable):
             self.states[ci].edited_lines[self.edit_row - 1] = prev + cur
             _ = self.states[ci].edited_lines.pop(self.edit_row)
             self.edit_row -= 1
+        self._rows_dirty = True
 
     def _edit_split(mut self):
         var ci = self.current
@@ -690,6 +711,7 @@ struct MergeView(Movable):
         self.states[ci].edited_lines.insert(self.edit_row + 1, tail)
         self.edit_row += 1
         self.edit_col = 0
+        self._rows_dirty = True
 
     # --- mouse -----------------------------------------------------------
 
@@ -716,21 +738,24 @@ struct MergeView(Movable):
                 and not event.motion and not self.edit_mode:
             var content = self._content_rect(rect)
             if content.contains(event.pos):
-                var rows = self._build_rows()
+                self._ensure_rows()
                 var vrow = self.scroll + (event.pos.y - content.a.y)
-                if 0 <= vrow and vrow < len(rows):
-                    ref row = rows[vrow]
-                    if row.kind == _ROW_ACTIONBAR:
+                if 0 <= vrow and vrow < len(self._rows_cache):
+                    # Snapshot what we need before any mut-self call so no ref
+                    # into _rows_cache is held while it might be rebuilt.
+                    var row_kind = self._rows_cache[vrow].kind
+                    var row_ordinal = self._rows_cache[vrow].ordinal
+                    if row_kind == _ROW_ACTIONBAR:
                         var spans = self._action_spans(content.a.x + 2)
                         for i in range(len(spans)):
                             if spans[i].x0 <= event.pos.x \
                                     and event.pos.x < spans[i].x1:
-                                self.current = row.ordinal
+                                self.current = row_ordinal
                                 self._set_choice(spans[i].action)
                                 return True
-                    elif row.ordinal >= 0:
+                    elif row_ordinal >= 0:
                         # Click anywhere in a conflict block selects it.
-                        self.current = row.ordinal
+                        self.current = row_ordinal
                         return True
         # Bottom Apply / Cancel buttons.
         _ = self._focus.handle_click(event)
