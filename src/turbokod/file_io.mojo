@@ -96,12 +96,24 @@ def read_file(path: String) raises -> String:
     # and the save baseline — so loop until the whole file is read or we
     # hit EOF.
     var total = 0
+    var retries = 0
     while total < size:
         var got = external_call["read", Int](
             fd, buf.unsafe_ptr() + total, size - total,
         )
-        if got <= 0:
-            break
+        if got == 0:
+            break  # true EOF — file shrank since stat; return what we have
+        if got < 0:
+            # Read error, most likely a transient EINTR (signal mid-read).
+            # Retry a bounded number of times; a persistent error returns ""
+            # rather than a partial buffer that would masquerade as the whole
+            # file and become the save baseline.
+            retries += 1
+            if retries > 8:
+                _ = external_call["close", Int32](fd)
+                return String("")
+            continue
+        retries = 0
         total += got
     _ = external_call["close", Int32](fd)
     if total <= 0:
