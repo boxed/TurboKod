@@ -784,6 +784,15 @@ struct Desktop(Movable):
     var _pytest_file_globs: List[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
+    # Snapshots for skipping per-frame menu rebuilds when nothing changed.
+    # ``_window_menu_titles`` is the window titles the Window menu was last
+    # built from; ``_shortcut_snapshot`` is the flat list of menu-item
+    # actions the shortcuts were last stamped against (hotkeys are static, so
+    # the stamping only changes when the item actions do). Both compare the
+    # actual current state each frame — no dirty-flag to keep in sync.
+    var _window_menu_titles: List[String]
+    var _window_menu_built: Bool     # force the first build (0 windows == empty snapshot)
+    var _shortcut_snapshot: List[String]
     # Path to open in a new host window on the next ``take_pending_new_window_project``
     # call. Set when the user picks a recent project from the Project menu
     # while ``host_owns_menu`` is True. The host reads + clears it after
@@ -1213,6 +1222,9 @@ struct Desktop(Movable):
         self._pytest_file_globs = List[String]()
         self._project_menu_idx = -1
         self._window_menu_idx = -1
+        self._window_menu_titles = List[String]()
+        self._window_menu_built = False
+        self._shortcut_snapshot = List[String]()
         self._pending_action = String("")
         self._pending_arg = String("")
         self._last_search = String("")
@@ -3042,6 +3054,26 @@ struct Desktop(Movable):
         return String("")
 
     def _refresh_shortcuts(mut self):
+        # The stamped shortcuts are a pure function of the menu item actions
+        # (hotkeys are registered once at init and never change), so re-stamp
+        # only when the set of non-separator actions differs from the last
+        # pass — skips the per-frame O(items*hotkeys) reverse-scan when the
+        # menus are stable. Comparing the actual actions each frame means
+        # there's no dirty-flag to keep in sync.
+        var actions = List[String]()
+        for m in range(len(self.menu_bar.menus)):
+            for it in range(len(self.menu_bar.menus[m].items)):
+                if self.menu_bar.menus[m].items[it].is_separator:
+                    continue
+                actions.append(self.menu_bar.menus[m].items[it].action)
+        var changed = len(actions) != len(self._shortcut_snapshot)
+        if not changed:
+            for i in range(len(actions)):
+                if actions[i] != self._shortcut_snapshot[i]:
+                    changed = True
+                    break
+        if not changed:
+            return
         for m in range(len(self.menu_bar.menus)):
             for it in range(len(self.menu_bar.menus[m].items)):
                 if self.menu_bar.menus[m].items[it].is_separator:
@@ -3049,6 +3081,7 @@ struct Desktop(Movable):
                 var action = self.menu_bar.menus[m].items[it].action
                 self.menu_bar.menus[m].items[it].shortcut = \
                     self._shortcut_for_action(action)
+        self._shortcut_snapshot = actions^
 
     # --- opening files -----------------------------------------------------
 
@@ -3800,17 +3833,32 @@ struct Desktop(Movable):
         a separator + Maximize all + Restore all."""
         if self._window_menu_idx < 0:
             return
+        # Skip the rebuild (List[MenuItem] alloc + per-window action concat)
+        # when the window titles are unchanged from the last build.
+        var changed = (not self._window_menu_built) \
+            or len(self._window_menu_titles) != len(self.windows.windows)
+        if not changed:
+            for i in range(len(self.windows.windows)):
+                if self._window_menu_titles[i] != self.windows.windows[i].title:
+                    changed = True
+                    break
+        if not changed:
+            return
         var items = List[MenuItem]()
+        var titles = List[String]()
         for i in range(len(self.windows.windows)):
             items.append(MenuItem(
                 self.windows.windows[i].title,
                 WINDOW_FOCUS_PREFIX + String(i),
             ))
+            titles.append(self.windows.windows[i].title)
         if len(self.windows.windows) > 0:
             items.append(MenuItem.separator())
         items.append(MenuItem(String("Maximize all"), WINDOW_MAXIMIZE_ALL))
         items.append(MenuItem(String("Restore all"), WINDOW_RESTORE_ALL))
         self.menu_bar.menus[self._window_menu_idx].items = items^
+        self._window_menu_titles = titles^
+        self._window_menu_built = True
 
     # --- project state -----------------------------------------------------
 
