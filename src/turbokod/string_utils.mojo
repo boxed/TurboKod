@@ -325,6 +325,12 @@ def codepoint_at(s: String, col: Int) -> Tuple[Int, Int]:
         size = 4
     if size == 1 or col + size > n:
         return (c, 1)
+    # Validate the expected continuation bytes. A malformed sequence decodes
+    # as the lead byte alone (advance 1) rather than masking garbage and
+    # swallowing the following valid bytes, which would skew the cell↔byte map.
+    for k in range(1, size):
+        if (Int(b[col + k]) & 0xC0) != 0x80:
+            return (c, 1)
     if size == 2:
         return (((c & 0x1F) << 6) | (Int(b[col + 1]) & 0x3F), 2)
     if size == 3:
