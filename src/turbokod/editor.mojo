@@ -3420,7 +3420,6 @@ struct Editor(Copyable, Movable):
         if self.read_only:
             return 0
         var fb = find.as_bytes()
-        var rb_len = len(replacement.as_bytes())
         var n = len(fb)
         if n == 0:
             return 0
@@ -3475,7 +3474,6 @@ struct Editor(Copyable, Movable):
             if self.selections[0].col > nlen: self.selections[0].col = nlen
             self.selections[0].anchor_row = self.selections[0].row
             self.selections[0].anchor_col = self.selections[0].col
-            _ = rb_len   # silence unused warning if compiler reports it
             # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         else:
             # Nothing changed — roll back the speculative snapshot so the
