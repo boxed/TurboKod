@@ -17,7 +17,7 @@
 //! a signal handler (`tk_terminate_all`) is safe; signal handlers
 //! take a `try_lock` so they never deadlock.
 
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void, CStr};
+use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
 use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
@@ -242,8 +242,11 @@ pub unsafe extern "C" fn tk_pty_spawn(
     // the right values — saves a SIGWINCH redraw.
     if cols > 0 && rows > 0 {
         let ws = libc::winsize {
-            ws_row: rows as c_uchar as u16,
-            ws_col: cols as c_uchar as u16,
+            // Clamp into u16 directly; the old `as c_uchar` truncated any
+            // dimension > 255 mod 256 (e.g. 480 cols -> 224) before widening,
+            // so a wide window reported the wrong size until the first SIGWINCH.
+            ws_row: rows.clamp(0, u16::MAX as c_int) as u16,
+            ws_col: cols.clamp(0, u16::MAX as c_int) as u16,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
