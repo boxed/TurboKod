@@ -28,7 +28,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect, center_in
-from .view import FocusGroup
+from .view import centered_row_start, FocusGroup
 from .window import close_button_clicked, paint_close_button
 
 
@@ -146,9 +146,7 @@ struct ConfirmDialog(Movable):
         var no_w = self._no_button.total_width()
         var gap = 2
         var total = yes_w + gap + no_w
-        var bx = rect.a.x + (rect.width() - total) // 2
-        if bx < rect.a.x + 2:
-            bx = rect.a.x + 2
+        var bx = centered_row_start(rect, total)
         self._yes_button.move_to(bx, by)
         self._no_button.move_to(bx + yes_w + gap, by)
         # Refresh focus slot rects to match the buttons' current

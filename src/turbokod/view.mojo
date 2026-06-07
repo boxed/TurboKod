@@ -10,6 +10,27 @@ windowed UIs out of plain functions and small structs.
 This file is intentionally bare. The `widgets` module (or just direct calls
 into Canvas) gives you immediate-mode drawing if you don't want to build
 state-bearing widget structs.
+
+Widget API conventions
+----------------------
+The stateful widgets (`Dropdown`, `ListBox`, `TextField`, `TabBar`,
+`MenuBar`, `Status`, …) don't share a trait, but new ones should follow
+the same shape so a host can route through them uniformly:
+
+* **Paint** is ``paint(mut canvas, bounds, focused, …)``. Name the
+  drawing rectangle ``bounds`` (not ``rect`` / ``container_bounds``);
+  take ``mut self`` only when the widget caches scroll or hit geometry
+  across frames; pass focus as a plain ``Bool`` flag, not an ``Attr``.
+* **Events** split into ``handle_key`` / ``handle_mouse`` rather than one
+  ``handle_event`` (handlers have heterogeneous extra args). Return a
+  plain ``Bool`` (event consumed) when that's all the host needs;
+  promote to a small result struct only when the widget must also report
+  "value changed" or a chosen action (see `text_field.TextFieldKeyResult`,
+  `menu.MenuResult`). Prefer the shared hit-status constants in
+  `events.mojo` (`MENU_HIT_*`) over a per-widget int triple.
+
+These are conventions for *new* code; the older widgets predate them and
+are aligned opportunistically rather than in a flag-day rename.
 """
 
 from std.collections.list import List
@@ -26,14 +47,20 @@ from .string_utils import display_columns
 
 
 trait Drawable:
-    """Anything that can paint itself into a Canvas at a given rect.
+    """Demo-only paint trait: paints into a Canvas at a given rect.
 
-    Conformed by the immediate-mode demo widgets below (``Label`` /
-    ``Frame`` / ``Fill``) that ``examples/`` builds on. The larger
+    **This is not the widget contract.** It's conformed only by the
+    immediate-mode demo widgets below (``Label`` / ``Frame`` / ``Fill``)
+    that ``examples/`` builds on — a minimal "paint yourself in a rect"
+    shape with no focus, no state, no event handling. The real
     stateful widgets (editor, dialogs, panels) deliberately do *not*
-    conform: each needs extra paint inputs (focus flag, item list,
-    body attr) and a richer return contract than a single trait can
-    capture, so they expose concrete ``paint`` methods instead.
+    conform: each needs extra paint inputs (focus flag, item list, body
+    attr) and a richer return contract than this single method can
+    capture, so they expose concrete ``paint`` methods following the
+    "Widget API conventions" in the module docstring above. Don't reach
+    for ``Drawable`` when building a real widget — it would force you to
+    smuggle that state in through fields and lose the type checking the
+    convention gives you.
     """
     def paint(self, mut canvas: Canvas, bounds: Rect): ...
 
@@ -123,6 +150,18 @@ def centered(outer: Rect, width: Int, height: Int) -> Rect:
     var x = outer.a.x + (outer.width() - width) // 2
     var y = outer.a.y + (outer.height() - height) // 2
     return Rect(x, y, x + width, y + height)
+
+
+def centered_row_start(rect: Rect, content_width: Int) -> Int:
+    """Left x for a ``content_width``-wide row centered horizontally in
+    ``rect``, clamped to a 2-cell left margin so a too-wide row doesn't
+    spill over the border. The shared "center a button row under a
+    dialog" arithmetic — confirm / fill / breakpoint each inlined
+    ``rect.a.x + (rect.width() - total) // 2`` plus the same clamp."""
+    var x = rect.a.x + (rect.width() - content_width) // 2
+    if x < rect.a.x + 2:
+        x = rect.a.x + 2
+    return x
 
 
 struct RowCursor(Copyable, Movable):

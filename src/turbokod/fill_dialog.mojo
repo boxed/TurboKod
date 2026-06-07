@@ -37,7 +37,7 @@ from .events import (
 )
 from .geometry import Point, Rect, center_in
 from .text_field import TextField
-from .view import FocusGroup, RowCursor
+from .view import centered_row_start, FocusGroup, RowCursor
 from .window import close_button_clicked, paint_close_button
 
 
@@ -493,9 +493,7 @@ struct FillDialog(Movable):
         var cancel_w = self._cancel.total_width()
         var gap = 2
         var total = ok_w + gap + cancel_w
-        var bx = rect.a.x + (rect.width() - total) // 2
-        if bx < rect.a.x + 2:
-            bx = rect.a.x + 2
+        var bx = centered_row_start(rect, total)
         self._ok.move_to(bx, by)
         self._cancel.move_to(bx + ok_w + gap, by)
         self._focus.update(
