@@ -409,8 +409,28 @@ def _expand_alternations(pat: String) -> List[String]:
 
 def _gm(
     pat: List[UInt8], pi: Int, path: List[UInt8], ti: Int,
+    mut memo: List[Int],
 ) -> Bool:
-    """Recursive glob matcher (no alternation — that's expanded upstream)."""
+    """Memoized glob matcher (no alternation — that's expanded upstream).
+
+    The result depends only on ``(pi, ti)`` for a fixed ``pat``/``path``,
+    so caching it turns the previously exponential ``*``/``**`` backtracking
+    (a pattern like ``a*a*a*…b`` against a long path) into O(len(pat) *
+    len(path)). ``memo`` is tri-state per ``(pi, ti)``: 0 unknown, 1 true,
+    2 false. The matching logic itself is unchanged."""
+    var key = pi * (len(path) + 1) + ti
+    var cached = memo[key]
+    if cached != 0:
+        return cached == 1
+    var r = _gm_compute(pat, pi, path, ti, memo)
+    memo[key] = 1 if r else 2
+    return r
+
+
+def _gm_compute(
+    pat: List[UInt8], pi: Int, path: List[UInt8], ti: Int,
+    mut memo: List[Int],
+) -> Bool:
     var pn = len(pat)
     var tn = len(path)
     if pi == pn:
@@ -423,17 +443,17 @@ def _gm(
             # matches ``foo`` at the top.
             var rest = pi + 2
             if rest < pn and pat[rest] == 0x2F:
-                if _gm(pat, rest + 1, path, ti):
+                if _gm(pat, rest + 1, path, ti, memo):
                     return True
             for j in range(ti, tn + 1):
-                if _gm(pat, rest, path, j):
+                if _gm(pat, rest, path, j, memo):
                     return True
             return False
         else:
             # ``*`` matches anything except ``/``.
             var j = ti
             while True:
-                if _gm(pat, pi + 1, path, j):
+                if _gm(pat, pi + 1, path, j, memo):
                     return True
                 if j >= tn:
                     return False
@@ -443,7 +463,7 @@ def _gm(
     elif c == 0x3F:    # '?'
         if ti >= tn or path[ti] == 0x2F:
             return False
-        return _gm(pat, pi + 1, path, ti + 1)
+        return _gm(pat, pi + 1, path, ti + 1, memo)
     elif c == 0x5B:    # '['
         var k = pi + 1
         var negated = False
@@ -457,7 +477,7 @@ def _gm(
             # malformed — fall through to literal match of '['
             if ti >= tn or path[ti] != c:
                 return False
-            return _gm(pat, pi + 1, path, ti + 1)
+            return _gm(pat, pi + 1, path, ti + 1, memo)
         if ti >= tn or path[ti] == 0x2F:
             return False
         var ch = path[ti]
@@ -474,11 +494,11 @@ def _gm(
                 m += 1
         if matched == negated:
             return False
-        return _gm(pat, k + 1, path, ti + 1)
+        return _gm(pat, k + 1, path, ti + 1, memo)
     else:
         if ti >= tn or path[ti] != c:
             return False
-        return _gm(pat, pi + 1, path, ti + 1)
+        return _gm(pat, pi + 1, path, ti + 1, memo)
 
 
 def _glob_match_one(pat: String, path: String) -> Bool:
@@ -491,7 +511,12 @@ def _glob_match_one(pat: String, path: String) -> Bool:
     var path_bytes = path.as_bytes()
     for i in range(len(path_bytes)):
         tb.append(path_bytes[i])
-    return _gm(pb, 0, tb, 0)
+    # Tri-state memo over (pi, ti): the matcher revisits the same state
+    # combinatorially on multi-star patterns without it.
+    var memo = List[Int]()
+    for _ in range((len(pb) + 1) * (len(tb) + 1)):
+        memo.append(0)
+    return _gm(pb, 0, tb, 0, memo)
 
 
 def _pattern_has_internal_slash(pat: String) -> Bool:
