@@ -573,8 +573,7 @@ struct LspProcess(Copyable, Movable):
                 if self.trace_fd >= 0 and n == 0:
                     self.trace(String("< EOF on stdout"))
                 return Optional[String]()
-            for i in range(n):
-                self._read_buffer.append(scratch[i])
+            self._read_buffer.extend(Span(scratch)[0:n])
             if self.trace_fd >= 0:
                 self.trace(
                     String("< raw ") + String(n) + String("B (buffer now ")
@@ -791,8 +790,7 @@ def _drop_prefix(var buf: List[UInt8], n: Int) -> List[UInt8]:
     if n >= len(buf):
         return List[UInt8]()
     var out = List[UInt8]()
-    for i in range(n, len(buf)):
-        out.append(buf[i])
+    out.extend(Span(buf)[n:len(buf)])
     return out^
 
 
