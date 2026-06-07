@@ -484,7 +484,10 @@ struct ActionEditor(Movable):
                 i -= 1
             if i > 0:
                 seed = String(StringSlice(unsafe_from_utf8=b[:i]))
-            elif i == 0:
+            else:
+                # i == 0 (path is "/x") or i < 0 (a bare program name like
+                # "black", no slash at all) — open at the filesystem root
+                # rather than handing the picker a non-directory.
                 seed = String("/")
         self.file_dialog.open(seed^)
 
