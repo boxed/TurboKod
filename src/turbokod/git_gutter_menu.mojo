@@ -10,21 +10,23 @@ mouse events to it before any other widget.
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
+from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, GREEN, LIGHT_GRAY,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
+    Event, EVENT_KEY,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
-    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
-    MOUSE_BUTTON_LEFT,
+    MENU_HIT_NONE,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .view import RowCursor
+from .anchored_menu import (
+    anchored_menu_mouse, anchored_menu_rect, paint_anchored_chrome,
+)
 
 
 def _row_y(rect: Rect) -> Int:
@@ -101,19 +103,11 @@ struct GitGutterMenu(Movable):
         self.submitted = True
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = display_columns(_LABEL_REVERT) + 4
-        var height = self._row_count() + 2
-        var x = self.anchor_x
-        if x + width > container_bounds.b.x:
-            x = container_bounds.b.x - width
-        if x < 0:
-            x = 0
-        var y = self.anchor_y + 1
-        if y + height > container_bounds.b.y:
-            y = self.anchor_y - height
-            if y < 0:
-                y = 0
-        return Rect(x, y, x + width, y + height)
+        return anchored_menu_rect(
+            self.anchor_x, self.anchor_y,
+            display_columns(_LABEL_REVERT) + 4, self._row_count() + 2,
+            container_bounds, False,
+        )
 
     def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
@@ -121,10 +115,8 @@ struct GitGutterMenu(Movable):
         var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
-        paint_drop_shadow(canvas, rect)
+        paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter.draw_box(canvas, rect, attr, False)
         var y0 = _row_y(rect)
         var is_sel = (self.selected == 0)
         var row_attr = sel_attr if is_sel else attr
@@ -156,37 +148,17 @@ struct GitGutterMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
-        """Button-like press / release model. Press inside arms
-        tracking + highlights; release inside fires the action.
-        Releases without a prior tracked press are non-events."""
+        """Button-like press / release model (see ``anchored_menu_mouse``):
+        press inside arms tracking, release inside fires the action."""
         if not self.active:
             return MENU_HIT_NONE
-        if event.kind != EVENT_MOUSE:
-            return MENU_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return MENU_HIT_NONE
         var rect = self._rect(container_bounds)
-        var inside = rect.contains(event.pos)
-        if event.pressed:
-            if not inside:
-                self._resolve(GUTTER_ACTION_NONE)
-                return MENU_HIT_OUTSIDE
-            var row = event.pos.y - _row_y(rect)
-            if row < 0 or row >= self._row_count():
-                return MENU_HIT_INSIDE
-            self.selected = row
-            self.tracking = True
-            return MENU_HIT_INSIDE
-        # Release.
-        if not self.tracking:
-            return MENU_HIT_NONE
-        self.tracking = False
-        if not inside:
+        var r = anchored_menu_mouse(
+            event, rect, _row_y(rect), self._row_count(),
+            self.selected, self.tracking,
+        )
+        if r.cancel:
             self._resolve(GUTTER_ACTION_NONE)
-            return MENU_HIT_OUTSIDE
-        var row = event.pos.y - _row_y(rect)
-        if row < 0 or row >= self._row_count():
-            return MENU_HIT_INSIDE
-        if row == 0:
+        elif r.fired_row == 0:
             self._resolve(GUTTER_ACTION_REVERT)
-        return MENU_HIT_INSIDE
+        return r.hit

@@ -11,20 +11,22 @@ resolve, so the host doesn't re-derive which test was clicked.
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
+from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .colors import (
     Attr, BLACK, GREEN, LIGHT_GRAY,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
+    Event, EVENT_KEY,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
-    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
-    MOUSE_BUTTON_LEFT,
+    MENU_HIT_NONE,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
+from .anchored_menu import (
+    anchored_menu_mouse, anchored_menu_rect, paint_anchored_chrome,
+)
 
 
 # ``TestGutterMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
@@ -102,19 +104,10 @@ struct TestGutterMenu(Movable):
         var w_run = display_columns(_LABEL_RUN)
         var w_dbg = display_columns(_LABEL_DEBUG)
         var label_w = w_run if w_run > w_dbg else w_dbg
-        var width = label_w + 4
-        var height = self._row_count() + 2
-        var x = self.anchor_x
-        if x + width > container_bounds.b.x:
-            x = container_bounds.b.x - width
-        if x < 0:
-            x = 0
-        var y = self.anchor_y + 1
-        if y + height > container_bounds.b.y:
-            y = self.anchor_y - height
-            if y < 0:
-                y = 0
-        return Rect(x, y, x + width, y + height)
+        return anchored_menu_rect(
+            self.anchor_x, self.anchor_y,
+            label_w + 4, self._row_count() + 2, container_bounds, False,
+        )
 
     def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
@@ -122,10 +115,8 @@ struct TestGutterMenu(Movable):
         var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
-        paint_drop_shadow(canvas, rect)
+        paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter.draw_box(canvas, rect, attr, False)
         for idx in range(self._row_count()):
             var y0 = self._row_y(rect, idx)
             var is_sel = (self.selected == idx)
@@ -166,36 +157,17 @@ struct TestGutterMenu(Movable):
         return True
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
-        """Button-like press / release model. Press inside arms tracking +
-        highlights; release inside fires the action. Releases without a
-        prior tracked press are non-events."""
+        """Button-like press / release model (see ``anchored_menu_mouse``):
+        press inside arms tracking, release inside fires the row action."""
         if not self.active:
             return MENU_HIT_NONE
-        if event.kind != EVENT_MOUSE:
-            return MENU_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return MENU_HIT_NONE
         var rect = self._rect(container_bounds)
-        var inside = rect.contains(event.pos)
-        if event.pressed:
-            if not inside:
-                self._resolve(TEST_ACTION_NONE)
-                return MENU_HIT_OUTSIDE
-            var row = event.pos.y - self._row_y(rect, 0)
-            if row < 0 or row >= self._row_count():
-                return MENU_HIT_INSIDE
-            self.selected = row
-            self.tracking = True
-            return MENU_HIT_INSIDE
-        # Release.
-        if not self.tracking:
-            return MENU_HIT_NONE
-        self.tracking = False
-        if not inside:
+        var r = anchored_menu_mouse(
+            event, rect, self._row_y(rect, 0), self._row_count(),
+            self.selected, self.tracking,
+        )
+        if r.cancel:
             self._resolve(TEST_ACTION_NONE)
-            return MENU_HIT_OUTSIDE
-        var row = event.pos.y - self._row_y(rect, 0)
-        if row < 0 or row >= self._row_count():
-            return MENU_HIT_INSIDE
-        self._resolve(self._action_for_row(row))
-        return MENU_HIT_INSIDE
+        elif r.fired_row >= 0:
+            self._resolve(self._action_for_row(r.fired_row))
+        return r.hit

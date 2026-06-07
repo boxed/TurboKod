@@ -20,7 +20,7 @@ routing keyboard / mouse events to it before any other widget.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas, paint_drop_shadow
+from .canvas import Canvas
 from .painter import Painter
 from .colors import (
     Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
@@ -35,6 +35,7 @@ from .geometry import Point, Rect
 from .lsp_dispatch import Diagnostic
 from .string_utils import display_columns
 from .view import RowCursor
+from .anchored_menu import anchored_menu_rect, paint_anchored_chrome
 
 
 def _row_y(rect: Rect) -> Int:
@@ -245,19 +246,11 @@ struct DiagnosticMenu(Movable):
         return w
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = self._label_width() + 4
-        var height = self._row_count() + 2
-        var x = self.anchor_x
-        if x + width > container_bounds.b.x:
-            x = container_bounds.b.x - width
-        if x < 0:
-            x = 0
-        var y = self.anchor_y + 1
-        if y + height > container_bounds.b.y:
-            y = self.anchor_y - height
-            if y < 0:
-                y = 0
-        return Rect(x, y, x + width, y + height)
+        return anchored_menu_rect(
+            self.anchor_x, self.anchor_y,
+            self._label_width() + 4, self._row_count() + 2,
+            container_bounds, False,
+        )
 
     def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
@@ -266,10 +259,8 @@ struct DiagnosticMenu(Movable):
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         var disabled_attr = Attr(DARK_GRAY, LIGHT_GRAY)
-        paint_drop_shadow(canvas, rect)
+        paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter.draw_box(canvas, rect, attr, False)
         var y0 = _row_y(rect)
         var rows = self._row_count()
         for row in range(rows):
