@@ -1144,12 +1144,19 @@ struct Vt(Copyable, Movable):
         if final_byte == 0x75:  # 'u' — restore cursor
             self._restore_cursor()
             return
-        if final_byte == 0x63:  # 'c' — DA1 (primary device attributes)
-            # Answer with "VT102" — the same canned reply xterm sends
-            # by default. Apps that probe for capabilities (terminfo
-            # detection, oh-my-zsh / starship init) treat any reply
-            # here as "this is a real terminal, proceed."
-            self.reply_buf = self.reply_buf + String("\x1b[?6c")
+        if final_byte == 0x63:  # 'c' — device attributes
+            if self._csi_private == 0x3E:  # '>' — DA2 (secondary)
+                # ``CSI > c`` asks for secondary DA, not primary — answer
+                # with a canned DA2 (terminal type 0, version 0) instead of
+                # the DA1 string, which an app sending DA2 would mis-parse.
+                self.reply_buf = self.reply_buf + String("\x1b[>0;0;0c")
+                return
+            if self._csi_private == 0:  # DA1 (primary device attributes)
+                # Answer with "VT102" — the same canned reply xterm sends
+                # by default. Apps that probe for capabilities (terminfo
+                # detection, oh-my-zsh / starship init) treat any reply
+                # here as "this is a real terminal, proceed."
+                self.reply_buf = self.reply_buf + String("\x1b[?6c")
             return
         if final_byte == 0x6E:  # 'n' — DSR
             var which = self._param_raw(0, 0)
@@ -1294,9 +1301,10 @@ struct Vt(Copyable, Movable):
         if top < 0: top = 0
         if bot >= self.rows: bot = self.rows - 1
         if top >= bot:
-            # Invalid region — vt100 says reset to full screen.
-            top = 0
-            bot = self.rows - 1
+            # Invalid region (top >= bottom): ignore the sequence entirely,
+            # like xterm — leave the margins unchanged and, crucially, don't
+            # home the cursor (homing is part of a *successful* DECSTBM).
+            return
         self.scroll_top = top
         self.scroll_bot = bot
         # DECSTBM resets cursor to home (within region, but origin
