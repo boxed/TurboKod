@@ -496,15 +496,12 @@ struct FillDialog(Movable):
         var bx = centered_row_start(rect, total)
         self._ok.move_to(bx, by)
         self._cancel.move_to(bx + ok_w + gap, by)
-        self._focus.update(
-            _SLOT_OK,
-            Rect(bx, by, bx + self._ok.face_width(), by + 1),
-        )
-        self._focus.update(
-            _SLOT_CANCEL,
-            Rect(bx + ok_w + gap, by,
-                 bx + ok_w + gap + self._cancel.face_width(), by + 1),
-        )
+        # Use the buttons' hit_rect (face + shadow) so the focus slot
+        # matches exactly where the button's own handle_mouse fires —
+        # handle_mouse registers the same rects, so paint must agree or a
+        # shadow-cell click focuses-or-not depending on which ran last.
+        self._focus.update(_SLOT_OK, self._ok.hit_rect())
+        self._focus.update(_SLOT_CANCEL, self._cancel.hit_rect())
         var ok_face: Attr
         var cancel_face: Attr
         if self._focus.is_focused(_SLOT_OK):

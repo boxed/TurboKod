@@ -149,18 +149,12 @@ struct ConfirmDialog(Movable):
         var bx = centered_row_start(rect, total)
         self._yes_button.move_to(bx, by)
         self._no_button.move_to(bx + yes_w + gap, by)
-        # Refresh focus slot rects to match the buttons' current
-        # positions. The face_width — not the total_width — bounds the
-        # clickable area; the drop-shadow column isn't a click target.
-        self._focus.update(
-            _SLOT_YES,
-            Rect(bx, by, bx + self._yes_button.face_width(), by + 1),
-        )
-        self._focus.update(
-            _SLOT_NO,
-            Rect(bx + yes_w + gap, by,
-                 bx + yes_w + gap + self._no_button.face_width(), by + 1),
-        )
+        # Refresh focus slot rects to match the buttons' current positions.
+        # Use hit_rect (face + shadow) so the focusable area matches exactly
+        # where the button's own handle_mouse fires — otherwise a click on a
+        # button's shadow cell fires the action without moving focus there.
+        self._focus.update(_SLOT_YES, self._yes_button.hit_rect())
+        self._focus.update(_SLOT_NO, self._no_button.hit_rect())
         var yes_face: Attr
         var no_face: Attr
         if self._focus.is_focused(_SLOT_YES):
