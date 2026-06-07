@@ -160,7 +160,9 @@ from .prompt import (
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
-from .string_utils import display_columns, parse_int_prefix, starts_with
+from .string_utils import (
+    display_columns, parse_int_prefix, starts_with, utf8_cell_of_byte,
+)
 from .session_store import (
     Session, SessionWindow, _resolve_session_path, _session_relative,
     encode_session, load_session, save_session,
@@ -10454,7 +10456,14 @@ struct Desktop(Movable):
             return
         var sa = sa_opt.value()
         var interior = self.windows.windows[idx].interior()
-        var sx = sa.col_start - self.windows.windows[idx].editor.scroll_x
+        # ``col_start`` / ``scroll_x`` are byte offsets, but ``sx`` is a screen
+        # cell column — convert both via the row's byte→cell map so a
+        # multi-byte glyph before the word doesn't push the popup sideways.
+        var sa_line = self.windows.windows[idx].editor.buffer.line(sa.row)
+        var sx = utf8_cell_of_byte(sa_line, sa.col_start) \
+            - utf8_cell_of_byte(
+                sa_line, self.windows.windows[idx].editor.scroll_x
+            )
         var sy = sa.row - self.windows.windows[idx].editor.scroll_y
         var ax = interior.a.x + sx
         var ay = interior.a.y + sy
