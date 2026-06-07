@@ -333,14 +333,19 @@ def save_project_targets(
         try:
             text = read_file(path)
         except:
-            text = String("")
+            # Reading the existing file failed transiently. Abort rather
+            # than overwrite a file we couldn't read with an empty target
+            # list — that would silently destroy every user-authored target.
+            return False
         var root: JsonValue
         try:
             root = parse_json(text)
         except:
-            root = json_object()
+            # Present but unparseable: don't clobber the user's targets with
+            # an empty array; leave the file for them to repair.
+            return False
         if not root.is_object():
-            root = json_object()
+            return False
         root.put(String("active"), json_str(active_name))
         # Preserve the existing ``targets`` array; if absent, write an
         # empty one rather than dropping the key.
