@@ -74,9 +74,10 @@ from .search_options import (
     SearchOptions, build_search_regex, default_search_options,
 )
 from .string_utils import (
-    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
-    prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, word_char_step, word_range_at,
+    char_width, codepoint_at, display_columns, is_word_codepoint,
+    leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
+    utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
+    word_char_step, word_range_at,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -4441,12 +4442,12 @@ struct Editor(Copyable, Movable):
         if last > n_items:
             last = n_items
         for i in range(first, last):
-            var lw = len(self.completion_items[i].label.as_bytes())
+            var lw = display_columns(self.completion_items[i].label)
             if lw > longest_label:
                 longest_label = lw
-            var kw = len(_completion_kind_name(
+            var kw = display_columns(_completion_kind_name(
                 self.completion_items[i].kind,
-            ).as_bytes())
+            ))
             if kw > longest_kind:
                 longest_kind = kw
         var kind_col_w = longest_kind + 2 if longest_kind > 0 else 0
@@ -4623,14 +4624,10 @@ struct Editor(Copyable, Movable):
             var max_label = label_w
             if max_label < 1:
                 max_label = 1
-            var lb = label.as_bytes()
-            if len(lb) > max_label:
-                if max_label >= 1:
-                    label = String(StringSlice(
-                        unsafe_from_utf8=lb[0:max_label - 1],
-                    )) + String("…")
-                else:
-                    label = String("…")
+            if display_columns(label) > max_label:
+                # Reserve one column for the ellipsis; truncate by display
+                # columns so a multi-byte label isn't sliced mid-codepoint.
+                label = truncate_to_columns(label, max_label - 1) + String("…")
             _ = pop_painter.put_text(
                 canvas, Point(label_left, ty),
                 label, row_attr,
@@ -7558,10 +7555,16 @@ struct Editor(Copyable, Movable):
             )
 
     def longest_line_width(self) -> Int:
-        """Used by the surrounding window to size its horizontal scroll bar."""
+        """Widest line in *display columns* — used by the surrounding window
+        to size its horizontal scroll bar and to clamp horizontal scroll.
+
+        Display columns (not byte length): the scroll axis and the bar's
+        ``visible`` extent are both in cells, so measuring the line in bytes
+        inflated the range on multi-byte lines and let the editor scroll past
+        the content into blank space."""
         var m = 0
         for i in range(self.buffer.line_count()):
-            var n = len(self.buffer.line(i).as_bytes())
+            var n = display_columns(self.buffer.line(i))
             if n > m: m = n
         return m
 
