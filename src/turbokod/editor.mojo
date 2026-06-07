@@ -2646,7 +2646,7 @@ struct Editor(Copyable, Movable):
 
     def _apply_buffer_edit_raw(
         mut self, sl: Int, sc: Int, el: Int, ec: Int, new_text: String,
-    ) -> Int:
+    ) -> Tuple[Int, Int, Int, Int]:
         """Apply one LSP ``TextEdit`` at absolute buffer coordinates.
 
         Replaces the half-open range ``[(sl, sc), (el, ec))`` with
@@ -2656,14 +2656,16 @@ struct Editor(Copyable, Movable):
         when the file has been edited mid-flight, and silently
         clamping is less disruptive than dropping the whole edit.
 
-        Returns the net change in line count (positive = lines added).
-        Caller is responsible for cursor / anchor adjustment using
-        that delta — this helper deliberately leaves both alone so
-        it composes cleanly when applying multiple edits in sequence.
+        Returns ``(line_delta, end_row, end_col, suffix_col)``: the net
+        line-count change, the clamped end row/col of the replaced span,
+        and the byte column the replaced span's tail now sits at. Caller
+        feeds these to ``_shift_pos_after_edit`` to relocate cursor /
+        anchor — this helper leaves both alone so it composes cleanly
+        when applying multiple edits in sequence.
         """
         var n_lines = self.buffer.line_count()
         if n_lines == 0 or sl < 0 or sl >= n_lines:
-            return 0
+            return (0, -1, 0, 0)
         var sc2 = sc
         if sc2 < 0: sc2 = 0
         var s_line = self.buffer.line(sl)
@@ -2723,12 +2725,33 @@ struct Editor(Copyable, Movable):
                 self.buffer.lines[current_row]
                 + _slice(new_text, line_start, len(bytes))
             )
-        # Suffix lands on whatever row the last newline left us on.
+        # Suffix lands on whatever row the last newline left us on. Its
+        # byte column there (before appending) is where any cursor that
+        # sat at/after the original ``(el2, ec2)`` should be relocated to.
+        var suffix_col = len(self.buffer.lines[current_row].as_bytes())
         self.buffer.lines[current_row] = (
             self.buffer.lines[current_row] + suffix
         )
 
-        return self.buffer.line_count() - n_lines
+        return (self.buffer.line_count() - n_lines, el2, ec2, suffix_col)
+
+    def _shift_pos_after_edit(
+        self, row: Int, col: Int,
+        el2: Int, ec2: Int, line_delta: Int, suffix_col: Int,
+    ) -> Tuple[Int, Int]:
+        """Map a ``(row, col)`` position from before an
+        ``_apply_buffer_edit_raw`` edit to after it.
+
+        Positions strictly below the edit's end row shift by the line
+        delta. A position on the end row at or after the edit's end
+        column tracks the relocated suffix — so a same-row
+        ``additionalTextEdits`` entry before the caret doesn't leave the
+        caret stranded at a stale (possibly mid-codepoint) byte offset."""
+        if row > el2:
+            return (row + line_delta, col)
+        if row == el2 and col >= ec2:
+            return (el2 + line_delta, suffix_col + (col - ec2))
+        return (row, col)
 
     def accept_completion(mut self) -> Bool:
         """Apply the currently highlighted completion to the buffer.
@@ -2844,16 +2867,25 @@ struct Editor(Copyable, Movable):
                     jj -= 1
         for k in range(m):
             var ed = aux[k]
-            var delta = self._apply_buffer_edit_raw(
+            var res = self._apply_buffer_edit_raw(
                 ed.start_line, ed.start_char,
                 ed.end_line, ed.end_char, ed.new_text,
             )
-            # Edit ended strictly above the cursor's current row →
-            # shift the cursor by the line delta. Same for the anchor
-            # so a subsequent shift-arrow doesn't grab a stale span.
-            if ed.end_line < self.selections[0].row and delta != 0:
-                self.selections[0].row += delta
-                self.selections[0].anchor_row += delta
+            # Relocate the caret + anchor past this edit: shift by the
+            # line delta when the edit ended above them, or track the
+            # relocated tail when it ended on the same row before them.
+            var cur = self._shift_pos_after_edit(
+                self.selections[0].row, self.selections[0].col,
+                res[1], res[2], res[0], res[3],
+            )
+            var anc = self._shift_pos_after_edit(
+                self.selections[0].anchor_row, self.selections[0].anchor_col,
+                res[1], res[2], res[0], res[3],
+            )
+            self.selections[0].row = cur[0]
+            self.selections[0].col = cur[1]
+            self.selections[0].anchor_row = anc[0]
+            self.selections[0].anchor_col = anc[1]
             if ed.start_line < hl_low:
                 hl_low = ed.start_line
         self.dirty = True
@@ -3003,13 +3035,22 @@ struct Editor(Copyable, Movable):
         var hl_low = self.selections[0].row
         for k in range(m):
             var ed = edits[k]
-            var delta = self._apply_buffer_edit_raw(
+            var res = self._apply_buffer_edit_raw(
                 ed.start_line, ed.start_char,
                 ed.end_line, ed.end_char, ed.new_text,
             )
-            if ed.end_line < self.selections[0].row and delta != 0:
-                self.selections[0].row += delta
-                self.selections[0].anchor_row += delta
+            var cur = self._shift_pos_after_edit(
+                self.selections[0].row, self.selections[0].col,
+                res[1], res[2], res[0], res[3],
+            )
+            var anc = self._shift_pos_after_edit(
+                self.selections[0].anchor_row, self.selections[0].anchor_col,
+                res[1], res[2], res[0], res[3],
+            )
+            self.selections[0].row = cur[0]
+            self.selections[0].col = cur[1]
+            self.selections[0].anchor_row = anc[0]
+            self.selections[0].anchor_col = anc[1]
             if ed.start_line < hl_low:
                 hl_low = ed.start_line
         self.dirty = True
