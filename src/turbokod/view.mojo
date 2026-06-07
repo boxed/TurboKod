@@ -271,6 +271,17 @@ struct FocusGroup(Movable):
             return False
         return self.slots[idx].visitable
 
+    def set_visitable(mut self, idx: Int, visitable: Bool):
+        """Toggle slot ``idx``'s participation in the tab walk without
+        touching its rect. For dialogs that drive focus purely through
+        ``cycle`` / ``is_focused`` (no ``hit_test``) and so never call
+        ``update`` to refresh rects — they just need to mark slots
+        in/out of the walk as runtime state changes (e.g. the language
+        editor hides its Remove/Up/Down slots when nothing is
+        selected)."""
+        if 0 <= idx and idx < len(self.slots):
+            self.slots[idx] = FocusableSlot(self.slots[idx].rect, visitable)
+
     def cycle(mut self, backward: Bool = False):
         """Advance focus to the next/previous visitable slot. Wraps
         around. If no slot is visitable, focus becomes -1."""

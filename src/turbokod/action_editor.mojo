@@ -52,7 +52,7 @@ from .file_dialog import FileDialog
 from .geometry import Point, Rect
 from .language_config import built_in_servers
 from .text_field import Form
-from .view import DraggableDialog, RowCursor
+from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
 )
@@ -160,7 +160,10 @@ struct ActionEditor(Movable):
     """Original index in the host's list (-1 for "new", else the slot
     being replaced). Carried verbatim so the host can re-find the
     record without keeping its own pending state."""
-    var focus: UInt8
+    var _focus: FocusGroup
+    """Which logical control owns focus. The ``_FOCUS_*`` ids are the
+    slot indices 0.._FOCUS_COUNT-1; every slot is always visitable, so
+    ``cycle`` is a plain wraparound (matching the old ``_next_focus``)."""
     var _dlg: DraggableDialog
     """Auto-center placement + title-bar move-by-drag."""
     var file_dialog: FileDialog
@@ -194,7 +197,8 @@ struct ActionEditor(Movable):
         self.submitted = False
         self.entry = OnSaveAction()
         self.edit_index = -1
-        self.focus = _FOCUS_LANG
+        self._focus = FocusGroup(_FOCUS_COUNT)
+        self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg = DraggableDialog()
         self.file_dialog = FileDialog()
         self.lang_dropdown = _build_lang_dropdown(String(""))
@@ -227,7 +231,7 @@ struct ActionEditor(Movable):
         self.edit_index = edit_index
         self.active = True
         self.submitted = False
-        self.focus = _FOCUS_LANG
+        self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg.reset()
         self.lang_dropdown = _build_lang_dropdown(seed_lang^)
         self.form = Form()
@@ -243,7 +247,7 @@ struct ActionEditor(Movable):
         self.submitted = False
         self.entry = OnSaveAction()
         self.edit_index = -1
-        self.focus = _FOCUS_LANG
+        self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg.reset()
         self.file_dialog.close()
         self.lang_dropdown = _build_lang_dropdown(String(""))
@@ -319,15 +323,15 @@ struct ActionEditor(Movable):
         self._paint_lang(canvas, layout)
         self.form.paint_field(
             canvas, _FOCUS_PROGRAM, layout.program_rect,
-            self.focus == _FOCUS_PROGRAM,
+            self._focus.is_focused(Int(_FOCUS_PROGRAM)),
         )
         self.form.paint_field(
             canvas, _FOCUS_ARGS, layout.args_rect,
-            self.focus == _FOCUS_ARGS,
+            self._focus.is_focused(Int(_FOCUS_ARGS)),
         )
         self.form.paint_field(
             canvas, _FOCUS_CWD, layout.cwd_rect,
-            self.focus == _FOCUS_CWD,
+            self._focus.is_focused(Int(_FOCUS_CWD)),
         )
         # Buttons.
         self._paint_buttons(canvas, rect, layout)
@@ -348,7 +352,7 @@ struct ActionEditor(Movable):
         return _build_lang_dropdown(current)
 
     def _paint_lang(self, mut canvas: Canvas, layout: _Layout):
-        var has_focus = self.focus == _FOCUS_LANG
+        var has_focus = self._focus.is_focused(Int(_FOCUS_LANG))
         self.lang_dropdown.paint(
             canvas, layout.lang_rect, has_focus,
             Attr(WHITE, BLUE), Attr(BLACK, CYAN),
@@ -374,7 +378,7 @@ struct ActionEditor(Movable):
     def _paint_button(mut self, mut canvas: Canvas, idx: Int):
         var pb = self._buttons[idx]
         var face: Attr
-        if self.focus == pb.focus:
+        if self._focus.is_focused(Int(pb.focus)):
             face = Attr(WHITE, BLUE)
         else:
             face = Attr(BLACK, GREEN)
@@ -396,7 +400,7 @@ struct ActionEditor(Movable):
         # dialog's own focus walk: the user expects arrow-key
         # navigation inside the popup, and Esc to close just the
         # popup (not the whole dialog).
-        if self.focus == _FOCUS_LANG and self.lang_dropdown.is_open:
+        if self._focus.is_focused(Int(_FOCUS_LANG)) and self.lang_dropdown.is_open:
             if k == KEY_ESC:
                 self.lang_dropdown.close()
                 return True
@@ -408,45 +412,36 @@ struct ActionEditor(Movable):
             return True
         if k == KEY_TAB:
             var backward = (event.mods & MOD_SHIFT) != 0
-            self.focus = self._next_focus(self.focus, backward)
+            self._focus.cycle(backward)
             return True
         if k == KEY_ENTER:
             # Enter on the focused (closed) lang dropdown opens the
             # popup — cheaper-to-discover than "press right-arrow to
             # cycle." Once open, the branch above takes over.
-            if self.focus == _FOCUS_LANG:
+            if self._focus.is_focused(Int(_FOCUS_LANG)):
                 self.lang_dropdown.open()
                 return True
             return self._activate_focus()
         if k == KEY_DOWN:
             # Down on the closed lang dropdown also opens it (matches
             # how every other native picker behaves).
-            if self.focus == _FOCUS_LANG:
+            if self._focus.is_focused(Int(_FOCUS_LANG)):
                 self.lang_dropdown.open()
                 return True
             return True
         # Lang dropdown left/right cycles options; for editable inputs
         # we let the field handle them (cursor movement).
-        if (k == KEY_LEFT or k == KEY_RIGHT) and self.focus == _FOCUS_LANG:
+        if (k == KEY_LEFT or k == KEY_RIGHT) and self._focus.is_focused(Int(_FOCUS_LANG)):
             self._cycle_lang(event)
             return True
         # Route to the focused editable strip via the ``Form``. The
         # form looks up the field by focus key and runs its key
         # handler; non-field focus (Save / Cancel / Browse) returns
         # ``consumed=False`` and falls through to the swallow below.
-        var r = self.form.handle_key(event, self.focus)
+        var r = self.form.handle_key(event, UInt8(self._focus.focused))
         if r.consumed:
             return True
         return True
-
-    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
-        var n = _FOCUS_COUNT
-        var idx = Int(current)
-        if backward:
-            idx = (idx - 1 + n) % n
-        else:
-            idx = (idx + 1) % n
-        return UInt8(idx)
 
     def _cycle_lang(mut self, event: Event):
         if not self.lang_dropdown.handle_key(event):
@@ -454,10 +449,10 @@ struct ActionEditor(Movable):
         self.entry.language_id = self.lang_dropdown.value()
 
     def _activate_focus(mut self) -> Bool:
-        if self.focus == _FOCUS_BROWSE:
+        if self._focus.is_focused(Int(_FOCUS_BROWSE)):
             self._open_browse()
             return True
-        if self.focus == _FOCUS_SAVE:
+        if self._focus.is_focused(Int(_FOCUS_SAVE)):
             # Snapshot the field-backed values into ``entry`` so the
             # host (which reads ``value()``) sees what the user typed.
             self.entry.program = self.form.text(_FOCUS_PROGRAM)
@@ -465,11 +460,11 @@ struct ActionEditor(Movable):
             self.entry.args = _split_args(self.form.text(_FOCUS_ARGS))
             self.submitted = True
             return True
-        if self.focus == _FOCUS_CANCEL:
+        if self._focus.is_focused(Int(_FOCUS_CANCEL)):
             self.close()
             return True
         # Enter on a field walks to the next focus.
-        self.focus = self._next_focus(self.focus, False)
+        self._focus.cycle()
         return True
 
     def _open_browse(mut self):
@@ -499,7 +494,7 @@ struct ActionEditor(Movable):
         var path = self.file_dialog.selected_path
         self.file_dialog.close()
         self.form.set_text(_FOCUS_PROGRAM, path^)
-        self.focus = _FOCUS_PROGRAM
+        self._focus.focus_force(Int(_FOCUS_PROGRAM))
 
     # --- mouse ------------------------------------------------------
 
@@ -524,7 +519,7 @@ struct ActionEditor(Movable):
             )
             if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
                 self.entry.language_id = self.lang_dropdown.value()
-                self.focus = _FOCUS_LANG
+                self._focus.focus_force(Int(_FOCUS_LANG))
                 return True
             if hit == DROPDOWN_HIT_OUTSIDE:
                 # Popup auto-closed; let the click fall through to
@@ -548,7 +543,7 @@ struct ActionEditor(Movable):
         # and reads back whichever field's focus key was hit.
         var hit = self.form.handle_mouse(event, layout.field_rects())
         if hit:
-            self.focus = hit.value()
+            self._focus.focus_force(Int(hit.value()))
             return True
         # Remaining widgets are press-only (no drag semantics): the
         # lang dropdown opens on a left press, nothing else.
@@ -565,7 +560,7 @@ struct ActionEditor(Movable):
             )
             if hit != DROPDOWN_HIT_NONE:
                 self.entry.language_id = self.lang_dropdown.value()
-            self.focus = _FOCUS_LANG
+            self._focus.focus_force(Int(_FOCUS_LANG))
             return True
         return True
 
@@ -575,7 +570,7 @@ struct ActionEditor(Movable):
             if status == BUTTON_NONE:
                 continue
             if status == BUTTON_FIRED and self._buttons[i].enabled:
-                self.focus = self._buttons[i].focus
+                self._focus.focus_force(Int(self._buttons[i].focus))
                 _ = self._activate_focus()
             return True
         return False

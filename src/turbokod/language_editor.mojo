@@ -45,7 +45,7 @@ from .geometry import Point, Rect
 from .list_box import ListBox
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
-from .view import DraggableDialog, RowCursor
+from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
 )
@@ -62,6 +62,7 @@ comptime _FOCUS_UP         = UInt8(6)
 comptime _FOCUS_DOWN       = UInt8(7)
 comptime _FOCUS_SAVE       = UInt8(8)
 comptime _FOCUS_CANCEL     = UInt8(9)
+comptime _FOCUS_COUNT      = 10
 
 
 # --- layout ---------------------------------------------------------------
@@ -167,7 +168,12 @@ struct LanguageEditor(Movable):
     its ``selected`` field. Painting is clipped to the list rect by
     the widget itself."""
     var argv_tf: TextField
-    var focus: UInt8
+    var _focus: FocusGroup
+    """Which logical control owns focus. ``_FOCUS_*`` ids are the slot
+    indices; ``_refresh_focus_visitability`` marks the language /
+    file-type fields out of the Tab walk for a built-in language and
+    the Remove/Up/Down buttons out when nothing is selected — what the
+    old hand-rolled ``_next_focus`` recomputed on every call."""
     var _dlg: DraggableDialog
     """Auto-center placement + title-bar move-by-drag."""
     var _buttons: List[_PlacedButton]
@@ -185,7 +191,8 @@ struct LanguageEditor(Movable):
         self.candidates = List[String]()
         self._list = ListBox()
         self.argv_tf = TextField()
-        self.focus = _FOCUS_LANG
+        self._focus = FocusGroup(_FOCUS_COUNT)
+        self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg = DraggableDialog()
         self._type_ahead = TypeAhead()
         self._buttons = List[_PlacedButton]()
@@ -232,8 +239,8 @@ struct LanguageEditor(Movable):
         self.is_existing = is_existing
         self.active = True
         self.submitted = False
-        self.focus = (
-            _FOCUS_LIST if is_existing else _FOCUS_LANG
+        self._focus.focus_force(
+            Int(_FOCUS_LIST if is_existing else _FOCUS_LANG)
         )
         self._dlg.reset()
         self._type_ahead.reset()
@@ -247,7 +254,7 @@ struct LanguageEditor(Movable):
         self.candidates = List[String]()
         self._list.reset()
         self.argv_tf = TextField()
-        self.focus = _FOCUS_LANG
+        self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg.reset()
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
@@ -311,10 +318,12 @@ struct LanguageEditor(Movable):
             )
         else:
             self.lang_tf.paint(
-                canvas, layout.lang_rect, self.focus == _FOCUS_LANG,
+                canvas, layout.lang_rect,
+                self._focus.is_focused(Int(_FOCUS_LANG)),
             )
             self.file_types_tf.paint(
-                canvas, layout.ft_rect, self.focus == _FOCUS_FILE_TYPES,
+                canvas, layout.ft_rect,
+                self._focus.is_focused(Int(_FOCUS_FILE_TYPES)),
             )
         # Candidate list.
         self._paint_list(canvas, layout.list_rect)
@@ -324,7 +333,8 @@ struct LanguageEditor(Movable):
             String("Argv:"), bg,
         )
         self.argv_tf.paint(
-            canvas, layout.argv_rect, self.focus == _FOCUS_ARGV,
+            canvas, layout.argv_rect,
+            self._focus.is_focused(Int(_FOCUS_ARGV)),
         )
         # Buttons row under the argv strip.
         self._layout_action_buttons(rect, layout.actions_y)
@@ -364,7 +374,7 @@ struct LanguageEditor(Movable):
             return
         self._list.paint(
             canvas, list_rect, self.candidates,
-            self.focus == _FOCUS_LIST, bg,
+            self._focus.is_focused(Int(_FOCUS_LIST)), bg,
         )
 
     def _layout_action_buttons(mut self, rect: Rect, y: Int):
@@ -387,7 +397,7 @@ struct LanguageEditor(Movable):
         var face: Attr
         if not pb.enabled:
             face = Attr(WHITE, GREEN)
-        elif self.focus == pb.focus:
+        elif self._focus.is_focused(Int(pb.focus)):
             face = Attr(WHITE, BLUE)
         else:
             face = Attr(BLACK, GREEN)
@@ -406,14 +416,16 @@ struct LanguageEditor(Movable):
             return True
         if k == KEY_TAB:
             var backward = (event.mods & MOD_SHIFT) != 0
-            var prev = self.focus
-            self.focus = self._next_focus(self.focus, backward)
-            if prev == _FOCUS_LIST and self.focus != _FOCUS_LIST:
+            var prev = self._focus.focused
+            self._refresh_focus_visitability()
+            self._focus.cycle(backward)
+            if prev == Int(_FOCUS_LIST) \
+                    and not self._focus.is_focused(Int(_FOCUS_LIST)):
                 self._type_ahead.reset()
             return True
         if k == KEY_ENTER:
             return self._activate_focus()
-        if self.focus == _FOCUS_LIST:
+        if self._focus.is_focused(Int(_FOCUS_LIST)):
             var prev = self._list.selected
             if self._list.handle_nav_key(event, len(self.candidates)):
                 if self._list.selected != prev and self._list.selected >= 0:
@@ -425,7 +437,7 @@ struct LanguageEditor(Movable):
         # Type-to-jump on the candidates list. Gated on focus so the
         # argv text field below it still consumes letters as text
         # input rather than as a search prefix.
-        if self.focus == _FOCUS_LIST and is_printable_ascii(k):
+        if self._focus.is_focused(Int(_FOCUS_LIST)) and is_printable_ascii(k):
             var labels = List[String]()
             for i in range(len(self.candidates)):
                 labels.append(self.candidates[i])
@@ -438,15 +450,15 @@ struct LanguageEditor(Movable):
                 self.argv_tf.set_text(self.candidates[self._list.selected])
             return True
         # Route to the focused field.
-        if self.focus == _FOCUS_LANG and not self.is_existing:
+        if self._focus.is_focused(Int(_FOCUS_LANG)) and not self.is_existing:
             var r = self.lang_tf.handle_key(event)
             if r.consumed:
                 return True
-        elif self.focus == _FOCUS_FILE_TYPES and not self.is_existing:
+        elif self._focus.is_focused(Int(_FOCUS_FILE_TYPES)) and not self.is_existing:
             var r = self.file_types_tf.handle_key(event)
             if r.consumed:
                 return True
-        elif self.focus == _FOCUS_ARGV:
+        elif self._focus.is_focused(Int(_FOCUS_ARGV)):
             var r = self.argv_tf.handle_key(event)
             if r.consumed:
                 # Mirror the strip text into the selected list row so
@@ -457,60 +469,53 @@ struct LanguageEditor(Movable):
                 return True
         return True
 
-    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
-        var ordered = List[UInt8]()
-        if not self.is_existing:
-            ordered.append(_FOCUS_LANG)
-            ordered.append(_FOCUS_FILE_TYPES)
-        ordered.append(_FOCUS_LIST)
-        ordered.append(_FOCUS_ARGV)
-        ordered.append(_FOCUS_ADD)
-        if self._list.selected >= 0:
-            ordered.append(_FOCUS_REMOVE)
-            ordered.append(_FOCUS_UP)
-            ordered.append(_FOCUS_DOWN)
-        ordered.append(_FOCUS_SAVE)
-        ordered.append(_FOCUS_CANCEL)
-        var pos = -1
-        for i in range(len(ordered)):
-            if ordered[i] == current:
-                pos = i
-                break
-        if pos < 0:
-            return ordered[0]
-        var n = len(ordered)
-        if backward:
-            return ordered[(pos - 1 + n) % n]
-        return ordered[(pos + 1) % n]
+    def _refresh_focus_visitability(mut self):
+        """Mark slots in/out of the Tab walk to match runtime state.
+
+        A built-in language (``is_existing``) keeps its id + file-type
+        fields display-only, and the Remove/Up/Down buttons only apply
+        when a candidate row is selected. The other slots (list, argv,
+        Add, Save, Cancel) are always in the walk. Called right before
+        every ``cycle`` so the set tracks edits — the visitability
+        equivalent of the old ``_next_focus``'s per-call ``ordered``
+        list."""
+        var editable_head = not self.is_existing
+        self._focus.set_visitable(Int(_FOCUS_LANG), editable_head)
+        self._focus.set_visitable(Int(_FOCUS_FILE_TYPES), editable_head)
+        var has_sel = self._list.selected >= 0
+        self._focus.set_visitable(Int(_FOCUS_REMOVE), has_sel)
+        self._focus.set_visitable(Int(_FOCUS_UP), has_sel)
+        self._focus.set_visitable(Int(_FOCUS_DOWN), has_sel)
 
     def _activate_focus(mut self) -> Bool:
-        if self.focus == _FOCUS_ADD:
+        if self._focus.is_focused(Int(_FOCUS_ADD)):
             self._add_candidate()
             return True
-        if self.focus == _FOCUS_REMOVE:
+        if self._focus.is_focused(Int(_FOCUS_REMOVE)):
             self._remove_candidate()
             return True
-        if self.focus == _FOCUS_UP:
+        if self._focus.is_focused(Int(_FOCUS_UP)):
             self._move_candidate(-1)
             return True
-        if self.focus == _FOCUS_DOWN:
+        if self._focus.is_focused(Int(_FOCUS_DOWN)):
             self._move_candidate(1)
             return True
-        if self.focus == _FOCUS_SAVE:
+        if self._focus.is_focused(Int(_FOCUS_SAVE)):
             self.submitted = True
             return True
-        if self.focus == _FOCUS_CANCEL:
+        if self._focus.is_focused(Int(_FOCUS_CANCEL)):
             self.close()
             return True
         # Enter on a non-button control walks forward.
-        self.focus = self._next_focus(self.focus, False)
+        self._refresh_focus_visitability()
+        self._focus.cycle()
         return True
 
     def _add_candidate(mut self):
         self.candidates.append(String(""))
         self._list.selected = len(self.candidates) - 1
         self.argv_tf = TextField()
-        self.focus = _FOCUS_ARGV
+        self._focus.focus_force(Int(_FOCUS_ARGV))
 
     def _remove_candidate(mut self):
         if self._list.selected < 0 or self._list.selected >= len(self.candidates):
@@ -524,7 +529,7 @@ struct LanguageEditor(Movable):
         if len(self.candidates) == 0:
             self._list.selected = -1
             self.argv_tf = TextField()
-            self.focus = _FOCUS_ADD
+            self._focus.focus_force(Int(_FOCUS_ADD))
         elif self._list.selected >= len(self.candidates):
             self._list.selected = len(self.candidates) - 1
         if self._list.selected >= 0:
@@ -580,14 +585,14 @@ struct LanguageEditor(Movable):
         # the per-candidate copy needs to stay in sync.
         if not self.is_existing \
                 and self.lang_tf.handle_mouse(event, layout.lang_rect):
-            self.focus = _FOCUS_LANG
+            self._focus.focus_force(Int(_FOCUS_LANG))
             return True
         if not self.is_existing \
                 and self.file_types_tf.handle_mouse(event, layout.ft_rect):
-            self.focus = _FOCUS_FILE_TYPES
+            self._focus.focus_force(Int(_FOCUS_FILE_TYPES))
             return True
         if self.argv_tf.handle_mouse(event, layout.argv_rect):
-            self.focus = _FOCUS_ARGV
+            self._focus.focus_force(Int(_FOCUS_ARGV))
             if self._list.selected >= 0 \
                     and self._list.selected < len(self.candidates):
                 self.candidates[self._list.selected] = self.argv_tf.text
@@ -604,7 +609,7 @@ struct LanguageEditor(Movable):
             if self._list.selected != prev and self._list.selected >= 0:
                 self.argv_tf = TextField()
                 self.argv_tf.set_text(self.candidates[self._list.selected])
-            self.focus = _FOCUS_LIST
+            self._focus.focus_force(Int(_FOCUS_LIST))
             return True
         return True
 
@@ -614,7 +619,7 @@ struct LanguageEditor(Movable):
             if status == BUTTON_NONE:
                 continue
             if status == BUTTON_FIRED and self._buttons[i].enabled:
-                self.focus = self._buttons[i].focus
+                self._focus.focus_force(Int(self._buttons[i].focus))
                 _ = self._activate_focus()
             return True
         return False

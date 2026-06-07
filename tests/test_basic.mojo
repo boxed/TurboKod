@@ -6166,7 +6166,7 @@ def test_language_editor_list_type_to_jump() raises:
     ed.open(
         String("xyzlang"), List[String](), argvs^, False,
     )
-    ed.focus = UInt8(2)  # _FOCUS_LIST
+    ed._focus.focus_force(2)  # _FOCUS_LIST
     _ = ed.handle_key(_key(UInt32(ord("p"))))
     assert_equal(ed._list.selected, 2)
     assert_equal(ed.argv_tf.text, String("pyright"))
@@ -6276,7 +6276,7 @@ def test_action_editor_enter_opens_lang_popup() raises:
     immediately."""
     var ed = ActionEditor()
     ed.open(OnSaveAction(), -1)
-    ed.focus = UInt8(0)  # _FOCUS_LANG
+    ed._focus.focus_force(0)  # _FOCUS_LANG
     assert_false(ed.lang_dropdown.is_open)
     var ev = Event.key_event(KEY_ENTER, MOD_NONE)
     _ = ed.handle_key(ev)
@@ -6377,7 +6377,7 @@ def test_action_editor_args_field_accepts_spaces() raises:
     Save, so multiple arguments can actually be typed."""
     var ed = ActionEditor()
     ed.open(OnSaveAction(), -1)
-    ed.focus = UInt8(3)  # _FOCUS_ARGS
+    ed._focus.focus_force(3)  # _FOCUS_ARGS
     var letters = String("a b c")
     var lb = letters.as_bytes()
     for i in range(len(lb)):
@@ -6386,7 +6386,7 @@ def test_action_editor_args_field_accepts_spaces() raises:
     assert_equal(ed.form.text(UInt8(3)), String("a b c"))
     # The committed list is empty until Save fires.
     assert_equal(len(ed.entry.args), 0)
-    ed.focus = UInt8(5)  # _FOCUS_SAVE
+    ed._focus.focus_force(5)  # _FOCUS_SAVE
     var enter = Event.key_event(KEY_ENTER, MOD_NONE)
     _ = ed.handle_key(enter)
     assert_true(ed.submitted)
