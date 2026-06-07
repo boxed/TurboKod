@@ -182,9 +182,14 @@ struct Canvas(Copyable, Movable):
                 # that the frontend can't complete.
                 if x + 2 > limit:
                     break
+                # Only write the continuation cell when the glyph's lead
+                # cell was written. If the lead is clipped off the left edge
+                # (``x < 0``, reachable via negative-x overlay/scroll paths),
+                # writing just the empty continuation at column 0 would leave
+                # an orphaned blank where the glyph's right half belongs —
+                # skip the whole glyph instead.
                 if x >= 0:
                     self.cells[self._index(x, y)] = Cell(glyph, attr, 2)
-                if x + 1 >= 0:
                     self.cells[self._index(x + 1, y)] = Cell(
                         String(""), attr, 0,
                     )
