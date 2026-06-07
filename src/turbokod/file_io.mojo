@@ -90,11 +90,23 @@ def read_file(path: String) raises -> String:
         _ = external_call["close", Int32](fd)
         return String("")
     var buf = alloc_zero_buffer(size + 1)
-    var got = external_call["read", Int](fd, buf.unsafe_ptr(), size)
+    # ``read(2)`` may return fewer than ``size`` bytes for a regular file
+    # (signal interruption, certain filesystems). A single read would
+    # silently truncate the buffer — which then becomes the editor content
+    # and the save baseline — so loop until the whole file is read or we
+    # hit EOF.
+    var total = 0
+    while total < size:
+        var got = external_call["read", Int](
+            fd, buf.unsafe_ptr() + total, size - total,
+        )
+        if got <= 0:
+            break
+        total += got
     _ = external_call["close", Int32](fd)
-    if got <= 0:
+    if total <= 0:
         return String("")
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=got))
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=total))
 
 
 def write_file(path: String, content: String) -> Bool:
