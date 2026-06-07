@@ -233,16 +233,19 @@ def capture_command(
 
 
 def _drain_to_eof(fd: Int32) -> String:
-    var out = String("")
+    # Accumulate into a byte buffer and build the String once: ``out = out +
+    # chunk`` reallocated the whole drain per read (O(n^2)), and this drains
+    # ``rg`` / git output that can run to many MB.
+    var buf = List[UInt8]()
     var scratch = alloc_zero_buffer(8192)
     while True:
         var n = read_into(fd, scratch, 8192)
         if n <= 0:
             break
-        out = out + String(StringSlice(
+        append_string_bytes(buf, String(StringSlice(
             ptr=scratch.unsafe_ptr(), length=n,
-        ))
-    return out^
+        )))
+    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
 
 # --- LspProcess -----------------------------------------------------------
