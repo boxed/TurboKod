@@ -2576,7 +2576,6 @@ struct Desktop(Movable):
         Read-only editors (the docs viewer) are special-cased: line
         numbers are forced off regardless of the global toggle, since
         a rendered docs page isn't a numbered source file."""
-        debug_log(String("[_apply_view_config] ENTER"))
         # Sync the View-menu checkmarks with the current config so the
         # dropdown always reflects the live state (Desktop owns the
         # config, the host owns the menu items, and this is the one
@@ -2603,7 +2602,6 @@ struct Desktop(Movable):
             tree_label = _TREE_LABEL_LEFT if self.file_tree.dock_left \
                 else _TREE_LABEL_RIGHT
         self.menu_bar.set_item_label(PROJECT_TREE_ACTION, tree_label)
-        debug_log(String("[_apply_view_config] after menu_bar checks"))
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
         # adds up; ``self.project`` is the only relevant root because
@@ -2629,9 +2627,7 @@ struct Desktop(Movable):
             var now = monotonic_ms()
             if now - self._last_git_state_check_ms >= _GIT_POLL_INTERVAL_MS:
                 self._last_git_state_check_ms = now
-                debug_log(String("[_apply_view_config] calling git_state_mtimes"))
                 var current = git_state_mtimes(root)
-                debug_log(String("[_apply_view_config] git_state_mtimes returned"))
                 if not self._git_state_mtimes.is_zero() \
                         and not current.is_zero() \
                         and not current.equals(self._git_state_mtimes):
@@ -2657,12 +2653,10 @@ struct Desktop(Movable):
             if since_input < 0:
                 since_input = 0
             caret_on = (since_input // _CARET_BLINK_HALF_MS) % 2 == 0
-        debug_log(String("[_apply_view_config] entering per-window loop"))
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
             self.windows.windows[i].editor.caret_visible = caret_on
-            debug_log(String("[_apply_view_config] window ") + String(i))
             if self.windows.windows[i].editor.read_only:
                 self.windows.windows[i].editor.line_numbers = False
             else:
@@ -2706,15 +2700,12 @@ struct Desktop(Movable):
                 )
                 if want_git_data and have_git:
                     var fp = self.windows.windows[i].editor.file_path
-                    debug_log(String("[_apply_view_config] git data for ") + fp)
                     # Step 1: fetch HEAD content once per file. Bracket
                     # the spawn with the loaded flag so untracked / new
                     # files don't re-spawn ``git show`` every paint.
                     if len(fp.as_bytes()) > 0 \
                             and not self.windows.windows[i].editor._git_head_loaded:
-                        debug_log(String("[_apply_view_config] fetch_head_text ") + fp)
                         var head = fetch_head_text(root, fp)
-                        debug_log(String("[_apply_view_config] fetch_head_text done"))
                         if head:
                             self.windows.windows[i].editor.set_git_head_text(
                                 head.value(), True,
@@ -2729,7 +2720,6 @@ struct Desktop(Movable):
                     # do per paint while the user types.
                     if self.windows.windows[i].editor._git_head_present \
                             and self.windows.windows[i].editor._git_changes_dirty:
-                        debug_log(String("[_apply_view_config] diff_buffer_against_head ") + fp)
                         var buf_lines = \
                             self.windows.windows[i].editor.buffer.lines.copy()
                         var head_text = \
@@ -2738,8 +2728,6 @@ struct Desktop(Movable):
                             head_text, buf_lines,
                         )
                         self.windows.windows[i].editor.set_git_changes(lines^)
-                        debug_log(String("[_apply_view_config] diff done"))
-        debug_log(String("[_apply_view_config] EXIT"))
 
     def paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
@@ -2776,16 +2764,13 @@ struct Desktop(Movable):
         # ones that were already open. The flag is one-shot: armed in
         # ``_set_project`` and cleared here even on failure.
         if self._pending_restore:
-            debug_log(String("[paint] pending_restore set, restoring..."))
             self._pending_restore = False
             self._restore_session(screen)
-            debug_log(String("[paint] _restore_session returned"))
         # If a file-open earlier deferred the install prompt because some
         # other modal was up, retry now. ``_maybe_prompt_lsp_install``
         # re-defers on a fresh `pending_*` field if a modal is *still*
         # in the way, so this is safe to call unconditionally.
         if len(self._pending_lsp_prompt_ext.as_bytes()) > 0:
-            debug_log(String("[paint] lsp install prompt"))
             var deferred_ext = self._pending_lsp_prompt_ext
             self._pending_lsp_prompt_ext = String("")
             self._maybe_prompt_lsp_install(deferred_ext)
@@ -2793,17 +2778,13 @@ struct Desktop(Movable):
         # from the LSP one — opening an Elm file when no Elm LSP install
         # spec exists still wants the grammar prompt to fire.
         if len(self._pending_grammar_prompt_ext.as_bytes()) > 0:
-            debug_log(String("[paint] grammar install prompt"))
             var deferred_ext = self._pending_grammar_prompt_ext
             self._pending_grammar_prompt_ext = String("")
             self._maybe_prompt_grammar_install(deferred_ext)
-        debug_log(String("[paint] before _apply_view_config"))
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
         self._apply_view_config()
-        debug_log(String("[paint] before flush_highlights loop n_windows=")
-            + String(len(self.windows.windows)))
         # Flush deferred highlight refreshes for every editor that
         # was edited since the last frame. ``flush_highlights`` is
         # a no-op when the dirty flag is clear, so this is cheap on
@@ -2811,8 +2792,6 @@ struct Desktop(Movable):
         # tokenization against the shared ``grammar_registry``.
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
-                debug_log(String("[paint] flush_highlights for window ")
-                    + String(i))
                 # Push the project's pytest file globs so the test gutter
                 # detects this project's test files; cheap + idempotent
                 # (only re-runs detection on an actual change).
@@ -2822,40 +2801,30 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.flush_highlights(
                     self.grammar_registry, self.speller,
                 )
-                debug_log(String("[paint] flush_highlights done ")
-                    + String(i))
-        debug_log(String("[paint] before windows.fit_into"))
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
         self.windows.fit_into(self.workspace_rect(screen))
-        debug_log(String("[paint] before _rebuild_window_menu"))
         # Rebuild the Window menu from current state so it always reflects
         # what's actually open. (Cheap; one short item list.)
         self._rebuild_window_menu()
-        debug_log(String("[paint] before _refresh_shortcuts"))
         # Stamp the right-aligned shortcut text onto each menu item so it
         # picks up user-registered hotkey overrides automatically.
         self._refresh_shortcuts()
-        debug_log(String("[paint] before _refresh_target_tabs"))
         # Refresh the target-tab strip every frame so tab indicators
         # (running, debugging, active) stay in sync with the actual
         # session state — single source of truth for the painter.
         self._refresh_target_tabs()
-        debug_log(String("[paint] before workspace fill"))
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
-        debug_log(String("[paint] before windows.paint"))
         self.windows.paint(
             canvas, self._compute_subdued_windows(),
             not self._any_dock_focused(),
         )
-        debug_log(String("[paint] after windows.paint"))
         # Title-bar full-path tooltip: floats above every window but
         # below the side panes / chrome, so the popup never gets
         # painted over by the editor it's describing.
         self.windows.paint_title_tooltip(canvas, ws)
-        debug_log(String("[paint] before file_tree.paint"))
         # Row 0 hosts the in-grid menu bar only when we own the menu;
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
@@ -2872,8 +2841,6 @@ struct Desktop(Movable):
                         self.windows.windows[i].editor.file_path,
                     )
         self.file_tree.paint(canvas, screen)
-        debug_log(String("[paint] before terminal_panes.paint n=")
-            + String(len(self.terminal_panes)))
         # When floating, the tool panels render on the host's separate panel
         # window (see `paint_panels`); the main surface skips them entirely.
         if not self.panels_detached:
@@ -2881,19 +2848,14 @@ struct Desktop(Movable):
                 self.terminal_panes[i].paint(
                     canvas, self.terminal_pane_rect(screen, i),
                 )
-            debug_log(String("[paint] before debug_pane.paint"))
             self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
             self.test_pane.paint(canvas, self.test_pane_rect(screen))
-        debug_log(String("[paint] before menu_bar.paint"))
         # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
         # in-grid paint so the top row stays clear for other content.
         if not self.host_owns_menu:
             self.menu_bar.paint(canvas, screen)
-        debug_log(String("[paint] before tab_bar.paint"))
         self._paint_tab_bar(canvas, screen)
-        debug_log(String("[paint] before status_bar.paint"))
         self.status_bar.paint(canvas, screen)
-        debug_log(String("[paint] after status_bar.paint"))
         # Non-modal install-progress popup. Sits between the workspace and
         # the modal dialogs — visible while the user keeps editing, but
         # dismissed by any modal that pops over the top.
