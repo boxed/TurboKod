@@ -28,6 +28,7 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
+    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
@@ -41,9 +42,8 @@ def _row_y(rect: Rect) -> Int:
     return cursor.place()
 
 
-comptime DIAG_MENU_HIT_NONE    = -1
-comptime DIAG_MENU_HIT_INSIDE  = 1
-comptime DIAG_MENU_HIT_OUTSIDE = 2
+# ``DiagnosticMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
+# (``events.mojo``).
 
 
 comptime DIAG_MENU_ACTION_NONE      = 0
@@ -338,37 +338,37 @@ struct DiagnosticMenu(Movable):
         are non-events — that's what stops the right-click that opened
         the menu from auto-firing on its trailing release."""
         if not self.active:
-            return DIAG_MENU_HIT_NONE
+            return MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
-            return DIAG_MENU_HIT_NONE
+            return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return DIAG_MENU_HIT_NONE
+            return MENU_HIT_NONE
         var rect = self._rect(screen)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:
                 self._resolve(DIAG_MENU_ACTION_NONE)
-                return DIAG_MENU_HIT_OUTSIDE
+                return MENU_HIT_OUTSIDE
             var row = event.pos.y - _row_y(rect)
             if row < 0 or row >= self._row_count():
-                return DIAG_MENU_HIT_INSIDE
+                return MENU_HIT_INSIDE
             if self._is_loading_row(row):
-                return DIAG_MENU_HIT_INSIDE
+                return MENU_HIT_INSIDE
             self.selected = row
             self.tracking = True
-            return DIAG_MENU_HIT_INSIDE
+            return MENU_HIT_INSIDE
         # Release.
         if not self.tracking:
-            return DIAG_MENU_HIT_NONE
+            return MENU_HIT_NONE
         self.tracking = False
         if not inside:
             self._resolve(DIAG_MENU_ACTION_NONE)
-            return DIAG_MENU_HIT_OUTSIDE
+            return MENU_HIT_OUTSIDE
         var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
-            return DIAG_MENU_HIT_INSIDE
+            return MENU_HIT_INSIDE
         if self._is_loading_row(row):
-            return DIAG_MENU_HIT_INSIDE
+            return MENU_HIT_INSIDE
         self.selected = row
         self._resolve_selected()
-        return DIAG_MENU_HIT_INSIDE
+        return MENU_HIT_INSIDE

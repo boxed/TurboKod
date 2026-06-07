@@ -62,8 +62,7 @@ from .git_changes import (
     git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
-    GUTTER_ACTION_REVERT, GUTTER_HIT_INSIDE, GUTTER_HIT_OUTSIDE,
-    GitGutterMenu,
+    GUTTER_ACTION_REVERT, GitGutterMenu,
 )
 from .test_gutter_menu import (
     TEST_ACTION_DEBUG, TEST_ACTION_RUN, TestGutterMenu,
@@ -87,8 +86,7 @@ from .highlight import (
 )
 from .spell import Speller
 from .spell_menu import (
-    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER,
-    SPELL_HIT_INSIDE, SPELL_HIT_OUTSIDE, SpellMenu,
+    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges

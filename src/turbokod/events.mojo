@@ -119,6 +119,24 @@ comptime MOUSE_WHEEL_DOWN    = UInt8(5)
 comptime DOUBLE_CLICK_MS:    Int = 500
 
 
+# --- Popup / menu mouse hit-status -------------------------------------------
+#
+# The shared return vocabulary for the small modal popup menus
+# (diagnostic / spell / git-gutter / test-gutter / LSP-status). Each
+# used to define its own identical ``<NAME>_HIT_NONE/INSIDE/OUTSIDE``
+# triple — the docstrings literally chained the copy lineage ("SPELL_HIT_*
+# shape", "GUTTER_HIT_* shape", …). One definition now, so a host that
+# routes events through several of these menus can compare every return
+# against the same constants.
+#
+# ``NONE`` is ``-1`` (event not ours — keep dispatching), ``INSIDE`` is a
+# consumed click within the popup, ``OUTSIDE`` is a click beyond it (the
+# popup self-dismisses and the host should treat the event as consumed).
+comptime MENU_HIT_NONE    = -1
+comptime MENU_HIT_INSIDE  = 1
+comptime MENU_HIT_OUTSIDE = 2
+
+
 @fieldwise_init
 struct Event(ImplicitlyCopyable, Movable):
     var kind: UInt8

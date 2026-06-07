@@ -20,17 +20,15 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
+    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
 
 
-# Hit-test result codes for ``TestGutterMenu.handle_mouse``. Mirrors the
-# ``GUTTER_HIT_*`` shape so callers can pattern-match similarly.
-comptime TEST_HIT_NONE    = -1
-comptime TEST_HIT_INSIDE  = 1
-comptime TEST_HIT_OUTSIDE = 2
+# ``TestGutterMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
+# (``events.mojo``).
 
 
 # Action codes returned to the host on resolve.
@@ -172,32 +170,32 @@ struct TestGutterMenu(Movable):
         highlights; release inside fires the action. Releases without a
         prior tracked press are non-events."""
         if not self.active:
-            return TEST_HIT_NONE
+            return MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
-            return TEST_HIT_NONE
+            return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return TEST_HIT_NONE
+            return MENU_HIT_NONE
         var rect = self._rect(screen)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:
                 self._resolve(TEST_ACTION_NONE)
-                return TEST_HIT_OUTSIDE
+                return MENU_HIT_OUTSIDE
             var row = event.pos.y - self._row_y(rect, 0)
             if row < 0 or row >= self._row_count():
-                return TEST_HIT_INSIDE
+                return MENU_HIT_INSIDE
             self.selected = row
             self.tracking = True
-            return TEST_HIT_INSIDE
+            return MENU_HIT_INSIDE
         # Release.
         if not self.tracking:
-            return TEST_HIT_NONE
+            return MENU_HIT_NONE
         self.tracking = False
         if not inside:
             self._resolve(TEST_ACTION_NONE)
-            return TEST_HIT_OUTSIDE
+            return MENU_HIT_OUTSIDE
         var row = event.pos.y - self._row_y(rect, 0)
         if row < 0 or row >= self._row_count():
-            return TEST_HIT_INSIDE
+            return MENU_HIT_INSIDE
         self._resolve(self._action_for_row(row))
-        return TEST_HIT_INSIDE
+        return MENU_HIT_INSIDE

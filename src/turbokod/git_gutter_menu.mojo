@@ -19,6 +19,7 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
+    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
@@ -33,11 +34,8 @@ def _row_y(rect: Rect) -> Int:
     return cursor.place()
 
 
-# Hit-test result codes for ``GitGutterMenu.handle_mouse``. Mirrors the
-# ``SPELL_HIT_*`` shape so callers can pattern-match similarly.
-comptime GUTTER_HIT_NONE    = -1
-comptime GUTTER_HIT_INSIDE  = 1
-comptime GUTTER_HIT_OUTSIDE = 2
+# ``GitGutterMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
+# (``events.mojo``).
 
 
 # Action codes returned to the host on resolve.
@@ -162,33 +160,33 @@ struct GitGutterMenu(Movable):
         tracking + highlights; release inside fires the action.
         Releases without a prior tracked press are non-events."""
         if not self.active:
-            return GUTTER_HIT_NONE
+            return MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
-            return GUTTER_HIT_NONE
+            return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return GUTTER_HIT_NONE
+            return MENU_HIT_NONE
         var rect = self._rect(screen)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:
                 self._resolve(GUTTER_ACTION_NONE)
-                return GUTTER_HIT_OUTSIDE
+                return MENU_HIT_OUTSIDE
             var row = event.pos.y - _row_y(rect)
             if row < 0 or row >= self._row_count():
-                return GUTTER_HIT_INSIDE
+                return MENU_HIT_INSIDE
             self.selected = row
             self.tracking = True
-            return GUTTER_HIT_INSIDE
+            return MENU_HIT_INSIDE
         # Release.
         if not self.tracking:
-            return GUTTER_HIT_NONE
+            return MENU_HIT_NONE
         self.tracking = False
         if not inside:
             self._resolve(GUTTER_ACTION_NONE)
-            return GUTTER_HIT_OUTSIDE
+            return MENU_HIT_OUTSIDE
         var row = event.pos.y - _row_y(rect)
         if row < 0 or row >= self._row_count():
-            return GUTTER_HIT_INSIDE
+            return MENU_HIT_INSIDE
         if row == 0:
             self._resolve(GUTTER_ACTION_REVERT)
-        return GUTTER_HIT_INSIDE
+        return MENU_HIT_INSIDE

@@ -25,6 +25,7 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
+    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
@@ -40,15 +41,9 @@ def _rows_top(rect: Rect) -> Int:
     return cursor.place()
 
 
-# Hit-test result codes for ``SpellMenu.handle_mouse``. Mirrors the
-# ``DROPDOWN_HIT_*`` shape so callers can pattern-match similarly.
-comptime SPELL_HIT_NONE    = -1
-comptime SPELL_HIT_INSIDE  = 1
-"""Click landed inside the popup (selection / no-op on disabled row);
-the menu has handled the click."""
-comptime SPELL_HIT_OUTSIDE = 2
-"""Click landed outside the popup. The menu auto-closes; the caller
-should treat the event as falling through to its own dispatch."""
+# ``SpellMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
+# (``events.mojo``): ``NONE`` = not ours, ``INSIDE`` = click handled
+# within the popup, ``OUTSIDE`` = clicked away (menu auto-closes).
 
 
 # Action codes returned to the host on resolve.
@@ -269,35 +264,35 @@ struct SpellMenu(Movable):
         release lands inside (drag off-and-release cancels). Releases
         without a prior tracked press are non-events."""
         if not self.active:
-            return SPELL_HIT_NONE
+            return MENU_HIT_NONE
         if event.kind != EVENT_MOUSE:
-            return SPELL_HIT_NONE
+            return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return SPELL_HIT_NONE
+            return MENU_HIT_NONE
         var rect = self._rect(screen)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:
                 self._resolve(SPELL_ACTION_NONE)
-                return SPELL_HIT_OUTSIDE
+                return MENU_HIT_OUTSIDE
             var row = event.pos.y - _rows_top(rect)
             if row < 0 or row >= self._row_count():
-                return SPELL_HIT_INSIDE
+                return MENU_HIT_INSIDE
             self.selected = row
             self.tracking = True
-            return SPELL_HIT_INSIDE
+            return MENU_HIT_INSIDE
         # Release.
         if not self.tracking:
-            return SPELL_HIT_NONE
+            return MENU_HIT_NONE
         self.tracking = False
         if not inside:
             self._resolve(SPELL_ACTION_NONE)
-            return SPELL_HIT_OUTSIDE
+            return MENU_HIT_OUTSIDE
         var row = event.pos.y - _rows_top(rect)
         if row < 0 or row >= self._row_count():
-            return SPELL_HIT_INSIDE
+            return MENU_HIT_INSIDE
         if row == 0:
             self._resolve(SPELL_ACTION_ADD_USER)
         elif row == 1 and self.has_project:
             self._resolve(SPELL_ACTION_ADD_PROJECT)
-        return SPELL_HIT_INSIDE
+        return MENU_HIT_INSIDE
