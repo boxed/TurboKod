@@ -146,7 +146,7 @@ def tokenize_with_grammar_full(
 
 def tokenize_lines_from(
     grammar: Grammar, lines: List[String],
-    start_row: Int, start_stack: List[Frame],
+    start_row: Int, min_row: Int, start_stack: List[Frame],
     cached_post_stacks: List[List[Frame]],
     mut post_stacks: List[List[Frame]],
     mut stable_row: Int,
@@ -158,6 +158,13 @@ def tokenize_lines_from(
     the new post-stack at row ``r`` matches ``cached_post_stacks[r]``
     we know everything from ``r+1`` onward is identical to last
     time and we can stop.
+
+    Early-exit is suppressed for rows ``< min_row``: the caller begins
+    one row *above* the edited row because rows are coupled by multi-line
+    ``\\n`` end-regexes (row R-1 is tokenized against
+    ``line[R-1] + "\\n" + line[R]``), and without this guard the loop would
+    match the unchanged starting row's post-stack and quit before reaching
+    the actual edit. Pass ``min_row == start_row`` for the classic behaviour.
 
     On return:
 
@@ -183,7 +190,8 @@ def tokenize_lines_from(
             next_line = lines[row + 1]
         _tokenize_line(grammar, lines[row], next_line, row, stack, out)
         post_stacks.append(copy_stack(stack))
-        if row < len(cached_post_stacks) \
+        if row >= min_row \
+                and row < len(cached_post_stacks) \
                 and stack_eq(stack, cached_post_stacks[row]):
             stable_row = row + 1
             return out^

@@ -465,12 +465,20 @@ def highlight_incremental(
     # Decide whether we can incrementalize. Conditions for "yes":
     #   * cache is warm: we already tokenized this extension before
     #     and have ``post_stacks`` of the right length;
-    #   * dirty_row > 0 (else there's nothing to skip);
-    #   * dirty_row is in range.
+    #   * eff_dirty > 0 (else there's nothing to skip — full retokenize);
+    #   * eff_dirty is in range.
     # Anything else collapses to a full retokenize.
     var n_lines = len(lines)
-    var can_incr = (dirty_row > 0
-                    and dirty_row <= n_lines
+    # An edit on row R can stale row R-1's cached result, not just R's: a
+    # grammar with a multi-line end regex (``end: "\\n..."``) tokenizes row
+    # R-1 against ``line[R-1] + "\n" + line[R]``, so row R-1's highlights and
+    # post-stack depend on row R's text. Back the incremental window up one
+    # row so that coupling can't leave stale highlights above the edit.
+    # Costs one extra row of tokenizing; an edit at row 1 collapses to a full
+    # retokenize (eff_dirty == 0), which is correct.
+    var eff_dirty = dirty_row - 1
+    var can_incr = (eff_dirty > 0
+                    and eff_dirty <= n_lines
                     and len(cache.post_stacks) == n_lines)
     if not can_incr:
         var hls = _full_retokenize(
@@ -484,28 +492,28 @@ def highlight_incremental(
         return hls^
 
     # Incremental path. Start state = post-state at end of line
-    # (dirty_row - 1), i.e. what dirty_row was tokenized against
+    # (eff_dirty - 1), i.e. what eff_dirty was tokenized against
     # last time. The tokenizer itself stops as soon as state
     # rejoins the cached trajectory and reports back via
     # ``stable_row``.
-    var start_stack = cache.post_stacks[dirty_row - 1].copy()
+    var start_stack = cache.post_stacks[eff_dirty - 1].copy()
     var new_post = List[List[Frame]]()
     var stable_row: Int = 0
     var new_hls = tokenize_lines_from(
-        registry.grammars[grammar_idx], lines, dirty_row, start_stack,
-        cache.post_stacks, new_post, stable_row,
+        registry.grammars[grammar_idx], lines, eff_dirty, dirty_row,
+        start_stack, cache.post_stacks, new_post, stable_row,
     )
 
     # Splice highlights:
-    #   1. Keep cached highlights with row < dirty_row.
-    #   2. Append re-tokenized highlights (rows ``[dirty_row,
+    #   1. Keep cached highlights with row < eff_dirty.
+    #   2. Append re-tokenized highlights (rows ``[eff_dirty,
     #      stable_row)``).
     #   3. Append cached highlights with row >= stable_row.
     # ``new_hls`` already contains only rows up to ``stable_row``
     # because that's where the tokenizer stopped.
     var out = List[Highlight]()
     for i in range(len(cache.highlights)):
-        if cache.highlights[i].row < dirty_row:
+        if cache.highlights[i].row < eff_dirty:
             out.append(cache.highlights[i])
     for i in range(len(new_hls)):
         out.append(new_hls[i])
@@ -514,11 +522,11 @@ def highlight_incremental(
             if cache.highlights[i].row >= stable_row:
                 out.append(cache.highlights[i])
 
-    # Update cached post_stacks: replace ``[dirty_row, stable_row)``
-    # with the new ones, keep cached entries below dirty_row and
+    # Update cached post_stacks: replace ``[eff_dirty, stable_row)``
+    # with the new ones, keep cached entries below eff_dirty and
     # at-or-above stable_row.
     var updated_stacks = List[List[Frame]]()
-    for i in range(dirty_row):
+    for i in range(eff_dirty):
         updated_stacks.append(cache.post_stacks[i].copy())
     for k in range(len(new_post)):
         updated_stacks.append(new_post[k].copy())
