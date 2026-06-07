@@ -18,6 +18,7 @@ from std.collections.optional import Optional
 
 from .diff import DiffOp, diff_lines
 from .file_io import find_git_project, join_path, stat_file
+from .posix import realpath
 from .lsp import capture_command
 from .string_utils import (
     split_lines, split_lines_no_trailing, starts_with,
@@ -233,9 +234,19 @@ def _relative_to_root(file_path: String, root: String) -> String:
     """Strip a leading ``<root>/`` (or ``<root>``) from ``file_path``;
     return the input unchanged if the prefix doesn't match. Used to
     feed ``git diff -- <pathspec>`` a path relative to the repo root,
-    which ``git -C <root>`` interprets that way."""
-    var fb = file_path.as_bytes()
-    var rb = root.as_bytes()
+    which ``git -C <root>`` interprets that way.
+
+    Both sides are realpath-canonicalized first (as ``compute_blame``
+    already does): ``root`` is canonical but ``file_path`` may not be
+    (NSOpenPanel / Dock-drop / CLI / session-restore), so on case-insensitive
+    APFS or a symlinked root a raw byte compare would fail and hand git the
+    full absolute path — silently disabling the gutter for that file."""
+    var rp = realpath(file_path)
+    var fp = rp if len(rp.as_bytes()) > 0 else file_path
+    var rr = realpath(root)
+    var rt = rr if len(rr.as_bytes()) > 0 else root
+    var fb = fp.as_bytes()
+    var rb = rt.as_bytes()
     if len(rb) == 0 or len(fb) < len(rb):
         return file_path
     for i in range(len(rb)):
