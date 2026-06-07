@@ -58,6 +58,9 @@ struct DocPick(Movable):
     var selected_index: Int
     # Cached input strip rect for mouse routing.
     var _input_rect: Rect
+    # Visible list height captured on the most recent ``paint`` so
+    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
+    var _revealed_height: Int
 
     def __init__(out self):
         self.active = False
@@ -70,6 +73,7 @@ struct DocPick(Movable):
         self.scroll = 0
         self.selected_index = -1
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 16
 
     def open(
         mut self, var display: String, var entries: List[DocEntry],
@@ -85,6 +89,7 @@ struct DocPick(Movable):
         self.scroll = 0
         self.selected_index = -1
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 16
         self._refilter()
 
     def close(mut self):
@@ -98,6 +103,7 @@ struct DocPick(Movable):
         self.scroll = 0
         self.selected_index = -1
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 16
 
     # --- filtering --------------------------------------------------------
 
@@ -168,6 +174,7 @@ struct DocPick(Movable):
         # Listing.
         var top = layout.list_top
         var h = layout.list_height
+        self._revealed_height = h
         if len(self.matched) == 0:
             var msg: String
             if len(self.entries) == 0:
@@ -276,4 +283,4 @@ struct DocPick(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, 16)
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)

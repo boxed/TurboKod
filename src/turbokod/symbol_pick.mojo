@@ -54,6 +54,9 @@ struct SymbolPick(Movable):
     var selected_character: Int
     # Cached input strip rect for mouse routing.
     var _input_rect: Rect
+    # Visible list height captured on the most recent ``paint`` so
+    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
+    var _revealed_height: Int
 
     def __init__(out self):
         self.active = False
@@ -68,6 +71,7 @@ struct SymbolPick(Movable):
         self.selected_line = 0
         self.selected_character = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 14
 
     def open(mut self, var path: String):
         """Open the picker in a loading state for ``path``. Entries arrive
@@ -84,6 +88,7 @@ struct SymbolPick(Movable):
         self.selected_line = 0
         self.selected_character = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 14
 
     def set_entries(mut self, var items: List[SymbolItem]):
         """Populate the picker with the response and clear the loading flag.
@@ -104,6 +109,7 @@ struct SymbolPick(Movable):
         self.selected = 0
         self.scroll = 0
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 14
 
     # --- filtering --------------------------------------------------------
 
@@ -171,6 +177,7 @@ struct SymbolPick(Movable):
         # Listing.
         var top = layout.list_top
         var h = layout.list_height
+        self._revealed_height = h
         if self.loading:
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, top),
@@ -295,7 +302,7 @@ struct SymbolPick(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, 14)
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
 
 
 def symbol_kind_label(kind: Int) -> String:

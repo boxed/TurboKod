@@ -42,6 +42,9 @@ struct ReferencePick(Movable):
     var selected_path: String
     var selected_line: Int
     var selected_character: Int
+    # Visible list height captured on the most recent ``paint`` so
+    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
+    var _revealed_height: Int
 
     def __init__(out self):
         self.active = False
@@ -54,6 +57,7 @@ struct ReferencePick(Movable):
         self.selected_path = String("")
         self.selected_line = 0
         self.selected_character = 0
+        self._revealed_height = 14
 
     def open(
         mut self, var entries: List[DefinitionResolved],
@@ -72,6 +76,7 @@ struct ReferencePick(Movable):
         self.selected_path = String("")
         self.selected_line = 0
         self.selected_character = 0
+        self._revealed_height = 14
 
     def close(mut self):
         self.active = False
@@ -81,6 +86,7 @@ struct ReferencePick(Movable):
         self.project_root = String("")
         self.selected = 0
         self.scroll = 0
+        self._revealed_height = 14
 
     # --- geometry ---------------------------------------------------------
 
@@ -142,6 +148,7 @@ struct ReferencePick(Movable):
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
+        self._revealed_height = h
         for i in range(h):
             var idx = self.scroll + i
             if idx >= len(self.entries):
@@ -239,7 +246,7 @@ struct ReferencePick(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, 14)
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
 
 
 def _ends_with_slash(s: String) -> Bool:

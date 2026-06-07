@@ -82,6 +82,9 @@ struct QuickOpen(Movable):
     # so ``handle_mouse`` can route clicks back to the field without
     # re-running layout. Negative width = "no paint yet".
     var _input_rect: Rect
+    # Visible list height captured on the most recent ``paint`` so
+    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
+    var _revealed_height: Int
     # Async file indexers. Owned for the duration of ``open()`` → first
     # ``tick()`` that observes ``indexer.alive==False``. ``_indexer`` is
     # the main ``ls-files -co`` enumeration; ``_ignored_indexer`` runs
@@ -142,6 +145,7 @@ struct QuickOpen(Movable):
         self.title = String(" Quick Open ")
         self.picks_project = False
         self._input_rect = Rect(0, 0, 0, 0)
+        self._revealed_height = 14
         self._indexer = Optional[FileIndexer]()
         self._ignored_indexer = Optional[FileIndexer]()
         self.indexing = False
@@ -473,6 +477,7 @@ struct QuickOpen(Movable):
         var sel_hi = self.selected if self.anchor < self.selected else self.anchor
         var top = layout.list_top
         var h = layout.list_height
+        self._revealed_height = h
         for i in range(h):
             var idx = self.scroll + i
             if idx >= len(self.matched):
@@ -605,7 +610,7 @@ struct QuickOpen(Movable):
         return True
 
     def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, 14)
+        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
 
 
 # --- match algorithm ---------------------------------------------------------
