@@ -339,6 +339,107 @@ def _slice_eq(
     return True
 
 
+# Per-chunk classification produced by ``_diff3_walk`` — which input's
+# slice the chunk resolves to, or that it's a genuine conflict.
+comptime CHUNK_BASE     = 0  # neither side changed → take base slice
+comptime CHUNK_THEIRS   = 1  # only theirs changed → take theirs slice
+comptime CHUNK_OURS     = 2  # only ours changed (or both changed alike)
+comptime CHUNK_CONFLICT = 3  # both sides changed differently
+
+
+@fieldwise_init
+struct _Diff3Region(Copyable, Movable):
+    """One anchor-to-anchor chunk of a 3-way merge, classified but not
+    yet emitted. The shared ``_diff3_walk`` returns a list of these;
+    ``diff3_merge`` and ``diff3_regions`` each render them their own way.
+
+    ``kind`` is one of the ``CHUNK_*`` constants. The ``*_lo``/``*_hi``
+    pairs are half-open ranges into base/ours/theirs for the chunk
+    between the previous anchor and this one. ``anchor_line`` is the
+    base index of the agreed anchor line that follows the chunk, or -1
+    for the trailing sentinel (no anchor line to emit)."""
+    var kind: Int
+    var b_lo: Int
+    var b_hi: Int
+    var o_lo: Int
+    var o_hi: Int
+    var t_lo: Int
+    var t_hi: Int
+    var anchor_line: Int
+
+
+def _diff3_walk(
+    base: List[String],
+    ours: List[String],
+    theirs: List[String],
+) -> List[_Diff3Region]:
+    """Shared anchor-walk for the two public 3-way-merge entry points.
+
+    Diffs ``ours`` and ``theirs`` against ``base``, finds the lines that
+    match unchanged across all three (anchors), and classifies each
+    chunk between anchors (see the ``CHUNK_*`` constants). A leading
+    sentinel anchor at index -1 and a trailing sentinel at ``len(base)``
+    cover the chunks before the first and after the last real anchor.
+    The trailing sentinel carries ``anchor_line == -1`` (no line to
+    emit); every other region's ``anchor_line`` is the agreed base line
+    that follows its chunk."""
+    var ops_ours = diff_lines(base, ours)
+    var ops_theirs = diff_lines(base, theirs)
+    var match_ours = _equal_match_map(ops_ours, len(base))
+    var match_theirs = _equal_match_map(ops_theirs, len(base))
+
+    var regions = List[_Diff3Region]()
+
+    var i_prev = -1
+    var oi_prev = -1
+    var ti_prev = -1
+    var i = 0
+    var n = len(base)
+    while i <= n:
+        var is_anchor = False
+        var oi = 0
+        var ti = 0
+        if i == n:
+            is_anchor = True
+            oi = len(ours)
+            ti = len(theirs)
+        elif match_ours[i] >= 0 and match_theirs[i] >= 0:
+            is_anchor = True
+            oi = match_ours[i]
+            ti = match_theirs[i]
+        if not is_anchor:
+            i += 1
+            continue
+        var b_lo = i_prev + 1
+        var b_hi = i
+        var o_lo = oi_prev + 1
+        var o_hi = oi
+        var t_lo = ti_prev + 1
+        var t_hi = ti
+        var ours_changed = not _slice_eq(ours, o_lo, o_hi, base, b_lo, b_hi)
+        var theirs_changed = not _slice_eq(theirs, t_lo, t_hi, base, b_lo, b_hi)
+        var kind: Int
+        if not ours_changed and not theirs_changed:
+            kind = CHUNK_BASE
+        elif not ours_changed:
+            kind = CHUNK_THEIRS
+        elif not theirs_changed:
+            kind = CHUNK_OURS
+        elif _slice_eq(ours, o_lo, o_hi, theirs, t_lo, t_hi):
+            kind = CHUNK_OURS
+        else:
+            kind = CHUNK_CONFLICT
+        var anchor_line = i if i < n else -1
+        regions.append(_Diff3Region(
+            kind, b_lo, b_hi, o_lo, o_hi, t_lo, t_hi, anchor_line,
+        ))
+        i_prev = i
+        oi_prev = oi
+        ti_prev = ti
+        i += 1
+    return regions^
+
+
 def diff3_merge(
     base: List[String],
     ours: List[String],
@@ -361,72 +462,35 @@ def diff3_merge(
     ``len(base)`` (mapped to the corresponding ours/theirs ends) cover
     chunks before the first real anchor and after the last.
     """
-    var ops_ours = diff_lines(base, ours)
-    var ops_theirs = diff_lines(base, theirs)
-    var match_ours = _equal_match_map(ops_ours, len(base))
-    var match_theirs = _equal_match_map(ops_theirs, len(base))
+    var regions = _diff3_walk(base, ours, theirs)
 
     var out_lines = List[String]()
     var conflicts = 0
     var first_conflict_row = -1
 
-    var i_prev = -1
-    var oi_prev = -1
-    var ti_prev = -1
-    var i = 0
-    var n = len(base)
-    while i <= n:
-        var is_anchor = False
-        var oi = 0
-        var ti = 0
-        if i == n:
-            is_anchor = True
-            oi = len(ours)
-            ti = len(theirs)
-        elif match_ours[i] >= 0 and match_theirs[i] >= 0:
-            is_anchor = True
-            oi = match_ours[i]
-            ti = match_theirs[i]
-        if not is_anchor:
-            i += 1
-            continue
-        var b_lo = i_prev + 1
-        var b_hi = i
-        var o_lo = oi_prev + 1
-        var o_hi = oi
-        var t_lo = ti_prev + 1
-        var t_hi = ti
-        var ours_changed = not _slice_eq(ours, o_lo, o_hi, base, b_lo, b_hi)
-        var theirs_changed = not _slice_eq(theirs, t_lo, t_hi, base, b_lo, b_hi)
-        if not ours_changed and not theirs_changed:
-            for k in range(b_lo, b_hi):
+    for r in regions:
+        if r.kind == CHUNK_BASE:
+            for k in range(r.b_lo, r.b_hi):
                 out_lines.append(base[k])
-        elif not ours_changed:
-            for k in range(t_lo, t_hi):
+        elif r.kind == CHUNK_THEIRS:
+            for k in range(r.t_lo, r.t_hi):
                 out_lines.append(theirs[k])
-        elif not theirs_changed:
-            for k in range(o_lo, o_hi):
-                out_lines.append(ours[k])
-        elif _slice_eq(ours, o_lo, o_hi, theirs, t_lo, t_hi):
-            for k in range(o_lo, o_hi):
+        elif r.kind == CHUNK_OURS:
+            for k in range(r.o_lo, r.o_hi):
                 out_lines.append(ours[k])
         else:
             if first_conflict_row < 0:
                 first_conflict_row = len(out_lines)
             conflicts += 1
             out_lines.append(String("<<<<<<< ") + ours_label)
-            for k in range(o_lo, o_hi):
+            for k in range(r.o_lo, r.o_hi):
                 out_lines.append(ours[k])
             out_lines.append(String("======="))
-            for k in range(t_lo, t_hi):
+            for k in range(r.t_lo, r.t_hi):
                 out_lines.append(theirs[k])
             out_lines.append(String(">>>>>>> ") + theirs_label)
-        if i < n:
-            out_lines.append(base[i])
-        i_prev = i
-        oi_prev = oi
-        ti_prev = ti
-        i += 1
+        if r.anchor_line >= 0:
+            out_lines.append(base[r.anchor_line])
     return MergeResult(out_lines^, conflicts, first_conflict_row)
 
 
@@ -446,55 +510,22 @@ def diff3_regions(
     *theirs*) slice of each conflict reproduces ``ours`` (resp.
     ``theirs``); the regression tests pin this to ``diff3_merge``.
     """
-    var ops_ours = diff_lines(base, ours)
-    var ops_theirs = diff_lines(base, theirs)
-    var match_ours = _equal_match_map(ops_ours, len(base))
-    var match_theirs = _equal_match_map(ops_theirs, len(base))
+    var regions = _diff3_walk(base, ours, theirs)
 
     var out = List[MergeRegion]()
     # Accumulator for the current run of agreed text; flushed as one
     # STABLE region whenever a conflict interrupts it or at the end.
     var pending = List[String]()
 
-    var i_prev = -1
-    var oi_prev = -1
-    var ti_prev = -1
-    var i = 0
-    var n = len(base)
-    while i <= n:
-        var is_anchor = False
-        var oi = 0
-        var ti = 0
-        if i == n:
-            is_anchor = True
-            oi = len(ours)
-            ti = len(theirs)
-        elif match_ours[i] >= 0 and match_theirs[i] >= 0:
-            is_anchor = True
-            oi = match_ours[i]
-            ti = match_theirs[i]
-        if not is_anchor:
-            i += 1
-            continue
-        var b_lo = i_prev + 1
-        var b_hi = i
-        var o_lo = oi_prev + 1
-        var o_hi = oi
-        var t_lo = ti_prev + 1
-        var t_hi = ti
-        var ours_changed = not _slice_eq(ours, o_lo, o_hi, base, b_lo, b_hi)
-        var theirs_changed = not _slice_eq(theirs, t_lo, t_hi, base, b_lo, b_hi)
-        if not ours_changed and not theirs_changed:
-            for k in range(b_lo, b_hi):
+    for r in regions:
+        if r.kind == CHUNK_BASE:
+            for k in range(r.b_lo, r.b_hi):
                 pending.append(base[k])
-        elif not ours_changed:
-            for k in range(t_lo, t_hi):
+        elif r.kind == CHUNK_THEIRS:
+            for k in range(r.t_lo, r.t_hi):
                 pending.append(theirs[k])
-        elif not theirs_changed:
-            for k in range(o_lo, o_hi):
-                pending.append(ours[k])
-        elif _slice_eq(ours, o_lo, o_hi, theirs, t_lo, t_hi):
-            for k in range(o_lo, o_hi):
+        elif r.kind == CHUNK_OURS:
+            for k in range(r.o_lo, r.o_hi):
                 pending.append(ours[k])
         else:
             # Genuine conflict — flush the pending stable run first so
@@ -506,25 +537,21 @@ def diff3_regions(
                 ))
                 pending = List[String]()
             var ours_slice = List[String]()
-            for k in range(o_lo, o_hi):
+            for k in range(r.o_lo, r.o_hi):
                 ours_slice.append(ours[k])
             var theirs_slice = List[String]()
-            for k in range(t_lo, t_hi):
+            for k in range(r.t_lo, r.t_hi):
                 theirs_slice.append(theirs[k])
             var base_slice = List[String]()
-            for k in range(b_lo, b_hi):
+            for k in range(r.b_lo, r.b_hi):
                 base_slice.append(base[k])
             out.append(MergeRegion(
                 REGION_CONFLICT, List[String](),
                 ours_slice^, theirs_slice^, base_slice^,
             ))
         # The anchor line itself is agreed text.
-        if i < n:
-            pending.append(base[i])
-        i_prev = i
-        oi_prev = oi
-        ti_prev = ti
-        i += 1
+        if r.anchor_line >= 0:
+            pending.append(base[r.anchor_line])
     if len(pending) > 0:
         out.append(MergeRegion(
             REGION_STABLE, pending^,
