@@ -1175,18 +1175,16 @@ def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     # minified-file matches alive in memory across the whole result
     # list. The cap is well above any plausible visible width.
     if len(text.as_bytes()) > _MATCH_TEXT_CAP:
-        text = _slice_str(text, 0, _MATCH_TEXT_CAP)
+        # Back the cut off any continuation byte so the cap can't split a
+        # multi-byte codepoint into invalid UTF-8.
+        var tb = text.as_bytes()
+        var cut = _MATCH_TEXT_CAP
+        while cut > 0 and (Int(tb[cut]) & 0xC0) == 0x80:
+            cut -= 1
+        text = _slice_str(text, 0, cut)
     return Optional[ProjectMatch](ProjectMatch(
         path, _strip_root(path, root), line_no, text,
     ))
-
-
-def _scan_to_newline(s: String, start: Int) -> Int:
-    var b = s.as_bytes()
-    var i = start
-    while i < len(b) and b[i] != 0x0A:
-        i += 1
-    return i
 
 
 def _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
