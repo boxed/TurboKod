@@ -211,19 +211,30 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
             ls = le + 1
         if len(path.as_bytes()) == 0:
             # Last-resort: pull the path out of ``diff --git a/X b/X``.
-            # The first ``b/`` token after the header word is the
-            # destination path; we just take everything after it.
+            # Scan *forward* for the leading `` a/`` token, then the first
+            # `` b/`` after it, and take everything past that as the
+            # destination path. Scanning from the right would mis-split a
+            # path that itself contains `` b/``. (Git quotes/escapes paths
+            # with spaces in C-string form, so a `` b/`` embedded in such a
+            # quoted path remains an ambiguity this simple scan can't fully
+            # resolve — acceptable for the rename/mode-only fallback.)
             var hdr_end = 0
             while hdr_end < len(cb) and cb[hdr_end] != 0x0A:
                 hdr_end += 1
             var hdr = String(StringSlice(unsafe_from_utf8=cb[:hdr_end]))
             var hb = hdr.as_bytes()
-            var p = len(hb) - 1
-            while p > 1 and not (hb[p - 1] == 0x20 and hb[p] == 0x62
-                                  and p + 1 < len(hb) and hb[p + 1] == 0x2F):
-                p -= 1
-            if p > 1:
-                path = String(StringSlice(unsafe_from_utf8=hb[p + 2:len(hb)]))
+            # Locate `` a/``.
+            var a = 0
+            while a + 2 < len(hb) and not (hb[a] == 0x20 and hb[a + 1] == 0x61
+                                            and hb[a + 2] == 0x2F):
+                a += 1
+            # Find the first `` b/`` after the `` a/`` token.
+            var p = a + 3 if (a + 2 < len(hb)) else 0
+            while p + 2 < len(hb) and not (hb[p] == 0x20 and hb[p + 1] == 0x62
+                                            and hb[p + 2] == 0x2F):
+                p += 1
+            if p + 2 < len(hb):
+                path = String(StringSlice(unsafe_from_utf8=hb[p + 3:len(hb)]))
             else:
                 path = String("(unknown)")
         out.append(ChangedFile(path^, chunk^))
