@@ -50,7 +50,9 @@ constants is the smoothest pattern available, and matches what
 from std.collections.list import List
 
 from .canvas import Canvas
-from .string_utils import char_width, codepoint_at
+from .string_utils import (
+    char_width, codepoint_at, display_columns, truncate_to_columns,
+)
 from .painter import Painter
 from .cell import Cell
 from .clipboard import clipboard_copy
@@ -1193,15 +1195,15 @@ def _basename(path: String) -> String:
 
 
 def _pad_right(s: String, width: Int) -> String:
-    var n = len(s.as_bytes())
-    if n >= width:
-        if n > width:
-            return String(StringSlice(
-                ptr=s.as_bytes().unsafe_ptr(), length=width,
-            ))
+    # Measure + truncate by display columns so a multi-byte frame name pads
+    # to the right column count and can't be cut into invalid UTF-8.
+    var cols = display_columns(s)
+    if cols >= width:
+        if cols > width:
+            return truncate_to_columns(s, width)
         return s
     var out = s
-    for _ in range(width - n):
+    for _ in range(width - cols):
         out = out + String(" ")
     return out^
 
