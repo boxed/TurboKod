@@ -296,12 +296,17 @@ struct TurbokodConfig(Copyable, Movable):
 
 def record_recent_project(
     mut config: TurbokodConfig, var path: String,
-):
+) -> Bool:
     """Promote ``path`` to the front of ``config.recent_projects``,
     dedup any existing entry, and cap the list at
-    ``_RECENT_PROJECTS_MAX``. Empty paths are ignored."""
+    ``_RECENT_PROJECTS_MAX``. Returns True iff the list actually changed —
+    callers use this to skip a redundant ``save_config`` when the project
+    is already at the front (mirrors ``record_recent_file``). Empty paths
+    are ignored."""
     if len(path.as_bytes()) == 0:
-        return
+        return False
+    if len(config.recent_projects) > 0 and config.recent_projects[0] == path:
+        return False
     var new_list = List[String]()
     new_list.append(path)
     for i in range(len(config.recent_projects)):
@@ -310,6 +315,7 @@ def record_recent_project(
     while len(new_list) > _RECENT_PROJECTS_MAX:
         _ = new_list.pop(len(new_list) - 1)
     config.recent_projects = new_list^
+    return True
 
 
 def record_recent_file(

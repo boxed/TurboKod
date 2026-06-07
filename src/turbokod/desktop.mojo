@@ -4112,10 +4112,8 @@ struct Desktop(Movable):
         # Record this project at the front of the persistent recents list
         # before any later step might raise — failing to save the config
         # is a non-fatal best-effort, just like the View-menu toggles.
-        record_recent_project(self.config, canonical)
-        debug_log(String("[_set_project] after record_recent_project"))
-        _ = save_config(self.config)
-        debug_log(String("[_set_project] after save_config"))
+        if record_recent_project(self.config, canonical):
+            _ = save_config(self.config)
         var items = List[MenuItem]()
         items.append(MenuItem(
             String("Project Settings..."), PROJECT_SETTINGS,
