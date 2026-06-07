@@ -628,18 +628,29 @@ struct MergeView(Movable):
         if k == KEY_ENTER:
             self._edit_split()
             return
-        # Printable insert: same range gate the editor uses.
+        # Printable insert: same range gate the editor uses. Stop before the
+        # surrogate range (0xD800..0xDFFF) — chr() on a lone surrogate aborts
+        # the process in this toolchain.
         if (UInt32(0x20) <= k and k < UInt32(0x7F)) \
-                or (UInt32(0xA0) <= k and k < UInt32(0xE000)) \
+                or (UInt32(0xA0) <= k and k < UInt32(0xD800)) \
                 or k > UInt32(0xF8FF):
             if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0:
                 return
             self._edit_insert(chr(Int(k)))
 
     def _clamp_edit_col(mut self):
-        var n = len(self.states[self.current].edited_lines[self.edit_row].as_bytes())
+        var b = self.states[self.current].edited_lines[self.edit_row].as_bytes()
+        var n = len(b)
         if self.edit_col > n:
             self.edit_col = n
+        if self.edit_col < 0:
+            self.edit_col = 0
+        # Vertical movement preserves a byte offset that was valid on the old
+        # row; on a row with a multi-byte glyph it can land mid-codepoint, so
+        # snap back off any continuation byte to the glyph's start.
+        while self.edit_col > 0 and self.edit_col < n \
+                and (Int(b[self.edit_col]) & 0xC0) == 0x80:
+            self.edit_col -= 1
 
     def _edit_insert(mut self, s: String):
         var ci = self.current
