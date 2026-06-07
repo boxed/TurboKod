@@ -87,7 +87,19 @@ struct Rect(ImplicitlyCopyable, Movable):
         return Rect(self.a + delta, self.b + delta)
 
     def inset(self, dx: Int, dy: Int) -> Rect:
-        return Rect(self.a.x + dx, self.a.y + dy, self.b.x - dx, self.b.y - dy)
+        # Clamp the far corner so a rect narrower/shorter than ``2*dx`` /
+        # ``2*dy`` collapses to an empty rect at the inset origin rather than
+        # an inverted one (negative width/height), which downstream column
+        # math and loops would mishandle.
+        var ax = self.a.x + dx
+        var ay = self.a.y + dy
+        var bx = self.b.x - dx
+        var by = self.b.y - dy
+        if bx < ax:
+            bx = ax
+        if by < ay:
+            by = ay
+        return Rect(ax, ay, bx, by)
 
     def __eq__(self, other: Rect) -> Bool:
         return self.a == other.a and self.b == other.b

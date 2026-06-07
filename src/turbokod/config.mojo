@@ -393,6 +393,15 @@ def load_config() -> TurbokodConfig:
         cfg.font_size = json_get_int(
             root, String("font_size"), cfg.font_size,
         )
+        # 0 means "use the default"; any explicit size is clamped to the
+        # same range the stepper / set_font_size enforce, so a corrupt or
+        # hand-edited config can't briefly push a negative or absurd size
+        # to the host at startup.
+        if cfg.font_size != 0:
+            if cfg.font_size < MIN_FONT_SIZE:
+                cfg.font_size = MIN_FONT_SIZE
+            elif cfg.font_size > MAX_FONT_SIZE:
+                cfg.font_size = MAX_FONT_SIZE
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
