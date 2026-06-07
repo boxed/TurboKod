@@ -128,6 +128,12 @@ struct QuickOpen(Movable):
     # an "Open Recent" close doesn't pollute the main picker's saved
     # state (open_recent always starts fresh).
     var _in_main_open: Bool
+    # High-water mark: how many of ``entries`` have already been matched
+    # into ``matched``. ``_refilter`` sets it to ``len(entries)`` after a
+    # full pass; ``tick``'s incremental ``_filter_appended`` matches only
+    # ``entries[_filtered_count:]`` (entries are append-only for a fixed
+    # query) and advances it, avoiding an O(n) rescan per indexing frame.
+    var _filtered_count: Int
 
     def __init__(out self):
         self.active = False
@@ -156,6 +162,7 @@ struct QuickOpen(Movable):
         self._saved_root = String("")
         self._pending_restore = False
         self._in_main_open = False
+        self._filtered_count = 0
 
     def open(mut self, var root: String, var prefill: String = String("")):
         # A different project root invalidates everything we'd saved —
@@ -307,7 +314,11 @@ struct QuickOpen(Movable):
         if self._ignored_indexer:
             self.indexing = True
         if changed:
-            self._refilter()
+            # Entries only ever grow here and the query is unchanged
+            # (``tick`` never edits it), so match just the newly-appended
+            # entries instead of re-walking the whole list each frame —
+            # turns the O(n²)-over-indexing rescan into O(n) total.
+            self._filter_appended()
 
     def open_recent(
         mut self, var root: String, var entries: List[String],
@@ -391,14 +402,42 @@ struct QuickOpen(Movable):
     # --- filtering --------------------------------------------------------
 
     def _refilter(mut self):
+        # Full pass: discard the prior matched set and re-match the
+        # entire entry list against the current query. Used on a query
+        # change (or any open/reset) where the old matched indices are
+        # invalid. ``tick``'s incremental path (``_filter_appended``)
+        # avoids this O(n) rescan while entries are still streaming in
+        # for an unchanged query.
         self.matched = List[Int]()
+        self._match_entries_from(0)
+        self._filtered_count = len(self.entries)
+        self._apply_filter_selection()
+
+    def _match_entries_from(mut self, start: Int):
+        """Substring-match ``entries[start:]`` against the current query
+        and append the matching indices to ``matched`` (in entry order).
+        An empty query matches every entry. Caller owns ``matched``'s
+        prior contents and the ``_filtered_count`` high-water mark."""
         if len(self.query.text.as_bytes()) == 0:
-            for i in range(len(self.entries)):
+            for i in range(start, len(self.entries)):
                 self.matched.append(i)
         else:
-            for i in range(len(self.entries)):
+            for i in range(start, len(self.entries)):
                 if quick_open_match(self.entries[i], self.query.text):
                     self.matched.append(i)
+
+    def _filter_appended(mut self):
+        """Incremental filter for ``tick``: entries are append-only and
+        the query is unchanged since the last ``_refilter`` (``tick``
+        never edits the query), so the matched indices for the existing
+        prefix are unchanged. Match only the entries appended since the
+        last filter and append their matches, preserving order — then
+        re-run the same selection/scroll clamp ``_refilter`` applies."""
+        self._match_entries_from(self._filtered_count)
+        self._filtered_count = len(self.entries)
+        self._apply_filter_selection()
+
+    def _apply_filter_selection(mut self):
         if self._pending_restore and len(self.matched) > 0:
             # Initial restore from a prior ``close()``. We always read
             # from ``_saved_selected`` / ``_saved_scroll`` (untouched
