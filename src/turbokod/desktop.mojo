@@ -1143,6 +1143,14 @@ struct Desktop(Movable):
     # yet", so the first observation only seeds the cache.
     var _git_state_mtimes: GitStateMtimes
     var _last_git_state_check_ms: Int
+    # Cache of project_is_git_repo for the current project root — repo-vs-not
+    # is stable for the session, so recompute only when the root changes
+    # rather than walking the tree to ``/`` every frame.
+    var _git_root_cached: String
+    var _git_root_is_repo: Bool
+    # Raw (pre-realpath) path of the last focused editor, so the per-frame
+    # recents bookkeeping can skip the realpath syscall when focus is steady.
+    var _last_focus_raw_path: String
     # Wall-clock (monotonic ms) of the last key / mouse event routed
     # through ``handle_event``. The caret-blink phase is measured from
     # here so the caret is solid the instant the user types or clicks
@@ -1301,6 +1309,9 @@ struct Desktop(Movable):
         self._nav_pos = -1
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
         self._last_git_state_check_ms = 0
+        self._git_root_cached = String("")
+        self._git_root_is_repo = False
+        self._last_focus_raw_path = String("")
         self._last_input_ms = 0
         self._last_focused_editor_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
@@ -2611,10 +2622,11 @@ struct Desktop(Movable):
         var root = String("")
         if self.project:
             root = self.project.value()
-            debug_log(String("[_apply_view_config] checking git for root=") + root)
-            have_git = project_is_git_repo(root)
-            debug_log(String("[_apply_view_config] have_git=")
-                + (String("yes") if have_git else String("no")))
+            # Repo-vs-not is stable per root; recompute only on a root change.
+            if root != self._git_root_cached:
+                self._git_root_cached = root
+                self._git_root_is_repo = project_is_git_repo(root)
+            have_git = self._git_root_is_repo
         # Poll for external git state changes (commit, checkout, reset,
         # stash, ...) at ~1 Hz. Two stat() calls — cheap enough on idle.
         # When ``.git/HEAD`` or ``.git/index`` mtime moves we drop every
@@ -8302,6 +8314,11 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
+        # Focus unchanged since last frame → recents can't have moved under
+        # us here; skip the realpath syscall entirely.
+        if path == self._last_focus_raw_path:
+            return
+        self._last_focus_raw_path = path
         var canon = realpath(path)
         if len(canon.as_bytes()) == 0:
             canon = path
