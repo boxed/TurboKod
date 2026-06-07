@@ -612,6 +612,11 @@ def _looks_binary(text: String) -> Bool:
 def _project_relative(root: String, full: String) -> String:
     var rb = root.as_bytes()
     var fb = full.as_bytes()
+    if len(rb) == 0:
+        # No project root → don't strip anything (an empty root would
+        # otherwise match every path and shave a leading '/'). Matches the
+        # guard the _session_relative / _vs_relative siblings already have.
+        return full
     if len(fb) <= len(rb) + 1:
         return full
     for k in range(len(rb)):
