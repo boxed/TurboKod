@@ -29,8 +29,8 @@ from .lsp import LspProcess
 from .string_utils import display_columns
 from .window import paint_window_title_at
 from .posix import (
-    alloc_zero_buffer, close_fd, exit_code_from_status, monotonic_ms,
-    poll_stdin, read_into, untrack_child, waitpid_nohang,
+    alloc_zero_buffer, append_string_bytes, close_fd, exit_code_from_status,
+    monotonic_ms, poll_stdin, read_into, untrack_child, waitpid_nohang,
 )
 
 
@@ -176,14 +176,22 @@ struct InstallRunner(Movable):
             return
         var scratch = alloc_zero_buffer(4096)
         var total = 0
+        # Accumulate this drain's reads into a local buffer and append to
+        # self.output once — concatenating per 4 KB chunk re-copied the whole
+        # (persisted, up-to-256 KB) output every read.
+        var chunk = List[UInt8]()
         while poll_stdin(fd, Int32(0)) and total < 65536:
             var n = read_into(fd, scratch, 4096)
             if n <= 0:
                 break
-            self.output = self.output + String(StringSlice(
+            append_string_bytes(chunk, String(StringSlice(
                 ptr=scratch.unsafe_ptr(), length=n,
-            ))
+            )))
             total += n
+        if len(chunk) > 0:
+            self.output = self.output + String(StringSlice(
+                ptr=chunk.unsafe_ptr(), length=len(chunk),
+            ))
         if len(self.output.as_bytes()) > _OUTPUT_CAP:
             # Keep the *tail*: install failures put the diagnostic at the
             # bottom of the log, and silently dropping the head is much
