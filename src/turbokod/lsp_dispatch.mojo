@@ -2775,7 +2775,7 @@ def _text_document_position_params(
     pos.put(String("line"), json_int(line))
     pos.put(String("character"), json_int(character))
     params.put(String("position"), pos)
-    return params
+    return params^
 
 
 def _uri_hex_nibble(n: Int) -> UInt8:
