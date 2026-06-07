@@ -241,12 +241,33 @@ def _tokenize_line(
     # pattern copies and include expansion — at every position.
     var cands = List[_Cand]()
     var cands_top = -2  # sentinel: forces the first build (-1 == empty stack)
+    # Per-candidate cached search result, reused across advancing positions
+    # while the candidate set and search options are unchanged. ``cached_start``
+    # is the cached match's start column, ``-1`` (no match in the rest of the
+    # line, valid forever), or ``-2`` (unknown — must search). A cached match
+    # stays valid while it's still at or ahead of ``pos``; once ``pos`` moves
+    # past it we re-search. A ``\G``-anchored match has start == its search
+    # start, so the "still ahead" test only reuses it at the identical
+    # position, which keeps the anchor semantics correct.
+    var cached_start = List[Int]()
+    var cached_match = List[OnigMatch]()
+    var cache_opts = ONIG_OPTION_NONE
+    var cache_ready = False
     while pos < n:
         var cur_top = -1 if len(stack) == 0 \
             else stack[len(stack) - 1].pattern_idx
         if cur_top != cands_top:
             cands = _active_candidates(grammar, stack)
             cands_top = cur_top
+            # New candidate set → the by-index cache is stale; rebuild empty.
+            cached_start = List[Int]()
+            cached_match = List[OnigMatch]()
+            for _ in range(len(cands)):
+                cached_start.append(-2)
+                cached_match.append(
+                    OnigMatch(-1, -1, List[Int](), List[Int]())
+                )
+            cache_ready = False
         # Find the earliest match across all candidates. Among ties,
         # the candidate listed first in ``cands`` wins — this mirrors
         # TextMate's "first listed pattern" tie-break, with the
@@ -255,17 +276,33 @@ def _tokenize_line(
         var search_options = ONIG_OPTION_NONE
         if pos != g_pos:
             search_options = ONIG_OPTION_NOT_BEGIN_POSITION
+        if (not cache_ready) or search_options != cache_opts:
+            # First pass for this candidate set, or the NOT_BEGIN_POSITION
+            # option flipped — anchors (\G, \A, ^) at the search start can
+            # then match differently, so drop the cache and re-search here.
+            for ci in range(len(cached_start)):
+                cached_start[ci] = -2
+            cache_opts = search_options
+            cache_ready = True
         var best_idx = -1
         var best_match = OnigMatch(-1, -1, List[Int](), List[Int]())
         for ci in range(len(cands)):
-            ref rx = grammar.regexes[cands[ci].regex_idx]
-            var m_opt = rx.search_at(line, pos, search_options)
-            if not m_opt:
-                continue
-            var m = m_opt.value().copy()
-            if best_idx < 0 or m.start < best_match.start:
-                best_idx = ci
-                best_match = m^
+            var cs = cached_start[ci]
+            if cs == -2 or (cs >= 0 and cs < pos):
+                # Unknown, or the cached match is now behind ``pos`` — search.
+                ref rx = grammar.regexes[cands[ci].regex_idx]
+                var m_opt = rx.search_at(line, pos, search_options)
+                if m_opt:
+                    cached_match[ci] = m_opt.value().copy()
+                    cached_start[ci] = cached_match[ci].start
+                else:
+                    cached_start[ci] = -1  # no match in the rest of the line
+                cs = cached_start[ci]
+            # ``cs`` is now -1 (no match) or >= pos (match at/ahead of pos).
+            if cs >= 0:
+                if best_idx < 0 or cs < best_match.start:
+                    best_idx = ci
+                    best_match = cached_match[ci].copy()
         if best_idx < 0:
             # No match in the rest of the line — the body of an open
             # scope (or the unmatched tail outside any scope) just
