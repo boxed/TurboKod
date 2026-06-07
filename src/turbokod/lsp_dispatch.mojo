@@ -930,14 +930,7 @@ struct LspManager(Copyable, Movable):
             + String(" text_len=") + String(len(text.as_bytes())),
         )
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
-        var pos = json_object()
-        pos.put(String("line"), json_int(line))
-        pos.put(String("character"), json_int(character))
-        params.put(String("position"), pos)
+        var params = _text_document_position_params(path, line, character)
         try:
             self._inflight_def_id = self.client.send_request(
                 String("textDocument/definition"), params,
@@ -989,14 +982,7 @@ struct LspManager(Copyable, Movable):
             + String(" word=") + word,
         )
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
-        var pos = json_object()
-        pos.put(String("line"), json_int(line))
-        pos.put(String("character"), json_int(character))
-        params.put(String("position"), pos)
+        var params = _text_document_position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("includeDeclaration"), json_bool(True))
         params.put(String("context"), ctx^)
@@ -1152,14 +1138,7 @@ struct LspManager(Copyable, Movable):
             + String(" character=") + String(character),
         )
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
-        var pos = json_object()
-        pos.put(String("line"), json_int(line))
-        pos.put(String("character"), json_int(character))
-        params.put(String("position"), pos)
+        var params = _text_document_position_params(path, line, character)
         # ``CompletionContext.triggerKind`` 1 = Invoked (manual / Ctrl+Space).
         # Most servers ignore the field but pyright/pylsp use it to suppress
         # auto-import suggestions when the user explicitly invoked.
@@ -1287,14 +1266,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
-        var pos = json_object()
-        pos.put(String("line"), json_int(line))
-        pos.put(String("character"), json_int(character))
-        params.put(String("position"), pos)
+        var params = _text_document_position_params(path, line, character)
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
         if len(self._inflight_hover_id.as_bytes()) > 0:
@@ -2786,6 +2758,24 @@ def _trim_trailing_newline(s: String) -> String:
     if end == len(b):
         return s
     return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
+
+
+def _text_document_position_params(
+    path: String, line: Int, character: Int,
+) -> JsonValue:
+    """Build the ``{textDocument:{uri}, position:{line,character}}`` params
+    object shared by the definition / references / completion / hover
+    requests. Callers add request-specific fields (e.g. ``context``) to the
+    returned object."""
+    var params = json_object()
+    var doc = json_object()
+    doc.put(String("uri"), json_str(_path_to_uri(path)))
+    params.put(String("textDocument"), doc)
+    var pos = json_object()
+    pos.put(String("line"), json_int(line))
+    pos.put(String("character"), json_int(character))
+    params.put(String("position"), pos)
+    return params
 
 
 def _uri_hex_nibble(n: Int) -> UInt8:
