@@ -27,7 +27,7 @@ clears the state and makes the next file open eligible to set it again.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas
+from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BLUE, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
@@ -8172,7 +8172,10 @@ struct Desktop(Movable):
         # target.character + len(word)). The LSP returns the start of
         # the def's identifier; the user can have clicked anywhere
         # inside it.
-        var span = len(origin_word.as_bytes())
+        # LSP character offsets count UTF-16 units, not bytes; a codepoint
+        # count matches for the BMP identifiers this handles (byte length
+        # over-counts a multi-byte identifier and mis-triggers references).
+        var span = utf8_codepoint_count(origin_word)
         if span <= 0:
             span = 1
         return origin_char >= target.character \
