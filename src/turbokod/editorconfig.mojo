@@ -142,10 +142,10 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         var n = self.effective_indent_size()
         if n < 1:
             n = 1
-        var out = String("")
+        var buf = List[UInt8]()
         for _ in range(n):
-            out = out + String(" ")
-        return out
+            buf.append(0x20)
+        return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
 
     def line_separator(self) -> String:
         """Byte sequence to use between lines on disk. ``\\n`` by default."""
