@@ -399,6 +399,14 @@ struct LspManager(Copyable, Movable):
     var client: LspClient
     var state: UInt8
     var failure_reason: String
+    # Position encoding negotiated at ``initialize`` (LSP 3.17
+    # ``general.positionEncodings``). The rest of this file treats LSP
+    # ``character`` offsets as byte offsets into the line, which is exactly
+    # what ``utf-8`` means — so with ``utf-8`` negotiated, the editor's byte
+    # columns map straight through, including on lines with multibyte
+    # characters. A server that doesn't support the negotiation uses the
+    # spec-mandated default ``utf-16``; recorded here so it's observable.
+    var _position_encoding: String
 
     # Outstanding request ids — strings so they round-trip verbatim
     # whether they ride as JSON ints or JSON strings on the wire (we
@@ -525,6 +533,7 @@ struct LspManager(Copyable, Movable):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
+        self._position_encoding = String("utf-16")
         self._init_id = String("")
         self._inflight_def_id = String("")
         self._inflight_word = String("")
@@ -586,6 +595,7 @@ struct LspManager(Copyable, Movable):
         self.client = LspClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
+        self._position_encoding = String("utf-16")
         self._init_id = String("")
         self._inflight_def_id = String("")
         self._inflight_word = String("")
@@ -642,6 +652,10 @@ struct LspManager(Copyable, Movable):
 
     def is_ready(self) -> Bool:
         return self.state == _STATE_READY
+
+    def position_encoding(self) -> String:
+        """The negotiated LSP position encoding (``utf-8`` or ``utf-16``)."""
+        return self._position_encoding
 
     def is_failed(self) -> Bool:
         return self.state == _STATE_FAILED
@@ -1892,6 +1906,24 @@ struct LspManager(Copyable, Movable):
             self.failure_reason = String("initialized failed: ") + String(e)
             return
         self.state = _STATE_READY
+        # Record the negotiated position encoding. With ``utf-8`` the
+        # editor's byte columns are valid LSP ``character`` offsets as-is;
+        # otherwise the server uses ``utf-16`` and multibyte columns can be
+        # off (logged for diagnosis).
+        if msg.result and msg.result.value().is_object():
+            var caps_opt = msg.result.value().object_get(String("capabilities"))
+            if caps_opt and caps_opt.value().is_object():
+                var enc_opt = caps_opt.value().object_get(
+                    String("positionEncoding"),
+                )
+                if enc_opt and enc_opt.value().is_string():
+                    self._position_encoding = enc_opt.value().as_str()
+        if self._position_encoding != String("utf-8"):
+            _lsp_debug_log(
+                String("position encoding negotiated as '")
+                + self._position_encoding
+                + String("' (not utf-8); multibyte columns may be off"),
+            )
         # Drain the queue of opens that arrived before we were ready.
         var paths = self._pending_open_paths^
         var texts = self._pending_open_texts^

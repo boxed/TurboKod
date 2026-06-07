@@ -1005,6 +1005,18 @@ def lsp_initialize_params(
     # forever.
     workspace_caps.put(String("configuration"), json_bool(True))
     capabilities.put(String("workspace"), workspace_caps^)
+    # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
+    # The editor reasons in byte offsets; with UTF-8 negotiated, LSP
+    # ``character`` offsets ARE byte offsets, so positions map straight through
+    # on lines containing multibyte characters (otherwise the server would use
+    # UTF-16 code-unit offsets and definitions/hover/completion would land at
+    # the wrong column). ``utf-16`` is listed as the spec-mandated fallback.
+    var general_caps = json_object()
+    var encodings = json_array()
+    encodings.append(json_str(String("utf-8")))
+    encodings.append(json_str(String("utf-16")))
+    general_caps.put(String("positionEncodings"), encodings^)
+    capabilities.put(String("general"), general_caps^)
     # Advertise textDocument/completion so servers know to honor our
     # requests. ``snippetSupport: False`` keeps responses to plain-text
     # inserts — the editor doesn't render snippet placeholders, so a
