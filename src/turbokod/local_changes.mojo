@@ -118,6 +118,12 @@ comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 
+# Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
+comptime _KEY_Y_UPPER = UInt32(0x59)
+comptime _KEY_Y_LOWER = UInt32(0x79)
+comptime _KEY_N_UPPER = UInt32(0x4E)
+comptime _KEY_N_LOWER = UInt32(0x6E)
+
 # In-flight async git ops. Tracked so that on completion we know which
 # op finished (for the success message + which refresh to run) and so
 # the user-facing popup title reads naturally ("Pushing", "Pulling", …).
@@ -3017,13 +3023,13 @@ struct LocalChanges(Movable):
                 return True
             return True
         # Confirmation overlays.
-        if k == UInt32(0x79) or k == UInt32(0x59):    # y / Y
+        if k == _KEY_Y_LOWER or k == _KEY_Y_UPPER:
             if self.overlay == _OVERLAY_AMEND_CONFIRM:
                 self._confirm_amend()
             elif self.overlay == _OVERLAY_REVERT_CONFIRM:
                 self._confirm_revert()
             return True
-        if k == UInt32(0x6E) or k == UInt32(0x4E):    # n / N
+        if k == _KEY_N_LOWER or k == _KEY_N_UPPER:
             self._close_overlay()
             return True
         return True

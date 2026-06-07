@@ -43,6 +43,12 @@ comptime _MIN_WIDTH     = 24
 comptime _YES_LABEL = String(" Yes ")
 comptime _NO_LABEL  = String(" No ")
 
+# Y/N answer keys (upper- and lowercase ASCII).
+comptime _KEY_Y_UPPER = UInt32(0x59)
+comptime _KEY_Y_LOWER = UInt32(0x79)
+comptime _KEY_N_UPPER = UInt32(0x4E)
+comptime _KEY_N_LOWER = UInt32(0x6E)
+
 
 struct ConfirmDialog(Movable):
     """Modal dialog with a wrapped message and Yes / No buttons.
@@ -190,10 +196,10 @@ struct ConfirmDialog(Movable):
             # need their own special case.
             self._focus.cycle()
             return True
-        if k == UInt32(0x59) or k == UInt32(0x79):
+        if k == _KEY_Y_UPPER or k == _KEY_Y_LOWER:
             self._resolve(True)
             return True
-        if k == UInt32(0x4E) or k == UInt32(0x6E):
+        if k == _KEY_N_UPPER or k == _KEY_N_LOWER:
             self._resolve(False)
             return True
         return True
