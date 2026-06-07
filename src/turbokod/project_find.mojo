@@ -46,7 +46,7 @@ from .project import ProjectMatch
 from .search_options import SearchOptions
 from .string_utils import display_columns, split_lines
 from .text_field import TextField
-from .window import hit_close_button, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
 comptime _DEBOUNCE_MS: Int = 300
@@ -870,9 +870,7 @@ struct ProjectFind(Movable):
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before toggle / input / list routing so a click on the chrome
         # glyph always dismisses the dialog.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(container_bounds.a.x, container_bounds.a.y), event.pos):
+        if close_button_clicked(container_bounds, event):
             self.close()
             return True
         # Toggles run first so a click on a chip doesn't slip through

@@ -54,7 +54,7 @@ from .language_config import built_in_servers
 from .text_field import Form
 from .view import DraggableDialog, RowCursor
 from .window import (
-    hit_close_button, paint_close_button, paint_window_title,
+    close_button_clicked, paint_close_button, paint_window_title,
 )
 
 
@@ -535,9 +535,7 @@ struct ActionEditor(Movable):
             return True
         if self._dlg.handle_drag_continue(event):
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.close()
             return True
         if self._dlg.handle_drag_start(event, rect):

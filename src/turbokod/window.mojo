@@ -165,6 +165,21 @@ def hit_close_button(top_left: Point, p: Point) -> Bool:
         and top_left.x + 1 <= p.x and p.x <= top_left.x + 3
 
 
+def close_button_clicked(rect: Rect, event: Event) -> Bool:
+    """True iff ``event`` is a real left-click (press, not motion) on the
+    ``[■]`` close button at ``rect``'s top-left corner.
+
+    Every modal dialog paints the close glyph at ``(rect.a.x, rect.a.y)``
+    and then has to write the same press-and-not-motion + ``hit_close_button``
+    guard before its button routing. This is that guard, once — a dialog
+    just does ``if close_button_clicked(rect, event): self.close()``.
+    """
+    return event.kind == EVENT_MOUSE \
+        and event.button == MOUSE_BUTTON_LEFT and event.pressed \
+        and not event.motion \
+        and hit_close_button(Point(rect.a.x, rect.a.y), event.pos)
+
+
 def paint_window_title(
     mut canvas: Canvas, rect: Rect, title: String,
     title_attr: Attr, body_bg: Attr,

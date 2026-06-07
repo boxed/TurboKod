@@ -41,7 +41,7 @@ from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
 from .view import FocusGroup
-from .window import hit_close_button, paint_close_button
+from .window import close_button_clicked, paint_close_button
 
 
 # Stable slot indices for the two-field Replace dialog. Single-field
@@ -591,11 +591,7 @@ struct Prompt(Movable):
         # glyph always dismisses the modal regardless of which field
         # currently owns focus.
         var dlg_rect = self._layout(container_bounds)
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(
-                    Point(dlg_rect.a.x, dlg_rect.a.y), event.pos,
-                ):
+        if close_button_clicked(dlg_rect, event):
             self.close()
             return True
         if self.show_options:

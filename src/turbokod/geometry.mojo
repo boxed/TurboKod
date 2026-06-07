@@ -121,3 +121,16 @@ def compute_dialog_rect(
         x = (container_bounds.b.x - w) // 2
         y = (container_bounds.b.y - h) // 2
     return Rect(x, y, x + w, y + h)
+
+
+def center_in(container_bounds: Rect, width: Int, height: Int) -> Rect:
+    """Center a ``width`` x ``height`` dialog in ``container_bounds``.
+
+    The placement primitive for *non-draggable* modal dialogs (confirm
+    prompts, fill/breakpoint dialogs, the quick pickers). Same cap +
+    clamp policy as ``compute_dialog_rect`` with no dragged position:
+    the rect is capped to leave a 4-cell margin, centered, and clamped
+    so the top-left never goes negative. Several dialogs used to inline
+    the ``(b.x - w) // 2`` + ``if x < 0`` math by hand; this is the one
+    spelling of it."""
+    return compute_dialog_rect(container_bounds, Optional[Point](), width, height)

@@ -22,14 +22,14 @@ from .events import (
     KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .lsp_dispatch import SymbolItem
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .quick_open import quick_open_match
 from .string_utils import display_columns
 from .text_field import TextField
 from .view import RowCursor
-from .window import hit_close_button, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -158,9 +158,7 @@ struct SymbolPick(Movable):
         var height = 20
         if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
         if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Find:`` query row."""
@@ -287,9 +285,7 @@ struct SymbolPick(Movable):
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before input/list routing so a click on the chrome glyph
         # always dismisses the dialog.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.close()
             return True
         if self._input_rect.width() > 0 \

@@ -37,7 +37,7 @@ from .file_io import join_path
 from .geometry import Point, Rect
 from .view import DraggableDialog, RowCursor
 from .window import (
-    hit_close_button, paint_close_button, paint_window_title,
+    close_button_clicked, paint_close_button, paint_window_title,
 )
 
 
@@ -296,9 +296,7 @@ struct FileDialog(Movable):
         # Close button [■] dismisses the dialog. Checked before the
         # title-bar drag-start below so a click on the close glyph
         # doesn't also begin a move.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.close()
             return True
         if self._dlg.handle_drag_start(event, rect):

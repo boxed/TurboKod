@@ -46,7 +46,7 @@ from .string_utils import (
     display_columns, prev_codepoint_start, utf8_codepoint_size,
 )
 from .view import FocusGroup
-from .window import hit_close_button, paint_close_button
+from .window import close_button_clicked, paint_close_button
 
 
 # --- per-conflict resolution choice -------------------------------------
@@ -684,9 +684,7 @@ struct MergeView(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._layout(container_bounds)
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.cancelled = True
             return True
         # Mouse wheel scrolls the merged document.

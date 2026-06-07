@@ -41,11 +41,11 @@ from .events import (
     KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_TAB,
     KEY_UP, KEY_DOWN, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .string_utils import display_columns
 from .text_field import TextField, text_field_bg
 from .view import FocusGroup, RowCursor
-from .window import hit_close_button, paint_close_button
+from .window import close_button_clicked, paint_close_button
 
 
 comptime _DLG_WIDTH = 64
@@ -238,11 +238,7 @@ struct BreakpointMenu(Movable):
         var height = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
         if height > container_bounds.b.y - 4:
             height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        if x < 0: x = 0
-        if y < 0: y = 0
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def _position_checkbox(mut self, layout: _MenuLayout, dlg: Rect):
         """Repoint the checkbox at the dialog's current position. Run
@@ -455,9 +451,7 @@ struct BreakpointMenu(Movable):
         # Standard ``[■]`` close button — equivalent to ESC / Cancel.
         # Checked before any other routing so a click on the chrome
         # glyph always dismisses the dialog without applying changes.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self._resolve(False)
             return True
         # Run the dropdown first when its popup is open: the popup
@@ -687,11 +681,7 @@ struct BreakpointConditionErrorDialog(Movable):
             height = 12
         if height > container_bounds.b.y - 4:
             height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        if x < 0: x = 0
-        if y < 0: y = 0
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
@@ -852,9 +842,7 @@ struct BreakpointConditionErrorDialog(Movable):
         # Standard ``[■]`` close button — equivalent to ESC / Cancel.
         # Checked before any other routing so a click on the chrome
         # glyph always cancels the dialog without applying changes.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.action = BP_ERR_CANCEL
             self.submitted = True
             return True

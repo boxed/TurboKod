@@ -27,9 +27,9 @@ from .events import (
     KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB,
     MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .view import FocusGroup
-from .window import hit_close_button, paint_close_button
+from .window import close_button_clicked, paint_close_button
 
 
 comptime _SLOT_YES = 0
@@ -116,11 +116,7 @@ struct ConfirmDialog(Movable):
             height = _MIN_HEIGHT
         if height > container_bounds.b.y - 4:
             height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        if x < 0: x = 0
-        if y < 0: y = 0
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
@@ -219,9 +215,7 @@ struct ConfirmDialog(Movable):
         # Checked before button routing so a click on the chrome glyph
         # always resolves the dialog as not-confirmed.
         var rect = self._layout(container_bounds)
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self._resolve(False)
             return True
         # Click on a button face moves focus there (used when the user

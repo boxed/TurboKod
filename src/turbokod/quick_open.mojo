@@ -34,7 +34,7 @@ from .picker_input import picker_nav_key, picker_wheel_scroll
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .text_field import TextField
 from .view import RowCursor
-from .window import hit_close_button, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -588,9 +588,7 @@ struct QuickOpen(Movable):
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before the input/list routing so a click on the chrome glyph
         # always dismisses the dialog.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.close()
             return True
         if self._input_rect.width() > 0 \

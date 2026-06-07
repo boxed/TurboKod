@@ -21,11 +21,11 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .file_io import basename
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .lsp_dispatch import DefinitionResolved
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .string_utils import display_columns, starts_with
-from .window import hit_close_button, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
 struct ReferencePick(Movable):
@@ -87,9 +87,7 @@ struct ReferencePick(Movable):
         var height = 20
         if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
         if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def _list_top(self, rect: Rect) -> Int:
         return rect.a.y + 1
@@ -211,9 +209,7 @@ struct ReferencePick(Movable):
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before list routing so a click on the chrome glyph always
         # dismisses the dialog.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self.close()
             return True
         if event.pressed and not event.motion:

@@ -35,10 +35,10 @@ from .events import (
     KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB,
     MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .text_field import TextField
 from .view import FocusGroup, RowCursor
-from .window import hit_close_button, paint_close_button
+from .window import close_button_clicked, paint_close_button
 
 
 comptime _DLG_WIDTH = 56
@@ -358,11 +358,7 @@ struct FillDialog(Movable):
         var height = 23
         if height > container_bounds.b.y - 4:
             height = container_bounds.b.y - 4
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        if x < 0: x = 0
-        if y < 0: y = 0
-        return Rect(x, y, x + width, y + height)
+        return center_in(container_bounds, width, height)
 
     def _position_pad(mut self, layout: _FillLayout, dlg: Rect):
         self.pad.move_to(dlg.a.x + 2, layout.pad_y)
@@ -639,9 +635,7 @@ struct FillDialog(Movable):
         var layout = _build_layout(rect)
         self._position_pad(layout, rect)
         # Standard close button — equivalent to Esc / Cancel.
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion \
-                and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):
+        if close_button_clicked(rect, event):
             self._resolve(False)
             return True
         # Open popups overlay everything else — route to them first so
