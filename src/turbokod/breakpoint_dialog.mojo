@@ -42,7 +42,7 @@ from .events import (
     KEY_UP, KEY_DOWN, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect, center_in
-from .string_utils import display_columns
+from .string_utils import display_columns, tail_to_columns
 from .text_field import TextField, text_field_bg
 from .view import centered_row_start, FocusGroup, RowCursor
 from .window import close_button_clicked, paint_close_button
@@ -267,19 +267,14 @@ struct BreakpointMenu(Movable):
         # Cap the location to the dialog interior so it can't bleed
         # past the right border on a long path.
         var avail = rect.width() - 2 - display_columns(title) - 1
-        var loc_b = loc.as_bytes()
         if avail < 0: avail = 0
-        if len(loc_b) > avail:
-            # Trim the head so the visible tail keeps the filename.
-            # Reserve one column for the "…" prefix — without this
-            # the prefix pushes one cell past avail.
+        if display_columns(loc) > avail:
+            # Trim the head so the visible tail keeps the filename. Reserve
+            # one column for the "…" prefix, and truncate by display columns
+            # so a multi-byte path isn't sliced mid-codepoint.
             var visible = avail - 1
             if visible < 0: visible = 0
-            var start = len(loc_b) - visible
-            loc = String("…") + String(StringSlice(
-                ptr=loc_b.unsafe_ptr() + start,
-                length=visible,
-            ))
+            loc = String("…") + tail_to_columns(loc, visible)
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.title_y), title + loc, attr,
         )
@@ -699,25 +694,17 @@ struct BreakpointConditionErrorDialog(Movable):
         var title = String(" Bad breakpoint condition — ")
         # Title bytes != cols (the em-dash is 3 bytes / 1 col); trim
         # budget has to be in display columns, not bytes.
-        var tb = title.as_bytes()
-        var title_cols = 0
-        for i in range(len(tb)):
-            if (Int(tb[i]) & 0xC0) != 0x80:
-                title_cols += 1
+        var title_cols = display_columns(title)
         var loc = self.path + String(":") + String(self.line + 1)
         var avail = rect.width() - 2 - title_cols - 1
-        var loc_b = loc.as_bytes()
         if avail < 0: avail = 0
-        if len(loc_b) > avail:
-            # Trim the head so the visible tail keeps filename + line.
-            # Reserve one column for the "…" prefix.
+        if display_columns(loc) > avail:
+            # Trim the head so the visible tail keeps filename + line. Reserve
+            # one column for the "…" prefix, and truncate by display columns
+            # so a multi-byte path isn't sliced mid-codepoint.
             var visible = avail - 1
             if visible < 0: visible = 0
-            var start = len(loc_b) - visible
-            loc = String("…") + String(StringSlice(
-                ptr=loc_b.unsafe_ptr() + start,
-                length=visible,
-            ))
+            loc = String("…") + tail_to_columns(loc, visible)
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.title_y),
             title + loc, attr,
