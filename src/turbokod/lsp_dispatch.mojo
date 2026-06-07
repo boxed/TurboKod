@@ -1600,6 +1600,7 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_symbols = True
                 self._symbols_empty = (len(self._resolved_symbols) == 0)
                 self._inflight_symbol_id = String("")
+                continue
             if id == self._inflight_ws_symbol_id:
                 var ws_items = List[WorkspaceSymbolItem]()
                 if msg.result:
@@ -1609,6 +1610,7 @@ struct LspManager(Copyable, Movable):
                 self._resolved_ws_symbols = ws_items^
                 self._has_resolved_ws_symbols = True
                 self._inflight_ws_symbol_id = String("")
+                continue
             if id == self._inflight_completion_id:
                 var comps = List[CompletionItem]()
                 if msg.result:
@@ -1621,6 +1623,7 @@ struct LspManager(Copyable, Movable):
                 self._resolved_completions = comps^
                 self._has_resolved_completions = True
                 self._inflight_completion_id = String("")
+                continue
             if id == self._inflight_hover_id:
                 var hover_text = String("")
                 if msg.result:
@@ -1633,6 +1636,7 @@ struct LspManager(Copyable, Movable):
                 self._resolved_hover = hover_text^
                 self._has_resolved_hover = True
                 self._inflight_hover_id = String("")
+                continue
             if id == self._inflight_code_action_id:
                 var actions = List[CodeAction]()
                 if msg.result:
