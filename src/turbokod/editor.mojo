@@ -1122,6 +1122,11 @@ struct Editor(Copyable, Movable):
     var _git_head_loaded: Bool
     var _git_head_present: Bool
     var _git_changes_dirty: Bool
+    # Cached "any line differs from HEAD", recomputed only when
+    # ``git_change_lines`` is replaced — so ``has_uncommitted_changes``
+    # (called per window per frame by the tab bar + file-tree tint) doesn't
+    # rescan the whole list each call.
+    var _git_has_changes: Bool
     # ``_lsp_dirty`` is True when the buffer has mutated since the last
     # didChange we sent to the LSP server. Set in ``_mark_hl_dirty``
     # (every edit path) and consumed by ``Desktop.lsp_tick`` which sends
@@ -1363,6 +1368,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self._git_has_changes = False
         self.minimap_visible = True
         self._git_head_text = String("")
         self._git_head_loaded = False
@@ -1474,6 +1480,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self._git_has_changes = False
         self.minimap_visible = True
         self._git_head_text = String("")
         self._git_head_loaded = False
@@ -1613,6 +1620,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = copy.blame_visible
         self.git_changes_visible = copy.git_changes_visible
         self.git_change_lines = copy.git_change_lines.copy()
+        self._git_has_changes = copy._git_has_changes
         self.minimap_visible = copy.minimap_visible
         self._git_head_text = copy._git_head_text
         self._git_head_loaded = copy._git_head_loaded
@@ -3764,6 +3772,12 @@ struct Editor(Copyable, Movable):
         pass calls this after running the buffer-vs-HEAD diff."""
         self.git_change_lines = lines^
         self._git_changes_dirty = False
+        var any_change = False
+        for i in range(len(self.git_change_lines)):
+            if self.git_change_lines[i] != GIT_CHANGE_NONE:
+                any_change = True
+                break
+        self._git_has_changes = any_change
 
     def git_head_text(self) -> Optional[String]:
         """Return the cached HEAD content for this file, or empty
@@ -3782,6 +3796,7 @@ struct Editor(Copyable, Movable):
         on-disk HEAD blob may itself have changed (commit, checkout)
         between when we cached it and now."""
         self.git_change_lines = List[Int]()
+        self._git_has_changes = False
         self._git_head_text = String("")
         self._git_head_loaded = False
         self._git_head_present = False
@@ -3793,12 +3808,7 @@ struct Editor(Copyable, Movable):
         filename. ``git_change_lines`` may be empty (non-git file or
         baseline not yet fetched) — that's not "uncommitted", just
         "unknown", so we report False."""
-        if self.dirty:
-            return True
-        for i in range(len(self.git_change_lines)):
-            if self.git_change_lines[i] != GIT_CHANGE_NONE:
-                return True
-        return False
+        return self.dirty or self._git_has_changes
 
     def _is_wrapping(self) -> Bool:
         """True when any wrapping mode is active (``WRAP_SOFT`` or
