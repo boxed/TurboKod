@@ -2483,16 +2483,24 @@ def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
             aux_edits^,
         ))
     # Stable insertion sort by sort_text — typical completion lists are
-    # under ~200 items so quadratic worst-case is fine here.
+    # under ~200 items so quadratic worst-case is fine here. Sort an index
+    # array (cheap Int swaps) instead of the items, then reorder once so each
+    # CompletionItem (with its additional_text_edits) is moved at most once.
     var m = len(out)
+    var order = List[Int]()
+    for i in range(m):
+        order.append(i)
     for i in range(1, m):
         var j = i
-        while j > 0 and out[j].sort_text < out[j - 1].sort_text:
-            var tmp = out[j].copy()
-            out[j] = out[j - 1].copy()
-            out[j - 1] = tmp^
+        while j > 0 and out[order[j]].sort_text < out[order[j - 1]].sort_text:
+            var tmp = order[j]
+            order[j] = order[j - 1]
+            order[j - 1] = tmp
             j -= 1
-    return out^
+    var sorted = List[CompletionItem]()
+    for i in range(m):
+        sorted.append(out[order[i]].copy())
+    return sorted^
 
 
 def _parse_hover_result(v: JsonValue) -> String:
