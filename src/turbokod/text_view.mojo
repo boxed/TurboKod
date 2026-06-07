@@ -1114,7 +1114,7 @@ struct TextLog(Copyable, Movable):
         if vidx < 0:
             vidx = 0
         var vrow = self.last_visual[vidx]
-        var cell_in_seg = pos.x - self.last_x0
+        var cell_in_seg = pos.x - self.last_x0 - vrow.indent_cells
         if cell_in_seg < 0:
             cell_in_seg = 0
         if cell_in_seg > vrow.cell_count:
