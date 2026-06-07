@@ -671,6 +671,8 @@ def _decode_entity(name: String) -> String:
                     cp = cp * 16 + (ch - 0x61 + 10)
                 else:
                     return String("&") + name + String(";")
+                if cp > 0x10FFFF:    # past the last valid codepoint; stop accumulating
+                    cp = 0x110000
         else:
             for i in range(1, len(b)):
                 var ch = Int(b[i])
@@ -678,8 +680,14 @@ def _decode_entity(name: String) -> String:
                     cp = cp * 10 + (ch - 0x30)
                 else:
                     return String("&") + name + String(";")
+                if cp > 0x10FFFF:
+                    cp = 0x110000
         if cp <= 0:
             return String(" ")
+        # Reject out-of-range and UTF-16 surrogate codepoints — encoding them
+        # would feed invalid UTF-8 to unsafe_from_utf8. Fall back to the literal.
+        if cp > 0x10FFFF or (0xD800 <= cp and cp <= 0xDFFF):
+            return String("&") + name + String(";")
         return _utf8_from_codepoint(cp)
     return String("&") + name + String(";")
 
