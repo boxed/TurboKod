@@ -5367,6 +5367,11 @@ struct Editor(Copyable, Movable):
         # conceal pre-pass needs them to decide what to hide.
         var all_carets_paint = self._all_carets_asc()
         var hl_buckets = List[List[Int]]()
+        # Spell + diagnostic overlays index these by row the same way the
+        # syntax pass uses ``hl_buckets`` — built once here instead of
+        # rescanning every spell highlight / diagnostic for each visible row.
+        var spell_buckets = List[List[Int]]()
+        var diag_buckets = List[List[Int]]()
         var vis_lo = 0
         if len(layout) > 0:
             vis_lo = layout[0].line_idx
@@ -5379,18 +5384,32 @@ struct Editor(Copyable, Movable):
                     vis_hi = r
             for _ in range(vis_hi - vis_lo + 1):
                 hl_buckets.append(List[Int]())
+                spell_buckets.append(List[Int]())
+                diag_buckets.append(List[Int]())
             for h in range(len(self.highlights)):
                 var r = self.highlights[h].row
                 if r >= vis_lo and r <= vis_hi:
                     hl_buckets[r - vis_lo].append(h)
+            for sh in range(len(self.spell_highlights)):
+                var r = self.spell_highlights[sh].row
+                if r >= vis_lo and r <= vis_hi:
+                    spell_buckets[r - vis_lo].append(sh)
+            for d in range(len(self.diagnostics)):
+                for r in range(vis_lo, vis_hi + 1):
+                    if _diag_intersects_row(self.diagnostics[d], r):
+                        diag_buckets[r - vis_lo].append(d)
         # Bracket-match partner rows stay expanded too, so the pair highlight
         # lands on real geometry; same guard as the bracket overlay below.
         var bracket_rows = List[Int]()
+        # Computed once here and reused by the bracket overlay below — the
+        # cursor can't move within a single paint, so a second call would
+        # rescan the buffer for the identical result.
+        var bracket_match = Optional[Tuple[Int, Int, Int, Int]]()
         if focused and not self.has_extra_carets() \
                 and not self.has_selection():
-            var bm = self._find_bracket_match_at_cursor()
-            if bm:
-                var bp = bm.value()
+            bracket_match = self._find_bracket_match_at_cursor()
+            if bracket_match:
+                var bp = bracket_match.value()
                 bracket_rows.append(bp[0])
                 bracket_rows.append(bp[2])
         # Conceal pre-pass: per visual row, the string to paint plus its
@@ -5456,6 +5475,8 @@ struct Editor(Copyable, Movable):
                     match_needle_n = cand_n
                     match_sel_row = sel_norm[0]
                     match_sel_byte = sel_norm[1]
+        # Loop-invariant (a chain of getenv lookups); evaluate once.
+        var diag_extended = terminal_supports_extended_underline()
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row].line_idx
             var start_byte = layout[screen_row].byte_start
@@ -5503,10 +5524,9 @@ struct Editor(Copyable, Movable):
             # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
             # pass so the underline lands on the comment/string color
             # rather than getting flattened back to plain text.
-            for h in range(len(self.spell_highlights)):
-                var sh = self.spell_highlights[h]
-                if sh.row != buf_row:
-                    continue
+            ref sp_bucket = spell_buckets[buf_row - vis_lo]
+            for sb in range(len(sp_bucket)):
+                var sh = self.spell_highlights[sp_bucket[sb]]
                 var sh_byte_start = sh.col_start - start_byte
                 var sh_byte_end = sh.col_end - start_byte
                 if sh_byte_start < 0:
@@ -5534,11 +5554,9 @@ struct Editor(Copyable, Movable):
             # underline_color, and write back. That preserves the
             # syntax color underneath while making severity readable
             # via the squiggle color.
-            var diag_extended = terminal_supports_extended_underline()
-            for d in range(len(self.diagnostics)):
-                var diag = self.diagnostics[d]
-                if not _diag_intersects_row(diag, buf_row):
-                    continue
+            ref diag_bucket = diag_buckets[buf_row - vis_lo]
+            for db in range(len(diag_bucket)):
+                var diag = self.diagnostics[diag_bucket[db]]
                 var d_lo = _diag_byte_start_for_row(diag, buf_row)
                 var d_hi = _diag_byte_end_for_row(
                     diag, buf_row, len(line.as_bytes()),
@@ -5684,24 +5702,21 @@ struct Editor(Copyable, Movable):
         # and add no navigation value. The cursor block below repaints
         # the source-side cell with the caret colors so the cursor stays
         # readable when it sits *on* the source bracket.
-        if focused and not self.has_extra_carets() \
-                and not self.has_selection():
-            var pair = self._find_bracket_match_at_cursor()
-            if pair:
-                var p = pair.value()
-                var bracket_attr = Attr(
-                    WHITE, MAGENTA, STYLE_BOLD,
-                )
-                self._paint_attr_at(
-                    canvas, painter, view, layout, text_x0,
-                    content_right, content_bottom,
-                    p[0], p[1], bracket_attr,
-                )
-                self._paint_attr_at(
-                    canvas, painter, view, layout, text_x0,
-                    content_right, content_bottom,
-                    p[2], p[3], bracket_attr,
-                )
+        if bracket_match:
+            var p = bracket_match.value()
+            var bracket_attr = Attr(
+                WHITE, MAGENTA, STYLE_BOLD,
+            )
+            self._paint_attr_at(
+                canvas, painter, view, layout, text_x0,
+                content_right, content_bottom,
+                p[0], p[1], bracket_attr,
+            )
+            self._paint_attr_at(
+                canvas, painter, view, layout, text_x0,
+                content_right, content_bottom,
+                p[2], p[3], bracket_attr,
+            )
         # Cursor block: a reverse-video cell on every caret position
         # when the editor is focused. The primary and any extras paint
         # identically — the user reads "this line is the focus" from
