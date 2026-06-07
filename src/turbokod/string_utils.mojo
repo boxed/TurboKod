@@ -237,6 +237,57 @@ def display_columns(s: String) -> Int:
     return cols
 
 
+def truncate_to_columns(s: String, max_cols: Int) -> String:
+    """Longest codepoint-aligned *prefix* of ``s`` that fits in ``max_cols``
+    display columns (``char_width``).
+
+    Use this instead of slicing ``as_bytes()`` at a column offset: byte
+    slicing over-counts multi-byte glyphs (so a label that would fit gets
+    truncated early) and can cut mid-codepoint, producing invalid UTF-8 when
+    the fragment is handed to ``StringSlice(unsafe_from_utf8=...)``. Returns
+    ``""`` for ``max_cols <= 0`` and ``s`` unchanged when it already fits."""
+    if max_cols <= 0:
+        return String("")
+    var b = s.as_bytes()
+    var n = len(b)
+    var cols = 0
+    var i = 0
+    while i < n:
+        var info = codepoint_at(s, i)
+        var w = char_width(info[0])
+        if cols + w > max_cols:
+            break
+        cols += w
+        i += info[1]
+    if i >= n:
+        return s
+    return String(StringSlice(ptr=b.unsafe_ptr(), length=i))
+
+
+def tail_to_columns(s: String, max_cols: Int) -> String:
+    """Longest codepoint-aligned *suffix* of ``s`` that fits in ``max_cols``
+    display columns.
+
+    The right-aligned-truncation counterpart of ``truncate_to_columns``: use
+    for paths and branch names shown with the tail visible, instead of a raw
+    ``start = len(bytes) - max_cols`` byte offset (which over-counts wide
+    glyphs and can slice mid-codepoint). Returns ``""`` for ``max_cols <= 0``
+    and ``s`` unchanged when it already fits."""
+    if max_cols <= 0:
+        return String("")
+    var b = s.as_bytes()
+    var n = len(b)
+    var total = display_columns(s)
+    if total <= max_cols:
+        return s
+    var i = 0
+    while i < n and total > max_cols:
+        var info = codepoint_at(s, i)
+        total -= char_width(info[0])
+        i += info[1]
+    return String(StringSlice(ptr=b.unsafe_ptr() + i, length=n - i))
+
+
 def parse_int_all(s: String) -> Int:
     """Parse ``s`` as a non-negative decimal; return ``-1`` if any byte
     isn't a digit or the string is empty."""
