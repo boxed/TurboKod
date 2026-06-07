@@ -373,6 +373,91 @@ def prev_codepoint_start(s: String, col: Int) -> Int:
     return c
 
 
+def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
+    """Cell column for byte offset ``byte_col`` in ``line``. Emoji advance
+    two cells (``char_width``); past-EOL bytes consume one virtual cell each
+    so cursors parked to the right of the last character stay distinguishable
+    in vertical-movement bookkeeping."""
+    if byte_col <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var cell = 0
+    var i = 0
+    while i < n and i < byte_col:
+        var info = codepoint_at(line, i)
+        cell += char_width(info[0])
+        i += info[1]
+    if byte_col > n:
+        cell += byte_col - n
+    return cell
+
+
+def utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
+    """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
+    clamped to ``len(line)``. Used to translate a remembered cell column from
+    one row to another during vertical movement. When ``cell_col`` lands on
+    the right half of a wide (emoji) glyph there is no codepoint to point at,
+    so we snap to the start of that glyph."""
+    if cell_col <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var cell = 0
+    var i = 0
+    while i < n and cell < cell_col:
+        var info = codepoint_at(line, i)
+        var w = char_width(info[0])
+        if cell + w > cell_col:
+            # ``cell_col`` falls inside this wide glyph — snap to its start.
+            break
+        cell += w
+        i += info[1]
+    return i
+
+
+def char_class(cp: Int) -> Int:
+    """Three-way character class used by ``word_range_at``. Word chars
+    cluster, whitespace clusters, everything else clusters as "punctuation"
+    — so a double-click on punctuation selects the run of punctuation, not
+    just the single byte. Operates on a codepoint (not a byte) so non-ASCII
+    letters cluster correctly with their ASCII neighbors (``ä`` and ``n``
+    end up in the same word)."""
+    if is_word_codepoint(cp):
+        return 1
+    if cp == 0x20 or cp == 0x09:
+        return 2
+    return 3
+
+
+def word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
+    """Return the (start, end) byte range of the contiguous run of the same
+    character class around ``col``. Empty range when ``col`` is at or past
+    end of line. Walks by UTF-8 codepoint so a multibyte letter (``ä``)
+    groups with its ASCII neighbors instead of breaking the selection in
+    the middle of the codepoint."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    if col < 0 or col >= n:
+        return (col, col)
+    var here = codepoint_at(line, col)
+    var cls = char_class(here[0])
+    var start = col
+    while start > 0:
+        var prev = prev_codepoint_start(line, start)
+        var info = codepoint_at(line, prev)
+        if char_class(info[0]) != cls:
+            break
+        start = prev
+    var end = col + here[1]
+    while end < n:
+        var info = codepoint_at(line, end)
+        if char_class(info[0]) != cls:
+            break
+        end += info[1]
+    return (start, end)
+
+
 def utf8_codepoint_size(b: Int) -> Int:
     """Byte length of a UTF-8 codepoint with lead byte ``b``. Returns 1
     on invalid leads / continuation bytes so a stray byte never traps a

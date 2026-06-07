@@ -75,7 +75,8 @@ from .search_options import (
 )
 from .string_utils import (
     char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
-    prev_codepoint_start, utf8_codepoint_size, word_char_step,
+    prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
+    utf8_codepoint_size, word_char_step, word_range_at,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -417,61 +418,6 @@ def _utf8_step_forward(line: String, col: Int) -> Int:
     return nxt
 
 
-def _utf8_step_backward(line: String, col: Int) -> Int:
-    """Byte offset of the codepoint boundary one step backward from ``col``.
-    Walks back over UTF-8 continuation bytes (10xxxxxx)."""
-    if col <= 0:
-        return 0
-    var bytes = line.as_bytes()
-    var c = col - 1
-    while c > 0 and (Int(bytes[c]) & 0xC0) == 0x80:
-        c -= 1
-    return c
-
-
-def _utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
-    """Cell column for byte offset ``byte_col`` in ``line``. Emoji advance
-    two cells (``char_width``); past-EOL bytes consume one virtual cell each
-    so cursors parked to the right of the last character stay distinguishable
-    in vertical-movement bookkeeping."""
-    if byte_col <= 0:
-        return 0
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and i < byte_col:
-        var info = codepoint_at(line, i)
-        cell += char_width(info[0])
-        i += info[1]
-    if byte_col > n:
-        cell += byte_col - n
-    return cell
-
-
-def _utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
-    """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
-    clamped to ``len(line)``. Used to translate a remembered cell column from
-    one row to another during vertical movement. When ``cell_col`` lands on
-    the right half of a wide (emoji) glyph there is no codepoint to point at,
-    so we snap to the start of that glyph."""
-    if cell_col <= 0:
-        return 0
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and cell < cell_col:
-        var info = codepoint_at(line, i)
-        var w = char_width(info[0])
-        if cell + w > cell_col:
-            # ``cell_col`` falls inside this wide glyph — snap to its start.
-            break
-        cell += w
-        i += info[1]
-    return i
-
-
 def _seg_cell_offset(
     line: String, seg_start: Int, seg_end: Int, target_byte: Int,
 ) -> Int:
@@ -498,7 +444,7 @@ def _seg_byte_of_cell(
     ``[seg_start, seg_end]`` at content-cell column ``want_cells``,
     clamped to ``seg_end``. A column that lands on the right half of a
     wide (emoji) glyph snaps to that glyph's start — mirrors
-    ``_utf8_byte_of_cell`` but scoped to one wrap segment."""
+    ``utf8_byte_of_cell`` but scoped to one wrap segment."""
     if want_cells <= 0:
         return seg_start
     var b = seg_start
@@ -595,7 +541,7 @@ struct TextBuffer(Copyable, Movable):
         """Backspace one codepoint. Returns the new cursor (row, col)."""
         if col > 0:
             var line = self.lines[row]
-            var prev_col = _utf8_step_backward(line, col)
+            var prev_col = prev_codepoint_start(line, col)
             self.lines[row] = _slice(line, 0, prev_col) + _slice(line, col, len(line.as_bytes()))
             return (row, prev_col)
         if row > 0:
@@ -2187,7 +2133,7 @@ struct Editor(Copyable, Movable):
         # user expects. The snapshot already carries each caret's
         # remembered desired_col, but a buffer rewind can leave it
         # pointing at a column that no longer exists on that row.
-        self.selections[0].desired_col = _utf8_cell_of_byte(
+        self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row),
             self.selections[0].col,
         )
@@ -2375,7 +2321,7 @@ struct Editor(Copyable, Movable):
         var nr = top.row - 1
         var line = self.buffer.line(nr)
         var dc = self.selections[0].desired_col
-        var nc = _utf8_byte_of_cell(line, dc)
+        var nc = utf8_byte_of_cell(line, dc)
         self._add_caret(Caret(nr, nc, dc, nr, nc))
 
     def add_caret_below(mut self):
@@ -2388,7 +2334,7 @@ struct Editor(Copyable, Movable):
         var nr = bot.row + 1
         var line = self.buffer.line(nr)
         var dc = self.selections[0].desired_col
-        var nc = _utf8_byte_of_cell(line, dc)
+        var nc = utf8_byte_of_cell(line, dc)
         self._add_caret(Caret(nr, nc, dc, nr, nc))
 
     def _all_carets_inline_safe(
@@ -3312,7 +3258,7 @@ struct Editor(Copyable, Movable):
             self.selections[0].col = n
         if self.selections[0].col < 0:
             self.selections[0].col = 0
-        self.selections[0].desired_col = _utf8_cell_of_byte(
+        self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
 
@@ -3644,7 +3590,7 @@ struct Editor(Copyable, Movable):
             self.selections[0].col += indent_n
         if self.selections[0].anchor_row >= sr and self.selections[0].anchor_row <= er:
             self.selections[0].anchor_col += indent_n
-        self.selections[0].desired_col = _utf8_cell_of_byte(
+        self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
         self.dirty = True
@@ -3694,7 +3640,7 @@ struct Editor(Copyable, Movable):
             var nca = self.selections[0].anchor_col - rm_a
             if nca < 0: nca = 0
             self.selections[0].anchor_col = nca
-        self.selections[0].desired_col = _utf8_cell_of_byte(
+        self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
         self.dirty = True
@@ -3715,7 +3661,7 @@ struct Editor(Copyable, Movable):
         self.selections[0].row = row
         self.selections[0].col = col
         if sticky_col:
-            self.selections[0].desired_col = _utf8_cell_of_byte(self.buffer.line(row), col)
+            self.selections[0].desired_col = utf8_cell_of_byte(self.buffer.line(row), col)
             # A horizontal/positional move ends any vertical streak, so the
             # next up/down re-derives its screen column from here.
             self._vmove_streak = False
@@ -4237,7 +4183,7 @@ struct Editor(Copyable, Movable):
         var seg_byte_end = rc[3]
         var seg_x0 = rc[4]
         var line = self.buffer.line(row)
-        var rng = _word_range_at(line, byte_col)
+        var rng = word_range_at(line, byte_col)
         var word_start = rng[0]
         var word_end = rng[1]
         if word_end <= word_start:
@@ -4272,7 +4218,7 @@ struct Editor(Copyable, Movable):
             if clip_end > line_n:
                 clip_end = line_n
             visible = _slice(line, seg_byte_start, clip_end)
-        var cell_off = _utf8_cell_of_byte(visible, byte_in_seg)
+        var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
         self._hover_candidate_row = row
         self._hover_candidate_col = word_start
         self._hover_candidate_since_ms = monotonic_ms()
@@ -4363,7 +4309,7 @@ struct Editor(Copyable, Movable):
             if clip_end > line_n:
                 clip_end = line_n
             visible = _slice(line, seg_byte_start, clip_end)
-        var cell_off = _utf8_cell_of_byte(visible, byte_in_seg)
+        var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
         self._minimap_hover_x = seg_x0 + cell_off
         self._minimap_hover_y = screen_y + 1
         self._minimap_hover_below = True
@@ -4375,7 +4321,7 @@ struct Editor(Copyable, Movable):
         inside the editor's text area. Returns
         ``(buf_row, byte_col, seg_byte_start, seg_byte_end, seg_x0)``
         — enough to convert any other byte position on the same visual
-        segment back to its screen x via ``_utf8_cell_of_byte``, which
+        segment back to its screen x via ``utf8_cell_of_byte``, which
         is what the hover path needs to anchor its tooltip to the
         leftmost cell of an underlined span.
 
@@ -4420,7 +4366,7 @@ struct Editor(Copyable, Movable):
         var visible_cells = utf8_codepoint_count(visible)
         if cell_x >= visible_cells:
             return miss
-        var col = seg_start + _utf8_byte_of_cell(visible, cell_x)
+        var col = seg_start + utf8_byte_of_cell(visible, cell_x)
         if col > line_n:
             col = line_n
         return Optional[Tuple[Int, Int, Int, Int, Int]](
@@ -5854,7 +5800,7 @@ struct Editor(Copyable, Movable):
             var nr = self.selections[0].row - page_height
             if nr < 0:
                 nr = 0
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+            var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
             self.move_to(nr, nc, extend, False)
         elif kind == 9:
             self._vmove_streak = False
@@ -5862,7 +5808,7 @@ struct Editor(Copyable, Movable):
             var max_row = self.buffer.line_count() - 1
             if nr > max_row:
                 nr = max_row
-            var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+            var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
             self.move_to(nr, nc, extend, False)
         elif kind == 10:
             # Smart-home (Cmd+Left): first non-whitespace column; a
@@ -5942,7 +5888,7 @@ struct Editor(Copyable, Movable):
             else:
                 var line_ro = self.buffer.line(c.row)
                 if op == 1:
-                    actual_sc = _utf8_step_backward(line_ro, actual_cur)
+                    actual_sc = prev_codepoint_start(line_ro, actual_cur)
                     actual_ec = actual_cur
                 elif op == 2:
                     actual_sc = actual_cur
@@ -5955,7 +5901,7 @@ struct Editor(Copyable, Movable):
             self.buffer.lines[c.row] = _slice(line, 0, actual_sc) \
                 + text + _slice(line, actual_ec, line_n)
             var new_col = actual_sc + n_text
-            var new_desired = _utf8_cell_of_byte(
+            var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
             )
             new_carets.append(
@@ -5990,7 +5936,7 @@ struct Editor(Copyable, Movable):
                 + self.buffer.line(row)
             _ = self.buffer.lines.pop(row)
             removed += 1
-            var desired = _utf8_cell_of_byte(
+            var desired = utf8_cell_of_byte(
                 self.buffer.line(row - 1), prev_len,
             )
             new_carets.append(
@@ -6050,7 +5996,7 @@ struct Editor(Copyable, Movable):
             self.buffer.lines[c.row] = _slice(line, 0, actual_sc) \
                 + text + _slice(line, actual_ec, line_n)
             var new_col = actual_sc + n_text
-            var new_desired = _utf8_cell_of_byte(
+            var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
             )
             new_carets.append(
@@ -6100,7 +6046,7 @@ struct Editor(Copyable, Movable):
         self.selections[0].anchor_col = sc
         self.selections[0].row = er
         self.selections[0].col = ec
-        self.selections[0].desired_col = _utf8_cell_of_byte(self.buffer.line(er), ec)
+        self.selections[0].desired_col = utf8_cell_of_byte(self.buffer.line(er), ec)
 
     def _smart_select_grow(mut self):
         """Expand the primary caret's selection to the next-larger
@@ -6541,12 +6487,12 @@ struct Editor(Copyable, Movable):
             bot -= 1
         # Anchor the column on the selection start's cell column; each
         # row resolves it back to a byte offset clamped to that row.
-        var col_cell = _utf8_cell_of_byte(self.buffer.line(top), top_col)
+        var col_cell = utf8_cell_of_byte(self.buffer.line(top), top_col)
         var carets = List[Caret]()
         for r in range(top, bot + 1):
             var line = self.buffer.line(r)
-            var b = _utf8_byte_of_cell(line, col_cell)
-            carets.append(Caret(r, b, _utf8_cell_of_byte(line, b), r, b))
+            var b = utf8_byte_of_cell(line, col_cell)
+            carets.append(Caret(r, b, utf8_cell_of_byte(line, b), r, b))
         self._install_carets(carets^)
 
     def handle_key(mut self, event: Event, view: Rect) -> Bool:
@@ -7807,7 +7753,7 @@ struct Editor(Copyable, Movable):
             visible = String("")
         else:
             visible = _slice(line, seg_start, seg_end)
-        var col = seg_start + _utf8_byte_of_cell(visible, cell_x)
+        var col = seg_start + utf8_byte_of_cell(visible, cell_x)
         if col > line_n: col = line_n
         # Cmd+click: capture a go-to-definition request without moving
         # the cursor. The host polls ``consume_definition_request`` and
@@ -7838,7 +7784,7 @@ struct Editor(Copyable, Movable):
             # motion replaces it.
             self._box_drag_active = True
             self._box_anchor_row = row
-            self._box_anchor_cell = _utf8_cell_of_byte(line, col)
+            self._box_anchor_cell = utf8_cell_of_byte(line, col)
             self._add_caret(Caret(row, col, self._box_anchor_cell,
                                    row, col))
             return True
@@ -7899,7 +7845,7 @@ struct Editor(Copyable, Movable):
         self._last_click_row = row
         self._last_click_col = col
         if self._click_count == 2:
-            var wrng = _word_range_at(line, col)
+            var wrng = word_range_at(line, col)
             self._dc_active = True
             self._tc_active = False
             self._dc_anchor_row = row
@@ -7931,7 +7877,7 @@ struct Editor(Copyable, Movable):
         anchored; the moving end snaps to the start or end of whichever
         word the pointer is currently over."""
         var line = self.buffer.line(row)
-        var rng = _word_range_at(line, col)
+        var rng = word_range_at(line, col)
         var word_start = rng[0]
         var word_end = rng[1]
         var ar = self._dc_anchor_row
@@ -7996,11 +7942,11 @@ struct Editor(Copyable, Movable):
         var r = r0
         while True:
             var line = self.buffer.line(r)
-            var anc_byte = _utf8_byte_of_cell(line, self._box_anchor_cell)
-            var cur_byte = _utf8_byte_of_cell(line, target_cell)
+            var anc_byte = utf8_byte_of_cell(line, self._box_anchor_cell)
+            var cur_byte = utf8_byte_of_cell(line, target_cell)
             carets.append(
                 Caret(
-                    r, cur_byte, _utf8_cell_of_byte(line, cur_byte),
+                    r, cur_byte, utf8_cell_of_byte(line, cur_byte),
                     r, anc_byte,
                 )
             )
@@ -8033,7 +7979,7 @@ struct Editor(Copyable, Movable):
     def _move_left(mut self, extend: Bool):
         if self.selections[0].col > 0:
             var line = self.buffer.line(self.selections[0].row)
-            var nc = _utf8_step_backward(line, self.selections[0].col)
+            var nc = prev_codepoint_start(line, self.selections[0].col)
             self.move_to(self.selections[0].row, nc, extend)
         elif self.selections[0].row > 0:
             var prev = self.buffer.line_length(self.selections[0].row - 1)
@@ -8203,7 +8149,7 @@ struct Editor(Copyable, Movable):
         var is_last_seg = (tci + 1 >= len(tsegs))
         if tbyte >= tseg.byte_end and not is_last_seg \
                 and tseg.byte_end > tseg.byte_start:
-            tbyte = _utf8_step_backward(tline, tseg.byte_end)
+            tbyte = prev_codepoint_start(tline, tseg.byte_end)
         self.move_to(trow, tbyte, extend, sticky_col=False)
         self.selections[0].desired_col = vcol
         self._vmove_streak = True
@@ -8213,7 +8159,7 @@ struct Editor(Copyable, Movable):
             self._vmove_streak = False
             if self.selections[0].row > 0:
                 var nr = self.selections[0].row - 1
-                var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+                var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
                 self.move_to(nr, nc, extend, False)
         else:
             self._visual_vmove(False, extend, content_w)
@@ -8223,7 +8169,7 @@ struct Editor(Copyable, Movable):
             self._vmove_streak = False
             if self.selections[0].row + 1 < self.buffer.line_count():
                 var nr = self.selections[0].row + 1
-                var nc = _utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
+                var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
                 self.move_to(nr, nc, extend, False)
         else:
             self._visual_vmove(True, extend, content_w)
@@ -8312,13 +8258,13 @@ struct Editor(Copyable, Movable):
         # to a byte offset so ``scroll_x`` always lands on a codepoint
         # boundary — the slicing in ``paint`` would corrupt UTF-8 otherwise.
         var line = self.buffer.line(self.selections[0].row)
-        var cur_cell = _utf8_cell_of_byte(line, self.selections[0].col)
-        var scroll_cell = _utf8_cell_of_byte(line, self.scroll_x)
+        var cur_cell = utf8_cell_of_byte(line, self.selections[0].col)
+        var scroll_cell = utf8_cell_of_byte(line, self.scroll_x)
         if cur_cell < scroll_cell:
             scroll_cell = cur_cell
         elif cur_cell >= scroll_cell + w:
             scroll_cell = cur_cell - w + 1
-        self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
+        self.scroll_x = utf8_byte_of_cell(line, scroll_cell)
 
     def max_scroll_y(self, view: Rect) -> Int:
         """Largest valid ``scroll_y`` for ``view``.
@@ -8415,8 +8361,8 @@ struct Editor(Copyable, Movable):
             # Re-snap to a codepoint boundary on the cursor row so a
             # multi-byte glyph isn't sliced by paint's substring.
             var line = self.buffer.line(self.selections[0].row)
-            var cell = _utf8_cell_of_byte(line, self.scroll_x)
-            self.scroll_x = _utf8_byte_of_cell(line, cell)
+            var cell = utf8_cell_of_byte(line, self.scroll_x)
+            self.scroll_x = utf8_byte_of_cell(line, cell)
         var max_y = self.max_scroll_y(view)
         if self.scroll_y > max_y:
             self.scroll_y = max_y
@@ -8463,13 +8409,13 @@ struct Editor(Copyable, Movable):
                 self.scroll_y = self.selections[0].row
             return
         var line = self.buffer.line(self.selections[0].row)
-        var cur_cell = _utf8_cell_of_byte(line, self.selections[0].col)
-        var scroll_cell = _utf8_cell_of_byte(line, self.scroll_x)
+        var cur_cell = utf8_cell_of_byte(line, self.selections[0].col)
+        var scroll_cell = utf8_cell_of_byte(line, self.scroll_x)
         if cur_cell < scroll_cell:
             scroll_cell = cur_cell
         elif cur_cell >= scroll_cell + w:
             scroll_cell = cur_cell - w + 1
-        self.scroll_x = _utf8_byte_of_cell(line, scroll_cell)
+        self.scroll_x = utf8_byte_of_cell(line, scroll_cell)
 
 
 def _caret_less(a: Caret, b: Caret) -> Bool:
@@ -8585,22 +8531,8 @@ def _try_merge_carets(
     else:
         cur_r = u_start_r; cur_c = u_start_c
         anc_r = u_end_r; anc_c = u_end_c
-    var desired = _utf8_cell_of_byte(buffer.line(cur_r), cur_c)
+    var desired = utf8_cell_of_byte(buffer.line(cur_r), cur_c)
     return Optional[Caret](Caret(cur_r, cur_c, desired, anc_r, anc_c))
-
-
-def _char_class(cp: Int) -> Int:
-    """Three-way character class used by ``_word_range_at``. Word chars
-    cluster, whitespace clusters, everything else clusters as
-    "punctuation" — so a double-click on punctuation selects the run of
-    punctuation, not just the single byte. Operates on a codepoint (not
-    a byte) so non-ASCII letters cluster correctly with their ASCII
-    neighbors (``ä`` and ``n`` end up in the same word)."""
-    if is_word_codepoint(cp):
-        return 1
-    if cp == 0x20 or cp == 0x09:
-        return 2
-    return 3
 
 
 def _smart_indent_for_enter(
@@ -8632,34 +8564,6 @@ def _smart_indent_for_enter(
         if last == 0x7B or last == 0x28 or last == 0x5B or last == 0x3A:
             return base + ec.indent_string()
     return base
-
-
-def _word_range_at(line: String, col: Int) -> Tuple[Int, Int]:
-    """Return the (start, end) byte range of the contiguous run of the
-    same character class around ``col``. Empty range when ``col`` is at
-    or past end of line. Walks by UTF-8 codepoint so a multibyte letter
-    (``ä``) groups with its ASCII neighbors instead of breaking the
-    selection in the middle of the codepoint."""
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    if col < 0 or col >= n:
-        return (col, col)
-    var here = codepoint_at(line, col)
-    var cls = _char_class(here[0])
-    var start = col
-    while start > 0:
-        var prev = prev_codepoint_start(line, start)
-        var info = codepoint_at(line, prev)
-        if _char_class(info[0]) != cls:
-            break
-        start = prev
-    var end = col + here[1]
-    while end < n:
-        var info = codepoint_at(line, end)
-        if _char_class(info[0]) != cls:
-            break
-        end += info[1]
-    return (start, end)
 
 
 # --- Smart-select helpers ---------------------------------------------------

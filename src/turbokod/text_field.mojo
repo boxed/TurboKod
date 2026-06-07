@@ -60,7 +60,8 @@ from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
     char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
-    prev_codepoint_start, utf8_codepoint_size, word_char_step,
+    prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
+    utf8_codepoint_size, word_char_step, word_range_at,
 )
 
 
@@ -362,7 +363,7 @@ struct TextField(Copyable, Movable):
         if not extend and self.has_selection():
             self._move(self._sel_range()[0], False)
             return
-        self._move(_utf8_step_backward(self.text, self.cursor), extend)
+        self._move(prev_codepoint_start(self.text, self.cursor), extend)
 
     def _step_right(mut self, extend: Bool):
         if not extend and self.has_selection():
@@ -423,7 +424,7 @@ struct TextField(Copyable, Movable):
         if self.cursor == 0:
             return False
         self._push_undo()
-        var prev = _utf8_step_backward(self.text, self.cursor)
+        var prev = prev_codepoint_start(self.text, self.cursor)
         self.text = _splice(self.text, prev, self.cursor, String(""))
         self.cursor = prev
         self.anchor = prev
@@ -656,7 +657,7 @@ struct TextField(Copyable, Movable):
             if self._click_count == 2:
                 # Word select: anchor the surrounding word range so a
                 # following drag snaps to whole-word boundaries.
-                var wrng = _word_range_at(self.text, byte)
+                var wrng = word_range_at(self.text, byte)
                 self._dc_active = True
                 self._dc_anchor_start = wrng[0]
                 self._dc_anchor_end = wrng[1]
@@ -686,7 +687,7 @@ struct TextField(Copyable, Movable):
                 pass
             elif self._dc_active:
                 # Snap to word boundaries unioned with the anchor word.
-                var wrng = _word_range_at(self.text, byte)
+                var wrng = word_range_at(self.text, byte)
                 var lo = wrng[0]
                 var hi = wrng[1]
                 if self._dc_anchor_start < lo:
@@ -723,14 +724,14 @@ struct TextField(Copyable, Movable):
         var n_cells = utf8_codepoint_count(self.text)
         if text_cell >= n_cells:
             return len(self.text.as_bytes())
-        return _utf8_byte_of_cell(self.text, text_cell)
+        return utf8_byte_of_cell(self.text, text_cell)
 
     # --- rendering helpers --------------------------------------------
 
     def cursor_cell(self) -> Int:
         """Cell column of the cursor relative to the start of
         ``self.text``."""
-        return _utf8_cell_of_byte(self.text, self.cursor)
+        return utf8_cell_of_byte(self.text, self.cursor)
 
     def _ensure_visible(mut self, width: Int):
         """Adjust ``_scroll`` so that the cursor sits within the
@@ -792,7 +793,7 @@ struct TextField(Copyable, Movable):
         # doesn't spill UTF-8 past the strip — and so scroll > 0
         # actually shifts the visible characters left.
         var bytes = self.text.as_bytes()
-        var start_byte = _utf8_byte_of_cell(self.text, self._scroll)
+        var start_byte = utf8_byte_of_cell(self.text, self._scroll)
         if start_byte < len(bytes):
             var visible = String(
                 StringSlice(unsafe_from_utf8=bytes[start_byte:])
@@ -804,8 +805,8 @@ struct TextField(Copyable, Movable):
         # selection without rewriting glyphs.
         if self.has_selection():
             var rng = self._sel_range()
-            var start_cell = _utf8_cell_of_byte(self.text, rng[0])
-            var end_cell = _utf8_cell_of_byte(self.text, rng[1])
+            var start_cell = utf8_cell_of_byte(self.text, rng[0])
+            var end_cell = utf8_cell_of_byte(self.text, rng[1])
             var x = rect.a.x + start_cell - self._scroll
             var stop = rect.a.x + end_cell - self._scroll
             if x < rect.a.x:
@@ -1022,89 +1023,6 @@ def _utf8_step_forward(text: String, col: Int) -> Int:
     if nxt > n:
         nxt = n
     return nxt
-
-
-def _utf8_step_backward(text: String, col: Int) -> Int:
-    if col <= 0:
-        return 0
-    var bytes = text.as_bytes()
-    var c = col - 1
-    while c > 0 and (Int(bytes[c]) & 0xC0) == 0x80:
-        c -= 1
-    return c
-
-
-def _utf8_cell_of_byte(text: String, byte_col: Int) -> Int:
-    if byte_col <= 0:
-        return 0
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and i < byte_col:
-        var info = codepoint_at(text, i)
-        cell += char_width(info[0])
-        i += info[1]
-    if byte_col > n:
-        cell += byte_col - n
-    return cell
-
-
-def _utf8_byte_of_cell(text: String, cell_col: Int) -> Int:
-    if cell_col <= 0:
-        return 0
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and cell < cell_col:
-        var info = codepoint_at(text, i)
-        var w = char_width(info[0])
-        if cell + w > cell_col:
-            break
-        cell += w
-        i += info[1]
-    return i
-
-
-def _char_class(cp: Int) -> Int:
-    """Three-way character class used by ``_word_range_at``. Word
-    chars cluster, whitespace clusters, everything else clusters as
-    "punctuation". Mirrors the editor's grouping so double-click in
-    a dialog field picks the same span as double-click in a
-    full-buffer line."""
-    if is_word_codepoint(cp):
-        return 1
-    if cp == 0x20 or cp == 0x09:
-        return 2
-    return 3
-
-
-def _word_range_at(text: String, byte_col: Int) -> Tuple[Int, Int]:
-    """Return the (start, end) byte range of the contiguous run of
-    same-class codepoints around ``byte_col``. Empty range when
-    ``byte_col`` is at end of text. Walks by UTF-8 codepoint so
-    multibyte letters cluster with their ASCII neighbours."""
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if byte_col < 0 or byte_col >= n:
-        return (byte_col, byte_col)
-    var here = codepoint_at(text, byte_col)
-    var cls = _char_class(here[0])
-    var start = byte_col
-    while start > 0:
-        var prev = prev_codepoint_start(text, start)
-        var info = codepoint_at(text, prev)
-        if _char_class(info[0]) != cls:
-            break
-        start = prev
-    var end = byte_col + here[1]
-    while end < n:
-        var info = codepoint_at(text, end)
-        if _char_class(info[0]) != cls:
-            break
-        end += info[1]
-    return (start, end)
 
 
 def _next_word_pos(text: String, col: Int) -> Int:
