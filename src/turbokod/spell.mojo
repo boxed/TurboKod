@@ -597,6 +597,12 @@ def find_misspelled_runs(
                 elif ch >= 0x41 and ch <= 0x5A:
                     if j > run_start:
                         has_internal_upper = True
+                elif ch >= 0x80:
+                    # Non-ASCII letter byte: treat as lowercase-equivalent so
+                    # all-non-ASCII words (Cyrillic, Greek, all-accented) are
+                    # still checked instead of silently skipped. The all-caps
+                    # acronym skip stays reserved for genuinely all-ASCII runs.
+                    has_lower = True
             if not has_lower:
                 continue
             if has_internal_upper:
