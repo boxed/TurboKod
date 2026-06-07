@@ -10001,6 +10001,25 @@ def test_editor_set_completions_opens_popup() raises:
     assert_false(ed.completion_popup_visible)
 
 
+def test_accept_completion_multibyte_prefix_deletes_codepoints() raises:
+    """The replace span arrives as byte offsets but is deleted one
+    *codepoint* at a time; iterating a byte count over-deletes a
+    multibyte prefix and eats preceding characters. Replacing the
+    2-byte ``ä`` in ``xyzä`` must leave ``xyz`` intact (not chew into
+    ``z``)."""
+    var ed = Editor(String("xyzä"))
+    ed.move_to(0, 5, False)   # cursor at end (byte 5, past the 2-byte ä)
+    var items = List[CompletionItem]()
+    items.append(CompletionItem(
+        String("Ä"), String("Ä"), 1, String(""), String("Ä"),
+        True, 0, 3, 0, 5,        # has_range: replace bytes [3,5) == "ä"
+        List[TextEditEntry](),
+    ))
+    ed.set_completions(items^, 0, 3)
+    assert_true(ed.accept_completion())
+    assert_equal(ed.buffer.line(0), String("xyzÄ"))
+
+
 def test_editor_typing_word_char_stamps_autotrigger_request() raises:
     """Typing an identifier char (letter, digit, underscore) auto-stamps
     ``pending_completion_request`` so the desktop dispatches a fresh
@@ -18339,6 +18358,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_completion_result_extracts_additional_text_edits()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
+    test_accept_completion_multibyte_prefix_deletes_codepoints()
     test_editor_typing_word_char_stamps_autotrigger_request()
     test_editor_typing_non_word_char_skips_autotrigger()
     test_editor_cursor_move_inside_word_keeps_popup_alive()

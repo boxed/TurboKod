@@ -2847,14 +2847,21 @@ struct Editor(Copyable, Movable):
             start = ln
         self._push_undo()
         self._typing_active = False
-        # Delete the existing prefix span, then insert.
+        # Delete the existing prefix span, then insert. ``start``/``end`` are
+        # byte offsets, but ``delete_before`` removes one *codepoint* per call
+        # — so loop until the cursor reaches ``start`` rather than iterating a
+        # byte count (which over-deletes when the prefix is multibyte, e.g.
+        # completing an identifier like ``Godkänn``).
         if end > start:
             self.move_to(self.selections[0].row, end, False)
-            for _ in range(end - start):
+            while self.selections[0].col > start:
+                var before = self.selections[0].col
                 var p = self.buffer.delete_before(
                     self.selections[0].row, self.selections[0].col,
                 )
                 self.move_to(p[0], p[1], False)
+                if self.selections[0].col >= before:
+                    break  # defensive: col didn't shrink, avoid spinning
         self.buffer.insert(
             self.selections[0].row, self.selections[0].col, item.insert_text,
         )
