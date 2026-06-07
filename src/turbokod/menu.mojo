@@ -19,7 +19,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
-from .string_utils import display_columns
+from .string_utils import char_width, codepoint_at, display_columns
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
@@ -350,10 +350,11 @@ struct MenuBar(Movable):
     ):
         """Paint ``label`` starting at ``(x, y)`` with Turbo-Vision-style
         hotkey coloring: the first codepoint gets ``hotkey_attr``, the
-        rest get ``body_attr``. Walks UTF-8 one codepoint at a time so
-        non-ASCII labels render as a single cell per glyph rather than
-        one cell per continuation byte (which used to split an em dash
-        across three cells)."""
+        rest get ``body_attr``. Walks UTF-8 one codepoint at a time and
+        advances by ``char_width`` so non-ASCII labels render one cell per
+        glyph (not per continuation byte) and a wide emoji occupies two
+        cells with an empty continuation cell — matching what ``_layout`` /
+        ``_dropdown_rect`` reserve."""
         var b = label.as_bytes()
         var n = len(b)
         var i = 0
@@ -375,9 +376,12 @@ struct MenuBar(Movable):
             else:
                 glyph = String(StringSlice(unsafe_from_utf8=b[i:i + seq]))
             var a = hotkey_attr if col == 0 else body_attr
-            painter.set(canvas, x + col, y, Cell(glyph, a, 1))
+            var w = char_width(codepoint_at(label, i)[0])
+            painter.set(canvas, x + col, y, Cell(glyph, a, w))
+            if w == 2:
+                painter.set(canvas, x + col + 1, y, Cell(String(""), a, 0))
             i += seq
-            col += 1
+            col += w
 
     def _paint_dropdown(self, mut canvas: Canvas, screen_width: Int):
         var rect = self._dropdown_rect(screen_width)
