@@ -19,10 +19,41 @@ from .events import (
     KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
+from .geometry import Point, Rect
+from .view import RowCursor
 
 
 comptime _PAGE_STEP: Int = 10
 comptime _WHEEL_STEP: Int = 3
+
+
+@fieldwise_init
+struct PickerLayout(ImplicitlyCopyable, Movable):
+    """Pre-computed rects for a filtered-list picker, shared by ``paint``
+    and ``handle_mouse`` so list hit-testing and rendering agree on the
+    top/height. Built by ``build_picker_layout``; ``label_w`` is the width
+    of the leading input label (``Find:`` etc.) the query field starts
+    after."""
+    var input_rect: Rect
+    var input_label_pt: Point
+    var list_top: Int
+    var list_height: Int
+    var hint_y: Int
+
+
+def build_picker_layout(rect: Rect, label_w: Int) -> PickerLayout:
+    var cursor = RowCursor(rect.a.y + 1)
+    var input_y = cursor.place()
+    var list_y = cursor.place()
+    var hint_y = rect.b.y - 1
+    var list_h = hint_y - list_y
+    if list_h < 0:
+        list_h = 0
+    return PickerLayout(
+        Rect(rect.a.x + 2 + label_w, input_y, rect.b.x - 1, input_y + 1),
+        Point(rect.a.x + 2, input_y),
+        list_y, list_h, hint_y,
+    )
 
 
 def scroll_to_reveal(scroll: Int, target: Int, window: Int) -> Int:

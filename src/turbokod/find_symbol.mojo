@@ -41,46 +41,19 @@ from .file_io import ci_less
 from .geometry import center_in, Point, Rect
 from .lsp import LspProcess
 from .picker_input import (
-    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+    build_picker_layout, picker_nav_key, picker_wheel_scroll,
+    scroll_to_reveal,
 )
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import starts_with
 from .text_field import TextField
 from .type_ahead import starts_with_ci
-from .view import RowCursor
 from .window import paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
 comptime _LABEL_W = 7
 """Columns occupied by the inline search label (``" Find: "``)."""
-
-
-@fieldwise_init
-struct _Layout(ImplicitlyCopyable, Movable):
-    """Pre-computed rects for the picker. Shared by ``paint`` and
-    ``handle_mouse`` so list hit-testing and list rendering see the
-    exact same top/height."""
-    var input_rect: Rect
-    var input_label_pt: Point
-    var list_top: Int
-    var list_height: Int
-    var hint_y: Int
-
-
-def _build_layout(rect: Rect) -> _Layout:
-    var cursor = RowCursor(rect.a.y + 1)
-    var input_y = cursor.place()
-    var list_y = cursor.place()
-    var hint_y = rect.b.y - 1
-    var list_h = hint_y - list_y
-    if list_h < 0:
-        list_h = 0
-    return _Layout(
-        Rect(rect.a.x + 2 + _LABEL_W, input_y, rect.b.x - 1, input_y + 1),
-        Point(rect.a.x + 2, input_y),
-        list_y, list_h, hint_y,
-    )
 
 
 comptime _ENTRIES_CAP: Int = 500
@@ -506,7 +479,7 @@ struct FindSymbol(Movable):
         if not self.active:
             return False
         var rect = self._rect(container_bounds)
-        return _build_layout(rect).input_rect.contains(pos)
+        return build_picker_layout(rect, _LABEL_W).input_rect.contains(pos)
 
     # --- paint ------------------------------------------------------------
 
@@ -518,7 +491,7 @@ struct FindSymbol(Movable):
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var error_attr  = Attr(RED,    LIGHT_GRAY)
         var rect = self._rect(container_bounds)
-        var layout = _build_layout(rect)
+        var layout = build_picker_layout(rect, _LABEL_W)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -691,7 +664,7 @@ struct FindSymbol(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(container_bounds)
-        var layout = _build_layout(rect)
+        var layout = build_picker_layout(rect, _LABEL_W)
         # Skip text-field mouse routing in chooser mode — the input is
         # frozen and the field isn't visibly painted, so capturing
         # clicks there would just move an invisible cursor.

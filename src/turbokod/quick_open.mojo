@@ -31,43 +31,17 @@ from .events import (
 )
 from .geometry import center_in, Point, Rect
 from .picker_input import (
-    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
+    build_picker_layout, picker_nav_key, picker_wheel_scroll,
+    scroll_to_reveal,
 )
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .text_field import TextField
-from .view import RowCursor
 from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
 comptime _LABEL_W = 7
 """Columns occupied by the inline search label (``" Find: "``)."""
-
-
-@fieldwise_init
-struct _Layout(ImplicitlyCopyable, Movable):
-    """Pre-computed rects for the picker. Shared by ``paint`` and
-    ``handle_mouse``."""
-    var input_rect: Rect
-    var input_label_pt: Point
-    var list_top: Int
-    var list_height: Int
-    var hint_y: Int
-
-
-def _build_layout(rect: Rect) -> _Layout:
-    var cursor = RowCursor(rect.a.y + 1)
-    var input_y = cursor.place()
-    var list_y = cursor.place()
-    var hint_y = rect.b.y - 1
-    var list_h = hint_y - list_y
-    if list_h < 0:
-        list_h = 0
-    return _Layout(
-        Rect(rect.a.x + 2 + _LABEL_W, input_y, rect.b.x - 1, input_y + 1),
-        Point(rect.a.x + 2, input_y),
-        list_y, list_h, hint_y,
-    )
 
 
 struct QuickOpen(Movable):
@@ -456,7 +430,7 @@ struct QuickOpen(Movable):
         if not self.active:
             return False
         var rect = self._rect(container_bounds)
-        return _build_layout(rect).input_rect.contains(pos)
+        return build_picker_layout(rect, _LABEL_W).input_rect.contains(pos)
 
     # --- paint ------------------------------------------------------------
 
@@ -467,7 +441,7 @@ struct QuickOpen(Movable):
         var sel_attr    = Attr(BLACK,  YELLOW)
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(container_bounds)
-        var layout = _build_layout(rect)
+        var layout = build_picker_layout(rect, _LABEL_W)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -580,7 +554,7 @@ struct QuickOpen(Movable):
         if event.kind != EVENT_MOUSE:
             return True
         var rect = self._rect(container_bounds)
-        var layout = _build_layout(rect)
+        var layout = build_picker_layout(rect, _LABEL_W)
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before the input/list routing so a click on the chrome glyph
         # always dismisses the dialog.
