@@ -45,7 +45,7 @@ from .picker_input import (
     scroll_to_reveal,
 )
 from .posix import alloc_zero_buffer, poll_stdin, read_into
-from .string_utils import starts_with
+from .string_utils import display_columns, starts_with, tail_to_columns
 from .text_field import TextField
 from .type_ahead import starts_with_ci
 from .window import paint_close_button, paint_window_title
@@ -847,24 +847,21 @@ def _relativize(path: String, root: String) -> String:
 
 
 def _truncate_path_to(s: String, max_cols: Int) -> String:
-    """Truncate ``s`` to at most ``max_cols`` cells, dropping bytes
-    from the *front* and marking elision with a leading ``…``. Paths
-    are most informative at their tail (the filename), so a head-
-    elide keeps the meaningful end visible.
+    """Truncate ``s`` to at most ``max_cols`` cells, dropping codepoints
+    from the *front* and marking elision with a leading ``…``. Paths are
+    most informative at their tail (the filename), so a head-elide keeps
+    the meaningful end visible.
 
-    Byte-length is used in place of ``display_columns`` because
-    paths are almost always ASCII; a non-ASCII char will at worst
-    over-advance by a cell, which is fine for a display label."""
+    Column- and codepoint-aware (via ``tail_to_columns``): a byte slice
+    would over-truncate a non-ASCII path and could split a codepoint into
+    invalid UTF-8 (rendered as a stray ``?``)."""
     if max_cols <= 0:
         return String("")
-    var b = s.as_bytes()
-    if len(b) <= max_cols:
+    if display_columns(s) <= max_cols:
         return s
     if max_cols == 1:
         return String("…")
-    var start = len(b) - max_cols + 1
-    return String("…") \
-        + String(StringSlice(unsafe_from_utf8=b[start:len(b)]))
+    return String("…") + tail_to_columns(s, max_cols - 1)
 
 
 def _sort_bucket_alpha(mut bucket: List[FindSymbolMatch]):
