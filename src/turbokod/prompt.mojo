@@ -274,6 +274,21 @@ struct Prompt(Movable):
         self.toggle_word.on = opts.whole_word
         self.toggle_regex.on = opts.regex
 
+    def _wrap_label(self, text_w: Int) -> Tuple[List[String], Bool, Int]:
+        """Wrap ``self.label`` to ``text_w`` and decide whether it fits
+        inline with the input. Returns ``(label_lines, inline,
+        last_label_w)``. ``_layout`` and ``paint`` both read these
+        numbers off this one helper so their geometry can't drift."""
+        var label_lines = wrap_to_width(self.label, text_w)
+        var inline = False
+        var last_label_w = 0
+        if len(label_lines) <= 1:
+            if len(label_lines) == 1:
+                last_label_w = utf8_codepoint_count(label_lines[0])
+            if last_label_w + _MIN_INLINE_INPUT <= text_w:
+                inline = True
+        return (label_lines^, inline, last_label_w)
+
     def _layout(self, container_bounds: Rect) -> Rect:
         """Compute the dialog rect for the current label.
 
@@ -294,14 +309,9 @@ struct Prompt(Movable):
         var text_w = width - 4
         if text_w < 1:
             text_w = 1
-        var label_lines = wrap_to_width(self.label, text_w)
-        var inline = False
-        if len(label_lines) <= 1:
-            var lw = 0
-            if len(label_lines) == 1:
-                lw = utf8_codepoint_count(label_lines[0])
-            if lw + _MIN_INLINE_INPUT <= text_w:
-                inline = True
+        var wrapped = self._wrap_label(text_w)
+        var label_lines = wrapped[0].copy()
+        var inline = wrapped[1]
         var height: Int
         if inline:
             height = 3
@@ -353,14 +363,9 @@ struct Prompt(Movable):
         if self.has_second:
             self._paint_two_field(canvas, rect, attr, painter, content_x, clip_x, text_w)
             return
-        var label_lines = wrap_to_width(self.label, text_w)
-        var inline = False
-        var last_label_w = 0
-        if len(label_lines) <= 1:
-            if len(label_lines) == 1:
-                last_label_w = utf8_codepoint_count(label_lines[0])
-            if last_label_w + _MIN_INLINE_INPUT <= text_w:
-                inline = True
+        var wrapped = self._wrap_label(text_w)
+        var inline = wrapped[1]
+        var last_label_w = wrapped[2]
         var max_label_rows = rect.height() - 2
         if not inline:
             max_label_rows -= 1   # reserve a row for the input
