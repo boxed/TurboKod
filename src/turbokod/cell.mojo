@@ -6,9 +6,12 @@ codepoint as a `String` rather than a fixed-width int so that grapheme clusters
 now we treat each cell as exactly one Mojo `String` value, which the writer is
 responsible for keeping to one or two terminal columns.
 
-`width` is the number of terminal columns the glyph occupies (1 for normal,
-2 for East-Asian fullwidth / many emoji, 0 for combining marks). For now we
-default to 1 and leave width-detection as a TODO — see `cell_width()` below.
+`width` is the number of terminal columns the glyph occupies: ``1`` for
+normal cells, ``2`` for emoji (the continuation half is a ``width=0`` blank),
+``0`` for the empty continuation cell itself. Width is derived from the glyph
+by `cell_width()` below, which delegates to `char_width` so it stays in lock
+step with `Canvas.put_text`. East-Asian fullwidth and zero-width combining
+marks are not yet modeled — only emoji widen.
 """
 
 from .colors import Attr, default_attr
