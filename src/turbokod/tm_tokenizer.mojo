@@ -235,8 +235,18 @@ def _tokenize_line(
         # The while-prefix counts as a real match for ``\\G`` purposes.
         g_pos = pos
 
+    # The active candidate set depends only on the top frame's
+    # ``pattern_idx`` (or the empty-stack root set), so recompute it only
+    # when the stack top changes rather than rebuilding the list — with its
+    # pattern copies and include expansion — at every position.
+    var cands = List[_Cand]()
+    var cands_top = -2  # sentinel: forces the first build (-1 == empty stack)
     while pos < n:
-        var cands = _active_candidates(grammar, stack)
+        var cur_top = -1 if len(stack) == 0 \
+            else stack[len(stack) - 1].pattern_idx
+        if cur_top != cands_top:
+            cands = _active_candidates(grammar, stack)
+            cands_top = cur_top
         # Find the earliest match across all candidates. Among ties,
         # the candidate listed first in ``cands`` wins — this mirrors
         # TextMate's "first listed pattern" tie-break, with the
@@ -248,7 +258,7 @@ def _tokenize_line(
         var best_idx = -1
         var best_match = OnigMatch(-1, -1, List[Int](), List[Int]())
         for ci in range(len(cands)):
-            var rx = grammar.regexes[cands[ci].regex_idx]
+            ref rx = grammar.regexes[cands[ci].regex_idx]
             var m_opt = rx.search_at(line, pos, search_options)
             if not m_opt:
                 continue
