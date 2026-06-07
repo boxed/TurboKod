@@ -298,17 +298,11 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
 
 def _read_ptr(addr: Int) -> Int:
     """Read an 8-byte pointer-sized value at the given address."""
-    var buf = List[UInt8]()
-    for _ in range(8):
-        buf.append(0)
-    _ = external_call["memcpy", Int](buf.unsafe_ptr(), addr, Int(8))
-    return buf.unsafe_ptr().bitcast[Int]()[0]
+    return UnsafePointer[Int, MutExternalOrigin](unsafe_from_address=addr)[0]
 
 
 def _read_int32(addr: Int) -> Int:
     """Read a 4-byte signed int at the given address, sign-extended."""
-    var buf = List[UInt8]()
-    for _ in range(4):
-        buf.append(0)
-    _ = external_call["memcpy", Int](buf.unsafe_ptr(), addr, Int(4))
-    return Int(buf.unsafe_ptr().bitcast[Int32]()[0])
+    return Int(
+        UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=addr)[0]
+    )
