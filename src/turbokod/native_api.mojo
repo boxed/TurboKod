@@ -420,7 +420,7 @@ def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: I
 @export
 def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
     """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
-    caller's buffer (3 u32 per cell). Returns the number of cells written."""
+    caller's buffer (5 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
     var canvas = Canvas(cols, rows)
@@ -558,7 +558,7 @@ def tk_desktop_layout_panels(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) -> Int:
     """Paint *only* the tool panels into the host's separate panel window and
-    pack them into the caller's buffer (same 3-u32-per-cell format as
+    pack them into the caller's buffer (same 5-u32-per-cell format as
     ``tk_desktop_layout``). Returns the number of cells written. The panel
     window does not run its own tick — the main window's ``tk_desktop_tick``
     drives the whole Desktop's per-frame work for both surfaces."""
@@ -748,7 +748,7 @@ def tk_desktop_layout_settings(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) -> Int:
     """Paint the Settings view into the host's settings window and pack it
-    into the caller's buffer (same 3-u32-per-cell format as
+    into the caller's buffer (same 5-u32-per-cell format as
     ``tk_desktop_layout``). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
@@ -835,7 +835,7 @@ def tk_desktop_layout_project_settings(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) -> Int:
     """Paint the Project Settings view into the host's window and pack it into
-    the caller's buffer (same 3-u32-per-cell format as ``tk_desktop_layout``).
+    the caller's buffer (same 5-u32-per-cell format as ``tk_desktop_layout``).
     Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
