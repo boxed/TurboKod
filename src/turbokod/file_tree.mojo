@@ -364,17 +364,17 @@ struct FileTree(Movable):
                 String(" "),
                 attr,
             )
-            var indent = String("")
-            for _ in range(e.depth):
-                indent = indent + String("  ")
             var marker: String
             if e.is_dir:
                 marker = String("▼") if e.is_expanded else String("▶")
             else:
                 marker = String(" ")
-            var label = indent + marker + String(" ") + e.name
+            # Indent by painting at an offset column rather than building a
+            # 2*depth-space prefix string per row per frame; the row
+            # background fill above already blanks the indent gap.
+            var label = marker + String(" ") + e.name
             _ = painter.put_text(
-                canvas, Point(content_x, list_top + i), label, attr,
+                canvas, Point(content_x + e.depth * 2, list_top + i), label, attr,
             )
 
     # --- mouse ------------------------------------------------------------
