@@ -429,15 +429,19 @@ struct MergeView(Movable):
     ):
         var spans = self._action_spans(content_x + 2)
         var choice = self.states[ordinal].choice
-        var labels = List[String]()
-        labels.append(_BTN_LOCAL)
-        labels.append(_BTN_DISK)
-        labels.append(_BTN_BOTH)
-        labels.append(_BTN_EDIT)
         for i in range(len(spans)):
             var sel = choice == spans[i].action
             var attr = Attr(BLACK, YELLOW) if sel else Attr(BLACK, CYAN)
-            _ = cp.put_text(canvas, Point(spans[i].x0, y), labels[i], attr)
+            # spans align with the four buttons by index; pick the constant
+            # directly instead of building a 4-element List every row.
+            var label = _BTN_LOCAL
+            if i == 1:
+                label = _BTN_DISK
+            elif i == 2:
+                label = _BTN_BOTH
+            elif i == 3:
+                label = _BTN_EDIT
+            _ = cp.put_text(canvas, Point(spans[i].x0, y), label, attr)
 
     def _paint_footer(mut self, mut canvas: Canvas, painter: Painter, rect: Rect):
         var body = Attr(BLACK, LIGHT_GRAY)
