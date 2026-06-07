@@ -149,6 +149,12 @@ struct TerminalPane(Copyable, Movable):
     single unrecognized spinner-glyph frame doesn't flip the title bar
     from ``working`` to ``waiting``. See ``ClaudeStateTracker`` for
     the smoothing contract."""
+    var _claude_title_state: UInt8
+    """Last Claude state computed by ``tick``'s attention pass. ``paint``
+    reads this for the title instead of re-scanning the grid tail and
+    re-classifying — ``tick`` already does that work each frame (the loop
+    runs ``tick`` before ``paint``). Seeded to ``CLAUDE_NONE`` so the
+    title is the plain shell default until the first classification."""
     var _attn_armed: Bool
     """True once a ``CLAUDE_WORKING`` state has been seen by ``tick``.
     When an armed pane settles into ``waiting`` / ``clean`` / ``none``
@@ -197,6 +203,7 @@ struct TerminalPane(Copyable, Movable):
         self._last_body = Rect.empty()
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
+        self._claude_title_state = CLAUDE_NONE
         self._attn_armed = False
         self._done_pending = False
         self._done_candidate_ms = 0
@@ -225,6 +232,7 @@ struct TerminalPane(Copyable, Movable):
         self._last_body = copy._last_body
         self._last_panel_top = copy._last_panel_top
         self._claude_tracker = copy._claude_tracker
+        self._claude_title_state = copy._claude_title_state
         self._attn_armed = copy._attn_armed
         self._done_pending = copy._done_pending
         self._done_candidate_ms = copy._done_candidate_ms
@@ -376,10 +384,13 @@ struct TerminalPane(Copyable, Movable):
         # the tracker's working-stickiness can expire with no new bytes.
         if total > 0 or self._attn_armed:
             var now = monotonic_ms()
-            self._note_claude_state(
-                self._claude_tracker.classify(self.vt.tail_rows(20), now),
-                now,
-            )
+            var state = self._claude_tracker.classify(self.vt.tail_rows(20), now)
+            # Cache for ``paint`` to read as the title — same scan/classify
+            # it would otherwise redo each frame. When this branch is
+            # skipped (idle shell, not armed) the tail is unchanged so the
+            # previously-cached state is still current.
+            self._claude_title_state = state
+            self._note_claude_state(state, now)
 
     def _note_claude_state(mut self, state: UInt8, now_ms: Int):
         """Arm on ``working``; fire one attention event when an armed
@@ -466,8 +477,11 @@ struct TerminalPane(Copyable, Movable):
         var displayed_title = String("Terminal")
         if len(self.vt.title.as_bytes()) > 0:
             displayed_title = self.vt.title
-        var tail = self.vt.tail_rows(20)
-        var claude_state = self._claude_tracker.classify(tail, monotonic_ms())
+        # Claude state is classified once per frame by ``tick`` (which the
+        # loop runs before ``paint``) and cached in ``_claude_title_state``;
+        # reuse it here rather than rescanning the grid tail and
+        # re-classifying.
+        var claude_state = self._claude_title_state
         if claude_state != CLAUDE_NONE:
             displayed_title = String("Claude · ") \
                 + claude_state_label(claude_state)
