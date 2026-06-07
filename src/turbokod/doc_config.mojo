@@ -152,6 +152,25 @@ def find_docset_by_language(
     return -1
 
 
+def _shell_sq(s: String) -> String:
+    """Single-quote ``s`` for safe splicing into an ``sh -c`` line, escaping
+    any embedded single quote as ``'\\''``. A project path containing ``'``
+    (legal on macOS) would otherwise break out of the quoting."""
+    var out = List[UInt8]()
+    out.append(0x27)  # opening '
+    var b = s.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x27:
+            out.append(0x27)  # '
+            out.append(0x5C)  # \
+            out.append(0x27)  # '
+            out.append(0x27)  # '
+        else:
+            out.append(b[i])
+    out.append(0x27)  # closing '
+    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+
+
 def docs_install_command(slug: String, dest_dir: String) -> String:
     """Shell command that mkdirs ``dest_dir`` and curls both DevDocs
     JSON files into it.
@@ -168,8 +187,8 @@ def docs_install_command(slug: String, dest_dir: String) -> String:
     var db_url    = DEVDOCS_BASE + slug + String("/db.json")
     var index_out = dest_dir + String("/index.json")
     var db_out    = dest_dir + String("/db.json")
-    return String("set -e; mkdir -p '") + dest_dir + String("'; ") \
-        + String("curl -fsSL -o '") + index_out + String("' '") \
-        + index_url + String("'; ") \
-        + String("curl -fsSL -o '") + db_out + String("' '") \
-        + db_url + String("'")
+    return String("set -e; mkdir -p ") + _shell_sq(dest_dir) + String("; ") \
+        + String("curl -fsSL -o ") + _shell_sq(index_out) + String(" ") \
+        + _shell_sq(index_url) + String("; ") \
+        + String("curl -fsSL -o ") + _shell_sq(db_out) + String(" ") \
+        + _shell_sq(db_url)
