@@ -209,7 +209,7 @@ struct InstallRunner(Movable):
 
     # --- paint ------------------------------------------------------------
 
-    def paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
         """Render the bottom-right progress popup. No-op when inactive.
 
         The popup is non-modal: it overlays whatever's underneath, and
@@ -223,13 +223,13 @@ struct InstallRunner(Movable):
         # Top border row (also carries the title), one row per output line,
         # bottom border row.
         var height = _LAST_LINES + 2
-        if width > screen.b.x - 2: width = screen.b.x - 2
-        if height > screen.b.y - 2: height = screen.b.y - 2
+        if width > container_bounds.b.x - 2: width = container_bounds.b.x - 2
+        if height > container_bounds.b.y - 2: height = container_bounds.b.y - 2
         if width < 20 or height < 4:
             return
         # Bottom-right, one row above the status bar, two cols off the edge.
-        var x = screen.b.x - width - 2
-        var y = screen.b.y - height - 1
+        var x = container_bounds.b.x - width - 2
+        var y = container_bounds.b.y - height - 1
         if x < 1: x = 1
         if y < 1: y = 1
         var rect = Rect(x, y, x + width, y + height)

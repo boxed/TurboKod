@@ -1,6 +1,6 @@
 """Popup menu that opens on Alt+Enter over a misspelled word.
 
-Anchored at the on-screen position of the misspelled word, the menu
+Anchored at the on-container_bounds position of the misspelled word, the menu
 offers the two ways the user can teach the speller about a word that
 isn't really wrong: adding it to the user-wide dictionary or to the
 current project's dictionary. The latter is disabled (still listed,
@@ -115,7 +115,7 @@ struct SpellMenu(Movable):
         mut self, var word: String, anchor: Point, has_project: Bool,
     ):
         """Open the menu over ``word`` anchored at ``anchor`` (the
-        screen cell the misspelled word starts at). ``has_project``
+        container_bounds cell the misspelled word starts at). ``has_project``
         gates the second row.
         Default selection is row 0 (user dictionary) — that's the
         choice that always works, and "stay personal unless I deliberately
@@ -159,7 +159,7 @@ struct SpellMenu(Movable):
 
     # --- layout / paint ---------------------------------------------------
 
-    def _rect(self, screen: Rect) -> Rect:
+    def _rect(self, container_bounds: Rect) -> Rect:
         """Where the popup will render. Width matches the longer
         label + 4 (left pad + label + right pad + 2 borders); height
         is ``rows + 2`` (two items + top/bottom borders).
@@ -172,22 +172,22 @@ struct SpellMenu(Movable):
             width = display_columns(_LABEL_USER) + 4
         var height = self._row_count() + 2
         var x = self.anchor_x
-        if x + width > screen.b.x:
-            x = screen.b.x - width
+        if x + width > container_bounds.b.x:
+            x = container_bounds.b.x - width
         if x < 0:
             x = 0
         var y = self.anchor_y + 1
-        if y + height > screen.b.y:
+        if y + height > container_bounds.b.y:
             # Flip above the anchor row.
             y = self.anchor_y - height
             if y < 0:
                 y = 0
         return Rect(x, y, x + width, y + height)
 
-    def paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         var sel_attr_disabled = Attr(WHITE, GREEN)
@@ -258,7 +258,7 @@ struct SpellMenu(Movable):
         # underlying editor while the menu is up would be surprising.
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
         """Button-like press / release model. Press inside a row arms
         tracking + highlights; the action only fires when the matching
         release lands inside (drag off-and-release cancels). Releases
@@ -269,7 +269,7 @@ struct SpellMenu(Movable):
             return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return MENU_HIT_NONE
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:

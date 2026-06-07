@@ -41,7 +41,7 @@ comptime FILE_TREE_MIN_WIDTH: Int = 10
 column once the indent + marker glyphs are accounted for."""
 comptime FILE_TREE_RIGHT_RESERVE: Int = 20
 """Min editor columns left after the tree eats its share of the
-screen. Keeps the user from accidentally dragging the tree across
+container_bounds. Keeps the user from accidentally dragging the tree across
 the whole window."""
 
 
@@ -77,7 +77,7 @@ struct FileTree(Movable):
     var root: String
     var width: Int
     var top: Int
-    """First screen row of the panel. Row 0 belongs to the in-grid menu
+    """First container_bounds row of the panel. Row 0 belongs to the in-grid menu
     bar on the terminal frontend (top=1, the default); when the host
     owns the menu (Swift/AppKit) the workspace starts at row 0 and the
     Desktop syncs this to 0 so the panel doesn't show a blank row above
@@ -294,11 +294,11 @@ struct FileTree(Movable):
 
     # --- geometry & paint -------------------------------------------------
 
-    def rect(self, screen: Rect) -> Rect:
+    def rect(self, container_bounds: Rect) -> Rect:
         if self.dock_left:
-            return Rect(0, self.top, self.width, screen.b.y - 1)
+            return Rect(0, self.top, self.width, container_bounds.b.y - 1)
         return Rect(
-            screen.b.x - self.width, self.top, screen.b.x, screen.b.y - 1,
+            container_bounds.b.x - self.width, self.top, container_bounds.b.x, container_bounds.b.y - 1,
         )
 
     def _sep_x(self, area: Rect) -> Int:
@@ -312,10 +312,10 @@ struct FileTree(Movable):
         inside the separator on the docked side)."""
         return area.a.x if self.dock_left else area.a.x + 1
 
-    def paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.visible:
             return
-        var area = self.rect(screen)
+        var area = self.rect(container_bounds)
         if area.is_empty():
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -451,15 +451,15 @@ struct FileTree(Movable):
             return True
         return False
 
-    def _clamp_width(self, want: Int, screen: Rect) -> Int:
-        """Pin a proposed width to ``[FILE_TREE_MIN_WIDTH, screen.b.x -
+    def _clamp_width(self, want: Int, container_bounds: Rect) -> Int:
+        """Pin a proposed width to ``[FILE_TREE_MIN_WIDTH, container_bounds.b.x -
         FILE_TREE_RIGHT_RESERVE]`` so a runaway drag can't shrink the
         editor area below something usable. Order of clamps matters on
         very narrow terminals: when the upper bound would fall below the
         lower, the lower wins (we'd rather have an unusable workspace
         for one frame than a 0-column tree)."""
         var w = want
-        var hi = screen.b.x - FILE_TREE_RIGHT_RESERVE
+        var hi = container_bounds.b.x - FILE_TREE_RIGHT_RESERVE
         if w > hi:
             w = hi
         if w < FILE_TREE_MIN_WIDTH:
@@ -467,12 +467,12 @@ struct FileTree(Movable):
         return w
 
     def _scroll_to_selection(mut self):
-        # Visible-window height isn't known without ``screen``, so
+        # Visible-window height isn't known without ``container_bounds``, so
         # use a conservative fixed visible count — the listing is
         # right-docked at a fixed width and the host gives us at
         # least 10 rows in practice. Erring small means we may
         # over-scroll on tiny terminals; that's preferable to
-        # leaving the selection off-screen.
+        # leaving the selection off-container_bounds.
         var visible = 10
         if self.selected < 0:
             return
@@ -481,26 +481,26 @@ struct FileTree(Movable):
         elif self.selected >= self.scroll + visible:
             self.scroll = self.selected - visible + 1
 
-    def is_on_resize_edge(self, pos: Point, screen: Rect) -> Bool:
+    def is_on_resize_edge(self, pos: Point, container_bounds: Rect) -> Bool:
         """Hit-test for the separator column — the row-tall handle the
         user drags to widen / narrow the panel. Used by the host to
         switch the mouse pointer to ``ew-resize`` while hovering."""
         if not self.visible:
             return False
-        var area = self.rect(screen)
+        var area = self.rect(container_bounds)
         return pos.x == self._sep_x(area) \
             and pos.y >= area.a.y and pos.y < area.b.y
 
     def is_resizing(self) -> Bool:
         return self._resizing
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         """Returns True iff the event was inside the panel (consumed)."""
         if not self.visible:
             return False
         if event.kind != EVENT_MOUSE:
             return False
-        var area = self.rect(screen)
+        var area = self.rect(container_bounds)
         # Resize-drag: once started, every subsequent mouse event
         # belongs to the resize until the button is released — even
         # when the cursor leaves the original panel rect. Checked
@@ -516,8 +516,8 @@ struct FileTree(Movable):
             # terminals report drag motion that way. The separator sits
             # at column ``width - 1`` when left-docked, hence the +1.
             var want = event.pos.x + 1 if self.dock_left \
-                else screen.b.x - event.pos.x
-            self.width = self._clamp_width(want, screen)
+                else container_bounds.b.x - event.pos.x
+            self.width = self._clamp_width(want, container_bounds)
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
             if event.pos.x == self._sep_x(area) \

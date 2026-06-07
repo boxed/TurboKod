@@ -82,13 +82,13 @@ struct ReferencePick(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    def _rect(self, screen: Rect) -> Rect:
+    def _rect(self, container_bounds: Rect) -> Rect:
         var width = 80
         var height = 20
-        if width > screen.b.x - 4: width = screen.b.x - 4
-        if height > screen.b.y - 4: height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
+        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
     def _list_top(self, rect: Rect) -> Int:
@@ -118,7 +118,7 @@ struct ReferencePick(Movable):
             return String(StringSlice(unsafe_from_utf8=pb[len(rb):]))
         return path
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -126,7 +126,7 @@ struct ReferencePick(Movable):
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var meta_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_meta    = Attr(BLUE,   YELLOW)
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), bg)
@@ -200,12 +200,12 @@ struct ReferencePick(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         # Standard ``[■]`` close button — equivalent to ESC. Checked

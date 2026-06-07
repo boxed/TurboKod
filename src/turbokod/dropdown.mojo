@@ -195,7 +195,7 @@ struct Dropdown(Copyable, Movable):
 
     # --- popup geometry -----------------------------------------------
 
-    def popup_rect(self, anchor: Rect, screen: Rect) -> Rect:
+    def popup_rect(self, anchor: Rect, container_bounds: Rect) -> Rect:
         """Where the popup will render relative to the collapsed
         strip. Sits directly below the strip when there's room;
         flips above when not. Width matches the strip but is widened
@@ -213,13 +213,13 @@ struct Dropdown(Copyable, Movable):
             if w > width:
                 width = w
         var x = anchor.a.x
-        if x + width > screen.b.x:
-            x = screen.b.x - width
+        if x + width > container_bounds.b.x:
+            x = container_bounds.b.x - width
             if x < 0:
                 x = 0
         # Prefer below; flip above if it'd run off the bottom.
         var y = anchor.b.y
-        if y + height > screen.b.y:
+        if y + height > container_bounds.b.y:
             y = anchor.a.y - height
             if y < 0:
                 y = 0
@@ -265,13 +265,13 @@ struct Dropdown(Copyable, Movable):
         var caret = String("▲") if self.is_open else String("▼")
         painter.set(canvas, rect.b.x - 1, rect.a.y, Cell(caret, fill_attr, 1))
 
-    def paint_popup(self, mut canvas: Canvas, anchor: Rect, screen: Rect):
+    def paint_popup(self, mut canvas: Canvas, anchor: Rect, container_bounds: Rect):
         """Render the popup list. Caller invokes this last (after the
         rest of the dialog) so the popup overlays whatever's
         underneath. No-op when the dropdown is collapsed."""
         if not self.is_open or len(self.options) == 0:
             return
-        var rect = self.popup_rect(anchor, screen)
+        var rect = self.popup_rect(anchor, container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         paint_drop_shadow(canvas, rect)
@@ -366,7 +366,7 @@ struct Dropdown(Copyable, Movable):
         self._scroll_to_highlight()
 
     def handle_mouse(
-        mut self, anchor: Rect, screen: Rect, event: Event,
+        mut self, anchor: Rect, container_bounds: Rect, event: Event,
     ) -> Int:
         """Treat ``event`` as a candidate click on the dropdown.
 
@@ -392,7 +392,7 @@ struct Dropdown(Copyable, Movable):
             return DROPDOWN_HIT_NONE
         # Wheel inside an open popup scrolls the highlight.
         if self.is_open:
-            var pr = self.popup_rect(anchor, screen)
+            var pr = self.popup_rect(anchor, container_bounds)
             if event.button == MOUSE_WHEEL_UP and pr.contains(event.pos):
                 self._step(-1)
                 return DROPDOWN_HIT_POPUP
@@ -406,7 +406,7 @@ struct Dropdown(Copyable, Movable):
                 self.toggle()
                 return DROPDOWN_HIT_BODY
             if self.is_open:
-                var pr = self.popup_rect(anchor, screen)
+                var pr = self.popup_rect(anchor, container_bounds)
                 if pr.contains(event.pos):
                     # Highlight the row under the cursor + arm
                     # tracking; commit happens on release.
@@ -428,7 +428,7 @@ struct Dropdown(Copyable, Movable):
         self._tracking = False
         if not self.is_open:
             return DROPDOWN_HIT_NONE
-        var pr = self.popup_rect(anchor, screen)
+        var pr = self.popup_rect(anchor, container_bounds)
         if not pr.contains(event.pos):
             # Drag-off-and-release cancels the commit, like a button.
             # The popup stays open so the user can keep navigating.

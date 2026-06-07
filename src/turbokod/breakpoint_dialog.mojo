@@ -225,10 +225,10 @@ struct BreakpointMenu(Movable):
             _wait_for_value(self.wait_for),
         )
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DLG_WIDTH
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < _MIN_WIDTH:
             width = _MIN_WIDTH
         # Rows: top border / title / blank / [Enabled] line / blank /
@@ -236,10 +236,10 @@ struct BreakpointMenu(Movable):
         # Condition: label / input / blank / button row / shadow /
         # bottom border
         var height = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0: x = 0
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
@@ -251,11 +251,11 @@ struct BreakpointMenu(Movable):
         the dialog has since moved/resized."""
         self.enabled.move_to(dlg.a.x + 2, layout.checkbox_y)
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_menu_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -361,15 +361,15 @@ struct BreakpointMenu(Movable):
         paint_shadow_button(canvas, self._ok, ok_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._cancel, cancel_face, LIGHT_GRAY)
 
-    def paint_popup(self, mut canvas: Canvas, screen: Rect):
+    def paint_popup(self, mut canvas: Canvas, container_bounds: Rect):
         """Render the wait-for dropdown popup on top. Caller invokes
         this after every other modal layer so the popup overlays them
         — same z-order pattern as ``Settings`` and ``ActionEditor``."""
         if not self.active or not self.wait_for.is_open:
             return
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_menu_layout(rect)
-        self.wait_for.paint_popup(canvas, layout.wait_for_rect, screen)
+        self.wait_for.paint_popup(canvas, layout.wait_for_rect, container_bounds)
 
     def _resolve(mut self, confirmed: Bool):
         self.submitted = True
@@ -444,12 +444,12 @@ struct BreakpointMenu(Movable):
         # above — the underlying ``ShadowButton`` only responds to mouse.
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_menu_layout(rect)
         self._position_checkbox(layout, rect)
         # Standard ``[■]`` close button — equivalent to ESC / Cancel.
@@ -465,7 +465,7 @@ struct BreakpointMenu(Movable):
         # not also flip checkbox / text-field focus underneath.
         if self.wait_for.is_open:
             var hit = self.wait_for.handle_mouse(
-                layout.wait_for_rect, screen, event,
+                layout.wait_for_rect, container_bounds, event,
             )
             if hit == DROPDOWN_HIT_BODY or hit == DROPDOWN_HIT_POPUP:
                 self._focus.focus_force(_SLOT_WAIT_FOR)
@@ -500,7 +500,7 @@ struct BreakpointMenu(Movable):
         # and would otherwise win on overlapping rows.
         if not self.wait_for.is_open:
             var hit2 = self.wait_for.handle_mouse(
-                layout.wait_for_rect, screen, event,
+                layout.wait_for_rect, container_bounds, event,
             )
             if hit2 == DROPDOWN_HIT_BODY:
                 return True
@@ -606,7 +606,7 @@ struct BreakpointConditionErrorDialog(Movable):
     var error: String
     var locals_: List[String]
     """``name = value`` strings, capped to a few lines so a huge frame
-    doesn't blow the dialog past the screen."""
+    doesn't blow the dialog past the container_bounds."""
     var condition: TextField
     var _focus: FocusGroup
     var _try: ShadowButton
@@ -671,10 +671,10 @@ struct BreakpointConditionErrorDialog(Movable):
         # Refocus the condition so the user can keep typing.
         self._focus.focus_force(_ERR_SLOT_CONDITION)
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DLG_WIDTH + 8
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < _MIN_WIDTH:
             width = _MIN_WIDTH
         # Rows: top / title / blank / "Error:" / err line / blank /
@@ -685,20 +685,20 @@ struct BreakpointConditionErrorDialog(Movable):
         var height = 1 + 1 + 1 + 1 + 1 + 1 + 1 + loc_rows + 1 + 1 + 1 + 1 + 1 + 1 + 1
         if height < 12:
             height = 12
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0: x = 0
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var err_attr = Attr(LIGHT_RED, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_error_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -842,12 +842,12 @@ struct BreakpointConditionErrorDialog(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_error_layout(rect)
         # Standard ``[■]`` close button — equivalent to ESC / Cancel.
         # Checked before any other routing so a click on the chrome

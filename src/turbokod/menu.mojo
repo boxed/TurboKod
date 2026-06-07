@@ -212,7 +212,7 @@ struct MenuBar(Movable):
         order doesn't matter; rank ties preserve insertion order. The
         ``self.menus`` list is *not* reshuffled, so any external indices
         (e.g., a Desktop's cached project / window menu index) stay valid.
-        On a very narrow screen the two groups may visually overlap.
+        On a very narrow container_bounds the two groups may visually overlap.
         """
         var rects = List[Rect]()
         for _ in range(len(self.menus)):
@@ -291,23 +291,23 @@ struct MenuBar(Movable):
         var height = len(menu.items) + 2
         if menu.right_aligned:
             # Anchor the dropdown's right edge to the label's right edge so
-            # it never spills off-screen.
+            # it never spills off-container_bounds.
             return Rect(anchor.b.x - width, 1, anchor.b.x, 1 + height)
         return Rect(anchor.a.x, 1, anchor.a.x + width, 1 + height)
 
     # --- paint -------------------------------------------------------------
 
-    def paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
         var bar      = Attr(BLACK, LIGHT_GRAY)
         var bar_key  = Attr(RED,   LIGHT_GRAY)
         var open_bg  = Attr(BLACK, GREEN)
         var open_key = Attr(WHITE, GREEN)
         # The menu bar owns the top row only — bind a Painter to that
         # one-row strip so a long label can't bleed onto the row below.
-        var bar_rect = Rect(0, 0, screen.b.x, 1)
+        var bar_rect = Rect(0, 0, container_bounds.b.x, 1)
         var bar_p = Painter(bar_rect)
         bar_p.fill(canvas, bar_rect, String(" "), bar)
-        var rects = self._layout(screen.b.x)
+        var rects = self._layout(container_bounds.b.x)
         # Default-paint the static ``≡`` brand mark; gets overdrawn below if
         # an actual system menu is registered (so the hit zone gains a real
         # hover/open background).
@@ -342,7 +342,7 @@ struct MenuBar(Movable):
             )
             bar_p.set(canvas, r.b.x - 1, 0, Cell(String(" "), bg, 1))
         if self.open_idx >= 0:
-            self._paint_dropdown(canvas, screen.b.x)
+            self._paint_dropdown(canvas, container_bounds.b.x)
 
     def _paint_label_hotkey(
         self, mut canvas: Canvas, painter: Painter, x: Int, y: Int,

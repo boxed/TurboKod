@@ -270,13 +270,13 @@ struct LanguageEditor(Movable):
 
     # --- painting ---------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -544,12 +544,12 @@ struct LanguageEditor(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Buttons first.
         if self._dispatch_buttons(event):

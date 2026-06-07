@@ -70,7 +70,7 @@ comptime _FMT_BIN = String("Binary")
 @fieldwise_init
 struct _FillLayout(ImplicitlyCopyable, Movable):
     """Pre-computed rects + row anchors for the dialog. Built once per
-    paint so geometry never lags the live screen size."""
+    paint so geometry never lags the live container_bounds size."""
     var title_y: Int
     var mode_label_y: Int
     var mode_rect: Rect
@@ -345,10 +345,10 @@ struct FillDialog(Movable):
         var inc_opt = _parse_signed_int(self.increment.text)
         return Bool(init_opt) and Bool(inc_opt)
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DLG_WIDTH
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < _MIN_WIDTH:
             width = _MIN_WIDTH
         # Rows: top / title / blank / mode label / mode / blank /
@@ -356,10 +356,10 @@ struct FillDialog(Movable):
         # increment label / increment / blank / pad checkbox / blank /
         # format label / format / blank / buttons / shadow / bottom
         var height = 23
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0: x = 0
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
@@ -379,13 +379,13 @@ struct FillDialog(Movable):
         self._focus.update(_SLOT_PAD, self.pad.hit_rect(), numbers)
         self._focus.update(_SLOT_FORMAT, layout.format_rect, numbers)
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var label_attr = Attr(BLACK, LIGHT_GRAY)
         var disabled_attr = Attr(WHITE, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -525,19 +525,19 @@ struct FillDialog(Movable):
         paint_shadow_button(canvas, self._ok, ok_face, LIGHT_GRAY)
         paint_shadow_button(canvas, self._cancel, cancel_face, LIGHT_GRAY)
 
-    def paint_popup(self, mut canvas: Canvas, screen: Rect):
+    def paint_popup(self, mut canvas: Canvas, container_bounds: Rect):
         """Render any open dropdown popup on top of the rest of the
         dialog. The host invokes this after every other modal layer so
         the popup overlays them — same z-order pattern as
         ``BreakpointMenu``."""
         if not self.active:
             return
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_layout(rect)
         if self.mode.is_open:
-            self.mode.paint_popup(canvas, layout.mode_rect, screen)
+            self.mode.paint_popup(canvas, layout.mode_rect, container_bounds)
         if self.format_.is_open and self.is_numbers_mode():
-            self.format_.paint_popup(canvas, layout.format_rect, screen)
+            self.format_.paint_popup(canvas, layout.format_rect, container_bounds)
 
     def _resolve(mut self, confirmed: Bool):
         if confirmed and not self._can_submit():
@@ -630,12 +630,12 @@ struct FillDialog(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         var layout = _build_layout(rect)
         self._position_pad(layout, rect)
         # Standard close button — equivalent to Esc / Cancel.
@@ -648,14 +648,14 @@ struct FillDialog(Movable):
         # a click on the popup doesn't also shift focus underneath.
         if self.mode.is_open:
             var h1 = self.mode.handle_mouse(
-                layout.mode_rect, screen, event,
+                layout.mode_rect, container_bounds, event,
             )
             if h1 == DROPDOWN_HIT_BODY or h1 == DROPDOWN_HIT_POPUP:
                 self._focus.focus_force(_SLOT_MODE)
                 return True
         if self.format_.is_open and self.is_numbers_mode():
             var h2 = self.format_.handle_mouse(
-                layout.format_rect, screen, event,
+                layout.format_rect, container_bounds, event,
             )
             if h2 == DROPDOWN_HIT_BODY or h2 == DROPDOWN_HIT_POPUP:
                 self._focus.focus_force(_SLOT_FORMAT)
@@ -674,13 +674,13 @@ struct FillDialog(Movable):
         # Closed-dropdown click on the strip toggles it open.
         if not self.mode.is_open:
             var h3 = self.mode.handle_mouse(
-                layout.mode_rect, screen, event,
+                layout.mode_rect, container_bounds, event,
             )
             if h3 == DROPDOWN_HIT_BODY:
                 return True
         if self.is_numbers_mode() and not self.format_.is_open:
             var h4 = self.format_.handle_mouse(
-                layout.format_rect, screen, event,
+                layout.format_rect, container_bounds, event,
             )
             if h4 == DROPDOWN_HIT_BODY:
                 return True

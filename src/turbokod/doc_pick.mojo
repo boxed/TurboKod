@@ -151,24 +151,24 @@ struct DocPick(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    def _rect(self, screen: Rect) -> Rect:
+    def _rect(self, container_bounds: Rect) -> Rect:
         var width = 80
         var height = 22
-        if width > screen.b.x - 4: width = screen.b.x - 4
-        if height > screen.b.y - 4: height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
+        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         return Rect(x, y, x + width, y + height)
 
-    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         return _build_layout(rect, _LABEL_W).input_rect.contains(pos)
 
     # --- paint ------------------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var bg          = Attr(BLACK,  LIGHT_GRAY)
@@ -176,7 +176,7 @@ struct DocPick(Movable):
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var type_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_type    = Attr(BLUE,   YELLOW)
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var layout = _build_layout(rect, _LABEL_W)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -263,12 +263,12 @@ struct DocPick(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var layout = _build_layout(rect, _LABEL_W)
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before input/list routing so a click on the chrome glyph

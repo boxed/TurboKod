@@ -257,7 +257,7 @@ def paint_title_commands(
     A one-cell gap is inserted between consecutive commands. Labels
     that don't fully fit before ``max_x`` are skipped — the returned
     list contains only commands the user can see end-to-end, so a
-    click never fires on a label whose hint half is off-screen.
+    click never fires on a label whose hint half is off-container_bounds.
     """
     var hits = List[TitleCommandHit]()
     if len(commands) == 0:
@@ -450,7 +450,7 @@ def paint_panel_window_buttons(
 
 comptime DOCK_MIN_HEIGHT = 4
 """Smallest NORMAL-state height the user can drag down to — keeps the
-title row, the status row, and at least two body rows on screen."""
+title row, the status row, and at least two body rows on container_bounds."""
 
 
 struct BottomDockedPanel(Copyable, Movable):
@@ -547,14 +547,14 @@ struct BottomDockedPanel(Copyable, Movable):
         if len(self.close_button_id.as_bytes()) > 0:
             self.pending_command_id = self.close_button_id
 
-    def effective_height(self, screen: Rect, bottom_chrome_h: Int) -> Int:
+    def effective_height(self, container_bounds: Rect, bottom_chrome_h: Int) -> Int:
         """Rendered height accounting for the state machine.
         NORMAL → ``preferred_height``. MINIMIZED → 1 (header only).
         MAXIMIZED → fill the workspace above the bottom chrome."""
         if self.state == PANEL_STATE_MINIMIZED:
             return 1
         if self.state == PANEL_STATE_MAXIMIZED:
-            var avail = screen.b.y - bottom_chrome_h - 1
+            var avail = container_bounds.b.y - bottom_chrome_h - 1
             if avail < DOCK_MIN_HEIGHT:
                 avail = DOCK_MIN_HEIGHT
             return avail
@@ -562,7 +562,7 @@ struct BottomDockedPanel(Copyable, Movable):
 
     def clamp_height(self, want: Int, panel: Rect) -> Int:
         """Pin a proposed height to a usable range. Lower bound keeps
-        the title bar plus a couple of body rows on screen; upper
+        the title bar plus a couple of body rows on container_bounds; upper
         bound leaves at least 5 rows of workspace above the panel."""
         var h = want
         var hi = panel.b.y - 5
@@ -1401,7 +1401,7 @@ struct Window(Copyable, Movable):
         ``track_pos`` (track-relative, 0..track_h) sits centered in the
         editor view. Triggered by clicks in the page-up / page-down zones
         of the vertical scrollbar — the user gets a direct "go here, with
-        a screen of context above and below" jump instead of paging."""
+        a container_bounds of context above and below" jump instead of paging."""
         if not self.is_editor: return
         self.editor.scroll_y = self._v_scrollbar().track_jump(track_pos)
 
@@ -1593,7 +1593,7 @@ struct WindowManager(Movable):
         panel (file tree / debug pane) toggling, or a session restore
         rewriting rects from saved positions. The first two should
         preserve the user's layout — two windows tiled side by side
-        covering the screen must still cover it after the terminal grows
+        covering the container_bounds must still cover it after the terminal grows
         — so each non-maximized window's rect is scaled proportionally
         when the workspace differs from the last one seen.
 
@@ -1623,7 +1623,7 @@ struct WindowManager(Movable):
         After fitting, every editor window's scroll offsets get clamped
         against its (possibly resized) interior — a window that was
         scrolled right while narrow must not leave leading text wedged
-        off-screen once it's wide enough that the scrollbar disappears.
+        off-container_bounds once it's wide enough that the scrollbar disappears.
         """
         if not self._has_last_workspace:
             self._clip_into(workspace)

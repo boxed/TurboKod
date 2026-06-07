@@ -78,7 +78,7 @@ comptime _CANCEL_LABEL = String(" Cancel ")
 
 # --- virtual render rows ------------------------------------------------
 # The merged document is flattened into a geometry-independent list of
-# RenderRows; paint maps a scroll window of them onto screen rows, and
+# RenderRows; paint maps a scroll window of them onto container_bounds rows, and
 # handle_mouse re-derives the same list to hit-test the action bars.
 
 comptime _ROW_TEXT      = 0   # stable / agreed line
@@ -315,19 +315,19 @@ struct MergeView(Movable):
                 return i
         return -1
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         var width = 100
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < 30:
             width = 30
         var height = 40
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
         if height < 10:
             height = 10
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0: x = 0
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
@@ -349,9 +349,9 @@ struct MergeView(Movable):
         if self.scroll < 0:
             self.scroll = 0
 
-    def _ensure_current_visible(mut self, screen: Rect):
+    def _ensure_current_visible(mut self, container_bounds: Rect):
         var rows = self._build_rows()
-        var content = self._content_rect(self._layout(screen))
+        var content = self._content_rect(self._layout(container_bounds))
         var visible = content.height()
         if visible < 1:
             return
@@ -366,11 +366,11 @@ struct MergeView(Movable):
 
     # --- paint -----------------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var body = Attr(BLACK, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), body)
@@ -678,12 +678,12 @@ struct MergeView(Movable):
 
     # --- mouse -----------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):

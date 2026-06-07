@@ -1203,57 +1203,57 @@ struct LocalChanges(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    def _panel_rect(self, screen: Rect) -> Rect:
+    def _panel_rect(self, container_bounds: Rect) -> Rect:
         """The modal always paints fullscreen — it intercepts every
         input event, so a non-fullscreen "windowed" mode wouldn't gain
         anything visible behind it that the user could interact with."""
-        return screen
+        return container_bounds
 
-    def _sidebar_width(self, screen: Rect) -> Int:
+    def _sidebar_width(self, container_bounds: Rect) -> Int:
         """Sidebar width in cells. The auto-default (no user drag yet)
         targets ~⅓ of the window with the ``_SIDEBAR_MIN``/``MAX``
         comfort range. Once the user drags, only natural bounds apply
         — the splitter must stay one cell inside the box on each side
         so the borders don't get clobbered, but otherwise the user can
         crush the sidebar (or the right side) all the way to 1 cell."""
-        var hard_max = screen.width() - 2
+        var hard_max = container_bounds.width() - 2
         if hard_max < 1:
             hard_max = 1
         var w: Int
         if self.sidebar_width_user >= 0:
             w = self.sidebar_width_user
         else:
-            w = screen.width() // 3
+            w = container_bounds.width() // 3
             if w < _SIDEBAR_MIN: w = _SIDEBAR_MIN
             if w > _SIDEBAR_MAX: w = _SIDEBAR_MAX
         if w < 1: w = 1
         if w > hard_max: w = hard_max
         return w
 
-    def _list_top(self, screen: Rect) -> Int:
-        return screen.a.y + 2
+    def _list_top(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.y + 2
 
-    def _list_bottom(self, screen: Rect) -> Int:
-        return screen.b.y - 1
+    def _list_bottom(self, container_bounds: Rect) -> Int:
+        return container_bounds.b.y - 1
 
-    def _list_height(self, screen: Rect) -> Int:
-        var h = self._list_bottom(screen) - self._list_top(screen)
+    def _list_height(self, container_bounds: Rect) -> Int:
+        var h = self._list_bottom(container_bounds) - self._list_top(container_bounds)
         return 0 if h < 0 else h
 
-    def _diff_left(self, screen: Rect) -> Int:
-        return screen.a.x + self._sidebar_width(screen) + 1
+    def _diff_left(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.x + self._sidebar_width(container_bounds) + 1
 
-    def _diff_right(self, screen: Rect) -> Int:
-        return screen.b.x - 1
+    def _diff_right(self, container_bounds: Rect) -> Int:
+        return container_bounds.b.x - 1
 
-    def _diff_width(self, screen: Rect) -> Int:
-        var w = self._diff_right(screen) - self._diff_left(screen) - 1
+    def _diff_width(self, container_bounds: Rect) -> Int:
+        var w = self._diff_right(container_bounds) - self._diff_left(container_bounds) - 1
         return 0 if w < 0 else w
 
-    def _diff_height(self, screen: Rect) -> Int:
-        return self._list_height(screen)
+    def _diff_height(self, container_bounds: Rect) -> Int:
+        return self._list_height(container_bounds)
 
-    def _pane_rows(self, screen: Rect) -> List[Int]:
+    def _pane_rows(self, container_bounds: Rect) -> List[Int]:
         """Return the y-row layout for the three sidebar panels:
         ``[files_top, files_h, branches_top, branches_h, commits_top,
         commits_h]``. Each panel's first row is a section heading; the
@@ -1267,8 +1267,8 @@ struct LocalChanges(Movable):
         all sections are NORMAL we honor ``files_height_user`` /
         ``branches_height_user`` so the user's splitter drags persist
         across frames."""
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
         var total = bottom - top
         if total < 6:
             total = 6
@@ -1318,14 +1318,14 @@ struct LocalChanges(Movable):
         out.append(c_h)
         return out^
 
-    def _right_panes(self, screen: Rect) -> List[Int]:
+    def _right_panes(self, container_bounds: Rect) -> List[Int]:
         """Returns ``[unstaged_top, unstaged_h, staged_top, staged_h]``
         when the right side is split for a file selection. Same min-
         height clamping logic as ``_pane_rows`` so dragging never
         squashes a panel below one body row. Honors
         ``unstaged_height_user`` when set."""
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
         var total = bottom - top
         if total < 4:
             total = 4
@@ -1351,7 +1351,7 @@ struct LocalChanges(Movable):
         out.append(s_h)
         return out^
 
-    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         return False
 
     # --- right-pane refresh ----------------------------------------------
@@ -1529,7 +1529,7 @@ struct LocalChanges(Movable):
     # --- paint ------------------------------------------------------------
 
     def paint(
-        mut self, mut canvas: Canvas, screen: Rect,
+        mut self, mut canvas: Canvas, container_bounds: Rect,
         mut registry: GrammarRegistry,
     ):
         if not self.active:
@@ -1550,10 +1550,10 @@ struct LocalChanges(Movable):
         var rem_attr    = Attr(LIGHT_RED, EDITOR_BG)
         var hunk_attr   = Attr(CYAN, EDITOR_BG)
         var header_attr = Attr(BORDER_FOCUS, EDITOR_BG)
-        # The modal always covers the full screen — it intercepts every
+        # The modal always covers the full container_bounds — it intercepts every
         # input event, so a windowed mode wouldn't gain any interactive
         # surface area behind it.
-        var bounds = self._panel_rect(screen)
+        var bounds = self._panel_rect(container_bounds)
         canvas.fill(bounds, String(" "), bg)
         canvas.draw_box(bounds, border, True)
         # Title row — framework helper enforces title bg = body bg.
@@ -1648,7 +1648,7 @@ struct LocalChanges(Movable):
         # last thing the user sees while a slow commit/push grinds.
         self.git_runner.paint(canvas, bounds)
 
-    def _paint_overlay(mut self, mut canvas: Canvas, screen: Rect):
+    def _paint_overlay(mut self, mut canvas: Canvas, container_bounds: Rect):
         """Render the active overlay (commit prompt / confirmation /
         status flash) as a small drop-shadowed box centered on the
         modal area. Every write is bound to the overlay's clip via a
@@ -1660,13 +1660,13 @@ struct LocalChanges(Movable):
         var err_attr  = Attr(WHITE, LIGHT_RED)
         # Box geometry — 60 cols wide, 5 rows tall by default; clamps
         # to the modal area on tiny terminals.
-        var max_w = screen.width() - 4
+        var max_w = container_bounds.width() - 4
         var box_w = 64 if max_w >= 64 else max_w
         if box_w < 24:
             box_w = 24
         var box_h = 5
-        var bx = screen.a.x + (screen.width() - box_w) // 2
-        var by = screen.a.y + (screen.height() - box_h) // 2
+        var bx = container_bounds.a.x + (container_bounds.width() - box_w) // 2
+        var by = container_bounds.a.y + (container_bounds.height() - box_h) // 2
         var rect = Rect(bx, by, bx + box_w, by + box_h)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -1952,27 +1952,27 @@ struct LocalChanges(Movable):
             )
 
     def _paint_right_side(
-        mut self, mut canvas: Canvas, screen: Rect,
+        mut self, mut canvas: Canvas, container_bounds: Rect,
         section_attr: Attr, splitter_attr: Attr,
         ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
         hunk_attr: Attr, header_attr: Attr,
     ):
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
-        var left = self._diff_left(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
+        var left = self._diff_left(container_bounds)
         # ``_diff_right`` historically returned the border column itself
-        # (``screen.b.x - 1``). The panels and splitters then used ``+1``
+        # (``container_bounds.b.x - 1``). The panels and splitters then used ``+1``
         # tricks that ended up writing one cell *past* the content area
         # — straight onto the modal's right border. Treat ``right_excl``
         # as the panel's exclusive right edge instead, anchored one cell
         # short of the border so the Painter clip naturally protects the
         # frame.
-        var right_excl = self._diff_right(screen)
+        var right_excl = self._diff_right(container_bounds)
         if right_excl <= left:
             return
         var driving = self._driving_pane()
         if driving == _PANE_FILES:
-            var rp = self._right_panes(screen)
+            var rp = self._right_panes(container_bounds)
             self._paint_panel_with_header(
                 canvas,
                 Rect(left, rp[0], right_excl, rp[0] + rp[1]),
@@ -2019,7 +2019,7 @@ struct LocalChanges(Movable):
     ):
         # Bind every write to ``area`` via a Painter — a long diff line
         # or an over-wide title can't bleed into the neighbour panel,
-        # the splitter row, or off-screen. Children paint without
+        # the splitter row, or off-container_bounds. Children paint without
         # needing to thread a clip arg through every primitive call.
         if area.width() < 1 or area.height() < 1:
             return
@@ -2070,7 +2070,7 @@ struct LocalChanges(Movable):
         var add_gutter_attr = Attr(BLACK, LIGHT_GREEN)
         var rem_gutter_attr = Attr(BLACK, LIGHT_RED)
         # Explicit body fill — the outer ``LocalChanges.paint`` sets
-        # every screen cell to ``YELLOW`` on ``EDITOR_BG``, but per-cell
+        # every container_bounds cell to ``YELLOW`` on ``EDITOR_BG``, but per-cell
         # writes below only touch the gutter glyph (col 0), the body
         # text (col +2 onward), and any highlight overlays. Without an
         # explicit fill the spacer column (col +1) and the trailing
@@ -2238,8 +2238,8 @@ struct LocalChanges(Movable):
         if self.focus == _PANE_COMMITS: return self.sel_commit
         return 0
 
-    def _focused_panel_height(self, screen: Rect) -> Int:
-        var rows = self._pane_rows(screen)
+    def _focused_panel_height(self, container_bounds: Rect) -> Int:
+        var rows = self._pane_rows(container_bounds)
         var h: Int
         if self.focus == _PANE_FILES:
             h = rows[1] - 1
@@ -2251,14 +2251,14 @@ struct LocalChanges(Movable):
             h = 0
         return 0 if h < 0 else h
 
-    def _set_focused_selection(mut self, new_idx: Int, screen: Rect):
+    def _set_focused_selection(mut self, new_idx: Int, container_bounds: Rect):
         var n = self._focused_count()
         if n == 0:
             return
         var new = new_idx
         if new < 0: new = 0
         if new >= n: new = n - 1
-        var h = self._focused_panel_height(screen)
+        var h = self._focused_panel_height(container_bounds)
         if h < 1: h = 1
         if self.focus == _PANE_FILES:
             self.sel_file = new
@@ -2370,21 +2370,21 @@ struct LocalChanges(Movable):
             self.last_sidebar_focus = _PANE_FILES
             return
 
-    def _focused_right_panel_height(self, screen: Rect) -> Int:
+    def _focused_right_panel_height(self, container_bounds: Rect) -> Int:
         if self.focus == _PANE_RIGHT_INFO:
-            return self._diff_height(screen) - 1
-        var rp = self._right_panes(screen)
+            return self._diff_height(container_bounds) - 1
+        var rp = self._right_panes(container_bounds)
         if self.focus == _PANE_RIGHT_UNSTAGED:
             return rp[1] - 1
         return rp[3] - 1
 
-    def _scroll_focused_right(mut self, delta: Int, screen: Rect):
+    def _scroll_focused_right(mut self, delta: Int, container_bounds: Rect):
         """Scroll the focused right panel and clamp its cursor.
 
         Dispatches to a free function (rather than a method) because
         Mojo's borrow checker rejects passing ``self.unstaged`` as a
         ``mut`` arg from a method that already holds ``mut self``."""
-        var h = self._focused_right_panel_height(screen)
+        var h = self._focused_right_panel_height(container_bounds)
         if self.focus == _PANE_RIGHT_UNSTAGED:
             _scroll_panel(self.unstaged, delta, h)
         elif self.focus == _PANE_RIGHT_STAGED:
@@ -2392,8 +2392,8 @@ struct LocalChanges(Movable):
         elif self.focus == _PANE_RIGHT_INFO:
             _scroll_panel(self.info, delta, h)
 
-    def _move_focused_right_cursor(mut self, delta: Int, screen: Rect):
-        var h = self._focused_right_panel_height(screen)
+    def _move_focused_right_cursor(mut self, delta: Int, container_bounds: Rect):
+        var h = self._focused_right_panel_height(container_bounds)
         if self.focus == _PANE_RIGHT_UNSTAGED:
             _move_panel_cursor(self.unstaged, delta, h)
         elif self.focus == _PANE_RIGHT_STAGED:
@@ -2402,7 +2402,7 @@ struct LocalChanges(Movable):
             _move_panel_cursor(self.info, delta, h)
 
     def _enter_right_pane(
-        mut self, screen: Rect, mut registry: GrammarRegistry,
+        mut self, container_bounds: Rect, mut registry: GrammarRegistry,
     ):
         """Move focus from sidebar → right side. For file selections we
         land on Unstaged and snap the cursor to the first stageable
@@ -2432,7 +2432,7 @@ struct LocalChanges(Movable):
                 self.unstaged.cursor = 0
             else:
                 self.unstaged.cursor = found
-            var h = self._focused_right_panel_height(screen)
+            var h = self._focused_right_panel_height(container_bounds)
             if h < 1: h = 1
             if self.unstaged.cursor < self.unstaged.scroll:
                 self.unstaged.scroll = self.unstaged.cursor
@@ -2450,14 +2450,14 @@ struct LocalChanges(Movable):
         self.focus = self.last_sidebar_focus
 
     def handle_key(
-        mut self, event: Event, screen: Rect,
+        mut self, event: Event, container_bounds: Rect,
         mut registry: GrammarRegistry,
     ) -> Bool:
         if not self.active or event.kind != EVENT_KEY:
             return False
         if self.overlay != _OVERLAY_NONE:
             return self._handle_overlay_key(event)
-        var bounds = self._panel_rect(screen)
+        var bounds = self._panel_rect(container_bounds)
         var k = event.key
         if k == KEY_ESC:
             # Refuse to close while a git op is in flight — the spinner
@@ -2588,7 +2588,7 @@ struct LocalChanges(Movable):
             return True
         return False
 
-    def _handle_space(mut self, screen: Rect):
+    def _handle_space(mut self, container_bounds: Rect):
         """Stage / unstage the focused thing.
 
         * On the Files panel: toggle whole-file staged status — stage if
@@ -3014,7 +3014,7 @@ struct LocalChanges(Movable):
 
     # --- mouse / drag helpers ---------------------------------------------
 
-    def _hit_splitter(self, pos: Point, screen: Rect) -> Int:
+    def _hit_splitter(self, pos: Point, container_bounds: Rect) -> Int:
         """Return ``_DRAG_*`` for the splitter at ``pos``, or
         ``_DRAG_NONE`` if the position isn't on any splitter. The
         vertical sidebar/right splitter takes a 2-cell hit zone (the
@@ -3022,51 +3022,51 @@ struct LocalChanges(Movable):
         so the drag is discoverable; widening the hit zone over the
         right side would steal clicks from diff body rows. Horizontal
         splitters are the ``─`` rows between sidebar/right sub-panels."""
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
         if pos.y < top or pos.y >= bottom:
             return _DRAG_NONE
-        var sw = self._sidebar_width(screen)
-        var sep_x = screen.a.x + sw
+        var sw = self._sidebar_width(container_bounds)
+        var sep_x = container_bounds.a.x + sw
         # Vertical sidebar/right splitter.
         if pos.x >= sep_x - 1 and pos.x <= sep_x:
             return _DRAG_SIDEBAR
-        var rows = self._pane_rows(screen)
+        var rows = self._pane_rows(container_bounds)
         var split1_y = rows[0] + rows[1]
         var split2_y = rows[2] + rows[3]
-        # Sidebar horizontal splitters span [screen.a.x, sep_x - 1]. Only
+        # Sidebar horizontal splitters span [container_bounds.a.x, sep_x - 1]. Only
         # draggable when all three sidebar panels are in NORMAL state —
         # min/max collapse the layout to state-driven sizing where
         # ``files_height_user`` / ``branches_height_user`` aren't read.
         if self.sidebar_dock.all_normal() \
-                and pos.x >= screen.a.x and pos.x < sep_x:
+                and pos.x >= container_bounds.a.x and pos.x < sep_x:
             if pos.y == split1_y:
                 return _DRAG_SPLIT_FB
             if pos.y == split2_y:
                 return _DRAG_SPLIT_BC
         # Right-side horizontal splitter (file mode only).
         if self._driving_pane() == _PANE_FILES \
-                and pos.x > sep_x and pos.x <= screen.b.x - 1:
-            var rp = self._right_panes(screen)
+                and pos.x > sep_x and pos.x <= container_bounds.b.x - 1:
+            var rp = self._right_panes(container_bounds)
             var split3_y = rp[0] + rp[1]
             if pos.y == split3_y:
                 return _DRAG_SPLIT_US
         return _DRAG_NONE
 
-    def _apply_drag(mut self, pos: Point, screen: Rect):
+    def _apply_drag(mut self, pos: Point, container_bounds: Rect):
         """Continue a drag: update the relevant override based on
         ``pos.y`` (or ``pos.x`` for the vertical splitter). The
         geometry helpers clamp on read, so we just store the raw value."""
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
         if self._drag_kind == _DRAG_SIDEBAR:
             # Only natural bounds: the splitter must stay one cell
             # inside the box on either side so the borders survive.
             # The user can drag the sidebar all the way down to 1 or
-            # all the way up to ``screen.width() - 2``.
-            var w = pos.x - screen.a.x
+            # all the way up to ``container_bounds.width() - 2``.
+            var w = pos.x - container_bounds.a.x
             if w < 1: w = 1
-            var max_w = screen.width() - 2
+            var max_w = container_bounds.width() - 2
             if max_w < 1: max_w = 1
             if w > max_w: w = max_w
             self.sidebar_width_user = w
@@ -3089,7 +3089,7 @@ struct LocalChanges(Movable):
         if self._drag_kind == _DRAG_SPLIT_BC:
             # pos.y is the new branches-bottom; subtract files_top + f_h + 1
             # (splitter row) to get branches height.
-            var rows = self._pane_rows(screen)
+            var rows = self._pane_rows(container_bounds)
             var b_top = rows[2]
             var h = pos.y - b_top
             var min_h = 1 + _PANEL_MIN_BODY
@@ -3111,14 +3111,14 @@ struct LocalChanges(Movable):
             self.unstaged_height_user = h
             return
 
-    def _pane_at(self, pos: Point, screen: Rect) -> Int:
+    def _pane_at(self, pos: Point, container_bounds: Rect) -> Int:
         """Return which sidebar pane (or -1 for "right pane / outside /
         on a splitter row") the cursor position falls in."""
-        var sw = self._sidebar_width(screen)
-        var sidebar_right = screen.a.x + sw
-        if pos.x >= sidebar_right or pos.x < screen.a.x:
+        var sw = self._sidebar_width(container_bounds)
+        var sidebar_right = container_bounds.a.x + sw
+        if pos.x >= sidebar_right or pos.x < container_bounds.a.x:
             return -1
-        var rows = self._pane_rows(screen)
+        var rows = self._pane_rows(container_bounds)
         if pos.y >= rows[0] and pos.y < rows[0] + rows[1]:
             return _PANE_FILES
         if pos.y >= rows[2] and pos.y < rows[2] + rows[3]:
@@ -3127,21 +3127,21 @@ struct LocalChanges(Movable):
             return _PANE_COMMITS
         return -1
 
-    def _right_pane_at(self, pos: Point, screen: Rect) -> Int:
+    def _right_pane_at(self, pos: Point, container_bounds: Rect) -> Int:
         """Return _PANE_RIGHT_UNSTAGED / _PANE_RIGHT_STAGED /
         _PANE_RIGHT_INFO based on which sub-panel ``pos`` falls in. -1
         when ``pos`` is outside the right side or on the splitter row."""
-        var sw = self._sidebar_width(screen)
-        var sep_x = screen.a.x + sw
-        if pos.x <= sep_x or pos.x > screen.b.x - 1:
+        var sw = self._sidebar_width(container_bounds)
+        var sep_x = container_bounds.a.x + sw
+        if pos.x <= sep_x or pos.x > container_bounds.b.x - 1:
             return -1
-        var top = self._list_top(screen)
-        var bottom = self._list_bottom(screen)
+        var top = self._list_top(container_bounds)
+        var bottom = self._list_bottom(container_bounds)
         if pos.y < top or pos.y >= bottom:
             return -1
         if self._driving_pane() != _PANE_FILES:
             return _PANE_RIGHT_INFO
-        var rp = self._right_panes(screen)
+        var rp = self._right_panes(container_bounds)
         if pos.y >= rp[0] and pos.y < rp[0] + rp[1]:
             return _PANE_RIGHT_UNSTAGED
         if pos.y >= rp[2] and pos.y < rp[2] + rp[3]:
@@ -3178,7 +3178,7 @@ struct LocalChanges(Movable):
         self.submitted = True
 
     def handle_mouse(
-        mut self, event: Event, screen: Rect,
+        mut self, event: Event, container_bounds: Rect,
         mut registry: GrammarRegistry,
     ) -> Bool:
         if not self.active or event.kind != EVENT_MOUSE:
@@ -3187,7 +3187,7 @@ struct LocalChanges(Movable):
         if self.overlay != _OVERLAY_NONE:
             return True
         var pos = event.pos
-        var bounds = self._panel_rect(screen)
+        var bounds = self._panel_rect(container_bounds)
         # --- in-progress splitter drag -----------------------------------
         # Resolved before any other handling so a click that *starts* on
         # a splitter never also triggers list-row behaviour even if the

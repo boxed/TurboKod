@@ -1,4 +1,4 @@
-"""Project Settings view — a second-surface screen (native window on the
+"""Project Settings view — a second-surface container_bounds (native window on the
 macOS frontend, in-grid movable/resizable dialog in the terminal), the
 same pattern as the global ``Settings`` view.
 
@@ -746,20 +746,20 @@ struct ProjectSettings(Movable):
 
     # --- chrome -----------------------------------------------------
 
-    def _workspace_rect(self, screen: Rect) -> Rect:
+    def _workspace_rect(self, container_bounds: Rect) -> Rect:
         if self.detached:
-            return screen
+            return container_bounds
         return self.bounds
 
-    def _host_workspace(self, screen: Rect) -> Rect:
-        var top = 1 if screen.b.y > 2 else 0
-        var bottom = screen.b.y - 1 if screen.b.y > 2 else screen.b.y
-        return Rect(screen.a.x, top, screen.b.x, bottom)
+    def _host_workspace(self, container_bounds: Rect) -> Rect:
+        var top = 1 if container_bounds.b.y > 2 else 0
+        var bottom = container_bounds.b.y - 1 if container_bounds.b.y > 2 else container_bounds.b.y
+        return Rect(container_bounds.a.x, top, container_bounds.b.x, bottom)
 
-    def _ensure_bounds(mut self, screen: Rect):
+    def _ensure_bounds(mut self, container_bounds: Rect):
         if self.detached:
             return
-        var ws = self._host_workspace(screen)
+        var ws = self._host_workspace(container_bounds)
         var w = self.bounds.width()
         var h = self.bounds.height()
         if w < _PS_MIN_W or h < _PS_MIN_H:
@@ -790,11 +790,11 @@ struct ProjectSettings(Movable):
         self.bounds = Rect(b.a.x + dx, b.a.y + dy, b.b.x + dx, b.b.y + dy)
 
     def _handle_window_chrome(
-        mut self, event: Event, rect: Rect, screen: Rect,
+        mut self, event: Event, rect: Rect, container_bounds: Rect,
     ) -> Bool:
         if self.detached:
             return False
-        var ws = self._host_workspace(screen)
+        var ws = self._host_workspace(container_bounds)
         if self._moving:
             if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
                 self._moving = False
@@ -878,11 +878,11 @@ struct ProjectSettings(Movable):
 
     # --- painting ---------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
-        self._ensure_bounds(screen)
-        var rect = self._workspace_rect(screen)
+        self._ensure_bounds(container_bounds)
+        var rect = self._workspace_rect(container_bounds)
         if not self.detached:
             paint_drop_shadow(canvas, rect)
         var bg = Attr(BLACK, LIGHT_GRAY)
@@ -900,14 +900,14 @@ struct ProjectSettings(Movable):
         # Dropdown popups float above the body.
         if self.section == _SECTION_TARGETS and self.tg_lang_dropdown.is_open:
             self.tg_lang_dropdown.paint_popup(
-                canvas, self._tg_lang_anchor, screen,
+                canvas, self._tg_lang_anchor, container_bounds,
             )
         if self.section == _SECTION_GRAMMARS and self.gr_lang_dropdown.is_open:
             self.gr_lang_dropdown.paint_popup(
-                canvas, self._gr_lang_anchor, screen,
+                canvas, self._gr_lang_anchor, container_bounds,
             )
         if self.editor.active:
-            self.editor.paint(canvas, screen)
+            self.editor.paint(canvas, container_bounds)
 
     def _paint_sections(
         self, mut canvas: Canvas, painter: Painter, rect: Rect,
@@ -1474,10 +1474,10 @@ struct ProjectSettings(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
-        var rect = self._workspace_rect(screen)
+        var rect = self._workspace_rect(container_bounds)
         var inner = self._right_rect(rect)
         if self.section == _SECTION_TARGETS and self.selected_tg >= 0:
             var list_w = 18
@@ -1494,23 +1494,23 @@ struct ProjectSettings(Movable):
                 return True
         return False
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if self.editor.active:
-            _ = self.editor.handle_mouse(event, screen)
+            _ = self.editor.handle_mouse(event, container_bounds)
             self._maybe_consume_editor()
             return True
         if event.kind != EVENT_MOUSE:
             return True
-        self._ensure_bounds(screen)
-        var rect = self._workspace_rect(screen)
-        if self._handle_window_chrome(event, rect, screen):
+        self._ensure_bounds(container_bounds)
+        var rect = self._workspace_rect(container_bounds)
+        if self._handle_window_chrome(event, rect, container_bounds):
             return True
         # Section-specific dropdown first-crack (body + popup clicks).
         if self.section == _SECTION_TARGETS and self.selected_tg >= 0:
             var hit = self.tg_lang_dropdown.handle_mouse(
-                self._tg_lang_anchor, screen, event,
+                self._tg_lang_anchor, container_bounds, event,
             )
             if hit == DROPDOWN_HIT_BODY:
                 self.focus = _FOCUS_TG_LANG
@@ -1521,7 +1521,7 @@ struct ProjectSettings(Movable):
                 return True
         if self.section == _SECTION_GRAMMARS and self.selected_gr >= 0:
             var hit = self.gr_lang_dropdown.handle_mouse(
-                self._gr_lang_anchor, screen, event,
+                self._gr_lang_anchor, container_bounds, event,
             )
             if hit == DROPDOWN_HIT_BODY:
                 self.focus = _FOCUS_GR_LANG
@@ -1560,9 +1560,9 @@ struct ProjectSettings(Movable):
         if self.section == _SECTION_ON_SAVE:
             return self._mouse_on_save(event, inner)
         if self.section == _SECTION_TARGETS:
-            return self._mouse_targets(event, inner, screen)
+            return self._mouse_targets(event, inner, container_bounds)
         if self.section == _SECTION_GRAMMARS:
-            return self._mouse_grammars(event, inner, screen)
+            return self._mouse_grammars(event, inner, container_bounds)
         return True
 
     def _mouse_on_save(mut self, event: Event, inner: Rect) -> Bool:
@@ -1581,7 +1581,7 @@ struct ProjectSettings(Movable):
             return True
         return True
 
-    def _mouse_targets(mut self, event: Event, inner: Rect, screen: Rect) -> Bool:
+    def _mouse_targets(mut self, event: Event, inner: Rect, container_bounds: Rect) -> Bool:
         var list_w = 18
         var list_rect = Rect(
             inner.a.x, inner.a.y + 2, inner.a.x + list_w, inner.b.y - 3,
@@ -1620,14 +1620,14 @@ struct ProjectSettings(Movable):
         if self.selected_tg >= 0 and self._tg_lang_anchor.contains(event.pos):
             self.focus = _FOCUS_TG_LANG
             var hit = self.tg_lang_dropdown.handle_mouse(
-                self._tg_lang_anchor, screen, event,
+                self._tg_lang_anchor, container_bounds, event,
             )
             if hit != DROPDOWN_HIT_NONE:
                 self._tg_commit_lang()
             return True
         return True
 
-    def _mouse_grammars(mut self, event: Event, inner: Rect, screen: Rect) -> Bool:
+    def _mouse_grammars(mut self, event: Event, inner: Rect, container_bounds: Rect) -> Bool:
         var list_w = 22
         var list_rect = Rect(
             inner.a.x, inner.a.y + 2, inner.a.x + list_w, inner.b.y - 3,
@@ -1653,7 +1653,7 @@ struct ProjectSettings(Movable):
         if self.selected_gr >= 0 and self._gr_lang_anchor.contains(event.pos):
             self.focus = _FOCUS_GR_LANG
             var hit = self.gr_lang_dropdown.handle_mouse(
-                self._gr_lang_anchor, screen, event,
+                self._gr_lang_anchor, container_bounds, event,
             )
             if hit != DROPDOWN_HIT_NONE:
                 self._gr_commit_lang()

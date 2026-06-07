@@ -184,7 +184,7 @@ struct SaveAsDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         # Same Turbo Vision palette as ``FileDialog``: light-gray
@@ -193,7 +193,7 @@ struct SaveAsDialog(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Drop shadow first — see ``FileDialog.paint`` for the rationale.
         paint_drop_shadow(canvas, rect)
@@ -320,22 +320,22 @@ struct SaveAsDialog(Movable):
 
     # --- mouse ------------------------------------------------------------
 
-    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         """True iff ``pos`` lies on the editable filename row. Used by
         the host to hint a text-cursor shape over the input but a
         default arrow over the listing and buttons."""
         if not self.active:
             return False
         return _build_layout(
-            self._dlg.rect(screen, _DIALOG_W, _DIALOG_H),
+            self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H),
         ).input_rect.contains(pos)
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Title-bar drag: a press on the title row begins a move,
         # motion repositions, release ends. Resolved before any

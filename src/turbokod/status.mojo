@@ -83,7 +83,7 @@ deliberately feels responsive."""
 
 comptime _TOOLTIP_MAX_WIDTH = 56
 """Hard cap on the tooltip popup width. Wider tooltips wrap; this
-keeps the box from spanning the whole screen on a wide terminal."""
+keeps the box from spanning the whole container_bounds on a wide terminal."""
 
 
 struct StatusBar(Movable):
@@ -189,16 +189,16 @@ struct StatusBar(Movable):
         else:
             self.active_tab = active_tab
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         # Same palette as the menu bar: dark text on light gray, hot keys in red.
         var bg = Attr(BLACK, LIGHT_GRAY)
         var key_attr = Attr(RED, LIGHT_GRAY)
         var desc_attr = Attr(BLACK, LIGHT_GRAY)
-        var y = screen.b.y - 1
+        var y = container_bounds.b.y - 1
         # Status bar owns the bottom row only — bind a Painter to that
         # one-row strip so an over-long label can't bleed up into the
         # editor stack above.
-        var bar_rect = Rect(0, y, screen.b.x, screen.b.y)
+        var bar_rect = Rect(0, y, container_bounds.b.x, container_bounds.b.y)
         var painter = Painter(bar_rect)
         painter.fill(canvas, bar_rect, String(" "), bg)
         var x = 1
@@ -219,7 +219,7 @@ struct StatusBar(Movable):
         if len(self.tabs) > 0:
             x += 1
             for i in range(len(self.tabs)):
-                if x >= screen.b.x - 1:
+                if x >= container_bounds.b.x - 1:
                     break
                 var tab = self.tabs[i]
                 var label = tab.label
@@ -252,26 +252,26 @@ struct StatusBar(Movable):
             if self.message_spinner:
                 rendered = _spinner_glyph_now() + String(" ") + self.message
             var msg_w = display_columns(rendered)
-            var mx = screen.b.x - msg_w - 1
+            var mx = container_bounds.b.x - msg_w - 1
             if mx < x + 1:
                 return
             _ = painter.put_text(canvas, Point(mx, y), rendered, self.message_attr)
             self._msg_a_x = mx
             self._msg_b_x = mx + msg_w
 
-    def update_hover(mut self, pos: Point, screen: Rect):
+    def update_hover(mut self, pos: Point, container_bounds: Rect):
         """Track whether the cursor is currently resting on the
         message rect so ``paint_tooltip`` can decide when the dwell
         has exceeded ``_TOOLTIP_HOVER_MS``. Call this once per frame
         from the host's mouse-move dispatcher (or with an
-        out-of-bounds ``pos`` when the pointer leaves the screen).
+        out-of-bounds ``pos`` when the pointer leaves the container_bounds).
 
         The hover only counts if the message has a non-empty
         ``message_tooltip`` — set_message callers explicitly opt in
         per state, so we don't pop a tooltip on simple confirmations
         like "Saved foo.py" that have nothing extra to say.
         """
-        if pos.y != screen.b.y - 1 \
+        if pos.y != container_bounds.b.y - 1 \
                 or self._msg_a_x >= self._msg_b_x \
                 or pos.x < self._msg_a_x \
                 or pos.x >= self._msg_b_x \
@@ -292,11 +292,11 @@ struct StatusBar(Movable):
         a stale hover from before the modal to keep ticking."""
         self._hover_since_ms = -1
 
-    def paint_tooltip(self, mut canvas: Canvas, screen: Rect):
+    def paint_tooltip(self, mut canvas: Canvas, container_bounds: Rect):
         """Overlay the message-tooltip popup if the dwell has exceeded
         the hover threshold. Called by the host after every other
         widget so the popup z-orders above the windows / menu bar /
-        prompts that share the same screen.
+        prompts that share the same container_bounds.
         """
         if self._hover_since_ms < 0:
             return
@@ -304,32 +304,32 @@ struct StatusBar(Movable):
             return
         if monotonic_ms() - self._hover_since_ms < _TOOLTIP_HOVER_MS:
             return
-        var max_box_w = screen.b.x - 2
+        var max_box_w = container_bounds.b.x - 2
         if max_box_w > _TOOLTIP_MAX_WIDTH:
             max_box_w = _TOOLTIP_MAX_WIDTH
         if max_box_w < 5:
             return
         var size = popup_size_for_text(
-            self.message_tooltip, max_box_w, screen.b.y,
+            self.message_tooltip, max_box_w, container_bounds.b.y,
         )
         var w = size[0]
         var h = size[1]
         if w == 0 or h == 0:
             return
         # Anchor just above the cursor so the popup floats over the
-        # hovered message instead of off-screen below the bottom row.
+        # hovered message instead of off-container_bounds below the bottom row.
         # Right-align the box to the message rect when possible so it
         # visually points at the spinner rather than dangling left.
         var bx = self._msg_b_x - w
         if bx < 0:
             bx = 0
-        if bx + w > screen.b.x:
-            bx = screen.b.x - w
+        if bx + w > container_bounds.b.x:
+            bx = container_bounds.b.x - w
         var by = self._hover_y - h
         if by < 0:
             by = self._hover_y + 1
-            if by + h > screen.b.y:
-                by = screen.b.y - h
+            if by + h > container_bounds.b.y:
+                by = container_bounds.b.y - h
                 if by < 0:
                     by = 0
         var r = Rect(bx, by, bx + w, by + h)
@@ -345,25 +345,25 @@ struct StatusBar(Movable):
         if msg_rect.width() > 0 and msg_rect.height() > 0:
             _ = canvas.put_wrapped_text(msg_rect, self.message_tooltip, attr)
 
-    def hit_test_message(self, pos: Point, screen: Rect) -> Bool:
+    def hit_test_message(self, pos: Point, container_bounds: Rect) -> Bool:
         """True if ``pos`` lands on a click-marked message. Returns False
         for non-clickable messages even when the geometry matches, so
         non-LSP messages can sit in the same slot without claiming
         clicks meant for whatever's underneath."""
         if not self.message_clickable:
             return False
-        if pos.y != screen.b.y - 1:
+        if pos.y != container_bounds.b.y - 1:
             return False
         if self._msg_a_x >= self._msg_b_x:
             return False
         return self._msg_a_x <= pos.x and pos.x < self._msg_b_x
 
-    def hit_test_tab(self, pos: Point, screen: Rect) -> Int:
+    def hit_test_tab(self, pos: Point, container_bounds: Rect) -> Int:
         """Return the index of the tab clicked at ``pos``, or -1 if no
         tab was hit. Hit rects are populated by ``paint`` and the bar
         only occupies the bottom row, so callers don't need to gate
         on row before calling — we do."""
-        if pos.y != screen.b.y - 1:
+        if pos.y != container_bounds.b.y - 1:
             return -1
         for i in range(len(self._tab_hits)):
             var h = self._tab_hits[i]
@@ -371,7 +371,7 @@ struct StatusBar(Movable):
                 return h.index
         return -1
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
         """Route a mouse event onto the tab strip. Returns the index of
         the clicked tab on a left-button press, or -1 if the event
         didn't land on a tab.
@@ -385,4 +385,4 @@ struct StatusBar(Movable):
             return -1
         if event.motion:
             return -1
-        return self.hit_test_tab(event.pos, screen)
+        return self.hit_test_tab(event.pos, container_bounds)

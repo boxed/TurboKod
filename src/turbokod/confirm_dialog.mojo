@@ -97,10 +97,10 @@ struct ConfirmDialog(Movable):
         self._no_button.pressed = False
         self._no_button.pressed_inside = False
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DEFAULT_WIDTH
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < _MIN_WIDTH:
             width = _MIN_WIDTH
         var text_w = width - 4
@@ -114,19 +114,19 @@ struct ConfirmDialog(Movable):
         var height = 1 + msg_rows + 1 + 1 + 1 + 1
         if height < _MIN_HEIGHT:
             height = _MIN_HEIGHT
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0: x = 0
         if y < 0: y = 0
         return Rect(x, y, x + width, y + height)
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
@@ -210,7 +210,7 @@ struct ConfirmDialog(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -218,7 +218,7 @@ struct ConfirmDialog(Movable):
         # Standard ``[■]`` close button — equivalent to ESC / Cancel.
         # Checked before button routing so a click on the chrome glyph
         # always resolves the dialog as not-confirmed.
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
                 and hit_close_button(Point(rect.a.x, rect.a.y), event.pos):

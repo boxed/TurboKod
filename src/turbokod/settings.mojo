@@ -331,7 +331,7 @@ struct Settings(Movable):
     movable by dragging the title row and resizable by dragging the left /
     right / bottom border — so the workspace behind stays visible while a
     theme change retints it live. Session-persistent across open/close;
-    ``_ensure_bounds`` re-clamps it against the current screen."""
+    ``_ensure_bounds`` re-clamps it against the current container_bounds."""
     var _moving: Bool
     var _move_dx: Int
     var _move_dy: Int
@@ -578,11 +578,11 @@ struct Settings(Movable):
 
     # --- painting ---------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
-        self._ensure_bounds(screen)
-        var rect = self._workspace_rect(screen)
+        self._ensure_bounds(container_bounds)
+        var rect = self._workspace_rect(container_bounds)
         # In-grid the dialog floats over the workspace — drop a shadow so it
         # reads as lifted (the host window provides this when detached).
         if not self.detached:
@@ -613,41 +613,41 @@ struct Settings(Movable):
         # wins z-order.
         if self.section == _SECTION_EDITOR and self._save_dropdown.is_open:
             self._save_dropdown.paint_popup(
-                canvas, self._save_dd_anchor, screen,
+                canvas, self._save_dd_anchor, container_bounds,
             )
         if self.section == _SECTION_EDITOR and self._wrap_dropdown.is_open:
             self._wrap_dropdown.paint_popup(
-                canvas, self._wrap_dd_anchor, screen,
+                canvas, self._wrap_dd_anchor, container_bounds,
             )
         # Editor floats on top.
         if self.language_editor.active:
-            self.language_editor.paint(canvas, screen)
+            self.language_editor.paint(canvas, container_bounds)
 
-    def _workspace_rect(self, screen: Rect) -> Rect:
+    def _workspace_rect(self, container_bounds: Rect) -> Rect:
         """The dialog's rect. Detached (native settings window) it fills the
         whole surface; in-grid (terminal) it's the movable / resizable
         ``bounds``, which ``_ensure_bounds`` keeps valid against the current
-        screen. Every geometry helper and hit-test derives from this, so the
+        container_bounds. Every geometry helper and hit-test derives from this, so the
         whole dialog follows a move/resize for free."""
         if self.detached:
-            return screen
+            return container_bounds
         return self.bounds
 
-    def _host_workspace(self, screen: Rect) -> Rect:
-        """The area the in-grid dialog may occupy — ``screen`` minus the
+    def _host_workspace(self, container_bounds: Rect) -> Rect:
+        """The area the in-grid dialog may occupy — ``container_bounds`` minus the
         menu bar (row 0) and status bar (last row), which the host keeps
         painting so the user keeps their bearings."""
-        var top = 1 if screen.b.y > 2 else 0
-        var bottom = screen.b.y - 1 if screen.b.y > 2 else screen.b.y
-        return Rect(screen.a.x, top, screen.b.x, bottom)
+        var top = 1 if container_bounds.b.y > 2 else 0
+        var bottom = container_bounds.b.y - 1 if container_bounds.b.y > 2 else container_bounds.b.y
+        return Rect(container_bounds.a.x, top, container_bounds.b.x, bottom)
 
-    def _ensure_bounds(mut self, screen: Rect):
+    def _ensure_bounds(mut self, container_bounds: Rect):
         """Initialize ``bounds`` (centered default) on first open and clamp
         it back into the workspace after a terminal resize. No-op when the
         host owns the window (detached)."""
         if self.detached:
             return
-        var ws = self._host_workspace(screen)
+        var ws = self._host_workspace(container_bounds)
         var w = self.bounds.width()
         var h = self.bounds.height()
         if w < _SETTINGS_MIN_W or h < _SETTINGS_MIN_H:
@@ -663,7 +663,7 @@ struct Settings(Movable):
             var x = ws.a.x + (ws.width() - w) // 2
             var y = ws.a.y + (ws.height() - h) // 2
             self.bounds = Rect(x, y, x + w, y + h)
-        # Shrink to fit, then slide fully on-screen.
+        # Shrink to fit, then slide fully on-container_bounds.
         var b = self.bounds
         if b.width() > ws.width():
             b = Rect(b.a.x, b.a.y, b.a.x + ws.width(), b.b.y)
@@ -682,7 +682,7 @@ struct Settings(Movable):
         self.bounds = Rect(b.a.x + dx, b.a.y + dy, b.b.x + dx, b.b.y + dy)
 
     def _handle_window_chrome(
-        mut self, event: Event, rect: Rect, screen: Rect,
+        mut self, event: Event, rect: Rect, container_bounds: Rect,
     ) -> Bool:
         """In-grid window chrome: drag the title row to move, drag the
         left / right / bottom border (corners included) to resize. An
@@ -692,7 +692,7 @@ struct Settings(Movable):
         the event was consumed."""
         if self.detached:
             return False
-        var ws = self._host_workspace(screen)
+        var ws = self._host_workspace(container_bounds)
         if self._moving:
             if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
                 self._moving = False
@@ -2024,20 +2024,20 @@ struct Settings(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if self.language_editor.active:
-            _ = self.language_editor.handle_mouse(event, screen)
+            _ = self.language_editor.handle_mouse(event, container_bounds)
             self._maybe_consume_language_editor()
             return True
         if event.kind != EVENT_MOUSE:
             return True
-        self._ensure_bounds(screen)
-        var rect = self._workspace_rect(screen)
+        self._ensure_bounds(container_bounds)
+        var rect = self._workspace_rect(container_bounds)
         # Move / resize chrome first — an in-flight drag owns every event,
         # and border presses must win over the widgets inside.
-        if self._handle_window_chrome(event, rect, screen):
+        if self._handle_window_chrome(event, rect, container_bounds):
             return True
         # Save-behavior dropdown gets first crack on the editor section
         # — both for body clicks (which would otherwise miss the focus
@@ -2046,7 +2046,7 @@ struct Settings(Movable):
         if self.section == _SECTION_EDITOR:
             var prev_idx = self._save_dropdown.index
             var hit = self._save_dropdown.handle_mouse(
-                self._save_dd_anchor, screen, event,
+                self._save_dd_anchor, container_bounds, event,
             )
             self._sync_dropdown_commit(prev_idx)
             if hit == DROPDOWN_HIT_BODY:
@@ -2060,7 +2060,7 @@ struct Settings(Movable):
             # Wrap-mode dropdown — same first-crack treatment.
             var prev_wrap = self._wrap_dropdown.index
             var wrap_hit = self._wrap_dropdown.handle_mouse(
-                self._wrap_dd_anchor, screen, event,
+                self._wrap_dd_anchor, container_bounds, event,
             )
             self._sync_wrap_commit(prev_wrap)
             if wrap_hit == DROPDOWN_HIT_BODY:

@@ -183,7 +183,7 @@ struct RowCursor(Copyable, Movable):
 
 @fieldwise_init
 struct FocusableSlot(ImplicitlyCopyable, Movable):
-    """One focusable widget's screen rect + whether it currently
+    """One focusable widget's container_bounds rect + whether it currently
     participates in the tab walk / click hit-test.
 
     ``rect`` is refreshed every paint (and every event dispatch) so the
@@ -241,7 +241,7 @@ struct FocusGroup(Movable):
     def update(mut self, idx: Int, rect: Rect, visitable: Bool = True):
         """Refresh slot ``idx``'s rect + visitability. Called from the
         dialog's paint (and from handle_mouse just before hit-testing)
-        so geometry never lags the screen."""
+        so geometry never lags the container_bounds."""
         if 0 <= idx and idx < len(self.slots):
             self.slots[idx] = FocusableSlot(rect, visitable)
 
@@ -374,7 +374,7 @@ struct DraggableDialog(ImplicitlyCopyable, Movable):
     != EVENT_MOUSE: return True`` guard):
 
     ```
-    var rect = self._dlg.rect(screen, WIDTH, HEIGHT)
+    var rect = self._dlg.rect(container_bounds, WIDTH, HEIGHT)
     if self._dlg.handle_drag_continue(event):
         return True
     if <close-button hit>: ...        # checked between continue and start
@@ -399,10 +399,10 @@ struct DraggableDialog(ImplicitlyCopyable, Movable):
         self.pos = Optional[Point]()
         self._drag = Optional[Point]()
 
-    def rect(self, screen: Rect, width: Int, height: Int) -> Rect:
-        """Placed rect: the dragged ``pos`` when set (clamped on-screen
-        by ``compute_dialog_rect``), else auto-centered in ``screen``."""
-        return compute_dialog_rect(screen, self.pos, width, height)
+    def rect(self, container_bounds: Rect, width: Int, height: Int) -> Rect:
+        """Placed rect: the dragged ``pos`` when set (clamped on-container_bounds
+        by ``compute_dialog_rect``), else auto-centered in ``container_bounds``."""
+        return compute_dialog_rect(container_bounds, self.pos, width, height)
 
     def is_dragging(self) -> Bool:
         return Bool(self._drag)

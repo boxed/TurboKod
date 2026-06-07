@@ -274,10 +274,10 @@ struct Prompt(Movable):
         self.toggle_word.on = opts.whole_word
         self.toggle_regex.on = opts.regex
 
-    def _layout(self, screen: Rect) -> Rect:
+    def _layout(self, container_bounds: Rect) -> Rect:
         """Compute the dialog rect for the current label.
 
-        Width caps at ``_DEFAULT_WIDTH`` (or whatever the screen
+        Width caps at ``_DEFAULT_WIDTH`` (or whatever the container_bounds
         allows); height grows to fit the wrapped label. Paint reads
         the same numbers — kept here so the cursor row and the
         painter agree even when the label is long enough to wrap.
@@ -287,8 +287,8 @@ struct Prompt(Movable):
         so the layout doesn't jump when the user hovers a toggle).
         """
         var width = _DEFAULT_WIDTH
-        if width > screen.b.x - 4:
-            width = screen.b.x - 4
+        if width > container_bounds.b.x - 4:
+            width = container_bounds.b.x - 4
         if width < 8:
             width = 8
         var text_w = width - 4
@@ -320,23 +320,23 @@ struct Prompt(Movable):
             height += 5
         elif self.show_options:
             height += 1   # toggle-tooltip row under the input
-        if height > screen.b.y - 4:
-            height = screen.b.y - 4
+        if height > container_bounds.b.y - 4:
+            height = container_bounds.b.y - 4
         if height < 3:
             height = 3
-        var x = (screen.b.x - width) // 2
-        var y = (screen.b.y - height) // 2
+        var x = (container_bounds.b.x - width) // 2
+        var y = (container_bounds.b.y - height) // 2
         if x < 0:
             x = 0
         if y < 0:
             y = 0
         return Rect(x, y, x + width, y + height)
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
-        var rect = self._layout(screen)
+        var rect = self._layout(container_bounds)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
         painter.fill(canvas, rect, String(" "), attr)
@@ -581,7 +581,7 @@ struct Prompt(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -590,7 +590,7 @@ struct Prompt(Movable):
         # Checked before any other routing so a click on the chrome
         # glyph always dismisses the modal regardless of which field
         # currently owns focus.
-        var dlg_rect = self._layout(screen)
+        var dlg_rect = self._layout(container_bounds)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
                 and hit_close_button(

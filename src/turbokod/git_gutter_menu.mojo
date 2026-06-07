@@ -100,25 +100,25 @@ struct GitGutterMenu(Movable):
         self.action = action
         self.submitted = True
 
-    def _rect(self, screen: Rect) -> Rect:
+    def _rect(self, container_bounds: Rect) -> Rect:
         var width = display_columns(_LABEL_REVERT) + 4
         var height = self._row_count() + 2
         var x = self.anchor_x
-        if x + width > screen.b.x:
-            x = screen.b.x - width
+        if x + width > container_bounds.b.x:
+            x = container_bounds.b.x - width
         if x < 0:
             x = 0
         var y = self.anchor_y + 1
-        if y + height > screen.b.y:
+        if y + height > container_bounds.b.y:
             y = self.anchor_y - height
             if y < 0:
                 y = 0
         return Rect(x, y, x + width, y + height)
 
-    def paint(self, mut canvas: Canvas, screen: Rect):
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
         var sel_attr = Attr(BLACK, GREEN)
         paint_drop_shadow(canvas, rect)
@@ -155,7 +155,7 @@ struct GitGutterMenu(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Int:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
         """Button-like press / release model. Press inside arms
         tracking + highlights; release inside fires the action.
         Releases without a prior tracked press are non-events."""
@@ -165,7 +165,7 @@ struct GitGutterMenu(Movable):
             return MENU_HIT_NONE
         if event.button != MOUSE_BUTTON_LEFT or event.motion:
             return MENU_HIT_NONE
-        var rect = self._rect(screen)
+        var rect = self._rect(container_bounds)
         var inside = rect.contains(event.pos)
         if event.pressed:
             if not inside:

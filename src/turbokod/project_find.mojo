@@ -427,35 +427,35 @@ struct ProjectFind(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    def _input_y(self, screen: Rect) -> Int:
-        return screen.a.y + 1
+    def _input_y(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.y + 1
 
-    def _list_top(self, screen: Rect) -> Int:
-        return screen.a.y + 3
+    def _list_top(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.y + 3
 
-    def _context_height(self, screen: Rect) -> Int:
+    def _context_height(self, container_bounds: Rect) -> Int:
         # 1 separator + ``2 * _CONTEXT_LINES + 1`` content rows.
         return 2 * _CONTEXT_LINES + 2
 
-    def _list_bottom(self, screen: Rect) -> Int:
-        return screen.b.y - 1 - self._context_height(screen)
+    def _list_bottom(self, container_bounds: Rect) -> Int:
+        return container_bounds.b.y - 1 - self._context_height(container_bounds)
 
-    def _list_height(self, screen: Rect) -> Int:
-        var h = self._list_bottom(screen) - self._list_top(screen)
+    def _list_height(self, container_bounds: Rect) -> Int:
+        var h = self._list_bottom(container_bounds) - self._list_top(container_bounds)
         if h < 0:
             return 0
         return h
 
-    def is_input_at(self, pos: Point, screen: Rect) -> Bool:
+    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Search:`` query row."""
         if not self.active:
             return False
-        var y = self._input_y(screen)
-        return Rect(screen.a.x + 1, y, screen.b.x - 1, y + 1).contains(pos)
+        var y = self._input_y(container_bounds)
+        return Rect(container_bounds.a.x + 1, y, container_bounds.b.x - 1, y + 1).contains(pos)
 
     # --- paint ------------------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect,
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect,
              mut registry: GrammarRegistry):
         if not self.active:
             return
@@ -475,25 +475,25 @@ struct ProjectFind(Movable):
         var sep_attr    = Attr(BORDER_FOCUS, EDITOR_BG)
         # Bind every write to the dialog rect so an over-long match
         # path or context line can't leak onto the modal's border or
-        # outside ``screen`` entirely.
-        var painter = Painter(screen)
-        painter.fill(canvas, screen, String(" "), bg)
-        painter.draw_box(canvas, screen, border, True)
+        # outside ``container_bounds`` entirely.
+        var painter = Painter(container_bounds)
+        painter.fill(canvas, container_bounds, String(" "), bg)
+        painter.draw_box(canvas, container_bounds, border, True)
         # Title — framework helper enforces title bg = body bg.
         paint_window_title(
-            canvas, screen, String(" Find in Project "), title_attr, bg,
+            canvas, container_bounds, String(" Find in Project "), title_attr, bg,
         )
         # Standard ``[■]`` close button at the top-LEFT — equivalent to
         # ESC / cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(screen.a.x, screen.a.y), border)
+        paint_close_button(canvas, Point(container_bounds.a.x, container_bounds.a.y), border)
         # Input row: ``Search: <query>_   Cc  W  .*``.
-        var input_y = self._input_y(screen)
+        var input_y = self._input_y(container_bounds)
         var label = String(" Search: ")
         _ = painter.put_text(
-            canvas, Point(screen.a.x + 1, input_y), label, label_attr,
+            canvas, Point(container_bounds.a.x + 1, input_y), label, label_attr,
         )
-        var qx = screen.a.x + 1 + display_columns(label)
+        var qx = container_bounds.a.x + 1 + display_columns(label)
         # Reserve room on the right edge of the input row for the
         # three search-mode toggles. Lay them out right-aligned with
         # one cell of gap between each chip — same idiom the Find
@@ -502,7 +502,7 @@ struct ProjectFind(Movable):
         var toggles_w = self.toggle_case.width() \
             + gap + self.toggle_word.width() \
             + gap + self.toggle_regex.width()
-        var toggles_right = screen.b.x - 1
+        var toggles_right = container_bounds.b.x - 1
         var tx = toggles_right - toggles_w
         if tx < qx + 4:
             # Pathologically narrow window — give the input what little
@@ -526,13 +526,13 @@ struct ProjectFind(Movable):
         var toggle_off = Attr(EDITOR_FG, EDITOR_BG)
         var toggle_on  = Attr(BLACK, YELLOW)
         paint_option_toggle(
-            canvas, self.toggle_case, toggle_off, toggle_on, screen.b.x - 1,
+            canvas, self.toggle_case, toggle_off, toggle_on, container_bounds.b.x - 1,
         )
         paint_option_toggle(
-            canvas, self.toggle_word, toggle_off, toggle_on, screen.b.x - 1,
+            canvas, self.toggle_word, toggle_off, toggle_on, container_bounds.b.x - 1,
         )
         paint_option_toggle(
-            canvas, self.toggle_regex, toggle_off, toggle_on, screen.b.x - 1,
+            canvas, self.toggle_regex, toggle_off, toggle_on, container_bounds.b.x - 1,
         )
         # Separator under the input. When a toggle is hovered the
         # separator gives way to the chip's tooltip text so the user
@@ -549,19 +549,19 @@ struct ProjectFind(Movable):
         if len(hovered_tooltip.as_bytes()) > 0:
             painter.fill(
                 canvas,
-                Rect(screen.a.x + 1, sep1_y, screen.b.x - 1, sep1_y + 1),
+                Rect(container_bounds.a.x + 1, sep1_y, container_bounds.b.x - 1, sep1_y + 1),
                 String(" "), bg,
             )
             _ = painter.put_text(
-                canvas, Point(screen.a.x + 2, sep1_y),
+                canvas, Point(container_bounds.a.x + 2, sep1_y),
                 hovered_tooltip, ctx_attr,
             )
         else:
-            for x in range(screen.a.x + 1, screen.b.x - 1):
+            for x in range(container_bounds.a.x + 1, container_bounds.b.x - 1):
                 painter.set(canvas, x, sep1_y, Cell(String("─"), sep_attr, 1))
         # Match list.
-        var top = self._list_top(screen)
-        var h = self._list_height(screen)
+        var top = self._list_top(container_bounds)
+        var h = self._list_height(container_bounds)
         if len(self.matches) == 0:
             var msg: String
             if len(self.query.text.as_bytes()) == 0:
@@ -573,7 +573,7 @@ struct ProjectFind(Movable):
             else:
                 msg = String("No matches.")
             _ = painter.put_text(
-                canvas, Point(screen.a.x + 2, top), msg, ctx_attr,
+                canvas, Point(container_bounds.a.x + 2, top), msg, ctx_attr,
             )
         # Keep the row-highlight cache aligned 1:1 with ``matches`` (only
         # grows; reset wholesale on a new search). Then give this frame a
@@ -592,30 +592,30 @@ struct ProjectFind(Movable):
             # reference would fail Mojo's exclusivity check.
             var m = self.matches[idx]
             self._paint_match_row(
-                canvas, screen, painter, top + i, m, idx == self.selected,
+                canvas, container_bounds, painter, top + i, m, idx == self.selected,
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
                 registry, idx, hl_deadline,
             )
         # Separator above the context panel.
-        var ctx_top = self._list_bottom(screen)
-        for x in range(screen.a.x + 1, screen.b.x - 1):
+        var ctx_top = self._list_bottom(container_bounds)
+        for x in range(container_bounds.a.x + 1, container_bounds.b.x - 1):
             painter.set(canvas, x, ctx_top, Cell(String("─"), sep_attr, 1))
         var ctx_label = String(" Context ")
-        var lx = screen.a.x + (screen.width() - display_columns(ctx_label)) // 2
+        var lx = container_bounds.a.x + (container_bounds.width() - display_columns(ctx_label)) // 2
         _ = painter.put_text(canvas, Point(lx, ctx_top), ctx_label, title_attr)
         # Context body. Lazy-tokenize the loaded file using the shared
         # registry so the grammar's regexes only get compiled once per
         # session (not per paint frame).
         self._ensure_context_highlights(registry)
         self._paint_context(
-            canvas, screen, painter, ctx_top + 1, ctx_attr, ctx_match,
+            canvas, container_bounds, painter, ctx_top + 1, ctx_attr, ctx_match,
         )
         # Hint at the very bottom (overlays the bottom border).
         var hint = String(" Enter: open  ESC: cancel  Up/Down: navigate ")
-        var hx = screen.b.x - display_columns(hint) - 1
-        if hx < screen.a.x + 1:
-            hx = screen.a.x + 1
-        _ = painter.put_text(canvas, Point(hx, screen.b.y - 1), hint, hint_attr)
+        var hx = container_bounds.b.x - display_columns(hint) - 1
+        if hx < container_bounds.a.x + 1:
+            hx = container_bounds.a.x + 1
+        _ = painter.put_text(canvas, Point(hx, container_bounds.b.y - 1), hint, hint_attr)
         # Truncation notice — left-aligned on the bottom border so the
         # user knows the result list is capped and more hits exist
         # outside it. Painted only when we actually had to drop hits
@@ -625,7 +625,7 @@ struct ProjectFind(Movable):
             var warn = String(" More than ") + String(_MAX_MATCHES) \
                 + String(" matches — refine your search ")
             var warn_attr = Attr(WHITE, RED)
-            var wx = screen.a.x + 2
+            var wx = container_bounds.a.x + 2
             # Clip against the hint so the two strips can't overpaint
             # each other on narrow windows.
             if wx + display_columns(warn) >= hx:
@@ -635,11 +635,11 @@ struct ProjectFind(Movable):
                 warn = String(" >") + String(_MAX_MATCHES) + String(" ")
             if wx + display_columns(warn) < hx:
                 _ = painter.put_text(
-                    canvas, Point(wx, screen.b.y - 1), warn, warn_attr,
+                    canvas, Point(wx, container_bounds.b.y - 1), warn, warn_attr,
                 )
 
     def _paint_match_row(
-        mut self, mut canvas: Canvas, screen: Rect, painter: Painter,
+        mut self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
         y: Int, m: ProjectMatch, is_sel: Bool,
         line_attr: Attr, sel_line: Attr,
         hl_attr: Attr, sel_hl_attr: Attr,
@@ -650,8 +650,8 @@ struct ProjectFind(Movable):
         var row_attr = sel_line if is_sel else line_attr
         var row_path = sel_path if is_sel else path_attr
         var row_hl = sel_hl_attr if is_sel else hl_attr
-        var inner_left = screen.a.x + 1
-        var inner_right = screen.b.x - 1
+        var inner_left = container_bounds.a.x + 1
+        var inner_right = container_bounds.b.x - 1
         painter.fill(
             canvas, Rect(inner_left, y, inner_right, y + 1),
             String(" "), row_attr,
@@ -754,11 +754,11 @@ struct ProjectFind(Movable):
             painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
 
     def _paint_context(
-        self, mut canvas: Canvas, screen: Rect, painter: Painter,
+        self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
         top_y: Int, ctx_attr: Attr, match_attr: Attr,
     ):
-        var inner_left = screen.a.x + 1
-        var inner_right = screen.b.x - 1
+        var inner_left = container_bounds.a.x + 1
+        var inner_right = container_bounds.b.x - 1
         var rows = 2 * _CONTEXT_LINES + 1
         var hit_attr = Attr(WHITE, RED)         # match-substring highlight
         if self.selected < 0 or self.selected >= len(self.matches):
@@ -777,7 +777,7 @@ struct ProjectFind(Movable):
         for k in range(rows):
             var src = center - _CONTEXT_LINES + k
             var y = top_y + k
-            if y >= screen.b.y - 1:
+            if y >= container_bounds.b.y - 1:
                 break
             if src < 0 or src >= line_count:
                 continue
@@ -862,7 +862,7 @@ struct ProjectFind(Movable):
             return True
         return True
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
@@ -872,7 +872,7 @@ struct ProjectFind(Movable):
         # glyph always dismisses the dialog.
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion \
-                and hit_close_button(Point(screen.a.x, screen.a.y), event.pos):
+                and hit_close_button(Point(container_bounds.a.x, container_bounds.a.y), event.pos):
             self.close()
             return True
         # Toggles run first so a click on a chip doesn't slip through
@@ -903,15 +903,15 @@ struct ProjectFind(Movable):
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.matches),
-                self._list_height(screen),
+                self._list_height(container_bounds),
             ):
                 return True
         if event.button != MOUSE_BUTTON_LEFT:
             return True
         if not event.pressed or event.motion:
             return True
-        var top = self._list_top(screen)
-        var h = self._list_height(screen)
+        var top = self._list_top(container_bounds)
+        var h = self._list_height(container_bounds)
         if event.pos.y < top or event.pos.y >= top + h:
             return True
         var idx = self.scroll + (event.pos.y - top)
@@ -929,7 +929,7 @@ struct ProjectFind(Movable):
 
     def _scroll_to_selection(mut self):
         # Conservative window: assume ~12 visible rows; the actual list
-        # height depends on the screen so we re-clamp on paint.
+        # height depends on the container_bounds so we re-clamp on paint.
         var visible = 12
         if self.selected < self.scroll:
             self.scroll = self.selected
@@ -943,7 +943,7 @@ struct ProjectFind(Movable):
 def _lstrip_tabs(s: String) -> String:
     """Drop leading whitespace (tabs/spaces) so the first non-blank
     character of the line lines up at the row's left edge — search hits
-    in deeply indented code stay on-screen."""
+    in deeply indented code stay on-container_bounds."""
     var b = s.as_bytes()
     var i = 0
     while i < len(b) and (b[i] == 0x20 or b[i] == 0x09):

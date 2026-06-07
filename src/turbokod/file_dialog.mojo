@@ -166,7 +166,7 @@ struct FileDialog(Movable):
 
     # --- painting ----------------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         # Turbo Vision palette: the dialog body sits on a light-gray
@@ -176,7 +176,7 @@ struct FileDialog(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var dir_attr = Attr(BLUE, LIGHT_GRAY)
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Drop shadow first — it darkens cells *outside* ``rect`` so
         # whatever workspace content sits behind the dialog reads as
@@ -275,7 +275,7 @@ struct FileDialog(Movable):
 
     # --- mouse -------------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         """Click in entry list selects; click on already-selected entry opens.
         Wheel up/down scrolls the listing. Clicks outside the dialog are
         swallowed (modal). Pressing on the title row begins a move-by-
@@ -285,7 +285,7 @@ struct FileDialog(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # --- title-bar drag: start / continue / end ---------------
         # Resolved before any other mouse handling so a click that

@@ -268,13 +268,13 @@ struct ActionEditor(Movable):
 
     # --- painting ---------------------------------------------------
 
-    def paint(mut self, mut canvas: Canvas, screen: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.active:
             return
         var bg = Attr(BLACK, LIGHT_GRAY)
         var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
         var hint = Attr(BLUE, LIGHT_GRAY)
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         paint_drop_shadow(canvas, rect)
         var painter = Painter(rect)
@@ -335,11 +335,11 @@ struct ActionEditor(Movable):
         # form so it sits on top, but before the file dialog so a Browse
         # popup wins over it.
         if self.lang_dropdown.is_open:
-            self.lang_dropdown.paint_popup(canvas, layout.lang_rect, screen)
+            self.lang_dropdown.paint_popup(canvas, layout.lang_rect, container_bounds)
         # The file dialog floats on top when open — paint last so it
         # overlays the edit form.
         if self.file_dialog.active:
-            self.file_dialog.paint(canvas, screen)
+            self.file_dialog.paint(canvas, container_bounds)
 
     def _lang_dropdown(self, current: String) -> Dropdown:
         """Test-only convenience: build a one-shot dropdown the way
@@ -503,16 +503,16 @@ struct ActionEditor(Movable):
 
     # --- mouse ------------------------------------------------------
 
-    def handle_mouse(mut self, event: Event, screen: Rect) -> Bool:
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
             return False
         if self.file_dialog.active:
-            _ = self.file_dialog.handle_mouse(event, screen)
+            _ = self.file_dialog.handle_mouse(event, container_bounds)
             self._maybe_consume_browse()
             return True
         if event.kind != EVENT_MOUSE:
             return True
-        var rect = self._dlg.rect(screen, _DIALOG_W, _DIALOG_H)
+        var rect = self._dlg.rect(container_bounds, _DIALOG_W, _DIALOG_H)
         var layout = _build_layout(rect)
         # Open dropdown popup gets first dibs on the click — same as
         # the keyboard branch. ``handle_mouse`` toggles open on body
@@ -520,7 +520,7 @@ struct ActionEditor(Movable):
         # an outside click.
         if self.lang_dropdown.is_open:
             var hit = self.lang_dropdown.handle_mouse(
-                layout.lang_rect, screen, event,
+                layout.lang_rect, container_bounds, event,
             )
             if hit != DROPDOWN_HIT_NONE and hit != DROPDOWN_HIT_OUTSIDE:
                 self.entry.language_id = self.lang_dropdown.value()
@@ -563,7 +563,7 @@ struct ActionEditor(Movable):
             # focus and the user had no way to discover the options
             # short of pressing arrow keys.
             var hit = self.lang_dropdown.handle_mouse(
-                layout.lang_rect, screen, event,
+                layout.lang_rect, container_bounds, event,
             )
             if hit != DROPDOWN_HIT_NONE:
                 self.entry.language_id = self.lang_dropdown.value()
