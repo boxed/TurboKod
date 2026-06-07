@@ -177,8 +177,7 @@ struct _FindSymbolRunner(Movable):
             if n == 0:
                 got_eof = True
                 break
-            for i in range(n):
-                self._buf.append(scratch[i])
+            self._buf.extend(Span(scratch)[0:n])
             total += n
         # Walk only the new bytes — ``_scan_pos`` carries forward
         # so a single huge unterminated tail isn't rescanned every
@@ -198,8 +197,7 @@ struct _FindSymbolRunner(Movable):
             i += 1
         if consumed > 0:
             var tail = List[UInt8]()
-            for j in range(consumed, len(self._buf)):
-                tail.append(self._buf[j])
+            tail.extend(Span(self._buf)[consumed:len(self._buf)])
             self._buf = tail^
             self._scan_pos = 0
         else:
