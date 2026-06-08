@@ -607,6 +607,31 @@ struct Vt(Copyable, Movable):
         else:
             self.primary[idx] = cell
 
+    def _grid_ref_get(self, idx: Int) -> Cell:
+        """Read from whichever grid is currently in use — the read-side
+        twin of ``_grid_ref_set``, so cell-shift loops don't hand-roll the
+        alt/primary branch."""
+        if self.using_alt:
+            return self.alt[idx]
+        return self.primary[idx]
+
+    def _blank_cell(self) -> Cell:
+        """A space cell carrying the current SGR attributes — the fill
+        used by every erase / scroll / insert-delete operation."""
+        return Cell(String(" "), self.current_attr, 1)
+
+    def _clamped_scroll_region(self) -> Tuple[Int, Int]:
+        """``(top, bot)`` of the active scroll region, clamped to the
+        grid. A returned ``top > bot`` means the region is empty and the
+        caller should bail."""
+        var top = self.scroll_top
+        var bot = self.scroll_bot
+        if top < 0:
+            top = 0
+        if bot >= self.rows:
+            bot = self.rows - 1
+        return (top, bot)
+
     # --- resize --------------------------------------------------------
 
     def resize(mut self, cols: Int, rows: Int):
@@ -838,10 +863,9 @@ struct Vt(Copyable, Movable):
         we kept their transient frames in the buffer that the shell
         owns."""
         if n <= 0: return
-        var top = self.scroll_top
-        var bot = self.scroll_bot
-        if top < 0: top = 0
-        if bot >= self.rows: bot = self.rows - 1
+        var region = self._clamped_scroll_region()
+        var top = region[0]
+        var bot = region[1]
         if top > bot: return
         var height = bot - top + 1
         var shift = n if n < height else height
@@ -876,11 +900,9 @@ struct Vt(Copyable, Movable):
             for c in range(self.cols):
                 var src = self._idx(r + shift, c)
                 var dst = self._idx(r, c)
-                if self.using_alt:
-                    self.alt[dst] = self.alt[src]
-                else:
-                    self.primary[dst] = self.primary[src]
-        var blank = Cell(String(" "), self.current_attr, 1)
+                var cell = self._grid_ref_get(src)
+                self._grid_ref_set(dst, cell)
+        var blank = self._blank_cell()
         for r in range(bot + 1 - shift, bot + 1):
             for c in range(self.cols):
                 self._grid_ref_set(self._idx(r, c), blank)
@@ -889,10 +911,9 @@ struct Vt(Copyable, Movable):
         """Shift rows in ``[scroll_top, scroll_bot]`` down by ``n``,
         filling the top with blanks. Used by RI (reverse index)."""
         if n <= 0: return
-        var top = self.scroll_top
-        var bot = self.scroll_bot
-        if top < 0: top = 0
-        if bot >= self.rows: bot = self.rows - 1
+        var region = self._clamped_scroll_region()
+        var top = region[0]
+        var bot = region[1]
         if top > bot: return
         var height = bot - top + 1
         var shift = n if n < height else height
@@ -901,12 +922,10 @@ struct Vt(Copyable, Movable):
             for c in range(self.cols):
                 var src = self._idx(r - shift, c)
                 var dst = self._idx(r, c)
-                if self.using_alt:
-                    self.alt[dst] = self.alt[src]
-                else:
-                    self.primary[dst] = self.primary[src]
+                var cell = self._grid_ref_get(src)
+                self._grid_ref_set(dst, cell)
             r -= 1
-        var blank = Cell(String(" "), self.current_attr, 1)
+        var blank = self._blank_cell()
         for r2 in range(top, top + shift):
             for c in range(self.cols):
                 self._grid_ref_set(self._idx(r2, c), blank)
@@ -1207,7 +1226,7 @@ struct Vt(Copyable, Movable):
     # --- erase ---------------------------------------------------------
 
     def _erase_in_display(mut self, mode: Int):
-        var blank = Cell(String(" "), self.current_attr, 1)
+        var blank = self._blank_cell()
         if mode == 0:
             # Cursor to end of screen.
             for c in range(self.cur_c, self.cols):
@@ -1232,7 +1251,7 @@ struct Vt(Copyable, Movable):
                     self._grid_ref_set(self._idx(r, c), blank)
 
     def _erase_in_line(mut self, mode: Int):
-        var blank = Cell(String(" "), self.current_attr, 1)
+        var blank = self._blank_cell()
         if mode == 0:
             for c in range(self.cur_c, self.cols):
                 self._grid_ref_set(self._idx(self.cur_r, c), blank)
@@ -1254,12 +1273,10 @@ struct Vt(Copyable, Movable):
         while c >= self.cur_c + shift:
             var src = self._idx(self.cur_r, c - shift)
             var dst = self._idx(self.cur_r, c)
-            if self.using_alt:
-                self.alt[dst] = self.alt[src]
-            else:
-                self.primary[dst] = self.primary[src]
+            var cell = self._grid_ref_get(src)
+            self._grid_ref_set(dst, cell)
             c -= 1
-        var blank = Cell(String(" "), self.current_attr, 1)
+        var blank = self._blank_cell()
         for c2 in range(self.cur_c, self.cur_c + shift):
             self._grid_ref_set(self._idx(self.cur_r, c2), blank)
 
@@ -1271,11 +1288,9 @@ struct Vt(Copyable, Movable):
         for c in range(self.cur_c, self.cols - shift):
             var src = self._idx(self.cur_r, c + shift)
             var dst = self._idx(self.cur_r, c)
-            if self.using_alt:
-                self.alt[dst] = self.alt[src]
-            else:
-                self.primary[dst] = self.primary[src]
-        var blank = Cell(String(" "), self.current_attr, 1)
+            var cell = self._grid_ref_get(src)
+            self._grid_ref_set(dst, cell)
+        var blank = self._blank_cell()
         for c2 in range(self.cols - shift, self.cols):
             self._grid_ref_set(self._idx(self.cur_r, c2), blank)
 
@@ -1284,7 +1299,7 @@ struct Vt(Copyable, Movable):
         if n <= 0: return
         var end = self.cur_c + n
         if end > self.cols: end = self.cols
-        var blank = Cell(String(" "), self.current_attr, 1)
+        var blank = self._blank_cell()
         for c in range(self.cur_c, end):
             self._grid_ref_set(self._idx(self.cur_r, c), blank)
 
