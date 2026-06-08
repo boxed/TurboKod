@@ -203,6 +203,22 @@ struct MenuBar(Movable):
 
     # --- layout ------------------------------------------------------------
 
+    def _rank_sort(self, mut indices: List[Int]):
+        """Stable insertion-sort of menu ``indices`` by ``_menu_rank``
+        (File → Edit → other → Window → Help); rank ties keep insertion
+        order. Shared by ``_layout`` and ``_display_order_indices``."""
+        for i in range(1, len(indices)):
+            var j = i
+            while j > 0:
+                var ra = _menu_rank(self.menus[indices[j]].label)
+                var rb = _menu_rank(self.menus[indices[j - 1]].label)
+                if ra >= rb:
+                    break
+                var tmp = indices[j]
+                indices[j] = indices[j - 1]
+                indices[j - 1] = tmp
+                j -= 1
+
     def _layout(self, screen_width: Int) -> List[Rect]:
         """Per-menu hit-test rects. Hidden menus get an empty rect at (0,0).
 
@@ -230,17 +246,7 @@ struct MenuBar(Movable):
                     and not self.menus[i].right_aligned \
                     and not self.menus[i].is_system:
                 left.append(i)
-        for i in range(1, len(left)):
-            var j = i
-            while j > 0:
-                var ra = _menu_rank(self.menus[left[j]].label)
-                var rb = _menu_rank(self.menus[left[j - 1]].label)
-                if ra >= rb:
-                    break
-                var tmp = left[j]
-                left[j] = left[j - 1]
-                left[j - 1] = tmp
-                j -= 1
+        self._rank_sort(left)
         var x = 3                                   # past `≡ `
         for k in range(len(left)):
             var i = left[k]
@@ -465,17 +471,7 @@ struct MenuBar(Movable):
                 right.append(i)
             else:
                 left.append(i)
-        for i in range(1, len(left)):
-            var j = i
-            while j > 0:
-                var ra = _menu_rank(self.menus[left[j]].label)
-                var rb = _menu_rank(self.menus[left[j - 1]].label)
-                if ra >= rb:
-                    break
-                var tmp = left[j]
-                left[j] = left[j - 1]
-                left[j - 1] = tmp
-                j -= 1
+        self._rank_sort(left)
         var order = List[Int]()
         if system >= 0:
             order.append(system)
