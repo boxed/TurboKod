@@ -1031,9 +1031,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
+        params.put(String("textDocument"), _text_document(path))
         try:
             self._inflight_symbol_id = self.client.send_request(
                 String("textDocument/documentSymbol"), params,
@@ -1108,6 +1106,20 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_ws_symbols = False
         return out^
 
+    def _send_cancel(mut self, var request_id: String, context: String):
+        """Best-effort ``$/cancelRequest`` for ``request_id``. The cancel is
+        a notification (no response), so a send failure is logged with
+        ``context`` and otherwise ignored — if the server already returned,
+        the cancel is a no-op anyway."""
+        var cancel_params = json_object()
+        cancel_params.put(String("id"), json_str(request_id))
+        try:
+            self.client.send_notification(
+                String("$/cancelRequest"), cancel_params,
+            )
+        except e:
+            print("lsp: cancelRequest (" + context + "):", String(e))
+
     def request_completion(
         mut self, path: String, line: Int, character: Int,
         var text: String, manual: Bool = False,
@@ -1155,19 +1167,9 @@ struct LspManager(Copyable, Movable):
         # already shadow the old id below, so the response (cancelled
         # or not) is dropped on arrival.
         if len(self._inflight_completion_id.as_bytes()) > 0:
-            var cancel_params = json_object()
-            cancel_params.put(
-                String("id"), json_str(self._inflight_completion_id),
+            self._send_cancel(
+                self._inflight_completion_id, String("completion"),
             )
-            try:
-                self.client.send_notification(
-                    String("$/cancelRequest"), cancel_params,
-                )
-            except e:
-                # Cancel-best-effort: if the server has already
-                # returned, the cancel is a no-op anyway. Log so a
-                # stuck pipe is visible.
-                print("lsp: cancelRequest (completion):", String(e))
         try:
             self._inflight_completion_id = self.client.send_request(
                 String("textDocument/completion"), params,
@@ -1202,16 +1204,9 @@ struct LspManager(Copyable, Movable):
                 + self._inflight_completion_id
                 + String(" lang=") + self._language_id,
             )
-            var cancel_params = json_object()
-            cancel_params.put(
-                String("id"), json_str(self._inflight_completion_id),
+            self._send_cancel(
+                self._inflight_completion_id, String("cancel_completion"),
             )
-            try:
-                self.client.send_notification(
-                    String("$/cancelRequest"), cancel_params,
-                )
-            except e:
-                print("lsp: cancelRequest (cancel_completion):", String(e))
             self._inflight_completion_id = String("")
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
@@ -1270,16 +1265,7 @@ struct LspManager(Copyable, Movable):
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
         if len(self._inflight_hover_id.as_bytes()) > 0:
-            var cancel_params = json_object()
-            cancel_params.put(
-                String("id"), json_str(self._inflight_hover_id),
-            )
-            try:
-                self.client.send_notification(
-                    String("$/cancelRequest"), cancel_params,
-                )
-            except e:
-                print("lsp: cancelRequest (hover):", String(e))
+            self._send_cancel(self._inflight_hover_id, String("hover"))
         try:
             self._inflight_hover_id = self.client.send_request(
                 String("textDocument/hover"), params,
@@ -1343,30 +1329,16 @@ struct LspManager(Copyable, Movable):
         )
         self._send_open_or_change(path, text^)
         var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
-        params.put(String("textDocument"), doc)
+        params.put(String("textDocument"), _text_document(path))
         var rng = json_object()
-        var start = json_object()
-        start.put(String("line"), json_int(diag.start_row))
-        start.put(String("character"), json_int(diag.start_col))
-        var end = json_object()
-        end.put(String("line"), json_int(diag.end_row))
-        end.put(String("character"), json_int(diag.end_col))
-        rng.put(String("start"), start^)
-        rng.put(String("end"), end^)
+        rng.put(String("start"), _lsp_position(diag.start_row, diag.start_col))
+        rng.put(String("end"), _lsp_position(diag.end_row, diag.end_col))
         params.put(String("range"), rng^)
         var ctx = json_object()
         var diag_obj = json_object()
         var d_rng = json_object()
-        var d_start = json_object()
-        d_start.put(String("line"), json_int(diag.start_row))
-        d_start.put(String("character"), json_int(diag.start_col))
-        var d_end = json_object()
-        d_end.put(String("line"), json_int(diag.end_row))
-        d_end.put(String("character"), json_int(diag.end_col))
-        d_rng.put(String("start"), d_start^)
-        d_rng.put(String("end"), d_end^)
+        d_rng.put(String("start"), _lsp_position(diag.start_row, diag.start_col))
+        d_rng.put(String("end"), _lsp_position(diag.end_row, diag.end_col))
         diag_obj.put(String("range"), d_rng^)
         diag_obj.put(String("severity"), json_int(diag.severity))
         if len(diag.message.as_bytes()) > 0:
@@ -2000,8 +1972,7 @@ struct LspManager(Copyable, Movable):
             + String(" text_len=") + String(len(text.as_bytes())),
         )
         var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        var doc = _text_document(path)
         doc.put(String("languageId"), json_str(self._language_id))
         doc.put(String("version"), json_int(1))
         doc.put(String("text"), json_str(text^))
@@ -2023,8 +1994,7 @@ struct LspManager(Copyable, Movable):
             + String(" text_len=") + String(len(text.as_bytes())),
         )
         var params = json_object()
-        var doc = json_object()
-        doc.put(String("uri"), json_str(_path_to_uri(path)))
+        var doc = _text_document(path)
         doc.put(String("version"), json_int(version))
         params.put(String("textDocument"), doc)
         var changes = json_array()
@@ -2768,6 +2738,23 @@ def _trim_trailing_newline(s: String) -> String:
     return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
 
 
+def _text_document(path: String) -> JsonValue:
+    """The ``{"uri": ...}`` TextDocumentIdentifier object for ``path``.
+    Callers that need a richer TextDocumentItem (languageId / version) add
+    those fields to the returned object."""
+    var doc = json_object()
+    doc.put(String("uri"), json_str(_path_to_uri(path)))
+    return doc^
+
+
+def _lsp_position(line: Int, character: Int) -> JsonValue:
+    """An LSP ``{"line", "character"}`` Position object (0-based)."""
+    var pos = json_object()
+    pos.put(String("line"), json_int(line))
+    pos.put(String("character"), json_int(character))
+    return pos^
+
+
 def _text_document_position_params(
     path: String, line: Int, character: Int,
 ) -> JsonValue:
@@ -2776,13 +2763,8 @@ def _text_document_position_params(
     requests. Callers add request-specific fields (e.g. ``context``) to the
     returned object."""
     var params = json_object()
-    var doc = json_object()
-    doc.put(String("uri"), json_str(_path_to_uri(path)))
-    params.put(String("textDocument"), doc)
-    var pos = json_object()
-    pos.put(String("line"), json_int(line))
-    pos.put(String("character"), json_int(character))
-    params.put(String("position"), pos)
+    params.put(String("textDocument"), _text_document(path))
+    params.put(String("position"), _lsp_position(line, character))
     return params^
 
 
