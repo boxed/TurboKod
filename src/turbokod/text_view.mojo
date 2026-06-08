@@ -40,8 +40,8 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import (
-    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
-    utf8_codepoint_size,
+    byte_slice, char_width, codepoint_at, is_word_codepoint,
+    leading_indent_bytes, utf8_codepoint_size,
 )
 
 
@@ -557,16 +557,16 @@ struct Selection(ImplicitlyCopyable, Movable):
         var s_line = r[0]; var s_col = r[1]
         var e_line = r[2]; var e_col = r[3]
         if s_line == e_line:
-            return _byte_slice(lines[s_line], s_col, e_col)
+            return byte_slice(lines[s_line], s_col, e_col)
         var first_line = lines[s_line]
         var first_n = len(first_line.as_bytes())
-        var out = _byte_slice(first_line, s_col, first_n)
+        var out = byte_slice(first_line, s_col, first_n)
         for li in range(s_line + 1, e_line):
             if li < 0 or li >= len(lines):
                 continue
             out = out + String("\n") + lines[li]
         if 0 <= e_line and e_line < len(lines):
-            out = out + String("\n") + _byte_slice(lines[e_line], 0, e_col)
+            out = out + String("\n") + byte_slice(lines[e_line], 0, e_col)
         return out^
 
 
@@ -1261,17 +1261,3 @@ def _row_cell_offset(
     return cells
 
 
-def _byte_slice(s: String, start: Int, end: Int) -> String:
-    """Byte-range substring (no UTF-8 decoding). Tolerates out-of-range
-    bounds. Mirrors editor.mojo's ``_slice`` so we can drop the local
-    copy in either consumer if it ever becomes single-source."""
-    var bytes = s.as_bytes()
-    var s_start = start
-    var s_end = end
-    if s_start < 0:
-        s_start = 0
-    if s_end > len(bytes):
-        s_end = len(bytes)
-    if s_start >= s_end:
-        return String("")
-    return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))

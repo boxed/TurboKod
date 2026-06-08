@@ -74,7 +74,7 @@ from .search_options import (
     SearchOptions, build_search_regex, default_search_options,
 )
 from .string_utils import (
-    char_width, codepoint_at, display_columns, is_word_codepoint,
+    byte_slice, char_width, codepoint_at, display_columns, is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
     utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
     word_char_step, word_range_at,
@@ -87,17 +87,6 @@ from .config import WRAP_NONE, WRAP_SMART
 
 
 # --- Helpers ----------------------------------------------------------------
-
-
-def _slice(s: String, start: Int, end: Int) -> String:
-    """Byte-range substring (ASCII-safe)."""
-    var bytes = s.as_bytes()
-    var s_start = start
-    var s_end = end
-    if s_start < 0: s_start = 0
-    if s_end > len(bytes): s_end = len(bytes)
-    if s_start >= s_end: return String("")
-    return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
 def _completion_kind_name(kind: Int) -> String:
@@ -201,7 +190,7 @@ def _rtrim(s: String) -> String:
         n -= 1
     if n == len(bytes):
         return s
-    return _slice(s, 0, n)
+    return byte_slice(s, 0, n)
 
 
 def _diag_intersects_row(diag: Diagnostic, row: Int) -> Bool:
@@ -486,7 +475,7 @@ struct TextBuffer(Copyable, Movable):
                 var line_end = i
                 if line_end > line_start and bytes[line_end - 1] == 0x0D:
                     line_end -= 1
-                self.lines.append(_slice(text, line_start, line_end))
+                self.lines.append(byte_slice(text, line_start, line_end))
                 line_start = i + 1
             i += 1
         # Final segment after the last '\n' (or the whole text when no
@@ -496,7 +485,7 @@ struct TextBuffer(Copyable, Movable):
         var end = len(bytes)
         if end > line_start and bytes[end - 1] == 0x0D:
             end -= 1
-        self.lines.append(_slice(text, line_start, end))
+        self.lines.append(byte_slice(text, line_start, end))
 
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
@@ -522,7 +511,7 @@ struct TextBuffer(Copyable, Movable):
         var pos = col
         if pos < 0: pos = 0
         if pos > n: pos = n
-        self.lines[row] = _slice(line, 0, pos) + text + _slice(line, pos, n)
+        self.lines[row] = byte_slice(line, 0, pos) + text + byte_slice(line, pos, n)
 
     def delete_at(mut self, row: Int, col: Int):
         """Delete one codepoint at (row, col). If past EOL, joins next line."""
@@ -536,14 +525,14 @@ struct TextBuffer(Copyable, Movable):
                 _ = self.lines.pop(row + 1)
             return
         var nxt = _utf8_step_forward(line, col)
-        self.lines[row] = _slice(line, 0, col) + _slice(line, nxt, n)
+        self.lines[row] = byte_slice(line, 0, col) + byte_slice(line, nxt, n)
 
     def delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Backspace one codepoint. Returns the new cursor (row, col)."""
         if col > 0:
             var line = self.lines[row]
             var prev_col = prev_codepoint_start(line, col)
-            self.lines[row] = _slice(line, 0, prev_col) + _slice(line, col, len(line.as_bytes()))
+            self.lines[row] = byte_slice(line, 0, prev_col) + byte_slice(line, col, len(line.as_bytes()))
             return (row, prev_col)
         if row > 0:
             var prev = self.lines[row - 1]
@@ -562,8 +551,8 @@ struct TextBuffer(Copyable, Movable):
         var pos = col
         if pos < 0: pos = 0
         if pos > n: pos = n
-        var head = _slice(line, 0, pos)
-        var tail = _slice(line, pos, n)
+        var head = byte_slice(line, 0, pos)
+        var tail = byte_slice(line, pos, n)
         self.lines[row] = head
         # Append-and-shift rather than relying on List.insert which may not
         # exist on all Mojo versions.
@@ -2695,8 +2684,8 @@ struct Editor(Copyable, Movable):
         if el2 == sl and ec2 < sc2:
             ec2 = sc2
 
-        var prefix = _slice(s_line, 0, sc2)
-        var suffix = _slice(e_line, ec2, e_ln)
+        var prefix = byte_slice(s_line, 0, sc2)
+        var suffix = byte_slice(e_line, ec2, e_ln)
 
         # Collapse the deleted span into the start row.
         self.buffer.lines[sl] = prefix
@@ -2717,7 +2706,7 @@ struct Editor(Copyable, Movable):
                 if i > line_start:
                     self.buffer.lines[current_row] = (
                         self.buffer.lines[current_row]
-                        + _slice(new_text, line_start, i)
+                        + byte_slice(new_text, line_start, i)
                     )
                 self.buffer.lines.append(String(""))
                 var k = len(self.buffer.lines) - 1
@@ -2731,7 +2720,7 @@ struct Editor(Copyable, Movable):
         if line_start < len(bytes):
             self.buffer.lines[current_row] = (
                 self.buffer.lines[current_row]
-                + _slice(new_text, line_start, len(bytes))
+                + byte_slice(new_text, line_start, len(bytes))
             )
         # Suffix lands on whatever row the last newline left us on. Its
         # byte column there (before appending) is where any cursor that
@@ -3680,7 +3669,7 @@ struct Editor(Copyable, Movable):
             var rm = removed[r - sr]
             if rm > 0:
                 var line = self.buffer.line(r)
-                self.buffer.lines[r] = _slice(line, rm, len(line.as_bytes()))
+                self.buffer.lines[r] = byte_slice(line, rm, len(line.as_bytes()))
         if self.selections[0].row >= sr and self.selections[0].row <= er:
             var rm_c = removed[self.selections[0].row - sr]
             var nc = self.selections[0].col - rm_c
@@ -4048,7 +4037,7 @@ struct Editor(Copyable, Movable):
             var hl = self.spell_highlights[h]
             if hl.row == row:
                 var line = self.buffer.line(row)
-                return _slice(line, hl.col_start, hl.col_end)
+                return byte_slice(line, hl.col_start, hl.col_end)
         return String("")
 
     def _minimap_first_diagnostic_message(self, row: Int) -> String:
@@ -4204,7 +4193,7 @@ struct Editor(Copyable, Movable):
             )
             self._minimap_hover_kind = 2
             self._minimap_hover_buf_row = row
-            self._minimap_hover_word = _slice(
+            self._minimap_hover_word = byte_slice(
                 self.buffer.line(row), sh.col_start, sh.col_end,
             )
             return
@@ -4270,7 +4259,7 @@ struct Editor(Copyable, Movable):
             var clip_end = seg_byte_end
             if clip_end > line_n:
                 clip_end = line_n
-            visible = _slice(line, seg_byte_start, clip_end)
+            visible = byte_slice(line, seg_byte_start, clip_end)
         var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
         self._hover_candidate_row = row
         self._hover_candidate_col = word_start
@@ -4361,7 +4350,7 @@ struct Editor(Copyable, Movable):
             var clip_end = seg_byte_end
             if clip_end > line_n:
                 clip_end = line_n
-            visible = _slice(line, seg_byte_start, clip_end)
+            visible = byte_slice(line, seg_byte_start, clip_end)
         var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
         self._minimap_hover_x = seg_x0 + cell_off
         self._minimap_hover_y = screen_y + 1
@@ -4415,7 +4404,7 @@ struct Editor(Copyable, Movable):
         if seg_start >= line_n:
             visible = String("")
         else:
-            visible = _slice(line, seg_start, seg_end)
+            visible = byte_slice(line, seg_start, seg_end)
         var visible_cells = utf8_codepoint_count(visible)
         if cell_x >= visible_cells:
             return miss
@@ -4567,7 +4556,7 @@ struct Editor(Copyable, Movable):
         if seg_start >= line_n:
             vis = String("")
         else:
-            vis = _slice(line, seg_start, layout[sr].byte_end)
+            vis = byte_slice(line, seg_start, layout[sr].byte_end)
         var cm = utf8_byte_to_cell(vis)
         var cc = utf8_codepoint_count(vis)
         var vbc = len(vis.as_bytes())
@@ -4965,7 +4954,7 @@ struct Editor(Copyable, Movable):
         if seg_start >= line_byte_count:
             visible_str = String("")
         else:
-            visible_str = _slice(line, seg_start, seg_end)
+            visible_str = byte_slice(line, seg_start, seg_end)
         var cursor_cell_map = utf8_byte_to_cell(visible_str)
         var cursor_cell_count = utf8_codepoint_count(visible_str)
         var visible_byte_count = len(visible_str.as_bytes())
@@ -5012,7 +5001,7 @@ struct Editor(Copyable, Movable):
         if seg_start >= line_byte_count:
             visible_str = String("")
         else:
-            visible_str = _slice(line, seg_start, seg_end)
+            visible_str = byte_slice(line, seg_start, seg_end)
         var cell_map = utf8_byte_to_cell(visible_str)
         var visible_byte_count = len(visible_str.as_bytes())
         var byte_off = col - seg_start
@@ -5210,7 +5199,7 @@ struct Editor(Copyable, Movable):
             if start_byte >= line_n:
                 seg = String("")
             else:
-                seg = _slice(line, start_byte, end_byte)
+                seg = byte_slice(line, start_byte, end_byte)
             var seg_n = len(seg.as_bytes())
             var compress = sep >= 0 and seg_n > 0 \
                 and not _row_is_expanded(buf_row, carets, bracket_rows)
@@ -5506,7 +5495,7 @@ struct Editor(Copyable, Movable):
         if self.has_selection() and not self.has_extra_carets():
             var sel_norm = self.selection()
             if sel_norm[0] == sel_norm[2] and sel_norm[3] > sel_norm[1]:
-                var cand = _slice(
+                var cand = byte_slice(
                     self.buffer.line(sel_norm[0]), sel_norm[1], sel_norm[3],
                 )
                 var cand_bytes = cand.as_bytes()
@@ -5812,7 +5801,7 @@ struct Editor(Copyable, Movable):
                 if seg_start >= line_n:
                     vis = String("")
                 else:
-                    vis = _slice(line, seg_start, layout[sr].byte_end)
+                    vis = byte_slice(line, seg_start, layout[sr].byte_end)
                 var cm = utf8_byte_to_cell(vis)
                 var cc = utf8_codepoint_count(vis)
                 var vbc = len(vis.as_bytes())
@@ -5962,8 +5951,8 @@ struct Editor(Copyable, Movable):
                     actual_ec = actual_cur
             var line = self.buffer.line(c.row)
             var line_n = len(line.as_bytes())
-            self.buffer.lines[c.row] = _slice(line, 0, actual_sc) \
-                + text + _slice(line, actual_ec, line_n)
+            self.buffer.lines[c.row] = byte_slice(line, 0, actual_sc) \
+                + text + byte_slice(line, actual_ec, line_n)
             var new_col = actual_sc + n_text
             var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
@@ -6057,8 +6046,8 @@ struct Editor(Copyable, Movable):
                 actual_ec = actual_cur
             var line = self.buffer.line(c.row)
             var line_n = len(line.as_bytes())
-            self.buffer.lines[c.row] = _slice(line, 0, actual_sc) \
-                + text + _slice(line, actual_ec, line_n)
+            self.buffer.lines[c.row] = byte_slice(line, 0, actual_sc) \
+                + text + byte_slice(line, actual_ec, line_n)
             var new_col = actual_sc + n_text
             var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
@@ -7530,12 +7519,12 @@ struct Editor(Copyable, Movable):
             if leading_indent_bytes(line) == lb_len:
                 continue  # leave blank lines alone
             if all_commented:
-                var before = _slice(line, 0, common_len)
-                var after = _slice(line, common_len + pn, lb_len)
+                var before = byte_slice(line, 0, common_len)
+                var after = byte_slice(line, common_len + pn, lb_len)
                 self.buffer.lines[r] = before + after
             else:
-                var before = _slice(line, 0, common_len)
-                var after = _slice(line, common_len, lb_len)
+                var before = byte_slice(line, 0, common_len)
+                var after = byte_slice(line, common_len, lb_len)
                 self.buffer.lines[r] = before + effective_prefix + after
         self.dirty = True
         # Toggle-comment touches rows ``sr..er``; mark dirty from
@@ -7590,7 +7579,7 @@ struct Editor(Copyable, Movable):
                 if i > line_start:
                     self.buffer.insert(
                         self.selections[0].row, self.selections[0].col,
-                        _slice(text, line_start, i),
+                        byte_slice(text, line_start, i),
                     )
                     self.selections[0].col += i - line_start
                 var p = self.buffer.split(self.selections[0].row, self.selections[0].col)
@@ -7598,7 +7587,7 @@ struct Editor(Copyable, Movable):
                 line_start = i + 1
             i += 1
         if line_start < len(bytes):
-            var rest = _slice(text, line_start, len(bytes))
+            var rest = byte_slice(text, line_start, len(bytes))
             self.buffer.insert(self.selections[0].row, self.selections[0].col, rest)
             self.move_to(
                 self.selections[0].row,
@@ -7823,7 +7812,7 @@ struct Editor(Copyable, Movable):
         if seg_start >= line_n:
             visible = String("")
         else:
-            visible = _slice(line, seg_start, seg_end)
+            visible = byte_slice(line, seg_start, seg_end)
         var col = seg_start + utf8_byte_of_cell(visible, cell_x)
         if col > line_n: col = line_n
         # Cmd+click: capture a go-to-definition request without moving
@@ -8034,12 +8023,12 @@ struct Editor(Copyable, Movable):
         var er = sel[2]; var ec = sel[3]
         if sr == er:
             var line = self.buffer.line(sr)
-            self.buffer.lines[sr] = _slice(line, 0, sc) + _slice(line, ec, len(line.as_bytes()))
+            self.buffer.lines[sr] = byte_slice(line, 0, sc) + byte_slice(line, ec, len(line.as_bytes()))
         else:
             var first = self.buffer.line(sr)
             var last = self.buffer.line(er)
-            var head = _slice(first, 0, sc)
-            var tail = _slice(last, ec, len(last.as_bytes()))
+            var head = byte_slice(first, 0, sc)
+            var tail = byte_slice(last, ec, len(last.as_bytes()))
             self.buffer.lines[sr] = head + tail
             for _ in range(er - sr):
                 _ = self.buffer.lines.pop(sr + 1)
@@ -8624,7 +8613,7 @@ def _smart_indent_for_enter(
     var i = 0
     while i < n and (bytes[i] == 0x20 or bytes[i] == 0x09):
         i += 1
-    var base = _slice(line, 0, i)
+    var base = byte_slice(line, 0, i)
     var p = split_col
     if p > n:
         p = n

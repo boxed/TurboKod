@@ -11,6 +11,21 @@ from the desktop copy by exactly one ``<`` vs. ``<=`` in a bounds check).
 from std.collections.list import List
 
 
+def byte_slice(s: String, start: Int, end: Int) -> String:
+    """Byte-range substring (no UTF-8 decoding). Tolerates out-of-range
+    bounds, returning ``""`` when the range is empty or inverted."""
+    var bytes = s.as_bytes()
+    var s_start = start
+    var s_end = end
+    if s_start < 0:
+        s_start = 0
+    if s_end > len(bytes):
+        s_end = len(bytes)
+    if s_start >= s_end:
+        return String("")
+    return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+
+
 def starts_with(s: String, prefix: String) -> Bool:
     """``True`` iff ``s`` begins with ``prefix`` byte-for-byte."""
     var sb = s.as_bytes()
