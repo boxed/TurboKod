@@ -53,7 +53,7 @@ from .config import (
 from .diff import unified_diff
 from .file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
-    read_file, stat_file, write_file,
+    project_relative, read_file, stat_file, write_file,
 )
 from .git_blame import compute_blame
 from .git_changes import (
@@ -164,7 +164,7 @@ from .string_utils import (
     display_columns, parse_int_prefix, starts_with, utf8_cell_of_byte,
 )
 from .session_store import (
-    Session, SessionWindow, _resolve_session_path, _session_relative,
+    Session, SessionWindow, _resolve_session_path,
     encode_session, load_session, save_session,
 )
 from .breakpoint_store import (
@@ -4306,7 +4306,7 @@ struct Desktop(Movable):
                 win_to_session.append(-1)
                 continue
             var sw = SessionWindow()
-            sw.path = _session_relative(root, fp)
+            sw.path = project_relative(root, fp)
             sw.rect_a_x = self.windows.windows[i].rect.a.x
             sw.rect_a_y = self.windows.windows[i].rect.a.y
             sw.rect_b_x = self.windows.windows[i].rect.b.x

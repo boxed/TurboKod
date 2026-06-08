@@ -28,7 +28,8 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .file_io import (
-    join_path, list_directory, sort_directory_listing, stat_file,
+    join_path, list_directory, project_relative, sort_directory_listing,
+    stat_file,
 )
 from .geometry import Point, Rect
 from .project import GitignoreMatcher, load_project_gitignore
@@ -52,24 +53,6 @@ struct FileTreeEntry(ImplicitlyCopyable, Movable):
     var depth: Int
     var is_dir: Bool
     var is_expanded: Bool
-
-
-def _strip_root_prefix(root: String, full: String) -> String:
-    """Return ``full`` minus the ``root + "/"`` prefix, or ``""`` when they
-    coincide. Falls back to ``full`` if the prefix doesn't match, so the
-    caller still gets a usable path."""
-    var rb = root.as_bytes()
-    var fb = full.as_bytes()
-    if len(fb) == len(rb):
-        return String("")
-    if len(fb) < len(rb) + 1:
-        return full
-    for k in range(len(rb)):
-        if fb[k] != rb[k]:
-            return full
-    if fb[len(rb)] != 0x2F:
-        return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
 struct FileTree(Movable):
@@ -183,7 +166,7 @@ struct FileTree(Movable):
         var raw = list_directory(path)
         var names = List[String]()
         var is_dirs = List[Bool]()
-        var rel_prefix = _strip_root_prefix(self.root, path)
+        var rel_prefix = project_relative(self.root, path, empty_on_exact=True)
         for i in range(len(raw)):
             var name = raw[i]
             if name == String(".") or name == String("..") \
@@ -243,12 +226,12 @@ struct FileTree(Movable):
         listing (gitignored)."""
         if not self.visible:
             return
-        var rel = _strip_root_prefix(self.root, path)
+        var rel = project_relative(self.root, path, empty_on_exact=True)
         var rb = rel.as_bytes()
         if len(rb) == 0:
             return
         if rb[0] == 0x2F:
-            # ``_strip_root_prefix`` echoed the absolute path back —
+            # ``project_relative`` echoed the absolute path back —
             # the prefix didn't match, so the file is outside the root.
             return
         # Split into components (no leading / trailing slashes by now).

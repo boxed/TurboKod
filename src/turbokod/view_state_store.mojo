@@ -31,7 +31,7 @@ malformed or missing file silently yields an empty list.
 from std.collections.list import List
 from std.ffi import external_call
 
-from .file_io import join_path, read_file, stat_file, write_file
+from .file_io import join_path, project_relative, read_file, stat_file, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_int, json_object, json_str,
     parse_json, json_get_int, json_get_string,
@@ -99,21 +99,6 @@ def _ensure_dirs(project_root: String):
     _ensure_dir(per_user)
     var user_dir = join_path(per_user, _current_username())
     _ensure_dir(user_dir)
-
-
-def _vs_relative(project_root: String, full: String) -> String:
-    var rb = project_root.as_bytes()
-    var fb = full.as_bytes()
-    if len(rb) == 0:
-        return full
-    if len(fb) <= len(rb) + 1:
-        return full
-    for k in range(len(rb)):
-        if fb[k] != rb[k]:
-            return full
-    if fb[len(rb)] != 0x2F:
-        return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
 def _resolve_vs_path(project_root: String, stored: String) -> String:
@@ -197,7 +182,7 @@ def encode_view_states(
     var arr = json_array()
     for i in range(len(views)):
         var v = json_object()
-        var rel = _vs_relative(project_root, views[i].path)
+        var rel = project_relative(project_root, views[i].path)
         v.put(String("path"), json_str(rel))
         v.put(
             String("cursor"),

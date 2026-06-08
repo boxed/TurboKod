@@ -55,7 +55,7 @@ from turbokod.find_symbol import (
 from turbokod.save_as_dialog import SaveAsDialog
 from turbokod.scrollbar import HScrollbar, VScrollbar
 from turbokod.session_store import (
-    Session, SessionWindow, _resolve_session_path, _session_relative,
+    Session, SessionWindow, _resolve_session_path,
     _session_path, encode_session, load_session, save_session,
 )
 from turbokod.breakpoint_store import (
@@ -84,7 +84,7 @@ from turbokod.desktop import (
 )
 from turbokod.file_io import (
     basename, find_git_project, join_path, list_directory, parent_path,
-    read_file, stat_file, write_file,
+    project_relative, read_file, stat_file, write_file,
 )
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
@@ -14107,15 +14107,15 @@ def test_view_state_store_per_user_path() raises:
 
 
 def test_session_relative_path_round_trip() raises:
-    """``_session_relative`` strips the project prefix; the inverse
+    """``project_relative`` strips the project prefix; the inverse
     re-anchors. Files outside the project keep their absolute form
     on the way out and pass through on the way back in."""
     var root = String("/Users/foo/proj")
     var inside = String("/Users/foo/proj/src/main.mojo")
     var outside = String("/etc/hosts")
-    var rel_in = _session_relative(root, inside)
+    var rel_in = project_relative(root, inside)
     assert_equal(rel_in, String("src/main.mojo"))
-    var rel_out = _session_relative(root, outside)
+    var rel_out = project_relative(root, outside)
     assert_equal(rel_out, outside)
     var resolved_in = _resolve_session_path(root, rel_in)
     assert_equal(resolved_in, inside)

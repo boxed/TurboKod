@@ -275,6 +275,54 @@ def join_path(dir: String, name: String) -> String:
     return d + String("/") + name
 
 
+def project_relative(
+    root: String,
+    full: String,
+    canonicalize: Bool = False,
+    empty_on_exact: Bool = False,
+) -> String:
+    """Strip a leading ``<root>/`` from ``full`` to get a project-relative
+    path. Returns ``full`` unchanged when it lies outside ``root`` (or
+    ``root`` is empty). When ``full`` equals ``root`` exactly, returns
+    ``""`` if ``empty_on_exact`` else ``full``.
+
+    With ``empty_on_exact=False`` a path that is merely ``root`` plus one
+    trailing byte (e.g. ``root + "/"``) is treated as non-strippable and
+    echoed back — matching the historic session/project/view-state guard.
+
+    With ``canonicalize=True`` both sides are ``realpath``-resolved before
+    the byte compare (needed when ``root`` is canonical but ``full`` may not
+    be, e.g. on case-insensitive APFS or a symlinked root); the original
+    ``full`` is still what's returned on a non-match.
+
+    Single source for what used to be ``_session_relative`` /
+    ``_project_relative`` / ``_vs_relative`` / ``_strip_root`` /
+    ``_strip_root_prefix`` / ``_relative_to_root``."""
+    var cmp_root = root
+    var cmp_full = full
+    if canonicalize:
+        var rr = realpath(root)
+        if len(rr.as_bytes()) > 0:
+            cmp_root = rr
+        var rp = realpath(full)
+        if len(rp.as_bytes()) > 0:
+            cmp_full = rp
+    var rb = cmp_root.as_bytes()
+    var fb = cmp_full.as_bytes()
+    if len(rb) == 0 or len(fb) < len(rb):
+        return full
+    for k in range(len(rb)):
+        if fb[k] != rb[k]:
+            return full
+    if len(fb) == len(rb):
+        return String("") if empty_on_exact else full
+    if not empty_on_exact and len(fb) == len(rb) + 1:
+        return full
+    if fb[len(rb)] != 0x2F:
+        return full
+    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
+
+
 def parent_path(path: String) -> String:
     """Return the parent directory of ``path`` (or ``"/"`` at the root)."""
     var bytes = path.as_bytes()

@@ -12,7 +12,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import (
-    join_path, list_directory, read_file, stat_file, write_file,
+    join_path, list_directory, project_relative, read_file, stat_file,
+    write_file,
 )
 from .lsp import LspProcess, capture_command
 from .onig import OnigRegex
@@ -609,24 +610,6 @@ def _looks_binary(text: String) -> Bool:
     return False
 
 
-def _project_relative(root: String, full: String) -> String:
-    var rb = root.as_bytes()
-    var fb = full.as_bytes()
-    if len(rb) == 0:
-        # No project root → don't strip anything (an empty root would
-        # otherwise match every path and shave a leading '/'). Matches the
-        # guard the _session_relative / _vs_relative siblings already have.
-        return full
-    if len(fb) <= len(rb) + 1:
-        return full
-    for k in range(len(rb)):
-        if fb[k] != rb[k]:
-            return full
-    if fb[len(rb)] != 0x2F:
-        return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
-
-
 def _replace_all_in_string(
     haystack: String, needle: String, replacement: String,
 ) -> String:
@@ -704,7 +687,7 @@ def find_in_project(
         if _looks_binary(text):
             continue
         var lines = split_lines_no_trailing(text)
-        var rel = _project_relative(root, full)
+        var rel = project_relative(root, full)
         for ln in range(len(lines)):
             var hit: Bool
             if rx_opt:

@@ -188,25 +188,6 @@ def _has_prefix(s: String, prefix: String) -> Bool:
     return True
 
 
-def _session_relative(project_root: String, full: String) -> String:
-    """Project-relative form of ``full``, or ``full`` unchanged when the
-    file lives outside the project. Mirrors ``_project_relative`` in
-    ``project.mojo`` but used at save time so the on-disk session
-    survives moving the project directory."""
-    var rb = project_root.as_bytes()
-    var fb = full.as_bytes()
-    if len(rb) == 0:
-        return full
-    if len(fb) <= len(rb) + 1:
-        return full
-    for k in range(len(rb)):
-        if fb[k] != rb[k]:
-            return full
-    if fb[len(rb)] != 0x2F:
-        return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
-
-
 def _resolve_session_path(project_root: String, stored: String) -> String:
     """Inverse of ``_session_relative``: anchor a stored relative path
     onto the project root. Absolute paths and empty roots pass

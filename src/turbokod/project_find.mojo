@@ -33,7 +33,7 @@ from .events import (
     KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
-from .file_io import read_file, stat_file
+from .file_io import project_relative, read_file, stat_file
 from .geometry import Point, Rect
 from .highlight import (
     GrammarRegistry, Highlight, HighlightCache,
@@ -1183,7 +1183,7 @@ def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
             cut -= 1
         text = _slice_str(text, 0, cut)
     return Optional[ProjectMatch](ProjectMatch(
-        path, _strip_root(path, root), line_no, text,
+        path, project_relative(root, path), line_no, text,
     ))
 
 
@@ -1219,19 +1219,6 @@ def _slice_str(s: String, start: Int, end: Int) -> String:
     if start >= end:
         return String("")
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
-
-
-def _strip_root(path: String, root: String) -> String:
-    var pb = path.as_bytes()
-    var rb = root.as_bytes()
-    if len(rb) == 0 or len(pb) <= len(rb) + 1:
-        return path
-    for k in range(len(rb)):
-        if pb[k] != rb[k]:
-            return path
-    if pb[len(rb)] != 0x2F:
-        return path
-    return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
 def _find_bytes(haystack: String, needle: String) -> Int:
