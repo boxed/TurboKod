@@ -48,6 +48,7 @@ from turbokod.desktop import (
     EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
+    EDITOR_RENAME_SYMBOL,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
     EDITOR_TOGGLE_GIT_CHANGES,
@@ -130,6 +131,7 @@ def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     e.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
     e.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
     e.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+    e.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
     e.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     e.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     e.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
@@ -228,7 +230,18 @@ def _refresh_menu_visibility(mut d: Desktop):
         var has_extras = d.focused_editor_has_extra_carets()
         for i in range(len(d.menu_bar.menus)):
             if d.menu_bar.menus[i].label == String("Edit"):
-                d.menu_bar.menus[i].items = _build_edit_items(has_extras)
+                # Only rebuild when the Fill item's presence actually
+                # changes. Swapping in fresh items every tick would drop
+                # the shortcut text ``_refresh_shortcuts`` stamped on the
+                # previous pass — and that stamper short-circuits when the
+                # action set is unchanged, so it never re-applies them.
+                var has_fill = False
+                for it in range(len(d.menu_bar.menus[i].items)):
+                    if d.menu_bar.menus[i].items[it].action == EDITOR_FILL:
+                        has_fill = True
+                        break
+                if has_fill != has_extras:
+                    d.menu_bar.menus[i].items = _build_edit_items(has_extras)
                 break
 
 

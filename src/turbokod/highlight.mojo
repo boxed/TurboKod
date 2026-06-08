@@ -784,6 +784,22 @@ struct DefinitionRequest(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
+struct EditorContextMenuRequest(ImplicitlyCopyable, Movable):
+    """Payload emitted when the user right-clicks plain identifier text
+    (not a diagnostic squiggle or a breakpoint gutter dot). Hosts poll
+    ``Editor.consume_context_menu_request()`` and open a popup of
+    symbol actions (Rename / Go to Definition / Find References) anchored
+    at ``(anchor_x, anchor_y)``. ``row`` / ``col`` are the buffer
+    coordinates under the click and ``word`` is the identifier there, so
+    the host can act without re-resolving the hit."""
+    var row: Int
+    var col: Int
+    var word: String
+    var anchor_x: Int
+    var anchor_y: Int
+
+
+@fieldwise_init
 struct CompletionRequest(ImplicitlyCopyable, Movable):
     """Payload emitted by the editor when the user invokes completion
     (Ctrl+Space). Hosts poll ``Editor.consume_completion_request()`` and

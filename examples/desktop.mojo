@@ -51,7 +51,8 @@ from turbokod import (
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS,
     EDITOR_NEW, EDITOR_OPEN, EDITOR_OPEN_RECENT,
     EDITOR_PASTE,
-    EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_REPLACE, EDITOR_SAVE,
+    EDITOR_QUICK_OPEN, EDITOR_REDO, EDITOR_RENAME_SYMBOL,
+    EDITOR_REPLACE, EDITOR_SAVE,
     EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
     EDITOR_TOGGLE_COMMENT,
     EDITOR_TOGGLE_COMPRESS_KWARGS,
@@ -106,6 +107,7 @@ def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
     edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
     edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+    edit_items.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
     edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))

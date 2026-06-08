@@ -1529,7 +1529,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let mainMenu = NSMenu()
         let appItem = NSMenuItem(); mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About TurboKod", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "About TurboKod",
+                        action: #selector(aboutAction), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit TurboKod",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -1631,7 +1632,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     sawSystem = true
                     // macOS app-menu conventions on top of Mojo's items.
                     submenu.addItem(NSMenuItem(title: "About TurboKod",
-                                               action: nil, keyEquivalent: ""))
+                                               action: #selector(aboutAction),
+                                               keyEquivalent: ""))
                     submenu.addItem(.separator())
                 }
                 let item = NSMenuItem()
@@ -1704,7 +1706,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if !sawSystem {
             let appSub = NSMenu(title: "TurboKod")
             appSub.addItem(NSMenuItem(title: "About TurboKod",
-                                      action: nil, keyEquivalent: ""))
+                                      action: #selector(aboutAction),
+                                      keyEquivalent: ""))
             appSub.addItem(.separator())
             appSub.addItem(NSMenuItem(
                 title: "Quit TurboKod",
@@ -1836,6 +1839,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc func openProjectAction() {
         if let v = keyView() { openProjectPanel(v) }
         else { openProjectPanelInNewWindow() }
+    }
+
+    // macOS "About TurboKod" — a small panel with a link to the project
+    // on GitHub. Handled entirely in the Swift host (the item is a macOS
+    // app-menu convention, not part of Mojo's shared menu).
+    @objc func aboutAction() {
+        let repoURL = "https://github.com/boxed/TurboKod"
+        let alert = NSAlert()
+        alert.messageText = "TurboKod"
+        alert.informativeText = "Experimental IDE inspired by TurboC++ 3.\n\n\(repoURL)"
+        if let icon = NSApp.applicationIconImage { alert.icon = icon }
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "View on GitHub")
+        if alert.runModal() == .alertSecondButtonReturn,
+           let url = URL(string: repoURL) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: action codes from Mojo (in-grid menu / Ctrl shortcuts)

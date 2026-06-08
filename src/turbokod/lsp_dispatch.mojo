@@ -490,6 +490,14 @@ struct LspManager(Copyable, Movable):
     var _code_action_path: String
     var _resolved_code_actions: List[CodeAction]
     var _has_resolved_code_actions: Bool
+    # Pending ``textDocument/rename`` request state. Same shape as the
+    # code-action slots: an inflight id, an echoed origin path so a stale
+    # response can be dropped, and a parked ``WorkspaceEdit`` (reusing the
+    # ``CodeActionFileEdit`` grouping since rename returns the same shape).
+    var _inflight_rename_id: String
+    var _rename_path: String
+    var _resolved_rename_edits: List[CodeActionFileEdit]
+    var _has_resolved_rename: Bool
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
@@ -571,6 +579,10 @@ struct LspManager(Copyable, Movable):
         self._code_action_path = String("")
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
+        self._inflight_rename_id = String("")
+        self._rename_path = String("")
+        self._resolved_rename_edits = List[CodeActionFileEdit]()
+        self._has_resolved_rename = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -633,6 +645,10 @@ struct LspManager(Copyable, Movable):
         self._code_action_path = String("")
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
+        self._inflight_rename_id = String("")
+        self._rename_path = String("")
+        self._resolved_rename_edits = List[CodeActionFileEdit]()
+        self._has_resolved_rename = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -1387,6 +1403,60 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_code_actions = False
         return out^
 
+    def request_rename(
+        mut self, path: String, line: Int, character: Int,
+        new_name: String, var text: String,
+    ) -> Bool:
+        """Ask the server for ``textDocument/rename`` at
+        ``(line, character)`` with the new identifier ``new_name``.
+
+        Mirrors ``request_references`` — pre-flights with didOpen/didChange
+        so the server's view matches the buffer, then parks an inflight id.
+        The response is a ``WorkspaceEdit`` (possibly spanning several
+        files), parsed in ``tick`` into the same ``CodeActionFileEdit``
+        grouping the host already knows how to apply."""
+        if self.state != _STATE_READY:
+            return False
+        _lsp_debug_log(
+            String("→ request_rename lang=") + self._language_id
+            + String(" path=") + path
+            + String(" line=") + String(line)
+            + String(" character=") + String(character)
+            + String(" new_name=") + new_name,
+        )
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        params.put(String("newName"), json_str(new_name))
+        try:
+            self._inflight_rename_id = self.client.send_request(
+                String("textDocument/rename"), params,
+            )
+        except:
+            self._inflight_rename_id = String("")
+            return False
+        self._rename_path = path
+        self._resolved_rename_edits = List[CodeActionFileEdit]()
+        self._has_resolved_rename = False
+        return True
+
+    def has_pending_rename(self) -> Bool:
+        """True iff a parsed rename ``WorkspaceEdit`` is parked for ``take``.
+        An empty list with the flag set means "server replied but had no
+        edits" (rename unsupported / nothing to rename)."""
+        return self._has_resolved_rename
+
+    def pending_rename_path(self) -> String:
+        """Path the most recent rename request was issued for."""
+        return self._rename_path
+
+    def take_rename_edits(mut self) -> List[CodeActionFileEdit]:
+        """Move the parked rename edits out of the manager. Clears the
+        pending flag either way."""
+        var out = self._resolved_rename_edits^
+        self._resolved_rename_edits = List[CodeActionFileEdit]()
+        self._has_resolved_rename = False
+        return out^
+
     # --- frame-tick driver -------------------------------------------------
 
     def tick(mut self) -> Optional[DefinitionResolved]:
@@ -1593,6 +1663,22 @@ struct LspManager(Copyable, Movable):
                 self._resolved_code_actions = actions^
                 self._has_resolved_code_actions = True
                 self._inflight_code_action_id = String("")
+                continue
+            if id == self._inflight_rename_id:
+                var rename_edits = List[CodeActionFileEdit]()
+                if msg.result and msg.result.value().is_object():
+                    rename_edits = _parse_workspace_edit_changes(
+                        msg.result.value(),
+                    )
+                _lsp_debug_log(
+                    String("← rename response id=") + id
+                    + String(" lang=") + self._language_id
+                    + String(" files=") + String(len(rename_edits)),
+                )
+                self._resolved_rename_edits = rename_edits^
+                self._has_resolved_rename = True
+                self._inflight_rename_id = String("")
+                continue
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -2557,59 +2643,76 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
         var file_edits = List[CodeActionFileEdit]()
         var edit_opt = entry.object_get(String("edit"))
         if edit_opt and edit_opt.value().is_object():
-            var edit = edit_opt.value().copy()
-            var changes_opt = edit.object_get(String("changes"))
-            if changes_opt and changes_opt.value().is_object():
-                var changes = changes_opt.value().copy()
-                # ``changes`` is an object keyed by URI; the JsonValue
-                # exposes its members through obj_v. We don't have a
-                # public iterator yet, but we can walk obj_v directly
-                # since this module already knows the internals.
-                for k in range(len(changes.obj_v)):
-                    var uri = changes.obj_v[k].key
-                    var edits_val = changes.obj_v[k].value.copy()
-                    if not edits_val.is_array():
-                        continue
-                    var edits = List[TextEditEntry]()
-                    for j in range(edits_val.array_len()):
-                        var te = edits_val.array_at(j)
-                        if not te.is_object():
-                            continue
-                        var nt_opt = te.object_get(String("newText"))
-                        if not nt_opt or not nt_opt.value().is_string():
-                            continue
-                        var nt = nt_opt.value().as_str()
-                        var rng_opt = te.object_get(String("range"))
-                        if not rng_opt or not rng_opt.value().is_object():
-                            continue
-                        var rng = rng_opt.value().copy()
-                        var s_opt = rng.object_get(String("start"))
-                        var e_opt = rng.object_get(String("end"))
-                        if not s_opt or not e_opt \
-                                or not s_opt.value().is_object() \
-                                or not e_opt.value().is_object():
-                            continue
-                        var sl_opt = s_opt.value().object_get(String("line"))
-                        var sc_opt = s_opt.value().object_get(String("character"))
-                        var el_opt = e_opt.value().object_get(String("line"))
-                        var ec_opt = e_opt.value().object_get(String("character"))
-                        if not sl_opt or not sc_opt or not el_opt or not ec_opt \
-                                or not sl_opt.value().is_int() \
-                                or not sc_opt.value().is_int() \
-                                or not el_opt.value().is_int() \
-                                or not ec_opt.value().is_int():
-                            continue
-                        edits.append(TextEditEntry(
-                            sl_opt.value().as_int(),
-                            sc_opt.value().as_int(),
-                            el_opt.value().as_int(),
-                            ec_opt.value().as_int(),
-                            nt,
-                        ))
-                    if len(edits) > 0:
-                        file_edits.append(CodeActionFileEdit(uri, edits^))
+            file_edits = _parse_workspace_edit_changes(edit_opt.value())
         out.append(CodeAction(title, kind_str, is_preferred, file_edits^))
     return out^
+
+
+def _parse_workspace_edit_changes(edit: JsonValue) -> List[CodeActionFileEdit]:
+    """Normalize a LSP ``WorkspaceEdit``'s ``changes`` map into per-file
+    ``CodeActionFileEdit`` groups.
+
+    Shared by ``textDocument/codeAction`` (where the WorkspaceEdit sits
+    under each action's ``edit`` field) and ``textDocument/rename`` (where
+    the response *is* the WorkspaceEdit). Only the ``changes`` form is
+    parsed; ``documentChanges`` (LSP 3.13+ versioned edits / file
+    create/rename/delete) come through empty, so a rename that only emits
+    ``documentChanges`` yields no file edits and the caller reports it as
+    unsupported rather than silently doing nothing wrong."""
+    var file_edits = List[CodeActionFileEdit]()
+    if not edit.is_object():
+        return file_edits^
+    var changes_opt = edit.object_get(String("changes"))
+    if not changes_opt or not changes_opt.value().is_object():
+        return file_edits^
+    var changes = changes_opt.value().copy()
+    # ``changes`` is an object keyed by URI; the JsonValue exposes its
+    # members through obj_v. We don't have a public iterator yet, but we
+    # can walk obj_v directly since this module knows the internals.
+    for k in range(len(changes.obj_v)):
+        var uri = changes.obj_v[k].key
+        var edits_val = changes.obj_v[k].value.copy()
+        if not edits_val.is_array():
+            continue
+        var edits = List[TextEditEntry]()
+        for j in range(edits_val.array_len()):
+            var te = edits_val.array_at(j)
+            if not te.is_object():
+                continue
+            var nt_opt = te.object_get(String("newText"))
+            if not nt_opt or not nt_opt.value().is_string():
+                continue
+            var nt = nt_opt.value().as_str()
+            var rng_opt = te.object_get(String("range"))
+            if not rng_opt or not rng_opt.value().is_object():
+                continue
+            var rng = rng_opt.value().copy()
+            var s_opt = rng.object_get(String("start"))
+            var e_opt = rng.object_get(String("end"))
+            if not s_opt or not e_opt \
+                    or not s_opt.value().is_object() \
+                    or not e_opt.value().is_object():
+                continue
+            var sl_opt = s_opt.value().object_get(String("line"))
+            var sc_opt = s_opt.value().object_get(String("character"))
+            var el_opt = e_opt.value().object_get(String("line"))
+            var ec_opt = e_opt.value().object_get(String("character"))
+            if not sl_opt or not sc_opt or not el_opt or not ec_opt \
+                    or not sl_opt.value().is_int() \
+                    or not sc_opt.value().is_int() \
+                    or not el_opt.value().is_int() \
+                    or not ec_opt.value().is_int():
+                continue
+            edits.append(TextEditEntry(
+                sl_opt.value().as_int(),
+                sc_opt.value().as_int(),
+                el_opt.value().as_int(),
+                ec_opt.value().as_int(),
+                nt,
+            ))
+        if len(edits) > 0:
+            file_edits.append(CodeActionFileEdit(uri, edits^))
+    return file_edits^
 
 
 def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
@@ -2810,6 +2913,13 @@ def _path_to_uri(path: String) -> String:
     return String("file://") + String(StringSlice(
         ptr=out.unsafe_ptr(), length=len(out),
     ))
+
+
+def uri_to_path(uri: String) -> String:
+    """Public wrapper over ``_uri_to_path`` for hosts (e.g. the rename
+    edit-application path) that need to map a WorkspaceEdit's file URIs
+    back to on-disk paths."""
+    return _uri_to_path(uri)
 
 
 def _uri_to_path(uri: String) -> String:

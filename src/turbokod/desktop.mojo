@@ -70,6 +70,10 @@ from .test_gutter_menu import (
 from .diagnostic_menu import (
     DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
 )
+from .context_menu import (
+    CTX_MENU_ACTION_DEFINITION, CTX_MENU_ACTION_REFERENCES,
+    CTX_MENU_ACTION_RENAME, EditorContextMenu,
+)
 from .lsp import LspProcess
 from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
@@ -112,7 +116,8 @@ from .language_config import (
     dependency_dirs_for_language_id, find_language_for_extension,
 )
 from .lsp_dispatch import (
-    CodeAction, DefinitionResolved, LspManager, WorkspaceSymbolItem,
+    CodeAction, CodeActionFileEdit, DefinitionResolved, LspManager,
+    WorkspaceSymbolItem, uri_to_path,
 )
 from .dap_dispatch import (
     DapConditionException, DapManager, DapStackFrame, DapTestEvaluation,
@@ -246,6 +251,13 @@ comptime EDITOR_FIND_SYMBOL   = String("edit:find_symbol")
 # — macOS hijacks Ctrl+Space for "Select previous input source" by
 # default, so many users will want Ctrl+J / Alt+/ / Cmd+. instead.
 comptime EDITOR_COMPLETE      = String("edit:complete")
+# LSP ``textDocument/rename`` — rename the symbol under the cursor across
+# the whole project. Bound to F2 / Shift+F6, in the Edit menu, and in the
+# editor's right-click context menu.
+comptime EDITOR_RENAME_SYMBOL = String("edit:rename_symbol")
+# Internal pending-action tag for the rename name prompt. Carries the
+# typed new name to ``_on_prompt_submit``.
+comptime _PA_RENAME           = String("rename:do")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
@@ -522,7 +534,7 @@ struct Hotkey(ImplicitlyCopyable, Movable):
     it never steals the key from the real handler — they exist only to be
     listed on the page. Two bindings that share one ``help`` string merge
     into a single row with their shortcuts joined by `` / `` (so aliases
-    like ``Ctrl+Space / Ctrl+J / F2`` read as one entry).
+    like ``Ctrl+Space / Ctrl+J`` read as one entry).
     """
     var key: UInt32
     var mods: UInt8
@@ -882,6 +894,21 @@ struct Desktop(Movable):
     # submit handler can find the chosen action's edits by
     # ``selected_fix_index``. Sized to match the menu's ``fix_titles``.
     var _diag_menu_actions: List[CodeAction]
+    # Right-click symbol-actions popup (Rename / Definition / References)
+    # and the click context it was opened with, mirroring the diagnostic
+    # menu's split of widget UI state vs. host routing state.
+    var editor_context_menu: EditorContextMenu
+    var _ctx_menu_editor_idx: Int
+    var _ctx_menu_row: Int
+    var _ctx_menu_col: Int
+    var _ctx_menu_word: String
+    # Origin of an in-flight rename: the path/line/col the request was
+    # issued at (read when the name prompt opens) and the path the user
+    # was focused on, so ``_drain_rename_edits`` can refocus there after
+    # opening/editing the affected files.
+    var _rename_path: String
+    var _rename_line: Int
+    var _rename_col: Int
     # Right-click on the LSP indicator on the right of the status bar →
     # contextual menu with a single ``Restart LSP`` action. Same
     # input-first routing pattern as ``git_gutter_menu``.
@@ -1253,6 +1280,14 @@ struct Desktop(Movable):
         self.diagnostic_menu = DiagnosticMenu()
         self._diag_menu_editor_idx = -1
         self._diag_menu_actions = List[CodeAction]()
+        self.editor_context_menu = EditorContextMenu()
+        self._ctx_menu_editor_idx = -1
+        self._ctx_menu_row = 0
+        self._ctx_menu_col = 0
+        self._ctx_menu_word = String("")
+        self._rename_path = String("")
+        self._rename_line = 0
+        self._rename_col = 0
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -1460,6 +1495,14 @@ struct Desktop(Movable):
             UInt32(ord("y")), MOD_META, EDITOR_REDO,
             group=HKG_EDIT, help=String("Redo"),
         ))
+        # Cmd+Shift+Z is the macOS-standard redo; register it after Cmd+Y so
+        # the newest-wins reverse lookup stamps it as the menu's displayed
+        # shortcut (Cmd+Y stays a working alias). Sharing help="Redo" folds
+        # both into one "Cmd+Y / Cmd+Shift+Z" row on the shortcuts page.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("z")), MOD_META | MOD_SHIFT, EDITOR_REDO,
+            group=HKG_EDIT, help=String("Redo"),
+        ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("f")), MOD_META | MOD_SHIFT, PROJECT_FIND,
             group=HKG_FIND, help=String("Find in project"),
@@ -1526,14 +1569,13 @@ struct Desktop(Movable):
             ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
             group=HKG_GIT, help=String("Show diff viewer"),
         ))
-        # LSP completion request. Three default triggers so at least
-        # one survives macOS's input-source hijack of Ctrl+Space:
+        # LSP completion request. Two default triggers so at least one
+        # survives macOS's input-source hijack of Ctrl+Space:
         #   * Ctrl+Space — IDE-conventional, on terminals that pass it
         #   * Ctrl+J — terminal-friendly fallback (LF is otherwise unbound)
-        #   * F2 — function-key fallback for keyboards / wrappers that
-        #     intercept the control chords above
-        # All three share the "Code completion" help, so the page merges
-        # them into one ``Ctrl+Space / Ctrl+J / F2`` row.
+        # Both share the "Code completion" help, so the page merges them
+        # into one ``Ctrl+Space / Ctrl+J`` row. (F2 used to be a third
+        # fallback here; it's now the LSP-standard rename key below.)
         self._hotkeys.append(Hotkey(
             KEY_SPACE, MOD_CTRL, EDITOR_COMPLETE,
             group=HKG_MOVE, help=String("Code completion"),
@@ -1542,9 +1584,15 @@ struct Desktop(Movable):
             ctrl_key("j"), MOD_CTRL, EDITOR_COMPLETE,
             group=HKG_MOVE, help=String("Code completion"),
         ))
+        # LSP rename. F2 is the de-facto rename key (VS Code); Shift+F6
+        # mirrors JetBrains. Both share one help row.
         self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_NONE, EDITOR_COMPLETE,
-            group=HKG_MOVE, help=String("Code completion"),
+            KEY_F2, MOD_NONE, EDITOR_RENAME_SYMBOL,
+            group=HKG_MOVE, help=String("Rename symbol"),
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F6, MOD_SHIFT, EDITOR_RENAME_SYMBOL,
+            group=HKG_MOVE, help=String("Rename symbol"),
         ))
         # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
         # the de facto standard set across VS Code, JetBrains, and most
@@ -2907,6 +2955,7 @@ struct Desktop(Movable):
         self.git_gutter_menu.paint(canvas, screen)
         self.test_gutter_menu.paint(canvas, screen)
         self.diagnostic_menu.paint(canvas, screen)
+        self.editor_context_menu.paint(canvas, screen)
         self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
         # Wait-for dropdown popup overlays the rest of the breakpoint
@@ -4850,6 +4899,16 @@ struct Desktop(Movable):
             if self.diagnostic_menu.submitted:
                 self._on_diagnostic_menu_submit()
             return Optional[String]()
+        if self.editor_context_menu.active:
+            # Right-click on plain identifier text opens the symbol-actions
+            # popup; same input-first routing as the diagnostic menu.
+            if event.kind == EVENT_KEY:
+                _ = self.editor_context_menu.handle_key(event)
+            else:
+                _ = self.editor_context_menu.handle_mouse(event, screen)
+            if self.editor_context_menu.submitted:
+                self._on_context_menu_submit()
+            return Optional[String]()
         if self.lsp_status_menu.active:
             # Right-click on the LSP indicator opens this single-row
             # menu; same input-first routing as ``git_gutter_menu``.
@@ -5245,6 +5304,10 @@ struct Desktop(Movable):
         # request on the focused editor — surface the popup before the
         # next paint so it lands on this same frame.
         self._maybe_open_diagnostic_menu()
+        # Right-click on plain identifier text (no squiggle) stamps a
+        # pending context-menu request — surface the symbol-actions popup
+        # on this same frame.
+        self._maybe_open_context_menu()
         # Right-click on a BP dot stamps a pending menu request on the
         # editor — surface the dialog before the next paint so the
         # user-visible delay is one frame max.
@@ -5430,7 +5493,7 @@ struct Desktop(Movable):
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
-            or self.diagnostic_menu.active \
+            or self.diagnostic_menu.active or self.editor_context_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
             or self.confirm_dialog.active or self.merge_view.active \
             or self.save_as_dialog.active \
@@ -5634,6 +5697,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_REPLACE:
             self._open_replace_prompt()
+            return Optional[String]()
+        if action == EDITOR_RENAME_SYMBOL:
+            self._begin_rename_at_cursor()
             return Optional[String]()
         if action == EDITOR_GOTO:
             self._pending_action = EDITOR_GOTO
@@ -6202,6 +6268,10 @@ struct Desktop(Movable):
         # path (the one it opened over), and the routing logic is
         # cleaner as a single helper than a clause repeated per manager.
         self._drain_diagnostic_code_actions()
+        # Apply any parked rename WorkspaceEdit project-wide. Done after
+        # the per-manager loop because it opens/edits/saves files (mutating
+        # the window list), which isn't safe mid-iteration.
+        self._drain_rename_edits(screen)
         # Per-editor LSP sync: walk every editor window once and (a) push
         # a didChange to the matching server when the buffer has been
         # edited since the last sync, and (b) pull any freshly-published
@@ -7143,6 +7213,7 @@ struct Desktop(Movable):
                 or self.breakpoint_menu.active or self.fill_dialog.active \
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
                 or self.diagnostic_menu.active \
+                or self.editor_context_menu.active \
                 or self.lsp_status_menu.active or self.prompt.active \
                 or self.confirm_dialog.active or self.merge_view.active \
                 or self.save_as_dialog.active \
@@ -8614,8 +8685,16 @@ struct Desktop(Movable):
         Restores the Cc / W / .* toggles to whatever the user had on
         for the previous Find so the flags persist across opens."""
         self._pending_action = EDITOR_FIND
+        # Prefer the editor's current selection ("find this thing I just
+        # highlighted"); when there's nothing selected, fall back to the
+        # previous Find needle so re-opening Find repeats the last search,
+        # fully selected for easy replace — matching Quick Open / Find in
+        # Files / Find Symbol.
+        var seed = self._selection_seed_for_search()
+        if len(seed.as_bytes()) == 0:
+            seed = self._last_search
         self.prompt.open(
-            String("Find: "), self._selection_seed_for_search(),
+            String("Find: "), seed^,
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
@@ -9817,7 +9896,7 @@ struct Desktop(Movable):
         group is never silently dropped. Within a group, entries keep
         registration order, and entries sharing one ``help`` string merge
         into a single row with their shortcuts joined by `` / `` (aliases
-        like ``Ctrl+Space / Ctrl+J / F2``)."""
+        like ``Ctrl+Space / Ctrl+J``)."""
         var preferred = List[String]()
         preferred.append(HKG_FILES)
         preferred.append(HKG_EDIT)
@@ -10159,6 +10238,213 @@ struct Desktop(Movable):
                     Attr(BLACK, LIGHT_GRAY),
                 )
             return
+
+    def _begin_rename_at_cursor(mut self):
+        """F2 / Shift+F6 / Edit-menu "Rename Symbol": rename the identifier
+        under the focused editor's cursor. Opens a name prompt seeded with
+        the current word; the request fires on prompt submit."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var row = self.windows.windows[idx].editor.selections[0].row
+        var col = self.windows.windows[idx].editor.selections[0].col
+        var line = self.windows.windows[idx].editor.buffer.line(row)
+        var word = word_at(line, col)
+        self._begin_rename_at(idx, row, col, word^)
+
+    def _begin_rename_at(
+        mut self, win_idx: Int, row: Int, col: Int, var word: String,
+    ):
+        """Shared rename entry for both the keyboard/menu (cursor) path
+        and the right-click context menu (clicked word). Validates a
+        server is ready and an identifier sits at ``(row, col)``, then
+        opens the name prompt and stashes the origin so the submit handler
+        can fire ``textDocument/rename`` even if the cursor later moved."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        if len(word.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("Rename: no symbol under cursor"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("Rename: file has no path"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            self.status_bar.set_message(
+                String("Rename: LSP not ready for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self._rename_path = path
+        self._rename_line = row
+        self._rename_col = col
+        self._pending_action = _PA_RENAME
+        self.prompt.open(
+            String("Rename '") + word + String("' to: "), word^,
+            select_prefill=True,
+        )
+
+    def _fire_rename_request(mut self, new_name: String):
+        """Submit-handler tail for ``_PA_RENAME``: send the rename to the
+        server for the stashed origin. The response is drained project-
+        wide in ``_drain_rename_edits``."""
+        var path = self._rename_path
+        if len(path.as_bytes()) == 0:
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            self.status_bar.set_message(
+                String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var win_idx = self._find_window_for_path(path)
+        if win_idx < 0 or not self.windows.windows[win_idx].is_editor:
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var ok = self.lsp_managers[lsp_idx].request_rename(
+            path, self._rename_line, self._rename_col, new_name, text^,
+        )
+        if ok:
+            self.status_bar.set_message(
+                String("Renaming to '") + new_name + String("'…"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+
+    def _drain_rename_edits(mut self, screen: Rect):
+        """Each frame, apply any parked rename ``WorkspaceEdit``: open every
+        affected file that isn't already open, apply that file's edits, and
+        save it. Focus returns to the file rename was invoked from."""
+        for li in range(len(self.lsp_managers)):
+            if not self.lsp_managers[li].has_pending_rename():
+                continue
+            var edits = self.lsp_managers[li].take_rename_edits()
+            self._apply_rename_edits(edits^, screen)
+
+    def _apply_rename_edits(
+        mut self, var file_edits: List[CodeActionFileEdit], screen: Rect,
+    ):
+        var origin_path = self._rename_path
+        self._rename_path = String("")
+        if len(file_edits) == 0:
+            self.status_bar.set_message(
+                String("Rename produced no edits (unsupported here?)"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var files_changed = 0
+        for k in range(len(file_edits)):
+            var path = uri_to_path(file_edits[k].uri)
+            if len(path.as_bytes()) == 0:
+                continue
+            var win_idx = self._find_window_for_path(path)
+            if win_idx < 0:
+                try:
+                    self.open_file(path, screen)
+                except:
+                    continue
+                win_idx = self._find_window_for_path(path)
+            if win_idx < 0 or win_idx >= len(self.windows.windows):
+                continue
+            if not self.windows.windows[win_idx].is_editor:
+                continue
+            # ``apply_code_action_edits`` filters by the editor's own URI,
+            # so handing it just this file's group applies exactly that.
+            var one = List[CodeActionFileEdit]()
+            one.append(file_edits[k].copy())
+            var ok = self.windows.windows[win_idx] \
+                .editor.apply_code_action_edits(one^)
+            if ok:
+                files_changed += 1
+                try:
+                    _ = self.windows.windows[win_idx].editor.save()
+                except e:
+                    print("desktop: rename save", path, ":", String(e))
+                self.windows.windows[win_idx].editor.invalidate_git_changes()
+        # Refocus the originating file so the user isn't left in the
+        # last-opened buffer.
+        if len(origin_path.as_bytes()) > 0:
+            var oi = self._find_window_for_path(origin_path)
+            if oi >= 0:
+                self.windows.focus_by_index(oi)
+        if files_changed > 0:
+            var suffix = String(" file")
+            if files_changed != 1:
+                suffix = String(" files")
+            self.status_bar.set_message(
+                String("Renamed across ") + String(files_changed) + suffix,
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        else:
+            self.status_bar.set_message(
+                String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY),
+            )
+
+    def _maybe_open_context_menu(mut self):
+        """Drain ``Editor.consume_context_menu_request`` on the focused
+        editor and open the symbol-actions popup anchored at the click,
+        remembering the buffer coordinates + word for the submit handler."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx] \
+            .editor.consume_context_menu_request()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        self._ctx_menu_editor_idx = idx
+        self._ctx_menu_row = req.row
+        self._ctx_menu_col = req.col
+        self._ctx_menu_word = req.word
+        self.editor_context_menu.open(Point(req.anchor_x, req.anchor_y))
+
+    def _on_context_menu_submit(mut self):
+        """Resolve the symbol-actions popup: Rename opens the name prompt;
+        Go to Definition / Find References reuse the same machinery the
+        Cmd+click path drives."""
+        var act = self.editor_context_menu.action
+        var idx = self._ctx_menu_editor_idx
+        var row = self._ctx_menu_row
+        var col = self._ctx_menu_col
+        var word = self._ctx_menu_word
+        self.editor_context_menu.close()
+        self._ctx_menu_editor_idx = -1
+        self._ctx_menu_word = String("")
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[idx].is_editor:
+            return
+        if act == CTX_MENU_ACTION_RENAME:
+            self._begin_rename_at(idx, row, col, word^)
+            return
+        if act == CTX_MENU_ACTION_DEFINITION:
+            # Same payload Cmd+click produces; lsp_tick consumes it.
+            self.windows.windows[idx].editor.pending_definition = \
+                Optional[DefinitionRequest](DefinitionRequest(row, col, word^))
+            return
+        if act == CTX_MENU_ACTION_REFERENCES:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                self.status_bar.set_message(
+                    String("References: LSP not ready"),
+                    Attr(RED, LIGHT_GRAY),
+                )
+                return
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            _ = self.lsp_managers[lsp_idx].request_references(
+                path, row, col, word^, text^,
+            )
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action
@@ -10723,6 +11009,15 @@ struct Desktop(Movable):
             # leaked into a regular prompt submit. Drop it cleanly.
             self._pending_arg = String("")
             self._clear_pending_dap_start()
+            return Optional[String]()
+        if pa == _PA_RENAME:
+            # Empty or unchanged → cancel silently; otherwise fire the
+            # ``textDocument/rename`` for the stashed origin.
+            var trimmed = text
+            if len(trimmed.as_bytes()) > 0:
+                self._fire_rename_request(trimmed)
+            else:
+                self._rename_path = String("")
             return Optional[String]()
         if pa == EDITOR_GOTO:
             self._last_goto_line = text

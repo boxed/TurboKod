@@ -46,8 +46,10 @@ from .git_changes import (
     GitRevertBlock, GitRevertRequest, compute_revert_block,
 )
 from .highlight import (
-    CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
-    HighlightCache, HoverRequest, extension_of, highlight_comment_attr,
+    CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
+    GrammarRegistry, Highlight,
+    HighlightCache, HoverRequest, extension_of,
+    highlight_comment_attr,
     highlight_for_extension, highlight_incremental, highlight_string_attr,
     line_comment_for_extension, word_at,
 )
@@ -941,6 +943,11 @@ struct Editor(Copyable, Movable):
     # ``consume_definition_request`` and forwards to whichever LSP client
     # is active.
     var pending_definition: Optional[DefinitionRequest]
+    # ``pending_context_menu`` is set when the user right-clicks plain
+    # identifier text — the host polls ``consume_context_menu_request`` and
+    # opens a symbol-actions popup (Rename / Go to Definition / Find
+    # References) anchored at the click.
+    var pending_context_menu: Optional[EditorContextMenuRequest]
     # Debugger gutter state. ``gutter_width`` is 0 when no debug session
     # is associated with this file; when > 0 the leftmost columns are
     # reserved for breakpoint dots / current-execution arrow. The Desktop
@@ -1315,6 +1322,7 @@ struct Editor(Copyable, Movable):
         self.diagnostic_lines = List[Int]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
+        self.pending_context_menu = Optional[EditorContextMenuRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.breakpoint_enabled = List[Bool]()
@@ -1427,6 +1435,7 @@ struct Editor(Copyable, Movable):
         self.diagnostic_lines = List[Int]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
+        self.pending_context_menu = Optional[EditorContextMenuRequest]()
         self.gutter_width = 0
         self.breakpoint_lines = List[Int]()
         self.breakpoint_enabled = List[Bool]()
@@ -1567,6 +1576,7 @@ struct Editor(Copyable, Movable):
         self.diagnostic_lines = copy.diagnostic_lines.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
+        self.pending_context_menu = copy.pending_context_menu
         self.gutter_width = copy.gutter_width
         self.breakpoint_lines = copy.breakpoint_lines.copy()
         self.breakpoint_enabled = copy.breakpoint_enabled.copy()
@@ -2402,6 +2412,14 @@ struct Editor(Copyable, Movable):
         """Return any pending ``DefinitionRequest`` and clear the slot."""
         var req = self.pending_definition
         self.pending_definition = Optional[DefinitionRequest]()
+        return req
+
+    def consume_context_menu_request(
+        mut self,
+    ) -> Optional[EditorContextMenuRequest]:
+        """Return any pending ``EditorContextMenuRequest`` and clear it."""
+        var req = self.pending_context_menu
+        self.pending_context_menu = Optional[EditorContextMenuRequest]()
         return req
 
     def consume_completion_request(
@@ -4274,10 +4292,13 @@ struct Editor(Copyable, Movable):
 
     def _maybe_request_diagnostic_menu(
         mut self, pos: Point, view: Rect,
-    ):
+    ) -> Bool:
         """Hit-test ``pos`` against diagnostic ranges in the text area
         and, if it lands on one, stash a ``DiagnosticMenuRequest`` so
-        the host can open the copy-message context menu.
+        the host can open the copy-message context menu. Returns True iff
+        a diagnostic was hit (and a request stashed) — the right-click
+        handler uses that to decide whether to fall back to the
+        symbol-actions context menu instead.
 
         Same hit logic as the hover-tooltip path: pick the lowest
         numeric severity (most severe) match on the cell so an error
@@ -4286,7 +4307,7 @@ struct Editor(Copyable, Movable):
         copies the same string the user just read."""
         var resolved = self._resolve_text_area_buf_pos(pos, view)
         if not resolved:
-            return
+            return False
         var rc = resolved.value()
         var row = rc[0]
         var byte_col = rc[1]
@@ -4300,13 +4321,34 @@ struct Editor(Copyable, Movable):
                 best_idx = d
                 best_sev = diag.severity
         if best_idx < 0:
-            return
+            return False
         var diag = self.diagnostics[best_idx]
         var label = diag.message
         if len(diag.source.as_bytes()) > 0:
             label = String("[") + diag.source + String("] ") + label
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest](
             DiagnosticMenuRequest(label^, pos.x, pos.y, diag),
+        )
+        return True
+
+    def _maybe_request_context_menu(
+        mut self, pos: Point, view: Rect,
+    ):
+        """Hit-test ``pos`` against identifier text and, if it lands on a
+        word, stash an ``EditorContextMenuRequest`` so the host opens the
+        symbol-actions popup. Called only when no diagnostic was hit.
+        Right-clicks on blank space / past EOL set nothing."""
+        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        if not resolved:
+            return
+        var rc = resolved.value()
+        var row = rc[0]
+        var byte_col = rc[1]
+        var word = word_at(self.buffer.line(row), byte_col)
+        if len(word.as_bytes()) == 0:
+            return
+        self.pending_context_menu = Optional[EditorContextMenuRequest](
+            EditorContextMenuRequest(row, byte_col, word, pos.x, pos.y),
         )
 
     def _set_text_hover_anchor(
@@ -7676,7 +7718,10 @@ struct Editor(Copyable, Movable):
                                     )
                                 break
                 else:
-                    self._maybe_request_diagnostic_menu(event.pos, view)
+                    if not self._maybe_request_diagnostic_menu(
+                        event.pos, view,
+                    ):
+                        self._maybe_request_context_menu(event.pos, view)
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False

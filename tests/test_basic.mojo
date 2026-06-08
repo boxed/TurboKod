@@ -160,7 +160,7 @@ from turbokod.lsp_dispatch import (
     TextEditEntry, _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
     _parse_hover_result, _parse_references_result,
-    _uri_to_path,
+    _parse_workspace_edit_changes, _path_to_uri, _uri_to_path,
 )
 from turbokod.git_changes import (
     GitStateMtimes, apply_patch_to_index, compute_staged_diff,
@@ -490,7 +490,10 @@ def test_help_hotkeys_opens_readonly_reference() raises:
     assert_true(_contains(body, String("Cmd+Up")))
     assert_true(_contains(body, String("Save")))
     # Aliases sharing one help string merge into a single row.
-    assert_true(_contains(body, String("Ctrl+Space / Ctrl+J / F2")))
+    assert_true(_contains(body, String("Ctrl+Space / Ctrl+J")))
+    # F2 / Shift+F6 are aliases for LSP rename — also one merged row.
+    assert_true(_contains(body, String("F2 / Shift+F6")))
+    assert_true(_contains(body, String("Rename symbol")))
     # Second dispatch must not open a duplicate.
     _ = d.dispatch_action(HELP_HOTKEYS, screen)
     assert_equal(len(d.windows.windows), before + 1)
@@ -9766,6 +9769,68 @@ def test_lsp_parse_code_action_result_null_or_non_array_is_empty() raises:
     assert_equal(len(_parse_code_action_result(ov)), 0)
 
 
+def test_lsp_parse_rename_workspace_edit_multi_file() raises:
+    """A ``textDocument/rename`` response *is* a ``WorkspaceEdit`` (no
+    CodeAction wrapper). ``_parse_workspace_edit_changes`` must flatten its
+    ``changes`` map — across multiple files — into per-file edit groups,
+    the same shape the code-action path produces, so the host can apply it
+    with ``Editor.apply_code_action_edits``."""
+    var v = parse_json(String(
+        "{\"changes\":{"
+        + "\"file:///tmp/a.py\":["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":4},"
+        + "\"end\":{\"line\":0,\"character\":7}},\"newText\":\"baz\"},"
+        + "{\"range\":{\"start\":{\"line\":2,\"character\":0},"
+        + "\"end\":{\"line\":2,\"character\":3}},\"newText\":\"baz\"}"
+        + "],"
+        + "\"file:///tmp/b.py\":["
+        + "{\"range\":{\"start\":{\"line\":5,\"character\":8},"
+        + "\"end\":{\"line\":5,\"character\":11}},\"newText\":\"baz\"}"
+        + "]}}"
+    ))
+    var groups = _parse_workspace_edit_changes(v)
+    assert_equal(len(groups), 2)
+    # Locate each file's group (map order isn't guaranteed).
+    var a_idx = -1
+    var b_idx = -1
+    for i in range(len(groups)):
+        if groups[i].uri == String("file:///tmp/a.py"):
+            a_idx = i
+        if groups[i].uri == String("file:///tmp/b.py"):
+            b_idx = i
+    assert_true(a_idx >= 0)
+    assert_true(b_idx >= 0)
+    assert_equal(len(groups[a_idx].edits), 2)
+    assert_equal(len(groups[b_idx].edits), 1)
+    assert_equal(groups[a_idx].edits[0].start_char, 4)
+    assert_equal(groups[a_idx].edits[0].new_text, String("baz"))
+
+
+def test_lsp_rename_edits_apply_to_buffer() raises:
+    """End-to-end on the application side: edits parsed from a rename
+    ``WorkspaceEdit`` flow through ``Editor.apply_code_action_edits`` and
+    rename every occurrence in the buffer. Uses the same URI round-trip
+    the host relies on (``_path_to_uri(editor.file_path)`` must match the
+    edit group's URI) so this also guards that contract."""
+    var ed = Editor(String("foo = 1\nprint(foo)\nfoo += foo"))
+    ed.file_path = String("/tmp/a.py")
+    var uri = _path_to_uri(String("/tmp/a.py"))
+    # Replace each "foo" (len 3) with "bar". Order doesn't matter —
+    # apply_code_action_edits sorts descending internally.
+    var edits = List[TextEditEntry]()
+    edits.append(TextEditEntry(0, 0, 0, 3, String("bar")))
+    edits.append(TextEditEntry(1, 6, 1, 9, String("bar")))
+    edits.append(TextEditEntry(2, 0, 2, 3, String("bar")))
+    edits.append(TextEditEntry(2, 7, 2, 10, String("bar")))
+    var fe = List[CodeActionFileEdit]()
+    fe.append(CodeActionFileEdit(uri, edits^))
+    var ok = ed.apply_code_action_edits(fe^)
+    assert_true(ok)
+    assert_equal(ed.buffer.line(0), String("bar = 1"))
+    assert_equal(ed.buffer.line(1), String("print(bar)"))
+    assert_equal(ed.buffer.line(2), String("bar += bar"))
+
+
 def test_lsp_initialize_params_advertise_code_action_literal_support() raises:
     """The initialize payload must declare ``codeActionLiteralSupport``
     so servers like ty / pyright return ``CodeAction`` literals (with
@@ -18377,6 +18442,8 @@ def _run_chunk_04() raises:
     test_lsp_parse_code_action_result_quickfix_with_workspace_edit()
     test_lsp_parse_code_action_result_skips_bare_commands()
     test_lsp_parse_code_action_result_null_or_non_array_is_empty()
+    test_lsp_parse_rename_workspace_edit_multi_file()
+    test_lsp_rename_edits_apply_to_buffer()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()
     test_lsp_parse_completion_result_list_shape()
