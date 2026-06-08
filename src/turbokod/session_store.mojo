@@ -31,7 +31,6 @@ just doesn't restore anything.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
 from .file_io import (
     join_path, read_file, stat_file, write_file,
@@ -40,13 +39,12 @@ from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
     json_get_bool, json_get_int, json_get_string,
+    encode_int_pair, encode_int_quad, read_int_pair, read_int_quad,
 )
-from .posix import getenv_value
+from .per_user_store import ensure_per_user_dir, per_user_path
 
 
-comptime SESSION_DIR_PROJECT  = String(".turbokod")
-comptime SESSION_DIR_PER_USER = String("per_user")
-comptime SESSION_FILE         = String("session.json")
+comptime SESSION_FILE = String("session.json")
 
 
 struct SessionWindow(ImplicitlyCopyable, Movable):
@@ -128,53 +126,8 @@ struct Session(Movable):
         self.focused = copy.focused
 
 
-def _current_username() -> String:
-    """Best-effort username for the per-user directory. Tries ``$USER``
-    then ``$LOGNAME`` — both POSIX-standard. Falls back to ``"default"``
-    so we still produce a valid path on a machine with an empty
-    environment."""
-    var user = getenv_value(String("USER"))
-    if len(user.as_bytes()) > 0:
-        return user^
-    var logname = getenv_value(String("LOGNAME"))
-    if len(logname.as_bytes()) > 0:
-        return logname^
-    return String("default")
-
-
-def _session_dir(project_root: String) -> String:
-    if len(project_root.as_bytes()) == 0:
-        return String("")
-    var d = join_path(project_root, SESSION_DIR_PROJECT)
-    d = join_path(d, SESSION_DIR_PER_USER)
-    return join_path(d, _current_username())
-
-
 def _session_path(project_root: String) -> String:
-    var dir = _session_dir(project_root)
-    if len(dir.as_bytes()) == 0:
-        return String("")
-    return join_path(dir, SESSION_FILE)
-
-
-def _ensure_dir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
-def _ensure_dirs(project_root: String):
-    """``mkdir`` only creates one level, so walk the parents top-down to
-    handle the ``per_user/<username>`` nesting on first use."""
-    if len(project_root.as_bytes()) == 0:
-        return
-    var top = join_path(project_root, SESSION_DIR_PROJECT)
-    _ensure_dir(top)
-    var per_user = join_path(top, SESSION_DIR_PER_USER)
-    _ensure_dir(per_user)
-    var user_dir = join_path(per_user, _current_username())
-    _ensure_dir(user_dir)
+    return per_user_path(project_root, SESSION_FILE)
 
 
 def _has_prefix(s: String, prefix: String) -> Bool:
@@ -214,45 +167,18 @@ def _int_array(value: JsonValue) -> List[Int]:
     return out^
 
 
-def _read_int_pair(
-    obj: JsonValue, key: String, fallback_a: Int, fallback_b: Int,
-) -> Tuple[Int, Int]:
-    var v = obj.object_get(key)
-    if v and v.value().is_array() and v.value().array_len() == 2:
-        var a_v = v.value().array_at(0)
-        var b_v = v.value().array_at(1)
-        if a_v.is_int() and b_v.is_int():
-            return (a_v.as_int(), b_v.as_int())
-    return (fallback_a, fallback_b)
-
-
-def _read_int_quad(
-    obj: JsonValue, key: String,
-    fa: Int, fb: Int, fc: Int, fd: Int,
-) -> Tuple[Int, Int, Int, Int]:
-    var v = obj.object_get(key)
-    if v and v.value().is_array() and v.value().array_len() == 4:
-        var a = v.value().array_at(0)
-        var b = v.value().array_at(1)
-        var c = v.value().array_at(2)
-        var d = v.value().array_at(3)
-        if a.is_int() and b.is_int() and c.is_int() and d.is_int():
-            return (a.as_int(), b.as_int(), c.as_int(), d.as_int())
-    return (fa, fb, fc, fd)
-
-
 def _parse_session_window(node: JsonValue) -> SessionWindow:
     var w = SessionWindow()
     if not node.is_object():
         return w^
     w.path = json_get_string(node, String("path"))
-    var rect = _read_int_quad(node, String("rect"), 0, 0, 0, 0)
+    var rect = read_int_quad(node, String("rect"), 0, 0, 0, 0)
     w.rect_a_x = rect[0]
     w.rect_a_y = rect[1]
     w.rect_b_x = rect[2]
     w.rect_b_y = rect[3]
     w.is_maximized = json_get_bool(node, String("maximized"), False)
-    var restore = _read_int_quad(
+    var restore = read_int_quad(
         node, String("restore_rect"),
         w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y,
     )
@@ -260,10 +186,10 @@ def _parse_session_window(node: JsonValue) -> SessionWindow:
     w.restore_a_y = restore[1]
     w.restore_b_x = restore[2]
     w.restore_b_y = restore[3]
-    var cursor = _read_int_pair(node, String("cursor"), 0, 0)
+    var cursor = read_int_pair(node, String("cursor"), 0, 0)
     w.cursor_row = cursor[0]
     w.cursor_col = cursor[1]
-    var scroll = _read_int_pair(node, String("scroll"), 0, 0)
+    var scroll = read_int_pair(node, String("scroll"), 0, 0)
     w.scroll_x = scroll[0]
     w.scroll_y = scroll[1]
     return w^
@@ -313,20 +239,6 @@ def load_session(project_root: String) -> Session:
     return out^
 
 
-def _encode_int_pair(a: Int, b: Int) -> JsonValue:
-    var arr = json_array()
-    arr.append(json_int(a))
-    arr.append(json_int(b))
-    return arr^
-
-
-def _encode_int_quad(a: Int, b: Int, c: Int, d: Int) -> JsonValue:
-    var arr = json_array()
-    arr.append(json_int(a))
-    arr.append(json_int(b))
-    arr.append(json_int(c))
-    arr.append(json_int(d))
-    return arr^
 
 
 def _encode_session_window(w: SessionWindow) -> JsonValue:
@@ -334,17 +246,17 @@ def _encode_session_window(w: SessionWindow) -> JsonValue:
     obj.put(String("path"), json_str(w.path))
     obj.put(
         String("rect"),
-        _encode_int_quad(w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y),
+        encode_int_quad(w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y),
     )
     obj.put(String("maximized"), json_bool(w.is_maximized))
     obj.put(
         String("restore_rect"),
-        _encode_int_quad(
+        encode_int_quad(
             w.restore_a_x, w.restore_a_y, w.restore_b_x, w.restore_b_y,
         ),
     )
-    obj.put(String("cursor"), _encode_int_pair(w.cursor_row, w.cursor_col))
-    obj.put(String("scroll"), _encode_int_pair(w.scroll_x, w.scroll_y))
+    obj.put(String("cursor"), encode_int_pair(w.cursor_row, w.cursor_col))
+    obj.put(String("scroll"), encode_int_pair(w.scroll_x, w.scroll_y))
     return obj^
 
 
@@ -374,5 +286,5 @@ def save_session(project_root: String, session: Session) -> Bool:
     var path = _session_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dirs(project_root)
+    ensure_per_user_dir(project_root)
     return write_file(path, encode_session(session))

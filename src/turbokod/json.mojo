@@ -158,6 +158,51 @@ def json_object() -> JsonValue:
     return v^
 
 
+def encode_int_pair(a: Int, b: Int) -> JsonValue:
+    var arr = json_array()
+    arr.append(json_int(a))
+    arr.append(json_int(b))
+    return arr^
+
+
+def encode_int_quad(a: Int, b: Int, c: Int, d: Int) -> JsonValue:
+    var arr = json_array()
+    arr.append(json_int(a))
+    arr.append(json_int(b))
+    arr.append(json_int(c))
+    arr.append(json_int(d))
+    return arr^
+
+
+def read_int_pair(
+    obj: JsonValue, key: String, fallback_a: Int, fallback_b: Int,
+) -> Tuple[Int, Int]:
+    """Read a 2-element int array under ``key``; fall back on any mismatch."""
+    var v = obj.object_get(key)
+    if v and v.value().is_array() and v.value().array_len() == 2:
+        var a_v = v.value().array_at(0)
+        var b_v = v.value().array_at(1)
+        if a_v.is_int() and b_v.is_int():
+            return (a_v.as_int(), b_v.as_int())
+    return (fallback_a, fallback_b)
+
+
+def read_int_quad(
+    obj: JsonValue, key: String,
+    fa: Int, fb: Int, fc: Int, fd: Int,
+) -> Tuple[Int, Int, Int, Int]:
+    """Read a 4-element int array under ``key``; fall back on any mismatch."""
+    var v = obj.object_get(key)
+    if v and v.value().is_array() and v.value().array_len() == 4:
+        var a = v.value().array_at(0)
+        var b = v.value().array_at(1)
+        var c = v.value().array_at(2)
+        var d = v.value().array_at(3)
+        if a.is_int() and b.is_int() and c.is_int() and d.is_int():
+            return (a.as_int(), b.as_int(), c.as_int(), d.as_int())
+    return (fa, fb, fc, fd)
+
+
 # --- typed field accessors -------------------------------------------------
 #
 # These collapse the very common

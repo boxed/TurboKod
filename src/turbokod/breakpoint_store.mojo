@@ -27,19 +27,16 @@ A malformed or missing file silently yields an empty list.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
-from .file_io import join_path, read_file, stat_file, write_file
+from .file_io import join_path, project_relative, read_file, stat_file, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
     json_get_bool, json_get_int, json_get_string,
 )
-from .posix import getenv_value
+from .per_user_store import ensure_per_user_dir, per_user_path
 
 
-comptime BP_DIR_PROJECT = String(".turbokod")
-comptime BP_DIR_PER_USER = String("per_user")
 comptime BP_FILE = String("breakpoints.json")
 
 
@@ -67,73 +64,8 @@ struct StoredBreakpoint(ImplicitlyCopyable, Movable):
     var wait_for: String
 
 
-def _current_username() -> String:
-    """Best-effort username for the per-user directory.
-
-    Tries ``$USER`` then ``$LOGNAME`` — both are POSIX-standard. Falls
-    back to ``"default"`` so we still produce a valid path on a machine
-    that has somehow inherited an empty environment."""
-    var user = getenv_value(String("USER"))
-    if len(user.as_bytes()) > 0:
-        return user^
-    var logname = getenv_value(String("LOGNAME"))
-    if len(logname.as_bytes()) > 0:
-        return logname^
-    return String("default")
-
-
-def _bp_dir(project_root: String) -> String:
-    if len(project_root.as_bytes()) == 0:
-        return String("")
-    var d = join_path(project_root, BP_DIR_PROJECT)
-    d = join_path(d, BP_DIR_PER_USER)
-    return join_path(d, _current_username())
-
-
 def _bp_path(project_root: String) -> String:
-    var dir = _bp_dir(project_root)
-    if len(dir.as_bytes()) == 0:
-        return String("")
-    return join_path(dir, BP_FILE)
-
-
-def _ensure_dir(path: String):
-    """Create ``path`` if missing. ``mkdir`` only creates one level, so
-    we walk parents top-down to handle the ``per_user/<username>``
-    nesting on first use."""
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
-def _ensure_dirs(project_root: String):
-    if len(project_root.as_bytes()) == 0:
-        return
-    var top = join_path(project_root, BP_DIR_PROJECT)
-    _ensure_dir(top)
-    var per_user = join_path(top, BP_DIR_PER_USER)
-    _ensure_dir(per_user)
-    var user_dir = join_path(per_user, _current_username())
-    _ensure_dir(user_dir)
-
-
-def _bp_relative(project_root: String, full: String) -> String:
-    """Project-relative form of ``full`` when inside the project, else
-    ``full`` unchanged. Identical algorithm to
-    ``session_store._session_relative``."""
-    var rb = project_root.as_bytes()
-    var fb = full.as_bytes()
-    if len(rb) == 0:
-        return full
-    if len(fb) <= len(rb) + 1:
-        return full
-    for k in range(len(rb)):
-        if fb[k] != rb[k]:
-            return full
-    if fb[len(rb)] != 0x2F:
-        return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
+    return per_user_path(project_root, BP_FILE)
 
 
 def _resolve_bp_path(project_root: String, stored: String) -> String:
@@ -208,7 +140,7 @@ def encode_breakpoints(
     var arr = json_array()
     for i in range(len(breakpoints)):
         var bp = json_object()
-        var rel = _bp_relative(project_root, breakpoints[i].path)
+        var rel = project_relative(project_root, breakpoints[i].path)
         bp.put(String("path"), json_str(rel))
         bp.put(String("line"), json_int(breakpoints[i].line))
         bp.put(String("condition"), json_str(breakpoints[i].condition))
@@ -235,5 +167,5 @@ def save_breakpoints(
     var path = _bp_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dirs(project_root)
+    ensure_per_user_dir(project_root)
     return write_file(path, encode_breakpoints(project_root, breakpoints))

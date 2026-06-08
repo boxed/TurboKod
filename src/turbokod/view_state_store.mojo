@@ -29,18 +29,16 @@ malformed or missing file silently yields an empty list.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
 from .file_io import join_path, project_relative, read_file, stat_file, write_file
 from .json import (
-    JsonValue, encode_json, json_array, json_int, json_object, json_str,
+    JsonValue, encode_json, json_array, json_object, json_str,
     parse_json, json_get_int, json_get_string,
+    encode_int_pair, read_int_pair,
 )
-from .posix import getenv_value
+from .per_user_store import ensure_per_user_dir, per_user_path
 
 
-comptime VS_DIR_PROJECT = String(".turbokod")
-comptime VS_DIR_PER_USER = String("per_user")
 comptime VS_FILE = String("view_states.json")
 
 
@@ -58,47 +56,8 @@ struct StoredViewState(ImplicitlyCopyable, Movable):
     var scroll_y: Int
 
 
-def _current_username() -> String:
-    var user = getenv_value(String("USER"))
-    if len(user.as_bytes()) > 0:
-        return user^
-    var logname = getenv_value(String("LOGNAME"))
-    if len(logname.as_bytes()) > 0:
-        return logname^
-    return String("default")
-
-
-def _vs_dir(project_root: String) -> String:
-    if len(project_root.as_bytes()) == 0:
-        return String("")
-    var d = join_path(project_root, VS_DIR_PROJECT)
-    d = join_path(d, VS_DIR_PER_USER)
-    return join_path(d, _current_username())
-
-
 def _vs_path(project_root: String) -> String:
-    var dir = _vs_dir(project_root)
-    if len(dir.as_bytes()) == 0:
-        return String("")
-    return join_path(dir, VS_FILE)
-
-
-def _ensure_dir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
-def _ensure_dirs(project_root: String):
-    if len(project_root.as_bytes()) == 0:
-        return
-    var top = join_path(project_root, VS_DIR_PROJECT)
-    _ensure_dir(top)
-    var per_user = join_path(top, VS_DIR_PER_USER)
-    _ensure_dir(per_user)
-    var user_dir = join_path(per_user, _current_username())
-    _ensure_dir(user_dir)
+    return per_user_path(project_root, VS_FILE)
 
 
 def _resolve_vs_path(project_root: String, stored: String) -> String:
@@ -110,18 +69,6 @@ def _resolve_vs_path(project_root: String, stored: String) -> String:
     if len(project_root.as_bytes()) == 0:
         return stored
     return join_path(project_root, stored)
-
-
-def _read_int_pair(
-    obj: JsonValue, key: String, fallback_a: Int, fallback_b: Int,
-) -> Tuple[Int, Int]:
-    var v = obj.object_get(key)
-    if v and v.value().is_array() and v.value().array_len() == 2:
-        var a_v = v.value().array_at(0)
-        var b_v = v.value().array_at(1)
-        if a_v.is_int() and b_v.is_int():
-            return (a_v.as_int(), b_v.as_int())
-    return (fallback_a, fallback_b)
 
 
 def load_view_states(project_root: String) -> List[StoredViewState]:
@@ -158,19 +105,12 @@ def load_view_states(project_root: String) -> List[StoredViewState]:
         if len(raw_path.as_bytes()) == 0:
             continue
         var resolved = _resolve_vs_path(project_root, raw_path)
-        var cursor = _read_int_pair(node, String("cursor"), 0, 0)
-        var scroll = _read_int_pair(node, String("scroll"), 0, 0)
+        var cursor = read_int_pair(node, String("cursor"), 0, 0)
+        var scroll = read_int_pair(node, String("scroll"), 0, 0)
         out.append(StoredViewState(
             resolved^, cursor[0], cursor[1], scroll[0], scroll[1],
         ))
     return out^
-
-
-def _encode_int_pair(a: Int, b: Int) -> JsonValue:
-    var arr = json_array()
-    arr.append(json_int(a))
-    arr.append(json_int(b))
-    return arr^
 
 
 def encode_view_states(
@@ -186,11 +126,11 @@ def encode_view_states(
         v.put(String("path"), json_str(rel))
         v.put(
             String("cursor"),
-            _encode_int_pair(views[i].cursor_row, views[i].cursor_col),
+            encode_int_pair(views[i].cursor_row, views[i].cursor_col),
         )
         v.put(
             String("scroll"),
-            _encode_int_pair(views[i].scroll_x, views[i].scroll_y),
+            encode_int_pair(views[i].scroll_x, views[i].scroll_y),
         )
         arr.append(v^)
     root.put(String("views"), arr^)
@@ -206,5 +146,5 @@ def save_view_states(
     var path = _vs_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dirs(project_root)
+    ensure_per_user_dir(project_root)
     return write_file(path, encode_view_states(project_root, views))
