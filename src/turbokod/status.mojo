@@ -9,8 +9,8 @@ clipped first."""
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
-from .painter import Painter
+from .canvas import Canvas, popup_size_for_text
+from .painter import Painter, paint_tooltip_popup
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
@@ -340,17 +340,7 @@ struct StatusBar(Movable):
                 if by < 0:
                     by = 0
         var r = Rect(bx, by, bx + w, by + h)
-        var attr = Attr(BLACK, LIGHT_GRAY)
-        paint_drop_shadow(canvas, r)
-        var tt_painter = Painter(r)
-        tt_painter.fill(canvas, r, String(" "), attr)
-        tt_painter.draw_box(canvas, r, attr, False)
-        var msg_rect = Rect(
-            r.a.x + 2, r.a.y + 1,
-            r.b.x - 2, r.b.y - 1,
-        )
-        if msg_rect.width() > 0 and msg_rect.height() > 0:
-            _ = canvas.put_wrapped_text(msg_rect, self.message_tooltip, attr)
+        paint_tooltip_popup(canvas, r, self.message_tooltip)
 
     def hit_test_message(self, pos: Point, container_bounds: Rect) -> Bool:
         """True if ``pos`` lands on a click-marked message. Returns False

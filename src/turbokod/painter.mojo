@@ -20,9 +20,9 @@ canvas reference flows through method args rather than being captured,
 which keeps Painter free of lifetime annotations.
 """
 
-from .canvas import Canvas, TAB_WIDTH
+from .canvas import Canvas, TAB_WIDTH, paint_drop_shadow
 from .cell import Cell
-from .colors import Attr
+from .colors import Attr, BLACK, LIGHT_GRAY
 from .geometry import Point, Rect
 from .string_utils import char_width, codepoint_at, utf8_codepoint_size
 
@@ -180,3 +180,18 @@ struct Painter(Copyable, Movable):
         """
         self.draw_box(canvas, rect, attr, double_line)
         return self.sub(rect.inset(1, 1))
+
+
+def paint_tooltip_popup(mut canvas: Canvas, r: Rect, text: String):
+    """Paint a tooltip popup at ``r``: drop shadow, a filled box with a
+    border, and ``text`` wrapped into the interior. The standard chrome
+    shared by the status-bar message tooltip and the window-title tooltip;
+    callers own anchor and size computation (via ``popup_size_for_text``)."""
+    var attr = Attr(BLACK, LIGHT_GRAY)
+    paint_drop_shadow(canvas, r)
+    var painter = Painter(r)
+    painter.fill(canvas, r, String(" "), attr)
+    painter.draw_box(canvas, r, attr, False)
+    var inner = Rect(r.a.x + 2, r.a.y + 1, r.b.x - 2, r.b.y - 1)
+    if inner.width() > 0 and inner.height() > 0:
+        _ = canvas.put_wrapped_text(inner, text, attr)
