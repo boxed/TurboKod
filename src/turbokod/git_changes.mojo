@@ -319,19 +319,49 @@ def fetch_blob_text(
     """
     if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
         return String("")
+    var args = List[String]()
+    args.append(String("show"))
+    args.append(git_ref + String(":") + rel_path)
+    return _git_stdout(project_root, args^)
+
+
+def _git_argv(project_root: String, var args: List[String]) -> List[String]:
+    """Build ``git -C <project_root> <args...>`` — the prefix every git
+    invocation in this module shares."""
     var argv = List[String]()
     argv.append(String("git"))
     argv.append(String("-C"))
     argv.append(project_root)
-    argv.append(String("show"))
-    argv.append(git_ref + String(":") + rel_path)
+    for i in range(len(args)):
+        argv.append(args[i])
+    return argv^
+
+
+def _git_stdout(project_root: String, var args: List[String]) -> String:
+    """Run ``git -C <root> <args...>``; return stdout, or ``""`` on a
+    non-zero exit or spawn failure. The common shape for the read-only
+    queries (diffs, status, log, show)."""
     try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
+        var r = capture_command(_git_argv(project_root, args^))
+        if Int(r.status) != 0:
             return String("")
-        return result.stdout
+        return r.stdout
     except:
         return String("")
+
+
+def _git_ok(
+    project_root: String, var args: List[String],
+    stdin_text: String = String(""),
+) -> Bool:
+    """Run ``git -C <root> <args...>`` (optionally feeding ``stdin_text``);
+    return ``True`` iff git exited 0. The common shape for the mutating
+    commands that only care whether they succeeded."""
+    try:
+        var r = capture_command(_git_argv(project_root, args^), stdin_text)
+        return Int(r.status) == 0
+    except:
+        return False
 
 
 def fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
@@ -349,14 +379,11 @@ def fetch_head_text(project_root: String, file_path: String) -> Optional[String]
     )
     if len(rel.as_bytes()) == 0:
         return Optional[String]()
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("show"))
-    argv.append(String("HEAD:") + rel^)
+    var args = List[String]()
+    args.append(String("show"))
+    args.append(String("HEAD:") + rel^)
     try:
-        var result = capture_command(argv)
+        var result = capture_command(_git_argv(project_root, args^))
         # Non-zero exit = path not in HEAD; treat as "no baseline".
         if Int(result.status) != 0:
             return Optional[String]()
@@ -427,14 +454,11 @@ def compute_local_changes(project_root: String) raises -> String:
 
     Raises only on spawn failure (e.g., git missing from PATH).
     """
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("diff"))
-    argv.append(String("HEAD"))
-    argv.append(String("--no-color"))
-    var result = capture_command(argv)
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("HEAD"))
+    args.append(String("--no-color"))
+    var result = capture_command(_git_argv(project_root, args^))
     return result.stdout
 
 
@@ -443,39 +467,21 @@ def compute_staged_diff(project_root: String) -> String:
     string on failure (no commits, not a repo, git missing)."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("diff"))
-    argv.append(String("--cached"))
-    argv.append(String("--no-color"))
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return String("")
-        return result.stdout
-    except:
-        return String("")
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("--cached"))
+    args.append(String("--no-color"))
+    return _git_stdout(project_root, args^)
 
 
 def compute_unstaged_diff(project_root: String) -> String:
     """``git diff --no-color`` — worktree versus index. Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("diff"))
-    argv.append(String("--no-color"))
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return String("")
-        return result.stdout
-    except:
-        return String("")
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("--no-color"))
+    return _git_stdout(project_root, args^)
 
 
 @fieldwise_init
@@ -504,21 +510,11 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     var out = List[GitFileStatus]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("status"))
-    argv.append(String("--porcelain=v1"))
-    argv.append(String("-z"))
-    var stdout: String
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return out^
-        stdout = result.stdout
-    except:
-        return out^
+    var args = List[String]()
+    args.append(String("status"))
+    args.append(String("--porcelain=v1"))
+    args.append(String("-z"))
+    var stdout = _git_stdout(project_root, args^)
     var b = stdout.as_bytes()
     var i = 0
     while i + 3 <= len(b):
@@ -551,18 +547,11 @@ def stage_file(project_root: String, path: String) -> Bool:
     status`` produces)."""
     if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
         return False
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("add"))
-    argv.append(String("--"))
-    argv.append(path)
-    try:
-        var r = capture_command(argv)
-        return Int(r.status) == 0
-    except:
-        return False
+    var args = List[String]()
+    args.append(String("add"))
+    args.append(String("--"))
+    args.append(path)
+    return _git_ok(project_root, args^)
 
 
 def unstage_file(project_root: String, path: String) -> Bool:
@@ -571,19 +560,12 @@ def unstage_file(project_root: String, path: String) -> Bool:
     touching the worktree. Returns False on failure."""
     if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
         return False
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("restore"))
-    argv.append(String("--staged"))
-    argv.append(String("--"))
-    argv.append(path)
-    try:
-        var r = capture_command(argv)
-        return Int(r.status) == 0
-    except:
-        return False
+    var args = List[String]()
+    args.append(String("restore"))
+    args.append(String("--staged"))
+    args.append(String("--"))
+    args.append(path)
+    return _git_ok(project_root, args^)
 
 
 def apply_patch_to_index(
@@ -598,21 +580,14 @@ def apply_patch_to_index(
     (already handled by the surrounding repo gate)."""
     if len(project_root.as_bytes()) == 0 or len(patch.as_bytes()) == 0:
         return False
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("apply"))
-    argv.append(String("--cached"))
-    argv.append(String("--recount"))
+    var args = List[String]()
+    args.append(String("apply"))
+    args.append(String("--cached"))
+    args.append(String("--recount"))
     if reverse:
-        argv.append(String("--reverse"))
-    argv.append(String("-"))
-    try:
-        var r = capture_command(argv, patch)
-        return Int(r.status) == 0
-    except:
-        return False
+        args.append(String("--reverse"))
+    args.append(String("-"))
+    return _git_ok(project_root, args^, patch)
 
 
 @fieldwise_init
@@ -657,15 +632,12 @@ def git_commit(project_root: String, message: String) -> GitOpResult:
     failure (typically ``nothing to commit`` or a hook complaint)."""
     if len(project_root.as_bytes()) == 0 or len(message.as_bytes()) == 0:
         return GitOpResult(False, String("empty message"))
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("commit"))
-    argv.append(String("-m"))
-    argv.append(message)
+    var args = List[String]()
+    args.append(String("commit"))
+    args.append(String("-m"))
+    args.append(message)
     try:
-        var r = capture_command(argv)
+        var r = capture_command(_git_argv(project_root, args^))
         var ok = Int(r.status) == 0
         var msg: String
         if ok:
@@ -688,15 +660,12 @@ def git_amend_no_edit(project_root: String) -> GitOpResult:
     re-touch the commit) into HEAD without prompting for a new message."""
     if len(project_root.as_bytes()) == 0:
         return GitOpResult(False, String("no project"))
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("commit"))
-    argv.append(String("--amend"))
-    argv.append(String("--no-edit"))
+    var args = List[String]()
+    args.append(String("commit"))
+    args.append(String("--amend"))
+    args.append(String("--no-edit"))
     try:
-        var r = capture_command(argv)
+        var r = capture_command(_git_argv(project_root, args^))
         var ok = Int(r.status) == 0
         var msg: String
         if ok:
@@ -723,22 +692,19 @@ def git_revert_file(
     if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
         return GitOpResult(False, String("empty path"))
     var untracked = (Int(staged) == 0x3F and Int(worktree) == 0x3F)
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
+    var args = List[String]()
     if untracked:
-        argv.append(String("clean"))
-        argv.append(String("-f"))
-        argv.append(String("--"))
-        argv.append(path)
+        args.append(String("clean"))
+        args.append(String("-f"))
+        args.append(String("--"))
+        args.append(path)
     else:
-        argv.append(String("checkout"))
-        argv.append(String("HEAD"))
-        argv.append(String("--"))
-        argv.append(path)
+        args.append(String("checkout"))
+        args.append(String("HEAD"))
+        args.append(String("--"))
+        args.append(path)
     try:
-        var r = capture_command(argv)
+        var r = capture_command(_git_argv(project_root, args^))
         var ok = Int(r.status) == 0
         var msg: String
         if ok:
@@ -761,13 +727,10 @@ def git_pull(project_root: String) -> GitOpResult:
     UI blocks until it returns."""
     if len(project_root.as_bytes()) == 0:
         return GitOpResult(False, String("no project"))
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("pull"))
+    var args = List[String]()
+    args.append(String("pull"))
     try:
-        var r = capture_command(argv)
+        var r = capture_command(_git_argv(project_root, args^))
         var ok = Int(r.status) == 0
         var msg: String
         if ok:
@@ -790,13 +753,10 @@ def git_push(project_root: String) -> GitOpResult:
     Same blocking caveat as ``git_pull``."""
     if len(project_root.as_bytes()) == 0:
         return GitOpResult(False, String("no project"))
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("push"))
+    var args = List[String]()
+    args.append(String("push"))
     try:
-        var r = capture_command(argv)
+        var r = capture_command(_git_argv(project_root, args^))
         var ok = Int(r.status) == 0
         var msg: String
         if ok:
@@ -872,24 +832,14 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
     var out = List[GitBranch]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("for-each-ref"))
-    argv.append(String("--sort=-committerdate"))
-    argv.append(
+    var args = List[String]()
+    args.append(String("for-each-ref"))
+    args.append(String("--sort=-committerdate"))
+    args.append(
         String("--format=%(HEAD)%09%(refname:short)%09%(objectname:short)%09%(subject)"),
     )
-    argv.append(String("refs/heads"))
-    var stdout: String
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return out^
-        stdout = result.stdout
-    except:
-        return out^
+    args.append(String("refs/heads"))
+    var stdout = _git_stdout(project_root, args^)
     var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
         var line = lines[li]
@@ -914,24 +864,14 @@ def _fetch_unpushed_short_shas(
     var out = List[String]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("rev-list"))
-    argv.append(String("-") + String(limit))
-    argv.append(String("HEAD"))
-    argv.append(String("--not"))
-    argv.append(String("--remotes"))
-    argv.append(String("--abbrev-commit"))
-    var stdout: String
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return out^
-        stdout = result.stdout
-    except:
-        return out^
+    var args = List[String]()
+    args.append(String("rev-list"))
+    args.append(String("-") + String(limit))
+    args.append(String("HEAD"))
+    args.append(String("--not"))
+    args.append(String("--remotes"))
+    args.append(String("--abbrev-commit"))
+    var stdout = _git_stdout(project_root, args^)
     var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
         var line = lines[li]
@@ -957,23 +897,13 @@ def fetch_git_commits(
     var out = List[GitCommit]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("log"))
-    argv.append(String("-") + String(limit))
-    argv.append(String("--no-color"))
-    argv.append(String("--date=short"))
-    argv.append(String("--pretty=format:%h%x09%an%x09%ad%x09%s"))
-    var stdout: String
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return out^
-        stdout = result.stdout
-    except:
-        return out^
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(String("-") + String(limit))
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(String("--pretty=format:%h%x09%an%x09%ad%x09%s"))
+    var stdout = _git_stdout(project_root, args^)
     var unpushed = _fetch_unpushed_short_shas(project_root, limit)
     var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
@@ -996,20 +926,11 @@ def fetch_commit_show(project_root: String, sha: String) -> String:
     user focuses a commit in the local-changes view."""
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("show"))
-    argv.append(String("--no-color"))
-    argv.append(sha)
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return String("")
-        return result.stdout
-    except:
-        return String("")
+    var args = List[String]()
+    args.append(String("show"))
+    args.append(String("--no-color"))
+    args.append(sha)
+    return _git_stdout(project_root, args^)
 
 
 def fetch_branch_log(
@@ -1022,22 +943,13 @@ def fetch_branch_log(
     in one paint, the same shape they'd see at the shell."""
     if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
         return String("")
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(project_root)
-    argv.append(String("log"))
-    argv.append(String("-") + String(limit))
-    argv.append(String("--no-color"))
-    argv.append(String("--date=short"))
-    argv.append(
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(String("-") + String(limit))
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(
         String("--pretty=format:%h  %ad  %an%n    %s%n"),
     )
-    argv.append(branch)
-    try:
-        var result = capture_command(argv)
-        if Int(result.status) != 0:
-            return String("")
-        return result.stdout
-    except:
-        return String("")
+    args.append(branch)
+    return _git_stdout(project_root, args^)
