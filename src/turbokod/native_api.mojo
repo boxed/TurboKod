@@ -246,6 +246,17 @@ def _action_code(action: Optional[String]) -> Int32:
     return ACT_NONE
 
 
+def _canon_ctrl_key(key: UInt32, mods: UInt8) -> UInt32:
+    """Fold an uppercase ASCII letter to lowercase when Ctrl or Cmd is
+    held, so the Mojo core sees a canonical ``Ctrl+<lower>`` chord
+    regardless of the host's shift state. Shared by every C-ABI key entry
+    point (main desktop, panels, settings, project settings)."""
+    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
+        if key >= UInt32(0x41) and key <= UInt32(0x5A):
+            return key + UInt32(0x20)
+    return key
+
+
 # --- C ABI ------------------------------------------------------------------
 
 # Process-local "did we already repair PATH?" flag. Mojo has no module-level
@@ -579,10 +590,7 @@ def tk_desktop_panels_key(
     codes), but dispatches through ``handle_panels_event``."""
     if h == 0:
         return ACT_NONE
-    var k = key
-    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
-        if k >= UInt32(0x41) and k <= UInt32(0x5A):
-            k = k + UInt32(0x20)
+    var k = _canon_ctrl_key(key, mods)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_panels_event(
@@ -767,10 +775,7 @@ def tk_desktop_settings_key(
     produces host actions, so this always returns ACT_NONE."""
     if h == 0:
         return ACT_NONE
-    var k = key
-    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
-        if k >= UInt32(0x41) and k <= UInt32(0x5A):
-            k = k + UInt32(0x20)
+    var k = _canon_ctrl_key(key, mods)
     _desk(h)[].handle_settings_event(
         Event.key_event(k, mods), Rect(0, 0, cols, rows),
     )
@@ -853,10 +858,7 @@ def tk_desktop_project_settings_key(
     Project Settings never produces host actions, so this returns ACT_NONE."""
     if h == 0:
         return ACT_NONE
-    var k = key
-    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
-        if k >= UInt32(0x41) and k <= UInt32(0x5A):
-            k = k + UInt32(0x20)
+    var k = _canon_ctrl_key(key, mods)
     _desk(h)[].handle_project_settings_event(
         Event.key_event(k, mods), Rect(0, 0, cols, rows),
     )
@@ -884,10 +886,7 @@ def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> In
         return ACT_NONE
     # Canonicalize Ctrl/Cmd + uppercase letter to lowercase (matches the
     # terminal path so hotkey tables match regardless of frontend).
-    var k = key
-    if (mods & MOD_CTRL) != 0 or (mods & MOD_META) != 0:
-        if k >= UInt32(0x41) and k <= UInt32(0x5A):
-            k = k + UInt32(0x20)
+    var k = _canon_ctrl_key(key, mods)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_event(Event.key_event(k, mods), Rect(0, 0, cols, rows))
