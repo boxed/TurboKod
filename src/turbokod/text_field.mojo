@@ -61,7 +61,7 @@ from .geometry import Point, Rect
 from .string_utils import (
     char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
     prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, word_char_step, word_range_at,
+    utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
 )
 
 
@@ -369,7 +369,7 @@ struct TextField(Copyable, Movable):
         if not extend and self.has_selection():
             self._move(self._sel_range()[1], False)
             return
-        self._move(_utf8_step_forward(self.text, self.cursor), extend)
+        self._move(utf8_step_forward(self.text, self.cursor), extend)
 
     def _word_left(mut self, extend: Bool):
         self._move(_prev_word_pos(self.text, self.cursor), extend)
@@ -438,7 +438,7 @@ struct TextField(Copyable, Movable):
         if self.cursor >= n:
             return False
         self._push_undo()
-        var nxt = _utf8_step_forward(self.text, self.cursor)
+        var nxt = utf8_step_forward(self.text, self.cursor)
         self.text = _splice(self.text, self.cursor, nxt, String(""))
         return True
 
@@ -1011,18 +1011,6 @@ def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
 
 
 # --- UTF-8 boundary helpers (mirrors editor.mojo) -----------------------
-
-
-def _utf8_step_forward(text: String, col: Int) -> Int:
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if col >= n:
-        return n
-    var step = utf8_codepoint_size(Int(bytes[col]))
-    var nxt = col + step
-    if nxt > n:
-        nxt = n
-    return nxt
 
 
 def _next_word_pos(text: String, col: Int) -> Int:

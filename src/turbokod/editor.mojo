@@ -77,7 +77,7 @@ from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
     utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
-    word_char_step, word_range_at,
+    utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -395,19 +395,6 @@ def _detect_line_ending(text: String) -> String:
 # stepping share one source of truth for UTF-8 lead-byte decoding.
 
 
-def _utf8_step_forward(line: String, col: Int) -> Int:
-    """Byte offset of the codepoint boundary one step forward from ``col``."""
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    if col >= n:
-        return n
-    var step = utf8_codepoint_size(Int(bytes[col]))
-    var nxt = col + step
-    if nxt > n:
-        nxt = n
-    return nxt
-
-
 def _seg_cell_offset(
     line: String, seg_start: Int, seg_end: Int, target_byte: Int,
 ) -> Int:
@@ -524,7 +511,7 @@ struct TextBuffer(Copyable, Movable):
                 self.lines[row] = line + self.lines[row + 1]
                 _ = self.lines.pop(row + 1)
             return
-        var nxt = _utf8_step_forward(line, col)
+        var nxt = utf8_step_forward(line, col)
         self.lines[row] = byte_slice(line, 0, col) + byte_slice(line, nxt, n)
 
     def delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
@@ -5945,7 +5932,7 @@ struct Editor(Copyable, Movable):
                     actual_ec = actual_cur
                 elif op == 2:
                     actual_sc = actual_cur
-                    actual_ec = _utf8_step_forward(line_ro, actual_cur)
+                    actual_ec = utf8_step_forward(line_ro, actual_cur)
                 else:
                     actual_sc = actual_cur
                     actual_ec = actual_cur
@@ -8049,7 +8036,7 @@ struct Editor(Copyable, Movable):
         var n = self.buffer.line_length(self.selections[0].row)
         if self.selections[0].col < n:
             var line = self.buffer.line(self.selections[0].row)
-            var nc = _utf8_step_forward(line, self.selections[0].col)
+            var nc = utf8_step_forward(line, self.selections[0].col)
             self.move_to(self.selections[0].row, nc, extend)
         elif self.selections[0].row + 1 < self.buffer.line_count():
             self.move_to(self.selections[0].row + 1, 0, extend)

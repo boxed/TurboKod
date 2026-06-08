@@ -546,6 +546,20 @@ def utf8_codepoint_size(b: Int) -> Int:
     return 1
 
 
+def utf8_step_forward(s: String, col: Int) -> Int:
+    """Byte offset of the codepoint boundary one step forward from ``col``,
+    clamped to ``len(s)``. Single source for the editor and text-field
+    forward-by-one-codepoint cursor steps."""
+    var bytes = s.as_bytes()
+    var n = len(bytes)
+    if col >= n:
+        return n
+    var nxt = col + utf8_codepoint_size(Int(bytes[col]))
+    if nxt > n:
+        nxt = n
+    return nxt
+
+
 def leading_indent_bytes(line: String) -> Int:
     """Byte count of leading ASCII spaces and tabs. Each space/tab
     counts as one byte under the editor's byte-as-cell column model,
