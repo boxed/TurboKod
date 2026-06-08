@@ -71,8 +71,12 @@ from .diagnostic_menu import (
     DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
 )
 from .context_menu import (
-    CTX_MENU_ACTION_DEFINITION, CTX_MENU_ACTION_REFERENCES,
-    CTX_MENU_ACTION_RENAME, EditorContextMenu,
+    CTX_MENU_ACTION_CALLERS, CTX_MENU_ACTION_DECLARATION,
+    CTX_MENU_ACTION_DEFINITION,
+    CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_REFERENCES,
+    CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUPERTYPES,
+    CTX_MENU_ACTION_TYPE_DEFINITION,
+    EditorContextMenu,
 )
 from .lsp import LspProcess
 from .lsp_status_menu import (
@@ -255,6 +259,15 @@ comptime EDITOR_COMPLETE      = String("edit:complete")
 # the whole project. Bound to F2 / Shift+F6, in the Edit menu, and in the
 # editor's right-click context menu.
 comptime EDITOR_RENAME_SYMBOL = String("edit:rename_symbol")
+# LSP go-to family (cursor-word). Definition itself stays on Cmd+click;
+# these three are the rarer jumps, exposed via Edit menu + context menu
+# and gated on server capability where surfaced.
+comptime EDITOR_GOTO_TYPE_DEF = String("edit:goto_type_def")
+comptime EDITOR_GOTO_IMPL     = String("edit:goto_impl")
+comptime EDITOR_GOTO_DECL     = String("edit:goto_decl")
+# LSP formatting: whole document, or just the selection (rangeFormatting).
+comptime EDITOR_FORMAT_DOCUMENT  = String("edit:format_document")
+comptime EDITOR_FORMAT_SELECTION = String("edit:format_selection")
 # Internal pending-action tag for the rename name prompt. Carries the
 # typed new name to ``_on_prompt_submit``.
 comptime _PA_RENAME           = String("rename:do")
@@ -909,6 +922,25 @@ struct Desktop(Movable):
     var _rename_path: String
     var _rename_line: Int
     var _rename_col: Int
+    # When non-empty, a format-on-save request is in flight for this path:
+    # the formatting-response drain applies the edits and *then* writes the
+    # file. A second save of the same path while pending bypasses formatting
+    # (a hung formatter must never block persistence).
+    var _format_then_save_path: String
+    # Last cursor position a documentHighlight request was issued for,
+    # encoded ``path|row|col``. Debounces the request to once per cursor
+    # move so we don't re-query the server every frame.
+    var _doc_hl_pos: String
+    # Debounce latch for inlay-hint / code-lens requests: ``path|linecount``.
+    # Re-requests on focus change or when the line count changes (covers
+    # most edits); same-line edits refresh on the next line-count change.
+    var _inlay_key: String
+    # Debounce latch for selectionRange requests (``path|row|col``).
+    var _selrange_pos: String
+    # Word under the cursor at rename time — the prompt seed when the
+    # server has no prepareRename placeholder (or prepareRename is
+    # unsupported and we fall back to a direct prompt).
+    var _rename_word: String
     # Right-click on the LSP indicator on the right of the status bar →
     # contextual menu with a single ``Restart LSP`` action. Same
     # input-first routing pattern as ``git_gutter_menu``.
@@ -1288,6 +1320,11 @@ struct Desktop(Movable):
         self._rename_path = String("")
         self._rename_line = 0
         self._rename_col = 0
+        self._rename_word = String("")
+        self._format_then_save_path = String("")
+        self._doc_hl_pos = String("")
+        self._inlay_key = String("")
+        self._selrange_pos = String("")
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -2803,6 +2840,26 @@ struct Desktop(Movable):
                         )
                         self.windows.windows[i].editor.set_git_changes(lines^)
 
+    def force_git_refresh(mut self):
+        """Drop every editor's cached HEAD baseline so the gutter re-diffs
+        against ``git show HEAD:<path>`` on the next paint — *unconditionally*,
+        without waiting for the 1 Hz ``.git/HEAD``/``.git/index`` mtime poll.
+
+        Called on host focus-gain. The user may have committed, checked out,
+        or simply edited files in another app while we were in the background;
+        a worktree-only change doesn't move the mtimes the cheap poll watches,
+        so the gutter would otherwise read stale until the next save or HEAD
+        move. Cheap here — the actual ``git show`` re-fetch is deferred to the
+        lazy gutter recompute on the next paint, and the in-process Myers diff
+        is per-frame anyway. We also reset the poll baseline so the periodic
+        poll reseeds (and doesn't immediately re-invalidate) the mtimes."""
+        for j in range(len(self.windows.windows)):
+            if self.windows.windows[j].is_editor \
+                    and not self.windows.windows[j].editor.read_only:
+                self.windows.windows[j].editor.invalidate_git_changes()
+        self._last_git_state_check_ms = 0
+        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+
     def paint(mut self, mut canvas: Canvas, screen: Rect):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
@@ -3011,6 +3068,20 @@ struct Desktop(Movable):
             # Caret blink: a pure paint toggle — the next frame's
             # ``_apply_view_config`` reads the new value, no extra apply.
             self.config.cursor_blink = self.settings.cursor_blink
+            # Language Server per-feature gates — plain bool copies; the
+            # feature code reads ``self.config.lsp_*`` at request/paint time.
+            self.config.lsp_format_on_save = self.settings.ls_format_on_save
+            self.config.lsp_signature_help = self.settings.ls_signature_help
+            self.config.lsp_document_highlight = (
+                self.settings.ls_document_highlight
+            )
+            self.config.lsp_document_links = self.settings.ls_document_links
+            self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
+            self.config.lsp_code_lens = self.settings.ls_code_lens
+            self.config.lsp_semantic_tokens = self.settings.ls_semantic_tokens
+            self.config.lsp_document_colors = self.settings.ls_document_colors
+            self.config.lsp_linked_editing = self.settings.ls_linked_editing
+            self.config.lsp_server_progress = self.settings.ls_server_progress
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
@@ -5606,6 +5677,16 @@ struct Desktop(Movable):
                 self.config.wrap_mode,
                 self.config.smart_wrap_comma_threshold,
                 self.config.cursor_blink,
+                self.config.lsp_format_on_save,
+                self.config.lsp_signature_help,
+                self.config.lsp_document_highlight,
+                self.config.lsp_document_links,
+                self.config.lsp_inlay_hints,
+                self.config.lsp_code_lens,
+                self.config.lsp_semantic_tokens,
+                self.config.lsp_document_colors,
+                self.config.lsp_linked_editing,
+                self.config.lsp_server_progress,
             )
             return Optional[String]()
         if action == HELP_HOTKEYS:
@@ -5700,6 +5781,21 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_RENAME_SYMBOL:
             self._begin_rename_at_cursor()
+            return Optional[String]()
+        if action == EDITOR_GOTO_TYPE_DEF:
+            self._navigate_at_cursor(String("textDocument/typeDefinition"))
+            return Optional[String]()
+        if action == EDITOR_GOTO_IMPL:
+            self._navigate_at_cursor(String("textDocument/implementation"))
+            return Optional[String]()
+        if action == EDITOR_GOTO_DECL:
+            self._navigate_at_cursor(String("textDocument/declaration"))
+            return Optional[String]()
+        if action == EDITOR_FORMAT_DOCUMENT:
+            self._format_document()
+            return Optional[String]()
+        if action == EDITOR_FORMAT_SELECTION:
+            self._format_selection()
             return Optional[String]()
         if action == EDITOR_GOTO:
             self._pending_action = EDITOR_GOTO
@@ -6152,6 +6248,13 @@ struct Desktop(Movable):
                 .consume_hover_request(monotonic_ms())
             if hover_opt:
                 self._dispatch_hover_request(idx, hover_opt.value())
+            var sig_opt = self.windows.windows[idx].editor \
+                .consume_signature_help_request()
+            if sig_opt:
+                self._dispatch_signature_help(idx, sig_opt.value())
+            self._maybe_request_doc_highlight(idx)
+            self._maybe_request_selection_range(idx)
+            self._maybe_request_inlay_codelens(idx)
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
         # focused.
@@ -6216,6 +6319,86 @@ struct Desktop(Movable):
                 var word = self.lsp_managers[i].references_word()
                 var refs = self.lsp_managers[i].take_references()
                 self._on_references_resolved(refs^, word, screen)
+            # Call / type hierarchy result → references picker (0 → notice,
+            # 1 → jump, ≥2 → chooser), same as references.
+            if self.lsp_managers[i].has_pending_hierarchy():
+                var hword = self.lsp_managers[i].hierarchy_word()
+                var hits = self.lsp_managers[i].take_hierarchy()
+                self._on_references_resolved(hits^, hword, screen)
+            # typeDefinition / implementation / declaration response:
+            # jump to the target, or report "not found" for that word.
+            if self.lsp_managers[i].has_pending_nav():
+                var nav_word = self.lsp_managers[i].nav_word()
+                var target = self.lsp_managers[i].take_nav_target()
+                if target:
+                    self._jump_to(target.value(), screen)
+                else:
+                    var msg = String("No result")
+                    if len(nav_word.as_bytes()) > 0:
+                        msg = msg + String(" for '") + nav_word + String("'")
+                    self.status_bar.set_message(msg^, Attr(RED, LIGHT_GRAY))
+            # Server-initiated status: work-done progress (gated by the
+            # ``lsp_server_progress`` setting) and showMessage (always).
+            # Always drain to clear the latch even when not displaying.
+            if self.lsp_managers[i].has_pending_progress():
+                var pnote = self.lsp_managers[i].take_progress_note()
+                if self.config.lsp_server_progress \
+                        and len(pnote.as_bytes()) > 0:
+                    self.status_bar.set_message(pnote^, Attr(BLACK, LIGHT_GRAY))
+            if self.lsp_managers[i].has_pending_server_message():
+                var smsg = self.lsp_managers[i].take_server_message()
+                if len(smsg.as_bytes()) > 0:
+                    self.status_bar.set_message(smsg^, Attr(BLACK, LIGHT_GRAY))
+            # signatureHelp → show the active signature in the status bar.
+            if self.lsp_managers[i].has_pending_signature():
+                var sig = self.lsp_managers[i].take_signature()
+                if len(sig.as_bytes()) > 0:
+                    self.status_bar.set_message(sig^, Attr(BLACK, LIGHT_GRAY))
+            # documentHighlight occurrences → push into the editor whose
+            # file they belong to (only if still open).
+            if self.lsp_managers[i].has_pending_doc_highlights():
+                var hl_path = self.lsp_managers[i].pending_doc_highlight_path()
+                var occ = self.lsp_managers[i].take_doc_highlights()
+                var hw = self._find_window_for_path(hl_path)
+                if hw >= 0 and self.windows.windows[hw].is_editor:
+                    self.windows.windows[hw].editor.set_document_highlights(
+                        occ^,
+                    )
+            # inlayHint → end-of-line annotations on the matching editor.
+            if self.lsp_managers[i].has_pending_inlay():
+                var ip = self.lsp_managers[i].pending_inlay_path()
+                var ihs = self.lsp_managers[i].take_inlay()
+                var iw = self._find_window_for_path(ip)
+                if iw >= 0 and self.windows.windows[iw].is_editor:
+                    self.windows.windows[iw].editor.set_inlay_hints(ihs^)
+            # codeLens → end-of-line annotations on the matching editor.
+            if self.lsp_managers[i].has_pending_codelens():
+                var cp = self.lsp_managers[i].pending_codelens_path()
+                var cls = self.lsp_managers[i].take_codelens()
+                var cw = self._find_window_for_path(cp)
+                if cw >= 0 and self.windows.windows[cw].is_editor:
+                    self.windows.windows[cw].editor.set_code_lens(cls^)
+            # semanticTokens → recolor overlay on the matching editor.
+            if self.lsp_managers[i].has_pending_semantic():
+                var sp = self.lsp_managers[i].pending_semantic_path()
+                var sems = self.lsp_managers[i].take_semantic()
+                var sw = self._find_window_for_path(sp)
+                if sw >= 0 and self.windows.windows[sw].is_editor:
+                    self.windows.windows[sw].editor.set_semantic_tokens(sems^)
+            # documentColor → swatch overlay on the matching editor.
+            if self.lsp_managers[i].has_pending_colors():
+                var clp = self.lsp_managers[i].pending_color_path()
+                var cols = self.lsp_managers[i].take_colors()
+                var clw = self._find_window_for_path(clp)
+                if clw >= 0 and self.windows.windows[clw].is_editor:
+                    self.windows.windows[clw].editor.set_color_swatches(cols^)
+            # selectionRange → cache the hierarchy on the matching editor.
+            if self.lsp_managers[i].has_pending_selrange():
+                var rp = self.lsp_managers[i].pending_selrange_path()
+                var rngs = self.lsp_managers[i].take_selrange()
+                var rw = self._find_window_for_path(rp)
+                if rw >= 0 and self.windows.windows[rw].is_editor:
+                    self.windows.windows[rw].editor.set_selection_ranges(rngs^)
             # Route completion responses back to the focused editor —
             # but only if the request's file matches what's currently
             # focused. The user may have switched buffers between
@@ -6268,6 +6451,15 @@ struct Desktop(Movable):
         # path (the one it opened over), and the routing logic is
         # cleaner as a single helper than a clause repeated per manager.
         self._drain_diagnostic_code_actions()
+        # Open the rename prompt once a prepareRename response lands (or
+        # report a non-renameable token). Before the edit drain so a same-
+        # frame prompt isn't starved.
+        self._drain_prepare_rename()
+        # Apply any parked formatting edits (and save, for format-on-save).
+        self._drain_formatting()
+        # Apply any server-driven workspace/applyEdit (e.g. from a code
+        # action's executeCommand). Project-wide, like rename.
+        self._drain_apply_edits(screen)
         # Apply any parked rename WorkspaceEdit project-wide. Done after
         # the per-manager loop because it opens/edits/saves files (mutating
         # the window list), which isn't safe mid-iteration.
@@ -6421,6 +6613,141 @@ struct Desktop(Movable):
         _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
         _ = self.lsp_managers[lsp_idx].request_completion(
             path, req.row, req.col, text^, req.manual,
+        )
+
+    def _maybe_request_inlay_codelens(mut self, win_idx: Int):
+        """Request inlay hints + code lens for the focused buffer when the
+        debounce key (``path|linecount``) changes. Gated per feature by the
+        ``lsp_inlay_hints`` / ``lsp_code_lens`` settings + server support."""
+        if not self.config.lsp_inlay_hints and not self.config.lsp_code_lens \
+                and not self.config.lsp_semantic_tokens \
+                and not self.config.lsp_document_colors:
+            return
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready():
+            return
+        var lc = self.windows.windows[win_idx].editor.buffer.line_count()
+        var key = path + String("|") + String(lc)
+        if key == self._inlay_key:
+            return
+        self._inlay_key = key
+        if self.config.lsp_inlay_hints and self.lsp_managers[li] \
+                .server_supports(String("inlayHintProvider")):
+            var t1 = self.windows.windows[win_idx].editor.text_snapshot()
+            _ = self.lsp_managers[li].request_inlay_hints(path, 0, lc, t1^)
+        if self.config.lsp_code_lens and self.lsp_managers[li] \
+                .server_supports(String("codeLensProvider")):
+            var t2 = self.windows.windows[win_idx].editor.text_snapshot()
+            _ = self.lsp_managers[li].request_code_lens(path, t2^)
+        if self.config.lsp_semantic_tokens and self.lsp_managers[li] \
+                .server_supports(String("semanticTokensProvider")):
+            var t3 = self.windows.windows[win_idx].editor.text_snapshot()
+            _ = self.lsp_managers[li].request_semantic_tokens(path, t3^)
+        if self.config.lsp_document_colors and self.lsp_managers[li] \
+                .server_supports(String("colorProvider")):
+            var t4 = self.windows.windows[win_idx].editor.text_snapshot()
+            _ = self.lsp_managers[li].request_document_colors(path, t4^)
+
+    def _maybe_request_selection_range(mut self, win_idx: Int):
+        """Request ``selectionRange`` at the cursor (debounced by position)
+        when the server supports it, so the editor's smart-select grow can
+        walk semantic ranges. Not behind a user setting — it transparently
+        improves a user-initiated action (grow/shrink selection)."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var row = self.windows.windows[win_idx].editor.selections[0].row
+        var col = self.windows.windows[win_idx].editor.selections[0].col
+        var key = path + String("|") + String(row) + String("|") + String(col)
+        if key == self._selrange_pos:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("selectionRangeProvider"),
+                ):
+            return
+        self._selrange_pos = key
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_selection_range(path, row, col, text^)
+
+    def _dispatch_signature_help(mut self, win_idx: Int, req: HoverRequest):
+        """Forward a signature-help request (stamped on ``(`` / ``,``) when
+        the ``lsp_signature_help`` setting is on and the server supports
+        it. The response shows in the status bar."""
+        if not self.config.lsp_signature_help:
+            return
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("signatureHelpProvider"),
+                ):
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_signature_help(
+            path, req.row, req.col, text^,
+        )
+
+    def _maybe_request_doc_highlight(mut self, win_idx: Int):
+        """Fire a ``textDocument/documentHighlight`` for the cursor word
+        when it moved since the last request — gated by the
+        ``lsp_document_highlight`` setting and server capability. Clears
+        the editor's occurrence overlay when the cursor isn't on a word."""
+        if not self.config.lsp_document_highlight:
+            # Setting off: make sure no stale overlay lingers.
+            if len(self._doc_hl_pos.as_bytes()) > 0:
+                self._doc_hl_pos = String("")
+                if win_idx >= 0 and win_idx < len(self.windows.windows) \
+                        and self.windows.windows[win_idx].is_editor:
+                    self.windows.windows[win_idx].editor \
+                        .clear_document_highlights()
+            return
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var row = self.windows.windows[win_idx].editor.selections[0].row
+        var col = self.windows.windows[win_idx].editor.selections[0].col
+        var line = self.windows.windows[win_idx].editor.buffer.line(row)
+        var word = word_at(line, col)
+        if len(word.as_bytes()) == 0:
+            # Off a word: clear any overlay and reset the debounce key.
+            if len(self._doc_hl_pos.as_bytes()) > 0:
+                self._doc_hl_pos = String("")
+                self.windows.windows[win_idx].editor.clear_document_highlights()
+            return
+        var key = path + String("|") + String(row) + String("|") + String(col)
+        if key == self._doc_hl_pos:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("documentHighlightProvider"),
+                ):
+            return
+        self._doc_hl_pos = key
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_document_highlight(
+            path, row, col, text^,
         )
 
     def _dispatch_hover_request(
@@ -8825,35 +9152,51 @@ struct Desktop(Movable):
         var idx = self._focused_editor_idx()
         if idx < 0:
             return
-        var has_path = len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0
-        if has_path:
-            try:
-                _ = self.windows.windows[idx].editor.save()
-                # If the user just saved the targets file, reload so
-                # the tab strip reflects their edit on the next frame
-                # without needing to close/reopen the project.
-                # Copy the path out before calling the reload helper —
-                # passing the field directly would alias the borrowed
-                # ``self`` (Mojo's exclusivity check rejects the call).
-                var saved_path = self.windows.windows[idx].editor.file_path
-                self._maybe_reload_targets(saved_path)
-                # The diff against ``HEAD`` is now stale; clear the
-                # cache so the next paint re-queries git for this file.
-                self.windows.windows[idx].editor.invalidate_git_changes()
-                # Fire any user-configured on-save actions whose language
-                # matches this file. Spawn-only — completion is reaped
-                # asynchronously by ``save_actions_tick`` so a slow or
-                # hung formatter can't freeze the UI.
-                self._run_on_save_actions(saved_path)
-            except e:
-                print(
-                    "desktop: _do_save",
-                    self.windows.windows[idx].editor.file_path,
-                    ":", String(e),
-                )
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            # No backing file — escalate to Save As.
+            self._open_save_as_dialog()
             return
-        # No backing file — escalate to Save As.
-        self._open_save_as_dialog()
+        # LSP format-on-save: when enabled and the server formats, fire a
+        # formatting request and let its response drain apply the edits and
+        # then write the file. Skip (and save raw) if a format for this same
+        # path is already pending — a hung formatter must not block saving.
+        if self.config.lsp_format_on_save \
+                and self._format_then_save_path != path \
+                and not self.windows.windows[idx].editor.read_only:
+            var li = self._lsp_for_path(path)
+            if li >= 0 and self.lsp_managers[li].is_ready() \
+                    and self.lsp_managers[li].server_supports(
+                        String("documentFormattingProvider"),
+                    ):
+                var text = self.windows.windows[idx].editor.text_snapshot()
+                if self.lsp_managers[li].request_formatting(path, text^):
+                    self._format_then_save_path = path
+                    return
+        # Normal save path. Clear any stale format-then-save latch for this
+        # file (we're writing it raw now).
+        if self._format_then_save_path == path:
+            self._format_then_save_path = String("")
+        try:
+            _ = self.windows.windows[idx].editor.save()
+            var saved_path = self.windows.windows[idx].editor.file_path
+            self._after_save(idx, saved_path)
+        except e:
+            print(
+                "desktop: _do_save",
+                self.windows.windows[idx].editor.file_path,
+                ":", String(e),
+            )
+
+    def _after_save(mut self, idx: Int, saved_path: String):
+        """Post-write housekeeping shared by ``_do_save`` and the
+        format-on-save drain: reload the targets file if it was the one
+        saved, invalidate the git diff cache, and fire on-save actions."""
+        self._maybe_reload_targets(saved_path)
+        if 0 <= idx and idx < len(self.windows.windows) \
+                and self.windows.windows[idx].is_editor:
+            self.windows.windows[idx].editor.invalidate_git_changes()
+        self._run_on_save_actions(saved_path)
 
     def _run_on_save_actions(mut self, saved_path: String):
         """Walk ``self.config.on_save_actions`` and spawn each entry
@@ -10182,17 +10525,20 @@ struct Desktop(Movable):
         var actions = self.lsp_managers[li].take_code_actions()
         var titles = List[String]()
         for k in range(len(actions)):
-            # Skip actions with no applicable file edits — we have no
-            # way to apply ``Command``-only actions yet.
-            if len(actions[k].file_edits) == 0:
+            # Keep actions we can act on: a direct WorkspaceEdit, or a
+            # Command we can run via workspace/executeCommand (the server
+            # pushes the resulting edit back via workspace/applyEdit).
+            if len(actions[k].file_edits) == 0 \
+                    and len(actions[k].command.as_bytes()) == 0:
                 continue
             titles.append(actions[k].title)
         self.diagnostic_menu.set_actions(titles^)
-        # Stash the full action list (after the same filter) so the
-        # submit handler can find the matching edits by selected index.
+        # Stash the kept action list (same filter) so the submit handler
+        # can find the matching action by selected index.
         var keep = List[CodeAction]()
         for k in range(len(actions)):
-            if len(actions[k].file_edits) > 0:
+            if len(actions[k].file_edits) > 0 \
+                    or len(actions[k].command.as_bytes()) > 0:
                 keep.append(actions[k].copy())
         self._diag_menu_actions = keep^
 
@@ -10224,19 +10570,35 @@ struct Desktop(Movable):
             if editor_idx < 0 or editor_idx >= len(self.windows.windows):
                 return
             var action = actions[fix_idx].copy()
-            var ok = self.windows.windows[
-                editor_idx
-            ].editor.apply_code_action_edits(action.file_edits.copy())
-            if ok:
-                self.status_bar.set_message(
-                    String("Applied fix: ") + action.title,
-                    Attr(BLACK, LIGHT_GRAY),
-                )
-            else:
-                self.status_bar.set_message(
-                    String("Fix had no edits for this file"),
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+            if len(action.file_edits) > 0:
+                var ok = self.windows.windows[
+                    editor_idx
+                ].editor.apply_code_action_edits(action.file_edits.copy())
+                if ok:
+                    self.status_bar.set_message(
+                        String("Applied fix: ") + action.title,
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
+                else:
+                    self.status_bar.set_message(
+                        String("Fix had no edits for this file"),
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
+                return
+            # Command-only action: run it via workspace/executeCommand. The
+            # server applies the effect and pushes back a workspace/applyEdit
+            # (handled by _drain_apply_edits).
+            if len(action.command.as_bytes()) > 0:
+                var cpath = self.windows.windows[editor_idx].editor.file_path
+                var cli = self._lsp_for_path(cpath)
+                if cli >= 0 and self.lsp_managers[cli].is_ready():
+                    _ = self.lsp_managers[cli].request_execute_command(
+                        action.command, action.command_args.copy(),
+                    )
+                    self.status_bar.set_message(
+                        String("Running: ") + action.title,
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
             return
 
     def _begin_rename_at_cursor(mut self):
@@ -10287,11 +10649,53 @@ struct Desktop(Movable):
         self._rename_path = path
         self._rename_line = row
         self._rename_col = col
+        self._rename_word = word.copy()
+        # When the server implements prepareRename, validate first: it
+        # tells us whether the token is renameable and gives the canonical
+        # placeholder. The prompt opens from the response drain
+        # (``_drain_prepare_rename``). Otherwise open it directly now.
+        if self.lsp_managers[lsp_idx].server_supports_prepare_rename():
+            var text = self.windows.windows[win_idx].editor.text_snapshot()
+            if self.lsp_managers[lsp_idx].request_prepare_rename(
+                path, row, col, text^,
+            ):
+                return
+        self._open_rename_prompt(word^)
+
+    def _open_rename_prompt(mut self, var seed: String):
+        """Open the rename name prompt seeded with ``seed`` (the server
+        placeholder, or the word under the cursor) and arm the submit
+        handler. The origin was already stashed by ``_begin_rename_at``."""
         self._pending_action = _PA_RENAME
         self.prompt.open(
-            String("Rename '") + word + String("' to: "), word^,
+            String("Rename '") + seed + String("' to: "), seed^,
             select_prefill=True,
         )
+
+    def _drain_prepare_rename(mut self):
+        """Drain a ``prepareRename`` response: open the prompt (seeded with
+        the server placeholder, or the cursor word) when renameable, fall
+        back to a direct prompt when the server doesn't support prepare,
+        and refuse with a status message when the token isn't renameable."""
+        for li in range(len(self.lsp_managers)):
+            if not self.lsp_managers[li].has_pending_prepare_rename():
+                continue
+            var res = self.lsp_managers[li].take_prepare_rename()
+            var state = res[0]
+            var placeholder = res[1]
+            if len(self._rename_path.as_bytes()) == 0:
+                continue
+            if state == 2:
+                self.status_bar.set_message(
+                    String("Rename: this symbol can't be renamed"),
+                    Attr(RED, LIGHT_GRAY),
+                )
+                self._rename_path = String("")
+                continue
+            var seed = self._rename_word
+            if state == 1 and len(placeholder.as_bytes()) > 0:
+                seed = placeholder
+            self._open_rename_prompt(seed^)
 
     def _fire_rename_request(mut self, new_name: String):
         """Submit-handler tail for ``_PA_RENAME``: send the rename to the
@@ -10329,17 +10733,31 @@ struct Desktop(Movable):
             var edits = self.lsp_managers[li].take_rename_edits()
             self._apply_rename_edits(edits^, screen)
 
-    def _apply_rename_edits(
+    def _drain_apply_edits(mut self, screen: Rect):
+        """Apply any parked server-driven ``workspace/applyEdit`` payloads
+        project-wide. Focus is left where it is (these come from a code
+        action the user already ran in place)."""
+        for li in range(len(self.lsp_managers)):
+            if not self.lsp_managers[li].has_pending_applyedit():
+                continue
+            var edits = self.lsp_managers[li].take_applyedit()
+            var n = self._apply_workspace_edits(edits^, screen)
+            if n > 0:
+                var suffix = String(" file")
+                if n != 1:
+                    suffix = String(" files")
+                self.status_bar.set_message(
+                    String("Applied edit across ") + String(n) + suffix,
+                    Attr(BLACK, LIGHT_GRAY),
+                )
+
+    def _apply_workspace_edits(
         mut self, var file_edits: List[CodeActionFileEdit], screen: Rect,
-    ):
-        var origin_path = self._rename_path
-        self._rename_path = String("")
-        if len(file_edits) == 0:
-            self.status_bar.set_message(
-                String("Rename produced no edits (unsupported here?)"),
-                Attr(RED, LIGHT_GRAY),
-            )
-            return
+    ) -> Int:
+        """Apply a multi-file ``WorkspaceEdit`` (the parsed per-file edit
+        groups): open every affected file not already open, apply that
+        file's edits, and save it. Returns the number of files changed.
+        Shared by symbol rename and server-driven ``workspace/applyEdit``."""
         var files_changed = 0
         for k in range(len(file_edits)):
             var path = uri_to_path(file_edits[k].uri)
@@ -10367,8 +10785,22 @@ struct Desktop(Movable):
                 try:
                     _ = self.windows.windows[win_idx].editor.save()
                 except e:
-                    print("desktop: rename save", path, ":", String(e))
+                    print("desktop: workspace-edit save", path, ":", String(e))
                 self.windows.windows[win_idx].editor.invalidate_git_changes()
+        return files_changed
+
+    def _apply_rename_edits(
+        mut self, var file_edits: List[CodeActionFileEdit], screen: Rect,
+    ):
+        var origin_path = self._rename_path
+        self._rename_path = String("")
+        if len(file_edits) == 0:
+            self.status_bar.set_message(
+                String("Rename produced no edits (unsupported here?)"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var files_changed = self._apply_workspace_edits(file_edits^, screen)
         # Refocus the originating file so the user isn't left in the
         # last-opened buffer.
         if len(origin_path.as_bytes()) > 0:
@@ -10404,11 +10836,52 @@ struct Desktop(Movable):
         self._ctx_menu_row = req.row
         self._ctx_menu_col = req.col
         self._ctx_menu_word = req.word
-        self.editor_context_menu.open(Point(req.anchor_x, req.anchor_y))
+        # Build the row set, gating the go-to family on what the server
+        # advertises. Rename / Definition / References always show (the
+        # server may still answer null — better a no-op than a missing
+        # row); the rarer providers only appear when supported.
+        var path = self.windows.windows[idx].editor.file_path
+        var li = self._lsp_for_path(path)
+        var labels = List[String]()
+        var actions = List[Int]()
+        labels.append(String("Rename Symbol…"))
+        actions.append(CTX_MENU_ACTION_RENAME)
+        labels.append(String("Go to Definition"))
+        actions.append(CTX_MENU_ACTION_DEFINITION)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("typeDefinitionProvider"),
+        ):
+            labels.append(String("Go to Type Definition"))
+            actions.append(CTX_MENU_ACTION_TYPE_DEFINITION)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("implementationProvider"),
+        ):
+            labels.append(String("Go to Implementation"))
+            actions.append(CTX_MENU_ACTION_IMPLEMENTATION)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("declarationProvider"),
+        ):
+            labels.append(String("Go to Declaration"))
+            actions.append(CTX_MENU_ACTION_DECLARATION)
+        labels.append(String("Find References"))
+        actions.append(CTX_MENU_ACTION_REFERENCES)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("callHierarchyProvider"),
+        ):
+            labels.append(String("Find Callers"))
+            actions.append(CTX_MENU_ACTION_CALLERS)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("typeHierarchyProvider"),
+        ):
+            labels.append(String("Find Supertypes"))
+            actions.append(CTX_MENU_ACTION_SUPERTYPES)
+        self.editor_context_menu.open(
+            Point(req.anchor_x, req.anchor_y), labels^, actions^,
+        )
 
     def _on_context_menu_submit(mut self):
         """Resolve the symbol-actions popup: Rename opens the name prompt;
-        Go to Definition / Find References reuse the same machinery the
+        the go-to family + Find References reuse the same machinery the
         Cmd+click path drives."""
         var act = self.editor_context_menu.action
         var idx = self._ctx_menu_editor_idx
@@ -10430,6 +10903,21 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.pending_definition = \
                 Optional[DefinitionRequest](DefinitionRequest(row, col, word^))
             return
+        if act == CTX_MENU_ACTION_TYPE_DEFINITION:
+            self._dispatch_navigation(
+                String("textDocument/typeDefinition"), idx, row, col, word^,
+            )
+            return
+        if act == CTX_MENU_ACTION_IMPLEMENTATION:
+            self._dispatch_navigation(
+                String("textDocument/implementation"), idx, row, col, word^,
+            )
+            return
+        if act == CTX_MENU_ACTION_DECLARATION:
+            self._dispatch_navigation(
+                String("textDocument/declaration"), idx, row, col, word^,
+            )
+            return
         if act == CTX_MENU_ACTION_REFERENCES:
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
@@ -10445,6 +10933,148 @@ struct Desktop(Movable):
             _ = self.lsp_managers[lsp_idx].request_references(
                 path, row, col, word^, text^,
             )
+            return
+        if act == CTX_MENU_ACTION_CALLERS or act == CTX_MENU_ACTION_SUPERTYPES:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                return
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            if act == CTX_MENU_ACTION_CALLERS:
+                _ = self.lsp_managers[lsp_idx].request_call_hierarchy(
+                    path, row, col, word^, text^,
+                )
+            else:
+                _ = self.lsp_managers[lsp_idx].request_type_hierarchy(
+                    path, row, col, word^, text^,
+                )
+
+    def _dispatch_navigation(
+        mut self, method: String, win_idx: Int, row: Int, col: Int,
+        var word: String,
+    ):
+        """Fire a typeDefinition / implementation / declaration request
+        for the symbol at ``(row, col)`` in the given editor. The resolved
+        target is drained in ``lsp_tick`` and jumped to."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var lsp_idx = self._lsp_for_path(path)
+        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            self.status_bar.set_message(
+                String("LSP not ready for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[lsp_idx].request_navigation(
+            method, path, row, col, word^, text^,
+        )
+
+    def _navigate_at_cursor(mut self, method: String):
+        """Edit-menu / hotkey entry for the go-to family: navigate from the
+        focused editor's cursor word."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var row = self.windows.windows[idx].editor.selections[0].row
+        var col = self.windows.windows[idx].editor.selections[0].col
+        var line = self.windows.windows[idx].editor.buffer.line(row)
+        var word = word_at(line, col)
+        self._dispatch_navigation(method, idx, row, col, word^)
+
+    def _format_document(mut self):
+        """Edit-menu / hotkey: format the whole focused buffer via
+        ``textDocument/formatting``. The response drains in ``lsp_tick``
+        and applies the edits."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("documentFormattingProvider"),
+                ):
+            self.status_bar.set_message(
+                String("Formatting not available for this file type"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var text = self.windows.windows[idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_formatting(path, text^)
+
+    def _format_selection(mut self):
+        """Edit-menu / hotkey: format the current selection via
+        ``textDocument/rangeFormatting`` (falls back to the whole document
+        when there's no selection)."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        if not self.windows.windows[idx].editor.has_selection():
+            self._format_document()
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("documentRangeFormattingProvider"),
+                ):
+            self.status_bar.set_message(
+                String("Range formatting not available"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        # Normalize the selection so start precedes end.
+        var sel = self.windows.windows[idx].editor.selections[0]
+        var sr = sel.row
+        var sc = sel.col
+        var er = sel.anchor_row
+        var ec = sel.anchor_col
+        if er < sr or (er == sr and ec < sc):
+            var tr = sr; var tc = sc
+            sr = er; sc = ec
+            er = tr; ec = tc
+        var text = self.windows.windows[idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_range_formatting(
+            path, sr, sc, er, ec, text^,
+        )
+
+    def _drain_formatting(mut self):
+        """Apply any parked formatting ``TextEdit[]`` to its editor. When
+        the edit was triggered by format-on-save (the path matches
+        ``_format_then_save_path``), write the file afterwards."""
+        for i in range(len(self.lsp_managers)):
+            if not self.lsp_managers[i].has_pending_formatting():
+                continue
+            var fpath = self.lsp_managers[i].pending_formatting_path()
+            var fedits = self.lsp_managers[i].take_formatting_edits()
+            var win = self._find_window_for_path(fpath)
+            if win < 0 or not self.windows.windows[win].is_editor:
+                if self._format_then_save_path == fpath:
+                    self._format_then_save_path = String("")
+                continue
+            if len(fedits) > 0:
+                _ = self.windows.windows[win].editor.apply_text_edits(
+                    fedits^,
+                )
+            if self._format_then_save_path == fpath:
+                self._format_then_save_path = String("")
+                try:
+                    _ = self.windows.windows[win].editor.save()
+                    self._after_save(win, fpath)
+                except e:
+                    print("desktop: format-on-save", fpath, ":", String(e))
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action

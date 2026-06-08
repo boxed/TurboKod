@@ -96,15 +96,27 @@ comptime _FOCUS_WRAP_MODE     = UInt8(21)
 comptime _FOCUS_COMPRESS_KW   = UInt8(22)
 comptime _FOCUS_COMMA_WRAP    = UInt8(23)
 comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
+# Language Server section checkboxes.
+comptime _FOCUS_LS_FORMAT_ON_SAVE = UInt8(25)
+comptime _FOCUS_LS_SIGNATURE      = UInt8(26)
+comptime _FOCUS_LS_DOC_HIGHLIGHT  = UInt8(27)
+comptime _FOCUS_LS_DOC_LINKS      = UInt8(28)
+comptime _FOCUS_LS_INLAY_HINTS    = UInt8(29)
+comptime _FOCUS_LS_CODE_LENS      = UInt8(30)
+comptime _FOCUS_LS_SEMANTIC       = UInt8(31)
+comptime _FOCUS_LS_DOC_COLORS     = UInt8(32)
+comptime _FOCUS_LS_LINKED_EDITING = UInt8(33)
+comptime _FOCUS_LS_PROGRESS       = UInt8(34)
 
 
 # --- section indices ------------------------------------------------------
 
-comptime _SECTION_EDITOR    = 0
-comptime _SECTION_SPELL     = 1
-comptime _SECTION_LANGUAGES = 2
-comptime _SECTION_THEME     = 3
-comptime _SECTION_FONT      = 4
+comptime _SECTION_EDITOR          = 0
+comptime _SECTION_SPELL           = 1
+comptime _SECTION_LANGUAGES       = 2
+comptime _SECTION_THEME           = 3
+comptime _SECTION_LANGUAGE_SERVER = 4
+comptime _SECTION_FONT            = 5
 
 
 # --- layout ---------------------------------------------------------------
@@ -148,6 +160,7 @@ def _section_labels(include_font: Bool) -> List[String]:
     out.append(String("Spell check"))
     out.append(String("Languages"))
     out.append(String("Theme"))
+    out.append(String("Language Server"))
     if include_font:
         out.append(String("Font"))
     return out^
@@ -211,6 +224,17 @@ struct Settings(Movable):
     var cursor_blink: Bool
     """Working copy of ``TurbokodConfig.cursor_blink`` — Editor ▸
     "Blinking cursor". Driven by ``_blink_cb``."""
+    # Working copies of the Language Server section's per-feature gates.
+    var ls_format_on_save: Bool
+    var ls_signature_help: Bool
+    var ls_document_highlight: Bool
+    var ls_document_links: Bool
+    var ls_inlay_hints: Bool
+    var ls_code_lens: Bool
+    var ls_semantic_tokens: Bool
+    var ls_document_colors: Bool
+    var ls_linked_editing: Bool
+    var ls_server_progress: Bool
     var section: Int
     """Index into ``_section_labels`` for the active section."""
     var focus: UInt8
@@ -258,6 +282,17 @@ struct Settings(Movable):
     ``compress_kwargs``."""
     var _blink_cb: Checkbox
     """Editor ▸ "Blinking cursor" toggle. Mirrors ``cursor_blink``."""
+    # Language Server section checkboxes, mirroring the ``ls_*`` bools.
+    var _ls_format_on_save_cb: Checkbox
+    var _ls_signature_cb: Checkbox
+    var _ls_doc_highlight_cb: Checkbox
+    var _ls_doc_links_cb: Checkbox
+    var _ls_inlay_hints_cb: Checkbox
+    var _ls_code_lens_cb: Checkbox
+    var _ls_semantic_cb: Checkbox
+    var _ls_doc_colors_cb: Checkbox
+    var _ls_linked_editing_cb: Checkbox
+    var _ls_progress_cb: Checkbox
     var dict_specs: List[DownloadableDictionary]
     """Catalog of downloadable spell-check dictionaries shown in the
     Spell-check pane. Snapshotted on ``open`` so the list and the
@@ -354,6 +389,16 @@ struct Settings(Movable):
         self.ensure_final_newline = False
         self.compress_kwargs = False
         self.cursor_blink = False
+        self.ls_format_on_save = False
+        self.ls_signature_help = False
+        self.ls_document_highlight = False
+        self.ls_document_links = False
+        self.ls_inlay_hints = False
+        self.ls_code_lens = False
+        self.ls_semantic_tokens = False
+        self.ls_document_colors = False
+        self.ls_linked_editing = False
+        self.ls_server_progress = False
         self.section = 0
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
@@ -409,6 +454,38 @@ struct Settings(Movable):
         self._blink_cb = Checkbox(
             String("Blinking cursor"), 0, 0, False,
         )
+        self._ls_format_on_save_cb = Checkbox(
+            String("Format on save"), 0, 0, False,
+        )
+        self._ls_signature_cb = Checkbox(
+            String("Signature help (parameter hints)"), 0, 0, False,
+        )
+        self._ls_doc_highlight_cb = Checkbox(
+            String("Highlight occurrences at cursor"), 0, 0, False,
+        )
+        self._ls_doc_links_cb = Checkbox(
+            String("Clickable document links"), 0, 0, False,
+        )
+        self._ls_inlay_hints_cb = Checkbox(
+            String("Inlay hints (inline types / parameter names)"),
+            0, 0, False,
+        )
+        self._ls_code_lens_cb = Checkbox(
+            String("Code lens (inline actions)"), 0, 0, False,
+        )
+        self._ls_semantic_cb = Checkbox(
+            String("Semantic highlighting"), 0, 0, False,
+        )
+        self._ls_doc_colors_cb = Checkbox(
+            String("Color swatches"), 0, 0, False,
+        )
+        self._ls_linked_editing_cb = Checkbox(
+            String("Linked editing (rename matching ranges together)"),
+            0, 0, False,
+        )
+        self._ls_progress_cb = Checkbox(
+            String("Show server progress"), 0, 0, False,
+        )
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
@@ -454,6 +531,16 @@ struct Settings(Movable):
         wrap_mode: Int = WRAP_NONE,
         comma_threshold: Int = -1,
         cursor_blink: Bool = True,
+        ls_format_on_save: Bool = False,
+        ls_signature_help: Bool = True,
+        ls_document_highlight: Bool = True,
+        ls_document_links: Bool = False,
+        ls_inlay_hints: Bool = False,
+        ls_code_lens: Bool = False,
+        ls_semantic_tokens: Bool = False,
+        ls_document_colors: Bool = False,
+        ls_linked_editing: Bool = False,
+        ls_server_progress: Bool = True,
     ):
         self.auto_save = auto_save
         self.wrap_mode = wrap_mode
@@ -465,6 +552,26 @@ struct Settings(Movable):
         self._final_nl_cb.on = ensure_final_newline
         self._compress_cb.on = compress_kwargs
         self._blink_cb.on = cursor_blink
+        self.ls_format_on_save = ls_format_on_save
+        self.ls_signature_help = ls_signature_help
+        self.ls_document_highlight = ls_document_highlight
+        self.ls_document_links = ls_document_links
+        self.ls_inlay_hints = ls_inlay_hints
+        self.ls_code_lens = ls_code_lens
+        self.ls_semantic_tokens = ls_semantic_tokens
+        self.ls_document_colors = ls_document_colors
+        self.ls_linked_editing = ls_linked_editing
+        self.ls_server_progress = ls_server_progress
+        self._ls_format_on_save_cb.on = ls_format_on_save
+        self._ls_signature_cb.on = ls_signature_help
+        self._ls_doc_highlight_cb.on = ls_document_highlight
+        self._ls_doc_links_cb.on = ls_document_links
+        self._ls_inlay_hints_cb.on = ls_inlay_hints
+        self._ls_code_lens_cb.on = ls_code_lens
+        self._ls_semantic_cb.on = ls_semantic_tokens
+        self._ls_doc_colors_cb.on = ls_document_colors
+        self._ls_linked_editing_cb.on = ls_linked_editing
+        self._ls_progress_cb.on = ls_server_progress
         self.active = True
         self.dirty = False
         self.section = 0
@@ -546,6 +653,16 @@ struct Settings(Movable):
         self.ensure_final_newline = False
         self.compress_kwargs = False
         self.cursor_blink = False
+        self.ls_format_on_save = False
+        self.ls_signature_help = False
+        self.ls_document_highlight = False
+        self.ls_document_links = False
+        self.ls_inlay_hints = False
+        self.ls_code_lens = False
+        self.ls_semantic_tokens = False
+        self.ls_document_colors = False
+        self.ls_linked_editing = False
+        self.ls_server_progress = False
         self.section = 0
         self.focus = _FOCUS_SECTIONS
         self._list_scroll = 0
@@ -559,6 +676,7 @@ struct Settings(Movable):
         self._compress_cb.pressed_inside = False
         self._blink_cb.pressed = False
         self._blink_cb.pressed_inside = False
+        self._reset_ls_checkbox_press()
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
@@ -830,6 +948,8 @@ struct Settings(Movable):
             self._paint_languages_section(canvas, sub, inner)
         elif self.section == _SECTION_THEME:
             self._paint_theme_section(canvas, sub, inner)
+        elif self.section == _SECTION_LANGUAGE_SERVER:
+            self._paint_language_server_section(canvas, sub, inner)
         elif self.section == _SECTION_FONT:
             self._paint_font_section(canvas, sub, inner)
 
@@ -1239,6 +1359,86 @@ struct Settings(Movable):
             hint,
         )
 
+    def _paint_language_server_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
+        """Per-feature gates for the optional LSP capabilities. Each only
+        takes effect when the active server also advertises the matching
+        provider — the note at the top says so."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        var chip = Attr(BLACK, CYAN)
+        var focus_attr = Attr(WHITE, BLUE)
+        var y = inner.a.y + 2
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, y),
+            String("Each applies only when the language server supports it."),
+            hint,
+        )
+        y += 2
+        # Sync every checkbox's glyph with its working-copy bool, then
+        # stack them one per row. Keep this order in lock-step with
+        # ``_next_focus`` so Tab walks top-to-bottom.
+        self._ls_format_on_save_cb.on = self.ls_format_on_save
+        self._ls_signature_cb.on = self.ls_signature_help
+        self._ls_doc_highlight_cb.on = self.ls_document_highlight
+        self._ls_doc_links_cb.on = self.ls_document_links
+        self._ls_inlay_hints_cb.on = self.ls_inlay_hints
+        self._ls_code_lens_cb.on = self.ls_code_lens
+        self._ls_semantic_cb.on = self.ls_semantic_tokens
+        self._ls_doc_colors_cb.on = self.ls_document_colors
+        self._ls_linked_editing_cb.on = self.ls_linked_editing
+        self._ls_progress_cb.on = self.ls_server_progress
+        self._ls_format_on_save_cb.move_to(inner.a.x, y)
+        paint_checkbox(
+            canvas, self._ls_format_on_save_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_FORMAT_ON_SAVE, inner.b.x,
+        )
+        self._ls_signature_cb.move_to(inner.a.x, y + 1)
+        paint_checkbox(
+            canvas, self._ls_signature_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_SIGNATURE, inner.b.x,
+        )
+        self._ls_doc_highlight_cb.move_to(inner.a.x, y + 2)
+        paint_checkbox(
+            canvas, self._ls_doc_highlight_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_DOC_HIGHLIGHT, inner.b.x,
+        )
+        self._ls_doc_links_cb.move_to(inner.a.x, y + 3)
+        paint_checkbox(
+            canvas, self._ls_doc_links_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_DOC_LINKS, inner.b.x,
+        )
+        self._ls_inlay_hints_cb.move_to(inner.a.x, y + 4)
+        paint_checkbox(
+            canvas, self._ls_inlay_hints_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_INLAY_HINTS, inner.b.x,
+        )
+        self._ls_code_lens_cb.move_to(inner.a.x, y + 5)
+        paint_checkbox(
+            canvas, self._ls_code_lens_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_CODE_LENS, inner.b.x,
+        )
+        self._ls_semantic_cb.move_to(inner.a.x, y + 6)
+        paint_checkbox(
+            canvas, self._ls_semantic_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_SEMANTIC, inner.b.x,
+        )
+        self._ls_doc_colors_cb.move_to(inner.a.x, y + 7)
+        paint_checkbox(
+            canvas, self._ls_doc_colors_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_DOC_COLORS, inner.b.x,
+        )
+        self._ls_linked_editing_cb.move_to(inner.a.x, y + 8)
+        paint_checkbox(
+            canvas, self._ls_linked_editing_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_LINKED_EDITING, inner.b.x,
+        )
+        self._ls_progress_cb.move_to(inner.a.x, y + 9)
+        paint_checkbox(
+            canvas, self._ls_progress_cb, chip, focus_attr,
+            self.focus == _FOCUS_LS_PROGRESS, inner.b.x,
+        )
+
     def _paint_spell_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
     ):
@@ -1582,6 +1782,8 @@ struct Settings(Movable):
             if self.focus == _FOCUS_BLINK_CURSOR:
                 self._toggle_blink_cursor()
                 return True
+            if self._toggle_ls_focus(self.focus):
+                return True
         # Comma-threshold field owns digits + Backspace while focused, ahead
         # of the type-to-jump fallthrough so the digits edit the value
         # instead of leaking in as a list search prefix.
@@ -1673,6 +1875,118 @@ struct Settings(Movable):
         self._blink_cb.on = self.cursor_blink
         self.dirty = True
 
+    # --- Language Server section toggles -----------------------------------
+
+    def _toggle_ls_format_on_save(mut self):
+        self.ls_format_on_save = not self.ls_format_on_save
+        self._ls_format_on_save_cb.on = self.ls_format_on_save
+        self.dirty = True
+
+    def _toggle_ls_signature(mut self):
+        self.ls_signature_help = not self.ls_signature_help
+        self._ls_signature_cb.on = self.ls_signature_help
+        self.dirty = True
+
+    def _toggle_ls_doc_highlight(mut self):
+        self.ls_document_highlight = not self.ls_document_highlight
+        self._ls_doc_highlight_cb.on = self.ls_document_highlight
+        self.dirty = True
+
+    def _toggle_ls_doc_links(mut self):
+        self.ls_document_links = not self.ls_document_links
+        self._ls_doc_links_cb.on = self.ls_document_links
+        self.dirty = True
+
+    def _toggle_ls_inlay_hints(mut self):
+        self.ls_inlay_hints = not self.ls_inlay_hints
+        self._ls_inlay_hints_cb.on = self.ls_inlay_hints
+        self.dirty = True
+
+    def _toggle_ls_code_lens(mut self):
+        self.ls_code_lens = not self.ls_code_lens
+        self._ls_code_lens_cb.on = self.ls_code_lens
+        self.dirty = True
+
+    def _toggle_ls_semantic(mut self):
+        self.ls_semantic_tokens = not self.ls_semantic_tokens
+        self._ls_semantic_cb.on = self.ls_semantic_tokens
+        self.dirty = True
+
+    def _toggle_ls_doc_colors(mut self):
+        self.ls_document_colors = not self.ls_document_colors
+        self._ls_doc_colors_cb.on = self.ls_document_colors
+        self.dirty = True
+
+    def _toggle_ls_linked_editing(mut self):
+        self.ls_linked_editing = not self.ls_linked_editing
+        self._ls_linked_editing_cb.on = self.ls_linked_editing
+        self.dirty = True
+
+    def _toggle_ls_progress(mut self):
+        self.ls_server_progress = not self.ls_server_progress
+        self._ls_progress_cb.on = self.ls_server_progress
+        self.dirty = True
+
+    def _toggle_ls_focus(mut self, focus: UInt8) -> Bool:
+        """Dispatch a toggle by focus id for the Language Server section.
+        Returns True iff ``focus`` matched one of its checkboxes — shared
+        by the keyboard (Space/Enter) and mouse paths."""
+        if focus == _FOCUS_LS_FORMAT_ON_SAVE:
+            self._toggle_ls_format_on_save()
+            return True
+        if focus == _FOCUS_LS_SIGNATURE:
+            self._toggle_ls_signature()
+            return True
+        if focus == _FOCUS_LS_DOC_HIGHLIGHT:
+            self._toggle_ls_doc_highlight()
+            return True
+        if focus == _FOCUS_LS_DOC_LINKS:
+            self._toggle_ls_doc_links()
+            return True
+        if focus == _FOCUS_LS_INLAY_HINTS:
+            self._toggle_ls_inlay_hints()
+            return True
+        if focus == _FOCUS_LS_CODE_LENS:
+            self._toggle_ls_code_lens()
+            return True
+        if focus == _FOCUS_LS_SEMANTIC:
+            self._toggle_ls_semantic()
+            return True
+        if focus == _FOCUS_LS_DOC_COLORS:
+            self._toggle_ls_doc_colors()
+            return True
+        if focus == _FOCUS_LS_LINKED_EDITING:
+            self._toggle_ls_linked_editing()
+            return True
+        if focus == _FOCUS_LS_PROGRESS:
+            self._toggle_ls_progress()
+            return True
+        return False
+
+    def _reset_ls_checkbox_press(mut self):
+        """Clear press/press-inside state on all Language Server
+        checkboxes — called from ``close`` so a reopen starts clean."""
+        self._ls_format_on_save_cb.pressed = False
+        self._ls_format_on_save_cb.pressed_inside = False
+        self._ls_signature_cb.pressed = False
+        self._ls_signature_cb.pressed_inside = False
+        self._ls_doc_highlight_cb.pressed = False
+        self._ls_doc_highlight_cb.pressed_inside = False
+        self._ls_doc_links_cb.pressed = False
+        self._ls_doc_links_cb.pressed_inside = False
+        self._ls_inlay_hints_cb.pressed = False
+        self._ls_inlay_hints_cb.pressed_inside = False
+        self._ls_code_lens_cb.pressed = False
+        self._ls_code_lens_cb.pressed_inside = False
+        self._ls_semantic_cb.pressed = False
+        self._ls_semantic_cb.pressed_inside = False
+        self._ls_doc_colors_cb.pressed = False
+        self._ls_doc_colors_cb.pressed_inside = False
+        self._ls_linked_editing_cb.pressed = False
+        self._ls_linked_editing_cb.pressed_inside = False
+        self._ls_progress_cb.pressed = False
+        self._ls_progress_cb.pressed_inside = False
+
     def comma_threshold_value(self) -> Int:
         """Parse ``smart_wrap_comma_text`` into the persisted int. Empty
         input → ``-1`` (no comma trigger). The text only ever holds digits
@@ -1755,6 +2069,17 @@ struct Settings(Movable):
         elif self.section == _SECTION_THEME:
             if len(self._theme_names) > 0:
                 ordered.append(_FOCUS_THEME_LIST)
+        elif self.section == _SECTION_LANGUAGE_SERVER:
+            ordered.append(_FOCUS_LS_FORMAT_ON_SAVE)
+            ordered.append(_FOCUS_LS_SIGNATURE)
+            ordered.append(_FOCUS_LS_DOC_HIGHLIGHT)
+            ordered.append(_FOCUS_LS_DOC_LINKS)
+            ordered.append(_FOCUS_LS_INLAY_HINTS)
+            ordered.append(_FOCUS_LS_CODE_LENS)
+            ordered.append(_FOCUS_LS_SEMANTIC)
+            ordered.append(_FOCUS_LS_DOC_COLORS)
+            ordered.append(_FOCUS_LS_LINKED_EDITING)
+            ordered.append(_FOCUS_LS_PROGRESS)
         elif self.section == _SECTION_FONT:
             if len(self._font_names) > 0:
                 ordered.append(_FOCUS_FONT_LIST)
@@ -1952,6 +2277,8 @@ struct Settings(Movable):
         if self.focus == _FOCUS_BLINK_CURSOR:
             self._toggle_blink_cursor()
             return True
+        if self._toggle_ls_focus(self.focus):
+            return True
         if self.focus == _FOCUS_DICT_INSTALL:
             self._request_dict_install()
             return True
@@ -2100,6 +2427,67 @@ struct Settings(Movable):
                     and not event.motion \
                     and self._comma_input_anchor.contains(event.pos):
                 self.focus = _FOCUS_COMMA_WRAP
+                return True
+        if self.section == _SECTION_LANGUAGE_SERVER:
+            var fmt_s = self._ls_format_on_save_cb.handle_mouse(event)
+            if fmt_s != BUTTON_NONE:
+                if fmt_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_FORMAT_ON_SAVE
+                    self._toggle_ls_format_on_save()
+                return True
+            var sig_s = self._ls_signature_cb.handle_mouse(event)
+            if sig_s != BUTTON_NONE:
+                if sig_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_SIGNATURE
+                    self._toggle_ls_signature()
+                return True
+            var hl_s = self._ls_doc_highlight_cb.handle_mouse(event)
+            if hl_s != BUTTON_NONE:
+                if hl_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_DOC_HIGHLIGHT
+                    self._toggle_ls_doc_highlight()
+                return True
+            var lk_s = self._ls_doc_links_cb.handle_mouse(event)
+            if lk_s != BUTTON_NONE:
+                if lk_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_DOC_LINKS
+                    self._toggle_ls_doc_links()
+                return True
+            var ih_s = self._ls_inlay_hints_cb.handle_mouse(event)
+            if ih_s != BUTTON_NONE:
+                if ih_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_INLAY_HINTS
+                    self._toggle_ls_inlay_hints()
+                return True
+            var cl_s = self._ls_code_lens_cb.handle_mouse(event)
+            if cl_s != BUTTON_NONE:
+                if cl_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_CODE_LENS
+                    self._toggle_ls_code_lens()
+                return True
+            var sem_s = self._ls_semantic_cb.handle_mouse(event)
+            if sem_s != BUTTON_NONE:
+                if sem_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_SEMANTIC
+                    self._toggle_ls_semantic()
+                return True
+            var col_s = self._ls_doc_colors_cb.handle_mouse(event)
+            if col_s != BUTTON_NONE:
+                if col_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_DOC_COLORS
+                    self._toggle_ls_doc_colors()
+                return True
+            var le_s = self._ls_linked_editing_cb.handle_mouse(event)
+            if le_s != BUTTON_NONE:
+                if le_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_LINKED_EDITING
+                    self._toggle_ls_linked_editing()
+                return True
+            var pr_s = self._ls_progress_cb.handle_mouse(event)
+            if pr_s != BUTTON_NONE:
+                if pr_s == BUTTON_FIRED:
+                    self.focus = _FOCUS_LS_PROGRESS
+                    self._toggle_ls_progress()
                 return True
         if self._dispatch_buttons(event):
             return True

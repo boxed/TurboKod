@@ -930,6 +930,37 @@ struct Editor(Copyable, Movable):
     # so the right-side minimap can color-code the marker.
     var diagnostics: List[Diagnostic]
     var diagnostic_lines: List[Int]
+    # LSP ``textDocument/documentHighlight`` occurrences of the symbol
+    # under the cursor, set by the host via ``set_document_highlights``.
+    # Each entry is a range carrier (``TextEditEntry`` reused —
+    # start/end line/char; ``new_text`` unused). Painted as a recolor
+    # overlay next to the selection-match highlights. Gated by the host
+    # behind the ``lsp_document_highlight`` setting before it ever calls
+    # the setter, so the editor just paints whatever it's given.
+    var occurrence_ranges: List[TextEditEntry]
+    # End-of-line virtual annotations (simplified renders of LSP inlay
+    # hints and code lens — see docs). Each is a (row, text) carrier
+    # reusing ``TextEditEntry`` (``start_line`` = buffer row, ``new_text``
+    # = the dim label). Painted after the line text at the end of the
+    # row's last visual segment; they never affect buffer columns / cursor
+    # math. The host sets them gated behind ``lsp_inlay_hints`` /
+    # ``lsp_code_lens``.
+    var inlay_notes: List[TextEditEntry]
+    var codelens_notes: List[TextEditEntry]
+    # LSP semantic tokens, decoded by the host into per-row ``Highlight``s
+    # (col span + ``Attr`` using a ``SYN_*`` role). Painted as a recolor
+    # pass *after* the TextMate syntax pass so semantic coloring wins on
+    # overlap. Gated by the host behind ``lsp_semantic_tokens``.
+    var semantic_highlights: List[Highlight]
+    # LSP ``selectionRange`` hierarchy at the cursor, innermost→outermost
+    # (range carriers). When present, smart-select grow walks these
+    # semantic ranges in preference to the syntactic heuristic; falls back
+    # when empty/stale. Set by the host on cursor idle.
+    var lsp_select_ranges: List[TextEditEntry]
+    # LSP ``documentColor`` swatches: per-color ``Highlight``s whose ``attr``
+    # carries the literal's actual color as a truecolor background, painted
+    # over the color literal. Gated by the host behind ``lsp_document_colors``.
+    var color_highlights: List[Highlight]
     # ``pending_spell_action`` is set when the user hits Alt+Enter on
     # a misspelled word — the host polls
     # ``consume_spell_action_request`` and forwards to whichever popup
@@ -1252,6 +1283,11 @@ struct Editor(Copyable, Movable):
     # ends up with just ``foo`` rather than ``fofoo``. The host also
     # uses these to position the popup below the start of the word.
     var pending_completion_request: Optional[CompletionRequest]
+    # Set when the user types ``(`` or ``,`` — the host polls
+    # ``consume_signature_help_request`` and (if enabled) asks the server
+    # for ``textDocument/signatureHelp``. Reuses ``HoverRequest`` (row,col)
+    # as the position payload.
+    var pending_signature_help: Optional[HoverRequest]
     var completion_popup_visible: Bool
     var completion_items: List[CompletionItem]
     var completion_highlight: Int
@@ -1320,6 +1356,12 @@ struct Editor(Copyable, Movable):
         self.spell_lines = List[Bool]()
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
+        self.occurrence_ranges = List[TextEditEntry]()
+        self.inlay_notes = List[TextEditEntry]()
+        self.codelens_notes = List[TextEditEntry]()
+        self.semantic_highlights = List[Highlight]()
+        self.lsp_select_ranges = List[TextEditEntry]()
+        self.color_highlights = List[Highlight]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.pending_context_menu = Optional[EditorContextMenuRequest]()
@@ -1391,6 +1433,7 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_y = 0
         self._minimap_hover_below = False
         self.pending_completion_request = Optional[CompletionRequest]()
+        self.pending_signature_help = Optional[HoverRequest]()
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1433,6 +1476,12 @@ struct Editor(Copyable, Movable):
         self.spell_lines = List[Bool]()
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
+        self.occurrence_ranges = List[TextEditEntry]()
+        self.inlay_notes = List[TextEditEntry]()
+        self.codelens_notes = List[TextEditEntry]()
+        self.semantic_highlights = List[Highlight]()
+        self.lsp_select_ranges = List[TextEditEntry]()
+        self.color_highlights = List[Highlight]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.pending_context_menu = Optional[EditorContextMenuRequest]()
@@ -1504,6 +1553,7 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_y = 0
         self._minimap_hover_below = False
         self.pending_completion_request = Optional[CompletionRequest]()
+        self.pending_signature_help = Optional[HoverRequest]()
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1574,6 +1624,12 @@ struct Editor(Copyable, Movable):
         self.spell_lines = copy.spell_lines.copy()
         self.diagnostics = copy.diagnostics.copy()
         self.diagnostic_lines = copy.diagnostic_lines.copy()
+        self.occurrence_ranges = copy.occurrence_ranges.copy()
+        self.inlay_notes = copy.inlay_notes.copy()
+        self.codelens_notes = copy.codelens_notes.copy()
+        self.semantic_highlights = copy.semantic_highlights.copy()
+        self.lsp_select_ranges = copy.lsp_select_ranges.copy()
+        self.color_highlights = copy.color_highlights.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.pending_context_menu = copy.pending_context_menu
@@ -1650,6 +1706,7 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_y = copy._minimap_hover_y
         self._minimap_hover_below = copy._minimap_hover_below
         self.pending_completion_request = copy.pending_completion_request
+        self.pending_signature_help = copy.pending_signature_help
         self.completion_popup_visible = copy.completion_popup_visible
         self.completion_items = copy.completion_items.copy()
         self.completion_highlight = copy.completion_highlight
@@ -1896,6 +1953,41 @@ struct Editor(Copyable, Movable):
         cache so the extra cost is microseconds."""
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+
+    def set_document_highlights(mut self, var ranges: List[TextEditEntry]):
+        """Replace the LSP document-highlight occurrence ranges. Each entry
+        is a range carrier (start/end line/char; ``new_text`` ignored). The
+        host gates this behind the ``lsp_document_highlight`` setting."""
+        self.occurrence_ranges = ranges^
+
+    def clear_document_highlights(mut self):
+        if len(self.occurrence_ranges) > 0:
+            self.occurrence_ranges = List[TextEditEntry]()
+
+    def set_inlay_hints(mut self, var notes: List[TextEditEntry]):
+        """Replace the end-of-line inlay-hint annotations. Each entry is a
+        (row, text) carrier. Host gates behind ``lsp_inlay_hints``."""
+        self.inlay_notes = notes^
+
+    def set_code_lens(mut self, var notes: List[TextEditEntry]):
+        """Replace the end-of-line code-lens annotations (row, text)."""
+        self.codelens_notes = notes^
+
+    def set_semantic_tokens(mut self, var hls: List[Highlight]):
+        """Replace the semantic-token recolor highlights. Host gates behind
+        ``lsp_semantic_tokens``; pass an empty list to clear."""
+        self.semantic_highlights = hls^
+
+    def set_selection_ranges(mut self, var ranges: List[TextEditEntry]):
+        """Replace the LSP selectionRange hierarchy (innermost→outermost
+        range carriers) used to back smart-select grow."""
+        self.lsp_select_ranges = ranges^
+
+    def set_color_swatches(mut self, var hls: List[Highlight]):
+        """Replace the documentColor swatch highlights (each ``attr`` has a
+        truecolor bg = the literal's color). Host gates behind
+        ``lsp_document_colors``."""
+        self.color_highlights = hls^
 
     def set_diagnostics(mut self, var diags: List[Diagnostic]):
         """Replace the diagnostic set with ``diags`` and rebuild the
@@ -2448,6 +2540,13 @@ struct Editor(Copyable, Movable):
                 return Optional[CompletionRequest]()
         self.pending_completion_request = Optional[CompletionRequest]()
         return Optional[CompletionRequest](req)
+
+    def consume_signature_help_request(mut self) -> Optional[HoverRequest]:
+        """Return any pending signature-help position (stamped on ``(`` /
+        ``,``) and clear the slot."""
+        var req = self.pending_signature_help
+        self.pending_signature_help = Optional[HoverRequest]()
+        return req
 
     def consume_hover_request(
         mut self, now_ms: Int = 0,
@@ -3012,6 +3111,17 @@ struct Editor(Copyable, Movable):
             if file_edits[k].uri == my_uri:
                 for j in range(len(file_edits[k].edits)):
                     edits.append(file_edits[k].edits[j])
+        return self.apply_text_edits(edits^)
+
+    def apply_text_edits(mut self, var edits: List[TextEditEntry]) -> Bool:
+        """Apply a flat ``TextEdit[]`` to this buffer. Used by formatting
+        (a whole-file ``TextEdit[]``) and by ``apply_code_action_edits``
+        after it filters a WorkspaceEdit down to this file. Edits are
+        sorted descending by start position so an earlier edit doesn't
+        shift positions of later ones; the cursor/anchor are nudged for
+        line-count deltas. Returns True iff at least one edit applied."""
+        if self.read_only:
+            return False
         if len(edits) == 0:
             return False
         # Descending sort by (start_line, start_char) so we apply later
@@ -5438,6 +5548,8 @@ struct Editor(Copyable, Movable):
         # rescanning every spell highlight / diagnostic for each visible row.
         var spell_buckets = List[List[Int]]()
         var diag_buckets = List[List[Int]]()
+        var sem_buckets = List[List[Int]]()
+        var color_buckets = List[List[Int]]()
         var vis_lo = 0
         if len(layout) > 0:
             vis_lo = layout[0].line_idx
@@ -5452,10 +5564,20 @@ struct Editor(Copyable, Movable):
                 hl_buckets.append(List[Int]())
                 spell_buckets.append(List[Int]())
                 diag_buckets.append(List[Int]())
+                sem_buckets.append(List[Int]())
+                color_buckets.append(List[Int]())
             for h in range(len(self.highlights)):
                 var r = self.highlights[h].row
                 if r >= vis_lo and r <= vis_hi:
                     hl_buckets[r - vis_lo].append(h)
+            for st in range(len(self.semantic_highlights)):
+                var r = self.semantic_highlights[st].row
+                if r >= vis_lo and r <= vis_hi:
+                    sem_buckets[r - vis_lo].append(st)
+            for ch in range(len(self.color_highlights)):
+                var r = self.color_highlights[ch].row
+                if r >= vis_lo and r <= vis_hi:
+                    color_buckets[r - vis_lo].append(ch)
             for sh in range(len(self.spell_highlights)):
                 var r = self.spell_highlights[sh].row
                 if r >= vis_lo and r <= vis_hi:
@@ -5585,6 +5707,55 @@ struct Editor(Copyable, Movable):
                     if sx_hl >= content_right:
                         break
                     painter.set_attr(canvas, sx_hl, sy_hl, hl.attr)
+            # Semantic-token overlay: identical byte→cell recolor as the
+            # syntax pass, applied *after* it so LSP semantic coloring wins
+            # on overlap. Empty unless ``set_semantic_tokens`` was called.
+            ref sem_bucket = sem_buckets[buf_row - vis_lo]
+            for sm in range(len(sem_bucket)):
+                var sh2 = self.semantic_highlights[sem_bucket[sm]]
+                var s2_byte_start = sh2.col_start - start_byte
+                var s2_byte_end = sh2.col_end - start_byte
+                if s2_byte_start < 0:
+                    s2_byte_start = 0
+                if s2_byte_end > visible_byte_count:
+                    s2_byte_end = visible_byte_count
+                if s2_byte_start >= s2_byte_end:
+                    continue
+                var s2_cell_start = visible_cell_map[s2_byte_start]
+                var s2_cell_end: Int
+                if s2_byte_end < visible_byte_count:
+                    s2_cell_end = visible_cell_map[s2_byte_end]
+                else:
+                    s2_cell_end = visible_cell_count
+                for cell_off in range(s2_cell_start, s2_cell_end):
+                    var sx_s2 = seg_x0 + cell_off
+                    if sx_s2 >= content_right:
+                        break
+                    painter.set_attr(canvas, sx_s2, sy_hl, sh2.attr)
+            # documentColor swatch overlay: recolor the color literal's
+            # cells to the literal's actual color (truecolor bg).
+            ref color_bucket = color_buckets[buf_row - vis_lo]
+            for cm in range(len(color_bucket)):
+                var ch2 = self.color_highlights[color_bucket[cm]]
+                var c2_byte_start = ch2.col_start - start_byte
+                var c2_byte_end = ch2.col_end - start_byte
+                if c2_byte_start < 0:
+                    c2_byte_start = 0
+                if c2_byte_end > visible_byte_count:
+                    c2_byte_end = visible_byte_count
+                if c2_byte_start >= c2_byte_end:
+                    continue
+                var c2_cell_start = visible_cell_map[c2_byte_start]
+                var c2_cell_end: Int
+                if c2_byte_end < visible_byte_count:
+                    c2_cell_end = visible_cell_map[c2_byte_end]
+                else:
+                    c2_cell_end = visible_cell_count
+                for cell_off in range(c2_cell_start, c2_cell_end):
+                    var sx_c2 = seg_x0 + cell_off
+                    if sx_c2 >= content_right:
+                        break
+                    painter.set_attr(canvas, sx_c2, sy_hl, ch2.attr)
             # Spell-check overlay: same byte-to-cell mapping as the
             # syntax pass above, but reapplies the *same* fg/bg with
             # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
@@ -5714,6 +5885,71 @@ struct Editor(Copyable, Movable):
                         ii += match_needle_n
                     else:
                         ii += 1
+            # Document-highlight overlay: LSP occurrences of the symbol
+            # under the cursor. Same byte→cell recolor as the syntax pass,
+            # driven by explicit ranges rather than byte-equality. Painted
+            # after match-highlight so both can coexist (they usually
+            # agree); sits before the selection pass so the selection still
+            # dominates visually.
+            for occ in range(len(self.occurrence_ranges)):
+                var oc = self.occurrence_ranges[occ]
+                if buf_row < oc.start_line or buf_row > oc.end_line:
+                    continue
+                var line_nb2 = len(line.as_bytes())
+                var o_lo = oc.start_char if buf_row == oc.start_line else 0
+                var o_hi = oc.end_char if buf_row == oc.end_line else line_nb2
+                var o_byte_start = o_lo - start_byte
+                var o_byte_end = o_hi - start_byte
+                if o_byte_start < 0:
+                    o_byte_start = 0
+                if o_byte_end > visible_byte_count:
+                    o_byte_end = visible_byte_count
+                if o_byte_start >= o_byte_end:
+                    continue
+                var o_cell_start = visible_cell_map[o_byte_start]
+                var o_cell_end: Int
+                if o_byte_end < visible_byte_count:
+                    o_cell_end = visible_cell_map[o_byte_end]
+                else:
+                    o_cell_end = visible_cell_count
+                for cell_off in range(o_cell_start, o_cell_end):
+                    var sx_o = seg_x0 + cell_off
+                    if sx_o >= content_right:
+                        break
+                    painter.set_attr(canvas, sx_o, sy_hl, match_attr)
+            # End-of-line virtual annotations (inlay hints + code lens).
+            # Only on the last visual segment of a buffer row so a
+            # soft-wrapped line shows them once, at the true line end.
+            if end_byte >= len(line.as_bytes()):
+                var note = String("")
+                for cl in range(len(self.codelens_notes)):
+                    if self.codelens_notes[cl].start_line == buf_row:
+                        if len(note.as_bytes()) > 0:
+                            note = note + String("  ")
+                        note = note + self.codelens_notes[cl].new_text
+                for il in range(len(self.inlay_notes)):
+                    if self.inlay_notes[il].start_line == buf_row:
+                        if len(note.as_bytes()) > 0:
+                            note = note + String("  ")
+                        note = note + self.inlay_notes[il].new_text
+                if len(note.as_bytes()) > 0:
+                    var note_attr = Attr(DARK_GRAY, EDITOR_BG)
+                    var nx = seg_x0 + visible_cell_count + 2
+                    var note_cps = note
+                    var nb = note_cps.as_bytes()
+                    var bi = 0
+                    while bi < len(nb) and nx < content_right:
+                        var cp_len = utf8_codepoint_size(Int(nb[bi]))
+                        if bi + cp_len > len(nb):
+                            cp_len = 1
+                        var glyph = String(StringSlice(
+                            ptr=nb.unsafe_ptr() + bi, length=cp_len,
+                        ))
+                        _ = painter.put_text(
+                            canvas, Point(nx, sy_hl), glyph, note_attr,
+                        )
+                        nx += 1
+                        bi += cp_len
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty
@@ -6172,6 +6408,34 @@ struct Editor(Copyable, Movable):
         """Return the next-larger range strictly containing
         ``[sr, sc) .. [er, ec)``, or the same range if no expansion
         applies (selection already covers the whole file)."""
+        # 0) LSP selectionRange hierarchy, when the host has cached one for
+        #    the cursor: pick the smallest cached range that strictly
+        #    contains the current selection. Falls through to the
+        #    syntactic ladder below when none qualifies (empty cache,
+        #    stale, or already at the outermost range).
+        if len(self.lsp_select_ranges) > 0:
+            var best = -1
+            for k in range(len(self.lsp_select_ranges)):
+                var rr = self.lsp_select_ranges[k]
+                if _smart_strictly_contains(
+                    sr, sc, er, ec,
+                    rr.start_line, rr.start_char, rr.end_line, rr.end_char,
+                ):
+                    if best < 0:
+                        best = k
+                    else:
+                        # Prefer the smaller (tighter) containing range.
+                        var b = self.lsp_select_ranges[best]
+                        if _smart_strictly_contains(
+                            rr.start_line, rr.start_char,
+                            rr.end_line, rr.end_char,
+                            b.start_line, b.start_char,
+                            b.end_line, b.end_char,
+                        ):
+                            best = k
+            if best >= 0:
+                var w = self.lsp_select_ranges[best]
+                return (w.start_line, w.start_char, w.end_line, w.end_char)
         # 1) Empty selection → word at cursor.
         if sr == er and sc == ec:
             var line = self.buffer.line(sr)
@@ -7075,6 +7339,15 @@ struct Editor(Copyable, Movable):
             if _is_completion_autotrigger_byte(k):
                 self._stamp_completion_request()
                 did_auto_trigger = True
+            # Signature-help trigger: opening a call or stepping to the
+            # next argument. The host gates the actual request behind the
+            # ``lsp_signature_help`` setting + server capability.
+            if k == UInt32(ord("(")) or k == UInt32(ord(",")):
+                self.pending_signature_help = Optional[HoverRequest](
+                    HoverRequest(
+                        self.selections[0].row, self.selections[0].col,
+                    ),
+                )
         else:
             return False
         self._scroll_to_cursor(view)

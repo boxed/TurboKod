@@ -47,6 +47,8 @@ from turbokod.desktop import (
     EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
     EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN,
+    EDITOR_FORMAT_DOCUMENT, EDITOR_FORMAT_SELECTION,
+    EDITOR_GOTO_DECL, EDITOR_GOTO_IMPL, EDITOR_GOTO_TYPE_DEF,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_RENAME_SYMBOL,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
@@ -131,7 +133,12 @@ def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     e.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
     e.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
     e.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+    e.append(MenuItem(String("Go to Type Definition"), EDITOR_GOTO_TYPE_DEF))
+    e.append(MenuItem(String("Go to Implementation"),  EDITOR_GOTO_IMPL))
+    e.append(MenuItem(String("Go to Declaration"),     EDITOR_GOTO_DECL))
     e.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
+    e.append(MenuItem(String("Format Document"),       EDITOR_FORMAT_DOCUMENT))
+    e.append(MenuItem(String("Format Selection"),      EDITOR_FORMAT_SELECTION))
     e.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     e.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     e.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
@@ -1086,6 +1093,19 @@ def tk_desktop_set_host_focused(h: Int, on: Int):
     if h == 0:
         return
     _desk(h)[].host_focused = on != 0
+
+
+@export
+def tk_desktop_refresh_git(h: Int):
+    """Force a git-state refresh: invalidate every editor's cached HEAD
+    baseline so the change gutter re-diffs on the next paint, regardless of
+    the cheap 1 Hz mtime poll. The host calls this on focus-gain (Cmd+Tab
+    back) — the user may have run git operations or edited files in another
+    app while we were backgrounded, and a worktree-only change doesn't move
+    the ``.git/HEAD``/``.git/index`` mtimes the poll watches."""
+    if h == 0:
+        return
+    _desk(h)[].force_git_refresh()
 
 
 def _b(v: Bool) -> String:

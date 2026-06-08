@@ -159,7 +159,14 @@ from turbokod.lsp_dispatch import (
     DefinitionResolved, LspManager,
     TextEditEntry, _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
-    _parse_hover_result, _parse_references_result,
+    _decode_semantic_tokens,
+    _parse_code_lens, _parse_document_colors, _parse_document_highlights,
+    _parse_hierarchy_result,
+    _parse_inlay_hints,
+    _parse_selection_ranges,
+    _parse_hover_result, _parse_prepare_rename_placeholder,
+    _parse_signature_help,
+    _parse_references_result, _parse_text_edits,
     _parse_workspace_edit_changes, _path_to_uri, _uri_to_path,
 )
 from turbokod.git_changes import (
@@ -214,7 +221,7 @@ from turbokod.config import (
     WRAP_NONE, WRAP_SMART, WRAP_SOFT,
 )
 from turbokod.dropdown import Dropdown
-from turbokod.settings import Settings
+from turbokod.settings import Settings, _FOCUS_LS_INLAY_HINTS
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
@@ -5377,6 +5384,32 @@ def test_settings_open_seeds_state() raises:
     assert_false(s.active)
 
 
+def test_settings_language_server_section_seeds_and_toggles() raises:
+    """The Language Server section seeds its checkboxes from the ``ls_*``
+    params, and toggling one flips the working copy + raises dirty so the
+    host's persistence loop writes it back."""
+    var s = Settings()
+    s.open(
+        False, List[LanguageServerOverride](),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
+        String(""), List[String](), 0, 0, 0, 0, -1, True,
+        ls_format_on_save=True,
+        ls_signature_help=False,
+        ls_inlay_hints=True,
+    )
+    assert_true(s.ls_format_on_save)
+    assert_false(s.ls_signature_help)
+    assert_true(s.ls_inlay_hints)
+    # Defaults for params left unspecified.
+    assert_true(s.ls_document_highlight)
+    assert_false(s.ls_code_lens)
+    assert_false(s.dirty)
+    # Toggling by focus id flips the working copy and marks dirty.
+    _ = s._toggle_ls_focus(_FOCUS_LS_INLAY_HINTS)
+    assert_false(s.ls_inlay_hints)
+    assert_true(s.dirty)
+
+
 def test_project_settings_on_save_seeds_state() raises:
     """Project Settings seeds the On-save section: the union(library,
     project_actions) display list parks selection on row 0, and an enabled
@@ -5786,8 +5819,10 @@ def test_settings_font_section_requires_host_fonts() raises:
     var s = Settings()
     s.open(False)
     var labels = s._labels()
-    assert_equal(len(labels), 4)
+    # Editor, Spell check, Languages, Theme, Language Server — no Font.
+    assert_equal(len(labels), 5)
     assert_equal(labels[3], String("Theme"))
+    assert_equal(labels[4], String("Language Server"))
     s.close()
     var fonts = List[String]()
     fonts.append(String("IBM VGA 8x16 (built-in)"))
@@ -5799,8 +5834,8 @@ def test_settings_font_section_requires_host_fonts() raises:
         String("Menlo"), fonts^,
     )
     labels = s._labels()
-    assert_equal(len(labels), 5)
-    assert_equal(labels[4], String("Font"))
+    assert_equal(len(labels), 6)
+    assert_equal(labels[5], String("Font"))
     # The active font row is pre-selected.
     assert_equal(s.selected_font, 1)
     assert_equal(s.font_choice, String("Menlo"))
@@ -9755,6 +9790,9 @@ def test_lsp_parse_code_action_result_skips_bare_commands() raises:
     assert_equal(len(actions), 2)
     assert_equal(actions[0].title, String("Run code fix"))
     assert_equal(len(actions[0].file_edits), 0)
+    # The command-only action now carries its command id (run via
+    # workspace/executeCommand).
+    assert_equal(actions[0].command, String("server.fix"))
     assert_equal(actions[1].title, String("Import X"))
     assert_equal(len(actions[1].file_edits), 1)
 
@@ -9829,6 +9867,330 @@ def test_lsp_rename_edits_apply_to_buffer() raises:
     assert_equal(ed.buffer.line(0), String("bar = 1"))
     assert_equal(ed.buffer.line(1), String("print(bar)"))
     assert_equal(ed.buffer.line(2), String("bar += bar"))
+
+
+def test_lsp_parse_text_edits_and_apply_formats_buffer() raises:
+    """``_parse_text_edits`` reads a bare ``TextEdit[]`` (the formatting
+    response shape) and ``Editor.apply_text_edits`` applies it — sorted
+    descending so multiple edits don't shift each other. Models a tiny
+    reformat: collapse double spaces and add a trailing newline split."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":3},"
+        + "\"end\":{\"line\":0,\"character\":5}},\"newText\":\" \"},"
+        + "{\"range\":{\"start\":{\"line\":1,\"character\":0},"
+        + "\"end\":{\"line\":1,\"character\":2}},\"newText\":\"\"}"
+        + "]"
+    ))
+    var edits = _parse_text_edits(v)
+    assert_equal(len(edits), 2)
+    assert_equal(edits[0].start_char, 3)
+    assert_equal(edits[0].new_text, String(" "))
+    # "foo    x" → collapse the 2-space span [3,5) to one; "  bar" → strip
+    # leading 2 spaces.
+    var ed = Editor(String("foo    x\n  bar"))
+    var ok = ed.apply_text_edits(edits^)
+    assert_true(ok)
+    assert_equal(ed.buffer.line(0), String("foo   x"))
+    assert_equal(ed.buffer.line(1), String("bar"))
+
+
+def test_lsp_parse_document_colors() raises:
+    """``documentColor`` → swatch highlights: the color literal's range
+    recolored with a truecolor bg matching the literal's color. Components
+    arrive as 0..1 floats (raw-text) or ints."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":3,\"character\":10},"
+        + "\"end\":{\"line\":3,\"character\":17}},"
+        + "\"color\":{\"red\":1,\"green\":0,\"blue\":0,\"alpha\":1}},"
+        + "{\"range\":{\"start\":{\"line\":4,\"character\":2},"
+        + "\"end\":{\"line\":4,\"character\":9}},"
+        + "\"color\":{\"red\":0.0,\"green\":0.5,\"blue\":1.0,\"alpha\":1.0}}]"
+    ))
+    var sw = _parse_document_colors(v)
+    assert_equal(len(sw), 2)
+    assert_equal(sw[0].row, 3)
+    assert_equal(sw[0].col_start, 10)
+    assert_equal(sw[0].col_end, 17)
+    # Pure red → bg_rgb 0xFF0000.
+    assert_equal(sw[0].attr.bg_rgb, UInt32(0xFF0000))
+    # 0.0 / 0.5 / 1.0 → ~0x0080FF.
+    var rgb2 = sw[1].attr.bg_rgb
+    assert_equal(Int((rgb2 >> 16) & 0xFF), 0)
+    assert_true(Int((rgb2 >> 8) & 0xFF) >= 127)
+    assert_equal(Int(rgb2 & 0xFF), 255)
+    assert_equal(len(_parse_document_colors(parse_json(String("null")))), 0)
+    var ed = Editor(String("x\ny\n\n  #ff0000\n  blue42"))
+    ed.set_color_swatches(sw^)
+    assert_equal(len(ed.color_highlights), 2)
+
+
+def test_lsp_parse_hierarchy_result() raises:
+    """The follow-up parser handles both ``incomingCalls`` (each entry has
+    a ``from`` item) and bare item arrays (``supertypes``), mapping each to
+    a jump location via uri + selectionRange (fallback range)."""
+    # incomingCalls shape.
+    var calls = parse_json(String(
+        "[{\"from\":{\"name\":\"caller\",\"uri\":\"file:///a.py\","
+        + "\"selectionRange\":{\"start\":{\"line\":9,\"character\":4},"
+        + "\"end\":{\"line\":9,\"character\":10}}},\"fromRanges\":[]}]"
+    ))
+    var c = _parse_hierarchy_result(calls)
+    assert_equal(len(c), 1)
+    assert_equal(c[0].path, String("/a.py"))
+    assert_equal(c[0].line, 9)
+    assert_equal(c[0].character, 4)
+    # supertypes shape (bare items, range fallback).
+    var supers = parse_json(String(
+        "[{\"name\":\"Base\",\"uri\":\"file:///b.py\","
+        + "\"range\":{\"start\":{\"line\":2,\"character\":0},"
+        + "\"end\":{\"line\":5,\"character\":0}}}]"
+    ))
+    var s = _parse_hierarchy_result(supers)
+    assert_equal(len(s), 1)
+    assert_equal(s[0].path, String("/b.py"))
+    assert_equal(s[0].line, 2)
+    assert_equal(len(_parse_hierarchy_result(parse_json(String("null")))), 0)
+
+
+def test_lsp_parse_selection_ranges_walks_parent_chain() raises:
+    """``selectionRange`` returns one entry per position, each a linked
+    list via ``parent``; the parser flattens innermost→outermost. It also
+    backs smart-select grow when cached on the editor."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":0,\"character\":4},"
+        + "\"end\":{\"line\":0,\"character\":7}},"
+        + "\"parent\":{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":12}},"
+        + "\"parent\":{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":3,\"character\":1}}}}}]"
+    ))
+    var ranges = _parse_selection_ranges(v)
+    assert_equal(len(ranges), 3)
+    assert_equal(ranges[0].start_char, 4)
+    assert_equal(ranges[0].end_char, 7)
+    assert_equal(ranges[1].end_char, 12)
+    assert_equal(ranges[2].end_line, 3)
+    assert_equal(len(_parse_selection_ranges(parse_json(String("null")))), 0)
+    # Cached on the editor, a cursor inside the innermost range grows to
+    # it via the LSP-first branch in _smart_compute_expansion.
+    var ed = Editor(String("foo bar baz\nq\nw\ne"))
+    ed.set_selection_ranges(ranges^)
+    ed.move_to(0, 5, False)  # cursor inside [4,7)
+    var grown = ed._smart_compute_expansion(0, 5, 0, 5)
+    assert_equal(grown[1], 4)
+    assert_equal(grown[3], 7)
+
+
+def test_lsp_decode_semantic_tokens() raises:
+    """The delta-encoded ``data`` array accumulates (deltaLine, deltaStart)
+    into absolute (row, start) per 5-int token. Same-line tokens add to
+    ``start``; a new line resets it. Out-of-legend type indices and
+    zero-length tokens are skipped."""
+    var legend = List[String]()
+    legend.append(String("keyword"))   # 0
+    legend.append(String("variable"))  # 1
+    legend.append(String("function"))  # 2
+    # tokens: (0,0,3,0) kw@row0[0,3); (1,4,5,2) fn@row1[4,9);
+    #         (0,6,2,1) var@row1[10,12) (same-line start 4+6=10);
+    #         (0,0,2,9) bad type → skipped.
+    var v = parse_json(String(
+        "{\"data\":[0,0,3,0,0, 1,4,5,2,0, 0,6,2,1,0, 0,0,2,9,0]}"
+    ))
+    var hls = _decode_semantic_tokens(v, legend)
+    assert_equal(len(hls), 3)
+    assert_equal(hls[0].row, 0)
+    assert_equal(hls[0].col_start, 0)
+    assert_equal(hls[0].col_end, 3)
+    assert_equal(hls[1].row, 1)
+    assert_equal(hls[1].col_start, 4)
+    assert_equal(hls[1].col_end, 9)
+    assert_equal(hls[2].row, 1)
+    assert_equal(hls[2].col_start, 10)
+    assert_equal(hls[2].col_end, 12)
+    # No data / wrong shape → empty.
+    assert_equal(len(_decode_semantic_tokens(parse_json(String("null")), legend)), 0)
+    var ed = Editor(String("kw\n    fn   var"))
+    ed.set_semantic_tokens(hls^)
+    assert_equal(len(ed.semantic_highlights), 3)
+
+
+def test_lsp_parse_inlay_hints() raises:
+    """``inlayHint`` entries carry a ``position`` + ``label`` (string or
+    label-part array); the parser flattens to (row, text) carriers."""
+    var v = parse_json(String(
+        "["
+        + "{\"position\":{\"line\":2,\"character\":7},\"label\":\": int\"},"
+        + "{\"position\":{\"line\":5,\"character\":0},\"label\":["
+        + "{\"value\":\"name\"},{\"value\":\": \"},{\"value\":\"str\"}]}"
+        + "]"
+    ))
+    var hints = _parse_inlay_hints(v)
+    assert_equal(len(hints), 2)
+    assert_equal(hints[0].start_line, 2)
+    assert_equal(hints[0].new_text, String(": int"))
+    assert_equal(hints[1].start_line, 5)
+    assert_equal(hints[1].new_text, String("name: str"))
+    var ed = Editor(String("a\nb\nc\nd\ne\nf"))
+    ed.set_inlay_hints(hints^)
+    assert_equal(len(ed.inlay_notes), 2)
+
+
+def test_lsp_parse_code_lens() raises:
+    """``codeLens`` keeps only lenses with a resolved ``command.title``;
+    unresolved (command-less) lenses are skipped."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":0}},"
+        + "\"command\":{\"title\":\"3 references\",\"command\":\"x\"}},"
+        + "{\"range\":{\"start\":{\"line\":4,\"character\":0},"
+        + "\"end\":{\"line\":4,\"character\":0}}}"
+        + "]"
+    ))
+    var lenses = _parse_code_lens(v)
+    assert_equal(len(lenses), 1)
+    assert_equal(lenses[0].start_line, 0)
+    assert_true(_contains(lenses[0].new_text, String("3 references")))
+    var ed = Editor(String("x\ny\nz"))
+    ed.set_code_lens(lenses^)
+    assert_equal(len(ed.codelens_notes), 1)
+
+
+def test_lsp_parse_signature_help() raises:
+    """``signatureHelp`` renders the active signature's label, marking the
+    active parameter when its label is a string. ``null`` / empty → ""."""
+    var v = parse_json(String(
+        "{\"signatures\":["
+        + "{\"label\":\"foo(a: int, b: str)\",\"parameters\":["
+        + "{\"label\":\"a: int\"},{\"label\":\"b: str\"}]},"
+        + "{\"label\":\"bar()\"}"
+        + "],\"activeSignature\":0,\"activeParameter\":1}"
+    ))
+    var s = _parse_signature_help(v)
+    assert_true(_contains(s, String("foo(a: int, b: str)")))
+    assert_true(_contains(s, String("b: str")))
+    # Second signature, no params → just the label.
+    var v2 = parse_json(String(
+        "{\"signatures\":[{\"label\":\"x()\"},{\"label\":\"y(z)\"}],"
+        + "\"activeSignature\":1}"
+    ))
+    assert_equal(_parse_signature_help(v2), String("y(z)"))
+    assert_equal(_parse_signature_help(parse_json(String("null"))), String(""))
+    assert_equal(
+        _parse_signature_help(parse_json(String("{\"signatures\":[]}"))),
+        String(""),
+    )
+
+
+def test_lsp_parse_document_highlights() raises:
+    """``documentHighlight`` returns ``{range, kind?}[]``; the parser keeps
+    the ranges (as carriers) and ignores ``kind``. ``null`` → empty."""
+    var v = parse_json(String(
+        "["
+        + "{\"range\":{\"start\":{\"line\":0,\"character\":4},"
+        + "\"end\":{\"line\":0,\"character\":7}},\"kind\":1},"
+        + "{\"range\":{\"start\":{\"line\":3,\"character\":0},"
+        + "\"end\":{\"line\":3,\"character\":3}},\"kind\":2}"
+        + "]"
+    ))
+    var occ = _parse_document_highlights(v)
+    assert_equal(len(occ), 2)
+    assert_equal(occ[0].start_line, 0)
+    assert_equal(occ[0].start_char, 4)
+    assert_equal(occ[0].end_char, 7)
+    assert_equal(occ[1].start_line, 3)
+    assert_equal(len(_parse_document_highlights(parse_json(String("null")))), 0)
+    # Editor accepts the ranges without disturbing buffer content.
+    var ed = Editor(String("foo\nbar\nbaz\nfoo"))
+    ed.set_document_highlights(occ^)
+    assert_equal(len(ed.occurrence_ranges), 2)
+    ed.clear_document_highlights()
+    assert_equal(len(ed.occurrence_ranges), 0)
+
+
+def test_lsp_parse_text_edits_null_is_empty() raises:
+    """A ``null`` formatting response (server had nothing to change) parses
+    to an empty edit list rather than raising."""
+    assert_equal(len(_parse_text_edits(parse_json(String("null")))), 0)
+
+
+def test_lsp_server_progress_and_show_message() raises:
+    """``$/progress`` begin/report build a one-line note and ``end`` clears
+    it; ``window/showMessage`` parks the message. Both drain via the
+    ``take_*`` accessors."""
+    var mgr = LspManager()
+    mgr._on_progress(parse_json(String(
+        "{\"token\":\"t\",\"value\":{\"kind\":\"begin\","
+        + "\"title\":\"indexing\",\"percentage\":42}}"
+    )))
+    assert_true(mgr.has_pending_progress())
+    var note = mgr.take_progress_note()
+    assert_true(_contains(note, String("indexing")))
+    assert_true(_contains(note, String("42%")))
+    assert_true(not mgr.has_pending_progress())
+    # ``end`` clears to empty (still flagged so the host hides the note).
+    mgr._on_progress(parse_json(String(
+        "{\"token\":\"t\",\"value\":{\"kind\":\"end\"}}"
+    )))
+    assert_true(mgr.has_pending_progress())
+    assert_equal(mgr.take_progress_note(), String(""))
+    mgr._on_show_message(parse_json(String(
+        "{\"type\":3,\"message\":\"server started\"}"
+    )))
+    assert_true(mgr.has_pending_server_message())
+    assert_true(_contains(mgr.take_server_message(), String("server started")))
+
+
+def test_lsp_server_supports_reads_capabilities() raises:
+    """``server_supports`` gates optional feature requests off the
+    initialize ``capabilities`` object: a boolean true, or any
+    registration-options object, counts as supported; absent or false does
+    not. ``server_supports_prepare_rename`` reads the nested
+    ``renameProvider.prepareProvider`` flag."""
+    var mgr = LspManager()
+    # No capabilities yet → everything reports unsupported.
+    assert_true(not mgr.server_supports(String("implementationProvider")))
+    assert_true(not mgr.server_supports_prepare_rename())
+    var caps = parse_json(String(
+        "{"
+        + "\"implementationProvider\":true,"
+        + "\"typeDefinitionProvider\":{},"
+        + "\"declarationProvider\":false,"
+        + "\"renameProvider\":{\"prepareProvider\":true}"
+        + "}"
+    ))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    assert_true(mgr.server_supports(String("implementationProvider")))
+    assert_true(mgr.server_supports(String("typeDefinitionProvider")))
+    assert_true(not mgr.server_supports(String("declarationProvider")))
+    assert_true(not mgr.server_supports(String("hoverProvider")))
+    assert_true(mgr.server_supports_prepare_rename())
+    # Plain renameProvider:true means rename works but prepare does not.
+    var caps2 = parse_json(String("{\"renameProvider\":true}"))
+    mgr._capabilities = Optional[JsonValue](caps2^)
+    assert_true(not mgr.server_supports_prepare_rename())
+
+
+def test_lsp_parse_prepare_rename_placeholder() raises:
+    """The prepareRename object result may carry a ``placeholder`` string,
+    be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
+    Only the explicit placeholder is extracted; the others return empty so
+    the host seeds the prompt from the word under the cursor."""
+    var with_ph = parse_json(String(
+        "{\"range\":{\"start\":{\"line\":1,\"character\":2},"
+        + "\"end\":{\"line\":1,\"character\":5}},\"placeholder\":\"myvar\"}"
+    ))
+    assert_equal(_parse_prepare_rename_placeholder(with_ph), String("myvar"))
+    var bare_range = parse_json(String(
+        "{\"start\":{\"line\":1,\"character\":2},"
+        + "\"end\":{\"line\":1,\"character\":5}}"
+    ))
+    assert_equal(_parse_prepare_rename_placeholder(bare_range), String(""))
+    var default_behavior = parse_json(String("{\"defaultBehavior\":true}"))
+    assert_equal(
+        _parse_prepare_rename_placeholder(default_behavior), String(""),
+    )
 
 
 def test_lsp_initialize_params_advertise_code_action_literal_support() raises:
@@ -18173,6 +18535,7 @@ def _run_chunk_01() raises:
     test_on_save_action_default_is_empty()
     test_on_save_action_copy_preserves_args()
     test_settings_open_seeds_state()
+    test_settings_language_server_section_seeds_and_toggles()
     test_project_settings_on_save_seeds_state()
 
 
@@ -18444,6 +18807,19 @@ def _run_chunk_04() raises:
     test_lsp_parse_code_action_result_null_or_non_array_is_empty()
     test_lsp_parse_rename_workspace_edit_multi_file()
     test_lsp_rename_edits_apply_to_buffer()
+    test_lsp_parse_text_edits_and_apply_formats_buffer()
+    test_lsp_parse_text_edits_null_is_empty()
+    test_lsp_parse_document_highlights()
+    test_lsp_parse_hierarchy_result()
+    test_lsp_parse_document_colors()
+    test_lsp_parse_selection_ranges_walks_parent_chain()
+    test_lsp_decode_semantic_tokens()
+    test_lsp_parse_inlay_hints()
+    test_lsp_parse_code_lens()
+    test_lsp_parse_signature_help()
+    test_lsp_server_progress_and_show_message()
+    test_lsp_server_supports_reads_capabilities()
+    test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()
     test_lsp_parse_completion_result_list_shape()

@@ -215,6 +215,21 @@ struct TurbokodConfig(Copyable, Movable):
     # right when you start typing. On by default — matches the classic
     # text-mode cursor and keeps the caret easy to spot.
     var cursor_blink: Bool
+    # Settings ▸ Language Server. Per-feature gates for the optional,
+    # non-user-initiated LSP capabilities. Each only takes effect when the
+    # active server also advertises the matching provider. Mixed defaults:
+    # cheap/quiet features (signature help, document highlight, server
+    # progress) start on; heavier or more intrusive ones start off.
+    var lsp_format_on_save: Bool      # run textDocument/formatting on save
+    var lsp_signature_help: Bool      # param-hints popup on '('/',' (default on)
+    var lsp_document_highlight: Bool  # highlight occurrences at cursor (default on)
+    var lsp_document_links: Bool      # clickable document links
+    var lsp_inlay_hints: Bool         # inline type/param-name hints
+    var lsp_code_lens: Bool           # actionable inline annotations
+    var lsp_semantic_tokens: Bool     # semantic highlighting overlay
+    var lsp_document_colors: Bool     # color swatches
+    var lsp_linked_editing: Bool      # co-edit matching ranges (e.g. tags)
+    var lsp_server_progress: Bool     # show server work progress (default on)
     # Settings ▸ Theme. Name of the active color theme (see ``theme.mojo``).
     # Drives both syntax highlighting and the UI chrome palette. Defaults to
     # the classic ``"Turbo C++ 3.0"`` look; an unknown name (e.g. a config
@@ -263,6 +278,16 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = True
         self.compress_kwargs = False
         self.cursor_blink = True
+        self.lsp_format_on_save = False
+        self.lsp_signature_help = True
+        self.lsp_document_highlight = True
+        self.lsp_document_links = False
+        self.lsp_inlay_hints = False
+        self.lsp_code_lens = False
+        self.lsp_semantic_tokens = False
+        self.lsp_document_colors = False
+        self.lsp_linked_editing = False
+        self.lsp_server_progress = True
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
         self.font_size = 0
@@ -285,6 +310,16 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = copy.ensure_final_newline
         self.compress_kwargs = copy.compress_kwargs
         self.cursor_blink = copy.cursor_blink
+        self.lsp_format_on_save = copy.lsp_format_on_save
+        self.lsp_signature_help = copy.lsp_signature_help
+        self.lsp_document_highlight = copy.lsp_document_highlight
+        self.lsp_document_links = copy.lsp_document_links
+        self.lsp_inlay_hints = copy.lsp_inlay_hints
+        self.lsp_code_lens = copy.lsp_code_lens
+        self.lsp_semantic_tokens = copy.lsp_semantic_tokens
+        self.lsp_document_colors = copy.lsp_document_colors
+        self.lsp_linked_editing = copy.lsp_linked_editing
+        self.lsp_server_progress = copy.lsp_server_progress
         self.theme = copy.theme
         self.font = copy.font
         self.font_size = copy.font_size
@@ -392,6 +427,37 @@ def load_config() -> TurbokodConfig:
         cfg.cursor_blink = json_get_bool(
             root, String("cursor_blink"), cfg.cursor_blink,
         )
+        cfg.lsp_format_on_save = json_get_bool(
+            root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
+        )
+        cfg.lsp_signature_help = json_get_bool(
+            root, String("lsp_signature_help"), cfg.lsp_signature_help,
+        )
+        cfg.lsp_document_highlight = json_get_bool(
+            root, String("lsp_document_highlight"),
+            cfg.lsp_document_highlight,
+        )
+        cfg.lsp_document_links = json_get_bool(
+            root, String("lsp_document_links"), cfg.lsp_document_links,
+        )
+        cfg.lsp_inlay_hints = json_get_bool(
+            root, String("lsp_inlay_hints"), cfg.lsp_inlay_hints,
+        )
+        cfg.lsp_code_lens = json_get_bool(
+            root, String("lsp_code_lens"), cfg.lsp_code_lens,
+        )
+        cfg.lsp_semantic_tokens = json_get_bool(
+            root, String("lsp_semantic_tokens"), cfg.lsp_semantic_tokens,
+        )
+        cfg.lsp_document_colors = json_get_bool(
+            root, String("lsp_document_colors"), cfg.lsp_document_colors,
+        )
+        cfg.lsp_linked_editing = json_get_bool(
+            root, String("lsp_linked_editing"), cfg.lsp_linked_editing,
+        )
+        cfg.lsp_server_progress = json_get_bool(
+            root, String("lsp_server_progress"), cfg.lsp_server_progress,
+        )
         var theme_v = json_get_string(root, String("theme"))
         if len(theme_v.as_bytes()) > 0:
             cfg.theme = theme_v
@@ -495,6 +561,36 @@ def save_config(config: TurbokodConfig) -> Bool:
     )
     root.put(String("compress_kwargs"), json_bool(config.compress_kwargs))
     root.put(String("cursor_blink"), json_bool(config.cursor_blink))
+    root.put(
+        String("lsp_format_on_save"), json_bool(config.lsp_format_on_save),
+    )
+    root.put(
+        String("lsp_signature_help"), json_bool(config.lsp_signature_help),
+    )
+    root.put(
+        String("lsp_document_highlight"),
+        json_bool(config.lsp_document_highlight),
+    )
+    root.put(
+        String("lsp_document_links"), json_bool(config.lsp_document_links),
+    )
+    root.put(String("lsp_inlay_hints"), json_bool(config.lsp_inlay_hints))
+    root.put(String("lsp_code_lens"), json_bool(config.lsp_code_lens))
+    root.put(
+        String("lsp_semantic_tokens"),
+        json_bool(config.lsp_semantic_tokens),
+    )
+    root.put(
+        String("lsp_document_colors"),
+        json_bool(config.lsp_document_colors),
+    )
+    root.put(
+        String("lsp_linked_editing"), json_bool(config.lsp_linked_editing),
+    )
+    root.put(
+        String("lsp_server_progress"),
+        json_bool(config.lsp_server_progress),
+    )
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
     root.put(String("font_size"), json_int(config.font_size))

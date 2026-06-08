@@ -34,6 +34,11 @@ from .lsp import (
     LspProcess, json_null_v, lsp_initialize_params,
 )
 from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
+from .highlight import Highlight
+from .colors import (
+    Attr, BLACK, EDITOR_BG, EDITOR_FG, SYN_COMMENT, SYN_DECORATOR, SYN_IDENT,
+    SYN_KEYWORD, SYN_NUMBER, SYN_OPERATOR, SYN_STRING, WHITE,
+)
 
 
 def _lsp_debug_log(line: String):
@@ -370,21 +375,33 @@ struct CodeAction(Copyable, Movable):
     var kind: String
     var is_preferred: Bool
     var file_edits: List[CodeActionFileEdit]
+    # When the action carries a ``Command`` (instead of, or in addition to,
+    # an inline edit), ``command`` is its id and ``command_args`` the raw
+    # ``arguments`` array — sent via ``workspace/executeCommand`` when the
+    # action has no directly-applicable ``file_edits``.
+    var command: String
+    var command_args: Optional[JsonValue]
 
     def __init__(
         out self, var title: String, var kind: String, is_preferred: Bool,
         var file_edits: List[CodeActionFileEdit],
+        var command: String = String(""),
+        var command_args: Optional[JsonValue] = Optional[JsonValue](),
     ):
         self.title = title^
         self.kind = kind^
         self.is_preferred = is_preferred
         self.file_edits = file_edits^
+        self.command = command^
+        self.command_args = command_args^
 
     def __copyinit__(mut self, copy: Self):
         self.title = copy.title
         self.kind = copy.kind
         self.is_preferred = copy.is_preferred
         self.file_edits = copy.file_edits.copy()
+        self.command = copy.command
+        self.command_args = copy.command_args
 
 
 struct LspManager(Copyable, Movable):
@@ -435,6 +452,26 @@ struct LspManager(Copyable, Movable):
     var _def_origin_line: Int
     var _def_origin_char: Int
     var _def_origin_word: String
+    # Raw server ``capabilities`` object from the initialize response,
+    # queried via ``server_supports`` so feature requests only fire when
+    # the server advertises them. Empty until initialize lands.
+    var _capabilities: Optional[JsonValue]
+    # Generic "navigate to a location" request (typeDefinition /
+    # implementation / declaration). Parked target + origin word, kept
+    # separate from the definition slot so it never triggers the
+    # cmd-click → references chaining the definition path does.
+    var _inflight_nav_id: String
+    var _nav_word: String
+    var _resolved_nav: Optional[DefinitionResolved]
+    var _has_resolved_nav: Bool
+    # ``textDocument/prepareRename`` round-trip that gates the rename
+    # flow. ``_prepare_rename_state``: 0 = unsupported / errored (host
+    # falls back to a direct prompt), 1 = renameable (seed prompt with
+    # ``_prepare_rename_placeholder``), 2 = not renameable (null result).
+    var _inflight_prepare_rename_id: String
+    var _has_resolved_prepare_rename: Bool
+    var _prepare_rename_state: Int
+    var _prepare_rename_placeholder: String
     # ``textDocument/references`` — list-of-locations form of definition.
     # Parked as ``DefinitionResolved`` rows (same shape, different list).
     # ``_has_resolved_references`` distinguishes "no response yet" from
@@ -498,6 +535,78 @@ struct LspManager(Copyable, Movable):
     var _rename_path: String
     var _resolved_rename_edits: List[CodeActionFileEdit]
     var _has_resolved_rename: Bool
+    # ``textDocument/formatting`` + ``rangeFormatting`` — both return a flat
+    # ``TextEdit[]`` for one file, parked here for the host to apply via
+    # the same edit-application path rename/code-actions use.
+    var _inflight_formatting_id: String
+    var _formatting_path: String
+    var _resolved_formatting_edits: List[TextEditEntry]
+    var _has_resolved_formatting: Bool
+    # ``textDocument/documentHighlight`` — occurrences of the symbol at the
+    # cursor, parked as range carriers (``TextEditEntry`` with empty
+    # ``new_text``) for the host to push into the editor overlay.
+    var _inflight_doc_highlight_id: String
+    var _doc_highlight_path: String
+    var _resolved_doc_highlights: List[TextEditEntry]
+    var _has_resolved_doc_highlight: Bool
+    # ``textDocument/signatureHelp`` — the active signature's rendered label
+    # (with the active parameter marked), parked for the status bar.
+    var _inflight_signature_id: String
+    var _resolved_signature: String
+    var _has_resolved_signature: Bool
+    # ``textDocument/inlayHint`` + ``codeLens`` — rendered as end-of-line
+    # annotations. Parked as (row, text) carriers (``TextEditEntry`` with
+    # ``start_line`` = row, ``new_text`` = the label).
+    var _inflight_inlay_id: String
+    var _inlay_path: String
+    var _resolved_inlay: List[TextEditEntry]
+    var _has_resolved_inlay: Bool
+    var _inflight_codelens_id: String
+    var _codelens_path: String
+    var _resolved_codelens: List[TextEditEntry]
+    var _has_resolved_codelens: Bool
+    # ``textDocument/semanticTokens/full`` — the server's token-type legend
+    # (from ``semanticTokensProvider.legend.tokenTypes``) plus the decoded
+    # per-row recolor ``Highlight``s parked for the editor overlay.
+    var _sem_token_types: List[String]
+    var _inflight_semantic_id: String
+    var _semantic_path: String
+    var _resolved_semantic: List[Highlight]
+    var _has_resolved_semantic: Bool
+    # Server-initiated status: ``$/progress`` (work-done progress) and
+    # ``window/showMessage``. Parked for the host to surface in the status
+    # bar — progress only when ``lsp_server_progress`` is on.
+    var _progress_note: String
+    var _has_progress_note: Bool
+    var _server_message: String
+    var _has_server_message: Bool
+    # ``textDocument/selectionRange`` — the cursor's range hierarchy
+    # (innermost→outermost), parked for the editor's smart-select grow.
+    var _inflight_selrange_id: String
+    var _selrange_path: String
+    var _resolved_selrange: List[TextEditEntry]
+    var _has_resolved_selrange: Bool
+    # Call / type hierarchy: a two-step flow (prepare → incomingCalls /
+    # supertypes) auto-chained in ``tick``. ``_hierarchy_followup`` is the
+    # method to fire on the prepared item; the final locations are parked
+    # in ``_resolved_hierarchy`` and surfaced through the references picker.
+    var _inflight_hier_prepare_id: String
+    var _inflight_hier_followup_id: String
+    var _hierarchy_followup: String
+    var _hierarchy_word: String
+    var _resolved_hierarchy: List[DefinitionResolved]
+    var _has_resolved_hierarchy: Bool
+    # ``textDocument/documentColor`` — per-color swatch ``Highlight``s
+    # (truecolor bg) parked for the editor overlay.
+    var _inflight_color_id: String
+    var _color_path: String
+    var _resolved_colors: List[Highlight]
+    var _has_resolved_colors: Bool
+    # Server-driven ``workspace/applyEdit`` (e.g. after executeCommand):
+    # the parsed WorkspaceEdit, parked for the host to apply project-wide.
+    # We optimistically reply ``applied: true`` and apply next frame.
+    var _resolved_applyedit: List[CodeActionFileEdit]
+    var _has_resolved_applyedit: Bool
     var _root_uri: String
     var _language_id: String
     var _argv: List[String]      # captured argv from start_with for the info dialog
@@ -551,6 +660,15 @@ struct LspManager(Copyable, Movable):
         self._def_origin_line = 0
         self._def_origin_char = 0
         self._def_origin_word = String("")
+        self._capabilities = Optional[JsonValue]()
+        self._inflight_nav_id = String("")
+        self._nav_word = String("")
+        self._resolved_nav = Optional[DefinitionResolved]()
+        self._has_resolved_nav = False
+        self._inflight_prepare_rename_id = String("")
+        self._has_resolved_prepare_rename = False
+        self._prepare_rename_state = 0
+        self._prepare_rename_placeholder = String("")
         self._inflight_ref_id = String("")
         self._ref_word = String("")
         self._resolved_references = List[DefinitionResolved]()
@@ -583,6 +701,50 @@ struct LspManager(Copyable, Movable):
         self._rename_path = String("")
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
+        self._inflight_formatting_id = String("")
+        self._formatting_path = String("")
+        self._resolved_formatting_edits = List[TextEditEntry]()
+        self._has_resolved_formatting = False
+        self._inflight_doc_highlight_id = String("")
+        self._doc_highlight_path = String("")
+        self._resolved_doc_highlights = List[TextEditEntry]()
+        self._has_resolved_doc_highlight = False
+        self._inflight_signature_id = String("")
+        self._resolved_signature = String("")
+        self._has_resolved_signature = False
+        self._inflight_inlay_id = String("")
+        self._inlay_path = String("")
+        self._resolved_inlay = List[TextEditEntry]()
+        self._has_resolved_inlay = False
+        self._inflight_codelens_id = String("")
+        self._codelens_path = String("")
+        self._resolved_codelens = List[TextEditEntry]()
+        self._has_resolved_codelens = False
+        self._sem_token_types = List[String]()
+        self._inflight_semantic_id = String("")
+        self._semantic_path = String("")
+        self._resolved_semantic = List[Highlight]()
+        self._has_resolved_semantic = False
+        self._progress_note = String("")
+        self._has_progress_note = False
+        self._server_message = String("")
+        self._has_server_message = False
+        self._inflight_selrange_id = String("")
+        self._selrange_path = String("")
+        self._resolved_selrange = List[TextEditEntry]()
+        self._has_resolved_selrange = False
+        self._inflight_hier_prepare_id = String("")
+        self._inflight_hier_followup_id = String("")
+        self._hierarchy_followup = String("")
+        self._hierarchy_word = String("")
+        self._resolved_hierarchy = List[DefinitionResolved]()
+        self._has_resolved_hierarchy = False
+        self._inflight_color_id = String("")
+        self._color_path = String("")
+        self._resolved_colors = List[Highlight]()
+        self._has_resolved_colors = False
+        self._resolved_applyedit = List[CodeActionFileEdit]()
+        self._has_resolved_applyedit = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -617,6 +779,15 @@ struct LspManager(Copyable, Movable):
         self._def_origin_line = 0
         self._def_origin_char = 0
         self._def_origin_word = String("")
+        self._capabilities = Optional[JsonValue]()
+        self._inflight_nav_id = String("")
+        self._nav_word = String("")
+        self._resolved_nav = Optional[DefinitionResolved]()
+        self._has_resolved_nav = False
+        self._inflight_prepare_rename_id = String("")
+        self._has_resolved_prepare_rename = False
+        self._prepare_rename_state = 0
+        self._prepare_rename_placeholder = String("")
         self._inflight_ref_id = String("")
         self._ref_word = String("")
         self._resolved_references = List[DefinitionResolved]()
@@ -649,6 +820,50 @@ struct LspManager(Copyable, Movable):
         self._rename_path = String("")
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
+        self._inflight_formatting_id = String("")
+        self._formatting_path = String("")
+        self._resolved_formatting_edits = List[TextEditEntry]()
+        self._has_resolved_formatting = False
+        self._inflight_doc_highlight_id = String("")
+        self._doc_highlight_path = String("")
+        self._resolved_doc_highlights = List[TextEditEntry]()
+        self._has_resolved_doc_highlight = False
+        self._inflight_signature_id = String("")
+        self._resolved_signature = String("")
+        self._has_resolved_signature = False
+        self._inflight_inlay_id = String("")
+        self._inlay_path = String("")
+        self._resolved_inlay = List[TextEditEntry]()
+        self._has_resolved_inlay = False
+        self._inflight_codelens_id = String("")
+        self._codelens_path = String("")
+        self._resolved_codelens = List[TextEditEntry]()
+        self._has_resolved_codelens = False
+        self._sem_token_types = List[String]()
+        self._inflight_semantic_id = String("")
+        self._semantic_path = String("")
+        self._resolved_semantic = List[Highlight]()
+        self._has_resolved_semantic = False
+        self._progress_note = String("")
+        self._has_progress_note = False
+        self._server_message = String("")
+        self._has_server_message = False
+        self._inflight_selrange_id = String("")
+        self._selrange_path = String("")
+        self._resolved_selrange = List[TextEditEntry]()
+        self._has_resolved_selrange = False
+        self._inflight_hier_prepare_id = String("")
+        self._inflight_hier_followup_id = String("")
+        self._hierarchy_followup = String("")
+        self._hierarchy_word = String("")
+        self._resolved_hierarchy = List[DefinitionResolved]()
+        self._has_resolved_hierarchy = False
+        self._inflight_color_id = String("")
+        self._color_path = String("")
+        self._resolved_colors = List[Highlight]()
+        self._has_resolved_colors = False
+        self._resolved_applyedit = List[CodeActionFileEdit]()
+        self._has_resolved_applyedit = False
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
@@ -973,6 +1188,131 @@ struct LspManager(Copyable, Movable):
 
     def definition_origin_word(self) -> String:
         return self._def_origin_word
+
+    # --- server capability queries ----------------------------------------
+
+    def server_supports(self, key: String) -> Bool:
+        """True iff the server advertised the capability named ``key`` in
+        its initialize response (e.g. ``implementationProvider``,
+        ``documentFormattingProvider``, ``inlayHintProvider``). A boolean
+        ``true`` or any registration-options object/string counts as
+        supported; absent or ``false`` counts as unsupported."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var v_opt = caps.object_get(key)
+        if not v_opt:
+            return False
+        var v = v_opt.value().copy()
+        if v.is_bool():
+            return v.as_bool()
+        return v.is_object() or v.is_string() or v.is_array()
+
+    def server_supports_prepare_rename(self) -> Bool:
+        """True iff ``renameProvider`` is an object with
+        ``prepareProvider: true`` — i.e. the server implements
+        ``textDocument/prepareRename``. Plain ``renameProvider: true``
+        means rename works but prepare does not."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var rp_opt = caps.object_get(String("renameProvider"))
+        if not rp_opt or not rp_opt.value().is_object():
+            return False
+        var pp_opt = rp_opt.value().copy().object_get(String("prepareProvider"))
+        if pp_opt and pp_opt.value().is_bool():
+            return pp_opt.value().as_bool()
+        return False
+
+    # --- navigate-to-location (typeDefinition / implementation / declaration)
+
+    def request_navigation(
+        mut self, method: String, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Send a definition-shaped jump request for ``method`` (one of
+        ``textDocument/typeDefinition`` / ``implementation`` /
+        ``declaration``). Pre-flights with didOpen/didChange and parks the
+        resolved target for the host to ``take_nav_target`` and jump to.
+        Kept separate from ``request_definition`` so it never trips the
+        cmd-click → references chaining."""
+        if self.state != _STATE_READY:
+            return False
+        _lsp_debug_log(
+            String("→ request_navigation ") + method
+            + String(" lang=") + self._language_id
+            + String(" line=") + String(line)
+            + String(" character=") + String(character),
+        )
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_nav_id = self.client.send_request(method, params)
+        except:
+            self._inflight_nav_id = String("")
+            return False
+        self._nav_word = word^
+        self._resolved_nav = Optional[DefinitionResolved]()
+        self._has_resolved_nav = False
+        return True
+
+    def has_pending_nav(self) -> Bool:
+        """True iff a navigation response is parked. The parked target may
+        still be empty (server found nothing) — distinguish via
+        ``take_nav_target`` returning None."""
+        return self._has_resolved_nav
+
+    def nav_word(self) -> String:
+        return self._nav_word
+
+    def take_nav_target(mut self) -> Optional[DefinitionResolved]:
+        """Move out the parked navigation target (None if the server
+        returned no location). Clears the pending flag either way."""
+        var out = self._resolved_nav
+        self._resolved_nav = Optional[DefinitionResolved]()
+        self._has_resolved_nav = False
+        return out
+
+    # --- prepareRename ----------------------------------------------------
+
+    def request_prepare_rename(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/prepareRename`` to validate the symbol at
+        ``(line, character)`` and fetch its placeholder before prompting.
+        Parks a tri-state result drained via ``take_prepare_rename``."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_prepare_rename_id = self.client.send_request(
+                String("textDocument/prepareRename"), params,
+            )
+        except:
+            self._inflight_prepare_rename_id = String("")
+            return False
+        self._has_resolved_prepare_rename = False
+        self._prepare_rename_state = 0
+        self._prepare_rename_placeholder = String("")
+        return True
+
+    def has_pending_prepare_rename(self) -> Bool:
+        return self._has_resolved_prepare_rename
+
+    def take_prepare_rename(mut self) -> Tuple[Int, String]:
+        """Return ``(state, placeholder)`` and clear the pending flag.
+        ``state``: 0 unsupported/error, 1 renameable, 2 not renameable."""
+        var st = self._prepare_rename_state
+        var ph = self._prepare_rename_placeholder
+        self._has_resolved_prepare_rename = False
+        self._prepare_rename_state = 0
+        self._prepare_rename_placeholder = String("")
+        return (st, ph)
 
     def request_references(
         mut self, path: String, line: Int, character: Int,
@@ -1403,6 +1743,29 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_code_actions = False
         return out^
 
+    def request_execute_command(
+        mut self, command: String, var args: Optional[JsonValue],
+    ) -> Bool:
+        """Fire ``workspace/executeCommand``. The server applies the effect
+        and typically pushes a ``workspace/applyEdit`` back, which our
+        handler parks for the host. Fire-and-forget — we don't track the
+        response (success is observed via the resulting edits)."""
+        if self.state != _STATE_READY or len(command.as_bytes()) == 0:
+            return False
+        var params = json_object()
+        params.put(String("command"), json_str(command))
+        if args and args.value().is_array():
+            params.put(String("arguments"), args.value().copy())
+        else:
+            params.put(String("arguments"), json_array())
+        try:
+            _ = self.client.send_request(
+                String("workspace/executeCommand"), params,
+            )
+        except:
+            return False
+        return True
+
     def request_rename(
         mut self, path: String, line: Int, character: Int,
         new_name: String, var text: String,
@@ -1455,6 +1818,401 @@ struct LspManager(Copyable, Movable):
         var out = self._resolved_rename_edits^
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
+        return out^
+
+    # --- formatting -------------------------------------------------------
+
+    def request_formatting(
+        mut self, path: String, var text: String,
+        tab_size: Int = 4, insert_spaces: Bool = True,
+    ) -> Bool:
+        """Send ``textDocument/formatting`` for the whole file. The
+        resulting ``TextEdit[]`` is parked for the host to apply."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("options"), _formatting_options(tab_size, insert_spaces))
+        try:
+            self._inflight_formatting_id = self.client.send_request(
+                String("textDocument/formatting"), params,
+            )
+        except:
+            self._inflight_formatting_id = String("")
+            return False
+        self._formatting_path = path
+        self._resolved_formatting_edits = List[TextEditEntry]()
+        self._has_resolved_formatting = False
+        return True
+
+    def request_range_formatting(
+        mut self, path: String, start_line: Int, start_char: Int,
+        end_line: Int, end_char: Int, var text: String,
+        tab_size: Int = 4, insert_spaces: Bool = True,
+    ) -> Bool:
+        """Send ``textDocument/rangeFormatting`` for the given range."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        var rng = json_object()
+        rng.put(String("start"), _lsp_position(start_line, start_char))
+        rng.put(String("end"), _lsp_position(end_line, end_char))
+        params.put(String("range"), rng^)
+        params.put(String("options"), _formatting_options(tab_size, insert_spaces))
+        try:
+            self._inflight_formatting_id = self.client.send_request(
+                String("textDocument/rangeFormatting"), params,
+            )
+        except:
+            self._inflight_formatting_id = String("")
+            return False
+        self._formatting_path = path
+        self._resolved_formatting_edits = List[TextEditEntry]()
+        self._has_resolved_formatting = False
+        return True
+
+    def has_pending_formatting(self) -> Bool:
+        return self._has_resolved_formatting
+
+    def pending_formatting_path(self) -> String:
+        return self._formatting_path
+
+    def take_formatting_edits(mut self) -> List[TextEditEntry]:
+        """Move out the parked formatting ``TextEdit[]``. Clears the flag."""
+        var out = self._resolved_formatting_edits^
+        self._resolved_formatting_edits = List[TextEditEntry]()
+        self._has_resolved_formatting = False
+        return out^
+
+    # --- document highlight ----------------------------------------------
+
+    def request_document_highlight(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/documentHighlight`` for the symbol at
+        ``(line, character)``. Parks the occurrence ranges."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_doc_highlight_id = self.client.send_request(
+                String("textDocument/documentHighlight"), params,
+            )
+        except:
+            self._inflight_doc_highlight_id = String("")
+            return False
+        self._doc_highlight_path = path
+        self._resolved_doc_highlights = List[TextEditEntry]()
+        self._has_resolved_doc_highlight = False
+        return True
+
+    def has_pending_doc_highlights(self) -> Bool:
+        return self._has_resolved_doc_highlight
+
+    def pending_doc_highlight_path(self) -> String:
+        return self._doc_highlight_path
+
+    def take_doc_highlights(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_doc_highlights^
+        self._resolved_doc_highlights = List[TextEditEntry]()
+        self._has_resolved_doc_highlight = False
+        return out^
+
+    # --- signature help ---------------------------------------------------
+
+    def request_signature_help(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/signatureHelp`` at ``(line, character)``.
+        Parks the rendered active-signature label for the status bar."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_signature_id = self.client.send_request(
+                String("textDocument/signatureHelp"), params,
+            )
+        except:
+            self._inflight_signature_id = String("")
+            return False
+        self._resolved_signature = String("")
+        self._has_resolved_signature = False
+        return True
+
+    def has_pending_signature(self) -> Bool:
+        return self._has_resolved_signature
+
+    def take_signature(mut self) -> String:
+        """Move out the parked signature label (empty if the server had no
+        signature here). Clears the pending flag."""
+        var out = self._resolved_signature^
+        self._resolved_signature = String("")
+        self._has_resolved_signature = False
+        return out^
+
+    # --- inlay hints / code lens -----------------------------------------
+
+    def request_inlay_hints(
+        mut self, path: String, start_line: Int, end_line: Int,
+        var text: String,
+    ) -> Bool:
+        """Send ``textDocument/inlayHint`` for the ``[start_line, end_line]``
+        range (typically the visible rows). Parks (row, label) carriers."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        var rng = json_object()
+        rng.put(String("start"), _lsp_position(start_line, 0))
+        rng.put(String("end"), _lsp_position(end_line, 0))
+        params.put(String("range"), rng^)
+        try:
+            self._inflight_inlay_id = self.client.send_request(
+                String("textDocument/inlayHint"), params,
+            )
+        except:
+            self._inflight_inlay_id = String("")
+            return False
+        self._inlay_path = path
+        self._resolved_inlay = List[TextEditEntry]()
+        self._has_resolved_inlay = False
+        return True
+
+    def has_pending_inlay(self) -> Bool:
+        return self._has_resolved_inlay
+
+    def pending_inlay_path(self) -> String:
+        return self._inlay_path
+
+    def take_inlay(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_inlay^
+        self._resolved_inlay = List[TextEditEntry]()
+        self._has_resolved_inlay = False
+        return out^
+
+    def request_code_lens(
+        mut self, path: String, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/codeLens`` for the whole file. Parks
+        (row, title) carriers for lenses that carry a resolved command."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_codelens_id = self.client.send_request(
+                String("textDocument/codeLens"), params,
+            )
+        except:
+            self._inflight_codelens_id = String("")
+            return False
+        self._codelens_path = path
+        self._resolved_codelens = List[TextEditEntry]()
+        self._has_resolved_codelens = False
+        return True
+
+    def has_pending_codelens(self) -> Bool:
+        return self._has_resolved_codelens
+
+    def pending_codelens_path(self) -> String:
+        return self._codelens_path
+
+    def take_codelens(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_codelens^
+        self._resolved_codelens = List[TextEditEntry]()
+        self._has_resolved_codelens = False
+        return out^
+
+    # --- semantic tokens --------------------------------------------------
+
+    def request_semantic_tokens(
+        mut self, path: String, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/semanticTokens/full``. The delta-encoded
+        result is decoded against the legend into per-row recolor
+        ``Highlight``s and parked for the editor."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_semantic_id = self.client.send_request(
+                String("textDocument/semanticTokens/full"), params,
+            )
+        except:
+            self._inflight_semantic_id = String("")
+            return False
+        self._semantic_path = path
+        self._resolved_semantic = List[Highlight]()
+        self._has_resolved_semantic = False
+        return True
+
+    def has_pending_semantic(self) -> Bool:
+        return self._has_resolved_semantic
+
+    def pending_semantic_path(self) -> String:
+        return self._semantic_path
+
+    def take_semantic(mut self) -> List[Highlight]:
+        var out = self._resolved_semantic^
+        self._resolved_semantic = List[Highlight]()
+        self._has_resolved_semantic = False
+        return out^
+
+    # --- selection range --------------------------------------------------
+
+    def request_selection_range(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/selectionRange`` for one position. Parks the
+        flattened range hierarchy (innermost→outermost)."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        var positions = json_array()
+        positions.append(_lsp_position(line, character))
+        params.put(String("positions"), positions^)
+        try:
+            self._inflight_selrange_id = self.client.send_request(
+                String("textDocument/selectionRange"), params,
+            )
+        except:
+            self._inflight_selrange_id = String("")
+            return False
+        self._selrange_path = path
+        self._resolved_selrange = List[TextEditEntry]()
+        self._has_resolved_selrange = False
+        return True
+
+    def has_pending_selrange(self) -> Bool:
+        return self._has_resolved_selrange
+
+    def pending_selrange_path(self) -> String:
+        return self._selrange_path
+
+    def take_selrange(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_selrange^
+        self._resolved_selrange = List[TextEditEntry]()
+        self._has_resolved_selrange = False
+        return out^
+
+    # --- call / type hierarchy -------------------------------------------
+
+    def request_call_hierarchy(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Begin a "find callers" flow: ``prepareCallHierarchy`` at the
+        cursor, auto-chained to ``callHierarchy/incomingCalls`` on the
+        prepared item. Final caller locations route to the references
+        picker."""
+        return self._begin_hierarchy(
+            String("textDocument/prepareCallHierarchy"),
+            String("callHierarchy/incomingCalls"),
+            path, line, character, word^, text^,
+        )
+
+    def request_type_hierarchy(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Begin a "find supertypes" flow: ``prepareTypeHierarchy`` →
+        ``typeHierarchy/supertypes``."""
+        return self._begin_hierarchy(
+            String("textDocument/prepareTypeHierarchy"),
+            String("typeHierarchy/supertypes"),
+            path, line, character, word^, text^,
+        )
+
+    def _begin_hierarchy(
+        mut self, prepare_method: String, followup_method: String,
+        path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_hier_prepare_id = self.client.send_request(
+                prepare_method, params,
+            )
+        except:
+            self._inflight_hier_prepare_id = String("")
+            return False
+        self._hierarchy_followup = followup_method
+        self._hierarchy_word = word^
+        self._inflight_hier_followup_id = String("")
+        self._resolved_hierarchy = List[DefinitionResolved]()
+        self._has_resolved_hierarchy = False
+        return True
+
+    def has_pending_hierarchy(self) -> Bool:
+        return self._has_resolved_hierarchy
+
+    def hierarchy_word(self) -> String:
+        return self._hierarchy_word
+
+    def take_hierarchy(mut self) -> List[DefinitionResolved]:
+        var out = self._resolved_hierarchy^
+        self._resolved_hierarchy = List[DefinitionResolved]()
+        self._has_resolved_hierarchy = False
+        return out^
+
+    # --- document color ---------------------------------------------------
+
+    def request_document_colors(
+        mut self, path: String, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/documentColor``. Parks swatch highlights."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_color_id = self.client.send_request(
+                String("textDocument/documentColor"), params,
+            )
+        except:
+            self._inflight_color_id = String("")
+            return False
+        self._color_path = path
+        self._resolved_colors = List[Highlight]()
+        self._has_resolved_colors = False
+        return True
+
+    def has_pending_colors(self) -> Bool:
+        return self._has_resolved_colors
+
+    def pending_color_path(self) -> String:
+        return self._color_path
+
+    def take_colors(mut self) -> List[Highlight]:
+        var out = self._resolved_colors^
+        self._resolved_colors = List[Highlight]()
+        self._has_resolved_colors = False
+        return out^
+
+    def has_pending_applyedit(self) -> Bool:
+        return self._has_resolved_applyedit
+
+    def take_applyedit(mut self) -> List[CodeActionFileEdit]:
+        """Move out a server-driven ``workspace/applyEdit`` payload (parsed
+        per-file edit groups). The host applies it project-wide."""
+        var out = self._resolved_applyedit^
+        self._resolved_applyedit = List[CodeActionFileEdit]()
+        self._has_resolved_applyedit = False
         return out^
 
     # --- frame-tick driver -------------------------------------------------
@@ -1547,6 +2305,10 @@ struct LspManager(Copyable, Movable):
                     var method = msg.method.value()
                     if method == String("textDocument/publishDiagnostics"):
                         self._on_publish_diagnostics(msg.params.value())
+                    elif method == String("$/progress"):
+                        self._on_progress(msg.params.value())
+                    elif method == String("window/showMessage"):
+                        self._on_show_message(msg.params.value())
                 continue
             if msg.kind == LSP_REQUEST:
                 self._handle_server_request(msg)
@@ -1678,6 +2440,144 @@ struct LspManager(Copyable, Movable):
                 self._resolved_rename_edits = rename_edits^
                 self._has_resolved_rename = True
                 self._inflight_rename_id = String("")
+                continue
+            if id == self._inflight_nav_id:
+                var nav = Optional[DefinitionResolved]()
+                if msg.result:
+                    nav = _parse_definition_result(msg.result.value())
+                var nav_found = String("no")
+                if nav:
+                    nav_found = String("yes")
+                _lsp_debug_log(
+                    String("← navigation response id=") + id
+                    + String(" found=") + nav_found,
+                )
+                self._resolved_nav = nav
+                self._has_resolved_nav = True
+                self._inflight_nav_id = String("")
+                continue
+            if id == self._inflight_prepare_rename_id:
+                # Success with a range/placeholder → renameable (1);
+                # success with null → not renameable (2); an error
+                # response (method unsupported) → fall back (0).
+                var st = 0
+                var ph = String("")
+                if msg.result:
+                    var rv = msg.result.value().copy()
+                    if rv.is_null():
+                        st = 2
+                    elif rv.is_object():
+                        st = 1
+                        ph = _parse_prepare_rename_placeholder(rv)
+                self._prepare_rename_state = st
+                self._prepare_rename_placeholder = ph^
+                self._has_resolved_prepare_rename = True
+                self._inflight_prepare_rename_id = String("")
+                continue
+            if id == self._inflight_formatting_id:
+                var fmt_edits = List[TextEditEntry]()
+                if msg.result:
+                    fmt_edits = _parse_text_edits(msg.result.value())
+                _lsp_debug_log(
+                    String("← formatting response id=") + id
+                    + String(" edits=") + String(len(fmt_edits)),
+                )
+                self._resolved_formatting_edits = fmt_edits^
+                self._has_resolved_formatting = True
+                self._inflight_formatting_id = String("")
+                continue
+            if id == self._inflight_doc_highlight_id:
+                var occ = List[TextEditEntry]()
+                if msg.result:
+                    occ = _parse_document_highlights(msg.result.value())
+                self._resolved_doc_highlights = occ^
+                self._has_resolved_doc_highlight = True
+                self._inflight_doc_highlight_id = String("")
+                continue
+            if id == self._inflight_signature_id:
+                var sig = String("")
+                if msg.result:
+                    sig = _parse_signature_help(msg.result.value())
+                self._resolved_signature = sig^
+                self._has_resolved_signature = True
+                self._inflight_signature_id = String("")
+                continue
+            if id == self._inflight_inlay_id:
+                var ih = List[TextEditEntry]()
+                if msg.result:
+                    ih = _parse_inlay_hints(msg.result.value())
+                self._resolved_inlay = ih^
+                self._has_resolved_inlay = True
+                self._inflight_inlay_id = String("")
+                continue
+            if id == self._inflight_codelens_id:
+                var cl = List[TextEditEntry]()
+                if msg.result:
+                    cl = _parse_code_lens(msg.result.value())
+                self._resolved_codelens = cl^
+                self._has_resolved_codelens = True
+                self._inflight_codelens_id = String("")
+                continue
+            if id == self._inflight_semantic_id:
+                var sem = List[Highlight]()
+                if msg.result:
+                    sem = _decode_semantic_tokens(
+                        msg.result.value(), self._sem_token_types,
+                    )
+                self._resolved_semantic = sem^
+                self._has_resolved_semantic = True
+                self._inflight_semantic_id = String("")
+                continue
+            if id == self._inflight_selrange_id:
+                var sr = List[TextEditEntry]()
+                if msg.result:
+                    sr = _parse_selection_ranges(msg.result.value())
+                self._resolved_selrange = sr^
+                self._has_resolved_selrange = True
+                self._inflight_selrange_id = String("")
+                continue
+            if id == self._inflight_hier_prepare_id:
+                # Prepare done → fire the follow-up (incomingCalls /
+                # supertypes) with the first prepared item echoed back.
+                self._inflight_hier_prepare_id = String("")
+                var item0 = Optional[JsonValue]()
+                if msg.result and msg.result.value().is_array() \
+                        and msg.result.value().array_len() > 0:
+                    item0 = Optional[JsonValue](
+                        msg.result.value().array_at(0),
+                    )
+                if item0:
+                    var fp = json_object()
+                    fp.put(String("item"), item0.value().copy())
+                    try:
+                        self._inflight_hier_followup_id = \
+                            self.client.send_request(
+                                self._hierarchy_followup, fp,
+                            )
+                    except:
+                        self._inflight_hier_followup_id = String("")
+                        self._resolved_hierarchy = List[DefinitionResolved]()
+                        self._has_resolved_hierarchy = True
+                else:
+                    # No symbol here → empty result so the host can notice.
+                    self._resolved_hierarchy = List[DefinitionResolved]()
+                    self._has_resolved_hierarchy = True
+                continue
+            if id == self._inflight_hier_followup_id:
+                var hits = List[DefinitionResolved]()
+                if msg.result:
+                    hits = _parse_hierarchy_result(msg.result.value())
+                self._resolved_hierarchy = hits^
+                self._has_resolved_hierarchy = True
+                self._inflight_hier_followup_id = String("")
+                continue
+            if id == self._inflight_color_id:
+                var cols = List[Highlight]()
+                if msg.result:
+                    cols = _parse_document_colors(msg.result.value())
+                self._resolved_colors = cols^
+                self._has_resolved_colors = True
+                self._inflight_color_id = String("")
                 continue
         return resolved
 
@@ -1828,6 +2728,74 @@ struct LspManager(Copyable, Movable):
             _DiagnosticBucket(path, diags^, False),
         )
 
+    def _on_progress(mut self, params: JsonValue):
+        """Parse a ``$/progress`` notification's ``value`` (a WorkDone
+        progress payload). ``begin`` / ``report`` build a one-line note
+        (``title — message (pct%)``); ``end`` clears it. Non-WorkDone
+        progress (partial results) is ignored."""
+        if not params.is_object():
+            return
+        var val_opt = params.object_get(String("value"))
+        if not val_opt or not val_opt.value().is_object():
+            return
+        var val = val_opt.value().copy()
+        var kind_opt = val.object_get(String("kind"))
+        var kind = String("")
+        if kind_opt and kind_opt.value().is_string():
+            kind = kind_opt.value().as_str()
+        if kind == String("end"):
+            self._progress_note = String("")
+            self._has_progress_note = True
+            return
+        if kind != String("begin") and kind != String("report"):
+            return
+        var note = self._language_id
+        var title_opt = val.object_get(String("title"))
+        if title_opt and title_opt.value().is_string() \
+                and len(title_opt.value().as_str().as_bytes()) > 0:
+            note = note + String(": ") + title_opt.value().as_str()
+        var msg_opt = val.object_get(String("message"))
+        if msg_opt and msg_opt.value().is_string() \
+                and len(msg_opt.value().as_str().as_bytes()) > 0:
+            note = note + String(" — ") + msg_opt.value().as_str()
+        var pct_opt = val.object_get(String("percentage"))
+        if pct_opt and pct_opt.value().is_int():
+            note = note + String(" (") + String(pct_opt.value().as_int()) \
+                + String("%)")
+        self._progress_note = note^
+        self._has_progress_note = True
+
+    def _on_show_message(mut self, params: JsonValue):
+        """Parse ``window/showMessage`` into a parked status string."""
+        if not params.is_object():
+            return
+        var msg_opt = params.object_get(String("message"))
+        if not msg_opt or not msg_opt.value().is_string():
+            return
+        var m = msg_opt.value().as_str()
+        if len(m.as_bytes()) == 0:
+            return
+        self._server_message = self._language_id + String(": ") + m
+        self._has_server_message = True
+
+    def has_pending_progress(self) -> Bool:
+        return self._has_progress_note
+
+    def take_progress_note(mut self) -> String:
+        var out = self._progress_note^
+        self._progress_note = String("")
+        self._has_progress_note = False
+        return out^
+
+    def has_pending_server_message(self) -> Bool:
+        return self._has_server_message
+
+    def take_server_message(mut self) -> String:
+        var out = self._server_message^
+        self._server_message = String("")
+        self._has_server_message = False
+        return out^
+
     def _handle_server_request(mut self, msg: LspIncoming):
         """Reply to a server-issued request.
 
@@ -1903,14 +2871,25 @@ struct LspManager(Copyable, Movable):
                 self.client.send_response(id, json_null_v())
                 return
             if method == String("workspace/applyEdit"):
-                # We don't model server-driven edits yet. Reply with
-                # ``applied: false`` so the server's response shape
-                # matches the spec.
+                # Parse the WorkspaceEdit and park it for the host to apply
+                # project-wide next frame; reply ``applied: true``
+                # optimistically (the host opens/edits/saves the files).
+                var edits = List[CodeActionFileEdit]()
+                if msg.params and msg.params.value().is_object():
+                    var edit_opt = msg.params.value().object_get(
+                        String("edit"),
+                    )
+                    if edit_opt and edit_opt.value().is_object():
+                        edits = _parse_workspace_edit_changes(edit_opt.value())
+                var edit_count = len(edits)
+                var applied = edit_count > 0
+                self._resolved_applyedit = edits^
+                self._has_resolved_applyedit = applied
                 var resp = json_object()
-                resp.put(String("applied"), json_bool(False))
+                resp.put(String("applied"), json_bool(applied))
                 _lsp_debug_log(
                     String("← server request workspace/applyEdit id=")
-                    + id_label + String(" (refused)"),
+                    + id_label + String(" files=") + String(edit_count),
                 )
                 self.client.send_response(id, resp^)
                 return
@@ -1947,11 +2926,39 @@ struct LspManager(Copyable, Movable):
         if msg.result and msg.result.value().is_object():
             var caps_opt = msg.result.value().object_get(String("capabilities"))
             if caps_opt and caps_opt.value().is_object():
+                # Stash the whole capabilities object so ``server_supports``
+                # can gate every optional feature request off it.
+                self._capabilities = Optional[JsonValue](
+                    caps_opt.value().copy(),
+                )
                 var enc_opt = caps_opt.value().object_get(
                     String("positionEncoding"),
                 )
                 if enc_opt and enc_opt.value().is_string():
                     self._position_encoding = enc_opt.value().as_str()
+                # Semantic-tokens legend: the token-type names, indexed by
+                # the ``tokenType`` field of each decoded token.
+                var stp_opt = caps_opt.value().object_get(
+                    String("semanticTokensProvider"),
+                )
+                if stp_opt and stp_opt.value().is_object():
+                    var legend_opt = stp_opt.value().object_get(
+                        String("legend"),
+                    )
+                    if legend_opt and legend_opt.value().is_object():
+                        var tt_opt = legend_opt.value().object_get(
+                            String("tokenTypes"),
+                        )
+                        if tt_opt and tt_opt.value().is_array():
+                            var tt = tt_opt.value().copy()
+                            var types = List[String]()
+                            for ti in range(tt.array_len()):
+                                var tv = tt.array_at(ti)
+                                if tv.is_string():
+                                    types.append(tv.as_str())
+                                else:
+                                    types.append(String(""))
+                            self._sem_token_types = types^
         if self._position_encoding != String("utf-8"):
             _lsp_debug_log(
                 String("position encoding negotiated as '")
@@ -2170,6 +3177,20 @@ def _id_to_string(v: JsonValue) -> String:
         return v.as_str()
     if v.is_int():
         return String(v.as_int())
+    return String("")
+
+
+def _parse_prepare_rename_placeholder(v: JsonValue) -> String:
+    """Extract the placeholder from a ``prepareRename`` object result. The
+    response may be a bare ``Range`` (no placeholder — return empty so the
+    host seeds the prompt from the word under the cursor), a
+    ``{range, placeholder}`` pair, or ``{defaultBehavior: true}`` (no
+    placeholder)."""
+    if not v.is_object():
+        return String("")
+    var ph_opt = v.object_get(String("placeholder"))
+    if ph_opt and ph_opt.value().is_string():
+        return ph_opt.value().as_str()
     return String("")
 
 
@@ -2644,7 +3665,28 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
         var edit_opt = entry.object_get(String("edit"))
         if edit_opt and edit_opt.value().is_object():
             file_edits = _parse_workspace_edit_changes(edit_opt.value())
-        out.append(CodeAction(title, kind_str, is_preferred, file_edits^))
+        # Extract a Command, if any. ``command`` is either a string (this
+        # entry *is* a Command: title + command + arguments at top level)
+        # or an object (a CodeAction literal with a nested Command).
+        var cmd = String("")
+        var cmd_args = Optional[JsonValue]()
+        var cmd_opt = entry.object_get(String("command"))
+        if cmd_opt and cmd_opt.value().is_string():
+            cmd = cmd_opt.value().as_str()
+            var a = entry.object_get(String("arguments"))
+            if a and a.value().is_array():
+                cmd_args = Optional[JsonValue](a.value().copy())
+        elif cmd_opt and cmd_opt.value().is_object():
+            var inner = cmd_opt.value().copy()
+            var c2 = inner.object_get(String("command"))
+            if c2 and c2.value().is_string():
+                cmd = c2.value().as_str()
+            var a2 = inner.object_get(String("arguments"))
+            if a2 and a2.value().is_array():
+                cmd_args = Optional[JsonValue](a2.value().copy())
+        out.append(CodeAction(
+            title, kind_str, is_preferred, file_edits^, cmd^, cmd_args^,
+        ))
     return out^
 
 
@@ -2856,6 +3898,466 @@ def _lsp_position(line: Int, character: Int) -> JsonValue:
     pos.put(String("line"), json_int(line))
     pos.put(String("character"), json_int(character))
     return pos^
+
+
+def _formatting_options(tab_size: Int, insert_spaces: Bool) -> JsonValue:
+    """The ``FormattingOptions`` object required by the formatting
+    requests. Only the two mandatory fields are sent."""
+    var opts = json_object()
+    opts.put(String("tabSize"), json_int(tab_size))
+    opts.put(String("insertSpaces"), json_bool(insert_spaces))
+    return opts^
+
+
+def _semantic_attr_for_type(t: String) -> Attr:
+    """Map an LSP semantic token-type name to one of the editor's reserved
+    ``SYN_*`` color roles (so the active theme controls the hue). Unknown
+    types fall back to the default editor foreground."""
+    if t == String("keyword") or t == String("modifier"):
+        return Attr(SYN_KEYWORD, EDITOR_BG)
+    if t == String("string"):
+        return Attr(SYN_STRING, EDITOR_BG)
+    if t == String("number"):
+        return Attr(SYN_NUMBER, EDITOR_BG)
+    if t == String("comment"):
+        return Attr(SYN_COMMENT, EDITOR_BG)
+    if t == String("operator"):
+        return Attr(SYN_OPERATOR, EDITOR_BG)
+    if t == String("decorator") or t == String("macro"):
+        return Attr(SYN_DECORATOR, EDITOR_BG)
+    # type-like and callable-like names share the identifier role (the
+    # palette only reserves so many slots; this keeps semantic coloring
+    # consistent with the TextMate scheme).
+    if t == String("function") or t == String("method") \
+            or t == String("type") or t == String("class") \
+            or t == String("struct") or t == String("enum") \
+            or t == String("interface") or t == String("namespace") \
+            or t == String("typeParameter") or t == String("enumMember"):
+        return Attr(SYN_IDENT, EDITOR_BG)
+    return Attr(EDITOR_FG, EDITOR_BG)
+
+
+def _decode_semantic_tokens(
+    v: JsonValue, legend: List[String],
+) -> List[Highlight]:
+    """Decode a ``SemanticTokens`` result's delta-encoded ``data`` array
+    into per-row ``Highlight``s. Each token is 5 integers
+    ``(deltaLine, deltaStart, length, tokenType, tokenModifiers)`` relative
+    to the previous token; the absolute row/start are accumulated. Tokens
+    whose ``tokenType`` indexes outside the legend, or with zero length,
+    are skipped. (Multi-line tokens are uncommon for the highlighted
+    types; a token's span is treated as single-row, which is what the
+    overlay paints.)"""
+    var out = List[Highlight]()
+    if not v.is_object():
+        return out^
+    var data_opt = v.object_get(String("data"))
+    if not data_opt or not data_opt.value().is_array():
+        return out^
+    var data = data_opt.value().copy()
+    var n = data.array_len()
+    var line = 0
+    var start = 0
+    var i = 0
+    while i + 5 <= n:
+        var d_line_v = data.array_at(i)
+        var d_start_v = data.array_at(i + 1)
+        var len_v = data.array_at(i + 2)
+        var type_v = data.array_at(i + 3)
+        if not d_line_v.is_int() or not d_start_v.is_int() \
+                or not len_v.is_int() or not type_v.is_int():
+            break
+        var d_line = d_line_v.as_int()
+        var d_start = d_start_v.as_int()
+        var length = len_v.as_int()
+        var ttype = type_v.as_int()
+        if d_line == 0:
+            start = start + d_start
+        else:
+            line = line + d_line
+            start = d_start
+        i += 5
+        if length <= 0:
+            continue
+        if ttype < 0 or ttype >= len(legend):
+            continue
+        out.append(Highlight(
+            line, start, start + length,
+            _semantic_attr_for_type(legend[ttype]),
+        ))
+    return out^
+
+
+def _parse_inlay_hints(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``InlayHint[] | null`` into (row, label) carriers. ``label``
+    is either a string or an array of ``InlayHintLabelPart`` objects with
+    a ``value`` field — both are flattened to one string."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var pos_opt = e.object_get(String("position"))
+        if not pos_opt or not pos_opt.value().is_object():
+            continue
+        var ln = pos_opt.value().object_get(String("line"))
+        if not ln or not ln.value().is_int():
+            continue
+        var row = ln.value().as_int()
+        var label = String("")
+        var lab_opt = e.object_get(String("label"))
+        if lab_opt:
+            var lab = lab_opt.value().copy()
+            if lab.is_string():
+                label = lab.as_str()
+            elif lab.is_array():
+                for k in range(lab.array_len()):
+                    var part = lab.array_at(k)
+                    if part.is_object():
+                        var pv = part.object_get(String("value"))
+                        if pv and pv.value().is_string():
+                            label = label + pv.value().as_str()
+        if len(label.as_bytes()) == 0:
+            continue
+        out.append(TextEditEntry(row, 0, row, 0, label))
+    return out^
+
+
+def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``CodeLens[] | null`` into (row, title) carriers. Only lenses
+    carrying a resolved ``command.title`` are kept — unresolved lenses
+    (no command) need a ``codeLens/resolve`` round-trip we don't do here,
+    so they're skipped rather than shown blank."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var rng_opt = e.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var s_opt = rng_opt.value().object_get(String("start"))
+        if not s_opt or not s_opt.value().is_object():
+            continue
+        var ln = s_opt.value().object_get(String("line"))
+        if not ln or not ln.value().is_int():
+            continue
+        var row = ln.value().as_int()
+        var cmd_opt = e.object_get(String("command"))
+        if not cmd_opt or not cmd_opt.value().is_object():
+            continue
+        var title_opt = cmd_opt.value().object_get(String("title"))
+        if not title_opt or not title_opt.value().is_string():
+            continue
+        var title = title_opt.value().as_str()
+        if len(title.as_bytes()) == 0:
+            continue
+        out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _color_unit_to_255(v: JsonValue) -> Int:
+    """Convert an LSP color component (0..1, a JSON float stored as raw
+    text, or an int 0/1) to a 0..255 channel value."""
+    if v.is_int():
+        var n = v.as_int() * 255
+        if n < 0:
+            return 0
+        if n > 255:
+            return 255
+        return n
+    if not v.is_float():
+        return 0
+    var b = v.as_str().as_bytes()
+    var i = 0
+    if len(b) > 0 and (b[0] == 0x2D):  # leading '-': clamp to 0
+        return 0
+    if len(b) > 0 and b[0] == 0x2B:
+        i = 1
+    var intpart = 0
+    while i < len(b) and Int(b[i]) >= 0x30 and Int(b[i]) <= 0x39:
+        intpart = intpart * 10 + (Int(b[i]) - 0x30)
+        i += 1
+    var frac = Float64(0.0)
+    var scale = Float64(0.1)
+    if i < len(b) and b[i] == 0x2E:  # '.'
+        i += 1
+        while i < len(b) and Int(b[i]) >= 0x30 and Int(b[i]) <= 0x39:
+            frac += Float64(Int(b[i]) - 0x30) * scale
+            scale *= 0.1
+            i += 1
+    var val = Float64(intpart) + frac
+    var out = Int(val * 255.0 + 0.5)
+    if out < 0:
+        return 0
+    if out > 255:
+        return 255
+    return out
+
+
+def _parse_document_colors(v: JsonValue) -> List[Highlight]:
+    """Parse ``ColorInformation[] | null`` into swatch ``Highlight``s: the
+    color literal's range recolored with the literal's actual color as a
+    truecolor background (fg auto-picked for contrast)."""
+    var out = List[Highlight]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var col_opt = e.object_get(String("color"))
+        var rng_opt = e.object_get(String("range"))
+        if not col_opt or not col_opt.value().is_object():
+            continue
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var col = col_opt.value().copy()
+        var r_opt = col.object_get(String("red"))
+        var g_opt = col.object_get(String("green"))
+        var b_opt = col.object_get(String("blue"))
+        if not r_opt or not g_opt or not b_opt:
+            continue
+        var r = _color_unit_to_255(r_opt.value())
+        var g = _color_unit_to_255(g_opt.value())
+        var b = _color_unit_to_255(b_opt.value())
+        var rgb = UInt32((r << 16) | (g << 8) | b)
+        # Contrast foreground: dark text on light swatches, light on dark.
+        var lum = (r * 299 + g * 587 + b * 114) // 1000
+        var fg = BLACK if lum > 140 else WHITE
+        var rng = rng_opt.value().copy()
+        var s_opt = rng.object_get(String("start"))
+        var e2_opt = rng.object_get(String("end"))
+        if not s_opt or not e2_opt or not s_opt.value().is_object() \
+                or not e2_opt.value().is_object():
+            continue
+        var sl = s_opt.value().object_get(String("line"))
+        var sc = s_opt.value().object_get(String("character"))
+        var el = e2_opt.value().object_get(String("line"))
+        var ec = e2_opt.value().object_get(String("character"))
+        if not sl or not sc or not el or not ec \
+                or not sl.value().is_int() or not sc.value().is_int() \
+                or not el.value().is_int() or not ec.value().is_int():
+            continue
+        # Single-row swatch (color literals don't span lines).
+        out.append(Highlight(
+            sl.value().as_int(), sc.value().as_int(), ec.value().as_int(),
+            Attr(fg, EDITOR_BG).with_bg_rgb(rgb),
+        ))
+    return out^
+
+
+def _hierarchy_item_location(item: JsonValue) -> Optional[DefinitionResolved]:
+    """A CallHierarchyItem / TypeHierarchyItem → a jump location, using its
+    ``uri`` + ``selectionRange`` (falling back to ``range``).start."""
+    if not item.is_object():
+        return Optional[DefinitionResolved]()
+    var uri_opt = item.object_get(String("uri"))
+    if not uri_opt or not uri_opt.value().is_string():
+        return Optional[DefinitionResolved]()
+    var path = _uri_to_path(uri_opt.value().as_str())
+    if len(path.as_bytes()) == 0:
+        return Optional[DefinitionResolved]()
+    var rng_opt = item.object_get(String("selectionRange"))
+    if not rng_opt or not rng_opt.value().is_object():
+        rng_opt = item.object_get(String("range"))
+    if not rng_opt or not rng_opt.value().is_object():
+        return Optional[DefinitionResolved]()
+    var start_opt = rng_opt.value().object_get(String("start"))
+    if not start_opt or not start_opt.value().is_object():
+        return Optional[DefinitionResolved]()
+    var ln = start_opt.value().object_get(String("line"))
+    var ch = start_opt.value().object_get(String("character"))
+    if not ln or not ch or not ln.value().is_int() or not ch.value().is_int():
+        return Optional[DefinitionResolved]()
+    return Optional[DefinitionResolved](DefinitionResolved(
+        path, ln.value().as_int(), ch.value().as_int(),
+    ))
+
+
+def _parse_hierarchy_result(v: JsonValue) -> List[DefinitionResolved]:
+    """Parse a hierarchy follow-up result into jump locations. Handles both
+    ``CallHierarchyIncomingCall[]`` (each has a ``from`` item) and a bare
+    item array (``typeHierarchy/supertypes``)."""
+    var out = List[DefinitionResolved]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var item = e.copy()
+        var from_opt = e.object_get(String("from"))
+        if from_opt and from_opt.value().is_object():
+            item = from_opt.value().copy()
+        var loc = _hierarchy_item_location(item)
+        if loc:
+            out.append(loc.value())
+    return out^
+
+
+def _parse_selection_ranges(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``SelectionRange[] | null`` for a single requested position.
+    Walks the ``parent`` chain of the first entry, collecting ranges
+    innermost→outermost (range carriers). Bounded to 128 levels."""
+    var out = List[TextEditEntry]()
+    if not v.is_array() or v.array_len() == 0:
+        return out^
+    var cur = v.array_at(0)
+    var depth = 0
+    while cur.is_object() and depth < 128:
+        depth += 1
+        var rng_opt = cur.object_get(String("range"))
+        if rng_opt and rng_opt.value().is_object():
+            var rng = rng_opt.value().copy()
+            var s_opt = rng.object_get(String("start"))
+            var e_opt = rng.object_get(String("end"))
+            if Bool(s_opt) and Bool(e_opt) and s_opt.value().is_object() \
+                    and e_opt.value().is_object():
+                var sl = s_opt.value().object_get(String("line"))
+                var sc = s_opt.value().object_get(String("character"))
+                var el = e_opt.value().object_get(String("line"))
+                var ec = e_opt.value().object_get(String("character"))
+                if Bool(sl) and Bool(sc) and Bool(el) and Bool(ec) \
+                        and sl.value().is_int() \
+                        and sc.value().is_int() and el.value().is_int() \
+                        and ec.value().is_int():
+                    out.append(TextEditEntry(
+                        sl.value().as_int(), sc.value().as_int(),
+                        el.value().as_int(), ec.value().as_int(), String(""),
+                    ))
+        var parent_opt = cur.object_get(String("parent"))
+        if not parent_opt or not parent_opt.value().is_object():
+            break
+        cur = parent_opt.value().copy()
+    return out^
+
+
+def _parse_signature_help(v: JsonValue) -> String:
+    """Render the active signature of a ``SignatureHelp`` result to a
+    one-line status string. Returns the signature ``label`` and, when an
+    active parameter with a string ``label`` is resolvable, appends
+    ``  ▸ <param>``. Empty string for ``null`` / no signatures."""
+    if not v.is_object():
+        return String("")
+    var sigs_opt = v.object_get(String("signatures"))
+    if not sigs_opt or not sigs_opt.value().is_array():
+        return String("")
+    var sigs = sigs_opt.value().copy()
+    if sigs.array_len() == 0:
+        return String("")
+    var active = 0
+    var as_opt = v.object_get(String("activeSignature"))
+    if as_opt and as_opt.value().is_int():
+        active = as_opt.value().as_int()
+    if active < 0 or active >= sigs.array_len():
+        active = 0
+    var sig = sigs.array_at(active)
+    if not sig.is_object():
+        return String("")
+    var label_opt = sig.object_get(String("label"))
+    if not label_opt or not label_opt.value().is_string():
+        return String("")
+    var label = label_opt.value().as_str()
+    # Resolve the active parameter's string label if present.
+    var ap = -1
+    var ap_opt = v.object_get(String("activeParameter"))
+    if ap_opt and ap_opt.value().is_int():
+        ap = ap_opt.value().as_int()
+    var sap_opt = sig.object_get(String("activeParameter"))
+    if sap_opt and sap_opt.value().is_int():
+        ap = sap_opt.value().as_int()
+    var params_opt = sig.object_get(String("parameters"))
+    if ap >= 0 and params_opt and params_opt.value().is_array():
+        var params = params_opt.value().copy()
+        if ap < params.array_len():
+            var p = params.array_at(ap)
+            if p.is_object():
+                var pl_opt = p.object_get(String("label"))
+                if pl_opt and pl_opt.value().is_string():
+                    return label + String("   ▸ ") + pl_opt.value().as_str()
+    return label
+
+
+def _parse_document_highlights(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``DocumentHighlight[] | null`` into range carriers
+    (``TextEditEntry`` with empty ``new_text``). Each entry has a
+    ``range``; the optional ``kind`` (text/read/write) is ignored — we
+    paint all occurrences the same."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var rng_opt = e.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var rng = rng_opt.value().copy()
+        var s_opt = rng.object_get(String("start"))
+        var e_opt = rng.object_get(String("end"))
+        if not s_opt or not e_opt \
+                or not s_opt.value().is_object() \
+                or not e_opt.value().is_object():
+            continue
+        var sl = s_opt.value().object_get(String("line"))
+        var sc = s_opt.value().object_get(String("character"))
+        var el = e_opt.value().object_get(String("line"))
+        var ec = e_opt.value().object_get(String("character"))
+        if not sl or not sc or not el or not ec \
+                or not sl.value().is_int() or not sc.value().is_int() \
+                or not el.value().is_int() or not ec.value().is_int():
+            continue
+        out.append(TextEditEntry(
+            sl.value().as_int(), sc.value().as_int(),
+            el.value().as_int(), ec.value().as_int(), String(""),
+        ))
+    return out^
+
+
+def _parse_text_edits(v: JsonValue) -> List[TextEditEntry]:
+    """Parse a bare ``TextEdit[] | null`` (the formatting response shape)
+    into ``TextEditEntry`` rows, skipping malformed entries. Reused for any
+    request that returns a flat edit list for a single file."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for j in range(v.array_len()):
+        var te = v.array_at(j)
+        if not te.is_object():
+            continue
+        var nt_opt = te.object_get(String("newText"))
+        if not nt_opt or not nt_opt.value().is_string():
+            continue
+        var nt = nt_opt.value().as_str()
+        var rng_opt = te.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var rng = rng_opt.value().copy()
+        var s_opt = rng.object_get(String("start"))
+        var e_opt = rng.object_get(String("end"))
+        if not s_opt or not e_opt \
+                or not s_opt.value().is_object() \
+                or not e_opt.value().is_object():
+            continue
+        var sl = s_opt.value().object_get(String("line"))
+        var sc = s_opt.value().object_get(String("character"))
+        var el = e_opt.value().object_get(String("line"))
+        var ec = e_opt.value().object_get(String("character"))
+        if not sl or not sc or not el or not ec \
+                or not sl.value().is_int() or not sc.value().is_int() \
+                or not el.value().is_int() or not ec.value().is_int():
+            continue
+        out.append(TextEditEntry(
+            sl.value().as_int(), sc.value().as_int(),
+            el.value().as_int(), ec.value().as_int(), nt,
+        ))
+    return out^
 
 
 def _text_document_position_params(

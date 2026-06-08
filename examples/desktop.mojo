@@ -47,7 +47,9 @@ from turbokod import (
     Desktop, FileDialog, Menu, MenuItem, Rect,
     EDITOR_COMPARE_CLIPBOARD,
     EDITOR_COPY, EDITOR_CUT, EDITOR_FILL, EDITOR_FIND, EDITOR_FIND_NEXT,
-    EDITOR_FIND_PREV, EDITOR_GOTO,
+    EDITOR_FIND_PREV,
+    EDITOR_FORMAT_DOCUMENT, EDITOR_FORMAT_SELECTION, EDITOR_GOTO,
+    EDITOR_GOTO_DECL, EDITOR_GOTO_IMPL, EDITOR_GOTO_TYPE_DEF,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS,
     EDITOR_NEW, EDITOR_OPEN, EDITOR_OPEN_RECENT,
     EDITOR_PASTE,
@@ -107,7 +109,12 @@ def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
     edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
     edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
+    edit_items.append(MenuItem(String("Go to Type Definition"), EDITOR_GOTO_TYPE_DEF))
+    edit_items.append(MenuItem(String("Go to Implementation"),  EDITOR_GOTO_IMPL))
+    edit_items.append(MenuItem(String("Go to Declaration"),     EDITOR_GOTO_DECL))
     edit_items.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
+    edit_items.append(MenuItem(String("Format Document"),       EDITOR_FORMAT_DOCUMENT))
+    edit_items.append(MenuItem(String("Format Selection"),      EDITOR_FORMAT_SELECTION))
     edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))

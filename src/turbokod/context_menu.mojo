@@ -3,15 +3,15 @@ text in the editor's text area (i.e. not a diagnostic squiggle and not a
 breakpoint gutter dot).
 
 It offers the symbol actions that otherwise live behind Cmd+click or a
-keybinding: ``Rename Symbol``, ``Go to Definition``, ``Find References``.
-The host (Desktop) opens it in response to
-``Editor.consume_context_menu_request`` — which carries the buffer
-``(row, col)`` and identifier under the click — and acts on the chosen
-row by reading ``action`` on submit.
+keybinding: rename, the go-to family (definition / type definition /
+implementation / declaration), and find references. The host (Desktop)
+decides *which* rows to show — it builds the label/action lists at open
+time, filtered by what the language server actually advertises, so a
+server without an ``implementationProvider`` simply doesn't get that row.
 
 Modeled on ``DiagnosticMenu`` so the look and the press/release event
-protocol match exactly; this one has no async/loading state, so the row
-set is fixed.
+protocol match exactly. Unlike the diagnostic menu its rows are dynamic,
+supplied per-open rather than hardcoded.
 """
 
 from std.collections.list import List
@@ -36,33 +36,20 @@ def _row_y(rect: Rect) -> Int:
     return cursor.place()
 
 
-comptime CTX_MENU_ACTION_NONE       = 0
-comptime CTX_MENU_ACTION_RENAME     = 1
-comptime CTX_MENU_ACTION_DEFINITION = 2
-comptime CTX_MENU_ACTION_REFERENCES = 3
-
-
-comptime _LABEL_RENAME     = String("Rename Symbol…")
-comptime _LABEL_DEFINITION = String("Go to Definition")
-comptime _LABEL_REFERENCES = String("Find References")
-
-
-# Three fixed rows; index ↔ action is ``row + 1`` (row 0 → Rename,
-# 1 → Definition, 2 → References), matching the ``CTX_MENU_ACTION_*``
-# values above.
-comptime _CTX_ROW_COUNT = 3
-
-
-def _ctx_label(row: Int) -> String:
-    if row == 0:
-        return _LABEL_RENAME
-    if row == 1:
-        return _LABEL_DEFINITION
-    return _LABEL_REFERENCES
+comptime CTX_MENU_ACTION_NONE            = 0
+comptime CTX_MENU_ACTION_RENAME          = 1
+comptime CTX_MENU_ACTION_DEFINITION      = 2
+comptime CTX_MENU_ACTION_REFERENCES      = 3
+comptime CTX_MENU_ACTION_TYPE_DEFINITION = 4
+comptime CTX_MENU_ACTION_IMPLEMENTATION  = 5
+comptime CTX_MENU_ACTION_DECLARATION     = 6
+comptime CTX_MENU_ACTION_CALLERS         = 7
+comptime CTX_MENU_ACTION_SUPERTYPES      = 8
 
 
 struct EditorContextMenu(Movable):
-    """Modal-ish popup of symbol actions anchored at a right-click."""
+    """Modal-ish popup of symbol actions anchored at a right-click. Rows
+    are supplied per-open by the host."""
 
     var active: Bool
     var submitted: Bool
@@ -76,6 +63,9 @@ struct EditorContextMenu(Movable):
     prior tracked press is ignored so the right-click that opened the
     menu can't auto-trigger a row."""
 
+    var labels: List[String]
+    var actions: List[Int]
+
     def __init__(out self):
         self.active = False
         self.submitted = False
@@ -84,8 +74,13 @@ struct EditorContextMenu(Movable):
         self.anchor_y = 0
         self.selected = 0
         self.tracking = False
+        self.labels = List[String]()
+        self.actions = List[Int]()
 
-    def open(mut self, anchor: Point):
+    def open(
+        mut self, anchor: Point,
+        var labels: List[String], var actions: List[Int],
+    ):
         self.anchor_x = anchor.x
         self.anchor_y = anchor.y
         self.active = True
@@ -93,18 +88,24 @@ struct EditorContextMenu(Movable):
         self.action = CTX_MENU_ACTION_NONE
         self.selected = 0
         self.tracking = False
+        self.labels = labels^
+        self.actions = actions^
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.action = CTX_MENU_ACTION_NONE
         self.tracking = False
+        self.labels = List[String]()
+        self.actions = List[Int]()
 
     def _row_count(self) -> Int:
-        return _CTX_ROW_COUNT
+        return len(self.labels)
 
     def _step(mut self, delta: Int):
         var n = self._row_count()
+        if n == 0:
+            return
         var i = self.selected + delta
         if i < 0:
             i = n - 1
@@ -120,17 +121,14 @@ struct EditorContextMenu(Movable):
         var row = self.selected
         if row < 0 or row >= self._row_count():
             return
-        # Row 0 → Rename (1), 1 → Definition (2), 2 → References (3).
-        self._resolve(row + 1)
+        self._resolve(self.actions[row])
 
     def _label_width(self) -> Int:
-        var w = display_columns(_LABEL_RENAME)
-        var d = display_columns(_LABEL_DEFINITION)
-        if d > w:
-            w = d
-        var r = display_columns(_LABEL_REFERENCES)
-        if r > w:
-            w = r
+        var w = 0
+        for i in range(len(self.labels)):
+            var lw = display_columns(self.labels[i])
+            if lw > w:
+                w = lw
         return w
 
     def _rect(self, container_bounds: Rect) -> Rect:
@@ -141,7 +139,7 @@ struct EditorContextMenu(Movable):
         )
 
     def paint(self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
+        if not self.active or self._row_count() == 0:
             return
         var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -159,7 +157,7 @@ struct EditorContextMenu(Movable):
                     String(" "), row_attr,
                 )
             _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, y), _ctx_label(row), row_attr,
+                canvas, Point(rect.a.x + 2, y), self.labels[row], row_attr,
             )
 
     def handle_key(mut self, event: Event) -> Bool:
