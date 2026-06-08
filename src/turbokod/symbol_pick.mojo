@@ -159,11 +159,8 @@ struct SymbolPick(Movable):
     # --- geometry ---------------------------------------------------------
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = 70
-        var height = 20
-        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
-        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        return center_in(container_bounds, width, height)
+        # center_in caps to a 4-cell margin, so no manual clamp is needed.
+        return center_in(container_bounds, 70, 20)
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         """True iff ``pos`` lies on the ``Find:`` query row."""

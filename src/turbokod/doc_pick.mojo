@@ -147,11 +147,8 @@ struct DocPick(Movable):
     # --- geometry ---------------------------------------------------------
 
     def _rect(self, container_bounds: Rect) -> Rect:
-        var width = 80
-        var height = 22
-        if width > container_bounds.b.x - 4: width = container_bounds.b.x - 4
-        if height > container_bounds.b.y - 4: height = container_bounds.b.y - 4
-        return center_in(container_bounds, width, height)
+        # center_in caps to a 4-cell margin, so no manual clamp is needed.
+        return center_in(container_bounds, 80, 22)
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
         if not self.active:
