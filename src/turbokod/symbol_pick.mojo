@@ -27,7 +27,7 @@ from .picker_input import (
     build_picker_layout, picker_nav_key, picker_wheel_scroll,
     scroll_to_reveal,
 )
-from .quick_open import quick_open_match
+from .quick_open import filter_indices_by_query
 from .string_utils import display_columns
 from .text_field import TextField
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
@@ -131,28 +131,10 @@ struct SymbolPick(Movable):
     # --- filtering --------------------------------------------------------
 
     def _refilter(mut self):
-        self.matched = List[Int]()
-        if len(self.query.text.as_bytes()) == 0:
-            for i in range(len(self.entries)):
-                self.matched.append(i)
-        else:
-            # Match against the precomputed ``container.name`` haystacks so
-            # users can type a parent-class prefix to narrow nested methods.
-            # Fall back to computing inline if the cache is somehow out of
-            # sync with ``entries`` (it shouldn't be — ``set_entries`` builds
-            # both together).
-            var cached = len(self._haystacks) == len(self.entries)
-            for i in range(len(self.entries)):
-                var hay: String
-                if cached:
-                    hay = self._haystacks[i]
-                elif len(self.entries[i].container.as_bytes()) > 0:
-                    hay = self.entries[i].container + String(".") \
-                        + self.entries[i].name
-                else:
-                    hay = self.entries[i].name
-                if quick_open_match(hay, self.query.text):
-                    self.matched.append(i)
+        # Match against the precomputed ``container.name`` haystacks
+        # (parallel to ``entries``, built in ``set_entries``) so users can
+        # type a parent-class prefix to narrow nested methods.
+        self.matched = filter_indices_by_query(self._haystacks, self.query.text)
         self.selected = 0
         self.scroll = 0
 

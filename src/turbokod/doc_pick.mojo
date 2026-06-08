@@ -26,7 +26,7 @@ from .picker_input import (
     build_picker_layout, picker_nav_key, picker_wheel_scroll,
     scroll_to_reveal,
 )
-from .quick_open import quick_open_match
+from .quick_open import filter_indices_by_query
 from .string_utils import display_columns
 from .text_field import TextField
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
@@ -119,28 +119,11 @@ struct DocPick(Movable):
     # --- filtering --------------------------------------------------------
 
     def _refilter(mut self):
-        self.matched = List[Int]()
-        if len(self.query.text.as_bytes()) == 0:
-            for i in range(len(self.entries)):
-                self.matched.append(i)
-        else:
-            # Match against the precomputed ``type.name`` haystacks so the
-            # user can type a section prefix (e.g. ``stdt`` for ``str.find``
-            # under "Standard Types") to narrow nested entries. Fall back to
-            # computing inline if the cache is somehow out of sync with
-            # ``entries`` (it shouldn't be — ``open`` builds both together).
-            var cached = len(self._haystacks) == len(self.entries)
-            for i in range(len(self.entries)):
-                var hay: String
-                if cached:
-                    hay = self._haystacks[i]
-                elif len(self.entries[i].type_name.as_bytes()) > 0:
-                    hay = self.entries[i].type_name + String(".") \
-                        + self.entries[i].name
-                else:
-                    hay = self.entries[i].name
-                if quick_open_match(hay, self.query.text):
-                    self.matched.append(i)
+        # Match against the precomputed ``type.name`` haystacks (parallel to
+        # ``entries``, built in ``open``) so the user can type a section
+        # prefix (e.g. ``stdt`` for ``str.find`` under "Standard Types") to
+        # narrow nested entries.
+        self.matched = filter_indices_by_query(self._haystacks, self.query.text)
         self.selected = 0
         self.scroll = 0
 

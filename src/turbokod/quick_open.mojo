@@ -680,6 +680,25 @@ def quick_open_match(path: String, query: String) -> Bool:
     return True
 
 
+def filter_indices_by_query(
+    haystacks: List[String], query: String,
+) -> List[Int]:
+    """Indices into ``haystacks`` that match ``query`` under
+    ``quick_open_match`` rules — all indices when the query is empty. The
+    symbol / docs pickers precompute their ``container.name`` /
+    ``type.name`` haystacks (parallel to their entry lists) in ``open`` /
+    ``set_entries`` and filter through this on every keystroke."""
+    var out = List[Int]()
+    if len(query.as_bytes()) == 0:
+        for i in range(len(haystacks)):
+            out.append(i)
+    else:
+        for i in range(len(haystacks)):
+            if quick_open_match(haystacks[i], query):
+                out.append(i)
+    return out^
+
+
 def _split_query_to_parts(q: String) -> List[String]:
     """Split ``q`` on spaces, then split each token around every ``/``,
     keeping ``/`` as its own one-byte part. Empty parts are dropped.
