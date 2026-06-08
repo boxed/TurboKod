@@ -20,8 +20,7 @@ include_ignored_files=True)``.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
+from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
@@ -36,7 +35,7 @@ from .picker_input import (
 )
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .text_field import TextField
-from .window import close_button_clicked, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -485,10 +484,7 @@ struct QuickOpen(Movable):
         var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
         var rect = self._rect(container_bounds)
         var layout = build_picker_layout(rect, _LABEL_W)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), bg)
-        painter.draw_box(canvas, rect, bg, False)
+        var painter = paint_modal_frame(canvas, rect, bg)
         # Dynamic title — base label + a parenthetical status while the
         # async indexer is still running, or a one-shot "truncated"
         # marker after we hit ``QUICK_OPEN_FILE_CAP`` so the user knows
@@ -501,10 +497,6 @@ struct QuickOpen(Movable):
             painted_title = self.title + String("(truncated at ") \
                 + String(QUICK_OPEN_FILE_CAP) + String(" files) ")
         paint_window_title(canvas, rect, painted_title, bg, bg)
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         # Search line: ``Find: <query>_``
         _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
         self._input_rect = layout.input_rect

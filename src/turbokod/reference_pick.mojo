@@ -11,8 +11,7 @@ picker doesn't have to model a loading state or a "no results" view.
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
+from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
@@ -27,7 +26,7 @@ from .picker_input import (
     picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
 )
 from .string_utils import display_columns, starts_with
-from .window import close_button_clicked, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
 
 struct ReferencePick(Movable):
@@ -133,19 +132,12 @@ struct ReferencePick(Movable):
         var meta_attr   = Attr(BLUE,   LIGHT_GRAY)
         var sel_meta    = Attr(BLUE,   YELLOW)
         var rect = self._rect(container_bounds)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), bg)
-        painter.draw_box(canvas, rect, bg, False)
+        var painter = paint_modal_frame(canvas, rect, bg)
         var title = String(" References")
         if len(self.word.as_bytes()) > 0:
             title = title + String(": ") + self.word
         title = title + String(" ")
         paint_window_title(canvas, rect, title^, bg, bg)
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         self._revealed_height = h

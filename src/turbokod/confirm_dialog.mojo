@@ -17,8 +17,7 @@ from .buttons import (
     BUTTON_FIRED, BUTTON_NONE,
     ShadowButton, paint_shadow_button,
 )
-from .canvas import Canvas, paint_drop_shadow, wrap_to_width
-from .painter import Painter
+from .canvas import Canvas, wrap_to_width
 from .colors import (
     Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE,
 )
@@ -27,9 +26,9 @@ from .events import (
     KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB,
     MOUSE_BUTTON_LEFT,
 )
-from .geometry import Point, Rect, center_in
+from .geometry import Rect, center_in
 from .view import centered_row_start, FocusGroup
-from .window import close_button_clicked, paint_close_button
+from .window import close_button_clicked, paint_modal_frame
 
 
 comptime _SLOT_YES = 0
@@ -129,14 +128,7 @@ struct ConfirmDialog(Movable):
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var rect = self._layout(container_bounds)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter.draw_box(canvas, rect, attr, False)
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / Cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
+        _ = paint_modal_frame(canvas, rect, attr)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         # Reserve the bottom-most three rows for the button row + its

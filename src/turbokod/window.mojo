@@ -12,7 +12,7 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 
 from std.collections.list import List
 
-from .canvas import Canvas, popup_size_for_text
+from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
 from .painter import Painter, paint_tooltip_popup
 from .cell import Cell
 from .colors import Attr, BLACK, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY, LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW
@@ -152,6 +152,22 @@ def paint_close_button(mut canvas: Canvas, top_left: Point, border: Attr):
     canvas.set(
         top_left.x + 3, top_left.y, Cell(String("]"), border, 1),
     )
+
+
+def paint_modal_frame(mut canvas: Canvas, rect: Rect, attr: Attr) -> Painter:
+    """Standard modal/dialog chrome: a drop shadow, a filled bordered box,
+    and the top-left close button. Returns the Painter bound to ``rect`` so
+    the caller can layer its title / body / list on top. Shared by the
+    prompt, confirm dialog, and the LSP/quick pickers.
+
+    (``fill_dialog`` intentionally keeps its own ``draw_box_inner`` frame —
+    it wants the border-clipped sub-painter — so it doesn't use this.)"""
+    paint_drop_shadow(canvas, rect)
+    var painter = Painter(rect)
+    painter.fill(canvas, rect, String(" "), attr)
+    painter.draw_box(canvas, rect, attr, False)
+    paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
+    return painter^
 
 
 def hit_close_button(top_left: Point, p: Point) -> Bool:

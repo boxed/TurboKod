@@ -29,7 +29,7 @@ from .buttons import (
     BUTTON_FIRED, OptionToggle, ShadowButton,
     paint_option_toggle, paint_shadow_button,
 )
-from .canvas import Canvas, paint_drop_shadow, utf8_codepoint_count, wrap_to_width
+from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE, YELLOW
@@ -41,7 +41,7 @@ from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
 from .view import FocusGroup
-from .window import close_button_clicked, paint_close_button
+from .window import close_button_clicked, paint_modal_frame
 
 
 # Stable slot indices for the two-field Replace dialog. Single-field
@@ -347,14 +347,7 @@ struct Prompt(Movable):
             return
         var attr = Attr(BLACK, LIGHT_GRAY)
         var rect = self._layout(container_bounds)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter.draw_box(canvas, rect, attr, False)
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
+        var painter = paint_modal_frame(canvas, rect, attr)
         var content_x = rect.a.x + 2
         var clip_x = rect.b.x - 1
         var text_w = rect.width() - 4

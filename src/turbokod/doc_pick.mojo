@@ -12,8 +12,7 @@ the same fuzzy-with-word-boundary feel as Quick Open / Go to Symbol.
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
+from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .doc_store import DocEntry
@@ -30,7 +29,7 @@ from .picker_input import (
 from .quick_open import quick_open_match
 from .string_utils import display_columns
 from .text_field import TextField
-from .window import close_button_clicked, paint_close_button, paint_window_title
+from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -172,18 +171,11 @@ struct DocPick(Movable):
         var sel_type    = Attr(BLUE,   YELLOW)
         var rect = self._rect(container_bounds)
         var layout = build_picker_layout(rect, _LABEL_W)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), bg)
-        painter.draw_box(canvas, rect, bg, False)
+        var painter = paint_modal_frame(canvas, rect, bg)
         paint_window_title(
             canvas, rect, String(" Docs: ") + self.display + String(" "),
             bg, bg,
         )
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), bg)
         # Search line.
         _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
         self._input_rect = layout.input_rect
