@@ -580,6 +580,11 @@ struct LspManager(Copyable, Movable):
     var _ontype_path: String
     var _resolved_ontype_edits: List[TextEditEntry]
     var _has_resolved_ontype: Bool
+    # ``textDocument/moniker`` — cross-repo symbol identity (scheme +
+    # identifier). Rendered as a one-line status string; parked here.
+    var _inflight_moniker_id: String
+    var _moniker_note: String
+    var _has_moniker: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -822,6 +827,9 @@ struct LspManager(Copyable, Movable):
         self._ontype_path = String("")
         self._resolved_ontype_edits = List[TextEditEntry]()
         self._has_resolved_ontype = False
+        self._inflight_moniker_id = String("")
+        self._moniker_note = String("")
+        self._has_moniker = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -978,6 +986,9 @@ struct LspManager(Copyable, Movable):
         self._ontype_path = String("")
         self._resolved_ontype_edits = List[TextEditEntry]()
         self._has_resolved_ontype = False
+        self._inflight_moniker_id = String("")
+        self._moniker_note = String("")
+        self._has_moniker = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2516,6 +2527,36 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_ontype = False
         return out^
 
+    def request_moniker(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/moniker`` for the symbol at ``(line,
+        character)``. The parsed ``scheme:identifier`` list is parked as a
+        status string."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_moniker_id = self.client.send_request(
+                String("textDocument/moniker"), params,
+            )
+        except:
+            self._inflight_moniker_id = String("")
+            return False
+        self._moniker_note = String("")
+        self._has_moniker = False
+        return True
+
+    def has_moniker(self) -> Bool:
+        return self._has_moniker
+
+    def take_moniker(mut self) -> String:
+        var out = self._moniker_note^
+        self._moniker_note = String("")
+        self._has_moniker = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3281,6 +3322,14 @@ struct LspManager(Copyable, Movable):
                 self._resolved_ontype_edits = ot_edits^
                 self._has_resolved_ontype = True
                 self._inflight_ontype_id = String("")
+                continue
+            if id == self._inflight_moniker_id:
+                var mnote = String("")
+                if msg.result:
+                    mnote = _parse_monikers(msg.result.value())
+                self._moniker_note = mnote^
+                self._has_moniker = True
+                self._inflight_moniker_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5396,6 +5445,33 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_monikers(v: JsonValue) -> String:
+    """Join a ``Moniker[] | null`` result into a ``scheme:identifier``
+    status string (comma-separated), or empty when none."""
+    if not v.is_array():
+        return String("")
+    var out = String("")
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var id_opt = e.object_get(String("identifier"))
+        if not id_opt or not id_opt.value().is_string():
+            continue
+        var ident = id_opt.value().as_str()
+        var scheme = String("")
+        var sc_opt = e.object_get(String("scheme"))
+        if sc_opt and sc_opt.value().is_string():
+            scheme = sc_opt.value().as_str()
+        var entry = (scheme + String(":") + ident) if len(
+            scheme.as_bytes()
+        ) > 0 else ident
+        if len(out.as_bytes()) > 0:
+            out = out + String(", ")
+        out = out + entry
     return out^
 
 

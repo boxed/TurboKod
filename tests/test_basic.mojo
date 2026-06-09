@@ -165,7 +165,7 @@ from turbokod.lsp_dispatch import (
     _parse_code_lens, _collect_unresolved_lenses, _codelens_title_of,
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
-    _parse_hierarchy_result,
+    _parse_hierarchy_result, _parse_monikers,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10389,6 +10389,16 @@ def test_lsp_on_type_trigger_chars() raises:
     assert_equal(mgr.on_type_trigger_chars(), String("};\n"))
 
 
+def test_lsp_parse_monikers() raises:
+    """Moniker[] joins into a scheme:identifier status string."""
+    var v = parse_json(String(
+        "[{\"scheme\":\"tsc\",\"identifier\":\"lib/foo\",\"unique\":\"scheme\"},"
+        + "{\"identifier\":\"bare\"}]"
+    ))
+    assert_equal(_parse_monikers(v), String("tsc:lib/foo, bare"))
+    assert_equal(_parse_monikers(parse_json(String("null"))), String(""))
+
+
 def test_lsp_parse_document_links() raises:
     """DocumentLink[] with inline targets become range carriers
     (new_text = target); targetless links are skipped."""
@@ -19108,6 +19118,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_document_links()
     test_lsp_semantic_tokens_delta()
     test_lsp_on_type_trigger_chars()
+    test_lsp_parse_monikers()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

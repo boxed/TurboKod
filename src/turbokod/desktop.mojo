@@ -74,7 +74,8 @@ from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
     CTX_MENU_ACTION_DECLARATION,
     CTX_MENU_ACTION_DEFINITION,
-    CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_REFERENCES,
+    CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_MONIKER,
+    CTX_MENU_ACTION_REFERENCES,
     CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUBTYPES,
     CTX_MENU_ACTION_SUPERTYPES,
     CTX_MENU_ACTION_TYPE_DEFINITION,
@@ -6596,6 +6597,18 @@ struct Desktop(Movable):
                 var dlw = self._find_window_for_path(dlp)
                 if dlw >= 0 and self.windows.windows[dlw].is_editor:
                     self.windows.windows[dlw].editor.set_document_links(dls^)
+            # moniker → status-bar string (cross-repo symbol identity).
+            if self.lsp_managers[i].has_moniker():
+                var mn = self.lsp_managers[i].take_moniker()
+                if len(mn.as_bytes()) > 0:
+                    self.status_bar.set_message(
+                        String("Moniker: ") + mn, Attr(BLACK, LIGHT_GRAY),
+                    )
+                else:
+                    self.status_bar.set_message(
+                        String("No moniker for symbol"),
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -11315,6 +11328,11 @@ struct Desktop(Movable):
             actions.append(CTX_MENU_ACTION_SUPERTYPES)
             labels.append(String("Find Subtypes"))
             actions.append(CTX_MENU_ACTION_SUBTYPES)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("monikerProvider"),
+        ):
+            labels.append(String("Show Moniker"))
+            actions.append(CTX_MENU_ACTION_MONIKER)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11400,6 +11418,18 @@ struct Desktop(Movable):
                 _ = self.lsp_managers[lsp_idx].request_type_hierarchy_subtypes(
                     path, row, col, word^, text^,
                 )
+            return
+        if act == CTX_MENU_ACTION_MONIKER:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                return
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            _ = self.lsp_managers[lsp_idx].request_moniker(
+                path, row, col, text^,
+            )
 
     def _dispatch_navigation(
         mut self, method: String, win_idx: Int, row: Int, col: Int,
