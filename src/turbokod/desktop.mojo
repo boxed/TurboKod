@@ -71,10 +71,12 @@ from .diagnostic_menu import (
     DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
 )
 from .context_menu import (
-    CTX_MENU_ACTION_CALLERS, CTX_MENU_ACTION_DECLARATION,
+    CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
+    CTX_MENU_ACTION_DECLARATION,
     CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_REFERENCES,
-    CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUPERTYPES,
+    CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUBTYPES,
+    CTX_MENU_ACTION_SUPERTYPES,
     CTX_MENU_ACTION_TYPE_DEFINITION,
     EditorContextMenu,
 )
@@ -11202,11 +11204,15 @@ struct Desktop(Movable):
         ):
             labels.append(String("Find Callers"))
             actions.append(CTX_MENU_ACTION_CALLERS)
+            labels.append(String("Find Callees"))
+            actions.append(CTX_MENU_ACTION_CALLEES)
         if li >= 0 and self.lsp_managers[li].server_supports(
             String("typeHierarchyProvider"),
         ):
             labels.append(String("Find Supertypes"))
             actions.append(CTX_MENU_ACTION_SUPERTYPES)
+            labels.append(String("Find Subtypes"))
+            actions.append(CTX_MENU_ACTION_SUBTYPES)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11266,7 +11272,9 @@ struct Desktop(Movable):
                 path, row, col, word^, text^,
             )
             return
-        if act == CTX_MENU_ACTION_CALLERS or act == CTX_MENU_ACTION_SUPERTYPES:
+        if act == CTX_MENU_ACTION_CALLERS or act == CTX_MENU_ACTION_SUPERTYPES \
+                or act == CTX_MENU_ACTION_CALLEES \
+                or act == CTX_MENU_ACTION_SUBTYPES:
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
@@ -11278,8 +11286,16 @@ struct Desktop(Movable):
                 _ = self.lsp_managers[lsp_idx].request_call_hierarchy(
                     path, row, col, word^, text^,
                 )
-            else:
+            elif act == CTX_MENU_ACTION_CALLEES:
+                _ = self.lsp_managers[lsp_idx].request_call_hierarchy_outgoing(
+                    path, row, col, word^, text^,
+                )
+            elif act == CTX_MENU_ACTION_SUPERTYPES:
                 _ = self.lsp_managers[lsp_idx].request_type_hierarchy(
+                    path, row, col, word^, text^,
+                )
+            else:
+                _ = self.lsp_managers[lsp_idx].request_type_hierarchy_subtypes(
                     path, row, col, word^, text^,
                 )
 

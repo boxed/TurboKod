@@ -45,6 +45,8 @@ comptime CTX_MENU_ACTION_IMPLEMENTATION  = 5
 comptime CTX_MENU_ACTION_DECLARATION     = 6
 comptime CTX_MENU_ACTION_CALLERS         = 7
 comptime CTX_MENU_ACTION_SUPERTYPES      = 8
+comptime CTX_MENU_ACTION_CALLEES         = 9
+comptime CTX_MENU_ACTION_SUBTYPES        = 10
 
 
 struct EditorContextMenu(Movable):

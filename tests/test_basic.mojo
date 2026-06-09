@@ -9951,6 +9951,17 @@ def test_lsp_parse_hierarchy_result() raises:
     assert_equal(len(s), 1)
     assert_equal(s[0].path, String("/b.py"))
     assert_equal(s[0].line, 2)
+    # outgoingCalls shape (each entry wraps a ``to`` item).
+    var outg = parse_json(String(
+        "[{\"to\":{\"name\":\"callee\",\"uri\":\"file:///c.py\","
+        + "\"selectionRange\":{\"start\":{\"line\":3,\"character\":2},"
+        + "\"end\":{\"line\":3,\"character\":8}}},\"fromRanges\":[]}]"
+    ))
+    var o = _parse_hierarchy_result(outg)
+    assert_equal(len(o), 1)
+    assert_equal(o[0].path, String("/c.py"))
+    assert_equal(o[0].line, 3)
+    assert_equal(o[0].character, 2)
     assert_equal(len(_parse_hierarchy_result(parse_json(String("null")))), 0)
 
 

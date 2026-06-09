@@ -2630,6 +2630,31 @@ struct LspManager(Copyable, Movable):
             path, line, character, word^, text^,
         )
 
+    def request_call_hierarchy_outgoing(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Begin a "find callees" flow: ``prepareCallHierarchy`` →
+        ``callHierarchy/outgoingCalls`` (the functions this symbol calls).
+        Mirror of ``request_call_hierarchy`` with the opposite direction."""
+        return self._begin_hierarchy(
+            String("textDocument/prepareCallHierarchy"),
+            String("callHierarchy/outgoingCalls"),
+            path, line, character, word^, text^,
+        )
+
+    def request_type_hierarchy_subtypes(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String,
+    ) -> Bool:
+        """Begin a "find subtypes" flow: ``prepareTypeHierarchy`` →
+        ``typeHierarchy/subtypes`` (the types deriving from this one)."""
+        return self._begin_hierarchy(
+            String("textDocument/prepareTypeHierarchy"),
+            String("typeHierarchy/subtypes"),
+            path, line, character, word^, text^,
+        )
+
     def _begin_hierarchy(
         mut self, prepare_method: String, followup_method: String,
         path: String, line: Int, character: Int,
@@ -5146,9 +5171,10 @@ def _hierarchy_item_location(item: JsonValue) -> Optional[DefinitionResolved]:
 
 
 def _parse_hierarchy_result(v: JsonValue) -> List[DefinitionResolved]:
-    """Parse a hierarchy follow-up result into jump locations. Handles both
-    ``CallHierarchyIncomingCall[]`` (each has a ``from`` item) and a bare
-    item array (``typeHierarchy/supertypes``)."""
+    """Parse a hierarchy follow-up result into jump locations. Handles
+    ``CallHierarchyIncomingCall[]`` (each wraps a ``from`` item),
+    ``CallHierarchyOutgoingCall[]`` (each wraps a ``to`` item), and a bare
+    item array (``typeHierarchy/supertypes`` / ``subtypes``)."""
     var out = List[DefinitionResolved]()
     if not v.is_array():
         return out^
@@ -5160,6 +5186,10 @@ def _parse_hierarchy_result(v: JsonValue) -> List[DefinitionResolved]:
         var from_opt = e.object_get(String("from"))
         if from_opt and from_opt.value().is_object():
             item = from_opt.value().copy()
+        else:
+            var to_opt = e.object_get(String("to"))
+            if to_opt and to_opt.value().is_object():
+                item = to_opt.value().copy()
         var loc = _hierarchy_item_location(item)
         if loc:
             out.append(loc.value())
