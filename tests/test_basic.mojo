@@ -10186,10 +10186,18 @@ def test_lsp_dynamic_capability_registration() raises:
         String("textDocument/foldingRange"), json_object(),
     )
     assert_true(mgr.server_supports(String("foldingRangeProvider")))
-    # Register a notification-only method (no provider field) → no-op.
+    # Register a notification-only method (no provider field): no
+    # capability key, but it flips the watched-files interest flag so the
+    # host's on-save hook starts pushing didChangeWatchedFiles.
+    assert_true(not mgr._watches_files)
     mgr._apply_capability_registration(
         String("workspace/didChangeWatchedFiles"), json_object(),
     )
+    assert_true(mgr._watches_files)
+    mgr._remove_capability_registration(
+        String("workspace/didChangeWatchedFiles"),
+    )
+    assert_true(not mgr._watches_files)
     # A dynamic semanticTokens registration carries the legend.
     var sem_opts = parse_json(String(
         "{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"function\"]}}"

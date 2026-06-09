@@ -1005,6 +1005,14 @@ def lsp_initialize_params(
     # so omitting the responder makes TOML buffers appear to analyze
     # forever.
     workspace_caps.put(String("configuration"), json_bool(True))
+    # Advertise workspace/didChangeWatchedFiles with dynamicRegistration so
+    # servers know they can register file watchers and expect on-disk
+    # change events from us (we push them on save via
+    # ``notify_watched_changed``). rust-analyzer keys re-indexing of
+    # non-open files — Cargo.toml, generated modules — off this.
+    var watched_caps = json_object()
+    watched_caps.put(String("dynamicRegistration"), json_bool(True))
+    workspace_caps.put(String("didChangeWatchedFiles"), watched_caps^)
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
     # The editor reasons in byte offsets; with UTF-8 negotiated, LSP

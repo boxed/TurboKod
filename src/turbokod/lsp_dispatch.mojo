@@ -469,6 +469,12 @@ struct LspManager(Copyable, Movable):
     # queried via ``server_supports`` so feature requests only fire when
     # the server advertises them. Empty until initialize lands.
     var _capabilities: Optional[JsonValue]
+    # True once the server has registered (via ``client/registerCapability``)
+    # or statically advertised a ``workspace/didChangeWatchedFiles`` watcher.
+    # We don't model the registered glob patterns — this just gates the
+    # notification so we never push watched-file events to a server that
+    # never asked for them (most ask dynamically, post-initialize).
+    var _watches_files: Bool
     # Generic "navigate to a location" request (typeDefinition /
     # implementation / declaration). Parked target + origin word, kept
     # separate from the definition slot so it never triggers the
@@ -685,6 +691,7 @@ struct LspManager(Copyable, Movable):
         self._def_origin_char = 0
         self._def_origin_word = String("")
         self._capabilities = Optional[JsonValue]()
+        self._watches_files = False
         self._inflight_nav_id = String("")
         self._nav_word = String("")
         self._resolved_nav = Optional[DefinitionResolved]()
@@ -808,6 +815,7 @@ struct LspManager(Copyable, Movable):
         self._def_origin_char = 0
         self._def_origin_word = String("")
         self._capabilities = Optional[JsonValue]()
+        self._watches_files = False
         self._inflight_nav_id = String("")
         self._nav_word = String("")
         self._resolved_nav = Optional[DefinitionResolved]()
@@ -1233,6 +1241,32 @@ struct LspManager(Copyable, Movable):
             )
         except e:
             print("lsp: didClose", path, ":", String(e))
+
+    def notify_watched_changed(mut self, path: String, change_type: Int):
+        """Send ``workspace/didChangeWatchedFiles`` for one on-disk change
+        (``change_type``: 1=created, 2=changed, 3=deleted), but only when
+        ready and the server actually registered a watcher. Lets servers
+        re-index files that changed outside an open buffer — e.g.
+        rust-analyzer reacting to a saved ``Cargo.toml`` or a sibling
+        module the buffer imports. We don't model the registered glob
+        patterns, so a watcher may receive events for paths outside its
+        set; that's spec-legal (servers ignore paths they don't track)
+        and far cheaper than mirroring the matcher."""
+        if self.state != _STATE_READY or not self._watches_files:
+            return
+        var params = json_object()
+        var changes = json_array()
+        var change = json_object()
+        change.put(String("uri"), json_str(_path_to_uri(path)))
+        change.put(String("type"), json_int(change_type))
+        changes.append(change^)
+        params.put(String("changes"), changes^)
+        try:
+            self.client.send_notification(
+                String("workspace/didChangeWatchedFiles"), params,
+            )
+        except e:
+            print("lsp: didChangeWatchedFiles", path, ":", String(e))
 
     def request_definition(
         mut self, path: String, line: Int, character: Int,
@@ -3046,6 +3080,11 @@ struct LspManager(Copyable, Movable):
         legend, formatting trigger chars, …) survive, else a bare
         ``true``. Methods with no ``capabilities`` field (e.g.
         ``workspace/didChangeWatchedFiles``) map to "" and are skipped."""
+        if method == String("workspace/didChangeWatchedFiles"):
+            # No ``capabilities`` field — record interest so the host's
+            # on-save hook starts pushing watched-file events to us.
+            self._watches_files = True
+            return
         var key = _capability_key_for_method(method)
         if len(key.as_bytes()) == 0:
             return
@@ -3067,6 +3106,9 @@ struct LspManager(Copyable, Movable):
         writing ``false`` for the mapped key — ``server_supports`` treats
         ``false`` as unsupported, and the object has no key-removal
         primitive."""
+        if method == String("workspace/didChangeWatchedFiles"):
+            self._watches_files = False
+            return
         var key = _capability_key_for_method(method)
         if len(key.as_bytes()) == 0 or not self._capabilities:
             return

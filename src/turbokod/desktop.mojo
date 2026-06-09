@@ -9390,6 +9390,14 @@ struct Desktop(Movable):
             if li >= 0:
                 var snap = self.windows.windows[idx].editor.text_snapshot()
                 self.lsp_managers[li].notify_saved(saved_path, snap^)
+            # Tell *every* running server that watches files about the
+            # on-disk change (type 2 = Changed). This reaches servers other
+            # than the saved file's own — e.g. a build/config file a
+            # different-language server watches — and the same server for
+            # files it tracks but doesn't have open. notify_watched_changed
+            # is a no-op for servers that never registered a watcher.
+            for wi in range(len(self.lsp_managers)):
+                self.lsp_managers[wi].notify_watched_changed(saved_path, 2)
         self._run_on_save_actions(saved_path)
 
     def _run_on_save_actions(mut self, saved_path: String):
