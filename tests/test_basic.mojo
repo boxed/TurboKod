@@ -161,7 +161,9 @@ from turbokod.lsp_dispatch import (
     _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
     _decode_semantic_tokens,
-    _parse_code_lens, _parse_document_colors, _parse_document_highlights,
+    _parse_code_lens, _collect_unresolved_lenses, _codelens_title_of,
+    _codelens_row_of,
+    _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result,
     _parse_inlay_hints,
     _parse_selection_ranges,
@@ -10329,6 +10331,25 @@ def test_lsp_server_wants_did_create() raises:
     assert_true(not mgr.server_wants_did_create())
 
 
+def test_lsp_codelens_resolve_collects_unresolved() raises:
+    """Lenses without a title-bearing command are collected for the
+    codeLens/resolve round-trip; resolved ones parse directly."""
+    var lenses = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":2,\"character\":0},"
+        + "\"end\":{\"line\":2,\"character\":1}},\"data\":[1]},"
+        + "{\"range\":{\"start\":{\"line\":5,\"character\":0},"
+        + "\"end\":{\"line\":5,\"character\":1}},"
+        + "\"command\":{\"title\":\"3 refs\",\"command\":\"x\"}}]"
+    ))
+    var unresolved = _collect_unresolved_lenses(lenses)
+    assert_equal(len(unresolved), 1)
+    assert_equal(_codelens_row_of(unresolved[0]), 2)
+    # _parse_code_lens keeps only the already-titled lens.
+    assert_equal(len(_parse_code_lens(lenses)), 1)
+    var single = parse_json(String("{\"command\":{\"title\":\"hi\"}}"))
+    assert_equal(_codelens_title_of(single), String("hi"))
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -19025,6 +19046,7 @@ def _run_chunk_04() raises:
     test_lsp_message_request_accessors()
     test_lsp_show_document_accessors()
     test_lsp_server_wants_did_create()
+    test_lsp_codelens_resolve_collects_unresolved()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

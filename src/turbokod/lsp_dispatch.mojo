@@ -595,6 +595,17 @@ struct LspManager(Copyable, Movable):
     var _codelens_path: String
     var _resolved_codelens: List[TextEditEntry]
     var _has_resolved_codelens: Bool
+    # ``codeLens/resolve`` round-trip. Servers (rust-analyzer) ship lenses
+    # without a ``command`` — just ``range`` + ``data`` — and fill the
+    # title only on resolve. We'd otherwise drop those, so we queue the raw
+    # unresolved lenses, resolve them one at a time, and grow ``_codelens_
+    # accum`` (the source of truth re-published into ``_resolved_codelens``
+    # after each resolve so the host's overlay grows). ``_codelens_resolve_
+    # row`` is the line of the in-flight lens.
+    var _inflight_codelens_resolve_id: String
+    var _codelens_resolve_queue: List[JsonValue]
+    var _codelens_resolve_row: Int
+    var _codelens_accum: List[TextEditEntry]
     # ``textDocument/semanticTokens/full`` — the server's token-type legend
     # (from ``semanticTokensProvider.legend.tokenTypes``) plus the decoded
     # per-row recolor ``Highlight``s parked for the editor overlay.
@@ -797,6 +808,10 @@ struct LspManager(Copyable, Movable):
         self._codelens_path = String("")
         self._resolved_codelens = List[TextEditEntry]()
         self._has_resolved_codelens = False
+        self._inflight_codelens_resolve_id = String("")
+        self._codelens_resolve_queue = List[JsonValue]()
+        self._codelens_resolve_row = 0
+        self._codelens_accum = List[TextEditEntry]()
         self._sem_token_types = List[String]()
         self._inflight_semantic_id = String("")
         self._semantic_path = String("")
@@ -938,6 +953,10 @@ struct LspManager(Copyable, Movable):
         self._codelens_path = String("")
         self._resolved_codelens = List[TextEditEntry]()
         self._has_resolved_codelens = False
+        self._inflight_codelens_resolve_id = String("")
+        self._codelens_resolve_queue = List[JsonValue]()
+        self._codelens_resolve_row = 0
+        self._codelens_accum = List[TextEditEntry]()
         self._sem_token_types = List[String]()
         self._inflight_semantic_id = String("")
         self._semantic_path = String("")
@@ -2512,7 +2531,46 @@ struct LspManager(Copyable, Movable):
         self._codelens_path = path
         self._resolved_codelens = List[TextEditEntry]()
         self._has_resolved_codelens = False
+        self._inflight_codelens_resolve_id = String("")
+        self._codelens_resolve_queue = List[JsonValue]()
+        self._codelens_accum = List[TextEditEntry]()
         return True
+
+    def server_supports_codelens_resolve(self) -> Bool:
+        """True iff ``codeLensProvider.resolveProvider`` — lenses arrive
+        without a ``command`` and need a ``codeLens/resolve`` to fill the
+        title."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var cl_opt = caps.object_get(String("codeLensProvider"))
+        if not cl_opt or not cl_opt.value().is_object():
+            return False
+        var rp_opt = cl_opt.value().copy().object_get(String("resolveProvider"))
+        if rp_opt and rp_opt.value().is_bool():
+            return rp_opt.value().as_bool()
+        return False
+
+    def _send_next_codelens_resolve(mut self):
+        """Pop the next unresolved lens off the queue and fire a
+        ``codeLens/resolve``. No-op when the queue is empty or one is
+        already in flight."""
+        if len(self._inflight_codelens_resolve_id.as_bytes()) > 0:
+            return
+        if len(self._codelens_resolve_queue) == 0:
+            return
+        var lens = self._codelens_resolve_queue.pop(0)
+        # Capture the lens's line so the resolved title lands on the right
+        # row regardless of response ordering.
+        self._codelens_resolve_row = _codelens_row_of(lens)
+        try:
+            self._inflight_codelens_resolve_id = self.client.send_request(
+                String("codeLens/resolve"), lens,
+            )
+        except:
+            self._inflight_codelens_resolve_id = String("")
 
     def has_pending_codelens(self) -> Bool:
         return self._has_resolved_codelens
@@ -3057,12 +3115,33 @@ struct LspManager(Copyable, Movable):
                 self._inflight_inlay_id = String("")
                 continue
             if id == self._inflight_codelens_id:
-                var cl = List[TextEditEntry]()
+                self._codelens_accum = List[TextEditEntry]()
+                self._codelens_resolve_queue = List[JsonValue]()
                 if msg.result:
-                    cl = _parse_code_lens(msg.result.value())
-                self._resolved_codelens = cl^
+                    self._codelens_accum = _parse_code_lens(msg.result.value())
+                    if self.server_supports_codelens_resolve():
+                        self._codelens_resolve_queue = \
+                            _collect_unresolved_lenses(msg.result.value())
+                self._resolved_codelens = self._codelens_accum.copy()
                 self._has_resolved_codelens = True
                 self._inflight_codelens_id = String("")
+                # Kick off resolving lenses that shipped without a title.
+                self._send_next_codelens_resolve()
+                continue
+            if id == self._inflight_codelens_resolve_id:
+                self._inflight_codelens_resolve_id = String("")
+                if msg.result and msg.result.value().is_object():
+                    var title = _codelens_title_of(msg.result.value())
+                    if len(title.as_bytes()) > 0:
+                        self._codelens_accum.append(TextEditEntry(
+                            self._codelens_resolve_row, 0,
+                            self._codelens_resolve_row, 0,
+                            String("‹") + title + String("›"),
+                        ))
+                        self._resolved_codelens = self._codelens_accum.copy()
+                        self._has_resolved_codelens = True
+                # Chain the next queued lens, if any.
+                self._send_next_codelens_resolve()
                 continue
             if id == self._inflight_semantic_id:
                 var sem = List[Highlight]()
@@ -5048,6 +5127,51 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _codelens_row_of(lens: JsonValue) -> Int:
+    """The ``range.start.line`` of a CodeLens object (0 on any mismatch)."""
+    if not lens.is_object():
+        return 0
+    var rng = lens.object_get(String("range"))
+    if not rng or not rng.value().is_object():
+        return 0
+    var s = rng.value().object_get(String("start"))
+    if not s or not s.value().is_object():
+        return 0
+    var ln = s.value().object_get(String("line"))
+    if ln and ln.value().is_int():
+        return ln.value().as_int()
+    return 0
+
+
+def _codelens_title_of(lens: JsonValue) -> String:
+    """The ``command.title`` of a (resolved) CodeLens, or empty."""
+    if not lens.is_object():
+        return String("")
+    var cmd = lens.object_get(String("command"))
+    if not cmd or not cmd.value().is_object():
+        return String("")
+    var t = cmd.value().object_get(String("title"))
+    if t and t.value().is_string():
+        return t.value().as_str()
+    return String("")
+
+
+def _collect_unresolved_lenses(v: JsonValue) -> List[JsonValue]:
+    """Return the raw CodeLens objects that have a ``range`` but no
+    title-bearing ``command`` — they need a ``codeLens/resolve`` to fill
+    in the title, and are otherwise dropped by ``_parse_code_lens``."""
+    var out = List[JsonValue]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object() or not e.object_has(String("range")):
+            continue
+        if len(_codelens_title_of(e).as_bytes()) == 0:
+            out.append(e.copy())
     return out^
 
 
