@@ -160,7 +160,8 @@ from turbokod.lsp_dispatch import (
     TextEditEntry, _parse_additional_text_edits,
     _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
-    _decode_semantic_tokens,
+    _decode_semantic_tokens, _decode_semantic_data, _semantic_data_ints,
+    _apply_semantic_edits,
     _parse_code_lens, _collect_unresolved_lenses, _codelens_title_of,
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
@@ -10350,6 +10351,30 @@ def test_lsp_codelens_resolve_collects_unresolved() raises:
     assert_equal(_codelens_title_of(single), String("hi"))
 
 
+def test_lsp_semantic_tokens_delta() raises:
+    """A SemanticTokensDelta edit set splices into the cached flat token
+    array; the shared decoder handles both full and spliced arrays."""
+    var legend = List[String]()
+    legend.append(String("keyword"))
+    legend.append(String("string"))
+    var full = parse_json(String(
+        "{\"resultId\":\"1\",\"data\":[0,0,3,0,0,0,4,2,1,0]}"
+    ))
+    var ints = _semantic_data_ints(full)
+    assert_equal(len(ints), 10)
+    assert_equal(len(_decode_semantic_data(ints, legend)), 2)
+    # Replace the 5 ints of the 2nd token with a fresh token.
+    var edits = parse_json(String(
+        "[{\"start\":5,\"deleteCount\":5,\"data\":[1,0,4,1,0]}]"
+    ))
+    var spliced = _apply_semantic_edits(ints, edits)
+    assert_equal(len(spliced), 10)
+    assert_equal(spliced[5], 1)
+    # A delete-only edit (no replacement data) drops the token.
+    var del_edit = parse_json(String("[{\"start\":5,\"deleteCount\":5}]"))
+    assert_equal(len(_apply_semantic_edits(ints, del_edit)), 5)
+
+
 def test_lsp_parse_document_links() raises:
     """DocumentLink[] with inline targets become range carriers
     (new_text = target); targetless links are skipped."""
@@ -19067,6 +19092,7 @@ def _run_chunk_04() raises:
     test_lsp_server_wants_did_create()
     test_lsp_codelens_resolve_collects_unresolved()
     test_lsp_parse_document_links()
+    test_lsp_semantic_tokens_delta()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

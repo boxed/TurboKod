@@ -622,6 +622,15 @@ struct LspManager(Copyable, Movable):
     var _semantic_path: String
     var _resolved_semantic: List[Highlight]
     var _has_resolved_semantic: Bool
+    # ``semanticTokens/full/delta`` state: the last ``resultId`` and the raw
+    # flat token-int array it corresponds to, keyed by path. A subsequent
+    # request for the same path sends ``/full/delta`` with the previous
+    # resultId; the delta's ``edits`` splice into ``_sem_data`` and we
+    # re-decode — far cheaper than re-tokenizing the whole file on a large
+    # buffer. Cleared / bypassed when the path changes or no resultId yet.
+    var _sem_result_id: String
+    var _sem_data: List[Int]
+    var _sem_data_path: String
     # Server-initiated status: ``$/progress`` (work-done progress) and
     # ``window/showMessage``. Parked for the host to surface in the status
     # bar — progress only when ``lsp_server_progress`` is on.
@@ -829,6 +838,9 @@ struct LspManager(Copyable, Movable):
         self._semantic_path = String("")
         self._resolved_semantic = List[Highlight]()
         self._has_resolved_semantic = False
+        self._sem_result_id = String("")
+        self._sem_data = List[Int]()
+        self._sem_data_path = String("")
         self._progress_note = String("")
         self._has_progress_note = False
         self._server_message = String("")
@@ -978,6 +990,9 @@ struct LspManager(Copyable, Movable):
         self._semantic_path = String("")
         self._resolved_semantic = List[Highlight]()
         self._has_resolved_semantic = False
+        self._sem_result_id = String("")
+        self._sem_data = List[Int]()
+        self._sem_data_path = String("")
         self._progress_note = String("")
         self._has_progress_note = False
         self._server_message = String("")
@@ -2640,25 +2655,60 @@ struct LspManager(Copyable, Movable):
     def request_semantic_tokens(
         mut self, path: String, var text: String,
     ) -> Bool:
-        """Send ``textDocument/semanticTokens/full``. The delta-encoded
-        result is decoded against the legend into per-row recolor
-        ``Highlight``s and parked for the editor."""
+        """Request semantic tokens for the whole file. When we have a
+        cached ``resultId`` for this same path and the server supports
+        delta, send ``semanticTokens/full/delta`` (the response is a small
+        edit set spliced into the cached token array); otherwise send the
+        full ``semanticTokens/full``. Either way the decoded recolor
+        ``Highlight``s are parked for the editor."""
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_semantic_id = self.client.send_request(
-                String("textDocument/semanticTokens/full"), params,
+        var use_delta = self._sem_data_path == path \
+            and len(self._sem_result_id.as_bytes()) > 0 \
+            and self.server_supports_semantic_delta()
+        var method = String("textDocument/semanticTokens/full")
+        if use_delta:
+            method = String("textDocument/semanticTokens/full/delta")
+            params.put(
+                String("previousResultId"), json_str(self._sem_result_id),
             )
+        else:
+            # New file (or no prior result): drop any stale cache so a
+            # delta-shaped response can't splice against the wrong array.
+            self._sem_result_id = String("")
+            self._sem_data = List[Int]()
+        try:
+            self._inflight_semantic_id = self.client.send_request(method, params)
         except:
             self._inflight_semantic_id = String("")
             return False
         self._semantic_path = path
+        self._sem_data_path = path
         self._resolved_semantic = List[Highlight]()
         self._has_resolved_semantic = False
         return True
+
+    def server_supports_semantic_delta(self) -> Bool:
+        """True iff ``semanticTokensProvider.full.delta`` — the server can
+        return token deltas keyed off a previous ``resultId``."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var sp_opt = caps.object_get(String("semanticTokensProvider"))
+        if not sp_opt or not sp_opt.value().is_object():
+            return False
+        var full_opt = sp_opt.value().copy().object_get(String("full"))
+        if not full_opt or not full_opt.value().is_object():
+            return False
+        var d_opt = full_opt.value().copy().object_get(String("delta"))
+        if d_opt and d_opt.value().is_bool():
+            return d_opt.value().as_bool()
+        return False
 
     def has_pending_semantic(self) -> Bool:
         return self._has_resolved_semantic
@@ -3203,12 +3253,27 @@ struct LspManager(Copyable, Movable):
                 self._inflight_doclink_id = String("")
                 continue
             if id == self._inflight_semantic_id:
-                var sem = List[Highlight]()
-                if msg.result:
-                    sem = _decode_semantic_tokens(
-                        msg.result.value(), self._sem_token_types,
+                if msg.result and msg.result.value().is_object():
+                    var r = msg.result.value().copy()
+                    var edits_opt = r.object_get(String("edits"))
+                    if edits_opt and edits_opt.value().is_array():
+                        # Delta: splice the edits into the cached array.
+                        self._sem_data = _apply_semantic_edits(
+                            self._sem_data, edits_opt.value(),
+                        )
+                    else:
+                        # Full: the response carries the whole token array.
+                        self._sem_data = _semantic_data_ints(r)
+                    var rid_opt = r.object_get(String("resultId"))
+                    if rid_opt and rid_opt.value().is_string():
+                        self._sem_result_id = rid_opt.value().as_str()
+                    else:
+                        self._sem_result_id = String("")
+                    self._resolved_semantic = _decode_semantic_data(
+                        self._sem_data, self._sem_token_types,
                     )
-                self._resolved_semantic = sem^
+                else:
+                    self._resolved_semantic = List[Highlight]()
                 self._has_resolved_semantic = True
                 self._inflight_semantic_id = String("")
                 continue
@@ -5077,29 +5142,42 @@ def _decode_semantic_tokens(
     are skipped. (Multi-line tokens are uncommon for the highlighted
     types; a token's span is treated as single-row, which is what the
     overlay paints.)"""
-    var out = List[Highlight]()
+    if not v.is_object():
+        return List[Highlight]()
+    return _decode_semantic_data(_semantic_data_ints(v), legend)
+
+
+def _semantic_data_ints(v: JsonValue) -> List[Int]:
+    """Pull the flat integer ``data`` array out of a ``SemanticTokens``
+    object (empty when absent / malformed)."""
+    var out = List[Int]()
     if not v.is_object():
         return out^
     var data_opt = v.object_get(String("data"))
     if not data_opt or not data_opt.value().is_array():
         return out^
     var data = data_opt.value().copy()
-    var n = data.array_len()
+    for i in range(data.array_len()):
+        var e = data.array_at(i)
+        out.append(e.as_int() if e.is_int() else 0)
+    return out^
+
+
+def _decode_semantic_data(data: List[Int], legend: List[String]) -> List[Highlight]:
+    """Decode a flat ``(deltaLine, deltaStart, length, tokenType,
+    tokenModifiers)`` token array (accumulated relative to the previous
+    token) into per-row ``Highlight``s. Shared by the ``/full`` and the
+    ``/full/delta`` paths (the latter reconstructs ``data`` first)."""
+    var out = List[Highlight]()
+    var n = len(data)
     var line = 0
     var start = 0
     var i = 0
     while i + 5 <= n:
-        var d_line_v = data.array_at(i)
-        var d_start_v = data.array_at(i + 1)
-        var len_v = data.array_at(i + 2)
-        var type_v = data.array_at(i + 3)
-        if not d_line_v.is_int() or not d_start_v.is_int() \
-                or not len_v.is_int() or not type_v.is_int():
-            break
-        var d_line = d_line_v.as_int()
-        var d_start = d_start_v.as_int()
-        var length = len_v.as_int()
-        var ttype = type_v.as_int()
+        var d_line = data[i]
+        var d_start = data[i + 1]
+        var length = data[i + 2]
+        var ttype = data[i + 3]
         if d_line == 0:
             start = start + d_start
         else:
@@ -5114,6 +5192,47 @@ def _decode_semantic_tokens(
             line, start, start + length,
             _semantic_attr_for_type(legend[ttype]),
         ))
+    return out^
+
+
+def _apply_semantic_edits(data: List[Int], edits: JsonValue) -> List[Int]:
+    """Apply a ``SemanticTokensDelta`` ``edits`` array to the previous flat
+    token-int ``data`` and return the new array. Each edit is
+    ``{start, deleteCount, data?}`` describing a splice of the *original*
+    array; the spec guarantees edits are sorted ascending and
+    non-overlapping, so a single forward pass — copy the gap, insert the
+    replacement, skip the deleted run — rebuilds the result."""
+    var out = List[Int]()
+    if not edits.is_array():
+        return data.copy()
+    var pos = 0
+    for i in range(edits.array_len()):
+        var e = edits.array_at(i)
+        if not e.is_object():
+            continue
+        var s_opt = e.object_get(String("start"))
+        if not s_opt or not s_opt.value().is_int():
+            continue
+        var start = s_opt.value().as_int()
+        var delc = 0
+        var dc_opt = e.object_get(String("deleteCount"))
+        if dc_opt and dc_opt.value().is_int():
+            delc = dc_opt.value().as_int()
+        var j = pos
+        while j < start and j < len(data):
+            out.append(data[j])
+            j += 1
+        var d_opt = e.object_get(String("data"))
+        if d_opt and d_opt.value().is_array():
+            var dd = d_opt.value().copy()
+            for k in range(dd.array_len()):
+                var ev = dd.array_at(k)
+                out.append(ev.as_int() if ev.is_int() else 0)
+        pos = start + delc
+    var t = pos
+    while t < len(data):
+        out.append(data[t])
+        t += 1
     return out^
 
 
