@@ -10240,6 +10240,26 @@ def test_lsp_pull_diagnostics_storage() raises:
     assert_true(not mgr.has_unconsumed_diagnostics_for(String("/x.py")))
 
 
+def test_lsp_server_supports_will_save() raises:
+    """The willSave / willSaveWaitUntil capability readers consult the
+    object form of textDocumentSync; the int form (or absent) is off."""
+    var mgr = LspManager()
+    assert_true(not mgr.server_supports_will_save())
+    assert_true(not mgr.server_supports_will_save_wait_until())
+    var caps = parse_json(String(
+        "{\"textDocumentSync\":{\"willSave\":true,"
+        + "\"willSaveWaitUntil\":true}}"
+    ))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    assert_true(mgr.server_supports_will_save())
+    assert_true(mgr.server_supports_will_save_wait_until())
+    # Plain int sync kind → neither flag.
+    var caps2 = parse_json(String("{\"textDocumentSync\":2}"))
+    mgr._capabilities = Optional[JsonValue](caps2^)
+    assert_true(not mgr.server_supports_will_save())
+    assert_true(not mgr.server_supports_will_save_wait_until())
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18931,6 +18951,7 @@ def _run_chunk_04() raises:
     test_lsp_server_supports_reads_capabilities()
     test_lsp_dynamic_capability_registration()
     test_lsp_pull_diagnostics_storage()
+    test_lsp_server_supports_will_save()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

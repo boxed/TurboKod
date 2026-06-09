@@ -927,6 +927,9 @@ struct Desktop(Movable):
     # file. A second save of the same path while pending bypasses formatting
     # (a hung formatter must never block persistence).
     var _format_then_save_path: String
+    # Same deferred-write latch for textDocument/willSaveWaitUntil: when
+    # set, a save is waiting on the server's pre-save edits before writing.
+    var _willsave_then_save_path: String
     # Identity of the completion item a ``completionItem/resolve`` is in
     # flight for: the editor's file path, the item's index in the popup,
     # and its label. The resolve response is matched against these before
@@ -1331,6 +1334,7 @@ struct Desktop(Movable):
         self._rename_col = 0
         self._rename_word = String("")
         self._format_then_save_path = String("")
+        self._willsave_then_save_path = String("")
         self._pending_resolve_path = String("")
         self._pending_resolve_index = -1
         self._pending_resolve_label = String("")
@@ -6574,6 +6578,7 @@ struct Desktop(Movable):
         self._drain_prepare_rename()
         # Apply any parked formatting edits (and save, for format-on-save).
         self._drain_formatting()
+        self._drain_willsave()
         # Apply any server-driven workspace/applyEdit (e.g. from a code
         # action's executeCommand). Project-wide, like rename.
         self._drain_apply_edits(screen)
@@ -9360,6 +9365,30 @@ struct Desktop(Movable):
             # No backing file — escalate to Save As.
             self._open_save_as_dialog()
             return
+        # LSP pre-save hooks (only for a buffer we're actually going to
+        # write — not read-only).
+        if not self.windows.windows[idx].editor.read_only:
+            var lwi = self._lsp_for_path(path)
+            if lwi >= 0 and self.lsp_managers[lwi].is_ready():
+                # Notify the server a save is imminent (reason 1 = manual).
+                self.lsp_managers[lwi].notify_will_save(path, 1)
+                # willSaveWaitUntil: let the server inject edits before the
+                # write (organize imports / final newline). Deferred like
+                # format-on-save — apply on response, then write. Takes
+                # precedence over format-on-save when both apply (a server
+                # offering pre-save edits rarely also needs the formatter,
+                # and chaining both is unnecessary). Skip if one is already
+                # pending for this path so a hung server can't block saving.
+                if self._willsave_then_save_path != path \
+                        and self.lsp_managers[lwi]
+                            .server_supports_will_save_wait_until():
+                    var wtext = self.windows.windows[idx] \
+                        .editor.text_snapshot()
+                    if self.lsp_managers[lwi].request_will_save_wait_until(
+                        path, 1, wtext^,
+                    ):
+                        self._willsave_then_save_path = path
+                        return
         # LSP format-on-save: when enabled and the server formats, fire a
         # formatting request and let its response drain apply the edits and
         # then write the file. Skip (and save raw) if a format for this same
@@ -9376,10 +9405,12 @@ struct Desktop(Movable):
                 if self.lsp_managers[li].request_formatting(path, text^):
                     self._format_then_save_path = path
                     return
-        # Normal save path. Clear any stale format-then-save latch for this
+        # Normal save path. Clear any stale deferred-write latches for this
         # file (we're writing it raw now).
         if self._format_then_save_path == path:
             self._format_then_save_path = String("")
+        if self._willsave_then_save_path == path:
+            self._willsave_then_save_path = String("")
         try:
             _ = self.windows.windows[idx].editor.save()
             var saved_path = self.windows.windows[idx].editor.file_path
@@ -11294,6 +11325,33 @@ struct Desktop(Movable):
                     self._after_save(win, fpath)
                 except e:
                     print("desktop: format-on-save", fpath, ":", String(e))
+
+    def _drain_willsave(mut self):
+        """Apply any parked textDocument/willSaveWaitUntil ``TextEdit[]`` to
+        its editor, then — when the edit was triggered by a save waiting on
+        the latch (``_willsave_then_save_path``) — write the file. Mirror of
+        ``_drain_formatting`` for the pre-save-edit hook."""
+        for i in range(len(self.lsp_managers)):
+            if not self.lsp_managers[i].has_pending_willsave():
+                continue
+            var wpath = self.lsp_managers[i].pending_willsave_path()
+            var wedits = self.lsp_managers[i].take_willsave_edits()
+            var win = self._find_window_for_path(wpath)
+            if win < 0 or not self.windows.windows[win].is_editor:
+                if self._willsave_then_save_path == wpath:
+                    self._willsave_then_save_path = String("")
+                continue
+            if len(wedits) > 0:
+                _ = self.windows.windows[win].editor.apply_text_edits(
+                    wedits^,
+                )
+            if self._willsave_then_save_path == wpath:
+                self._willsave_then_save_path = String("")
+                try:
+                    _ = self.windows.windows[win].editor.save()
+                    self._after_save(win, wpath)
+                except e:
+                    print("desktop: willSaveWaitUntil", wpath, ":", String(e))
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action

@@ -1040,6 +1040,15 @@ def lsp_initialize_params(
     # snippet body would otherwise land in the buffer with literal
     # ``${1:foo}`` markers.
     var text_doc_caps = json_object()
+    # Advertise willSave + willSaveWaitUntil so servers know they can ask
+    # to react before a write (willSave) or inject edits before it
+    # (willSaveWaitUntil — organize imports, final newline). Gated server
+    # side off textDocumentSync.{willSave,willSaveWaitUntil}.
+    var sync_caps = json_object()
+    sync_caps.put(String("dynamicRegistration"), json_bool(False))
+    sync_caps.put(String("willSave"), json_bool(True))
+    sync_caps.put(String("willSaveWaitUntil"), json_bool(True))
+    text_doc_caps.put(String("synchronization"), sync_caps^)
     var completion_caps = json_object()
     var completion_item_caps = json_object()
     completion_item_caps.put(String("snippetSupport"), json_bool(False))

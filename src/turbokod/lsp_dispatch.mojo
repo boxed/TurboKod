@@ -643,6 +643,14 @@ struct LspManager(Copyable, Movable):
     var _inflight_pull_diag_id: String
     var _pull_diag_path: String
     var _pulled_paths: List[String]
+    # ``textDocument/willSaveWaitUntil`` — the server returns a
+    # ``TextEdit[]`` to apply before the buffer is written (e.g. organize
+    # imports / final-newline). Parked like the formatting edits; the host
+    # applies them then writes (see ``_drain_willsave``).
+    var _inflight_willsave_id: String
+    var _willsave_path: String
+    var _resolved_willsave_edits: List[TextEditEntry]
+    var _has_resolved_willsave: Bool
     # Server-driven ``workspace/applyEdit`` (e.g. after executeCommand):
     # the parsed WorkspaceEdit, parked for the host to apply project-wide.
     # We optimistically reply ``applied: true`` and apply next frame.
@@ -792,6 +800,10 @@ struct LspManager(Copyable, Movable):
         self._inflight_pull_diag_id = String("")
         self._pull_diag_path = String("")
         self._pulled_paths = List[String]()
+        self._inflight_willsave_id = String("")
+        self._willsave_path = String("")
+        self._resolved_willsave_edits = List[TextEditEntry]()
+        self._has_resolved_willsave = False
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -919,6 +931,10 @@ struct LspManager(Copyable, Movable):
         self._inflight_pull_diag_id = String("")
         self._pull_diag_path = String("")
         self._pulled_paths = List[String]()
+        self._inflight_willsave_id = String("")
+        self._willsave_path = String("")
+        self._resolved_willsave_edits = List[TextEditEntry]()
+        self._has_resolved_willsave = False
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -1346,6 +1362,62 @@ struct LspManager(Copyable, Movable):
         except e:
             print("lsp: didChangeConfiguration", ":", String(e))
 
+    def notify_will_save(mut self, path: String, reason: Int):
+        """Send ``textDocument/willSave`` (``reason``: 1=manual, 2=after-
+        delay, 3=focus-out) so the server can react before the buffer is
+        written. Fire-and-forget; no-op unless ready and the server set
+        ``textDocumentSync.willSave``."""
+        if self.state != _STATE_READY or not self.server_supports_will_save():
+            return
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("reason"), json_int(reason))
+        try:
+            self.client.send_notification(
+                String("textDocument/willSave"), params,
+            )
+        except e:
+            print("lsp: willSave", path, ":", String(e))
+
+    def request_will_save_wait_until(
+        mut self, path: String, reason: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/willSaveWaitUntil`` and park the returned
+        ``TextEdit[]`` for the host to apply *before* writing the file
+        (organize-imports / final-newline style edits). Pre-flights the
+        about-to-be-saved text via didChange. No-op unless ready and the
+        server set ``textDocumentSync.willSaveWaitUntil``."""
+        if self.state != _STATE_READY \
+                or not self.server_supports_will_save_wait_until():
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("reason"), json_int(reason))
+        try:
+            self._inflight_willsave_id = self.client.send_request(
+                String("textDocument/willSaveWaitUntil"), params,
+            )
+        except:
+            self._inflight_willsave_id = String("")
+            return False
+        self._willsave_path = path
+        self._resolved_willsave_edits = List[TextEditEntry]()
+        self._has_resolved_willsave = False
+        return True
+
+    def has_pending_willsave(self) -> Bool:
+        return self._has_resolved_willsave
+
+    def pending_willsave_path(self) -> String:
+        return self._willsave_path
+
+    def take_willsave_edits(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_willsave_edits^
+        self._resolved_willsave_edits = List[TextEditEntry]()
+        self._has_resolved_willsave = False
+        return out^
+
     def request_definition(
         mut self, path: String, line: Int, character: Int,
         var word: String, var text: String,
@@ -1459,6 +1531,33 @@ struct LspManager(Copyable, Movable):
         if inc_opt and inc_opt.value().is_bool():
             return inc_opt.value().as_bool()
         return False
+
+    def _text_sync_bool(self, key: String) -> Bool:
+        """Read a boolean flag (``willSave`` / ``willSaveWaitUntil``) off
+        the object form of ``textDocumentSync``. The int / absent forms
+        mean the feature is unsupported."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var sync_opt = caps.object_get(String("textDocumentSync"))
+        if not sync_opt or not sync_opt.value().is_object():
+            return False
+        var f_opt = sync_opt.value().copy().object_get(key)
+        if f_opt and f_opt.value().is_bool():
+            return f_opt.value().as_bool()
+        return False
+
+    def server_supports_will_save(self) -> Bool:
+        """True iff ``textDocumentSync.willSave`` — the server wants a
+        ``textDocument/willSave`` notification before each save."""
+        return self._text_sync_bool(String("willSave"))
+
+    def server_supports_will_save_wait_until(self) -> Bool:
+        """True iff ``textDocumentSync.willSaveWaitUntil`` — the server can
+        return edits to apply *before* the buffer is written."""
+        return self._text_sync_bool(String("willSaveWaitUntil"))
 
     def server_supports_completion_resolve(self) -> Bool:
         """True iff ``completionProvider.resolveProvider`` is ``true`` —
@@ -2930,6 +3029,18 @@ struct LspManager(Copyable, Movable):
                         )
                         self._store_diagnostics(ppath, pdiags^)
                 self._clear_diag_inflight(ppath, 0)
+                continue
+            if id == self._inflight_willsave_id:
+                var wse = List[TextEditEntry]()
+                if msg.result:
+                    wse = _parse_text_edits(msg.result.value())
+                _lsp_debug_log(
+                    String("← willSaveWaitUntil response id=") + id
+                    + String(" edits=") + String(len(wse)),
+                )
+                self._resolved_willsave_edits = wse^
+                self._has_resolved_willsave = True
+                self._inflight_willsave_id = String("")
                 continue
         return resolved
 
