@@ -10287,6 +10287,23 @@ def test_lsp_message_request_accessors() raises:
     assert_equal(mgr.message_request_actions()[0], String("Reload"))
 
 
+def test_lsp_show_document_accessors() raises:
+    """The parked showDocument request exposes the target; a file:// uri
+    converts to a filesystem path, external uris are flagged."""
+    var mgr = LspManager()
+    assert_true(not mgr.has_show_document())
+    mgr._show_doc_pending = True
+    mgr._show_doc_uri = String("file:///tmp/x.py")
+    mgr._show_doc_external = False
+    mgr._show_doc_line = 4
+    assert_true(mgr.has_show_document())
+    assert_equal(mgr.show_document_path(), String("/tmp/x.py"))
+    assert_equal(mgr.show_document_line(), 4)
+    assert_true(not mgr.show_document_external())
+    mgr.clear_show_document()
+    assert_true(not mgr.has_show_document())
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18981,6 +18998,7 @@ def _run_chunk_04() raises:
     test_lsp_server_supports_will_save()
     test_lsp_log_message_capture()
     test_lsp_message_request_accessors()
+    test_lsp_show_document_accessors()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

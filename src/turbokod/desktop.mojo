@@ -6430,6 +6430,28 @@ struct Desktop(Movable):
                     self.lsp_managers[i].message_request_actions(),
                 )
                 self._msgreq_mgr_idx = i
+            # Server-driven window/showDocument → open a file (optionally at
+            # a selection) or surface an external URL on the status bar (we
+            # don't launch a browser from the core).
+            if self.lsp_managers[i].has_show_document():
+                var sd_external = self.lsp_managers[i].show_document_external()
+                var sd_uri = self.lsp_managers[i].show_document_uri()
+                var sd_path = self.lsp_managers[i].show_document_path()
+                var sd_line = self.lsp_managers[i].show_document_line()
+                var sd_char = self.lsp_managers[i].show_document_char()
+                self.lsp_managers[i].clear_show_document()
+                if sd_external or len(sd_path.as_bytes()) == 0:
+                    self.status_bar.set_message(
+                        String("LSP wants to open: ") + sd_uri,
+                        Attr(BLACK, LIGHT_GRAY),
+                    )
+                else:
+                    var ln = sd_line if sd_line >= 0 else 0
+                    var ch = sd_char if sd_line >= 0 else 0
+                    try:
+                        self.open_file_at(sd_path, ln, ch, screen)
+                    except e:
+                        print("desktop: showDocument", sd_path, ":", String(e))
             # Workspace symbol response routes the second step of the
             # Find Symbol picker. We sent the request to every ready
             # LSP at submit time, so each manager response drains

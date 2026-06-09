@@ -659,6 +659,14 @@ struct LspManager(Copyable, Movable):
     var _msgreq_id: Optional[JsonValue]
     var _msgreq_message: String
     var _msgreq_actions: List[String]
+    # ``window/showDocument`` — the server asks us to open a file (in an
+    # editor, optionally at a selection) or an external URL. Parked for the
+    # host to act on next frame; we reply ``success: true`` optimistically.
+    var _show_doc_pending: Bool
+    var _show_doc_uri: String
+    var _show_doc_external: Bool
+    var _show_doc_line: Int
+    var _show_doc_char: Int
     # Server-driven ``workspace/applyEdit`` (e.g. after executeCommand):
     # the parsed WorkspaceEdit, parked for the host to apply project-wide.
     # We optimistically reply ``applied: true`` and apply next frame.
@@ -823,6 +831,11 @@ struct LspManager(Copyable, Movable):
         self._msgreq_id = Optional[JsonValue]()
         self._msgreq_message = String("")
         self._msgreq_actions = List[String]()
+        self._show_doc_pending = False
+        self._show_doc_uri = String("")
+        self._show_doc_external = False
+        self._show_doc_line = 0
+        self._show_doc_char = 0
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -959,6 +972,11 @@ struct LspManager(Copyable, Movable):
         self._msgreq_id = Optional[JsonValue]()
         self._msgreq_message = String("")
         self._msgreq_actions = List[String]()
+        self._show_doc_pending = False
+        self._show_doc_uri = String("")
+        self._show_doc_external = False
+        self._show_doc_line = 0
+        self._show_doc_char = 0
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -3371,6 +3389,33 @@ struct LspManager(Copyable, Movable):
         self._msgreq_message = String("")
         self._msgreq_actions = List[String]()
 
+    def has_show_document(self) -> Bool:
+        return self._show_doc_pending
+
+    def show_document_external(self) -> Bool:
+        return self._show_doc_external
+
+    def show_document_uri(self) -> String:
+        return self._show_doc_uri
+
+    def show_document_path(self) -> String:
+        """Filesystem path for a non-external showDocument uri (``file://``
+        stripped + percent-decoded). Empty for an external/http uri."""
+        return _uri_to_path(self._show_doc_uri)
+
+    def show_document_line(self) -> Int:
+        return self._show_doc_line
+
+    def show_document_char(self) -> Int:
+        return self._show_doc_char
+
+    def clear_show_document(mut self):
+        self._show_doc_pending = False
+        self._show_doc_uri = String("")
+        self._show_doc_external = False
+        self._show_doc_line = -1
+        self._show_doc_char = 0
+
     def _capture_semantic_legend(mut self, provider: JsonValue):
         """Pull ``legend.tokenTypes`` out of a ``semanticTokensProvider``
         object (from the initialize capabilities *or* a dynamic
@@ -3640,6 +3685,40 @@ struct LspManager(Copyable, Movable):
                     + id_label + String(" actions=")
                     + String(len(self._msgreq_actions)),
                 )
+                return
+            if method == String("window/showDocument"):
+                # Park the open request (file → editor, or external URL) for
+                # the host to act on next frame; reply success optimistically
+                # like workspace/applyEdit.
+                var uri = String("")
+                var external = False
+                var sel_line = -1
+                var sel_char = 0
+                if msg.params and msg.params.value().is_object():
+                    var p = msg.params.value().copy()
+                    var u_opt = p.object_get(String("uri"))
+                    if u_opt and u_opt.value().is_string():
+                        uri = u_opt.value().as_str()
+                    var ext_opt = p.object_get(String("external"))
+                    if ext_opt and ext_opt.value().is_bool():
+                        external = ext_opt.value().as_bool()
+                    var sel_opt = p.object_get(String("selection"))
+                    if sel_opt and sel_opt.value().is_object():
+                        var pos = _start_pos_of(sel_opt.value())
+                        sel_line = pos[0]
+                        sel_char = pos[1]
+                self._show_doc_uri = uri^
+                self._show_doc_external = external
+                self._show_doc_line = sel_line
+                self._show_doc_char = sel_char
+                self._show_doc_pending = len(self._show_doc_uri.as_bytes()) > 0
+                var ok = json_object()
+                ok.put(String("success"), json_bool(self._show_doc_pending))
+                _lsp_debug_log(
+                    String("← server request window/showDocument id=")
+                    + id_label + String(" external=") + String(external),
+                )
+                self.client.send_response(id, ok^)
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
