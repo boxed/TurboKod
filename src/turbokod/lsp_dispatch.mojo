@@ -599,6 +599,13 @@ struct LspManager(Copyable, Movable):
     var _colorpres_sc: Int
     var _colorpres_el: Int
     var _colorpres_ec: Int
+    # ``textDocument/inlineCompletion`` — ghost-text suggestion. Parked text
+    # + the request position (so the editor anchors the ghost there).
+    var _inflight_inlinecomp_id: String
+    var _inlinecomp_text: String
+    var _inlinecomp_row: Int
+    var _inlinecomp_col: Int
+    var _has_inlinecomp: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -852,6 +859,11 @@ struct LspManager(Copyable, Movable):
         self._colorpres_sc = 0
         self._colorpres_el = 0
         self._colorpres_ec = 0
+        self._inflight_inlinecomp_id = String("")
+        self._inlinecomp_text = String("")
+        self._inlinecomp_row = 0
+        self._inlinecomp_col = 0
+        self._has_inlinecomp = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -1019,6 +1031,11 @@ struct LspManager(Copyable, Movable):
         self._colorpres_sc = 0
         self._colorpres_el = 0
         self._colorpres_ec = 0
+        self._inflight_inlinecomp_id = String("")
+        self._inlinecomp_text = String("")
+        self._inlinecomp_row = 0
+        self._inlinecomp_col = 0
+        self._has_inlinecomp = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2647,6 +2664,50 @@ struct LspManager(Copyable, Movable):
         self._has_colorpres = False
         return out^
 
+    def request_inline_completion(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/inlineCompletion`` at ``(line, character)``
+        (manually invoked). The first item's insert text is parked as a
+        ghost-text suggestion anchored at the request position."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("position"), _lsp_position(line, character))
+        var ctx = json_object()
+        ctx.put(String("triggerKind"), json_int(1))  # Invoked
+        params.put(String("context"), ctx^)
+        try:
+            self._inflight_inlinecomp_id = self.client.send_request(
+                String("textDocument/inlineCompletion"), params,
+            )
+        except:
+            self._inflight_inlinecomp_id = String("")
+            return False
+        self._inlinecomp_row = line
+        self._inlinecomp_col = character
+        self._inlinecomp_text = String("")
+        self._has_inlinecomp = False
+        return True
+
+    def has_inline_completion(self) -> Bool:
+        return self._has_inlinecomp
+
+    def inline_completion_text(self) -> String:
+        return self._inlinecomp_text
+
+    def inline_completion_row(self) -> Int:
+        return self._inlinecomp_row
+
+    def inline_completion_col(self) -> Int:
+        return self._inlinecomp_col
+
+    def clear_inline_completion(mut self):
+        self._has_inlinecomp = False
+        self._inlinecomp_text = String("")
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3447,6 +3508,14 @@ struct LspManager(Copyable, Movable):
                 self._colorpres_edits = cp_edits^
                 self._has_colorpres = True
                 self._inflight_colorpres_id = String("")
+                continue
+            if id == self._inflight_inlinecomp_id:
+                var ic = String("")
+                if msg.result:
+                    ic = _parse_inline_completion(msg.result.value())
+                self._inlinecomp_text = ic^
+                self._has_inlinecomp = True
+                self._inflight_inlinecomp_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5563,6 +5632,36 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
     return out^
+
+
+def _parse_inline_completion(v: JsonValue) -> String:
+    """Pull the first suggestion's insert text out of an
+    ``InlineCompletionList`` (``{items: [...]}``) or a bare
+    ``InlineCompletionItem[]``. ``insertText`` is a string (or, in the
+    snippet form we don't render, an object with ``value``)."""
+    var items = v.copy()
+    if v.is_object():
+        var it_opt = v.object_get(String("items"))
+        if it_opt and it_opt.value().is_array():
+            items = it_opt.value().copy()
+        else:
+            return String("")
+    if not items.is_array() or items.array_len() == 0:
+        return String("")
+    var first = items.array_at(0)
+    if not first.is_object():
+        return String("")
+    var ins_opt = first.object_get(String("insertText"))
+    if not ins_opt:
+        return String("")
+    var ins = ins_opt.value().copy()
+    if ins.is_string():
+        return ins.as_str()
+    if ins.is_object():
+        var val = ins.object_get(String("value"))
+        if val and val.value().is_string():
+            return val.value().as_str()
+    return String("")
 
 
 def _parse_monikers(v: JsonValue) -> String:

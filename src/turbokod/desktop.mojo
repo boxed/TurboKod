@@ -73,7 +73,7 @@ from .diagnostic_menu import (
 from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
     CTX_MENU_ACTION_COLOR_PRESENTATION,
-    CTX_MENU_ACTION_DECLARATION,
+    CTX_MENU_ACTION_DECLARATION, CTX_MENU_ACTION_INLINE_COMPLETION,
     CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_MONIKER,
     CTX_MENU_ACTION_REFERENCES,
@@ -6630,6 +6630,18 @@ struct Desktop(Movable):
                         String("No moniker for symbol"),
                         Attr(BLACK, LIGHT_GRAY),
                     )
+            # inlineCompletion → ghost text on the focused editor (the
+            # manual request was issued there; a fast async round-trip).
+            if self.lsp_managers[i].has_inline_completion():
+                var ictext = self.lsp_managers[i].inline_completion_text()
+                var icrow = self.lsp_managers[i].inline_completion_row()
+                var iccol = self.lsp_managers[i].inline_completion_col()
+                self.lsp_managers[i].clear_inline_completion()
+                if len(ictext.as_bytes()) > 0:
+                    var icw = self._focused_editor_idx()
+                    if icw >= 0:
+                        self.windows.windows[icw].editor \
+                            .set_inline_completion(ictext^, icrow, iccol)
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -11363,6 +11375,11 @@ struct Desktop(Movable):
         ):
             labels.append(String("Change Color Format…"))
             actions.append(CTX_MENU_ACTION_COLOR_PRESENTATION)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("inlineCompletionProvider"),
+        ):
+            labels.append(String("Inline Suggestion"))
+            actions.append(CTX_MENU_ACTION_INLINE_COMPLETION)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11480,6 +11497,18 @@ struct Desktop(Movable):
             _ = self.lsp_managers[lsp_idx].request_color_presentation(
                 path, r, g, b, sw.row, sw.col_start, sw.row, sw.col_end,
                 text^,
+            )
+            return
+        if act == CTX_MENU_ACTION_INLINE_COMPLETION:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                return
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            _ = self.lsp_managers[lsp_idx].request_inline_completion(
+                path, row, col, text^,
             )
 
     def _dispatch_navigation(

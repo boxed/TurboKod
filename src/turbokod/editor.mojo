@@ -1300,6 +1300,15 @@ struct Editor(Copyable, Movable):
     # insert (LSP wants the position following the typed char).
     var pending_on_type: Optional[HoverRequest]
     var pending_on_type_ch: String
+    # LSP inline completion (ghost text). ``inline_completion_text`` is the
+    # suggestion to show dimmed after the cursor (empty = none); it's
+    # anchored at ``(inline_completion_row, inline_completion_col)`` and
+    # only painted when the cursor is still there and at end-of-line. Tab
+    # accepts (inserts it), any other key / cursor move dismisses. Set by
+    # the host after a manual "Inline Suggestion" request.
+    var inline_completion_text: String
+    var inline_completion_row: Int
+    var inline_completion_col: Int
     var completion_popup_visible: Bool
     var completion_items: List[CompletionItem]
     var completion_highlight: Int
@@ -1449,6 +1458,9 @@ struct Editor(Copyable, Movable):
         self.pending_signature_help = Optional[HoverRequest]()
         self.pending_on_type = Optional[HoverRequest]()
         self.pending_on_type_ch = String("")
+        self.inline_completion_text = String("")
+        self.inline_completion_row = 0
+        self.inline_completion_col = 0
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1572,6 +1584,9 @@ struct Editor(Copyable, Movable):
         self.pending_signature_help = Optional[HoverRequest]()
         self.pending_on_type = Optional[HoverRequest]()
         self.pending_on_type_ch = String("")
+        self.inline_completion_text = String("")
+        self.inline_completion_row = 0
+        self.inline_completion_col = 0
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1727,6 +1742,9 @@ struct Editor(Copyable, Movable):
         self.pending_signature_help = copy.pending_signature_help
         self.pending_on_type = copy.pending_on_type
         self.pending_on_type_ch = copy.pending_on_type_ch
+        self.inline_completion_text = copy.inline_completion_text
+        self.inline_completion_row = copy.inline_completion_row
+        self.inline_completion_col = copy.inline_completion_col
         self.completion_popup_visible = copy.completion_popup_visible
         self.completion_items = copy.completion_items.copy()
         self.completion_highlight = copy.completion_highlight
@@ -2008,6 +2026,43 @@ struct Editor(Copyable, Movable):
         truecolor bg = the literal's color). Host gates behind
         ``lsp_document_colors``."""
         self.color_highlights = hls^
+
+    def set_inline_completion(
+        mut self, var text: String, row: Int, col: Int,
+    ):
+        """Show ``text`` as ghost text anchored at ``(row, col)``. Cleared
+        on the next keystroke unless it's the Tab that accepts it."""
+        self.inline_completion_text = text^
+        self.inline_completion_row = row
+        self.inline_completion_col = col
+
+    def has_inline_completion(self) -> Bool:
+        return len(self.inline_completion_text.as_bytes()) > 0
+
+    def clear_inline_completion(mut self):
+        if len(self.inline_completion_text.as_bytes()) > 0:
+            self.inline_completion_text = String("")
+
+    def accept_inline_completion(mut self) -> Bool:
+        """Insert the ghost text at its anchor if the cursor is still
+        there, leaving the caret at the end, then clear. Returns False
+        (no-op) when there's no suggestion, the buffer is read-only, or the
+        cursor moved off the anchor."""
+        if not self.has_inline_completion() or self.read_only:
+            self.clear_inline_completion()
+            return False
+        if self.selections[0].row != self.inline_completion_row \
+                or self.selections[0].col != self.inline_completion_col:
+            self.clear_inline_completion()
+            return False
+        var text = self.inline_completion_text
+        self.clear_inline_completion()
+        self.clear_extra_carets()
+        # paste_text pushes its own undo step and inserts verbatim
+        # (handling embedded newlines for a multi-line suggestion),
+        # advancing the caret to the end.
+        self.paste_text(text)
+        return True
 
     def color_at(self, row: Int, col: Int) -> Optional[Highlight]:
         """Return the documentColor swatch covering ``(row, col)`` (its
@@ -6066,6 +6121,38 @@ struct Editor(Copyable, Movable):
                         )
                         nx += 1
                         bi += cp_len
+                # LSP inline-completion ghost text: dim, right after the
+                # caret. Only on its anchor row, only while the caret is
+                # still at the anchor, and only when that anchor is at
+                # end-of-line (so the ghost can't overlap real text).
+                if len(self.inline_completion_text.as_bytes()) > 0 \
+                        and buf_row == self.inline_completion_row \
+                        and self.selections[0].row \
+                            == self.inline_completion_row \
+                        and self.selections[0].col \
+                            == self.inline_completion_col \
+                        and self.inline_completion_col >= len(line.as_bytes()):
+                    var gb = self.inline_completion_text.as_bytes()
+                    var gn = len(gb)
+                    for gi in range(len(gb)):
+                        if gb[gi] == 0x0A:  # first line only
+                            gn = gi
+                            break
+                    var gx = seg_x0 + visible_cell_count
+                    var ghost_attr = Attr(DARK_GRAY, EDITOR_BG)
+                    var gbi = 0
+                    while gbi < gn and gx < content_right:
+                        var gcp = utf8_codepoint_size(Int(gb[gbi]))
+                        if gbi + gcp > gn:
+                            gcp = 1
+                        var gglyph = String(StringSlice(
+                            ptr=gb.unsafe_ptr() + gbi, length=gcp,
+                        ))
+                        _ = painter.put_text(
+                            canvas, Point(gx, sy_hl), gglyph, ghost_attr,
+                        )
+                        gx += 1
+                        gbi += gcp
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty
@@ -6970,6 +7057,17 @@ struct Editor(Copyable, Movable):
         # the hovered identifier — drop the dwell candidate and any
         # popup so it doesn't float over edits we're about to make.
         self.clear_hover_state()
+        # LSP inline-completion (ghost text) intercept. Tab accepts the
+        # suggestion; Esc or any other key dismisses it (other keys then
+        # fall through to be handled normally so typing isn't swallowed).
+        # Skipped while the completion popup owns Tab.
+        if self.has_inline_completion() and not self.completion_popup_visible:
+            if event.key == KEY_TAB and event.mods == MOD_NONE:
+                return self.accept_inline_completion()
+            if event.key == KEY_ESC:
+                self.clear_inline_completion()
+                return True
+            self.clear_inline_completion()
         # LSP completion-popup intercept. While the popup is visible
         # the navigation keys steer it rather than the cursor;
         # Enter/Tab accept; Esc dismisses. Typing / backspace / arrow

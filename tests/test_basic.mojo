@@ -166,6 +166,7 @@ from turbokod.lsp_dispatch import (
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result, _parse_monikers, _unit_text,
+    _parse_inline_completion,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10400,6 +10401,22 @@ def test_lsp_color_unit_text() raises:
     assert_equal(mid.as_bytes()[1], UInt8(ord(".")))
 
 
+def test_lsp_parse_inline_completion() raises:
+    """The first inline-completion item's insertText is extracted from
+    both the list form ({items:[...]}) and a bare item array, string or
+    {value} insertText."""
+    var lst = parse_json(String(
+        "{\"items\":[{\"insertText\":\"foo()\"},{\"insertText\":\"bar\"}]}"
+    ))
+    assert_equal(_parse_inline_completion(lst), String("foo()"))
+    var arr = parse_json(String("[{\"insertText\":{\"value\":\"baz\"}}]"))
+    assert_equal(_parse_inline_completion(arr), String("baz"))
+    assert_equal(
+        _parse_inline_completion(parse_json(String("{\"items\":[]}"))),
+        String(""),
+    )
+
+
 def test_lsp_parse_monikers() raises:
     """Moniker[] joins into a scheme:identifier status string."""
     var v = parse_json(String(
@@ -19131,6 +19148,7 @@ def _run_chunk_04() raises:
     test_lsp_on_type_trigger_chars()
     test_lsp_parse_monikers()
     test_lsp_color_unit_text()
+    test_lsp_parse_inline_completion()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

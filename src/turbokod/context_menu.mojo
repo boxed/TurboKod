@@ -49,6 +49,7 @@ comptime CTX_MENU_ACTION_CALLEES         = 9
 comptime CTX_MENU_ACTION_SUBTYPES        = 10
 comptime CTX_MENU_ACTION_MONIKER         = 11
 comptime CTX_MENU_ACTION_COLOR_PRESENTATION = 12
+comptime CTX_MENU_ACTION_INLINE_COMPLETION = 13
 
 
 struct EditorContextMenu(Movable):
