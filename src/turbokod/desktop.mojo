@@ -3185,6 +3185,12 @@ struct Desktop(Movable):
                         )
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
+            # Kick every running server to re-read its configuration — a
+            # pull-config server re-issues workspace/configuration, which
+            # we answer. Cheap and idempotent; servers ignore it if they
+            # don't care.
+            for ci in range(len(self.lsp_managers)):
+                self.lsp_managers[ci].notify_configuration_changed()
             self.settings.ack_dirty()
         # Drain pending dictionary install / remove requests emitted by
         # the Spell-check pane. Install routes through the shared

@@ -1013,6 +1013,14 @@ def lsp_initialize_params(
     var watched_caps = json_object()
     watched_caps.put(String("dynamicRegistration"), json_bool(True))
     workspace_caps.put(String("didChangeWatchedFiles"), watched_caps^)
+    # Advertise workspace/didChangeConfiguration so servers accept our
+    # "settings changed, please re-read" kick (sent when the user changes
+    # settings — see ``notify_configuration_changed``).
+    var didchange_cfg_caps = json_object()
+    didchange_cfg_caps.put(String("dynamicRegistration"), json_bool(True))
+    workspace_caps.put(
+        String("didChangeConfiguration"), didchange_cfg_caps^,
+    )
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
     # The editor reasons in byte offsets; with UTF-8 negotiated, LSP

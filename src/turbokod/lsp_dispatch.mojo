@@ -1268,6 +1268,26 @@ struct LspManager(Copyable, Movable):
         except e:
             print("lsp: didChangeWatchedFiles", path, ":", String(e))
 
+    def notify_configuration_changed(mut self):
+        """Send ``workspace/didChangeConfiguration`` so the server knows
+        its settings may have changed and re-reads them. Servers that use
+        push-configuration read the ``settings`` payload directly; the
+        more common pull-configuration servers ignore it and re-issue
+        ``workspace/configuration`` (which ``_handle_server_request``
+        answers). We carry an empty ``settings`` object — the host doesn't
+        push per-server settings blobs, it only answers the pull — so this
+        is purely the "go re-pull" kick. No-op until ready."""
+        if self.state != _STATE_READY:
+            return
+        var params = json_object()
+        params.put(String("settings"), json_object())
+        try:
+            self.client.send_notification(
+                String("workspace/didChangeConfiguration"), params,
+            )
+        except e:
+            print("lsp: didChangeConfiguration", ":", String(e))
+
     def request_definition(
         mut self, path: String, line: Int, character: Int,
         var word: String, var text: String,
