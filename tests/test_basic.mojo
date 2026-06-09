@@ -164,12 +164,10 @@ from turbokod.lsp_dispatch import (
     CodeAction, CodeActionFileEdit,
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
-    DefinitionResolved, LspManager,
+    DefinitionResolved, LspManager, _STATE_READY,
     TextEditEntry, _parse_additional_text_edits,
     _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
-    _decode_semantic_tokens, _decode_semantic_data, _semantic_data_ints,
-    _apply_semantic_edits,
     _parse_code_lens, _collect_unresolved_lenses, _codelens_title_of,
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
@@ -7560,6 +7558,56 @@ def test_textmate_json_grammar_paints_strings_and_numbers() raises:
     assert_true(saw_keyword)
 
 
+def test_textmate_css_declaration_values_are_tokenized() raises:
+    """CSS property *values* — numbers, strings, comments — must color.
+
+    Regression for two tokenizer bugs that left declaration values
+    untouched:
+
+    1. ``meta.property-name`` closes with a zero-width ``end``
+       (``(?![-a-zA-Z])``) right on the ``:``. The empty-match guard
+       used to bump ``pos`` one byte past a zero-width *end* pop the
+       same way it does a zero-width plain match, swallowing the colon
+       so the sibling property-value ``(:)\\s*`` begin never fired —
+       the whole value (``24px``, ``"hello"``, …) went untokenized.
+    2. A pushed ``string`` / ``comment`` frame nests under wrapper
+       scopes (``meta.property-value.css`` …), so ``_emit_unmatched``
+       prefix-matching the *whole* chain missed the inner scope and
+       left string/comment bodies uncolored. It now walks the chain
+       innermost-first.
+    """
+    var lines = _hl_lines(
+        String("/* note */"),
+        String(".foo {"),
+        String("  width: 24px;"),
+        String("  content: \"hello\";"),
+        String("}"),
+    )
+    var hls = highlight_for_extension(String("css"), lines)
+
+    # ``24px`` sits at cols 9-12 on row 2; its leading digits must
+    # paint as a number.
+    var saw_number = False
+    # The string body ``hello`` sits at cols 12-16 on row 3.
+    var saw_string_body = False
+    # The block comment body on row 0.
+    var saw_comment = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 2 and h.col_start <= 9 and h.col_end > 9:
+            if h.attr == highlight_number_attr():
+                saw_number = True
+        if h.row == 3 and h.col_start <= 13 and h.col_end > 13:
+            if h.attr == highlight_string_attr():
+                saw_string_body = True
+        if h.row == 0 and h.col_start <= 4 and h.col_end > 4:
+            if h.attr == highlight_comment_attr():
+                saw_comment = True
+    assert_true(saw_number)
+    assert_true(saw_string_body)
+    assert_true(saw_comment)
+
+
 def test_intellij_language_injection_html_in_python_string() raises:
     """A ``# language=html`` marker on the line above a string literal
     re-tokenizes the string body with the HTML grammar. We verify by
@@ -10047,39 +10095,6 @@ def test_lsp_parse_selection_ranges_walks_parent_chain() raises:
     assert_equal(grown[3], 7)
 
 
-def test_lsp_decode_semantic_tokens() raises:
-    """The delta-encoded ``data`` array accumulates (deltaLine, deltaStart)
-    into absolute (row, start) per 5-int token. Same-line tokens add to
-    ``start``; a new line resets it. Out-of-legend type indices and
-    zero-length tokens are skipped."""
-    var legend = List[String]()
-    legend.append(String("keyword"))   # 0
-    legend.append(String("variable"))  # 1
-    legend.append(String("function"))  # 2
-    # tokens: (0,0,3,0) kw@row0[0,3); (1,4,5,2) fn@row1[4,9);
-    #         (0,6,2,1) var@row1[10,12) (same-line start 4+6=10);
-    #         (0,0,2,9) bad type → skipped.
-    var v = parse_json(String(
-        "{\"data\":[0,0,3,0,0, 1,4,5,2,0, 0,6,2,1,0, 0,0,2,9,0]}"
-    ))
-    var hls = _decode_semantic_tokens(v, legend)
-    assert_equal(len(hls), 3)
-    assert_equal(hls[0].row, 0)
-    assert_equal(hls[0].col_start, 0)
-    assert_equal(hls[0].col_end, 3)
-    assert_equal(hls[1].row, 1)
-    assert_equal(hls[1].col_start, 4)
-    assert_equal(hls[1].col_end, 9)
-    assert_equal(hls[2].row, 1)
-    assert_equal(hls[2].col_start, 10)
-    assert_equal(hls[2].col_end, 12)
-    # No data / wrong shape → empty.
-    assert_equal(len(_decode_semantic_tokens(parse_json(String("null")), legend)), 0)
-    var ed = Editor(String("kw\n    fn   var"))
-    ed.set_semantic_tokens(hls^)
-    assert_equal(len(ed.semantic_highlights), 3)
-
-
 def test_lsp_parse_inlay_hints() raises:
     """``inlayHint`` entries carry a ``position`` + ``label`` (string or
     label-part array); the parser flattens to (row, text) carriers."""
@@ -10241,8 +10256,7 @@ def test_lsp_dynamic_capability_registration() raises:
     """``client/registerCapability`` merges into the cached capabilities so
     ``server_supports`` reports dynamically-registered providers (the way
     rust-analyzer enables most of its features); ``unregisterCapability``
-    flips them back off. A dynamic semanticTokens registration also seeds
-    the token-type legend the same way the initialize path does."""
+    flips them back off."""
     var mgr = LspManager()
     assert_true(not mgr.server_supports(String("foldingRangeProvider")))
     # Register with an options object → stored verbatim, reports supported.
@@ -10262,16 +10276,6 @@ def test_lsp_dynamic_capability_registration() raises:
         String("workspace/didChangeWatchedFiles"),
     )
     assert_true(not mgr._watches_files)
-    # A dynamic semanticTokens registration carries the legend.
-    var sem_opts = parse_json(String(
-        "{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"function\"]}}"
-    ))
-    mgr._apply_capability_registration(
-        String("textDocument/semanticTokens"), sem_opts^,
-    )
-    assert_true(mgr.server_supports(String("semanticTokensProvider")))
-    assert_equal(len(mgr._sem_token_types), 3)
-    assert_equal(mgr._sem_token_types[2], String("function"))
     # Unregister flips the capability back to unsupported.
     mgr._remove_capability_registration(String("textDocument/foldingRange"))
     assert_true(not mgr.server_supports(String("foldingRangeProvider")))
@@ -10302,6 +10306,33 @@ def test_lsp_pull_diagnostics_storage() raises:
     assert_equal(len(got), 1)
     # Consumed flag flips so the host doesn't re-apply every frame.
     assert_true(not mgr.has_unconsumed_diagnostics_for(String("/x.py")))
+
+
+def test_lsp_pull_diagnostics_multi_inflight() raises:
+    """Several pull requests can be in flight at once — on session restore
+    the host opens N buffers and fires one pull per file in a single frame.
+    Each is tracked by (id, path) so every response matches its own request;
+    a single slot would strand all but the last (their "analysing edits…"
+    spinners stuck until the 8 s inflight timeout, diagnostics dropped)."""
+    var mgr = LspManager()
+    var caps = parse_json(String("{\"diagnosticProvider\":{}}"))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    mgr.state = _STATE_READY
+    assert_true(mgr.request_pull_diagnostics(String("/a.py")))
+    assert_true(mgr.request_pull_diagnostics(String("/b.py")))
+    assert_true(mgr.request_pull_diagnostics(String("/c.py")))
+    # All three outstanding, with distinct ids (not collapsed to one slot).
+    assert_equal(len(mgr._pull_diag_ids), 3)
+    assert_equal(len(mgr._pull_diag_paths), 3)
+    assert_equal(mgr._pull_diag_paths[0], String("/a.py"))
+    assert_equal(mgr._pull_diag_paths[2], String("/c.py"))
+    assert_true(mgr._pull_diag_ids[0] != mgr._pull_diag_ids[2])
+    # Re-pulling an already-inflight path supersedes the old entry rather
+    # than duplicating it (edit-driven pull replaces the initial one).
+    assert_true(mgr.request_pull_diagnostics(String("/a.py")))
+    assert_equal(len(mgr._pull_diag_paths), 3)
+    # /a.py moved to the tail with a fresh id; /b.py and /c.py stay.
+    assert_equal(mgr._pull_diag_paths[2], String("/a.py"))
 
 
 def test_lsp_server_supports_will_save() raises:
@@ -10399,30 +10430,6 @@ def test_lsp_codelens_resolve_collects_unresolved() raises:
     assert_equal(len(_parse_code_lens(lenses)), 1)
     var single = parse_json(String("{\"command\":{\"title\":\"hi\"}}"))
     assert_equal(_codelens_title_of(single), String("hi"))
-
-
-def test_lsp_semantic_tokens_delta() raises:
-    """A SemanticTokensDelta edit set splices into the cached flat token
-    array; the shared decoder handles both full and spliced arrays."""
-    var legend = List[String]()
-    legend.append(String("keyword"))
-    legend.append(String("string"))
-    var full = parse_json(String(
-        "{\"resultId\":\"1\",\"data\":[0,0,3,0,0,0,4,2,1,0]}"
-    ))
-    var ints = _semantic_data_ints(full)
-    assert_equal(len(ints), 10)
-    assert_equal(len(_decode_semantic_data(ints, legend)), 2)
-    # Replace the 5 ints of the 2nd token with a fresh token.
-    var edits = parse_json(String(
-        "[{\"start\":5,\"deleteCount\":5,\"data\":[1,0,4,1,0]}]"
-    ))
-    var spliced = _apply_semantic_edits(ints, edits)
-    assert_equal(len(spliced), 10)
-    assert_equal(spliced[5], 1)
-    # A delete-only edit (no replacement data) drops the token.
-    var del_edit = parse_json(String("[{\"start\":5,\"deleteCount\":5}]"))
-    assert_equal(len(_apply_semantic_edits(ints, del_edit)), 5)
 
 
 def test_lsp_on_type_trigger_chars() raises:
@@ -19191,6 +19198,7 @@ def _run_chunk_02() raises:
     test_textmate_all_bundled_grammars_load()
     test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()
+    test_textmate_css_declaration_values_are_tokenized()
     test_textmate_rust_block_comment_spans_lines()
     test_intellij_language_injection_html_in_python_string()
     test_intellij_language_injection_inline_marker()
@@ -19384,7 +19392,6 @@ def _run_chunk_04() raises:
     test_lsp_parse_hierarchy_result()
     test_lsp_parse_document_colors()
     test_lsp_parse_selection_ranges_walks_parent_chain()
-    test_lsp_decode_semantic_tokens()
     test_lsp_parse_inlay_hints()
     test_lsp_parse_code_lens()
     test_lsp_parse_signature_help()
@@ -19392,6 +19399,7 @@ def _run_chunk_04() raises:
     test_lsp_server_supports_reads_capabilities()
     test_lsp_dynamic_capability_registration()
     test_lsp_pull_diagnostics_storage()
+    test_lsp_pull_diagnostics_multi_inflight()
     test_lsp_server_supports_will_save()
     test_lsp_log_message_capture()
     test_lsp_message_request_accessors()
@@ -19399,7 +19407,6 @@ def _run_chunk_04() raises:
     test_lsp_server_wants_did_create()
     test_lsp_codelens_resolve_collects_unresolved()
     test_lsp_parse_document_links()
-    test_lsp_semantic_tokens_delta()
     test_lsp_on_type_trigger_chars()
     test_lsp_parse_monikers()
     test_lsp_color_unit_text()

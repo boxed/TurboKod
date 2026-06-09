@@ -103,10 +103,9 @@ comptime _FOCUS_LS_DOC_HIGHLIGHT  = UInt8(27)
 comptime _FOCUS_LS_DOC_LINKS      = UInt8(28)
 comptime _FOCUS_LS_INLAY_HINTS    = UInt8(29)
 comptime _FOCUS_LS_CODE_LENS      = UInt8(30)
-comptime _FOCUS_LS_SEMANTIC       = UInt8(31)
-comptime _FOCUS_LS_DOC_COLORS     = UInt8(32)
-comptime _FOCUS_LS_LINKED_EDITING = UInt8(33)
-comptime _FOCUS_LS_PROGRESS       = UInt8(34)
+comptime _FOCUS_LS_DOC_COLORS     = UInt8(31)
+comptime _FOCUS_LS_LINKED_EDITING = UInt8(32)
+comptime _FOCUS_LS_PROGRESS       = UInt8(33)
 
 
 # --- section indices ------------------------------------------------------
@@ -231,7 +230,6 @@ struct Settings(Movable):
     var ls_document_links: Bool
     var ls_inlay_hints: Bool
     var ls_code_lens: Bool
-    var ls_semantic_tokens: Bool
     var ls_document_colors: Bool
     var ls_linked_editing: Bool
     var ls_server_progress: Bool
@@ -289,7 +287,6 @@ struct Settings(Movable):
     var _ls_doc_links_cb: Checkbox
     var _ls_inlay_hints_cb: Checkbox
     var _ls_code_lens_cb: Checkbox
-    var _ls_semantic_cb: Checkbox
     var _ls_doc_colors_cb: Checkbox
     var _ls_linked_editing_cb: Checkbox
     var _ls_progress_cb: Checkbox
@@ -395,7 +392,6 @@ struct Settings(Movable):
         self.ls_document_links = False
         self.ls_inlay_hints = False
         self.ls_code_lens = False
-        self.ls_semantic_tokens = False
         self.ls_document_colors = False
         self.ls_linked_editing = False
         self.ls_server_progress = False
@@ -473,9 +469,6 @@ struct Settings(Movable):
         self._ls_code_lens_cb = Checkbox(
             String("Code lens (inline actions)"), 0, 0, False,
         )
-        self._ls_semantic_cb = Checkbox(
-            String("Semantic highlighting"), 0, 0, False,
-        )
         self._ls_doc_colors_cb = Checkbox(
             String("Color swatches"), 0, 0, False,
         )
@@ -537,7 +530,6 @@ struct Settings(Movable):
         ls_document_links: Bool = False,
         ls_inlay_hints: Bool = False,
         ls_code_lens: Bool = False,
-        ls_semantic_tokens: Bool = False,
         ls_document_colors: Bool = False,
         ls_linked_editing: Bool = False,
         ls_server_progress: Bool = True,
@@ -558,7 +550,6 @@ struct Settings(Movable):
         self.ls_document_links = ls_document_links
         self.ls_inlay_hints = ls_inlay_hints
         self.ls_code_lens = ls_code_lens
-        self.ls_semantic_tokens = ls_semantic_tokens
         self.ls_document_colors = ls_document_colors
         self.ls_linked_editing = ls_linked_editing
         self.ls_server_progress = ls_server_progress
@@ -568,7 +559,6 @@ struct Settings(Movable):
         self._ls_doc_links_cb.on = ls_document_links
         self._ls_inlay_hints_cb.on = ls_inlay_hints
         self._ls_code_lens_cb.on = ls_code_lens
-        self._ls_semantic_cb.on = ls_semantic_tokens
         self._ls_doc_colors_cb.on = ls_document_colors
         self._ls_linked_editing_cb.on = ls_linked_editing
         self._ls_progress_cb.on = ls_server_progress
@@ -659,7 +649,6 @@ struct Settings(Movable):
         self.ls_document_links = False
         self.ls_inlay_hints = False
         self.ls_code_lens = False
-        self.ls_semantic_tokens = False
         self.ls_document_colors = False
         self.ls_linked_editing = False
         self.ls_server_progress = False
@@ -1384,7 +1373,6 @@ struct Settings(Movable):
         self._ls_doc_links_cb.on = self.ls_document_links
         self._ls_inlay_hints_cb.on = self.ls_inlay_hints
         self._ls_code_lens_cb.on = self.ls_code_lens
-        self._ls_semantic_cb.on = self.ls_semantic_tokens
         self._ls_doc_colors_cb.on = self.ls_document_colors
         self._ls_linked_editing_cb.on = self.ls_linked_editing
         self._ls_progress_cb.on = self.ls_server_progress
@@ -1418,22 +1406,17 @@ struct Settings(Movable):
             canvas, self._ls_code_lens_cb, chip, focus_attr,
             self.focus == _FOCUS_LS_CODE_LENS, inner.b.x,
         )
-        self._ls_semantic_cb.move_to(inner.a.x, y + 6)
-        paint_checkbox(
-            canvas, self._ls_semantic_cb, chip, focus_attr,
-            self.focus == _FOCUS_LS_SEMANTIC, inner.b.x,
-        )
-        self._ls_doc_colors_cb.move_to(inner.a.x, y + 7)
+        self._ls_doc_colors_cb.move_to(inner.a.x, y + 6)
         paint_checkbox(
             canvas, self._ls_doc_colors_cb, chip, focus_attr,
             self.focus == _FOCUS_LS_DOC_COLORS, inner.b.x,
         )
-        self._ls_linked_editing_cb.move_to(inner.a.x, y + 8)
+        self._ls_linked_editing_cb.move_to(inner.a.x, y + 7)
         paint_checkbox(
             canvas, self._ls_linked_editing_cb, chip, focus_attr,
             self.focus == _FOCUS_LS_LINKED_EDITING, inner.b.x,
         )
-        self._ls_progress_cb.move_to(inner.a.x, y + 9)
+        self._ls_progress_cb.move_to(inner.a.x, y + 8)
         paint_checkbox(
             canvas, self._ls_progress_cb, chip, focus_attr,
             self.focus == _FOCUS_LS_PROGRESS, inner.b.x,
@@ -1907,11 +1890,6 @@ struct Settings(Movable):
         self._ls_code_lens_cb.on = self.ls_code_lens
         self.dirty = True
 
-    def _toggle_ls_semantic(mut self):
-        self.ls_semantic_tokens = not self.ls_semantic_tokens
-        self._ls_semantic_cb.on = self.ls_semantic_tokens
-        self.dirty = True
-
     def _toggle_ls_doc_colors(mut self):
         self.ls_document_colors = not self.ls_document_colors
         self._ls_doc_colors_cb.on = self.ls_document_colors
@@ -1949,9 +1927,6 @@ struct Settings(Movable):
         if focus == _FOCUS_LS_CODE_LENS:
             self._toggle_ls_code_lens()
             return True
-        if focus == _FOCUS_LS_SEMANTIC:
-            self._toggle_ls_semantic()
-            return True
         if focus == _FOCUS_LS_DOC_COLORS:
             self._toggle_ls_doc_colors()
             return True
@@ -1978,8 +1953,6 @@ struct Settings(Movable):
         self._ls_inlay_hints_cb.pressed_inside = False
         self._ls_code_lens_cb.pressed = False
         self._ls_code_lens_cb.pressed_inside = False
-        self._ls_semantic_cb.pressed = False
-        self._ls_semantic_cb.pressed_inside = False
         self._ls_doc_colors_cb.pressed = False
         self._ls_doc_colors_cb.pressed_inside = False
         self._ls_linked_editing_cb.pressed = False
@@ -2076,7 +2049,6 @@ struct Settings(Movable):
             ordered.append(_FOCUS_LS_DOC_LINKS)
             ordered.append(_FOCUS_LS_INLAY_HINTS)
             ordered.append(_FOCUS_LS_CODE_LENS)
-            ordered.append(_FOCUS_LS_SEMANTIC)
             ordered.append(_FOCUS_LS_DOC_COLORS)
             ordered.append(_FOCUS_LS_LINKED_EDITING)
             ordered.append(_FOCUS_LS_PROGRESS)
@@ -2464,12 +2436,6 @@ struct Settings(Movable):
                 if cl_s == BUTTON_FIRED:
                     self.focus = _FOCUS_LS_CODE_LENS
                     self._toggle_ls_code_lens()
-                return True
-            var sem_s = self._ls_semantic_cb.handle_mouse(event)
-            if sem_s != BUTTON_NONE:
-                if sem_s == BUTTON_FIRED:
-                    self.focus = _FOCUS_LS_SEMANTIC
-                    self._toggle_ls_semantic()
                 return True
             var col_s = self._ls_doc_colors_cb.handle_mouse(event)
             if col_s != BUTTON_NONE:

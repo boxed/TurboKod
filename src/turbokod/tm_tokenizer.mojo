@@ -253,7 +253,24 @@ def _tokenize_line(
     var cached_match = List[OnigMatch]()
     var cache_opts = ONIG_OPTION_NONE
     var cache_ready = False
+    # Stuck guard: count consecutive iterations that don't advance ``pos``.
+    # Zero-width begin pushes and zero-width end pops are legitimate
+    # no-advance steps (bounded by grammar nesting depth), but a begin↔end
+    # pair that both match zero-width at the same position would oscillate
+    # forever. When the no-advance streak clearly exceeds any sane nesting
+    # depth we force a one-byte step to guarantee progress.
+    var stuck_pos = -1
+    var stuck_iters = 0
     while pos < n:
+        if pos == stuck_pos:
+            stuck_iters += 1
+        else:
+            stuck_pos = pos
+            stuck_iters = 0
+        if stuck_iters > 2 * len(stack) + 16:
+            # Pathological zero-width oscillation — step past this byte.
+            pos += 1
+            continue
         var cur_top = -1 if len(stack) == 0 \
             else stack[len(stack) - 1].pattern_idx
         if cur_top != cands_top:
@@ -318,11 +335,22 @@ def _tokenize_line(
         # empty-match guards bump ``match_end`` artificially.
         g_pos = match_end
         var was_zero_width = (match_end == match_start)
-        # Empty match guard: bump ``match_end`` so a non-begin
-        # zero-width match doesn't loop forever at the same pos.
-        # Skipped for zero-width begin transitions (``(?!\\G)``-style)
-        # so the body of the pushed frame can start *at* the
-        # matched position rather than one byte past it.
+        # Empty match guard: bump ``match_end`` so a zero-width *match*
+        # doesn't loop forever at the same pos.
+        #
+        # Two transitions are exempt from the bump:
+        #   * zero-width begin transitions (``(?!\\G)``-style) — so the
+        #     body of the pushed frame starts *at* the matched position
+        #     rather than one byte past it.
+        #   * zero-width ``end`` pops — the closing position belongs to
+        #     the parent context, so popping must NOT consume the
+        #     character. A construct like ``meta.property-name`` whose
+        #     end is ``(?![-a-zA-Z])`` closes right *on* the ``:`` that
+        #     the sibling property-value ``(:)\s*`` begin needs to see;
+        #     bumping past it swallowed the colon and left the whole
+        #     value (numbers, strings, …) untokenized.
+        # ``stuck_iters`` below guards the resulting zero-advance pops
+        # against a pathological begin↔end oscillation.
         var cand = cands[best_idx]
         var is_begin_push = False
         if cand.pattern_idx >= 0:
@@ -330,7 +358,8 @@ def _tokenize_line(
             if pat_kind == PATTERN_BEGIN_END \
                     or pat_kind == PATTERN_BEGIN_WHILE:
                 is_begin_push = True
-        if was_zero_width and not is_begin_push:
+        var is_end_pop = (cand.pattern_idx < 0)
+        if was_zero_width and not is_begin_push and not is_end_pop:
             match_end = match_start + 1
 
         # Emit any unscoped run between ``pos`` and the match start.
@@ -344,7 +373,8 @@ def _tokenize_line(
             var top = stack[len(stack) - 1]
             var pat = grammar.patterns[top.pattern_idx].copy()
             var attr = _attr_for_scopes(top.scope_chain, pat.name)
-            out.append(Highlight(row, match_start, match_end, attr))
+            if match_end > match_start:
+                out.append(Highlight(row, match_start, match_end, attr))
             _emit_captures(
                 grammar, top.scope_chain, pat.name, pat.end_captures,
                 best_match, line, row, out,
@@ -668,7 +698,12 @@ def _emit_unmatched(
     var chain = _top_chain(stack)
     if len(chain.as_bytes()) == 0:
         return
-    var attr_opt = _scope_attr(chain)
+    # Walk the chain innermost-first: an open ``string`` / ``comment``
+    # frame nests under wrapper scopes (``meta.property-value.css`` …),
+    # so a prefix match against the *whole* chain would miss it — the
+    # chain starts with the unmapped ``meta.*`` scope. Only paint when
+    # some scope in the chain maps; truly-unscoped runs stay uncolored.
+    var attr_opt = _scope_attr_in_chain(chain)
     if attr_opt:
         out.append(Highlight(row, start, end, attr_opt.value()))
 
@@ -791,6 +826,23 @@ def _expand_into(
 # --- scope → Attr mapping ----------------------------------------------------
 
 
+def _scope_attr_in_chain(chain: String) -> Optional[Attr]:
+    """Walk a space-separated scope chain innermost-first and return the
+    first scope that maps to an Attr (or ``None`` if none do). Cheap —
+    chains are short (typically 0-3 scopes deep for the bundled
+    grammars)."""
+    if len(chain.as_bytes()) == 0:
+        return Optional[Attr]()
+    var parts = _split_scopes(chain)
+    var i = len(parts) - 1
+    while i >= 0:
+        var ao = _scope_attr(parts[i])
+        if ao:
+            return ao
+        i -= 1
+    return Optional[Attr]()
+
+
 def _attr_for_scopes(chain: String, leaf: String) -> Attr:
     """Pick an Attr by inspecting the leaf scope first, then walking
     the chain from innermost to outermost. First known prefix wins.
@@ -800,17 +852,9 @@ def _attr_for_scopes(chain: String, leaf: String) -> Attr:
         var ao = _scope_attr(leaf)
         if ao:
             return ao.value()
-    if len(chain.as_bytes()) > 0:
-        # Walk the chain right-to-left (innermost-first) by splitting
-        # on spaces. Cheap because chains are short — typically 0-3
-        # scopes deep for the bundled grammar.
-        var parts = _split_scopes(chain)
-        var i = len(parts) - 1
-        while i >= 0:
-            var ao = _scope_attr(parts[i])
-            if ao:
-                return ao.value()
-            i -= 1
+    var co = _scope_attr_in_chain(chain)
+    if co:
+        return co.value()
     return highlight_ident_attr()
 
 

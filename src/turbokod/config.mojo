@@ -226,7 +226,6 @@ struct TurbokodConfig(Copyable, Movable):
     var lsp_document_links: Bool      # clickable document links
     var lsp_inlay_hints: Bool         # inline type/param-name hints
     var lsp_code_lens: Bool           # actionable inline annotations
-    var lsp_semantic_tokens: Bool     # semantic highlighting overlay
     var lsp_document_colors: Bool     # color swatches
     var lsp_linked_editing: Bool      # co-edit matching ranges (e.g. tags)
     var lsp_server_progress: Bool     # show server work progress (default on)
@@ -284,7 +283,6 @@ struct TurbokodConfig(Copyable, Movable):
         self.lsp_document_links = False
         self.lsp_inlay_hints = False
         self.lsp_code_lens = False
-        self.lsp_semantic_tokens = False
         self.lsp_document_colors = False
         self.lsp_linked_editing = False
         self.lsp_server_progress = True
@@ -316,7 +314,6 @@ struct TurbokodConfig(Copyable, Movable):
         self.lsp_document_links = copy.lsp_document_links
         self.lsp_inlay_hints = copy.lsp_inlay_hints
         self.lsp_code_lens = copy.lsp_code_lens
-        self.lsp_semantic_tokens = copy.lsp_semantic_tokens
         self.lsp_document_colors = copy.lsp_document_colors
         self.lsp_linked_editing = copy.lsp_linked_editing
         self.lsp_server_progress = copy.lsp_server_progress
@@ -446,9 +443,6 @@ def load_config() -> TurbokodConfig:
         cfg.lsp_code_lens = json_get_bool(
             root, String("lsp_code_lens"), cfg.lsp_code_lens,
         )
-        cfg.lsp_semantic_tokens = json_get_bool(
-            root, String("lsp_semantic_tokens"), cfg.lsp_semantic_tokens,
-        )
         cfg.lsp_document_colors = json_get_bool(
             root, String("lsp_document_colors"), cfg.lsp_document_colors,
         )
@@ -576,10 +570,6 @@ def save_config(config: TurbokodConfig) -> Bool:
     )
     root.put(String("lsp_inlay_hints"), json_bool(config.lsp_inlay_hints))
     root.put(String("lsp_code_lens"), json_bool(config.lsp_code_lens))
-    root.put(
-        String("lsp_semantic_tokens"),
-        json_bool(config.lsp_semantic_tokens),
-    )
     root.put(
         String("lsp_document_colors"),
         json_bool(config.lsp_document_colors),

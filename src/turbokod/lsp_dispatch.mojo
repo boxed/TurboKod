@@ -35,10 +35,7 @@ from .lsp import (
 )
 from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
 from .highlight import Highlight
-from .colors import (
-    Attr, BLACK, EDITOR_BG, EDITOR_FG, SYN_COMMENT, SYN_DECORATOR, SYN_IDENT,
-    SYN_KEYWORD, SYN_NUMBER, SYN_OPERATOR, SYN_STRING, WHITE,
-)
+from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
 
 def _lsp_debug_log(line: String):
@@ -672,23 +669,6 @@ struct LspManager(Copyable, Movable):
     var _doclink_path: String
     var _resolved_doclinks: List[TextEditEntry]
     var _has_resolved_doclinks: Bool
-    # ``textDocument/semanticTokens/full`` — the server's token-type legend
-    # (from ``semanticTokensProvider.legend.tokenTypes``) plus the decoded
-    # per-row recolor ``Highlight``s parked for the editor overlay.
-    var _sem_token_types: List[String]
-    var _inflight_semantic_id: String
-    var _semantic_path: String
-    var _resolved_semantic: List[Highlight]
-    var _has_resolved_semantic: Bool
-    # ``semanticTokens/full/delta`` state: the last ``resultId`` and the raw
-    # flat token-int array it corresponds to, keyed by path. A subsequent
-    # request for the same path sends ``/full/delta`` with the previous
-    # resultId; the delta's ``edits`` splice into ``_sem_data`` and we
-    # re-decode — far cheaper than re-tokenizing the whole file on a large
-    # buffer. Cleared / bypassed when the path changes or no resultId yet.
-    var _sem_result_id: String
-    var _sem_data: List[Int]
-    var _sem_data_path: String
     # Server-initiated status: ``$/progress`` (work-done progress) and
     # ``window/showMessage``. Parked for the host to surface in the status
     # bar — progress only when ``lsp_server_progress`` is on.
@@ -721,13 +701,17 @@ struct LspManager(Copyable, Movable):
     # ``textDocument/diagnostic`` — the pull-diagnostics model (LSP 3.17).
     # Servers that advertise ``diagnosticProvider`` don't push
     # ``publishDiagnostics``; we request a report per document instead.
-    # Single in-flight slot (``_pull_diag_path`` echoes which path it's
-    # for); the parsed items land in the same ``_diagnostic_buckets`` the
-    # push path uses. ``_pulled_paths`` records every path we've requested
-    # so the host can fire the *initial* pull exactly once per buffer
-    # (subsequent pulls are edit-driven).
-    var _inflight_pull_diag_id: String
-    var _pull_diag_path: String
+    # Multiple pulls can be in flight at once — on session restore the host
+    # opens N buffers and fires one pull per file in a single frame, so a
+    # single slot would let all but the last response go unmatched (their
+    # "analysing edits…" spinners then stick until the inflight timeout, and
+    # their diagnostics never land). We track every outstanding request as an
+    # index-aligned (id, path) pair; the parsed items land in the same
+    # ``_diagnostic_buckets`` the push path uses. ``_pulled_paths`` records
+    # every path we've requested so the host can fire the *initial* pull
+    # exactly once per buffer (subsequent pulls are edit-driven).
+    var _pull_diag_ids: List[String]
+    var _pull_diag_paths: List[String]
     var _pulled_paths: List[String]
     # ``textDocument/willSaveWaitUntil`` — the server returns a
     # ``TextEdit[]`` to apply before the buffer is written (e.g. organize
@@ -930,14 +914,6 @@ struct LspManager(Copyable, Movable):
         self._doclink_path = String("")
         self._resolved_doclinks = List[TextEditEntry]()
         self._has_resolved_doclinks = False
-        self._sem_token_types = List[String]()
-        self._inflight_semantic_id = String("")
-        self._semantic_path = String("")
-        self._resolved_semantic = List[Highlight]()
-        self._has_resolved_semantic = False
-        self._sem_result_id = String("")
-        self._sem_data = List[Int]()
-        self._sem_data_path = String("")
         self._progress_note = String("")
         self._has_progress_note = False
         self._server_message = String("")
@@ -956,8 +932,8 @@ struct LspManager(Copyable, Movable):
         self._color_path = String("")
         self._resolved_colors = List[Highlight]()
         self._has_resolved_colors = False
-        self._inflight_pull_diag_id = String("")
-        self._pull_diag_path = String("")
+        self._pull_diag_ids = List[String]()
+        self._pull_diag_paths = List[String]()
         self._pulled_paths = List[String]()
         self._inflight_willsave_id = String("")
         self._willsave_path = String("")
@@ -1114,14 +1090,6 @@ struct LspManager(Copyable, Movable):
         self._doclink_path = String("")
         self._resolved_doclinks = List[TextEditEntry]()
         self._has_resolved_doclinks = False
-        self._sem_token_types = List[String]()
-        self._inflight_semantic_id = String("")
-        self._semantic_path = String("")
-        self._resolved_semantic = List[Highlight]()
-        self._has_resolved_semantic = False
-        self._sem_result_id = String("")
-        self._sem_data = List[Int]()
-        self._sem_data_path = String("")
         self._progress_note = String("")
         self._has_progress_note = False
         self._server_message = String("")
@@ -1140,8 +1108,8 @@ struct LspManager(Copyable, Movable):
         self._color_path = String("")
         self._resolved_colors = List[Highlight]()
         self._has_resolved_colors = False
-        self._inflight_pull_diag_id = String("")
-        self._pull_diag_path = String("")
+        self._pull_diag_ids = List[String]()
+        self._pull_diag_paths = List[String]()
         self._pulled_paths = List[String]()
         self._inflight_willsave_id = String("")
         self._willsave_path = String("")
@@ -1297,9 +1265,10 @@ struct LspManager(Copyable, Movable):
     def request_pull_diagnostics(mut self, path: String) -> Bool:
         """Request a ``textDocument/diagnostic`` report for ``path`` (pull
         model). The parsed items land in the same diagnostic bucket the
-        push path writes, so the host consumes them identically. Single
-        in-flight slot — a fresh pull shadows any prior one (per-path
-        races just defer the older path's refresh to its next pull).
+        push path writes, so the host consumes them identically. Every
+        outstanding request is tracked by (id, path) so a burst of pulls
+        across many buffers (session restore opens N files in one frame)
+        all match their responses — see ``_pull_diag_ids``.
         No-op unless ready and the server advertises ``diagnosticProvider``;
         assumes the document is already open (caller pre-flights via the
         normal didOpen/didChange path)."""
@@ -1307,14 +1276,25 @@ struct LspManager(Copyable, Movable):
             return False
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
+        var req_id: String
         try:
-            self._inflight_pull_diag_id = self.client.send_request(
+            req_id = self.client.send_request(
                 String("textDocument/diagnostic"), params,
             )
         except:
-            self._inflight_pull_diag_id = String("")
             return False
-        self._pull_diag_path = path
+        # Drop any prior outstanding request for the same path — a newer
+        # pull (edit-driven) supersedes it, and its response would just
+        # overwrite the same bucket.
+        var k = 0
+        while k < len(self._pull_diag_paths):
+            if self._pull_diag_paths[k] == path:
+                _ = self._pull_diag_ids.pop(k)
+                _ = self._pull_diag_paths.pop(k)
+            else:
+                k += 1
+        self._pull_diag_ids.append(req_id)
+        self._pull_diag_paths.append(path)
         if not self.has_pulled(path):
             self._pulled_paths.append(path)
         return True
@@ -3098,78 +3078,6 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_doclinks = False
         return out^
 
-    # --- semantic tokens --------------------------------------------------
-
-    def request_semantic_tokens(
-        mut self, path: String, var text: String,
-    ) -> Bool:
-        """Request semantic tokens for the whole file. When we have a
-        cached ``resultId`` for this same path and the server supports
-        delta, send ``semanticTokens/full/delta`` (the response is a small
-        edit set spliced into the cached token array); otherwise send the
-        full ``semanticTokens/full``. Either way the decoded recolor
-        ``Highlight``s are parked for the editor."""
-        if self.state != _STATE_READY:
-            return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
-        var use_delta = self._sem_data_path == path \
-            and len(self._sem_result_id.as_bytes()) > 0 \
-            and self.server_supports_semantic_delta()
-        var method = String("textDocument/semanticTokens/full")
-        if use_delta:
-            method = String("textDocument/semanticTokens/full/delta")
-            params.put(
-                String("previousResultId"), json_str(self._sem_result_id),
-            )
-        else:
-            # New file (or no prior result): drop any stale cache so a
-            # delta-shaped response can't splice against the wrong array.
-            self._sem_result_id = String("")
-            self._sem_data = List[Int]()
-        try:
-            self._inflight_semantic_id = self.client.send_request(method, params)
-        except:
-            self._inflight_semantic_id = String("")
-            return False
-        self._semantic_path = path
-        self._sem_data_path = path
-        self._resolved_semantic = List[Highlight]()
-        self._has_resolved_semantic = False
-        return True
-
-    def server_supports_semantic_delta(self) -> Bool:
-        """True iff ``semanticTokensProvider.full.delta`` — the server can
-        return token deltas keyed off a previous ``resultId``."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var sp_opt = caps.object_get(String("semanticTokensProvider"))
-        if not sp_opt or not sp_opt.value().is_object():
-            return False
-        var full_opt = sp_opt.value().copy().object_get(String("full"))
-        if not full_opt or not full_opt.value().is_object():
-            return False
-        var d_opt = full_opt.value().copy().object_get(String("delta"))
-        if d_opt and d_opt.value().is_bool():
-            return d_opt.value().as_bool()
-        return False
-
-    def has_pending_semantic(self) -> Bool:
-        return self._has_resolved_semantic
-
-    def pending_semantic_path(self) -> String:
-        return self._semantic_path
-
-    def take_semantic(mut self) -> List[Highlight]:
-        var out = self._resolved_semantic^
-        self._resolved_semantic = List[Highlight]()
-        self._has_resolved_semantic = False
-        return out^
-
     # --- selection range --------------------------------------------------
 
     def request_selection_range(
@@ -3778,31 +3686,6 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_doclinks = True
                 self._inflight_doclink_id = String("")
                 continue
-            if id == self._inflight_semantic_id:
-                if msg.result and msg.result.value().is_object():
-                    var r = msg.result.value().copy()
-                    var edits_opt = r.object_get(String("edits"))
-                    if edits_opt and edits_opt.value().is_array():
-                        # Delta: splice the edits into the cached array.
-                        self._sem_data = _apply_semantic_edits(
-                            self._sem_data, edits_opt.value(),
-                        )
-                    else:
-                        # Full: the response carries the whole token array.
-                        self._sem_data = _semantic_data_ints(r)
-                    var rid_opt = r.object_get(String("resultId"))
-                    if rid_opt and rid_opt.value().is_string():
-                        self._sem_result_id = rid_opt.value().as_str()
-                    else:
-                        self._sem_result_id = String("")
-                    self._resolved_semantic = _decode_semantic_data(
-                        self._sem_data, self._sem_token_types,
-                    )
-                else:
-                    self._resolved_semantic = List[Highlight]()
-                self._has_resolved_semantic = True
-                self._inflight_semantic_id = String("")
-                continue
             if id == self._inflight_selrange_id:
                 var sr = List[TextEditEntry]()
                 if msg.result:
@@ -3854,13 +3737,19 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_colors = True
                 self._inflight_color_id = String("")
                 continue
-            if id == self._inflight_pull_diag_id:
+            var pull_slot = -1
+            for pk in range(len(self._pull_diag_ids)):
+                if self._pull_diag_ids[pk] == id:
+                    pull_slot = pk
+                    break
+            if pull_slot >= 0:
                 # Pull-diagnostics report. A "full" report (or any object
                 # carrying ``items``) replaces the bucket — an empty
                 # ``items`` array is a valid "all clear". An "unchanged"
                 # report means reuse what we have, so leave the bucket be.
-                var ppath = self._pull_diag_path
-                self._inflight_pull_diag_id = String("")
+                var ppath = self._pull_diag_paths[pull_slot]
+                _ = self._pull_diag_ids.pop(pull_slot)
+                _ = self._pull_diag_paths.pop(pull_slot)
                 if msg.result and msg.result.value().is_object():
                     var rep = msg.result.value().copy()
                     var kind = String("")
@@ -4216,31 +4105,6 @@ struct LspManager(Copyable, Movable):
         self._show_doc_line = -1
         self._show_doc_char = 0
 
-    def _capture_semantic_legend(mut self, provider: JsonValue):
-        """Pull ``legend.tokenTypes`` out of a ``semanticTokensProvider``
-        object (from the initialize capabilities *or* a dynamic
-        ``client/registerCapability``) into ``_sem_token_types``, indexed
-        by each decoded token's ``tokenType`` field. Shared so both the
-        static and the dynamic-registration paths build the same legend —
-        rust-analyzer ships its legend only on the dynamic registration."""
-        if not provider.is_object():
-            return
-        var legend_opt = provider.object_get(String("legend"))
-        if not legend_opt or not legend_opt.value().is_object():
-            return
-        var tt_opt = legend_opt.value().object_get(String("tokenTypes"))
-        if not tt_opt or not tt_opt.value().is_array():
-            return
-        var tt = tt_opt.value().copy()
-        var types = List[String]()
-        for ti in range(tt.array_len()):
-            var tv = tt.array_at(ti)
-            if tv.is_string():
-                types.append(tv.as_str())
-            else:
-                types.append(String(""))
-        self._sem_token_types = types^
-
     def _apply_capability_registration(
         mut self, method: String, options: JsonValue,
     ):
@@ -4269,9 +4133,6 @@ struct LspManager(Copyable, Movable):
         else:
             caps.put(key, json_bool(True))
         self._capabilities = Optional[JsonValue](caps^)
-        if method == String("textDocument/semanticTokens") \
-                and options.is_object():
-            self._capture_semantic_legend(options)
 
     def _remove_capability_registration(mut self, method: String):
         """Undo a registration on ``client/unregisterCapability`` by
@@ -4582,13 +4443,6 @@ struct LspManager(Copyable, Movable):
                 )
                 if enc_opt and enc_opt.value().is_string():
                     self._position_encoding = enc_opt.value().as_str()
-                # Semantic-tokens legend: the token-type names, indexed by
-                # the ``tokenType`` field of each decoded token.
-                var stp_opt = caps_opt.value().object_get(
-                    String("semanticTokensProvider"),
-                )
-                if stp_opt and stp_opt.value().is_object():
-                    self._capture_semantic_legend(stp_opt.value())
         if self._position_encoding != String("utf-8"):
             _lsp_debug_log(
                 String("position encoding negotiated as '")
@@ -4853,8 +4707,6 @@ def _capability_key_for_method(method: String) -> String:
         return String("inlineCompletionProvider")
     if method == String("textDocument/linkedEditingRange"):
         return String("linkedEditingRangeProvider")
-    if method == String("textDocument/semanticTokens"):
-        return String("semanticTokensProvider")
     if method == String("textDocument/prepareCallHierarchy"):
         return String("callHierarchyProvider")
     if method == String("textDocument/prepareTypeHierarchy"):
@@ -5634,139 +5486,6 @@ def _formatting_options(tab_size: Int, insert_spaces: Bool) -> JsonValue:
     opts.put(String("tabSize"), json_int(tab_size))
     opts.put(String("insertSpaces"), json_bool(insert_spaces))
     return opts^
-
-
-def _semantic_attr_for_type(t: String) -> Attr:
-    """Map an LSP semantic token-type name to one of the editor's reserved
-    ``SYN_*`` color roles (so the active theme controls the hue). Unknown
-    types fall back to the default editor foreground."""
-    if t == String("keyword") or t == String("modifier"):
-        return Attr(SYN_KEYWORD, EDITOR_BG)
-    if t == String("string"):
-        return Attr(SYN_STRING, EDITOR_BG)
-    if t == String("number"):
-        return Attr(SYN_NUMBER, EDITOR_BG)
-    if t == String("comment"):
-        return Attr(SYN_COMMENT, EDITOR_BG)
-    if t == String("operator"):
-        return Attr(SYN_OPERATOR, EDITOR_BG)
-    if t == String("decorator") or t == String("macro"):
-        return Attr(SYN_DECORATOR, EDITOR_BG)
-    # type-like and callable-like names share the identifier role (the
-    # palette only reserves so many slots; this keeps semantic coloring
-    # consistent with the TextMate scheme).
-    if t == String("function") or t == String("method") \
-            or t == String("type") or t == String("class") \
-            or t == String("struct") or t == String("enum") \
-            or t == String("interface") or t == String("namespace") \
-            or t == String("typeParameter") or t == String("enumMember"):
-        return Attr(SYN_IDENT, EDITOR_BG)
-    return Attr(EDITOR_FG, EDITOR_BG)
-
-
-def _decode_semantic_tokens(
-    v: JsonValue, legend: List[String],
-) -> List[Highlight]:
-    """Decode a ``SemanticTokens`` result's delta-encoded ``data`` array
-    into per-row ``Highlight``s. Each token is 5 integers
-    ``(deltaLine, deltaStart, length, tokenType, tokenModifiers)`` relative
-    to the previous token; the absolute row/start are accumulated. Tokens
-    whose ``tokenType`` indexes outside the legend, or with zero length,
-    are skipped. (Multi-line tokens are uncommon for the highlighted
-    types; a token's span is treated as single-row, which is what the
-    overlay paints.)"""
-    if not v.is_object():
-        return List[Highlight]()
-    return _decode_semantic_data(_semantic_data_ints(v), legend)
-
-
-def _semantic_data_ints(v: JsonValue) -> List[Int]:
-    """Pull the flat integer ``data`` array out of a ``SemanticTokens``
-    object (empty when absent / malformed)."""
-    var out = List[Int]()
-    if not v.is_object():
-        return out^
-    var data_opt = v.object_get(String("data"))
-    if not data_opt or not data_opt.value().is_array():
-        return out^
-    var data = data_opt.value().copy()
-    for i in range(data.array_len()):
-        var e = data.array_at(i)
-        out.append(e.as_int() if e.is_int() else 0)
-    return out^
-
-
-def _decode_semantic_data(data: List[Int], legend: List[String]) -> List[Highlight]:
-    """Decode a flat ``(deltaLine, deltaStart, length, tokenType,
-    tokenModifiers)`` token array (accumulated relative to the previous
-    token) into per-row ``Highlight``s. Shared by the ``/full`` and the
-    ``/full/delta`` paths (the latter reconstructs ``data`` first)."""
-    var out = List[Highlight]()
-    var n = len(data)
-    var line = 0
-    var start = 0
-    var i = 0
-    while i + 5 <= n:
-        var d_line = data[i]
-        var d_start = data[i + 1]
-        var length = data[i + 2]
-        var ttype = data[i + 3]
-        if d_line == 0:
-            start = start + d_start
-        else:
-            line = line + d_line
-            start = d_start
-        i += 5
-        if length <= 0:
-            continue
-        if ttype < 0 or ttype >= len(legend):
-            continue
-        out.append(Highlight(
-            line, start, start + length,
-            _semantic_attr_for_type(legend[ttype]),
-        ))
-    return out^
-
-
-def _apply_semantic_edits(data: List[Int], edits: JsonValue) -> List[Int]:
-    """Apply a ``SemanticTokensDelta`` ``edits`` array to the previous flat
-    token-int ``data`` and return the new array. Each edit is
-    ``{start, deleteCount, data?}`` describing a splice of the *original*
-    array; the spec guarantees edits are sorted ascending and
-    non-overlapping, so a single forward pass — copy the gap, insert the
-    replacement, skip the deleted run — rebuilds the result."""
-    var out = List[Int]()
-    if not edits.is_array():
-        return data.copy()
-    var pos = 0
-    for i in range(edits.array_len()):
-        var e = edits.array_at(i)
-        if not e.is_object():
-            continue
-        var s_opt = e.object_get(String("start"))
-        if not s_opt or not s_opt.value().is_int():
-            continue
-        var start = s_opt.value().as_int()
-        var delc = 0
-        var dc_opt = e.object_get(String("deleteCount"))
-        if dc_opt and dc_opt.value().is_int():
-            delc = dc_opt.value().as_int()
-        var j = pos
-        while j < start and j < len(data):
-            out.append(data[j])
-            j += 1
-        var d_opt = e.object_get(String("data"))
-        if d_opt and d_opt.value().is_array():
-            var dd = d_opt.value().copy()
-            for k in range(dd.array_len()):
-                var ev = dd.array_at(k)
-                out.append(ev.as_int() if ev.is_int() else 0)
-        pos = start + delc
-    var t = pos
-    while t < len(data):
-        out.append(data[t])
-        t += 1
-    return out^
 
 
 def _parse_inlay_hints(v: JsonValue) -> List[TextEditEntry]:

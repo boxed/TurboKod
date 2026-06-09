@@ -951,11 +951,6 @@ struct Editor(Copyable, Movable):
     # of the line, like inlay/code-lens. Set by the host when the debugger
     # is stopped; cleared on continue / session end.
     var inline_value_notes: List[TextEditEntry]
-    # LSP semantic tokens, decoded by the host into per-row ``Highlight``s
-    # (col span + ``Attr`` using a ``SYN_*`` role). Painted as a recolor
-    # pass *after* the TextMate syntax pass so semantic coloring wins on
-    # overlap. Gated by the host behind ``lsp_semantic_tokens``.
-    var semantic_highlights: List[Highlight]
     # LSP ``selectionRange`` hierarchy at the cursor, innermost→outermost
     # (range carriers). When present, smart-select grow walks these
     # semantic ranges in preference to the syntactic heuristic; falls back
@@ -1397,7 +1392,6 @@ struct Editor(Copyable, Movable):
         self.inlay_notes = List[TextEditEntry]()
         self.codelens_notes = List[TextEditEntry]()
         self.inline_value_notes = List[TextEditEntry]()
-        self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
         self.fold_regions = List[TextEditEntry]()
@@ -1526,7 +1520,6 @@ struct Editor(Copyable, Movable):
         self.inlay_notes = List[TextEditEntry]()
         self.codelens_notes = List[TextEditEntry]()
         self.inline_value_notes = List[TextEditEntry]()
-        self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
         self.fold_regions = List[TextEditEntry]()
@@ -1683,7 +1676,6 @@ struct Editor(Copyable, Movable):
         self.inlay_notes = copy.inlay_notes.copy()
         self.codelens_notes = copy.codelens_notes.copy()
         self.inline_value_notes = copy.inline_value_notes.copy()
-        self.semantic_highlights = copy.semantic_highlights.copy()
         self.lsp_select_ranges = copy.lsp_select_ranges.copy()
         self.color_highlights = copy.color_highlights.copy()
         self.fold_regions = copy.fold_regions.copy()
@@ -2136,11 +2128,6 @@ struct Editor(Copyable, Movable):
                 var sc = self.selections[0].col
                 var sl = self.buffer.line_length(start)
                 self.move_to(start, sc if sc < sl else sl, False)
-
-    def set_semantic_tokens(mut self, var hls: List[Highlight]):
-        """Replace the semantic-token recolor highlights. Host gates behind
-        ``lsp_semantic_tokens``; pass an empty list to clear."""
-        self.semantic_highlights = hls^
 
     def set_selection_ranges(mut self, var ranges: List[TextEditEntry]):
         """Replace the LSP selectionRange hierarchy (innermost→outermost
@@ -5941,7 +5928,6 @@ struct Editor(Copyable, Movable):
         # rescanning every spell highlight / diagnostic for each visible row.
         var spell_buckets = List[List[Int]]()
         var diag_buckets = List[List[Int]]()
-        var sem_buckets = List[List[Int]]()
         var color_buckets = List[List[Int]]()
         var vis_lo = 0
         if len(layout) > 0:
@@ -5957,16 +5943,11 @@ struct Editor(Copyable, Movable):
                 hl_buckets.append(List[Int]())
                 spell_buckets.append(List[Int]())
                 diag_buckets.append(List[Int]())
-                sem_buckets.append(List[Int]())
                 color_buckets.append(List[Int]())
             for h in range(len(self.highlights)):
                 var r = self.highlights[h].row
                 if r >= vis_lo and r <= vis_hi:
                     hl_buckets[r - vis_lo].append(h)
-            for st in range(len(self.semantic_highlights)):
-                var r = self.semantic_highlights[st].row
-                if r >= vis_lo and r <= vis_hi:
-                    sem_buckets[r - vis_lo].append(st)
             for ch in range(len(self.color_highlights)):
                 var r = self.color_highlights[ch].row
                 if r >= vis_lo and r <= vis_hi:
@@ -6100,31 +6081,6 @@ struct Editor(Copyable, Movable):
                     if sx_hl >= content_right:
                         break
                     painter.set_attr(canvas, sx_hl, sy_hl, hl.attr)
-            # Semantic-token overlay: identical byte→cell recolor as the
-            # syntax pass, applied *after* it so LSP semantic coloring wins
-            # on overlap. Empty unless ``set_semantic_tokens`` was called.
-            ref sem_bucket = sem_buckets[buf_row - vis_lo]
-            for sm in range(len(sem_bucket)):
-                var sh2 = self.semantic_highlights[sem_bucket[sm]]
-                var s2_byte_start = sh2.col_start - start_byte
-                var s2_byte_end = sh2.col_end - start_byte
-                if s2_byte_start < 0:
-                    s2_byte_start = 0
-                if s2_byte_end > visible_byte_count:
-                    s2_byte_end = visible_byte_count
-                if s2_byte_start >= s2_byte_end:
-                    continue
-                var s2_cell_start = visible_cell_map[s2_byte_start]
-                var s2_cell_end: Int
-                if s2_byte_end < visible_byte_count:
-                    s2_cell_end = visible_cell_map[s2_byte_end]
-                else:
-                    s2_cell_end = visible_cell_count
-                for cell_off in range(s2_cell_start, s2_cell_end):
-                    var sx_s2 = seg_x0 + cell_off
-                    if sx_s2 >= content_right:
-                        break
-                    painter.set_attr(canvas, sx_s2, sy_hl, sh2.attr)
             # documentColor swatch overlay: recolor the color literal's
             # cells to the literal's actual color (truecolor bg).
             ref color_bucket = color_buckets[buf_row - vis_lo]

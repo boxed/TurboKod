@@ -84,6 +84,41 @@ without a measurement.
    synchronously in `sendMouse`, so 20 Hz during motion buys nothing.
    A frame that genuinely changes still resets to full rate.
 
+## Removed feature: LSP semantic highlighting (do not reintroduce)
+
+`textDocument/semanticTokens` — the server-computed recolor overlay that
+sits *on top* of the local TextMate syntax pass (distinguishing variable
+vs. parameter vs. property, `readonly`/`async` modifiers, etc.) — was
+**removed**, deliberately, for performance. It is not behind a setting any
+more; the client doesn't even advertise the capability, so servers skip
+the work entirely.
+
+Why, measured against the real `ty` server on a 4404-line / 195 KB Python
+file (`dryft/core/views.py`), driving a real `LspManager` end-to-end:
+
+| Step | Time | Where |
+|---|---|---|
+| semantic tokens, cold (on open) | ~240 ms | server |
+| semantic tokens, warm (per settled edit) | ~50–60 ms | server |
+| our tick processing | 0 ms avg, 7 ms max | us |
+| our JSON parse+copy of a 40k-int response | ~25 ms | us |
+
+The cost was almost entirely **server-side**: `ty` recomputes full-file
+tokens on open and again after every settled edit (it advertises no token
+*delta* support, so there's no cheap incremental path). The user-visible
+effect was the syntax colors *shifting* ~¼ s after open and *flickering*
+on every edit pause — for a refinement on top of coloring TextMate
+already provides instantly. Our own pipeline was never the bottleneck (see
+the table), so there was nothing to optimize on our side short of not
+asking for it.
+
+If this is ever wanted back, the **only** acceptable shape is
+`textDocument/semanticTokens/range` scoped to the visible viewport (~50
+lines, not 4404 — `ty` advertises `range: true`), which needs partial
+results spliced into the existing highlight set and a re-request on
+scroll. A `/full` request per edit is what made it too slow; don't restore
+that path.
+
 ## The floor
 
 After the above, fast continuous mouse movement sits around ~8% CPU, and

@@ -3174,10 +3174,6 @@ struct Desktop(Movable):
             var codelens_changed = (
                 self.settings.ls_code_lens != self.config.lsp_code_lens
             )
-            var semantic_changed = (
-                self.settings.ls_semantic_tokens
-                != self.config.lsp_semantic_tokens
-            )
             var colors_changed = (
                 self.settings.ls_document_colors
                 != self.config.lsp_document_colors
@@ -3188,10 +3184,9 @@ struct Desktop(Movable):
             )
             self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
             self.config.lsp_code_lens = self.settings.ls_code_lens
-            self.config.lsp_semantic_tokens = self.settings.ls_semantic_tokens
             self.config.lsp_document_colors = self.settings.ls_document_colors
             self.config.lsp_document_links = self.settings.ls_document_links
-            if inlay_changed or codelens_changed or semantic_changed \
+            if inlay_changed or codelens_changed \
                     or colors_changed or links_changed:
                 # Force a re-request next frame (covers every turn-on).
                 self._inlay_key = String("")
@@ -3205,11 +3200,6 @@ struct Desktop(Movable):
                     if codelens_changed and not self.config.lsp_code_lens:
                         self.windows.windows[wi].editor.set_code_lens(
                             List[TextEditEntry]()
-                        )
-                    if semantic_changed \
-                            and not self.config.lsp_semantic_tokens:
-                        self.windows.windows[wi].editor.set_semantic_tokens(
-                            List[Highlight]()
                         )
                     if colors_changed and not self.config.lsp_document_colors:
                         self.windows.windows[wi].editor.set_color_swatches(
@@ -5900,7 +5890,6 @@ struct Desktop(Movable):
                 self.config.lsp_document_links,
                 self.config.lsp_inlay_hints,
                 self.config.lsp_code_lens,
-                self.config.lsp_semantic_tokens,
                 self.config.lsp_document_colors,
                 self.config.lsp_linked_editing,
                 self.config.lsp_server_progress,
@@ -6679,13 +6668,6 @@ struct Desktop(Movable):
                 var cw = self._find_window_for_path(cp)
                 if cw >= 0 and self.windows.windows[cw].is_editor:
                     self.windows.windows[cw].editor.set_code_lens(cls^)
-            # semanticTokens → recolor overlay on the matching editor.
-            if self.lsp_managers[i].has_pending_semantic():
-                var sp = self.lsp_managers[i].pending_semantic_path()
-                var sems = self.lsp_managers[i].take_semantic()
-                var sw = self._find_window_for_path(sp)
-                if sw >= 0 and self.windows.windows[sw].is_editor:
-                    self.windows.windows[sw].editor.set_semantic_tokens(sems^)
             # documentColor → swatch overlay on the matching editor.
             if self.lsp_managers[i].has_pending_colors():
                 var clp = self.lsp_managers[i].pending_color_path()
@@ -7017,7 +6999,6 @@ struct Desktop(Movable):
         debounce key (``path|linecount``) changes. Gated per feature by the
         ``lsp_inlay_hints`` / ``lsp_code_lens`` settings + server support."""
         if not self.config.lsp_inlay_hints and not self.config.lsp_code_lens \
-                and not self.config.lsp_semantic_tokens \
                 and not self.config.lsp_document_colors \
                 and not self.config.lsp_document_links:
             return
@@ -7044,10 +7025,6 @@ struct Desktop(Movable):
                 .server_supports(String("codeLensProvider")):
             var t2 = self.windows.windows[win_idx].editor.text_snapshot()
             _ = self.lsp_managers[li].request_code_lens(path, t2^)
-        if self.config.lsp_semantic_tokens and self.lsp_managers[li] \
-                .server_supports(String("semanticTokensProvider")):
-            var t3 = self.windows.windows[win_idx].editor.text_snapshot()
-            _ = self.lsp_managers[li].request_semantic_tokens(path, t3^)
         if self.config.lsp_document_colors and self.lsp_managers[li] \
                 .server_supports(String("colorProvider")):
             var t4 = self.windows.windows[win_idx].editor.text_snapshot()
