@@ -89,8 +89,8 @@ from .posix import (
 from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
-    CompletionRequest, DefinitionRequest, GrammarRegistry, HoverRequest,
-    embedded_language_extensions, extension_of, word_at,
+    CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
+    HoverRequest, embedded_language_extensions, extension_of, word_at,
 )
 from .spell import Speller
 from .spell_menu import (
@@ -3088,10 +3088,56 @@ struct Desktop(Movable):
                 self.settings.ls_document_highlight
             )
             self.config.lsp_document_links = self.settings.ls_document_links
+            # The four annotation features below share the ``_inlay_key``
+            # debounce and push results into per-editor overlays. Toggling
+            # any of them has to take effect live, not on restart:
+            #  - turned OFF: clear the stale overlay on every editor (paint
+            #    has no gate, so it'd keep showing the last response);
+            #  - turned ON: invalidate the debounce key so the next
+            #    ``_maybe_request_inlay_codelens`` actually re-requests
+            #    instead of short-circuiting on the unchanged buffer.
+            var inlay_changed = (
+                self.settings.ls_inlay_hints != self.config.lsp_inlay_hints
+            )
+            var codelens_changed = (
+                self.settings.ls_code_lens != self.config.lsp_code_lens
+            )
+            var semantic_changed = (
+                self.settings.ls_semantic_tokens
+                != self.config.lsp_semantic_tokens
+            )
+            var colors_changed = (
+                self.settings.ls_document_colors
+                != self.config.lsp_document_colors
+            )
             self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
             self.config.lsp_code_lens = self.settings.ls_code_lens
             self.config.lsp_semantic_tokens = self.settings.ls_semantic_tokens
             self.config.lsp_document_colors = self.settings.ls_document_colors
+            if inlay_changed or codelens_changed or semantic_changed \
+                    or colors_changed:
+                # Force a re-request next frame (covers every turn-on).
+                self._inlay_key = String("")
+                for wi in range(len(self.windows.windows)):
+                    if not self.windows.windows[wi].is_editor:
+                        continue
+                    if inlay_changed and not self.config.lsp_inlay_hints:
+                        self.windows.windows[wi].editor.set_inlay_hints(
+                            List[TextEditEntry]()
+                        )
+                    if codelens_changed and not self.config.lsp_code_lens:
+                        self.windows.windows[wi].editor.set_code_lens(
+                            List[TextEditEntry]()
+                        )
+                    if semantic_changed \
+                            and not self.config.lsp_semantic_tokens:
+                        self.windows.windows[wi].editor.set_semantic_tokens(
+                            List[Highlight]()
+                        )
+                    if colors_changed and not self.config.lsp_document_colors:
+                        self.windows.windows[wi].editor.set_color_swatches(
+                            List[Highlight]()
+                        )
             self.config.lsp_linked_editing = self.settings.ls_linked_editing
             self.config.lsp_server_progress = self.settings.ls_server_progress
             self.config.language_servers = (
