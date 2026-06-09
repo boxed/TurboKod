@@ -74,7 +74,7 @@ from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
     CTX_MENU_ACTION_COLOR_PRESENTATION,
     CTX_MENU_ACTION_DECLARATION, CTX_MENU_ACTION_INLINE_COMPLETION,
-    CTX_MENU_ACTION_LINKED_EDIT,
+    CTX_MENU_ACTION_LINKED_EDIT, CTX_MENU_ACTION_TOGGLE_FOLD,
     CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_MONIKER,
     CTX_MENU_ACTION_REFERENCES,
@@ -11473,6 +11473,9 @@ struct Desktop(Movable):
         ):
             labels.append(String("Linked Edit"))
             actions.append(CTX_MENU_ACTION_LINKED_EDIT)
+        if self.windows.windows[idx].editor.has_foldable_at(req.row):
+            labels.append(String("Toggle Fold"))
+            actions.append(CTX_MENU_ACTION_TOGGLE_FOLD)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11614,6 +11617,12 @@ struct Desktop(Movable):
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_linked_editing(
                 path, row, col, text^,
+            )
+            return
+        if act == CTX_MENU_ACTION_TOGGLE_FOLD:
+            self.windows.windows[idx].editor.toggle_fold_at(row)
+            self.windows.windows[idx].editor.reveal_cursor(
+                self.windows.windows[idx].interior(),
             )
 
     def _dispatch_navigation(

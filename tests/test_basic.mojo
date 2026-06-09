@@ -1072,6 +1072,46 @@ def test_text_buffer_split_and_join() raises:
     assert_equal(b.line(0), String("ab"))
 
 
+def test_editor_fold_collapse() raises:
+    """Collapsing a fold region hides its inner rows from the layout, makes
+    vertical movement step over them, and snaps move_to off them; expanding
+    restores. The start line stays visible."""
+    var ed = Editor(String("a\nb\nc\nd\ne\nf"))  # lines 0..5
+    var regions = List[TextEditEntry]()
+    regions.append(TextEditEntry(1, 0, 3, 0, String("")))  # fold lines 1..3
+    ed.set_fold_regions(regions^)
+    assert_true(not ed._is_row_hidden(2))      # not folded yet
+    ed.toggle_fold_at(1)                        # collapse
+    assert_true(not ed._is_row_hidden(1))      # start stays visible
+    assert_true(ed._is_row_hidden(2))
+    assert_true(ed._is_row_hidden(3))
+    assert_true(not ed._is_row_hidden(4))
+    # move_to onto a hidden row snaps up to the fold start.
+    ed.move_to(2, 0, False)
+    assert_equal(ed.selections[0].row, 1)
+    # Down-arrow from the start steps over the collapsed body to line 4.
+    ed.move_to(1, 0, False)
+    ed._move_down(False, 80)
+    assert_equal(ed.selections[0].row, 4)
+    # Up-arrow from line 4 steps back over the body to the start (1).
+    ed._move_up(False, 80)
+    assert_equal(ed.selections[0].row, 1)
+    # The layout omits hidden rows 2 and 3.
+    var layout = ed._layout_lines(10, 80)
+    var saw2 = False
+    var saw3 = False
+    for i in range(len(layout)):
+        if layout[i].line_idx == 2:
+            saw2 = True
+        if layout[i].line_idx == 3:
+            saw3 = True
+    assert_true(not saw2)
+    assert_true(not saw3)
+    # Expanding restores visibility.
+    ed.toggle_fold_at(1)
+    assert_true(not ed._is_row_hidden(2))
+
+
 def test_editor_typing_and_arrows() raises:
     var ed = Editor(String("hello"))
     assert_equal(ed.selections[0].col, 0)
@@ -18760,6 +18800,7 @@ def _run_chunk_00() raises:
     test_scrollbar_track_jump_centers_target()
     test_scrollbar_horizontal_paints_arrows_on_axis()
     test_text_buffer_split_and_join()
+    test_editor_fold_collapse()
     test_editor_typing_and_arrows()
     test_softwrap_visual_updown()
     test_editor_typing_non_ascii()

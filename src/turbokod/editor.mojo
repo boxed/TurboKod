@@ -971,6 +971,12 @@ struct Editor(Copyable, Movable):
     # deferred follow-up. Set by the host gated behind the server's
     # foldingRangeProvider.
     var fold_regions: List[TextEditEntry]
+    # Start lines of the fold regions the user has collapsed. A buffer row R
+    # is hidden iff some collapsed region (start in here) has start < R <=
+    # end — the start line stays visible (it shows the ⋯ marker). Render
+    # skips hidden rows, vertical movement steps over them, and ``move_to``
+    # snaps off them, so the cursor can never land on a hidden row.
+    var folded_starts: List[Int]
     # LSP ``documentLink`` ranges: range carriers whose ``new_text`` is the
     # target uri. Painted underlined; Cmd+click on one opens the target
     # (the host checks ``document_link_at`` before firing definition).
@@ -1395,6 +1401,7 @@ struct Editor(Copyable, Movable):
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
         self.fold_regions = List[TextEditEntry]()
+        self.folded_starts = List[Int]()
         self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
@@ -1523,6 +1530,7 @@ struct Editor(Copyable, Movable):
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
         self.fold_regions = List[TextEditEntry]()
+        self.folded_starts = List[Int]()
         self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
@@ -1679,6 +1687,7 @@ struct Editor(Copyable, Movable):
         self.lsp_select_ranges = copy.lsp_select_ranges.copy()
         self.color_highlights = copy.color_highlights.copy()
         self.fold_regions = copy.fold_regions.copy()
+        self.folded_starts = copy.folded_starts.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.pending_context_menu = copy.pending_context_menu
@@ -2033,10 +2042,95 @@ struct Editor(Copyable, Movable):
         self.inline_value_notes = notes^
 
     def set_fold_regions(mut self, var regions: List[TextEditEntry]):
-        """Replace the LSP folding regions (start_line..end_line). Start
-        lines get a dim ``⋯`` end-of-line marker. Host gates behind the
-        server's foldingRangeProvider."""
+        """Replace the LSP folding regions (start_line..end_line). A
+        collapsed region's start line shows a ``⋯N`` end-of-line marker.
+        Host gates behind the server's foldingRangeProvider. Any collapsed
+        fold whose start no longer begins a region (the buffer changed) is
+        dropped so stale folds can't hide the wrong rows."""
         self.fold_regions = regions^
+        if len(self.folded_starts) > 0:
+            var kept = List[Int]()
+            for i in range(len(self.folded_starts)):
+                if self._fold_end_for_start(self.folded_starts[i]) >= 0:
+                    kept.append(self.folded_starts[i])
+            self.folded_starts = kept^
+
+    def has_foldable_at(self, row: Int) -> Bool:
+        """True iff ``row`` starts or is inside a fold region — i.e.
+        ``toggle_fold_at(row)`` would do something. Used to gate the
+        Toggle Fold menu item."""
+        for i in range(len(self.fold_regions)):
+            if self.fold_regions[i].start_line == row \
+                    or (self.fold_regions[i].start_line < row
+                        and row <= self.fold_regions[i].end_line):
+                return True
+        return False
+
+    def _fold_end_for_start(self, start: Int) -> Int:
+        """End line of the fold region beginning at ``start``, or -1."""
+        for i in range(len(self.fold_regions)):
+            if self.fold_regions[i].start_line == start:
+                return self.fold_regions[i].end_line
+        return -1
+
+    def _is_row_hidden(self, row: Int) -> Bool:
+        """True iff ``row`` is inside a collapsed region (start < row <=
+        end). The start line itself stays visible."""
+        for i in range(len(self.folded_starts)):
+            var s = self.folded_starts[i]
+            if s < row and row <= self._fold_end_for_start(s):
+                return True
+        return False
+
+    def _next_visible_row(self, row: Int, going_down: Bool) -> Int:
+        """Step ``row`` off any collapsed region in the given direction to
+        the nearest visible row (clamped to the buffer)."""
+        var r = row
+        var n = self.buffer.line_count()
+        while r >= 0 and r < n and self._is_row_hidden(r):
+            if going_down:
+                r += 1
+            else:
+                r -= 1
+        if r < 0:
+            r = 0
+        if r >= n:
+            r = n - 1
+        return r
+
+    def toggle_fold_at(mut self, row: Int):
+        """Collapse / expand the fold region the cursor is on: prefer a
+        region that *starts* at ``row``, else the innermost region
+        containing it. On collapse, move the caret to the fold's start line
+        if it was inside the now-hidden span."""
+        var start = -1
+        var end = -1
+        for i in range(len(self.fold_regions)):
+            var fs = self.fold_regions[i].start_line
+            var fe = self.fold_regions[i].end_line
+            if fs == row:
+                start = fs
+                end = fe
+                break
+            if fs < row and row <= fe and fs > start:
+                start = fs
+                end = fe
+        if start < 0:
+            return
+        var idx = -1
+        for i in range(len(self.folded_starts)):
+            if self.folded_starts[i] == start:
+                idx = i
+                break
+        if idx >= 0:
+            _ = self.folded_starts.pop(idx)  # expand
+        else:
+            self.folded_starts.append(start)  # collapse
+            if self.selections[0].row > start \
+                    and self.selections[0].row <= end:
+                var sc = self.selections[0].col
+                var sl = self.buffer.line_length(start)
+                self.move_to(start, sc if sc < sl else sl, False)
 
     def set_semantic_tokens(mut self, var hls: List[Highlight]):
         """Replace the semantic-token recolor highlights. Host gates behind
@@ -4010,16 +4104,27 @@ struct Editor(Copyable, Movable):
         cell-column representation is what makes this survive lines whose
         byte and visual widths disagree (multi-byte UTF-8 characters).
         """
-        self.selections[0].row = row
-        self.selections[0].col = col
+        # Safety net: no caret may land inside a collapsed fold. If a
+        # target row is hidden (click, word-move, go-to-line, …), snap up
+        # to the fold's start line and clamp the column. Skipped entirely
+        # when nothing is folded, so normal editing is unchanged.
+        var trow = row
+        var tcol = col
+        if len(self.folded_starts) > 0 and self._is_row_hidden(trow):
+            trow = self._next_visible_row(trow, False)
+            var tl = self.buffer.line_length(trow)
+            if tcol > tl:
+                tcol = tl
+        self.selections[0].row = trow
+        self.selections[0].col = tcol
         if sticky_col:
-            self.selections[0].desired_col = utf8_cell_of_byte(self.buffer.line(row), col)
+            self.selections[0].desired_col = utf8_cell_of_byte(self.buffer.line(trow), tcol)
             # A horizontal/positional move ends any vertical streak, so the
             # next up/down re-derives its screen column from here.
             self._vmove_streak = False
         if not extend:
-            self.selections[0].anchor_row = row
-            self.selections[0].anchor_col = col
+            self.selections[0].anchor_row = trow
+            self.selections[0].anchor_col = tcol
 
     # --- view options ------------------------------------------------------
 
@@ -5235,6 +5340,11 @@ struct Editor(Copyable, Movable):
         if self.wrap_mode == WRAP_NONE:
             var out = List[VisualLine]()
             while br < n_lines and len(out) < max_rows:
+                # Skip rows hidden inside a collapsed fold (the start line
+                # is never hidden, so the fold header still renders).
+                if self._is_row_hidden(br):
+                    br += 1
+                    continue
                 var n = self.buffer.line_length(br)
                 out.append(VisualLine(br, self.scroll_x, n, 0, 0, 0))
                 br += 1
@@ -5245,8 +5355,9 @@ struct Editor(Copyable, Movable):
         var tab = self.editorconfig.effective_indent_size()
         if tab < 1:
             tab = 4
+        var wrapped: List[VisualLine]
         if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
-            return smart_wrap_lines(
+            wrapped = smart_wrap_lines(
                 self.buffer.lines, w, tab,
                 line_comment=line_comment_for_extension(
                     extension_of(self.file_path)
@@ -5254,11 +5365,20 @@ struct Editor(Copyable, Movable):
                 start_line=self.scroll_y, max_rows=max_rows,
                 comma_threshold=self.smart_wrap_comma_threshold,
             )
-        return wrap_lines(
-            self.buffer.lines, w,
-            indent_size=tab, word_aware=True,
-            start_line=self.scroll_y, max_rows=max_rows,
-        )
+        else:
+            wrapped = wrap_lines(
+                self.buffer.lines, w,
+                indent_size=tab, word_aware=True,
+                start_line=self.scroll_y, max_rows=max_rows,
+            )
+        if len(self.folded_starts) == 0:
+            return wrapped^
+        # Drop visual rows whose buffer line is hidden by a collapsed fold.
+        var vis = List[VisualLine]()
+        for i in range(len(wrapped)):
+            if not self._is_row_hidden(wrapped[i].line_idx):
+                vis.append(wrapped[i])
+        return vis^
 
     def _cursor_screen_row(
         self, layout: List[VisualLine],
@@ -6167,13 +6287,15 @@ struct Editor(Copyable, Movable):
                         if len(note.as_bytes()) > 0:
                             note = note + String("  ")
                         note = note + self.inline_value_notes[iv].new_text
-                # LSP foldingRange: a dim ⋯ marks a foldable block's first
-                # line (collapse itself is a deferred follow-up).
-                for fr in range(len(self.fold_regions)):
-                    if self.fold_regions[fr].start_line == buf_row:
-                        if len(note.as_bytes()) > 0:
-                            note = note + String("  ")
-                        note = note + String("⋯")
+                # LSP foldingRange: a collapsed region's start line shows a
+                # dim ``⋯N`` (N = hidden line count) so the fold is visible.
+                for fr in range(len(self.folded_starts)):
+                    if self.folded_starts[fr] == buf_row:
+                        var fend = self._fold_end_for_start(buf_row)
+                        if fend > buf_row:
+                            if len(note.as_bytes()) > 0:
+                                note = note + String("  ")
+                            note = note + String("⋯") + String(fend - buf_row)
                         break
                 if len(note.as_bytes()) > 0:
                     var note_attr = Attr(DARK_GRAY, EDITOR_BG)
@@ -8824,7 +8946,10 @@ struct Editor(Copyable, Movable):
         if self.wrap_mode == WRAP_NONE:
             self._vmove_streak = False
             if self.selections[0].row > 0:
-                var nr = self.selections[0].row - 1
+                # Step over any collapsed fold above the cursor.
+                var nr = self._next_visible_row(
+                    self.selections[0].row - 1, False,
+                )
                 var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
                 self.move_to(nr, nc, extend, False)
         else:
@@ -8834,7 +8959,10 @@ struct Editor(Copyable, Movable):
         if self.wrap_mode == WRAP_NONE:
             self._vmove_streak = False
             if self.selections[0].row + 1 < self.buffer.line_count():
-                var nr = self.selections[0].row + 1
+                # Step over any collapsed fold below the cursor.
+                var nr = self._next_visible_row(
+                    self.selections[0].row + 1, True,
+                )
                 var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
                 self.move_to(nr, nc, extend, False)
         else:
