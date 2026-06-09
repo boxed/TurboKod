@@ -72,6 +72,7 @@ from .diagnostic_menu import (
 )
 from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
+    CTX_MENU_ACTION_COLOR_PRESENTATION,
     CTX_MENU_ACTION_DECLARATION,
     CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_MONIKER,
@@ -722,6 +723,10 @@ struct Desktop(Movable):
     # of the lsp_managers entry awaiting the reply (-1 when none).
     var message_request_dialog: MessageRequestDialog
     var _msgreq_mgr_idx: Int
+    # When a colorPresentation picker is showing in message_request_dialog,
+    # this is the lsp_managers index holding the parked edits (-1 = the
+    # dialog, if open, is a real showMessageRequest, not a color picker).
+    var _colorpres_mgr_idx: Int
     # Interactive three-way merge modal, opened when an external write
     # conflicts with unsaved local edits. Single-instance; the
     # ``pending_merge_queue`` holds the indices of other editor windows
@@ -1271,6 +1276,7 @@ struct Desktop(Movable):
         self.confirm_dialog = ConfirmDialog()
         self.message_request_dialog = MessageRequestDialog()
         self._msgreq_mgr_idx = -1
+        self._colorpres_mgr_idx = -1
         self.merge_view = MergeView()
         self.pending_merge_queue = List[Int]()
         self.quick_open = QuickOpen()
@@ -5156,7 +5162,10 @@ struct Desktop(Movable):
             else:
                 _ = self.message_request_dialog.handle_mouse(event, screen)
             if self.message_request_dialog.submitted:
-                self._on_message_request_submit()
+                if self._colorpres_mgr_idx >= 0:
+                    self._on_colorpres_submit()
+                else:
+                    self._on_message_request_submit()
             return Optional[String]()
         if self.save_as_dialog.active:
             if event.kind == EVENT_KEY:
@@ -6460,6 +6469,18 @@ struct Desktop(Movable):
                     self.lsp_managers[i].message_request_actions(),
                 )
                 self._msgreq_mgr_idx = i
+            # colorPresentation response → reuse the action picker to choose
+            # a color format; the chosen edit rewrites the literal.
+            if self.lsp_managers[i].has_color_presentations() \
+                    and not self.message_request_dialog.active \
+                    and self._msgreq_mgr_idx < 0 \
+                    and self._colorpres_mgr_idx < 0:
+                var cp_labels = self.lsp_managers[i].color_presentation_labels()
+                if len(cp_labels) > 0:
+                    self.message_request_dialog.open(
+                        String("Change color format:"), cp_labels^,
+                    )
+                    self._colorpres_mgr_idx = i
             # Server-driven window/showDocument → open a file (optionally at
             # a selection) or surface an external URL on the status bar (we
             # don't launch a browser from the core).
@@ -11333,6 +11354,15 @@ struct Desktop(Movable):
         ):
             labels.append(String("Show Moniker"))
             actions.append(CTX_MENU_ACTION_MONIKER)
+        # Color-format conversion: only when the cursor sits on a
+        # documentColor swatch and the server provides colors.
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("colorProvider"),
+        ) and self.windows.windows[idx].editor.color_at(
+            req.row, req.col,
+        ):
+            labels.append(String("Change Color Format…"))
+            actions.append(CTX_MENU_ACTION_COLOR_PRESENTATION)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11429,6 +11459,27 @@ struct Desktop(Movable):
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_moniker(
                 path, row, col, text^,
+            )
+            return
+        if act == CTX_MENU_ACTION_COLOR_PRESENTATION:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                return
+            var sw_opt = self.windows.windows[idx].editor.color_at(row, col)
+            if not sw_opt:
+                return
+            var sw = sw_opt.value()
+            var rgb = sw.attr.bg_rgb
+            var r = Int((rgb >> 16) & 0xFF)
+            var g = Int((rgb >> 8) & 0xFF)
+            var b = Int(rgb & 0xFF)
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            _ = self.lsp_managers[lsp_idx].request_color_presentation(
+                path, r, g, b, sw.row, sw.col_start, sw.row, sw.col_end,
+                text^,
             )
 
     def _dispatch_navigation(
@@ -11993,6 +12044,24 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.invalidate_spell()
+
+    def _on_colorpres_submit(mut self):
+        """Apply the colorPresentation the user picked (rewriting the color
+        literal in the buffer the context menu was opened on) and reset the
+        picker latch."""
+        var idx = self._colorpres_mgr_idx
+        var choice = self.message_request_dialog.selected_index
+        self.message_request_dialog.close()
+        self._colorpres_mgr_idx = -1
+        if idx < 0 or idx >= len(self.lsp_managers) or choice < 0:
+            return
+        var edits = self.lsp_managers[idx].take_color_presentation_edit(choice)
+        if len(edits) == 0:
+            return
+        var w = self._ctx_menu_editor_idx
+        if 0 <= w and w < len(self.windows.windows) \
+                and self.windows.windows[w].is_editor:
+            _ = self.windows.windows[w].editor.apply_text_edits(edits^)
 
     def _on_message_request_submit(mut self):
         """Relay the user's showMessageRequest choice back to the server

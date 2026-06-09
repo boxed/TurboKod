@@ -2009,6 +2009,16 @@ struct Editor(Copyable, Movable):
         ``lsp_document_colors``."""
         self.color_highlights = hls^
 
+    def color_at(self, row: Int, col: Int) -> Optional[Highlight]:
+        """Return the documentColor swatch covering ``(row, col)`` (its
+        range + the color in ``attr.bg_rgb``), or None. Used by the host to
+        offer colorPresentation (change color format) at the cursor."""
+        for i in range(len(self.color_highlights)):
+            var h = self.color_highlights[i]
+            if h.row == row and col >= h.col_start and col < h.col_end:
+                return Optional[Highlight](h)
+        return Optional[Highlight]()
+
     def set_document_links(mut self, var links: List[TextEditEntry]):
         """Replace the LSP documentLink ranges (range carrier + target uri
         in ``new_text``). Host gates behind ``lsp_document_links``."""

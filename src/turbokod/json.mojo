@@ -146,6 +146,17 @@ def json_str(var s: String) -> JsonValue:
     return v^
 
 
+def json_float(var text: String) -> JsonValue:
+    """Build a JSON float from its already-formatted decimal ``text``
+    (e.g. ``"0.5"``). Floats are stored as verbatim text and ``_encode``
+    round-trips that text, so this is the way to emit a non-integer number
+    (LSP color components are 0..1 floats)."""
+    var v = JsonValue()
+    v.kind = JSON_FLOAT
+    v.str_v = text^
+    return v^
+
+
 def json_array() -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_ARRAY

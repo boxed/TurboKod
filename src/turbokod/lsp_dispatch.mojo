@@ -25,8 +25,8 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
-    json_str, parse_json,
+    JsonValue, encode_json, json_array, json_bool, json_float, json_int,
+    json_object, json_str, parse_json,
 )
 from .file_io import basename, join_path, parent_path, stat_file
 from .lsp import (
@@ -585,6 +585,20 @@ struct LspManager(Copyable, Movable):
     var _inflight_moniker_id: String
     var _moniker_note: String
     var _has_moniker: Bool
+    # ``textDocument/colorPresentation`` — given a color + its range, the
+    # server returns alternate textual forms (hex / rgb() / named). Parked
+    # as parallel ``_colorpres_labels`` / ``_colorpres_edits`` (label[i] ↔
+    # the TextEdit that rewrites the literal to that form). ``_colorpres_*``
+    # range fields remember the requested span so a label-only presentation
+    # (no textEdit) can synthesize one.
+    var _inflight_colorpres_id: String
+    var _colorpres_labels: List[String]
+    var _colorpres_edits: List[TextEditEntry]
+    var _has_colorpres: Bool
+    var _colorpres_sl: Int
+    var _colorpres_sc: Int
+    var _colorpres_el: Int
+    var _colorpres_ec: Int
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -830,6 +844,14 @@ struct LspManager(Copyable, Movable):
         self._inflight_moniker_id = String("")
         self._moniker_note = String("")
         self._has_moniker = False
+        self._inflight_colorpres_id = String("")
+        self._colorpres_labels = List[String]()
+        self._colorpres_edits = List[TextEditEntry]()
+        self._has_colorpres = False
+        self._colorpres_sl = 0
+        self._colorpres_sc = 0
+        self._colorpres_el = 0
+        self._colorpres_ec = 0
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -989,6 +1011,14 @@ struct LspManager(Copyable, Movable):
         self._inflight_moniker_id = String("")
         self._moniker_note = String("")
         self._has_moniker = False
+        self._inflight_colorpres_id = String("")
+        self._colorpres_labels = List[String]()
+        self._colorpres_edits = List[TextEditEntry]()
+        self._has_colorpres = False
+        self._colorpres_sl = 0
+        self._colorpres_sc = 0
+        self._colorpres_el = 0
+        self._colorpres_ec = 0
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2557,6 +2587,66 @@ struct LspManager(Copyable, Movable):
         self._has_moniker = False
         return out^
 
+    def request_color_presentation(
+        mut self, path: String, r: Int, g: Int, b: Int,
+        start_line: Int, start_char: Int, end_line: Int, end_char: Int,
+        var text: String,
+    ) -> Bool:
+        """Send ``textDocument/colorPresentation`` for the color ``(r,g,b)``
+        (0..255) occupying the given range. The server returns alternate
+        textual forms; each becomes a (label, edit) pair the host shows in a
+        picker."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var color = json_object()
+        color.put(String("red"), json_float(_unit_text(r)))
+        color.put(String("green"), json_float(_unit_text(g)))
+        color.put(String("blue"), json_float(_unit_text(b)))
+        color.put(String("alpha"), json_float(String("1.0")))
+        var rng = json_object()
+        rng.put(String("start"), _lsp_position(start_line, start_char))
+        rng.put(String("end"), _lsp_position(end_line, end_char))
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("color"), color^)
+        params.put(String("range"), rng^)
+        try:
+            self._inflight_colorpres_id = self.client.send_request(
+                String("textDocument/colorPresentation"), params,
+            )
+        except:
+            self._inflight_colorpres_id = String("")
+            return False
+        self._colorpres_sl = start_line
+        self._colorpres_sc = start_char
+        self._colorpres_el = end_line
+        self._colorpres_ec = end_char
+        self._colorpres_labels = List[String]()
+        self._colorpres_edits = List[TextEditEntry]()
+        self._has_colorpres = False
+        return True
+
+    def has_color_presentations(self) -> Bool:
+        return self._has_colorpres
+
+    def color_presentation_labels(self) -> List[String]:
+        return self._colorpres_labels.copy()
+
+    def take_color_presentation_edit(
+        mut self, index: Int,
+    ) -> List[TextEditEntry]:
+        """Return the chosen presentation's edit (as a one-element list) and
+        clear all parked presentations. Empty list for an out-of-range
+        index."""
+        var out = List[TextEditEntry]()
+        if 0 <= index and index < len(self._colorpres_edits):
+            out.append(self._colorpres_edits[index])
+        self._colorpres_labels = List[String]()
+        self._colorpres_edits = List[TextEditEntry]()
+        self._has_colorpres = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3330,6 +3420,33 @@ struct LspManager(Copyable, Movable):
                 self._moniker_note = mnote^
                 self._has_moniker = True
                 self._inflight_moniker_id = String("")
+                continue
+            if id == self._inflight_colorpres_id:
+                var cp_labels = List[String]()
+                var cp_edits = List[TextEditEntry]()
+                if msg.result and msg.result.value().is_array():
+                    var arr = msg.result.value().copy()
+                    for k in range(arr.array_len()):
+                        var e = arr.array_at(k)
+                        if not e.is_object():
+                            continue
+                        var lab_opt = e.object_get(String("label"))
+                        if not lab_opt or not lab_opt.value().is_string():
+                            continue
+                        var label = lab_opt.value().as_str()
+                        cp_labels.append(label)
+                        # Rewrite the color literal's range with the chosen
+                        # form. (We use the label as the new text — for color
+                        # literals the server's textEdit range matches the
+                        # requested span and its text is the label.)
+                        cp_edits.append(TextEditEntry(
+                            self._colorpres_sl, self._colorpres_sc,
+                            self._colorpres_el, self._colorpres_ec, label,
+                        ))
+                self._colorpres_labels = cp_labels^
+                self._colorpres_edits = cp_edits^
+                self._has_colorpres = True
+                self._inflight_colorpres_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5558,6 +5675,16 @@ def _collect_unresolved_lenses(v: JsonValue) -> List[JsonValue]:
         if len(_codelens_title_of(e).as_bytes()) == 0:
             out.append(e.copy())
     return out^
+
+
+def _unit_text(n: Int) -> String:
+    """Format a 0..255 channel value as a 0..1 decimal string for an LSP
+    color component (e.g. 128 → ``"0.501..."``, 255 → ``"1.0"``)."""
+    if n <= 0:
+        return String("0.0")
+    if n >= 255:
+        return String("1.0")
+    return String(Float64(n) / 255.0)
 
 
 def _color_unit_to_255(v: JsonValue) -> Int:
