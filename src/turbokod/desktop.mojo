@@ -74,6 +74,7 @@ from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
     CTX_MENU_ACTION_COLOR_PRESENTATION,
     CTX_MENU_ACTION_DECLARATION, CTX_MENU_ACTION_INLINE_COMPLETION,
+    CTX_MENU_ACTION_LINKED_EDIT,
     CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_IMPLEMENTATION, CTX_MENU_ACTION_MONIKER,
     CTX_MENU_ACTION_REFERENCES,
@@ -6642,6 +6643,12 @@ struct Desktop(Movable):
                     if icw >= 0:
                         self.windows.windows[icw].editor \
                             .set_inline_completion(ictext^, icrow, iccol)
+            # linkedEditingRange → synchronized carets on the focused editor.
+            if self.lsp_managers[i].has_linked_editing():
+                var lr = self.lsp_managers[i].take_linked_ranges()
+                var lw = self._focused_editor_idx()
+                if lw >= 0 and len(lr) >= 2:
+                    self.windows.windows[lw].editor.begin_linked_edit(lr^)
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -11380,6 +11387,11 @@ struct Desktop(Movable):
         ):
             labels.append(String("Inline Suggestion"))
             actions.append(CTX_MENU_ACTION_INLINE_COMPLETION)
+        if li >= 0 and self.lsp_managers[li].server_supports(
+            String("linkedEditingRangeProvider"),
+        ):
+            labels.append(String("Linked Edit"))
+            actions.append(CTX_MENU_ACTION_LINKED_EDIT)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -11508,6 +11520,18 @@ struct Desktop(Movable):
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_inline_completion(
+                path, row, col, text^,
+            )
+            return
+        if act == CTX_MENU_ACTION_LINKED_EDIT:
+            var path = self.windows.windows[idx].editor.file_path
+            if len(path.as_bytes()) == 0:
+                return
+            var lsp_idx = self._lsp_for_path(path)
+            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+                return
+            var text = self.windows.windows[idx].editor.text_snapshot()
+            _ = self.lsp_managers[lsp_idx].request_linked_editing(
                 path, row, col, text^,
             )
 

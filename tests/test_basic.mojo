@@ -166,7 +166,7 @@ from turbokod.lsp_dispatch import (
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result, _parse_monikers, _unit_text,
-    _parse_inline_completion,
+    _parse_inline_completion, _parse_linked_ranges,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10401,6 +10401,23 @@ def test_lsp_color_unit_text() raises:
     assert_equal(mid.as_bytes()[1], UInt8(ord(".")))
 
 
+def test_lsp_parse_linked_ranges() raises:
+    """LinkedEditingRanges parse into range carriers (one per range)."""
+    var v = parse_json(String(
+        "{\"ranges\":[{\"start\":{\"line\":1,\"character\":1},"
+        + "\"end\":{\"line\":1,\"character\":4}},"
+        + "{\"start\":{\"line\":3,\"character\":2},"
+        + "\"end\":{\"line\":3,\"character\":5}}],\"wordPattern\":\"x\"}"
+    ))
+    var r = _parse_linked_ranges(v)
+    assert_equal(len(r), 2)
+    assert_equal(r[0].start_line, 1)
+    assert_equal(r[0].start_char, 1)
+    assert_equal(r[0].end_char, 4)
+    assert_equal(r[1].start_line, 3)
+    assert_equal(len(_parse_linked_ranges(parse_json(String("null")))), 0)
+
+
 def test_lsp_parse_inline_completion() raises:
     """The first inline-completion item's insertText is extracted from
     both the list form ({items:[...]}) and a bare item array, string or
@@ -19149,6 +19166,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_monikers()
     test_lsp_color_unit_text()
     test_lsp_parse_inline_completion()
+    test_lsp_parse_linked_ranges()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

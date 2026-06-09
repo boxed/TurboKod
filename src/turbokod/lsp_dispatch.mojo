@@ -606,6 +606,12 @@ struct LspManager(Copyable, Movable):
     var _inlinecomp_row: Int
     var _inlinecomp_col: Int
     var _has_inlinecomp: Bool
+    # ``textDocument/linkedEditingRange`` — the set of ranges that should be
+    # edited together (e.g. an HTML open/close tag pair). Parked as range
+    # carriers; the host places synchronized carets at them for co-editing.
+    var _inflight_linked_id: String
+    var _linked_ranges: List[TextEditEntry]
+    var _has_linked: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -864,6 +870,9 @@ struct LspManager(Copyable, Movable):
         self._inlinecomp_row = 0
         self._inlinecomp_col = 0
         self._has_inlinecomp = False
+        self._inflight_linked_id = String("")
+        self._linked_ranges = List[TextEditEntry]()
+        self._has_linked = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -1036,6 +1045,9 @@ struct LspManager(Copyable, Movable):
         self._inlinecomp_row = 0
         self._inlinecomp_col = 0
         self._has_inlinecomp = False
+        self._inflight_linked_id = String("")
+        self._linked_ranges = List[TextEditEntry]()
+        self._has_linked = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2708,6 +2720,36 @@ struct LspManager(Copyable, Movable):
         self._has_inlinecomp = False
         self._inlinecomp_text = String("")
 
+    def request_linked_editing(
+        mut self, path: String, line: Int, character: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/linkedEditingRange`` at ``(line, character)``.
+        Parks the linked ranges (range carriers) for the host to place
+        synchronized carets at."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        try:
+            self._inflight_linked_id = self.client.send_request(
+                String("textDocument/linkedEditingRange"), params,
+            )
+        except:
+            self._inflight_linked_id = String("")
+            return False
+        self._linked_ranges = List[TextEditEntry]()
+        self._has_linked = False
+        return True
+
+    def has_linked_editing(self) -> Bool:
+        return self._has_linked
+
+    def take_linked_ranges(mut self) -> List[TextEditEntry]:
+        var out = self._linked_ranges^
+        self._linked_ranges = List[TextEditEntry]()
+        self._has_linked = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3516,6 +3558,14 @@ struct LspManager(Copyable, Movable):
                 self._inlinecomp_text = ic^
                 self._has_inlinecomp = True
                 self._inflight_inlinecomp_id = String("")
+                continue
+            if id == self._inflight_linked_id:
+                var lr = List[TextEditEntry]()
+                if msg.result:
+                    lr = _parse_linked_ranges(msg.result.value())
+                self._linked_ranges = lr^
+                self._has_linked = True
+                self._inflight_linked_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5631,6 +5681,36 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_linked_ranges(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``LinkedEditingRanges`` (``{ranges: Range[], wordPattern?}``)
+    into range carriers (``new_text`` unused)."""
+    var out = List[TextEditEntry]()
+    if not v.is_object():
+        return out^
+    var r_opt = v.object_get(String("ranges"))
+    if not r_opt or not r_opt.value().is_array():
+        return out^
+    var arr = r_opt.value().copy()
+    for i in range(arr.array_len()):
+        var rng = arr.array_at(i)
+        if not rng.is_object():
+            continue
+        var en_opt = rng.object_get(String("end"))
+        if not en_opt or not en_opt.value().is_object():
+            continue
+        var sp = _start_pos_of(rng)
+        var el_opt = en_opt.value().object_get(String("line"))
+        var ec_opt = en_opt.value().object_get(String("character"))
+        if not el_opt or not ec_opt or not el_opt.value().is_int() \
+                or not ec_opt.value().is_int():
+            continue
+        out.append(TextEditEntry(
+            sp[0], sp[1], el_opt.value().as_int(), ec_opt.value().as_int(),
+            String(""),
+        ))
     return out^
 
 

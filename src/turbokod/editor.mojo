@@ -2064,6 +2064,38 @@ struct Editor(Copyable, Movable):
         self.paste_text(text)
         return True
 
+    def begin_linked_edit(mut self, ranges: List[TextEditEntry]):
+        """Place synchronized point carets at the LSP linked-editing ranges
+        so typing/backspace edits them all together (reusing the
+        multi-caret machinery). The caret already inside one range stays
+        primary; a caret is added at the corresponding offset in each other
+        range. No-op when read-only, fewer than two ranges, or the cursor
+        isn't inside any range. Esc / a click clears the extra carets as
+        usual. (Assumes single-line ranges — the LSP word ranges are.)"""
+        if self.read_only or len(ranges) < 2:
+            return
+        var cr = self.selections[0].row
+        var cc = self.selections[0].col
+        var host = -1
+        for i in range(len(ranges)):
+            if cr == ranges[i].start_line and cc >= ranges[i].start_char \
+                    and cc <= ranges[i].end_char:
+                host = i
+                break
+        if host < 0:
+            return
+        var offset = cc - ranges[host].start_char
+        self.clear_extra_carets()
+        for i in range(len(ranges)):
+            if i == host:
+                continue
+            var col = ranges[i].start_char + offset
+            if col > ranges[i].end_char:
+                col = ranges[i].end_char
+            self._add_caret(
+                Caret(ranges[i].start_line, col, col, ranges[i].start_line, col)
+            )
+
     def color_at(self, row: Int, col: Int) -> Optional[Highlight]:
         """Return the documentColor swatch covering ``(row, col)`` (its
         range + the color in ``attr.bg_rgb``), or None. Used by the host to
