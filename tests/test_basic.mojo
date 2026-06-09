@@ -166,7 +166,7 @@ from turbokod.lsp_dispatch import (
     _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result, _parse_monikers, _unit_text,
-    _parse_inline_completion, _parse_linked_ranges,
+    _parse_inline_completion, _parse_linked_ranges, _parse_inline_values,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10401,6 +10401,22 @@ def test_lsp_color_unit_text() raises:
     assert_equal(mid.as_bytes()[1], UInt8(ord(".")))
 
 
+def test_lsp_parse_inline_values() raises:
+    """InlineValueText entries become (row, text) carriers; the lookup /
+    evaluable variants (no ``text`` field) are skipped."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":4,\"character\":2},"
+        + "\"end\":{\"line\":4,\"character\":6}},\"text\":\"x = 41\"},"
+        + "{\"range\":{\"start\":{\"line\":5,\"character\":0},"
+        + "\"end\":{\"line\":5,\"character\":3}},\"variableName\":\"y\"}]"
+    ))
+    var iv = _parse_inline_values(v)
+    assert_equal(len(iv), 1)
+    assert_equal(iv[0].start_line, 4)
+    assert_equal(iv[0].new_text, String("x = 41"))
+    assert_equal(len(_parse_inline_values(parse_json(String("null")))), 0)
+
+
 def test_lsp_parse_linked_ranges() raises:
     """LinkedEditingRanges parse into range carriers (one per range)."""
     var v = parse_json(String(
@@ -19167,6 +19183,7 @@ def _run_chunk_04() raises:
     test_lsp_color_unit_text()
     test_lsp_parse_inline_completion()
     test_lsp_parse_linked_ranges()
+    test_lsp_parse_inline_values()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

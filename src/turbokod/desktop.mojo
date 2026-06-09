@@ -6649,6 +6649,12 @@ struct Desktop(Movable):
                 var lw = self._focused_editor_idx()
                 if lw >= 0 and len(lr) >= 2:
                     self.windows.windows[lw].editor.begin_linked_edit(lr^)
+            # inlineValue → end-of-line annotations on the stopped file.
+            if self.lsp_managers[i].has_inline_values():
+                var ivs = self.lsp_managers[i].take_inline_values()
+                var ivw = self._find_window_for_path(self._dap_exec_path)
+                if ivw >= 0 and self.windows.windows[ivw].is_editor:
+                    self.windows.windows[ivw].editor.set_inline_values(ivs^)
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -6784,6 +6790,16 @@ struct Desktop(Movable):
         # amend / revert) the same way. ``tick`` is a no-op when the
         # modal is closed or idle.
         self.local_changes.tick()
+        # Drop stale inline-value annotations once the debugger resumes /
+        # the session ends — they're only meaningful at a stopped frame.
+        if not self.dap.is_stopped():
+            for ivc in range(len(self.windows.windows)):
+                if self.windows.windows[ivc].is_editor \
+                        and len(self.windows.windows[ivc]
+                                .editor.inline_value_notes) > 0:
+                    self.windows.windows[ivc].editor.set_inline_values(
+                        List[TextEditEntry]()
+                    )
         self._refresh_lsp_status()
 
     def _on_install_complete(
@@ -7021,6 +7037,29 @@ struct Desktop(Movable):
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[li].request_on_type_formatting(
             path, req.row, req.col, ch, text^,
+        )
+
+    def _request_inline_values(
+        mut self, path: String, stopped_line: Int, frame_id: Int,
+    ):
+        """Request textDocument/inlineValue for ``path`` at the stopped
+        debug frame (gated on inlineValueProvider). The response renders as
+        end-of-line annotations."""
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("inlineValueProvider"),
+                ):
+            return
+        var w = self._find_window_for_path(path)
+        if w < 0 or not self.windows.windows[w].is_editor:
+            return
+        var lc = self.windows.windows[w].editor.buffer.line_count()
+        var text = self.windows.windows[w].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_inline_values(
+            path, 0, lc, stopped_line, frame_id, text^,
         )
 
     def _drain_ontype(mut self):
@@ -7581,6 +7620,11 @@ struct Desktop(Movable):
                             frames[0].path, frames[0].line, 0,
                         ),
                         screen,
+                    )
+                    # LSP inline values for the stopped frame's file (the
+                    # InlineValueText variant renders at end-of-line).
+                    self._request_inline_values(
+                        frames[0].path, frames[0].line, frames[0].id,
                     )
                 # Cache the stack so subsequent variable arrivals can
                 # rebuild the pane's inspect rows around the same frames.

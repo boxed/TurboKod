@@ -612,6 +612,14 @@ struct LspManager(Copyable, Movable):
     var _inflight_linked_id: String
     var _linked_ranges: List[TextEditEntry]
     var _has_linked: Bool
+    # ``textDocument/inlineValue`` — values to show inline at the stopped
+    # debug frame. We render the ``InlineValueText`` variant (server gives
+    # the text directly) as end-of-line annotations, parked here as (row,
+    # text) carriers. (The variable-lookup / evaluable-expression variants
+    # would need a DAP ``evaluate`` round-trip — not wired yet.)
+    var _inflight_inlineval_id: String
+    var _inlinevals: List[TextEditEntry]
+    var _has_inlinevals: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -873,6 +881,9 @@ struct LspManager(Copyable, Movable):
         self._inflight_linked_id = String("")
         self._linked_ranges = List[TextEditEntry]()
         self._has_linked = False
+        self._inflight_inlineval_id = String("")
+        self._inlinevals = List[TextEditEntry]()
+        self._has_inlinevals = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -1048,6 +1059,9 @@ struct LspManager(Copyable, Movable):
         self._inflight_linked_id = String("")
         self._linked_ranges = List[TextEditEntry]()
         self._has_linked = False
+        self._inflight_inlineval_id = String("")
+        self._inlinevals = List[TextEditEntry]()
+        self._has_inlinevals = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2750,6 +2764,50 @@ struct LspManager(Copyable, Movable):
         self._has_linked = False
         return out^
 
+    def request_inline_values(
+        mut self, path: String, start_line: Int, end_line: Int,
+        stopped_line: Int, frame_id: Int, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/inlineValue`` for the ``[start_line,
+        end_line]`` range with the debugger's stopped context. Parks the
+        ``InlineValueText`` entries as (row, text) carriers for end-of-line
+        rendering."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        var rng = json_object()
+        rng.put(String("start"), _lsp_position(start_line, 0))
+        rng.put(String("end"), _lsp_position(end_line, 0))
+        params.put(String("range"), rng^)
+        var ctx = json_object()
+        ctx.put(String("frameId"), json_int(frame_id))
+        var stopped = json_object()
+        stopped.put(String("start"), _lsp_position(stopped_line, 0))
+        stopped.put(String("end"), _lsp_position(stopped_line, 0))
+        ctx.put(String("stoppedLocation"), stopped^)
+        params.put(String("context"), ctx^)
+        try:
+            self._inflight_inlineval_id = self.client.send_request(
+                String("textDocument/inlineValue"), params,
+            )
+        except:
+            self._inflight_inlineval_id = String("")
+            return False
+        self._inlinevals = List[TextEditEntry]()
+        self._has_inlinevals = False
+        return True
+
+    def has_inline_values(self) -> Bool:
+        return self._has_inlinevals
+
+    def take_inline_values(mut self) -> List[TextEditEntry]:
+        var out = self._inlinevals^
+        self._inlinevals = List[TextEditEntry]()
+        self._has_inlinevals = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3566,6 +3624,14 @@ struct LspManager(Copyable, Movable):
                 self._linked_ranges = lr^
                 self._has_linked = True
                 self._inflight_linked_id = String("")
+                continue
+            if id == self._inflight_inlineval_id:
+                var iv = List[TextEditEntry]()
+                if msg.result:
+                    iv = _parse_inline_values(msg.result.value())
+                self._inlinevals = iv^
+                self._has_inlinevals = True
+                self._inflight_inlineval_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5681,6 +5747,34 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_inline_values(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``InlineValue[] | null`` into (row, text) carriers, keeping the
+    ``InlineValueText`` variant (which carries ``text`` directly). The
+    variable-lookup / evaluable-expression variants would need a DAP
+    ``evaluate`` round-trip we don't do here, so they're skipped."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var t_opt = e.object_get(String("text"))
+        if not t_opt or not t_opt.value().is_string():
+            continue  # not an InlineValueText
+        var txt = t_opt.value().as_str()
+        if len(txt.as_bytes()) == 0:
+            continue
+        var rng_opt = e.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var sp = _start_pos_of(rng_opt.value())
+        if sp[0] < 0:
+            continue
+        out.append(TextEditEntry(sp[0], 0, sp[0], 0, txt))
     return out^
 
 

@@ -947,6 +947,10 @@ struct Editor(Copyable, Movable):
     # ``lsp_code_lens``.
     var inlay_notes: List[TextEditEntry]
     var codelens_notes: List[TextEditEntry]
+    # LSP inline values (debug only): (row, text) carriers shown at the end
+    # of the line, like inlay/code-lens. Set by the host when the debugger
+    # is stopped; cleared on continue / session end.
+    var inline_value_notes: List[TextEditEntry]
     # LSP semantic tokens, decoded by the host into per-row ``Highlight``s
     # (col span + ``Attr`` using a ``SYN_*`` role). Painted as a recolor
     # pass *after* the TextMate syntax pass so semantic coloring wins on
@@ -1380,6 +1384,7 @@ struct Editor(Copyable, Movable):
         self.occurrence_ranges = List[TextEditEntry]()
         self.inlay_notes = List[TextEditEntry]()
         self.codelens_notes = List[TextEditEntry]()
+        self.inline_value_notes = List[TextEditEntry]()
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
@@ -1506,6 +1511,7 @@ struct Editor(Copyable, Movable):
         self.occurrence_ranges = List[TextEditEntry]()
         self.inlay_notes = List[TextEditEntry]()
         self.codelens_notes = List[TextEditEntry]()
+        self.inline_value_notes = List[TextEditEntry]()
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
@@ -1660,6 +1666,7 @@ struct Editor(Copyable, Movable):
         self.occurrence_ranges = copy.occurrence_ranges.copy()
         self.inlay_notes = copy.inlay_notes.copy()
         self.codelens_notes = copy.codelens_notes.copy()
+        self.inline_value_notes = copy.inline_value_notes.copy()
         self.semantic_highlights = copy.semantic_highlights.copy()
         self.lsp_select_ranges = copy.lsp_select_ranges.copy()
         self.color_highlights = copy.color_highlights.copy()
@@ -2010,6 +2017,11 @@ struct Editor(Copyable, Movable):
     def set_code_lens(mut self, var notes: List[TextEditEntry]):
         """Replace the end-of-line code-lens annotations (row, text)."""
         self.codelens_notes = notes^
+
+    def set_inline_values(mut self, var notes: List[TextEditEntry]):
+        """Replace the debug inline-value annotations (row, text), shown at
+        end-of-line. Pass an empty list to clear (on continue / stop)."""
+        self.inline_value_notes = notes^
 
     def set_semantic_tokens(mut self, var hls: List[Highlight]):
         """Replace the semantic-token recolor highlights. Host gates behind
@@ -6135,6 +6147,11 @@ struct Editor(Copyable, Movable):
                         if len(note.as_bytes()) > 0:
                             note = note + String("  ")
                         note = note + self.inlay_notes[il].new_text
+                for iv in range(len(self.inline_value_notes)):
+                    if self.inline_value_notes[iv].start_line == buf_row:
+                        if len(note.as_bytes()) > 0:
+                            note = note + String("  ")
+                        note = note + self.inline_value_notes[iv].new_text
                 if len(note.as_bytes()) > 0:
                     var note_attr = Attr(DARK_GRAY, EDITOR_BG)
                     var nx = seg_x0 + visible_cell_count + 2
