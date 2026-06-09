@@ -620,6 +620,9 @@ struct LspManager(Copyable, Movable):
     var _inflight_inlineval_id: String
     var _inlinevals: List[TextEditEntry]
     var _has_inlinevals: Bool
+    # The variable-lookup / evaluable-expression inline values: (row, expr)
+    # carriers the host evaluates via DAP, then renders as ``expr = value``.
+    var _inlineval_exprs: List[TextEditEntry]
     # ``textDocument/foldingRange`` — collapsible regions. Parked as range
     # carriers (start_line..end_line). The editor marks region starts; full
     # collapse (which needs fold-aware cursor/scroll/layout) is deferred.
@@ -891,6 +894,7 @@ struct LspManager(Copyable, Movable):
         self._inflight_inlineval_id = String("")
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        self._inlineval_exprs = List[TextEditEntry]()
         self._inflight_folding_id = String("")
         self._folding_path = String("")
         self._folding_ranges = List[TextEditEntry]()
@@ -1073,6 +1077,7 @@ struct LspManager(Copyable, Movable):
         self._inflight_inlineval_id = String("")
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        self._inlineval_exprs = List[TextEditEntry]()
         self._inflight_folding_id = String("")
         self._folding_path = String("")
         self._folding_ranges = List[TextEditEntry]()
@@ -2812,6 +2817,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        self._inlineval_exprs = List[TextEditEntry]()
         return True
 
     def has_inline_values(self) -> Bool:
@@ -2821,6 +2827,13 @@ struct LspManager(Copyable, Movable):
         var out = self._inlinevals^
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        return out^
+
+    def take_inline_value_exprs(mut self) -> List[TextEditEntry]:
+        """The variable-lookup / evaluable inline values as (row, expr)
+        carriers for the host to evaluate via DAP. Cleared on take."""
+        var out = self._inlineval_exprs^
+        self._inlineval_exprs = List[TextEditEntry]()
         return out^
 
     def request_folding_ranges(
@@ -3676,9 +3689,12 @@ struct LspManager(Copyable, Movable):
                 continue
             if id == self._inflight_inlineval_id:
                 var iv = List[TextEditEntry]()
+                var ive = List[TextEditEntry]()
                 if msg.result:
                     iv = _parse_inline_values(msg.result.value())
+                    ive = _parse_inline_value_exprs(msg.result.value())
                 self._inlinevals = iv^
+                self._inlineval_exprs = ive^
                 self._has_inlinevals = True
                 self._inflight_inlineval_id = String("")
                 continue
@@ -5804,6 +5820,42 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_inline_value_exprs(v: JsonValue) -> List[TextEditEntry]:
+    """Parse the non-text ``InlineValue`` variants into (row, expr)
+    carriers the host evaluates via the debugger: ``InlineValueVariable
+    Lookup`` contributes its ``variableName``, ``InlineValueEvaluable
+    Expression`` its ``expression``. Entries that already carry ``text``
+    (handled by ``_parse_inline_values``) are skipped."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var t_opt = e.object_get(String("text"))
+        if t_opt and t_opt.value().is_string():
+            continue  # InlineValueText — already rendered directly
+        var expr = String("")
+        var vn_opt = e.object_get(String("variableName"))
+        if vn_opt and vn_opt.value().is_string():
+            expr = vn_opt.value().as_str()
+        else:
+            var ex_opt = e.object_get(String("expression"))
+            if ex_opt and ex_opt.value().is_string():
+                expr = ex_opt.value().as_str()
+        if len(expr.as_bytes()) == 0:
+            continue
+        var rng_opt = e.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var sp = _start_pos_of(rng_opt.value())
+        if sp[0] < 0:
+            continue
+        out.append(TextEditEntry(sp[0], 0, sp[0], 0, expr))
     return out^
 
 

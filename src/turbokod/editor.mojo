@@ -2041,6 +2041,11 @@ struct Editor(Copyable, Movable):
         end-of-line. Pass an empty list to clear (on continue / stop)."""
         self.inline_value_notes = notes^
 
+    def add_inline_value(mut self, row: Int, var text: String):
+        """Append one inline-value annotation (e.g. an async DAP-evaluated
+        ``expr = value``) without disturbing the existing ones."""
+        self.inline_value_notes.append(TextEditEntry(row, 0, row, 0, text^))
+
     def set_fold_regions(mut self, var regions: List[TextEditEntry]):
         """Replace the LSP folding regions (start_line..end_line). A
         collapsed region's start line shows a ``⋯N`` end-of-line marker.

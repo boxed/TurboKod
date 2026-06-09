@@ -167,7 +167,7 @@ from turbokod.lsp_dispatch import (
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result, _parse_monikers, _unit_text,
     _parse_inline_completion, _parse_linked_ranges, _parse_inline_values,
-    _parse_folding_ranges,
+    _parse_inline_value_exprs, _parse_folding_ranges,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10442,6 +10442,25 @@ def test_lsp_color_unit_text() raises:
     assert_equal(mid.as_bytes()[1], UInt8(ord(".")))
 
 
+def test_lsp_parse_inline_value_exprs() raises:
+    """The variable-lookup / evaluable inline-value variants become
+    (row, expr) carriers for DAP evaluation; text variants are skipped."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":4,\"character\":2},"
+        + "\"end\":{\"line\":4,\"character\":6}},\"text\":\"x = 41\"},"
+        + "{\"range\":{\"start\":{\"line\":5,\"character\":0},"
+        + "\"end\":{\"line\":5,\"character\":3}},\"variableName\":\"y\"},"
+        + "{\"range\":{\"start\":{\"line\":6,\"character\":0},"
+        + "\"end\":{\"line\":6,\"character\":4}},\"expression\":\"a+b\"}]"
+    ))
+    var ex = _parse_inline_value_exprs(v)
+    assert_equal(len(ex), 2)        # text variant skipped
+    assert_equal(ex[0].start_line, 5)
+    assert_equal(ex[0].new_text, String("y"))
+    assert_equal(ex[1].start_line, 6)
+    assert_equal(ex[1].new_text, String("a+b"))
+
+
 def test_lsp_parse_folding_ranges() raises:
     """FoldingRange[] parse into start..end range carriers; single-line
     (endLine <= startLine) regions are dropped."""
@@ -19242,6 +19261,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_inline_completion()
     test_lsp_parse_linked_ranges()
     test_lsp_parse_inline_values()
+    test_lsp_parse_inline_value_exprs()
     test_lsp_parse_folding_ranges()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()

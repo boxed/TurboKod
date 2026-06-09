@@ -393,11 +393,16 @@ comptime TARGET_TEST_DEBUG       = String("target:test_debug")
 # Test-pane chrome actions. The test runner (``TARGET_TEST``) owns its
 # own bottom-docked output pane — separate process slot from the
 # run/debug pane — so running tests never disturbs an in-flight target
-# run (e.g. a dev server). ``TEST_STOP`` SIGTERMs the test child;
+# run (e.g. a dev server). ``TEST_STOP`` SIGTERMs the test child but
+# keeps the pane open with its output held (it does *not* close);
 # ``TEST_CLEAR_OUTPUT`` wipes just that pane's scrollback;
-# ``TEST_PANE_CLOSE`` is the pane's ``[■]`` close button. "Re-run" on
-# the pane reuses ``TARGET_TEST`` (which stop-then-reruns the tests).
+# ``TEST_PANE_CLOSE`` is the pane's ``[■]`` close button. ``TEST_RERUN``
+# re-runs *the same command that last ran* — the single test if a single
+# test was launched (from a gutter run-icon), the whole suite otherwise —
+# by replaying ``_last_test_node_id``. (``TARGET_TEST``/Cmd+T always runs
+# the whole suite and resets that to empty.)
 comptime TEST_STOP               = String("test:stop")
+comptime TEST_RERUN              = String("test:rerun")
 comptime TEST_CLEAR_OUTPUT       = String("test:clear_output")
 comptime TEST_PANE_CLOSE         = String("test:pane_close")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
@@ -1101,6 +1106,13 @@ struct Desktop(Movable):
     # know which frame they belong to even after the pane has been
     # repainted with a different selection.
     var _dap_current_frame_id: Int
+    # Pending LSP inline-value expressions awaiting DAP evaluation: the
+    # stopped file + parallel (expr, row) lists. When an ``evaluate``
+    # response matches a pending expr, an ``expr = value`` annotation is
+    # added to that file's editor.
+    var _inlineval_pending_path: String
+    var _inlineval_pending_exprs: List[String]
+    var _inlineval_pending_rows: List[Int]
     # Label of the scope whose variables are in flight. Used to render
     # ``Locals:`` / ``Globals:`` in the pane when the response lands.
     var _dap_pending_scope_label: String
@@ -1177,6 +1189,10 @@ struct Desktop(Movable):
     var test_session: RunSession
     var test_pane: DebugPane
     var _test_output_held: Bool
+    # The pytest node id of the last test run (empty = whole suite), so
+    # the pane's "Re-run" replays *that* command rather than always
+    # falling back to the whole suite. Set on every ``_target_test``.
+    var _last_test_node_id: String
     # Per-user window session, persisted in
     # ``<project>/.turbokod/per_user/<username>/session.json``.
     # ``_pending_restore`` is
@@ -1391,6 +1407,9 @@ struct Desktop(Movable):
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self._dap_current_frame_id = -1
+        self._inlineval_pending_path = String("")
+        self._inlineval_pending_exprs = List[String]()
+        self._inlineval_pending_rows = List[Int]()
         self._dap_pending_scope_label = String("")
         self._dap_var_target_kind = UInt8(0)
         self._dap_var_target_row = -1
@@ -1420,6 +1439,7 @@ struct Desktop(Movable):
         self.test_pane.set_title(String("Tests"))
         self.test_pane.dock.close_button_id = TEST_PANE_CLOSE
         self._test_output_held = False
+        self._last_test_node_id = String("")
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
@@ -4272,6 +4292,7 @@ struct Desktop(Movable):
         self._run_output_held = False
         self.test_session.terminate()
         self._test_output_held = False
+        self._last_test_node_id = String("")
         self.targets = ProjectTargets()
         # Drop any per-project grammar overrides loaded from this
         # project's ``.turbokod/grammars.json`` so a buffer opened
@@ -6304,8 +6325,25 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == TEST_STOP:
             # Stop only the test child — the run/debug session is a
-            # separate slot and keeps running.
-            self.test_session.terminate()
+            # separate slot and keeps running. Hold the pane open with
+            # its output: stop ≠ close. (Without the hold, the next
+            # ``dap_tick`` would see an inactive session and no hold and
+            # hide the pane.) ``test_tick`` won't get to log an exit line
+            # since we've already terminated, so note it here.
+            if self.test_session.is_active():
+                self.test_session.terminate()
+                self.test_pane.append_output(
+                    String("[tests stopped]"), UInt8(2),  # PANE_OUT_CONSOLE
+                )
+                self._test_output_held = True
+            return Optional[String]()
+        if action == TEST_RERUN:
+            # Re-run the *last* test command — the single test if that's
+            # what last ran, the whole suite otherwise. Copy out of the
+            # field first: ``_target_test`` mutates ``self``, so passing
+            # the field directly would alias a mutable location.
+            var last_node = self._last_test_node_id
+            self._target_test(last_node)
             return Optional[String]()
         if action == TEST_CLEAR_OUTPUT:
             self.test_pane.clear_output()
@@ -6666,6 +6704,21 @@ struct Desktop(Movable):
                 var ivw = self._find_window_for_path(self._dap_exec_path)
                 if ivw >= 0 and self.windows.windows[ivw].is_editor:
                     self.windows.windows[ivw].editor.set_inline_values(ivs^)
+                # The variable-lookup / evaluable variants are resolved by
+                # evaluating each expression in the stopped frame; the
+                # value lands in _drain_evaluations and gets appended as
+                # "expr = value".
+                var ive = self.lsp_managers[i].take_inline_value_exprs()
+                self._inlineval_pending_path = self._dap_exec_path
+                self._inlineval_pending_exprs = List[String]()
+                self._inlineval_pending_rows = List[Int]()
+                for k in range(len(ive)):
+                    self._inlineval_pending_exprs.append(ive[k].new_text)
+                    self._inlineval_pending_rows.append(ive[k].start_line)
+                    _ = self.dap.request_evaluate(
+                        ive[k].new_text, self._dap_current_frame_id,
+                        String("hover"),
+                    )
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -6811,6 +6864,9 @@ struct Desktop(Movable):
                     self.windows.windows[ivc].editor.set_inline_values(
                         List[TextEditEntry]()
                     )
+            if len(self._inlineval_pending_exprs) > 0:
+                self._inlineval_pending_exprs = List[String]()
+                self._inlineval_pending_rows = List[Int]()
         self._refresh_lsp_status()
 
     def _on_install_complete(
@@ -8184,20 +8240,21 @@ struct Desktop(Movable):
         """Title-strip buttons for the test pane. While tests run:
         Stop + Re-run. After they exit (output held): Re-run only —
         there's nothing left to stop. Clear is always available.
-        ``TARGET_TEST`` terminates the in-flight test child before
-        relaunching, so Re-run is a true stop-then-rerun without a
-        separate handler (same idiom as the run pane's Restart)."""
+        ``TEST_RERUN`` replays the last test command (single test or
+        whole suite) and terminates any in-flight test child first, so
+        Re-run is a true stop-then-rerun without a separate handler
+        (same idiom as the run pane's Restart)."""
         var out = List[TitleCommand]()
         if self.test_session.is_active():
             out.append(TitleCommand(
                 String("[■ Stop]"), TEST_STOP,
             ))
             out.append(TitleCommand(
-                String("[↻ Re-run]"), TARGET_TEST,
+                String("[↻ Re-run]"), TEST_RERUN,
             ))
         elif self._test_output_held:
             out.append(TitleCommand(
-                String("[↻ Re-run]"), TARGET_TEST,
+                String("[↻ Re-run]"), TEST_RERUN,
             ))
         out.append(TitleCommand(
             String("[⌫ Clear]"), TEST_CLEAR_OUTPUT,
@@ -8296,6 +8353,19 @@ struct Desktop(Movable):
                         self._dap_watch_values[k] = batch.values[i]
                     else:
                         self._dap_watch_values.append(batch.values[i])
+                    break
+            # LSP inline values: a matching pending expression becomes an
+            # "expr = value" annotation on the stopped file's editor.
+            for k in range(len(self._inlineval_pending_exprs)):
+                if self._inlineval_pending_exprs[k] == e:
+                    var ivw = self._find_window_for_path(
+                        self._inlineval_pending_path,
+                    )
+                    if ivw >= 0 and self.windows.windows[ivw].is_editor:
+                        self.windows.windows[ivw].editor.add_inline_value(
+                            self._inlineval_pending_rows[k],
+                            e + String(" = ") + batch.values[i],
+                        )
                     break
         # Pane rebuild needs current locals — we don't have them cached
         # so reuse the existing pane row set by extracting locals from
@@ -8876,6 +8946,9 @@ struct Desktop(Movable):
         args.append(String("--color=yes"))
         if len(node_id.as_bytes()) > 0:
             args.append(node_id)
+        # Remember what we ran so the pane's "Re-run" replays this exact
+        # command (single test vs. whole suite) rather than the suite.
+        self._last_test_node_id = node_id
         # Stop only the *previous test run* — the run/debug session is a
         # separate slot and is left untouched (a dev server keeps
         # serving while tests run).
