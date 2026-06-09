@@ -3010,6 +3010,72 @@ struct LspManager(Copyable, Movable):
         self._has_server_message = False
         return out^
 
+    def _capture_semantic_legend(mut self, provider: JsonValue):
+        """Pull ``legend.tokenTypes`` out of a ``semanticTokensProvider``
+        object (from the initialize capabilities *or* a dynamic
+        ``client/registerCapability``) into ``_sem_token_types``, indexed
+        by each decoded token's ``tokenType`` field. Shared so both the
+        static and the dynamic-registration paths build the same legend —
+        rust-analyzer ships its legend only on the dynamic registration."""
+        if not provider.is_object():
+            return
+        var legend_opt = provider.object_get(String("legend"))
+        if not legend_opt or not legend_opt.value().is_object():
+            return
+        var tt_opt = legend_opt.value().object_get(String("tokenTypes"))
+        if not tt_opt or not tt_opt.value().is_array():
+            return
+        var tt = tt_opt.value().copy()
+        var types = List[String]()
+        for ti in range(tt.array_len()):
+            var tv = tt.array_at(ti)
+            if tv.is_string():
+                types.append(tv.as_str())
+            else:
+                types.append(String(""))
+        self._sem_token_types = types^
+
+    def _apply_capability_registration(
+        mut self, method: String, options: JsonValue,
+    ):
+        """Merge one ``client/registerCapability`` entry into the cached
+        server ``capabilities`` so ``server_supports`` reflects a feature
+        the server enabled after initialize. ``options`` is the entry's
+        ``registerOptions`` (or null); stored verbatim when it's an object
+        so capability sub-fields (``resolveProvider``, the semantic-tokens
+        legend, formatting trigger chars, …) survive, else a bare
+        ``true``. Methods with no ``capabilities`` field (e.g.
+        ``workspace/didChangeWatchedFiles``) map to "" and are skipped."""
+        var key = _capability_key_for_method(method)
+        if len(key.as_bytes()) == 0:
+            return
+        var caps = self._capabilities.value().copy() \
+            if self._capabilities else json_object()
+        if not caps.is_object():
+            caps = json_object()
+        if options.is_object():
+            caps.put(key, options.copy())
+        else:
+            caps.put(key, json_bool(True))
+        self._capabilities = Optional[JsonValue](caps^)
+        if method == String("textDocument/semanticTokens") \
+                and options.is_object():
+            self._capture_semantic_legend(options)
+
+    def _remove_capability_registration(mut self, method: String):
+        """Undo a registration on ``client/unregisterCapability`` by
+        writing ``false`` for the mapped key — ``server_supports`` treats
+        ``false`` as unsupported, and the object has no key-removal
+        primitive."""
+        var key = _capability_key_for_method(method)
+        if len(key.as_bytes()) == 0 or not self._capabilities:
+            return
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return
+        caps.put(key, json_bool(False))
+        self._capabilities = Optional[JsonValue](caps^)
+
     def _handle_server_request(mut self, msg: LspIncoming):
         """Reply to a server-issued request.
 
@@ -3071,13 +3137,72 @@ struct LspManager(Copyable, Movable):
                 )
                 self.client.send_response(id, result^)
                 return
-            if method == String("client/registerCapability") \
-                    or method == String("client/unregisterCapability") \
-                    or method == String("window/workDoneProgress/create"):
-                # Acknowledge with success. We don't actually act on
-                # dynamic registrations — file watchers, etc. — but
-                # accepting matches what vscode does and lets servers
-                # proceed instead of stalling on the probe.
+            if method == String("client/registerCapability"):
+                # Merge each registration into the cached capabilities so
+                # ``server_supports`` sees features the server turns on
+                # *after* initialize. Many servers (rust-analyzer most
+                # notably) advertise an almost-empty static capabilities
+                # blob and register the real providers dynamically; without
+                # this merge every dynamically-registered feature looks
+                # unsupported and we never send the request. Reply success
+                # regardless — we always accept.
+                var merged = 0
+                if msg.params and msg.params.value().is_object():
+                    var regs_opt = msg.params.value().object_get(
+                        String("registrations"),
+                    )
+                    if regs_opt and regs_opt.value().is_array():
+                        var regs = regs_opt.value().copy()
+                        for ri in range(regs.array_len()):
+                            var reg = regs.array_at(ri)
+                            if not reg.is_object():
+                                continue
+                            var m_opt = reg.object_get(String("method"))
+                            if not m_opt or not m_opt.value().is_string():
+                                continue
+                            var ro = reg.object_get(String("registerOptions"))
+                            var options = ro.value().copy() if ro \
+                                else json_null_v()
+                            self._apply_capability_registration(
+                                m_opt.value().as_str(), options,
+                            )
+                            merged += 1
+                _lsp_debug_log(
+                    String("← server request client/registerCapability id=")
+                    + id_label + String(" merged=") + String(merged),
+                )
+                self.client.send_response(id, json_null_v())
+                return
+            if method == String("client/unregisterCapability"):
+                # Mirror of the register path: write ``false`` for each
+                # unregistered method's capability key so ``server_supports``
+                # stops reporting it. (The spec misspells the field as
+                # ``unregisterations`` — match it verbatim.)
+                if msg.params and msg.params.value().is_object():
+                    var uns_opt = msg.params.value().object_get(
+                        String("unregisterations"),
+                    )
+                    if uns_opt and uns_opt.value().is_array():
+                        var uns = uns_opt.value().copy()
+                        for ui in range(uns.array_len()):
+                            var un = uns.array_at(ui)
+                            if not un.is_object():
+                                continue
+                            var m_opt = un.object_get(String("method"))
+                            if m_opt and m_opt.value().is_string():
+                                self._remove_capability_registration(
+                                    m_opt.value().as_str(),
+                                )
+                _lsp_debug_log(
+                    String("← server request client/unregisterCapability id=")
+                    + id_label + String(" (removed)"),
+                )
+                self.client.send_response(id, json_null_v())
+                return
+            if method == String("window/workDoneProgress/create"):
+                # Acknowledge with success. We don't track the progress
+                # token itself, but accepting lets the server proceed
+                # instead of stalling on the probe.
                 _lsp_debug_log(
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (acked)"),
@@ -3156,23 +3281,7 @@ struct LspManager(Copyable, Movable):
                     String("semanticTokensProvider"),
                 )
                 if stp_opt and stp_opt.value().is_object():
-                    var legend_opt = stp_opt.value().object_get(
-                        String("legend"),
-                    )
-                    if legend_opt and legend_opt.value().is_object():
-                        var tt_opt = legend_opt.value().object_get(
-                            String("tokenTypes"),
-                        )
-                        if tt_opt and tt_opt.value().is_array():
-                            var tt = tt_opt.value().copy()
-                            var types = List[String]()
-                            for ti in range(tt.array_len()):
-                                var tv = tt.array_at(ti)
-                                if tv.is_string():
-                                    types.append(tv.as_str())
-                                else:
-                                    types.append(String(""))
-                            self._sem_token_types = types^
+                    self._capture_semantic_legend(stp_opt.value())
         if self._position_encoding != String("utf-8"):
             _lsp_debug_log(
                 String("position encoding negotiated as '")
@@ -3373,6 +3482,78 @@ def _python_for_sphinx(root: String, server_argv: List[String]) -> String:
         if stat_file(sibling3).ok:
             return sibling3
     return String("python3")
+
+
+def _capability_key_for_method(method: String) -> String:
+    """Map an LSP feature method name (as it appears in a
+    ``client/registerCapability`` registration) to the matching server
+    ``capabilities`` field name, so a dynamic registration updates the
+    very object ``server_supports`` reads. Returns "" for methods with no
+    capabilities-object field (notifications like
+    ``workspace/didChangeWatchedFiles`` carry no provider flag)."""
+    if method == String("textDocument/completion"):
+        return String("completionProvider")
+    if method == String("textDocument/hover"):
+        return String("hoverProvider")
+    if method == String("textDocument/signatureHelp"):
+        return String("signatureHelpProvider")
+    if method == String("textDocument/declaration"):
+        return String("declarationProvider")
+    if method == String("textDocument/definition"):
+        return String("definitionProvider")
+    if method == String("textDocument/typeDefinition"):
+        return String("typeDefinitionProvider")
+    if method == String("textDocument/implementation"):
+        return String("implementationProvider")
+    if method == String("textDocument/references"):
+        return String("referencesProvider")
+    if method == String("textDocument/documentHighlight"):
+        return String("documentHighlightProvider")
+    if method == String("textDocument/documentSymbol"):
+        return String("documentSymbolProvider")
+    if method == String("textDocument/codeAction"):
+        return String("codeActionProvider")
+    if method == String("textDocument/codeLens"):
+        return String("codeLensProvider")
+    if method == String("textDocument/documentLink"):
+        return String("documentLinkProvider")
+    if method == String("textDocument/documentColor"):
+        return String("colorProvider")
+    if method == String("textDocument/formatting"):
+        return String("documentFormattingProvider")
+    if method == String("textDocument/rangeFormatting"):
+        return String("documentRangeFormattingProvider")
+    if method == String("textDocument/onTypeFormatting"):
+        return String("documentOnTypeFormattingProvider")
+    if method == String("textDocument/rename"):
+        return String("renameProvider")
+    if method == String("textDocument/foldingRange"):
+        return String("foldingRangeProvider")
+    if method == String("textDocument/selectionRange"):
+        return String("selectionRangeProvider")
+    if method == String("textDocument/inlayHint"):
+        return String("inlayHintProvider")
+    if method == String("textDocument/inlineValue"):
+        return String("inlineValueProvider")
+    if method == String("textDocument/inlineCompletion"):
+        return String("inlineCompletionProvider")
+    if method == String("textDocument/linkedEditingRange"):
+        return String("linkedEditingRangeProvider")
+    if method == String("textDocument/semanticTokens"):
+        return String("semanticTokensProvider")
+    if method == String("textDocument/prepareCallHierarchy"):
+        return String("callHierarchyProvider")
+    if method == String("textDocument/prepareTypeHierarchy"):
+        return String("typeHierarchyProvider")
+    if method == String("textDocument/moniker"):
+        return String("monikerProvider")
+    if method == String("textDocument/diagnostic"):
+        return String("diagnosticProvider")
+    if method == String("workspace/symbol"):
+        return String("workspaceSymbolProvider")
+    if method == String("workspace/executeCommand"):
+        return String("executeCommandProvider")
+    return String("")
 
 
 def _id_to_string(v: JsonValue) -> String:

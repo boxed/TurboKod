@@ -10173,6 +10173,38 @@ def test_lsp_server_supports_reads_capabilities() raises:
     assert_true(not mgr.server_supports_prepare_rename())
 
 
+def test_lsp_dynamic_capability_registration() raises:
+    """``client/registerCapability`` merges into the cached capabilities so
+    ``server_supports`` reports dynamically-registered providers (the way
+    rust-analyzer enables most of its features); ``unregisterCapability``
+    flips them back off. A dynamic semanticTokens registration also seeds
+    the token-type legend the same way the initialize path does."""
+    var mgr = LspManager()
+    assert_true(not mgr.server_supports(String("foldingRangeProvider")))
+    # Register with an options object → stored verbatim, reports supported.
+    mgr._apply_capability_registration(
+        String("textDocument/foldingRange"), json_object(),
+    )
+    assert_true(mgr.server_supports(String("foldingRangeProvider")))
+    # Register a notification-only method (no provider field) → no-op.
+    mgr._apply_capability_registration(
+        String("workspace/didChangeWatchedFiles"), json_object(),
+    )
+    # A dynamic semanticTokens registration carries the legend.
+    var sem_opts = parse_json(String(
+        "{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"function\"]}}"
+    ))
+    mgr._apply_capability_registration(
+        String("textDocument/semanticTokens"), sem_opts^,
+    )
+    assert_true(mgr.server_supports(String("semanticTokensProvider")))
+    assert_equal(len(mgr._sem_token_types), 3)
+    assert_equal(mgr._sem_token_types[2], String("function"))
+    # Unregister flips the capability back to unsupported.
+    mgr._remove_capability_registration(String("textDocument/foldingRange"))
+    assert_true(not mgr.server_supports(String("foldingRangeProvider")))
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18862,6 +18894,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_signature_help()
     test_lsp_server_progress_and_show_message()
     test_lsp_server_supports_reads_capabilities()
+    test_lsp_dynamic_capability_registration()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()
