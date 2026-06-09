@@ -10270,6 +10270,23 @@ def test_lsp_log_message_capture() raises:
     assert_equal(mgr.captured_log(), String("[E] boom\n[I] fyi\n"))
 
 
+def test_lsp_message_request_accessors() raises:
+    """The parked showMessageRequest surface (message + action titles) is
+    readable so the host can drive the modal; actions are returned by copy."""
+    var mgr = LspManager()
+    assert_true(not mgr.has_message_request())
+    mgr._msgreq_pending = True
+    mgr._msgreq_message = String("Reload window?")
+    var acts = List[String]()
+    acts.append(String("Reload"))
+    acts.append(String("Later"))
+    mgr._msgreq_actions = acts^
+    assert_true(mgr.has_message_request())
+    assert_equal(mgr.message_request_text(), String("Reload window?"))
+    assert_equal(len(mgr.message_request_actions()), 2)
+    assert_equal(mgr.message_request_actions()[0], String("Reload"))
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18963,6 +18980,7 @@ def _run_chunk_04() raises:
     test_lsp_pull_diagnostics_storage()
     test_lsp_server_supports_will_save()
     test_lsp_log_message_capture()
+    test_lsp_message_request_accessors()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

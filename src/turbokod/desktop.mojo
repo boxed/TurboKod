@@ -160,6 +160,7 @@ from .breakpoint_dialog import (
     BreakpointConditionErrorDialog, BreakpointMenu,
 )
 from .confirm_dialog import ConfirmDialog
+from .message_request_dialog import MessageRequestDialog
 from .merge_view import MergeView
 from .fill_dialog import FillDialog
 from .prompt import (
@@ -714,6 +715,10 @@ struct Desktop(Movable):
     var file_tree: FileTree
     var prompt: Prompt
     var confirm_dialog: ConfirmDialog
+    # Modal for a server-driven window/showMessageRequest, plus the index
+    # of the lsp_managers entry awaiting the reply (-1 when none).
+    var message_request_dialog: MessageRequestDialog
+    var _msgreq_mgr_idx: Int
     # Interactive three-way merge modal, opened when an external write
     # conflicts with unsaved local edits. Single-instance; the
     # ``pending_merge_queue`` holds the indices of other editor windows
@@ -1261,6 +1266,8 @@ struct Desktop(Movable):
         self.file_tree = FileTree()
         self.prompt = Prompt()
         self.confirm_dialog = ConfirmDialog()
+        self.message_request_dialog = MessageRequestDialog()
+        self._msgreq_mgr_idx = -1
         self.merge_view = MergeView()
         self.pending_merge_queue = List[Int]()
         self.quick_open = QuickOpen()
@@ -2596,6 +2603,8 @@ struct Desktop(Movable):
             return String("default")
         if self.confirm_dialog.active:
             return String("default")
+        if self.message_request_dialog.active:
+            return String("default")
         if self.merge_view.active:
             return String("default")
         if self.save_as_dialog.active:
@@ -3012,6 +3021,7 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
         self.confirm_dialog.paint(canvas, screen)
+        self.message_request_dialog.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
@@ -5129,6 +5139,14 @@ struct Desktop(Movable):
             if self.confirm_dialog.submitted:
                 return self._on_confirm_submit()
             return Optional[String]()
+        if self.message_request_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.message_request_dialog.handle_key(event)
+            else:
+                _ = self.message_request_dialog.handle_mouse(event, screen)
+            if self.message_request_dialog.submitted:
+                self._on_message_request_submit()
+            return Optional[String]()
         if self.save_as_dialog.active:
             if event.kind == EVENT_KEY:
                 _ = self.save_as_dialog.handle_key(event)
@@ -5674,6 +5692,7 @@ struct Desktop(Movable):
             or self.diagnostic_menu.active or self.editor_context_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
             or self.confirm_dialog.active or self.merge_view.active \
+            or self.message_request_dialog.active \
             or self.save_as_dialog.active \
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
@@ -6400,6 +6419,17 @@ struct Desktop(Movable):
                         # with the stale "no definition found" one on
                         # the next tick.
                         self.lsp_managers[i].clear_empty()
+            # Server-driven window/showMessageRequest → modal. One at a
+            # time across all managers; a second request stays parked in
+            # its manager until the first is answered.
+            if self.lsp_managers[i].has_message_request() \
+                    and not self.message_request_dialog.active \
+                    and self._msgreq_mgr_idx < 0:
+                self.message_request_dialog.open(
+                    self.lsp_managers[i].message_request_text(),
+                    self.lsp_managers[i].message_request_actions(),
+                )
+                self._msgreq_mgr_idx = i
             # Workspace symbol response routes the second step of the
             # Find Symbol picker. We sent the request to every ready
             # LSP at submit time, so each manager response drains
@@ -7773,6 +7803,7 @@ struct Desktop(Movable):
                 or self.editor_context_menu.active \
                 or self.lsp_status_menu.active or self.prompt.active \
                 or self.confirm_dialog.active or self.merge_view.active \
+                or self.message_request_dialog.active \
                 or self.save_as_dialog.active \
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
@@ -11785,6 +11816,16 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.invalidate_spell()
+
+    def _on_message_request_submit(mut self):
+        """Relay the user's showMessageRequest choice back to the server
+        (action index, or -1 = dismissed) and reset the modal latch."""
+        var idx = self._msgreq_mgr_idx
+        var choice = self.message_request_dialog.selected_index
+        self.message_request_dialog.close()
+        self._msgreq_mgr_idx = -1
+        if 0 <= idx and idx < len(self.lsp_managers):
+            self.lsp_managers[idx].respond_message_request(choice)
 
     def _on_confirm_submit(mut self) -> Optional[String]:
         """Resolve the most recent ``confirm_dialog.open`` by reading

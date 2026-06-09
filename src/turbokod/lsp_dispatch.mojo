@@ -651,6 +651,14 @@ struct LspManager(Copyable, Movable):
     var _willsave_path: String
     var _resolved_willsave_edits: List[TextEditEntry]
     var _has_resolved_willsave: Bool
+    # ``window/showMessageRequest`` — a server request that blocks until the
+    # client replies with the chosen ``MessageActionItem`` (or null). We
+    # park the message + action titles + the request id, surface a modal,
+    # and reply via ``respond_message_request`` once the user picks.
+    var _msgreq_pending: Bool
+    var _msgreq_id: Optional[JsonValue]
+    var _msgreq_message: String
+    var _msgreq_actions: List[String]
     # Server-driven ``workspace/applyEdit`` (e.g. after executeCommand):
     # the parsed WorkspaceEdit, parked for the host to apply project-wide.
     # We optimistically reply ``applied: true`` and apply next frame.
@@ -811,6 +819,10 @@ struct LspManager(Copyable, Movable):
         self._willsave_path = String("")
         self._resolved_willsave_edits = List[TextEditEntry]()
         self._has_resolved_willsave = False
+        self._msgreq_pending = False
+        self._msgreq_id = Optional[JsonValue]()
+        self._msgreq_message = String("")
+        self._msgreq_actions = List[String]()
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -943,6 +955,10 @@ struct LspManager(Copyable, Movable):
         self._willsave_path = String("")
         self._resolved_willsave_edits = List[TextEditEntry]()
         self._has_resolved_willsave = False
+        self._msgreq_pending = False
+        self._msgreq_id = Optional[JsonValue]()
+        self._msgreq_message = String("")
+        self._msgreq_actions = List[String]()
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -3321,6 +3337,40 @@ struct LspManager(Copyable, Movable):
         self._has_server_message = False
         return out^
 
+    def has_message_request(self) -> Bool:
+        return self._msgreq_pending
+
+    def message_request_text(self) -> String:
+        return self._msgreq_message
+
+    def message_request_actions(self) -> List[String]:
+        return self._msgreq_actions.copy()
+
+    def respond_message_request(mut self, action_index: Int):
+        """Reply to the parked ``window/showMessageRequest`` with the chosen
+        ``MessageActionItem`` (``action_index`` into
+        ``message_request_actions``) or null when ``action_index < 0``
+        (the user dismissed)."""
+        if not self._msgreq_pending or not self._msgreq_id:
+            return
+        var id = self._msgreq_id.value().copy()
+        var result = json_null_v()
+        if 0 <= action_index and action_index < len(self._msgreq_actions):
+            var item = json_object()
+            item.put(
+                String("title"),
+                json_str(self._msgreq_actions[action_index]),
+            )
+            result = item^
+        try:
+            self.client.send_response(id, result^)
+        except e:
+            print("lsp: showMessageRequest response:", String(e))
+        self._msgreq_pending = False
+        self._msgreq_id = Optional[JsonValue]()
+        self._msgreq_message = String("")
+        self._msgreq_actions = List[String]()
+
     def _capture_semantic_legend(mut self, provider: JsonValue):
         """Pull ``legend.tokenTypes`` out of a ``semanticTokensProvider``
         object (from the initialize capabilities *or* a dynamic
@@ -3550,6 +3600,46 @@ struct LspManager(Copyable, Movable):
                     + id_label + String(" files=") + String(edit_count),
                 )
                 self.client.send_response(id, resp^)
+                return
+            if method == String("window/showMessageRequest"):
+                # Park the message + action titles + request id for a modal;
+                # the host replies via ``respond_message_request`` once the
+                # user picks. A request with no actions is effectively a
+                # showMessage with a mandatory (null) reply — surface it and
+                # answer null now. A second request while one is pending is
+                # declined (null) so the first isn't orphaned.
+                var rmsg = String("")
+                var ractions = List[String]()
+                if msg.params and msg.params.value().is_object():
+                    var p = msg.params.value().copy()
+                    var m_opt = p.object_get(String("message"))
+                    if m_opt and m_opt.value().is_string():
+                        rmsg = m_opt.value().as_str()
+                    var a_opt = p.object_get(String("actions"))
+                    if a_opt and a_opt.value().is_array():
+                        var arr = a_opt.value().copy()
+                        for ai in range(arr.array_len()):
+                            var item = arr.array_at(ai)
+                            if item.is_object():
+                                var t_opt = item.object_get(String("title"))
+                                if t_opt and t_opt.value().is_string():
+                                    ractions.append(t_opt.value().as_str())
+                if self._msgreq_pending or len(ractions) == 0:
+                    if not self._msgreq_pending and len(rmsg.as_bytes()) > 0:
+                        self._server_message = self._language_id \
+                            + String(": ") + rmsg
+                        self._has_server_message = True
+                    self.client.send_response(id, json_null_v())
+                    return
+                self._msgreq_id = Optional[JsonValue](id.copy())
+                self._msgreq_message = rmsg^
+                self._msgreq_actions = ractions^
+                self._msgreq_pending = True
+                _lsp_debug_log(
+                    String("← server request window/showMessageRequest id=")
+                    + id_label + String(" actions=")
+                    + String(len(self._msgreq_actions)),
+                )
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
