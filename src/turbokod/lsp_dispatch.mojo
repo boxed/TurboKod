@@ -780,6 +780,14 @@ struct LspManager(Copyable, Movable):
     # Per-document tracking for didOpen / didChange.
     var _doc_paths: List[String]      # absolute paths
     var _doc_versions: List[Int]
+    # Last text we actually sent the server for each doc (parallel to
+    # ``_doc_paths``). Cursor-driven requests (documentHighlight,
+    # signatureHelp, documentColor, …) all funnel through
+    # ``_send_open_or_change`` to guarantee the server has the live text;
+    # without this, each one bumps the version and fires a no-op didChange
+    # even when nothing changed, which restarts the server's analysis and
+    # flickers the "analyzing edits…" spinner on every cursor move.
+    var _doc_texts: List[String]
 
     # Queued ``(path, text)`` pairs waiting for ``initialized`` to land.
     var _pending_open_paths: List[String]
@@ -971,6 +979,7 @@ struct LspManager(Copyable, Movable):
         self._argv = List[String]()
         self._doc_paths = List[String]()
         self._doc_versions = List[Int]()
+        self._doc_texts = List[String]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
@@ -1154,6 +1163,7 @@ struct LspManager(Copyable, Movable):
         self._argv = List[String]()
         self._doc_paths = List[String]()
         self._doc_versions = List[Int]()
+        self._doc_texts = List[String]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
@@ -1517,6 +1527,7 @@ struct LspManager(Copyable, Movable):
             return
         _ = self._doc_paths.pop(idx)
         _ = self._doc_versions.pop(idx)
+        _ = self._doc_texts.pop(idx)
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
@@ -4601,10 +4612,17 @@ struct LspManager(Copyable, Movable):
         if idx < 0:
             self._doc_paths.append(path)
             self._doc_versions.append(1)
+            self._doc_texts.append(text.copy())
             self._send_did_open(path, text^)
         else:
+            # Unchanged text → the server already has this exact content.
+            # Skip the didChange so cursor-driven requests don't trigger a
+            # spurious re-analysis (the "analyzing edits…" flicker).
+            if self._doc_texts[idx] == text:
+                return
             var version = self._doc_versions[idx] + 1
             self._doc_versions[idx] = version
+            self._doc_texts[idx] = text.copy()
             self._send_did_change(path, version, text^)
 
     def diagnostics_inflight_ms_for(mut self, path: String) -> Int:

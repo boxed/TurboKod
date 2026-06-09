@@ -72,6 +72,7 @@ from .diagnostic_menu import (
 )
 from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
+    CTX_MENU_ACTION_COLOR_PICKER,
     CTX_MENU_ACTION_COLOR_PRESENTATION,
     CTX_MENU_ACTION_DECLARATION, CTX_MENU_ACTION_INLINE_COMPLETION,
     CTX_MENU_ACTION_LINKED_EDIT, CTX_MENU_ACTION_TOGGLE_FOLD,
@@ -166,6 +167,7 @@ from .breakpoint_dialog import (
 )
 from .confirm_dialog import ConfirmDialog
 from .message_request_dialog import MessageRequestDialog
+from .color_picker import ColorPickerDialog
 from .merge_view import MergeView
 from .fill_dialog import FillDialog
 from .prompt import (
@@ -733,6 +735,21 @@ struct Desktop(Movable):
     # this is the lsp_managers index holding the parked edits (-1 = the
     # dialog, if open, is a real showMessageRequest, not a color picker).
     var _colorpres_mgr_idx: Int
+    # The editor window the colorPresentation request was issued on. Latched
+    # separately from ``_ctx_menu_editor_idx`` because the context-menu submit
+    # handler clears that the moment it dispatches, but the colorPresentation
+    # round-trip is async — we need the window index to still be valid when the
+    # picker resolves later.
+    var _colorpres_editor_idx: Int
+    # Interactive color picker (Color Picker… on a documentColor swatch).
+    # Unlike colorPresentation it's fully client-side: it opens synchronously
+    # from the menu dispatch, so it only needs the editor + swatch range to
+    # write the edited literal back on apply.
+    var color_picker: ColorPickerDialog
+    var _color_picker_editor_idx: Int
+    var _color_picker_row: Int
+    var _color_picker_col_start: Int
+    var _color_picker_col_end: Int
     # Interactive three-way merge modal, opened when an external write
     # conflicts with unsaved local edits. Single-instance; the
     # ``pending_merge_queue`` holds the indices of other editor windows
@@ -1296,6 +1313,12 @@ struct Desktop(Movable):
         self.message_request_dialog = MessageRequestDialog()
         self._msgreq_mgr_idx = -1
         self._colorpres_mgr_idx = -1
+        self._colorpres_editor_idx = -1
+        self.color_picker = ColorPickerDialog()
+        self._color_picker_editor_idx = -1
+        self._color_picker_row = 0
+        self._color_picker_col_start = 0
+        self._color_picker_col_end = 0
         self.merge_view = MergeView()
         self.pending_merge_queue = List[Int]()
         self.quick_open = QuickOpen()
@@ -2638,6 +2661,8 @@ struct Desktop(Movable):
             return String("default")
         if self.message_request_dialog.active:
             return String("default")
+        if self.color_picker.active:
+            return String("default")
         if self.merge_view.active:
             return String("default")
         if self.save_as_dialog.active:
@@ -3055,6 +3080,7 @@ struct Desktop(Movable):
         self.prompt.paint(canvas, screen)
         self.confirm_dialog.paint(canvas, screen)
         self.message_request_dialog.paint(canvas, screen)
+        self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
         self.save_as_dialog.paint(canvas, screen)
@@ -5192,6 +5218,14 @@ struct Desktop(Movable):
                 else:
                     self._on_message_request_submit()
             return Optional[String]()
+        if self.color_picker.active:
+            if event.kind == EVENT_KEY:
+                _ = self.color_picker.handle_key(event)
+            else:
+                _ = self.color_picker.handle_mouse(event, screen)
+            if self.color_picker.submitted:
+                self._on_color_picker_submit()
+            return Optional[String]()
         if self.save_as_dialog.active:
             if event.kind == EVENT_KEY:
                 _ = self.save_as_dialog.handle_key(event)
@@ -5690,6 +5724,10 @@ struct Desktop(Movable):
         # ``_handle_mouse`` (right-click path) before. Without this call
         # the menu would never open from the keyboard.
         self._maybe_open_diagnostic_menu()
+        # And the symbol-actions context menu — Alt+Enter on a plain
+        # identifier stamps a ``pending_context_menu`` request the same way
+        # a right-click does; drain it here so it opens from the keyboard.
+        self._maybe_open_context_menu()
         return Optional[String]()
 
     def _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
@@ -5745,6 +5783,7 @@ struct Desktop(Movable):
             or self.lsp_status_menu.active or self.prompt.active \
             or self.confirm_dialog.active or self.merge_view.active \
             or self.message_request_dialog.active \
+            or self.color_picker.active \
             or self.save_as_dialog.active \
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
@@ -8127,6 +8166,7 @@ struct Desktop(Movable):
                 or self.lsp_status_menu.active or self.prompt.active \
                 or self.confirm_dialog.active or self.merge_view.active \
                 or self.message_request_dialog.active \
+                or self.color_picker.active \
                 or self.save_as_dialog.active \
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
@@ -11536,6 +11576,8 @@ struct Desktop(Movable):
         ):
             labels.append(String("Change Color Format…"))
             actions.append(CTX_MENU_ACTION_COLOR_PRESENTATION)
+            labels.append(String("Color Picker…"))
+            actions.append(CTX_MENU_ACTION_COLOR_PICKER)
         if li >= 0 and self.lsp_managers[li].server_supports(
             String("inlineCompletionProvider"),
         ):
@@ -11663,10 +11705,26 @@ struct Desktop(Movable):
             var g = Int((rgb >> 8) & 0xFF)
             var b = Int(rgb & 0xFF)
             var text = self.windows.windows[idx].editor.text_snapshot()
+            # Remember the target editor — ``_ctx_menu_editor_idx`` is already
+            # cleared by the time the async response opens the picker.
+            self._colorpres_editor_idx = idx
             _ = self.lsp_managers[lsp_idx].request_color_presentation(
                 path, r, g, b, sw.row, sw.col_start, sw.row, sw.col_end,
                 text^,
             )
+            return
+        if act == CTX_MENU_ACTION_COLOR_PICKER:
+            # Fully client-side: seed the picker from the swatch color and
+            # remember its range so apply can rewrite the literal in place.
+            var sw_opt = self.windows.windows[idx].editor.color_at(row, col)
+            if not sw_opt:
+                return
+            var sw = sw_opt.value()
+            self.color_picker.open(sw.attr.bg_rgb)
+            self._color_picker_editor_idx = idx
+            self._color_picker_row = sw.row
+            self._color_picker_col_start = sw.col_start
+            self._color_picker_col_end = sw.col_end
             return
         if act == CTX_MENU_ACTION_INLINE_COMPLETION:
             var path = self.windows.windows[idx].editor.file_path
@@ -12269,14 +12327,39 @@ struct Desktop(Movable):
         var choice = self.message_request_dialog.selected_index
         self.message_request_dialog.close()
         self._colorpres_mgr_idx = -1
-        if idx < 0 or idx >= len(self.lsp_managers) or choice < 0:
+        if idx < 0 or idx >= len(self.lsp_managers):
             return
+        # Always drain the parked presentations — even on a cancel
+        # (``choice < 0``). ``take_color_presentation_edit`` is what clears
+        # ``has_color_presentations()``; skipping it on cancel leaves the
+        # latch set and ``process_lsp`` re-opens the picker every tick.
         var edits = self.lsp_managers[idx].take_color_presentation_edit(choice)
+        var w = self._colorpres_editor_idx
+        self._colorpres_editor_idx = -1
         if len(edits) == 0:
             return
-        var w = self._ctx_menu_editor_idx
         if 0 <= w and w < len(self.windows.windows) \
                 and self.windows.windows[w].is_editor:
+            _ = self.windows.windows[w].editor.apply_text_edits(edits^)
+
+    def _on_color_picker_submit(mut self):
+        """Apply (or discard) the color picker. On accept, rewrite the
+        swatch's range with the edited CSS literal; reset the latch either
+        way."""
+        var accepted = self.color_picker.accepted
+        var literal = self.color_picker.result_text
+        var w = self._color_picker_editor_idx
+        var row = self._color_picker_row
+        var cs = self._color_picker_col_start
+        var ce = self._color_picker_col_end
+        self.color_picker.close()
+        self._color_picker_editor_idx = -1
+        if not accepted or len(literal.as_bytes()) == 0:
+            return
+        if 0 <= w and w < len(self.windows.windows) \
+                and self.windows.windows[w].is_editor:
+            var edits = List[TextEditEntry]()
+            edits.append(TextEditEntry(row, cs, row, ce, literal))
             _ = self.windows.windows[w].editor.apply_text_edits(edits^)
 
     def _on_message_request_submit(mut self):

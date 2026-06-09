@@ -52,6 +52,14 @@ from turbokod.find_symbol import (
     container_matches_qualifier, sanitize_symbol_query,
     _query_member, _query_qualifier,
 )
+from turbokod.color_convert import (
+    srgb_to_rgb255, rgb255_to_srgb, srgb_to_oklab, oklab_to_srgb,
+    srgb_to_hsl, hsl_to_srgb, format_rgb, format_hsl,
+    format_hex, fmt_fixed, parse_float,
+)
+from turbokod.color_picker import (
+    ColorPickerDialog, MODE_OKLAB, MODE_RGB, MODE_HSL,
+)
 from turbokod.save_as_dialog import SaveAsDialog
 from turbokod.scrollbar import HScrollbar, VScrollbar
 from turbokod.session_store import (
@@ -11447,12 +11455,149 @@ def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
     # in the codeAction request's ``context.diagnostics``.
     assert_equal(req.diag.severity, DIAG_SEVERITY_ERROR)
     assert_equal(req.diag.start_col, 4)
-    # No diagnostic and no spell run → Alt+Enter falls through.
-    var ed2 = Editor(String("plain"))
+    # No diagnostic, no spell run, caret on blank space (not an
+    # identifier) → Alt+Enter falls through as an unbound hotkey.
+    var ed2 = Editor(String("   "))
     ed2.selections[0].row = 0
-    ed2.selections[0].col = 2
+    ed2.selections[0].col = 1
     var consumed2 = ed2.handle_key(ev, view)
     assert_false(consumed2)
+
+
+def test_editor_alt_enter_on_identifier_stamps_context_menu_request() raises:
+    """Alt+Enter on a plain identifier (no diagnostic, no misspelling)
+    opens the symbol-actions context menu — the keyboard counterpart to
+    a right-click. It stamps a ``pending_context_menu`` request carrying
+    the word + caret coordinates and consumes the key (no newline)."""
+    var ed = Editor(String("value = other"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 2  # inside "value"
+    var view = Rect(0, 0, 80, 24)
+    var ev = Event.key_event(KEY_ENTER, MOD_ALT)
+    var consumed = ed.handle_key(ev, view)
+    assert_true(consumed)
+    var req_opt = ed.consume_context_menu_request()
+    assert_true(Bool(req_opt))
+    var req = req_opt.value()
+    assert_equal(req.word, String("value"))
+    assert_equal(req.row, 0)
+    assert_equal(req.col, 2)
+    # The buffer is untouched — Alt+Enter must not split the line.
+    assert_equal(ed.buffer.line_count(), 1)
+    assert_equal(ed.buffer.line(0), String("value = other"))
+
+
+def test_color_convert_roundtrips() raises:
+    """OkLab and HSL must round-trip an 8-bit color back to the same 8-bit
+    color (the picker leans on this for non-destructive space switching)."""
+    var samples = List[Tuple[Int, Int, Int]]()
+    samples.append((255, 87, 51))
+    samples.append((0, 0, 0))
+    samples.append((255, 255, 255))
+    samples.append((18, 52, 86))
+    samples.append((127, 200, 9))
+    for i in range(len(samples)):
+        var c = samples[i]
+        var s = rgb255_to_srgb(c[0], c[1], c[2])
+        var ok = srgb_to_oklab(s[0], s[1], s[2])
+        var ok_srgb = oklab_to_srgb(ok[0], ok[1], ok[2])
+        var ok_back = srgb_to_rgb255(ok_srgb[0], ok_srgb[1], ok_srgb[2])
+        assert_equal(ok_back[0], c[0])
+        assert_equal(ok_back[1], c[1])
+        assert_equal(ok_back[2], c[2])
+        var hsl = srgb_to_hsl(s[0], s[1], s[2])
+        var hsl_srgb = hsl_to_srgb(hsl[0], hsl[1], hsl[2])
+        var hsl_back = srgb_to_rgb255(hsl_srgb[0], hsl_srgb[1], hsl_srgb[2])
+        assert_equal(hsl_back[0], c[0])
+        assert_equal(hsl_back[1], c[1])
+        assert_equal(hsl_back[2], c[2])
+
+
+def test_color_convert_formatting() raises:
+    """Literal formatters produce CSS syntax with the expected precision."""
+    assert_equal(fmt_fixed(0.6279999, 3), String("0.628"))
+    assert_equal(fmt_fixed(11.0, 0), String("11"))
+    assert_equal(fmt_fixed(-0.0021, 3), String("-0.002"))
+    assert_equal(format_rgb(255, 87, 51), String("rgb(255, 87, 51)"))
+    assert_equal(format_hex(255, 87, 51), String("#ff5733"))
+    assert_equal(format_hsl(11.0, 100.0, 60.0), String("hsl(11, 100%, 60%)"))
+    # parse_float accepts clean numbers, rejects junk.
+    assert_true(Bool(parse_float(String("0.42"))))
+    assert_true(Bool(parse_float(String("-3"))))
+    assert_false(Bool(parse_float(String("abc"))))
+    assert_false(Bool(parse_float(String(""))))
+    assert_false(Bool(parse_float(String("1.2.3"))))
+
+
+def test_color_picker_opens_in_oklab() raises:
+    """The picker defaults to the OkLab space and seeds its channels from
+    the swatch color (focus starts on the first channel)."""
+    var d = ColorPickerDialog()
+    d.open(0xFF5733)
+    assert_true(d.active)
+    assert_equal(d.mode, MODE_OKLAB)
+    assert_equal(d.focus, 1)
+    # The formatted literal is an oklab() call.
+    assert_true(d._format_current().find(String("oklab(")) >= 0)
+
+
+def test_color_picker_mode_switch_preserves_color() raises:
+    """Cycling the color space must keep the on-screen color identical —
+    only its representation changes. Switching OkLab→RGB then applying
+    yields the original 8-bit color."""
+    var d = ColorPickerDialog()
+    d.open(0xFF5733)
+    d._set_mode(MODE_RGB)
+    assert_equal(d.mode, MODE_RGB)
+    assert_equal(d._format_current(), String("rgb(255, 87, 51)"))
+    d._set_mode(MODE_HSL)
+    # Back through HSL and on to apply still round-trips the color.
+    var srgb = d._current_srgb()
+    var rgb = srgb_to_rgb255(srgb[0], srgb[1], srgb[2])
+    assert_equal(rgb[0], 255)
+    assert_equal(rgb[1], 87)
+    assert_equal(rgb[2], 51)
+
+
+def test_color_picker_text_entry_commits_value() raises:
+    """Typing digits into a focused channel and pressing Enter commits the
+    exact value (clamped to range)."""
+    var d = ColorPickerDialog()
+    d.open(0xFF5733)
+    d._set_mode(MODE_RGB)
+    d.focus = 1  # R channel
+    # Type "100" then Enter.
+    _ = d.handle_key(Event.key_event(UInt32(ord("1"))))
+    _ = d.handle_key(Event.key_event(UInt32(ord("0"))))
+    _ = d.handle_key(Event.key_event(UInt32(ord("0"))))
+    assert_true(d.editing)
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(d.editing)
+    assert_equal(Int(d.chan[0] + 0.5), 100)
+    # Over-range entry clamps to the channel max (255 for RGB).
+    _ = d.handle_key(Event.key_event(UInt32(ord("9"))))
+    _ = d.handle_key(Event.key_event(UInt32(ord("9"))))
+    _ = d.handle_key(Event.key_event(UInt32(ord("9"))))
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_equal(Int(d.chan[0] + 0.5), 255)
+
+
+def test_color_picker_apply_and_cancel() raises:
+    """Enter applies (accepted + result_text set); Esc cancels (not
+    accepted)."""
+    var d = ColorPickerDialog()
+    d.open(0xFF5733)
+    d._set_mode(MODE_RGB)
+    d.focus = 1
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d.submitted)
+    assert_true(d.accepted)
+    assert_equal(d.result_text, String("rgb(255, 87, 51)"))
+    var d2 = ColorPickerDialog()
+    d2.open(0xFF5733)
+    _ = d2.handle_key(Event.key_event(KEY_ESC))
+    assert_true(d2.submitted)
+    assert_false(d2.accepted)
 
 
 def test_editor_apply_code_action_edits_inserts_typing_import() raises:
@@ -19306,6 +19451,13 @@ def _run_chunk_04() raises:
     test_editor_accept_completion_applies_additional_text_edits()
     test_editor_diagnostic_at_cursor_picks_most_severe()
     test_editor_alt_enter_on_diagnostic_stamps_menu_request()
+    test_editor_alt_enter_on_identifier_stamps_context_menu_request()
+    test_color_convert_roundtrips()
+    test_color_convert_formatting()
+    test_color_picker_opens_in_oklab()
+    test_color_picker_mode_switch_preserves_color()
+    test_color_picker_text_entry_commits_value()
+    test_color_picker_apply_and_cancel()
     test_editor_apply_code_action_edits_inserts_typing_import()
     test_editor_set_diagnostics_builds_per_row_severity_index()
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()

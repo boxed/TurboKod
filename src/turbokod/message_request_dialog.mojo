@@ -113,9 +113,12 @@ struct MessageRequestDialog(Movable):
             var row_attr = attr
             if i == self._sel:
                 row_attr = Attr(WHITE, BLUE)
-            # Paint the full interior width so the selection bar is solid.
+            # Paint the full interior width so the selection bar is solid —
+            # stop at ``rect.b.x - 1`` (exclusive) so the bar fills up to the
+            # last interior column and leaves the right border intact.
             canvas.fill(
-                Rect(rect.a.x + 1, y, rect.b.x, y + 1), String(" "), row_attr,
+                Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
+                String(" "), row_attr,
             )
             var marker = String("▸ ") if i == self._sel else String("  ")
             _ = canvas.put_text(

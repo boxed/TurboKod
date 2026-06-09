@@ -4768,6 +4768,77 @@ struct Editor(Copyable, Movable):
             EditorContextMenuRequest(row, byte_col, word, pos.x, pos.y),
         )
 
+    def _cursor_screen_point(self, view: Rect) -> Optional[Point]:
+        """Screen cell of the primary caret, or empty when the caret is
+        scrolled out of the painted area. Mirrors the gutter +
+        cell-offset geometry of ``paint`` / ``_paint_one_caret`` so a
+        keyboard-driven anchor lands exactly on the caret."""
+        var miss = Optional[Point]()
+        if view.is_empty():
+            return miss
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var text_x0 = view.a.x + total_gutter
+        var content_right = view.b.x - right_gutter
+        var content_bottom = view.b.y
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            content_w = 1
+        var layout = self._layout_lines(content_h, content_w)
+        var row = self.selections[0].row
+        var col = self.selections[0].col
+        var sr = self._screen_row_for(layout, row, col)
+        if sr < 0:
+            return miss
+        var seg_start = layout[sr].byte_start
+        var seg_end = layout[sr].byte_end
+        var seg_x0 = text_x0 + layout[sr].indent_cells
+        var line = self.buffer.line(row)
+        var line_byte_count = len(line.as_bytes())
+        var visible_str: String
+        if seg_start >= line_byte_count:
+            visible_str = String("")
+        else:
+            visible_str = byte_slice(line, seg_start, seg_end)
+        var cell_map = utf8_byte_to_cell(visible_str)
+        var cell_count = utf8_codepoint_count(visible_str)
+        var visible_byte_count = len(visible_str.as_bytes())
+        var cursor_byte = col - seg_start
+        var cell_offset: Int
+        if cursor_byte < 0:
+            cell_offset = 0
+        elif cursor_byte < visible_byte_count:
+            cell_offset = cell_map[cursor_byte]
+        else:
+            cell_offset = cell_count + (cursor_byte - visible_byte_count)
+        var sx = seg_x0 + cell_offset
+        var sy = view.a.y + sr
+        if not (view.a.x <= sx and sx < content_right
+                and view.a.y <= sy and sy < content_bottom):
+            return miss
+        return Optional[Point](Point(sx, sy))
+
+    def request_context_menu_at_cursor(mut self, view: Rect) -> Bool:
+        """Stash an ``EditorContextMenuRequest`` anchored at the primary
+        caret — the keyboard (Alt+Enter) counterpart to a right-click on
+        an identifier. Returns False (nothing stashed) when the caret
+        isn't on a word or is scrolled out of view, mirroring the
+        right-click path's word gate."""
+        var row = self.selections[0].row
+        var col = self.selections[0].col
+        var word = word_at(self.buffer.line(row), col)
+        if len(word.as_bytes()) == 0:
+            return False
+        var pt_opt = self._cursor_screen_point(view)
+        if not pt_opt:
+            return False
+        var pt = pt_opt.value()
+        self.pending_context_menu = Optional[EditorContextMenuRequest](
+            EditorContextMenuRequest(row, col, word, pt.x, pt.y),
+        )
+        return True
+
     def _set_text_hover_anchor(
         mut self, row: Int, span_start: Int,
         seg_byte_start: Int, seg_byte_end: Int, seg_x0: Int,
@@ -7567,7 +7638,12 @@ struct Editor(Copyable, Movable):
                         DiagnosticMenuRequest
                     ](DiagnosticMenuRequest(label^, ax, ay, diag))
                     return True
-                # Alt+Enter outside any misspelling / diagnostic: leave
+                # Alt+Enter on a plain identifier: open the symbol-actions
+                # context menu at the caret — the keyboard counterpart to a
+                # right-click. The host drains ``pending_context_menu``.
+                if self.request_context_menu_at_cursor(view):
+                    return True
+                # Outside any misspelling / diagnostic / identifier: leave
                 # the event for the caller to bind to a hotkey of its own.
                 return False
             if self.read_only:
