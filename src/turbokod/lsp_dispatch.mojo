@@ -667,6 +667,13 @@ struct LspManager(Copyable, Movable):
     # state. Capped at 16 KB to bound memory; once full, new bytes are
     # dropped (the head usually has the most useful diagnostic line).
     var _stderr_log: String
+    # Rolling capture of the server's protocol-level log: ``window/
+    # logMessage`` lines (prefixed by severity) and ``telemetry/event``
+    # payloads, both of which the spec otherwise drops on the floor.
+    # Surfaced in the LSP info window alongside stderr so a server that
+    # explains a problem via logMessage (rather than crashing) is visible.
+    # Capped at 16 KB like the stderr capture.
+    var _log_capture: String
 
     # Per-document tracking for didOpen / didChange.
     var _doc_paths: List[String]      # absolute paths
@@ -818,6 +825,7 @@ struct LspManager(Copyable, Movable):
         self._diag_inflight_versions = List[Int]()
         self._diag_inflight_since_ms = List[Int]()
         self._stderr_log = String("")
+        self._log_capture = String("")
 
     def __copyinit__(mut self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
@@ -949,6 +957,7 @@ struct LspManager(Copyable, Movable):
         self._diag_inflight_versions = List[Int]()
         self._diag_inflight_since_ms = List[Int]()
         self._stderr_log = String("")
+        self._log_capture = String("")
 
     def is_active(self) -> Bool:
         return self.state == _STATE_READY \
@@ -2716,6 +2725,13 @@ struct LspManager(Copyable, Movable):
                         self._on_progress(msg.params.value())
                     elif method == String("window/showMessage"):
                         self._on_show_message(msg.params.value())
+                    elif method == String("window/logMessage"):
+                        self._on_log_message(msg.params.value())
+                    elif method == String("telemetry/event"):
+                        self._append_log(
+                            String("[telemetry] ")
+                            + encode_json(msg.params.value()),
+                        )
                 continue
             if msg.kind == LSP_REQUEST:
                 self._handle_server_request(msg)
@@ -3246,6 +3262,46 @@ struct LspManager(Copyable, Movable):
             return
         self._server_message = self._language_id + String(": ") + m
         self._has_server_message = True
+
+    def _on_log_message(mut self, params: JsonValue):
+        """Append a ``window/logMessage`` to the rolling log capture,
+        prefixed by severity (E/W/I/L for error/warning/info/log). Unlike
+        ``showMessage`` this is log-stream output, not a user toast — it
+        lives in the LSP info window, not the status bar."""
+        if not params.is_object():
+            return
+        var msg_opt = params.object_get(String("message"))
+        if not msg_opt or not msg_opt.value().is_string():
+            return
+        var m = msg_opt.value().as_str()
+        if len(m.as_bytes()) == 0:
+            return
+        var sev = String("L")
+        var type_opt = params.object_get(String("type"))
+        if type_opt and type_opt.value().is_int():
+            var t = type_opt.value().as_int()
+            if t == 1:
+                sev = String("E")
+            elif t == 2:
+                sev = String("W")
+            elif t == 3:
+                sev = String("I")
+        self._append_log(String("[") + sev + String("] ") + m)
+
+    def _append_log(mut self, var line: String):
+        """Append one line (a newline is added) to the 16 KB-capped log
+        capture; once full, new lines are dropped (the head is usually the
+        most useful)."""
+        comptime CAP: Int = 16 * 1024
+        var have = len(self._log_capture.as_bytes())
+        if have >= CAP:
+            return
+        self._log_capture = self._log_capture + line + String("\n")
+
+    def captured_log(self) -> String:
+        """The server's protocol-level log (``window/logMessage`` +
+        ``telemetry/event``) captured since spawn, capped at 16 KB."""
+        return self._log_capture
 
     def has_pending_progress(self) -> Bool:
         return self._has_progress_note

@@ -10260,6 +10260,16 @@ def test_lsp_server_supports_will_save() raises:
     assert_true(not mgr.server_supports_will_save_wait_until())
 
 
+def test_lsp_log_message_capture() raises:
+    """The window/logMessage handler lands lines in the rolling log
+    capture, prefixed by severity (E/W/I/L), one per message."""
+    var mgr = LspManager()
+    assert_equal(len(mgr.captured_log().as_bytes()), 0)
+    mgr._on_log_message(parse_json(String("{\"type\":1,\"message\":\"boom\"}")))
+    mgr._on_log_message(parse_json(String("{\"type\":3,\"message\":\"fyi\"}")))
+    assert_equal(mgr.captured_log(), String("[E] boom\n[I] fyi\n"))
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18952,6 +18962,7 @@ def _run_chunk_04() raises:
     test_lsp_dynamic_capability_registration()
     test_lsp_pull_diagnostics_storage()
     test_lsp_server_supports_will_save()
+    test_lsp_log_message_capture()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

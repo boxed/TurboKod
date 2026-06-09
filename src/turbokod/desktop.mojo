@@ -7089,6 +7089,28 @@ struct Desktop(Movable):
                             length=len(eb) - start,
                         ))
                         lines.append(String("    ") + tail)
+                # Server protocol log (window/logMessage + telemetry/event)
+                # — a server that explains a problem via logMessage rather
+                # than crashing is otherwise invisible.
+                var lg = m.captured_log()
+                if len(lg.as_bytes()) > 0:
+                    lines.append(String("  log:"))
+                    var lstart = 0
+                    var lb = lg.as_bytes()
+                    for k in range(len(lb)):
+                        if lb[k] == 0x0A:
+                            var seg = String(StringSlice(
+                                ptr=lb.unsafe_ptr() + lstart,
+                                length=k - lstart,
+                            ))
+                            lines.append(String("    ") + seg)
+                            lstart = k + 1
+                    if lstart < len(lb):
+                        var ltail = String(StringSlice(
+                            ptr=lb.unsafe_ptr() + lstart,
+                            length=len(lb) - lstart,
+                        ))
+                        lines.append(String("    ") + ltail)
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
         for i in range(len(self.lsp_specs)):
