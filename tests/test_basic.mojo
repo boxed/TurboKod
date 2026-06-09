@@ -167,6 +167,7 @@ from turbokod.lsp_dispatch import (
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result, _parse_monikers, _unit_text,
     _parse_inline_completion, _parse_linked_ranges, _parse_inline_values,
+    _parse_folding_ranges,
     _parse_inlay_hints,
     _parse_selection_ranges,
     _parse_hover_result, _parse_prepare_rename_placeholder,
@@ -10401,6 +10402,22 @@ def test_lsp_color_unit_text() raises:
     assert_equal(mid.as_bytes()[1], UInt8(ord(".")))
 
 
+def test_lsp_parse_folding_ranges() raises:
+    """FoldingRange[] parse into start..end range carriers; single-line
+    (endLine <= startLine) regions are dropped."""
+    var v = parse_json(String(
+        "[{\"startLine\":2,\"endLine\":8,\"kind\":\"region\"},"
+        + "{\"startLine\":10,\"endLine\":10},"
+        + "{\"startLine\":12,\"endLine\":15}]"
+    ))
+    var fr = _parse_folding_ranges(v)
+    assert_equal(len(fr), 2)
+    assert_equal(fr[0].start_line, 2)
+    assert_equal(fr[0].end_line, 8)
+    assert_equal(fr[1].start_line, 12)
+    assert_equal(len(_parse_folding_ranges(parse_json(String("null")))), 0)
+
+
 def test_lsp_parse_inline_values() raises:
     """InlineValueText entries become (row, text) carriers; the lookup /
     evaluable variants (no ``text`` field) are skipped."""
@@ -19184,6 +19201,7 @@ def _run_chunk_04() raises:
     test_lsp_parse_inline_completion()
     test_lsp_parse_linked_ranges()
     test_lsp_parse_inline_values()
+    test_lsp_parse_folding_ranges()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

@@ -965,6 +965,12 @@ struct Editor(Copyable, Movable):
     # carries the literal's actual color as a truecolor background, painted
     # over the color literal. Gated by the host behind ``lsp_document_colors``.
     var color_highlights: List[Highlight]
+    # LSP ``foldingRange`` regions (start_line..end_line range carriers). The
+    # start line gets a dim ``⋯`` end-of-line marker so foldable blocks are
+    # visible; actual collapse (fold-aware cursor/scroll/layout) is a
+    # deferred follow-up. Set by the host gated behind the server's
+    # foldingRangeProvider.
+    var fold_regions: List[TextEditEntry]
     # LSP ``documentLink`` ranges: range carriers whose ``new_text`` is the
     # target uri. Painted underlined; Cmd+click on one opens the target
     # (the host checks ``document_link_at`` before firing definition).
@@ -1388,6 +1394,7 @@ struct Editor(Copyable, Movable):
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
+        self.fold_regions = List[TextEditEntry]()
         self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
@@ -1515,6 +1522,7 @@ struct Editor(Copyable, Movable):
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
+        self.fold_regions = List[TextEditEntry]()
         self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
@@ -1670,6 +1678,7 @@ struct Editor(Copyable, Movable):
         self.semantic_highlights = copy.semantic_highlights.copy()
         self.lsp_select_ranges = copy.lsp_select_ranges.copy()
         self.color_highlights = copy.color_highlights.copy()
+        self.fold_regions = copy.fold_regions.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.pending_context_menu = copy.pending_context_menu
@@ -2022,6 +2031,12 @@ struct Editor(Copyable, Movable):
         """Replace the debug inline-value annotations (row, text), shown at
         end-of-line. Pass an empty list to clear (on continue / stop)."""
         self.inline_value_notes = notes^
+
+    def set_fold_regions(mut self, var regions: List[TextEditEntry]):
+        """Replace the LSP folding regions (start_line..end_line). Start
+        lines get a dim ``⋯`` end-of-line marker. Host gates behind the
+        server's foldingRangeProvider."""
+        self.fold_regions = regions^
 
     def set_semantic_tokens(mut self, var hls: List[Highlight]):
         """Replace the semantic-token recolor highlights. Host gates behind
@@ -6152,6 +6167,14 @@ struct Editor(Copyable, Movable):
                         if len(note.as_bytes()) > 0:
                             note = note + String("  ")
                         note = note + self.inline_value_notes[iv].new_text
+                # LSP foldingRange: a dim ⋯ marks a foldable block's first
+                # line (collapse itself is a deferred follow-up).
+                for fr in range(len(self.fold_regions)):
+                    if self.fold_regions[fr].start_line == buf_row:
+                        if len(note.as_bytes()) > 0:
+                            note = note + String("  ")
+                        note = note + String("⋯")
+                        break
                 if len(note.as_bytes()) > 0:
                     var note_attr = Attr(DARK_GRAY, EDITOR_BG)
                     var nx = seg_x0 + visible_cell_count + 2

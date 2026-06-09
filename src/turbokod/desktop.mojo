@@ -963,6 +963,8 @@ struct Desktop(Movable):
     var _inlay_key: String
     # Debounce latch for selectionRange requests (``path|row|col``).
     var _selrange_pos: String
+    # Debounce latch for foldingRange requests (``path|linecount``).
+    var _fold_key: String
     # Word under the cursor at rename time — the prompt seed when the
     # server has no prepareRename placeholder (or prepareRename is
     # unsupported and we fall back to a direct prompt).
@@ -1358,6 +1360,7 @@ struct Desktop(Movable):
         self._doc_hl_pos = String("")
         self._inlay_key = String("")
         self._selrange_pos = String("")
+        self._fold_key = String("")
         self.lsp_status_menu = LspStatusMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -6428,6 +6431,7 @@ struct Desktop(Movable):
                 self._dispatch_on_type_formatting(idx, ot_opt.value())
             self._maybe_request_doc_highlight(idx)
             self._maybe_request_selection_range(idx)
+            self._maybe_request_folding(idx)
             self._maybe_request_inlay_codelens(idx)
             self._maybe_request_completion_resolve(idx)
         # Drain every spawned manager every frame so responses on any
@@ -6619,6 +6623,13 @@ struct Desktop(Movable):
                 var dlw = self._find_window_for_path(dlp)
                 if dlw >= 0 and self.windows.windows[dlw].is_editor:
                     self.windows.windows[dlw].editor.set_document_links(dls^)
+            # foldingRange → mark foldable block starts on the editor.
+            if self.lsp_managers[i].has_pending_folding():
+                var fp = self.lsp_managers[i].pending_folding_path()
+                var frs = self.lsp_managers[i].take_folding_ranges()
+                var fw = self._find_window_for_path(fp)
+                if fw >= 0 and self.windows.windows[fw].is_editor:
+                    self.windows.windows[fw].editor.set_fold_regions(frs^)
             # moniker → status-bar string (cross-repo symbol identity).
             if self.lsp_managers[i].has_moniker():
                 var mn = self.lsp_managers[i].take_moniker()
@@ -6977,6 +6988,32 @@ struct Desktop(Movable):
         self._selrange_pos = key
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[li].request_selection_range(path, row, col, text^)
+
+    def _maybe_request_folding(mut self, win_idx: Int):
+        """Request ``foldingRange`` for the focused buffer when the debounce
+        key (``path|linecount``) changes and the server supports it. Not
+        behind a user setting — it just adds a dim marker on foldable
+        blocks."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports(
+                    String("foldingRangeProvider"),
+                ):
+            return
+        var lc = self.windows.windows[win_idx].editor.buffer.line_count()
+        var key = path + String("|") + String(lc)
+        if key == self._fold_key:
+            return
+        self._fold_key = key
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_folding_ranges(path, text^)
 
     def _dispatch_signature_help(mut self, win_idx: Int, req: HoverRequest):
         """Forward a signature-help request (stamped on ``(`` / ``,``) when

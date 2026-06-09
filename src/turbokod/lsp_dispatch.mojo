@@ -620,6 +620,13 @@ struct LspManager(Copyable, Movable):
     var _inflight_inlineval_id: String
     var _inlinevals: List[TextEditEntry]
     var _has_inlinevals: Bool
+    # ``textDocument/foldingRange`` — collapsible regions. Parked as range
+    # carriers (start_line..end_line). The editor marks region starts; full
+    # collapse (which needs fold-aware cursor/scroll/layout) is deferred.
+    var _inflight_folding_id: String
+    var _folding_path: String
+    var _folding_ranges: List[TextEditEntry]
+    var _has_folding: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -884,6 +891,10 @@ struct LspManager(Copyable, Movable):
         self._inflight_inlineval_id = String("")
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        self._inflight_folding_id = String("")
+        self._folding_path = String("")
+        self._folding_ranges = List[TextEditEntry]()
+        self._has_folding = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -1062,6 +1073,10 @@ struct LspManager(Copyable, Movable):
         self._inflight_inlineval_id = String("")
         self._inlinevals = List[TextEditEntry]()
         self._has_inlinevals = False
+        self._inflight_folding_id = String("")
+        self._folding_path = String("")
+        self._folding_ranges = List[TextEditEntry]()
+        self._has_folding = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2808,6 +2823,40 @@ struct LspManager(Copyable, Movable):
         self._has_inlinevals = False
         return out^
 
+    def request_folding_ranges(
+        mut self, path: String, var text: String,
+    ) -> Bool:
+        """Send ``textDocument/foldingRange`` for the whole file. Parks the
+        collapsible regions as (start_line..end_line) range carriers."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_folding_id = self.client.send_request(
+                String("textDocument/foldingRange"), params,
+            )
+        except:
+            self._inflight_folding_id = String("")
+            return False
+        self._folding_path = path
+        self._folding_ranges = List[TextEditEntry]()
+        self._has_folding = False
+        return True
+
+    def has_pending_folding(self) -> Bool:
+        return self._has_folding
+
+    def pending_folding_path(self) -> String:
+        return self._folding_path
+
+    def take_folding_ranges(mut self) -> List[TextEditEntry]:
+        var out = self._folding_ranges^
+        self._folding_ranges = List[TextEditEntry]()
+        self._has_folding = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3632,6 +3681,14 @@ struct LspManager(Copyable, Movable):
                 self._inlinevals = iv^
                 self._has_inlinevals = True
                 self._inflight_inlineval_id = String("")
+                continue
+            if id == self._inflight_folding_id:
+                var fr = List[TextEditEntry]()
+                if msg.result:
+                    fr = _parse_folding_ranges(msg.result.value())
+                self._folding_ranges = fr^
+                self._has_folding = True
+                self._inflight_folding_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()
@@ -5747,6 +5804,31 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_folding_ranges(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``FoldingRange[] | null`` into range carriers
+    (``start_line``..``end_line``; characters unused — folding is
+    line-based). Entries needing both a startLine and endLine; the
+    optional ``kind`` is ignored."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var sl_opt = e.object_get(String("startLine"))
+        var el_opt = e.object_get(String("endLine"))
+        if not sl_opt or not el_opt or not sl_opt.value().is_int() \
+                or not el_opt.value().is_int():
+            continue
+        var sl = sl_opt.value().as_int()
+        var el = el_opt.value().as_int()
+        if el <= sl:
+            continue  # not a multi-line region
+        out.append(TextEditEntry(sl, 0, el, 0, String("")))
     return out^
 
 
