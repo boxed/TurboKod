@@ -1293,6 +1293,13 @@ struct Editor(Copyable, Movable):
     # for ``textDocument/signatureHelp``. Reuses ``HoverRequest`` (row,col)
     # as the position payload.
     var pending_signature_help: Optional[HoverRequest]
+    # Set when a single character (or newline) is inserted — the host polls
+    # ``consume_on_type_request`` + ``on_type_char`` and, if the char is one
+    # the server declared as an onTypeFormatting trigger, asks for
+    # ``textDocument/onTypeFormatting``. Position is the cursor *after* the
+    # insert (LSP wants the position following the typed char).
+    var pending_on_type: Optional[HoverRequest]
+    var pending_on_type_ch: String
     var completion_popup_visible: Bool
     var completion_items: List[CompletionItem]
     var completion_highlight: Int
@@ -1440,6 +1447,8 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_below = False
         self.pending_completion_request = Optional[CompletionRequest]()
         self.pending_signature_help = Optional[HoverRequest]()
+        self.pending_on_type = Optional[HoverRequest]()
+        self.pending_on_type_ch = String("")
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1561,6 +1570,8 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_below = False
         self.pending_completion_request = Optional[CompletionRequest]()
         self.pending_signature_help = Optional[HoverRequest]()
+        self.pending_on_type = Optional[HoverRequest]()
+        self.pending_on_type_ch = String("")
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
         self.completion_highlight = 0
@@ -1714,6 +1725,8 @@ struct Editor(Copyable, Movable):
         self._minimap_hover_below = copy._minimap_hover_below
         self.pending_completion_request = copy.pending_completion_request
         self.pending_signature_help = copy.pending_signature_help
+        self.pending_on_type = copy.pending_on_type
+        self.pending_on_type_ch = copy.pending_on_type_ch
         self.completion_popup_visible = copy.completion_popup_visible
         self.completion_items = copy.completion_items.copy()
         self.completion_highlight = copy.completion_highlight
@@ -2573,6 +2586,20 @@ struct Editor(Copyable, Movable):
         var req = self.pending_signature_help
         self.pending_signature_help = Optional[HoverRequest]()
         return req
+
+    def consume_on_type_request(mut self) -> Optional[HoverRequest]:
+        """Return any pending on-type-formatting position (stamped on a
+        char/newline insert) and clear the slot. Pair with
+        ``on_type_char`` to read which character was typed."""
+        var req = self.pending_on_type
+        self.pending_on_type = Optional[HoverRequest]()
+        return req
+
+    def on_type_char(self) -> String:
+        """The character that produced the most recent pending on-type
+        request (``\\n`` for Enter). Read after ``consume_on_type_request``;
+        stays valid until the next char insert overwrites it."""
+        return self.pending_on_type_ch
 
     def consume_hover_request(
         mut self, now_ms: Int = 0,
@@ -7265,6 +7292,12 @@ struct Editor(Copyable, Movable):
                 )
             self.dirty = True
             self._mark_hl_dirty(pre_dirty_row)
+            # On-type formatting trigger for newline (many servers reindent
+            # on '\n'): stamp the post-split cursor + the newline char.
+            self.pending_on_type = Optional[HoverRequest](
+                HoverRequest(self.selections[0].row, self.selections[0].col),
+            )
+            self.pending_on_type_ch = String("\n")
         elif k == KEY_TAB:
             if self.read_only:
                 return True
@@ -7427,6 +7460,15 @@ struct Editor(Copyable, Movable):
                         self.selections[0].row, self.selections[0].col,
                     ),
                 )
+            # On-type formatting trigger: stamp the just-typed char + the
+            # post-insert cursor. The host fires a request only when the
+            # char is in the server's declared trigger set.
+            self.pending_on_type = Optional[HoverRequest](
+                HoverRequest(
+                    self.selections[0].row, self.selections[0].col,
+                ),
+            )
+            self.pending_on_type_ch = chr(Int(k))
         else:
             return False
         self._scroll_to_cursor(view)

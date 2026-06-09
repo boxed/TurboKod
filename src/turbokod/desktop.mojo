@@ -6411,6 +6411,10 @@ struct Desktop(Movable):
                 .consume_signature_help_request()
             if sig_opt:
                 self._dispatch_signature_help(idx, sig_opt.value())
+            var ot_opt = self.windows.windows[idx].editor \
+                .consume_on_type_request()
+            if ot_opt:
+                self._dispatch_on_type_formatting(idx, ot_opt.value())
             self._maybe_request_doc_highlight(idx)
             self._maybe_request_selection_range(idx)
             self._maybe_request_inlay_codelens(idx)
@@ -6663,6 +6667,7 @@ struct Desktop(Movable):
         # Apply any parked formatting edits (and save, for format-on-save).
         self._drain_formatting()
         self._drain_willsave()
+        self._drain_ontype()
         # Apply any server-driven workspace/applyEdit (e.g. from a code
         # action's executeCommand). Project-wide, like rename.
         self._drain_apply_edits(screen)
@@ -6925,6 +6930,60 @@ struct Desktop(Movable):
         _ = self.lsp_managers[li].request_signature_help(
             path, req.row, req.col, text^,
         )
+
+    def _dispatch_on_type_formatting(
+        mut self, win_idx: Int, req: HoverRequest,
+    ):
+        """Fire ``textDocument/onTypeFormatting`` when the just-typed
+        character is one the server declared as a trigger. The returned
+        edits are applied (without saving) in ``_drain_ontype``. Gated on
+        server support only — there's no user toggle yet."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if self.windows.windows[win_idx].editor.read_only:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready():
+            return
+        var triggers = self.lsp_managers[li].on_type_trigger_chars()
+        if len(triggers.as_bytes()) == 0:
+            return
+        var ch = self.windows.windows[win_idx].editor.on_type_char()
+        var cb = ch.as_bytes()
+        if len(cb) == 0:
+            return
+        # Trigger chars are single ASCII bytes (incl. '\n'); match the
+        # typed char's first byte against the declared set.
+        var tb = triggers.as_bytes()
+        var matched = False
+        for ti in range(len(tb)):
+            if tb[ti] == cb[0]:
+                matched = True
+                break
+        if not matched:
+            return
+        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        _ = self.lsp_managers[li].request_on_type_formatting(
+            path, req.row, req.col, ch, text^,
+        )
+
+    def _drain_ontype(mut self):
+        """Apply any parked onTypeFormatting ``TextEdit[]`` to its editor.
+        Unlike formatting/willSaveWaitUntil this never writes the file —
+        it just reflows as you type."""
+        for i in range(len(self.lsp_managers)):
+            if not self.lsp_managers[i].has_pending_ontype():
+                continue
+            var op = self.lsp_managers[i].pending_ontype_path()
+            var oe = self.lsp_managers[i].take_ontype_edits()
+            var ow = self._find_window_for_path(op)
+            if ow < 0 or not self.windows.windows[ow].is_editor:
+                continue
+            if len(oe) > 0:
+                _ = self.windows.windows[ow].editor.apply_text_edits(oe^)
 
     def _maybe_request_doc_highlight(mut self, win_idx: Int):
         """Fire a ``textDocument/documentHighlight`` for the cursor word

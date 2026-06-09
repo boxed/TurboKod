@@ -572,6 +572,14 @@ struct LspManager(Copyable, Movable):
     var _formatting_path: String
     var _resolved_formatting_edits: List[TextEditEntry]
     var _has_resolved_formatting: Bool
+    # ``textDocument/onTypeFormatting`` — format-as-you-type. Fired when a
+    # server-declared trigger char (``}``/``;``/newline/…) is typed; the
+    # returned ``TextEdit[]`` (typically a reindent) is parked here and
+    # applied without saving (distinct from the on-save formatting slot).
+    var _inflight_ontype_id: String
+    var _ontype_path: String
+    var _resolved_ontype_edits: List[TextEditEntry]
+    var _has_resolved_ontype: Bool
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
@@ -810,6 +818,10 @@ struct LspManager(Copyable, Movable):
         self._formatting_path = String("")
         self._resolved_formatting_edits = List[TextEditEntry]()
         self._has_resolved_formatting = False
+        self._inflight_ontype_id = String("")
+        self._ontype_path = String("")
+        self._resolved_ontype_edits = List[TextEditEntry]()
+        self._has_resolved_ontype = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -962,6 +974,10 @@ struct LspManager(Copyable, Movable):
         self._formatting_path = String("")
         self._resolved_formatting_edits = List[TextEditEntry]()
         self._has_resolved_formatting = False
+        self._inflight_ontype_id = String("")
+        self._ontype_path = String("")
+        self._resolved_ontype_edits = List[TextEditEntry]()
+        self._has_resolved_ontype = False
         self._inflight_doc_highlight_id = String("")
         self._doc_highlight_path = String("")
         self._resolved_doc_highlights = List[TextEditEntry]()
@@ -2433,6 +2449,73 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_formatting = False
         return out^
 
+    def on_type_trigger_chars(self) -> String:
+        """The concatenated set of characters that trigger
+        ``onTypeFormatting`` (``firstTriggerCharacter`` +
+        ``moreTriggerCharacter[]``), or empty when unsupported. The host
+        only fires a request when the just-typed char is in this set."""
+        if not self._capabilities:
+            return String("")
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return String("")
+        var p_opt = caps.object_get(String("documentOnTypeFormattingProvider"))
+        if not p_opt or not p_opt.value().is_object():
+            return String("")
+        var prov = p_opt.value().copy()
+        var out = String("")
+        var first = prov.object_get(String("firstTriggerCharacter"))
+        if first and first.value().is_string():
+            out = out + first.value().as_str()
+        var more = prov.object_get(String("moreTriggerCharacter"))
+        if more and more.value().is_array():
+            var arr = more.value().copy()
+            for i in range(arr.array_len()):
+                var c = arr.array_at(i)
+                if c.is_string():
+                    out = out + c.as_str()
+        return out^
+
+    def request_on_type_formatting(
+        mut self, path: String, line: Int, character: Int, ch: String,
+        var text: String, tab_size: Int = 4, insert_spaces: Bool = True,
+    ) -> Bool:
+        """Send ``textDocument/onTypeFormatting`` at ``(line, character)``
+        for the just-typed ``ch``. The returned ``TextEdit[]`` (a reindent
+        of the current construct) is parked for the host to apply without
+        saving."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        params.put(String("position"), _lsp_position(line, character))
+        params.put(String("ch"), json_str(ch))
+        params.put(String("options"), _formatting_options(tab_size, insert_spaces))
+        try:
+            self._inflight_ontype_id = self.client.send_request(
+                String("textDocument/onTypeFormatting"), params,
+            )
+        except:
+            self._inflight_ontype_id = String("")
+            return False
+        self._ontype_path = path
+        self._resolved_ontype_edits = List[TextEditEntry]()
+        self._has_resolved_ontype = False
+        return True
+
+    def has_pending_ontype(self) -> Bool:
+        return self._has_resolved_ontype
+
+    def pending_ontype_path(self) -> String:
+        return self._ontype_path
+
+    def take_ontype_edits(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_ontype_edits^
+        self._resolved_ontype_edits = List[TextEditEntry]()
+        self._has_resolved_ontype = False
+        return out^
+
     # --- document highlight ----------------------------------------------
 
     def request_document_highlight(
@@ -3190,6 +3273,14 @@ struct LspManager(Copyable, Movable):
                 self._resolved_formatting_edits = fmt_edits^
                 self._has_resolved_formatting = True
                 self._inflight_formatting_id = String("")
+                continue
+            if id == self._inflight_ontype_id:
+                var ot_edits = List[TextEditEntry]()
+                if msg.result:
+                    ot_edits = _parse_text_edits(msg.result.value())
+                self._resolved_ontype_edits = ot_edits^
+                self._has_resolved_ontype = True
+                self._inflight_ontype_id = String("")
                 continue
             if id == self._inflight_doc_highlight_id:
                 var occ = List[TextEditEntry]()

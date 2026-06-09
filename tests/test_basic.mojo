@@ -10375,6 +10375,20 @@ def test_lsp_semantic_tokens_delta() raises:
     assert_equal(len(_apply_semantic_edits(ints, del_edit)), 5)
 
 
+def test_lsp_on_type_trigger_chars() raises:
+    """The trigger-char reader concatenates firstTriggerCharacter +
+    moreTriggerCharacter from documentOnTypeFormattingProvider."""
+    var mgr = LspManager()
+    assert_equal(mgr.on_type_trigger_chars(), String(""))
+    var caps = parse_json(String(
+        "{\"documentOnTypeFormattingProvider\":{"
+        + "\"firstTriggerCharacter\":\"}\","
+        + "\"moreTriggerCharacter\":[\";\",\"\\n\"]}}"
+    ))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    assert_equal(mgr.on_type_trigger_chars(), String("};\n"))
+
+
 def test_lsp_parse_document_links() raises:
     """DocumentLink[] with inline targets become range carriers
     (new_text = target); targetless links are skipped."""
@@ -19093,6 +19107,7 @@ def _run_chunk_04() raises:
     test_lsp_codelens_resolve_collects_unresolved()
     test_lsp_parse_document_links()
     test_lsp_semantic_tokens_delta()
+    test_lsp_on_type_trigger_chars()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()
