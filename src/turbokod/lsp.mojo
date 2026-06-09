@@ -1021,6 +1021,13 @@ def lsp_initialize_params(
     workspace_caps.put(
         String("didChangeConfiguration"), didchange_cfg_caps^,
     )
+    # Advertise workspace/didCreateFiles so servers that fix up imports /
+    # index on file creation know we'll notify them (sent on Save As of a
+    # new file — see ``notify_did_create_files``).
+    var file_ops_caps = json_object()
+    file_ops_caps.put(String("dynamicRegistration"), json_bool(False))
+    file_ops_caps.put(String("didCreate"), json_bool(True))
+    workspace_caps.put(String("fileOperations"), file_ops_caps^)
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
     # The editor reasons in byte offsets; with UTF-8 negotiated, LSP

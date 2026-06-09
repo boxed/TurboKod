@@ -10304,6 +10304,20 @@ def test_lsp_show_document_accessors() raises:
     assert_true(not mgr.has_show_document())
 
 
+def test_lsp_server_wants_did_create() raises:
+    """The didCreateFiles gate reads workspace.fileOperations.didCreate."""
+    var mgr = LspManager()
+    assert_true(not mgr.server_wants_did_create())
+    var caps = parse_json(String(
+        "{\"workspace\":{\"fileOperations\":{\"didCreate\":{\"filters\":[]}}}}"
+    ))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    assert_true(mgr.server_wants_did_create())
+    var caps2 = parse_json(String("{\"workspace\":{\"fileOperations\":{}}}"))
+    mgr._capabilities = Optional[JsonValue](caps2^)
+    assert_true(not mgr.server_wants_did_create())
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18999,6 +19013,7 @@ def _run_chunk_04() raises:
     test_lsp_log_message_capture()
     test_lsp_message_request_accessors()
     test_lsp_show_document_accessors()
+    test_lsp_server_wants_did_create()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

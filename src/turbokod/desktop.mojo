@@ -5165,6 +5165,13 @@ struct Desktop(Movable):
                         self.windows.windows[idx].title = basename(
                             self.windows.windows[idx].editor.file_path,
                         )
+                        # Tell servers a file was created so they can index
+                        # it / fix up imports (no-op unless one registered).
+                        var spath = self.windows.windows[idx].editor.file_path
+                        for ci in range(len(self.lsp_managers)):
+                            self.lsp_managers[ci].notify_did_create_files(
+                                spath,
+                            )
             return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:

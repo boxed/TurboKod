@@ -1405,6 +1405,52 @@ struct LspManager(Copyable, Movable):
         except e:
             print("lsp: didChangeConfiguration", ":", String(e))
 
+    def server_wants_did_create(self) -> Bool:
+        """True iff the server advertised
+        ``workspace.fileOperations.didCreate`` — it wants a
+        ``workspace/didCreateFiles`` notification when files are created
+        (so it can fix up imports / index the new file)."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var ws_opt = caps.object_get(String("workspace"))
+        if not ws_opt or not ws_opt.value().is_object():
+            return False
+        var fo_opt = ws_opt.value().copy().object_get(
+            String("fileOperations"),
+        )
+        if not fo_opt or not fo_opt.value().is_object():
+            return False
+        var dc_opt = fo_opt.value().copy().object_get(String("didCreate"))
+        if not dc_opt:
+            return False
+        var dc = dc_opt.value().copy()
+        if dc.is_bool():
+            return dc.as_bool()
+        return dc.is_object()
+
+    def notify_did_create_files(mut self, path: String):
+        """Send ``workspace/didCreateFiles`` for one newly-created file, but
+        only when ready and the server registered interest. We don't model
+        the registered glob filters — a server still receives events for
+        paths outside its set, which it ignores (spec-legal)."""
+        if self.state != _STATE_READY or not self.server_wants_did_create():
+            return
+        var params = json_object()
+        var files = json_array()
+        var f = json_object()
+        f.put(String("uri"), json_str(_path_to_uri(path)))
+        files.append(f^)
+        params.put(String("files"), files^)
+        try:
+            self.client.send_notification(
+                String("workspace/didCreateFiles"), params,
+            )
+        except e:
+            print("lsp: didCreateFiles", path, ":", String(e))
+
     def notify_will_save(mut self, path: String, reason: Int):
         """Send ``textDocument/willSave`` (``reason``: 1=manual, 2=after-
         delay, 3=focus-out) so the server can react before the buffer is
@@ -3685,6 +3731,25 @@ struct LspManager(Copyable, Movable):
                     + id_label + String(" actions=")
                     + String(len(self._msgreq_actions)),
                 )
+                return
+            if method == String("workspace/workspaceFolders"):
+                # The server asks for the open workspace folders. Reply with
+                # our single root (or an empty array if none — spec-legal).
+                # Some servers (pyright) gate module resolution on this.
+                var folders = json_array()
+                if len(self._root_uri.as_bytes()) > 0:
+                    var f = json_object()
+                    f.put(String("uri"), json_str(self._root_uri))
+                    f.put(
+                        String("name"),
+                        json_str(basename(_uri_to_path(self._root_uri))),
+                    )
+                    folders.append(f^)
+                _lsp_debug_log(
+                    String("← server request workspace/workspaceFolders id=")
+                    + id_label,
+                )
+                self.client.send_response(id, folders^)
                 return
             if method == String("window/showDocument"):
                 # Park the open request (file → editor, or external URL) for
