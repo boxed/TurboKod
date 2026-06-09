@@ -162,7 +162,7 @@ from turbokod.lsp_dispatch import (
     _parse_diagnostics_array,
     _decode_semantic_tokens,
     _parse_code_lens, _collect_unresolved_lenses, _codelens_title_of,
-    _codelens_row_of,
+    _codelens_row_of, _parse_document_links,
     _parse_document_colors, _parse_document_highlights,
     _parse_hierarchy_result,
     _parse_inlay_hints,
@@ -10350,6 +10350,25 @@ def test_lsp_codelens_resolve_collects_unresolved() raises:
     assert_equal(_codelens_title_of(single), String("hi"))
 
 
+def test_lsp_parse_document_links() raises:
+    """DocumentLink[] with inline targets become range carriers
+    (new_text = target); targetless links are skipped."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":1,\"character\":4},"
+        + "\"end\":{\"line\":1,\"character\":20}},"
+        + "\"target\":\"https://example.com\"},"
+        + "{\"range\":{\"start\":{\"line\":2,\"character\":0},"
+        + "\"end\":{\"line\":2,\"character\":5}}}]"
+    ))
+    var links = _parse_document_links(v)
+    assert_equal(len(links), 1)
+    assert_equal(links[0].start_line, 1)
+    assert_equal(links[0].start_char, 4)
+    assert_equal(links[0].end_char, 20)
+    assert_equal(links[0].new_text, String("https://example.com"))
+    assert_equal(len(_parse_document_links(parse_json(String("null")))), 0)
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -19047,6 +19066,7 @@ def _run_chunk_04() raises:
     test_lsp_show_document_accessors()
     test_lsp_server_wants_did_create()
     test_lsp_codelens_resolve_collects_unresolved()
+    test_lsp_parse_document_links()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

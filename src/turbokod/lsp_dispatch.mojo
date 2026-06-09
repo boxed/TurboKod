@@ -606,6 +606,14 @@ struct LspManager(Copyable, Movable):
     var _codelens_resolve_queue: List[JsonValue]
     var _codelens_resolve_row: Int
     var _codelens_accum: List[TextEditEntry]
+    # ``textDocument/documentLink`` — clickable links (range + target uri),
+    # parked as range carriers with ``new_text`` = the target. Only links
+    # the server returned with an inline ``target`` are kept (we don't
+    # round-trip ``documentLink/resolve`` for deferred targets).
+    var _inflight_doclink_id: String
+    var _doclink_path: String
+    var _resolved_doclinks: List[TextEditEntry]
+    var _has_resolved_doclinks: Bool
     # ``textDocument/semanticTokens/full`` — the server's token-type legend
     # (from ``semanticTokensProvider.legend.tokenTypes``) plus the decoded
     # per-row recolor ``Highlight``s parked for the editor overlay.
@@ -812,6 +820,10 @@ struct LspManager(Copyable, Movable):
         self._codelens_resolve_queue = List[JsonValue]()
         self._codelens_resolve_row = 0
         self._codelens_accum = List[TextEditEntry]()
+        self._inflight_doclink_id = String("")
+        self._doclink_path = String("")
+        self._resolved_doclinks = List[TextEditEntry]()
+        self._has_resolved_doclinks = False
         self._sem_token_types = List[String]()
         self._inflight_semantic_id = String("")
         self._semantic_path = String("")
@@ -957,6 +969,10 @@ struct LspManager(Copyable, Movable):
         self._codelens_resolve_queue = List[JsonValue]()
         self._codelens_resolve_row = 0
         self._codelens_accum = List[TextEditEntry]()
+        self._inflight_doclink_id = String("")
+        self._doclink_path = String("")
+        self._resolved_doclinks = List[TextEditEntry]()
+        self._has_resolved_doclinks = False
         self._sem_token_types = List[String]()
         self._inflight_semantic_id = String("")
         self._semantic_path = String("")
@@ -2584,6 +2600,41 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_codelens = False
         return out^
 
+    # --- document links ---------------------------------------------------
+
+    def request_document_links(mut self, path: String, var text: String) -> Bool:
+        """Send ``textDocument/documentLink`` for the whole file. Parks
+        range carriers (``new_text`` = target uri) for links the server
+        returned with an inline target."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_doclink_id = self.client.send_request(
+                String("textDocument/documentLink"), params,
+            )
+        except:
+            self._inflight_doclink_id = String("")
+            return False
+        self._doclink_path = path
+        self._resolved_doclinks = List[TextEditEntry]()
+        self._has_resolved_doclinks = False
+        return True
+
+    def has_pending_doclinks(self) -> Bool:
+        return self._has_resolved_doclinks
+
+    def pending_doclink_path(self) -> String:
+        return self._doclink_path
+
+    def take_doclinks(mut self) -> List[TextEditEntry]:
+        var out = self._resolved_doclinks^
+        self._resolved_doclinks = List[TextEditEntry]()
+        self._has_resolved_doclinks = False
+        return out^
+
     # --- semantic tokens --------------------------------------------------
 
     def request_semantic_tokens(
@@ -3142,6 +3193,14 @@ struct LspManager(Copyable, Movable):
                         self._has_resolved_codelens = True
                 # Chain the next queued lens, if any.
                 self._send_next_codelens_resolve()
+                continue
+            if id == self._inflight_doclink_id:
+                var dls = List[TextEditEntry]()
+                if msg.result:
+                    dls = _parse_document_links(msg.result.value())
+                self._resolved_doclinks = dls^
+                self._has_resolved_doclinks = True
+                self._inflight_doclink_id = String("")
                 continue
             if id == self._inflight_semantic_id:
                 var sem = List[Highlight]()
@@ -5127,6 +5186,46 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
+    return out^
+
+
+def _parse_document_links(v: JsonValue) -> List[TextEditEntry]:
+    """Parse ``DocumentLink[] | null`` into range carriers whose
+    ``new_text`` is the link ``target`` uri. Links without an inline
+    target (deferred to ``documentLink/resolve``, which we don't do) are
+    skipped rather than shown as dead ranges."""
+    var out = List[TextEditEntry]()
+    if not v.is_array():
+        return out^
+    for i in range(v.array_len()):
+        var e = v.array_at(i)
+        if not e.is_object():
+            continue
+        var tgt_opt = e.object_get(String("target"))
+        if not tgt_opt or not tgt_opt.value().is_string():
+            continue
+        var target = tgt_opt.value().as_str()
+        if len(target.as_bytes()) == 0:
+            continue
+        var rng_opt = e.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var rng = rng_opt.value().copy()
+        var s_opt = rng.object_get(String("start"))
+        var en_opt = rng.object_get(String("end"))
+        if not s_opt or not en_opt or not s_opt.value().is_object() \
+                or not en_opt.value().is_object():
+            continue
+        var sp = _start_pos_of(rng)
+        var el_opt = en_opt.value().object_get(String("line"))
+        var ec_opt = en_opt.value().object_get(String("character"))
+        if not el_opt or not ec_opt or not el_opt.value().is_int() \
+                or not ec_opt.value().is_int():
+            continue
+        out.append(TextEditEntry(
+            sp[0], sp[1], el_opt.value().as_int(), ec_opt.value().as_int(),
+            target,
+        ))
     return out^
 
 

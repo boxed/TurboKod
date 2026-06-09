@@ -3103,8 +3103,7 @@ struct Desktop(Movable):
             self.config.lsp_document_highlight = (
                 self.settings.ls_document_highlight
             )
-            self.config.lsp_document_links = self.settings.ls_document_links
-            # The four annotation features below share the ``_inlay_key``
+            # The annotation features below share the ``_inlay_key``
             # debounce and push results into per-editor overlays. Toggling
             # any of them has to take effect live, not on restart:
             #  - turned OFF: clear the stale overlay on every editor (paint
@@ -3126,12 +3125,17 @@ struct Desktop(Movable):
                 self.settings.ls_document_colors
                 != self.config.lsp_document_colors
             )
+            var links_changed = (
+                self.settings.ls_document_links
+                != self.config.lsp_document_links
+            )
             self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
             self.config.lsp_code_lens = self.settings.ls_code_lens
             self.config.lsp_semantic_tokens = self.settings.ls_semantic_tokens
             self.config.lsp_document_colors = self.settings.ls_document_colors
+            self.config.lsp_document_links = self.settings.ls_document_links
             if inlay_changed or codelens_changed or semantic_changed \
-                    or colors_changed:
+                    or colors_changed or links_changed:
                 # Force a re-request next frame (covers every turn-on).
                 self._inlay_key = String("")
                 for wi in range(len(self.windows.windows)):
@@ -3153,6 +3157,10 @@ struct Desktop(Movable):
                     if colors_changed and not self.config.lsp_document_colors:
                         self.windows.windows[wi].editor.set_color_swatches(
                             List[Highlight]()
+                        )
+                    if links_changed and not self.config.lsp_document_links:
+                        self.windows.windows[wi].editor.set_document_links(
+                            List[TextEditEntry]()
                         )
             self.config.lsp_linked_editing = self.settings.ls_linked_editing
             self.config.lsp_server_progress = self.settings.ls_server_progress
@@ -6371,7 +6379,15 @@ struct Desktop(Movable):
         if idx >= 0:
             var req_opt = self.windows.windows[idx].editor.consume_definition_request()
             if req_opt:
-                self._dispatch_definition_request(idx, req_opt.value())
+                var dreq = req_opt.value()
+                # A Cmd+click on a document-link span opens the target
+                # instead of asking for a definition.
+                var dl_target = self.windows.windows[idx].editor \
+                    .document_link_at(dreq.row, dreq.col)
+                if len(dl_target.as_bytes()) > 0:
+                    self._open_document_link(dl_target, screen)
+                else:
+                    self._dispatch_definition_request(idx, dreq)
             # Drain the cancel latch *before* consuming a new request:
             # close_completion_popup may have set both (e.g. typing a
             # non-word char that dismissed the popup yet stamped a
@@ -6569,6 +6585,13 @@ struct Desktop(Movable):
                 var clw = self._find_window_for_path(clp)
                 if clw >= 0 and self.windows.windows[clw].is_editor:
                     self.windows.windows[clw].editor.set_color_swatches(cols^)
+            # documentLink → underlined clickable spans on the editor.
+            if self.lsp_managers[i].has_pending_doclinks():
+                var dlp = self.lsp_managers[i].pending_doclink_path()
+                var dls = self.lsp_managers[i].take_doclinks()
+                var dlw = self._find_window_for_path(dlp)
+                if dlw >= 0 and self.windows.windows[dlw].is_editor:
+                    self.windows.windows[dlw].editor.set_document_links(dls^)
             # selectionRange → cache the hierarchy on the matching editor.
             if self.lsp_managers[i].has_pending_selrange():
                 var rp = self.lsp_managers[i].pending_selrange_path()
@@ -6815,7 +6838,8 @@ struct Desktop(Movable):
         ``lsp_inlay_hints`` / ``lsp_code_lens`` settings + server support."""
         if not self.config.lsp_inlay_hints and not self.config.lsp_code_lens \
                 and not self.config.lsp_semantic_tokens \
-                and not self.config.lsp_document_colors:
+                and not self.config.lsp_document_colors \
+                and not self.config.lsp_document_links:
             return
         if win_idx < 0 or win_idx >= len(self.windows.windows):
             return
@@ -6848,6 +6872,10 @@ struct Desktop(Movable):
                 .server_supports(String("colorProvider")):
             var t4 = self.windows.windows[win_idx].editor.text_snapshot()
             _ = self.lsp_managers[li].request_document_colors(path, t4^)
+        if self.config.lsp_document_links and self.lsp_managers[li] \
+                .server_supports(String("documentLinkProvider")):
+            var t5 = self.windows.windows[win_idx].editor.text_snapshot()
+            _ = self.lsp_managers[li].request_document_links(path, t5^)
 
     def _maybe_request_selection_range(mut self, win_idx: Int):
         """Request ``selectionRange`` at the cursor (debounced by position)
@@ -7042,6 +7070,21 @@ struct Desktop(Movable):
         _ = self.lsp_managers[lsp_idx].request_hover(
             path, req.row, req.col, text^,
         )
+
+    def _open_document_link(mut self, target: String, screen: Rect):
+        """Open a documentLink target: a ``file://`` uri opens in the
+        editor; anything else (http/https/mailto) is surfaced on the status
+        bar (the frontend-agnostic core doesn't launch a browser)."""
+        if starts_with(target, String("file://")):
+            var p = uri_to_path(target)
+            try:
+                self.open_file_at(p, 0, 0, screen)
+            except e:
+                print("desktop: open document link", p, ":", String(e))
+        else:
+            self.status_bar.set_message(
+                String("Link: ") + target, Attr(BLACK, LIGHT_GRAY),
+            )
 
     def _dispatch_definition_request(
         mut self, win_idx: Int, var req: DefinitionRequest,

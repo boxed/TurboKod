@@ -961,6 +961,11 @@ struct Editor(Copyable, Movable):
     # carries the literal's actual color as a truecolor background, painted
     # over the color literal. Gated by the host behind ``lsp_document_colors``.
     var color_highlights: List[Highlight]
+    # LSP ``documentLink`` ranges: range carriers whose ``new_text`` is the
+    # target uri. Painted underlined; Cmd+click on one opens the target
+    # (the host checks ``document_link_at`` before firing definition).
+    # Gated by the host behind ``lsp_document_links``.
+    var document_links: List[TextEditEntry]
     # ``pending_spell_action`` is set when the user hits Alt+Enter on
     # a misspelled word — the host polls
     # ``consume_spell_action_request`` and forwards to whichever popup
@@ -1362,6 +1367,7 @@ struct Editor(Copyable, Movable):
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
+        self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.pending_context_menu = Optional[EditorContextMenuRequest]()
@@ -1482,6 +1488,7 @@ struct Editor(Copyable, Movable):
         self.semantic_highlights = List[Highlight]()
         self.lsp_select_ranges = List[TextEditEntry]()
         self.color_highlights = List[Highlight]()
+        self.document_links = List[TextEditEntry]()
         self.pending_spell_action = Optional[SpellActionRequest]()
         self.pending_definition = Optional[DefinitionRequest]()
         self.pending_context_menu = Optional[EditorContextMenuRequest]()
@@ -1988,6 +1995,25 @@ struct Editor(Copyable, Movable):
         truecolor bg = the literal's color). Host gates behind
         ``lsp_document_colors``."""
         self.color_highlights = hls^
+
+    def set_document_links(mut self, var links: List[TextEditEntry]):
+        """Replace the LSP documentLink ranges (range carrier + target uri
+        in ``new_text``). Host gates behind ``lsp_document_links``."""
+        self.document_links = links^
+
+    def document_link_at(self, row: Int, col: Int) -> String:
+        """Return the target uri of the document link covering ``(row,
+        col)`` (buffer coordinates), or empty when none. Used by the host
+        to open a link on Cmd+click instead of firing a definition."""
+        for i in range(len(self.document_links)):
+            var lk = self.document_links[i]
+            if row < lk.start_line or row > lk.end_line:
+                continue
+            var lo = lk.start_char if row == lk.start_line else 0
+            var hi = lk.end_char if row == lk.end_line else col + 1
+            if col >= lo and col < hi:
+                return lk.new_text
+        return String("")
 
     def set_diagnostics(mut self, var diags: List[Diagnostic]):
         """Replace the diagnostic set with ``diags`` and rebuild the
@@ -5851,6 +5877,39 @@ struct Editor(Copyable, Movable):
                         # visible on its own.
                         new_attr = new_attr.with_fg(underline_color)
                     painter.set_attr(canvas, sx_d, sy_hl, new_attr)
+            # Document-link overlay: underline the link spans (LSP
+            # documentLink). Read the existing cell attr and OR in
+            # STYLE_UNDERLINE so the syntax color underneath is kept;
+            # Cmd+click on the span opens the target (host-side).
+            for dl in range(len(self.document_links)):
+                var dk = self.document_links[dl]
+                if buf_row < dk.start_line or buf_row > dk.end_line:
+                    continue
+                var dk_nb = len(line.as_bytes())
+                var dk_lo = dk.start_char if buf_row == dk.start_line else 0
+                var dk_hi = dk.end_char if buf_row == dk.end_line else dk_nb
+                var dk_byte_start = dk_lo - start_byte
+                var dk_byte_end = dk_hi - start_byte
+                if dk_byte_start < 0:
+                    dk_byte_start = 0
+                if dk_byte_end > visible_byte_count:
+                    dk_byte_end = visible_byte_count
+                if dk_byte_start >= dk_byte_end:
+                    continue
+                var dk_cell_start = visible_cell_map[dk_byte_start]
+                var dk_cell_end: Int
+                if dk_byte_end < visible_byte_count:
+                    dk_cell_end = visible_cell_map[dk_byte_end]
+                else:
+                    dk_cell_end = visible_cell_count
+                for cell_off in range(dk_cell_start, dk_cell_end):
+                    var sx_dk = seg_x0 + cell_off
+                    if sx_dk >= content_right:
+                        break
+                    var dk_attr = canvas.get(sx_dk, sy_hl).attr.add_style(
+                        STYLE_UNDERLINE,
+                    )
+                    painter.set_attr(canvas, sx_dk, sy_hl, dk_attr)
             # Match-highlight overlay: byte-equality search of the
             # selection text within this row's visible segment. Sits
             # before the selection pass below so the actual selection
