@@ -2669,6 +2669,26 @@ struct Editor(Copyable, Movable):
         self.completion_anchor_col = anchor_col
         self.completion_is_message = False
 
+    def patch_completion_item(
+        mut self, index: Int, var aux: List[TextEditEntry], detail: String,
+    ):
+        """Merge a ``completionItem/resolve`` result into the parked
+        item at ``index`` — fill in the auto-import edits and detail the
+        server deferred. Marks the item ``resolved`` either way so the
+        host's prefetch doesn't ask again. No-op when the popup is a
+        message or ``index`` is out of range (the list may have been
+        replaced while the resolve was in flight; the host also guards
+        by identity, this is the belt-and-braces bound check)."""
+        if self.completion_is_message:
+            return
+        if index < 0 or index >= len(self.completion_items):
+            return
+        if len(aux) > 0:
+            self.completion_items[index].additional_text_edits = aux^
+        if len(detail.as_bytes()) > 0:
+            self.completion_items[index].detail = detail
+        self.completion_items[index].resolved = True
+
     def show_no_completion_message(
         mut self, anchor_row: Int, anchor_col: Int,
     ):

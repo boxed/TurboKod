@@ -157,7 +157,8 @@ from turbokod.lsp_dispatch import (
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic,
     DefinitionResolved, LspManager,
-    TextEditEntry, _parse_code_action_result, _parse_completion_result,
+    TextEditEntry, _parse_additional_text_edits,
+    _parse_code_action_result, _parse_completion_result,
     _parse_diagnostics_array,
     _decode_semantic_tokens,
     _parse_code_lens, _parse_document_colors, _parse_document_highlights,
@@ -10893,6 +10894,48 @@ def test_lsp_parse_completion_result_extracts_additional_text_edits() raises:
     assert_equal(aux.new_text, String("import foo\n"))
 
 
+def test_lsp_parse_completion_result_captures_data_for_resolve() raises:
+    """An item whose ``additionalTextEdits`` are deferred to resolve
+    arrives with empty aux edits, ``resolved == False``, and its opaque
+    ``data`` payload preserved as raw JSON so it can be echoed back in
+    ``completionItem/resolve``."""
+    var v = parse_json(String(
+        "[{\"label\":\"foo\",\"kind\":3,"
+        + "\"data\":{\"import\":\"bar\",\"id\":7}}]"
+    ))
+    var items = _parse_completion_result(v)
+    assert_equal(len(items), 1)
+    assert_equal(len(items[0].additional_text_edits), 0)
+    assert_false(items[0].resolved)
+    # ``data`` round-trips as re-parseable JSON carrying both members.
+    assert_true(len(items[0].data.as_bytes()) > 0)
+    var back = parse_json(items[0].data)
+    assert_true(back.is_object())
+    var imp = back.object_get(String("import"))
+    assert_true(Bool(imp))
+    assert_equal(imp.value().as_str(), String("bar"))
+
+
+def test_lsp_parse_additional_text_edits_from_resolved_item() raises:
+    """A ``completionItem/resolve`` response is a single CompletionItem
+    object; ``_parse_additional_text_edits`` pulls its (now-populated)
+    auto-import edit straight off that object — the same helper the
+    initial-list parse uses."""
+    var resolved = parse_json(String(
+        "{\"label\":\"foo\",\"detail\":\"def foo() -> int\","
+        + "\"additionalTextEdits\":["
+        + "{\"newText\":\"from bar import foo\\n\","
+        + "\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":0}}}"
+        + "]}"
+    ))
+    var aux = _parse_additional_text_edits(resolved)
+    assert_equal(len(aux), 1)
+    assert_equal(aux[0].new_text, String("from bar import foo\n"))
+    assert_equal(aux[0].start_line, 0)
+    assert_equal(aux[0].end_char, 0)
+
+
 def test_lsp_parse_completion_result_extracts_text_edit_range() raises:
     """A ``textEdit`` with a ``range`` populates ``has_range`` plus
     the start/end coords so the editor can replace exactly what the
@@ -18836,6 +18879,8 @@ def _run_chunk_04() raises:
     test_lsp_parse_completion_result_extracts_text_edit_range()
     test_lsp_parse_completion_result_extracts_insert_replace_edit()
     test_lsp_parse_completion_result_extracts_additional_text_edits()
+    test_lsp_parse_completion_result_captures_data_for_resolve()
+    test_lsp_parse_additional_text_edits_from_resolved_item()
     test_editor_completion_prefix_start_walks_back_through_word()
     test_editor_set_completions_opens_popup()
     test_accept_completion_multibyte_prefix_deletes_codepoints()

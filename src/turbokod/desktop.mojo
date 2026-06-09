@@ -121,7 +121,7 @@ from .language_config import (
 )
 from .lsp_dispatch import (
     CodeAction, CodeActionFileEdit, DefinitionResolved, LspManager,
-    WorkspaceSymbolItem, uri_to_path,
+    TextEditEntry, WorkspaceSymbolItem, uri_to_path,
 )
 from .dap_dispatch import (
     DapConditionException, DapManager, DapStackFrame, DapTestEvaluation,
@@ -927,6 +927,15 @@ struct Desktop(Movable):
     # file. A second save of the same path while pending bypasses formatting
     # (a hung formatter must never block persistence).
     var _format_then_save_path: String
+    # Identity of the completion item a ``completionItem/resolve`` is in
+    # flight for: the editor's file path, the item's index in the popup,
+    # and its label. The resolve response is matched against these before
+    # patching so a result that lands after the popup changed (user kept
+    # typing, list replaced) is dropped instead of corrupting an
+    # unrelated item. ``_pending_resolve_index < 0`` means none in flight.
+    var _pending_resolve_path: String
+    var _pending_resolve_index: Int
+    var _pending_resolve_label: String
     # Last cursor position a documentHighlight request was issued for,
     # encoded ``path|row|col``. Debounces the request to once per cursor
     # move so we don't re-query the server every frame.
@@ -1322,6 +1331,9 @@ struct Desktop(Movable):
         self._rename_col = 0
         self._rename_word = String("")
         self._format_then_save_path = String("")
+        self._pending_resolve_path = String("")
+        self._pending_resolve_index = -1
+        self._pending_resolve_label = String("")
         self._doc_hl_pos = String("")
         self._inlay_key = String("")
         self._selrange_pos = String("")
@@ -3793,6 +3805,23 @@ struct Desktop(Movable):
                 return i
         return -1
 
+    def _lsp_notify_closed_if_last(mut self, path: String):
+        """Send ``textDocument/didClose`` for ``path`` to its language
+        server, but only when no *other* surviving editor window still
+        has that file open — the same buffer split across two windows
+        must stay open on the server until the last view closes. Call
+        this *after* the window has been removed so the survivor scan
+        sees the post-close set."""
+        if len(path.as_bytes()) == 0:
+            return
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.file_path == path:
+                return
+        var li = self._lsp_for_path(path)
+        if li >= 0:
+            self.lsp_managers[li].notify_closed(path)
+
     def _default_window_rect(self, workspace: Rect) -> Rect:
         var w80 = (workspace.width() * 80) // 100
         var h80 = (workspace.height() * 80) // 100
@@ -4230,10 +4259,17 @@ struct Desktop(Movable):
         windows (host-added panels / demo content) alone. Rebuilds
         ``z_order`` and ``focused`` against the surviving windows."""
         # Capture each editor's view state before its window is dropped
-        # — once removed, the next paint can't read scroll off it.
+        # — once removed, the next paint can't read scroll off it. Also
+        # collect open paths so we can didClose them on the servers
+        # after the rebuild (closing every editor frees the server's
+        # per-document state instead of leaking it for the session).
+        var closing_paths = List[String]()
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self._capture_view_state_for_window(i)
+                var p = self.windows.windows[i].editor.file_path
+                if len(p.as_bytes()) > 0:
+                    closing_paths.append(p)
         var kept = List[Window]()
         var remap = List[Int]()
         for i in range(len(self.windows.windows)):
@@ -4256,6 +4292,21 @@ struct Desktop(Movable):
         # Reset the cascade counter so the next project's first opens
         # land at the workspace origin instead of inheriting an offset.
         self._open_count = 0
+        # All editor windows are gone now, so the survivor scan in
+        # ``_lsp_notify_closed_if_last`` finds nothing — every captured
+        # path is genuinely closed and gets a didClose (deduped so a
+        # file open in two windows notifies once).
+        var notified = List[String]()
+        for k in range(len(closing_paths)):
+            var p = closing_paths[k]
+            var seen = False
+            for s in range(len(notified)):
+                if notified[s] == p:
+                    seen = True
+                    break
+            if not seen:
+                notified.append(p)
+                self._lsp_notify_closed_if_last(p)
 
     def _set_project(mut self, path: String):
         debug_log(String("[_set_project] ENTER path=") + path)
@@ -6059,7 +6110,15 @@ struct Desktop(Movable):
             if self._request_focused_pane_close():
                 return Optional[String]()
             self._capture_view_state_for_window(self.windows.focused)
+            # Capture the closing editor's path before the window is
+            # dropped so we can notify the language server afterward.
+            var closing_path = String("")
+            var fw = self.windows.focused
+            if 0 <= fw and fw < len(self.windows.windows) \
+                    and self.windows.windows[fw].is_editor:
+                closing_path = self.windows.windows[fw].editor.file_path
             _ = self.windows.close_focused()
+            self._lsp_notify_closed_if_last(closing_path)
             return Optional[String]()
         if action == WINDOW_CLOSE_ALL:
             self._close_all_editor_windows()
@@ -6255,6 +6314,7 @@ struct Desktop(Movable):
             self._maybe_request_doc_highlight(idx)
             self._maybe_request_selection_range(idx)
             self._maybe_request_inlay_codelens(idx)
+            self._maybe_request_completion_resolve(idx)
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
         # focused.
@@ -6429,6 +6489,11 @@ struct Desktop(Movable):
                         self.windows.windows[fidx].editor.set_completions(
                             items^, cur_row, start_col,
                         )
+            if self.lsp_managers[i].has_resolve_result():
+                # Read detail before take_resolve_aux clears it.
+                var r_detail = self.lsp_managers[i].resolve_detail()
+                var r_aux = self.lsp_managers[i].take_resolve_aux()
+                self._apply_completion_resolve(r_detail, r_aux^)
             if self.lsp_managers[i].has_pending_hover():
                 var fidx = self._focused_editor_idx()
                 var hover_path = self.lsp_managers[i].pending_hover_path()
@@ -6748,6 +6813,81 @@ struct Desktop(Movable):
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[li].request_document_highlight(
             path, row, col, text^,
+        )
+
+    def _maybe_request_completion_resolve(mut self, win_idx: Int):
+        """Prefetch ``completionItem/resolve`` for the highlighted popup
+        entry so its auto-import edits + detail are already merged by the
+        time the user accepts. Keeps acceptance synchronous — the editor
+        never waits on the server. Fires at most once per item (the
+        ``resolved`` flag gates re-asks) and only when the server defers
+        these fields (``resolveProvider``)."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        if not self.windows.windows[win_idx].editor.completion_popup_visible:
+            return
+        if self.windows.windows[win_idx].editor.completion_is_message:
+            return
+        var hl = self.windows.windows[win_idx].editor.completion_highlight
+        if hl < 0 \
+                or hl >= len(self.windows.windows[win_idx].editor.completion_items):
+            return
+        var item = self.windows.windows[win_idx] \
+            .editor.completion_items[hl].copy()
+        # Already resolved (or already carries its import edits) — nothing
+        # to fetch.
+        if item.resolved or len(item.additional_text_edits) > 0:
+            return
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        # Already resolving this exact item — don't re-fire every frame.
+        if self._pending_resolve_index == hl \
+                and self._pending_resolve_path == path \
+                and self._pending_resolve_label == item.label:
+            return
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready() \
+                or not self.lsp_managers[li].server_supports_completion_resolve():
+            return
+        if self.lsp_managers[li].request_resolve_completion(item):
+            self._pending_resolve_path = path
+            self._pending_resolve_index = hl
+            self._pending_resolve_label = item.label
+
+    def _apply_completion_resolve(
+        mut self, detail: String, var aux: List[TextEditEntry],
+    ):
+        """Merge a resolved item's enrichment back into the popup, but
+        only if the focused editor still shows the same item the resolve
+        was fired for (same path, index, label). The user may have typed
+        on — in which case the list changed and the result is dropped."""
+        var idx = self._pending_resolve_index
+        var path = self._pending_resolve_path
+        var label = self._pending_resolve_label
+        # The request is now accounted for; clear the latch regardless of
+        # whether we end up applying it.
+        self._pending_resolve_path = String("")
+        self._pending_resolve_index = -1
+        self._pending_resolve_label = String("")
+        if idx < 0:
+            return
+        var fidx = self._focused_editor_idx()
+        if fidx < 0 or not self.windows.windows[fidx].is_editor:
+            return
+        if self.windows.windows[fidx].editor.file_path != path:
+            return
+        if not self.windows.windows[fidx].editor.completion_popup_visible \
+                or self.windows.windows[fidx].editor.completion_is_message:
+            return
+        if idx >= len(self.windows.windows[fidx].editor.completion_items):
+            return
+        if self.windows.windows[fidx].editor.completion_items[idx].label != label:
+            return
+        self.windows.windows[fidx].editor.patch_completion_item(
+            idx, aux^, detail,
         )
 
     def _dispatch_hover_request(
@@ -9196,6 +9336,14 @@ struct Desktop(Movable):
         if 0 <= idx and idx < len(self.windows.windows) \
                 and self.windows.windows[idx].is_editor:
             self.windows.windows[idx].editor.invalidate_git_changes()
+            # Tell the language server the buffer was persisted — some run
+            # save-triggered passes (extra diagnostics, build) that never
+            # fire on didChange alone. Shared by the normal save and the
+            # format-on-save drain, so both paths notify.
+            var li = self._lsp_for_path(saved_path)
+            if li >= 0:
+                var snap = self.windows.windows[idx].editor.text_snapshot()
+                self.lsp_managers[li].notify_saved(saved_path, snap^)
         self._run_on_save_actions(saved_path)
 
     def _run_on_save_actions(mut self, saved_path: String):

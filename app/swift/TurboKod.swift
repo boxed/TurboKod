@@ -1385,6 +1385,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self.attentionBadge = 0
             NSApp.dockTile.badgeLabel = nil
             self.refreshMenu()
+            // The user may have committed / checked out / edited files in
+            // another app while we were backgrounded; force the git change
+            // gutters to re-diff against HEAD instead of waiting on the 1 Hz
+            // mtime poll (which a worktree-only edit doesn't even trip).
+            for v in self.views { tk_desktop_refresh_git(v.handle) }
             for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
         }
         nc.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,

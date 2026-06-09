@@ -200,6 +200,14 @@ struct CompletionItem(Copyable, Movable):
     var range_end_line: Int
     var range_end_char: Int
     var additional_text_edits: List[TextEditEntry]
+    # Raw JSON of the server's opaque ``data`` field, echoed verbatim in
+    # ``completionItem/resolve`` (the server keys the resolve off it).
+    # Empty when the item carried no ``data``.
+    var data: String
+    # True once the item has been through ``completionItem/resolve`` (or
+    # never needed it). Gates the prefetch so we don't re-resolve the
+    # same highlighted item every tick.
+    var resolved: Bool
 
     def __init__(
         out self, var label: String, var insert_text: String, kind: Int,
@@ -207,6 +215,7 @@ struct CompletionItem(Copyable, Movable):
         range_start_line: Int, range_start_char: Int,
         range_end_line: Int, range_end_char: Int,
         var additional_text_edits: List[TextEditEntry],
+        var data: String = String(""), resolved: Bool = False,
     ):
         self.label = label^
         self.insert_text = insert_text^
@@ -219,6 +228,8 @@ struct CompletionItem(Copyable, Movable):
         self.range_end_line = range_end_line
         self.range_end_char = range_end_char
         self.additional_text_edits = additional_text_edits^
+        self.data = data^
+        self.resolved = resolved
 
     def __copyinit__(mut self, copy: Self):
         self.label = copy.label
@@ -232,6 +243,8 @@ struct CompletionItem(Copyable, Movable):
         self.range_end_line = copy.range_end_line
         self.range_end_char = copy.range_end_char
         self.additional_text_edits = copy.additional_text_edits.copy()
+        self.data = copy.data
+        self.resolved = copy.resolved
 
 
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
@@ -505,6 +518,17 @@ struct LspManager(Copyable, Movable):
     var _completion_manual: Bool
     var _resolved_completions: List[CompletionItem]
     var _has_resolved_completions: Bool
+    # ``completionItem/resolve`` round-trip. Servers that set
+    # ``resolveProvider`` ship the initial list without ``detail`` /
+    # ``additionalTextEdits`` (auto-imports) and fill them in only on a
+    # follow-up resolve. We surface just the resolved item's aux edits +
+    # detail; the host merges them into the completion item it already
+    # holds (it tracks the item's identity itself). One in flight at a
+    # time — a fresh resolve shadows the prior id.
+    var _inflight_resolve_id: String
+    var _resolve_aux: List[TextEditEntry]
+    var _resolve_detail: String
+    var _has_resolve_result: Bool
     # Pending ``textDocument/hover`` request state. Same idea as the
     # completion fields: ``_hover_path``/``_hover_row``/``_hover_col``
     # are echoed via ``pending_hover_*`` so the host can drop a stale
@@ -687,6 +711,10 @@ struct LspManager(Copyable, Movable):
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
+        self._inflight_resolve_id = String("")
+        self._resolve_aux = List[TextEditEntry]()
+        self._resolve_detail = String("")
+        self._has_resolve_result = False
         self._inflight_hover_id = String("")
         self._hover_path = String("")
         self._hover_row = 0
@@ -806,6 +834,10 @@ struct LspManager(Copyable, Movable):
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
+        self._inflight_resolve_id = String("")
+        self._resolve_aux = List[TextEditEntry]()
+        self._resolve_detail = String("")
+        self._has_resolve_result = False
         self._inflight_hover_id = String("")
         self._hover_path = String("")
         self._hover_row = 0
@@ -1135,6 +1167,73 @@ struct LspManager(Copyable, Movable):
             return
         self._send_open_or_change(path, text^)
 
+    def notify_saved(mut self, path: String, var text: String):
+        """Send ``textDocument/didSave`` for ``path``. No-op unless the
+        server is READY and we already opened the document — some
+        servers run save-triggered passes (extra diagnostics, build
+        steps) that only fire on this notification. ``includeText`` is
+        sent only when the server advertised ``save.includeText`` in
+        its sync capability; most want just the URI."""
+        if self.state != _STATE_READY:
+            return
+        var opened = False
+        for k in range(len(self._doc_paths)):
+            if self._doc_paths[k] == path:
+                opened = True
+                break
+        if not opened:
+            return
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        if self.save_includes_text():
+            params.put(String("text"), json_str(text^))
+        try:
+            self.client.send_notification(
+                String("textDocument/didSave"), params,
+            )
+        except e:
+            print("lsp: didSave", path, ":", String(e))
+
+    def notify_closed(mut self, path: String):
+        """Send ``textDocument/didClose`` and forget the document so a
+        later reopen re-sends ``didOpen`` (version resetting to 1)
+        rather than ``didChange``. Without this the server keeps the
+        buffer's state pinned for the whole session — closing 50 files
+        leaves the server thinking all 50 are still open. Also drops it
+        from the pending-open queue so a close that races ahead of the
+        handshake never opens it at all."""
+        if self.state == _STATE_FAILED or self.state == _STATE_NOT_STARTED:
+            return
+        if self.state == _STATE_INITIALIZING:
+            var j = 0
+            while j < len(self._pending_open_paths):
+                if self._pending_open_paths[j] == path:
+                    _ = self._pending_open_paths.pop(j)
+                    _ = self._pending_open_texts.pop(j)
+                else:
+                    j += 1
+            return
+        var idx = -1
+        for k in range(len(self._doc_paths)):
+            if self._doc_paths[k] == path:
+                idx = k
+                break
+        if idx < 0:
+            return
+        _ = self._doc_paths.pop(idx)
+        _ = self._doc_versions.pop(idx)
+        # Drop any "analyzing edits…" spinner state — a closed buffer
+        # must not keep one spinning.
+        self._clear_diag_inflight(path, 0)
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self.client.send_notification(
+                String("textDocument/didClose"), params,
+            )
+        except e:
+            print("lsp: didClose", path, ":", String(e))
+
     def request_definition(
         mut self, path: String, line: Int, character: Int,
         var word: String, var text: String,
@@ -1226,6 +1325,46 @@ struct LspManager(Copyable, Movable):
         var pp_opt = rp_opt.value().copy().object_get(String("prepareProvider"))
         if pp_opt and pp_opt.value().is_bool():
             return pp_opt.value().as_bool()
+        return False
+
+    def save_includes_text(self) -> Bool:
+        """True iff the server's ``textDocumentSync.save`` is an object
+        with ``includeText: true`` — i.e. it wants the full buffer text
+        on ``didSave``. A plain ``save: true`` (or an int sync kind)
+        means notify-only, so we send just the URI."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var sync_opt = caps.object_get(String("textDocumentSync"))
+        if not sync_opt or not sync_opt.value().is_object():
+            return False
+        var save_opt = sync_opt.value().copy().object_get(String("save"))
+        if not save_opt or not save_opt.value().is_object():
+            return False
+        var inc_opt = save_opt.value().copy().object_get(String("includeText"))
+        if inc_opt and inc_opt.value().is_bool():
+            return inc_opt.value().as_bool()
+        return False
+
+    def server_supports_completion_resolve(self) -> Bool:
+        """True iff ``completionProvider.resolveProvider`` is ``true`` —
+        the server fills in ``detail`` / ``documentation`` /
+        ``additionalTextEdits`` (auto-imports) only on a follow-up
+        ``completionItem/resolve``. When false, the initial completion
+        list is already complete and we never resolve."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var cp_opt = caps.object_get(String("completionProvider"))
+        if not cp_opt or not cp_opt.value().is_object():
+            return False
+        var rp_opt = cp_opt.value().copy().object_get(String("resolveProvider"))
+        if rp_opt and rp_opt.value().is_bool():
+            return rp_opt.value().as_bool()
         return False
 
     # --- navigate-to-location (typeDefinition / implementation / declaration)
@@ -1595,6 +1734,63 @@ struct LspManager(Copyable, Movable):
         var out = self._resolved_completions^
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
+        return out^
+
+    def request_resolve_completion(mut self, item: CompletionItem) -> Bool:
+        """Round-trip ``item`` through ``completionItem/resolve`` to pull
+        in the ``detail`` / ``additionalTextEdits`` (auto-import) the
+        server deferred. Gated on the server's ``resolveProvider`` — the
+        host only calls this for the highlighted item, so the cost is one
+        request per item the user actually considers. A fresh resolve
+        shadows any prior in-flight one. Returns False (no-op) when the
+        server isn't ready or doesn't resolve."""
+        if self.state != _STATE_READY:
+            return False
+        if not self.server_supports_completion_resolve():
+            return False
+        # Reconstruct enough of the CompletionItem for the server to key
+        # the resolve. ``data`` is the field most servers actually need;
+        # ``label`` is mandatory. Re-parse the stashed raw ``data`` JSON
+        # so it goes back as a real value, not a string.
+        var ci = json_object()
+        ci.put(String("label"), json_str(item.label))
+        if item.kind > 0:
+            ci.put(String("kind"), json_int(item.kind))
+        if len(item.detail.as_bytes()) > 0:
+            ci.put(String("detail"), json_str(item.detail))
+        if len(item.insert_text.as_bytes()) > 0:
+            ci.put(String("insertText"), json_str(item.insert_text))
+        if len(item.data.as_bytes()) > 0:
+            try:
+                ci.put(String("data"), parse_json(item.data))
+            except:
+                pass
+        try:
+            self._inflight_resolve_id = self.client.send_request(
+                String("completionItem/resolve"), ci,
+            )
+        except:
+            self._inflight_resolve_id = String("")
+            return False
+        self._has_resolve_result = False
+        return True
+
+    def has_resolve_result(self) -> Bool:
+        """True iff a resolved CompletionItem's enrichment is parked."""
+        return self._has_resolve_result
+
+    def resolve_detail(self) -> String:
+        """The resolved item's ``detail`` (empty if none / unresolved).
+        Read before ``take_resolve_aux``, which clears it."""
+        return self._resolve_detail
+
+    def take_resolve_aux(mut self) -> List[TextEditEntry]:
+        """Move the resolved item's ``additionalTextEdits`` out and clear
+        the parked-result flag. Pair with ``has_resolve_result``."""
+        var out = self._resolve_aux^
+        self._resolve_aux = List[TextEditEntry]()
+        self._resolve_detail = String("")
+        self._has_resolve_result = False
         return out^
 
     def request_hover(
@@ -2399,6 +2595,24 @@ struct LspManager(Copyable, Movable):
                 self._resolved_completions = comps^
                 self._has_resolved_completions = True
                 self._inflight_completion_id = String("")
+                continue
+            if id == self._inflight_resolve_id:
+                var r_aux = List[TextEditEntry]()
+                var r_detail = String("")
+                if msg.result and msg.result.value().is_object():
+                    r_aux = _parse_additional_text_edits(msg.result.value())
+                    var d_opt = msg.result.value().object_get(String("detail"))
+                    if d_opt and d_opt.value().is_string():
+                        r_detail = d_opt.value().as_str()
+                _lsp_debug_log(
+                    String("← resolve response id=") + id
+                    + String(" lang=") + self._language_id
+                    + String(" aux=") + String(len(r_aux)),
+                )
+                self._resolve_aux = r_aux^
+                self._resolve_detail = r_detail^
+                self._has_resolve_result = True
+                self._inflight_resolve_id = String("")
                 continue
             if id == self._inflight_hover_id:
                 var hover_text = String("")
@@ -3406,6 +3620,55 @@ def _parse_workspace_symbol(
     )
 
 
+def _parse_additional_text_edits(entry: JsonValue) -> List[TextEditEntry]:
+    """Pull the ``additionalTextEdits`` array off a CompletionItem (or a
+    resolved CompletionItem) into normalized ``TextEditEntry`` rows.
+    Malformed entries (missing range or newText) are skipped silently —
+    losing one auxiliary edit is better than dropping the whole item.
+    Returns an empty list when the field is absent or not an array."""
+    var aux_edits = List[TextEditEntry]()
+    var aux_opt = entry.object_get(String("additionalTextEdits"))
+    if aux_opt and aux_opt.value().is_array():
+        var aux_arr = aux_opt.value().copy()
+        var aux_n = aux_arr.array_len()
+        for j in range(aux_n):
+            var aux = aux_arr.array_at(j)
+            if not aux.is_object():
+                continue
+            var nt_opt = aux.object_get(String("newText"))
+            if not nt_opt or not nt_opt.value().is_string():
+                continue
+            var aux_new_text = nt_opt.value().as_str()
+            var aux_rng_opt = aux.object_get(String("range"))
+            if not aux_rng_opt or not aux_rng_opt.value().is_object():
+                continue
+            var aux_rng = aux_rng_opt.value().copy()
+            var as_opt = aux_rng.object_get(String("start"))
+            var ae_opt = aux_rng.object_get(String("end"))
+            if not as_opt or not ae_opt \
+                    or not as_opt.value().is_object() \
+                    or not ae_opt.value().is_object():
+                continue
+            var asl_opt = as_opt.value().object_get(String("line"))
+            var asc_opt = as_opt.value().object_get(String("character"))
+            var ael_opt = ae_opt.value().object_get(String("line"))
+            var aec_opt = ae_opt.value().object_get(String("character"))
+            if not asl_opt or not asc_opt or not ael_opt or not aec_opt \
+                    or not asl_opt.value().is_int() \
+                    or not asc_opt.value().is_int() \
+                    or not ael_opt.value().is_int() \
+                    or not aec_opt.value().is_int():
+                continue
+            aux_edits.append(TextEditEntry(
+                asl_opt.value().as_int(),
+                asc_opt.value().as_int(),
+                ael_opt.value().as_int(),
+                aec_opt.value().as_int(),
+                aux_new_text,
+            ))
+    return aux_edits^
+
+
 def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
     """``textDocument/completion`` returns either ``CompletionItem[]``
     directly, or a ``CompletionList`` object whose ``items`` field holds
@@ -3511,53 +3774,22 @@ def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
         if sort_opt and sort_opt.value().is_string():
             sort_text = sort_opt.value().as_str()
         # ``additionalTextEdits``: array of TextEdits applied alongside
-        # the primary edit. Skip malformed entries (missing range or
-        # newText) silently — losing one auxiliary edit is better than
-        # losing the whole completion entry.
-        var aux_edits = List[TextEditEntry]()
-        var aux_opt = entry.object_get(String("additionalTextEdits"))
-        if aux_opt and aux_opt.value().is_array():
-            var aux_arr = aux_opt.value().copy()
-            var aux_n = aux_arr.array_len()
-            for j in range(aux_n):
-                var aux = aux_arr.array_at(j)
-                if not aux.is_object():
-                    continue
-                var nt_opt = aux.object_get(String("newText"))
-                if not nt_opt or not nt_opt.value().is_string():
-                    continue
-                var aux_new_text = nt_opt.value().as_str()
-                var aux_rng_opt = aux.object_get(String("range"))
-                if not aux_rng_opt or not aux_rng_opt.value().is_object():
-                    continue
-                var aux_rng = aux_rng_opt.value().copy()
-                var as_opt = aux_rng.object_get(String("start"))
-                var ae_opt = aux_rng.object_get(String("end"))
-                if not as_opt or not ae_opt \
-                        or not as_opt.value().is_object() \
-                        or not ae_opt.value().is_object():
-                    continue
-                var asl_opt = as_opt.value().object_get(String("line"))
-                var asc_opt = as_opt.value().object_get(String("character"))
-                var ael_opt = ae_opt.value().object_get(String("line"))
-                var aec_opt = ae_opt.value().object_get(String("character"))
-                if not asl_opt or not asc_opt or not ael_opt or not aec_opt \
-                        or not asl_opt.value().is_int() \
-                        or not asc_opt.value().is_int() \
-                        or not ael_opt.value().is_int() \
-                        or not aec_opt.value().is_int():
-                    continue
-                aux_edits.append(TextEditEntry(
-                    asl_opt.value().as_int(),
-                    asc_opt.value().as_int(),
-                    ael_opt.value().as_int(),
-                    aec_opt.value().as_int(),
-                    aux_new_text,
-                ))
+        # the primary edit (typically the auto-import line). Often empty
+        # on the initial list and only filled in by ``completionItem/
+        # resolve`` — see ``_parse_additional_text_edits``.
+        var aux_edits = _parse_additional_text_edits(entry)
+        # ``data``: opaque server-defined payload echoed back verbatim in
+        # ``completionItem/resolve``. Keep its raw JSON so we can re-emit
+        # it unchanged — the server keys the resolve lookup off it, and a
+        # resolve without it returns nothing useful.
+        var data_raw = String("")
+        var data_opt = entry.object_get(String("data"))
+        if data_opt:
+            data_raw = encode_json(data_opt.value())
         out.append(CompletionItem(
             label, insert_text, kind, detail, sort_text,
             has_range, rs_line, rs_char, re_line, re_char,
-            aux_edits^,
+            aux_edits^, data_raw^,
         ))
     # Stable insertion sort by sort_text — typical completion lists are
     # under ~200 items so quadratic worst-case is fine here. Sort an index
