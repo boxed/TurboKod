@@ -632,6 +632,17 @@ struct LspManager(Copyable, Movable):
     var _color_path: String
     var _resolved_colors: List[Highlight]
     var _has_resolved_colors: Bool
+    # ``textDocument/diagnostic`` — the pull-diagnostics model (LSP 3.17).
+    # Servers that advertise ``diagnosticProvider`` don't push
+    # ``publishDiagnostics``; we request a report per document instead.
+    # Single in-flight slot (``_pull_diag_path`` echoes which path it's
+    # for); the parsed items land in the same ``_diagnostic_buckets`` the
+    # push path uses. ``_pulled_paths`` records every path we've requested
+    # so the host can fire the *initial* pull exactly once per buffer
+    # (subsequent pulls are edit-driven).
+    var _inflight_pull_diag_id: String
+    var _pull_diag_path: String
+    var _pulled_paths: List[String]
     # Server-driven ``workspace/applyEdit`` (e.g. after executeCommand):
     # the parsed WorkspaceEdit, parked for the host to apply project-wide.
     # We optimistically reply ``applied: true`` and apply next frame.
@@ -778,6 +789,9 @@ struct LspManager(Copyable, Movable):
         self._color_path = String("")
         self._resolved_colors = List[Highlight]()
         self._has_resolved_colors = False
+        self._inflight_pull_diag_id = String("")
+        self._pull_diag_path = String("")
+        self._pulled_paths = List[String]()
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -902,6 +916,9 @@ struct LspManager(Copyable, Movable):
         self._color_path = String("")
         self._resolved_colors = List[Highlight]()
         self._has_resolved_colors = False
+        self._inflight_pull_diag_id = String("")
+        self._pull_diag_path = String("")
+        self._pulled_paths = List[String]()
         self._resolved_applyedit = List[CodeActionFileEdit]()
         self._has_resolved_applyedit = False
         self._root_uri = String("")
@@ -1021,6 +1038,47 @@ struct LspManager(Copyable, Movable):
             if self._diagnostic_buckets[k].path == path:
                 return self._diagnostic_buckets[k].diags.copy()
         return List[Diagnostic]()
+
+    def supports_pull_diagnostics(self) -> Bool:
+        """True iff the server advertises ``diagnosticProvider`` — the LSP
+        3.17 pull model. Such servers don't push ``publishDiagnostics``;
+        the host must request a report per document via
+        ``request_pull_diagnostics`` or no squiggles ever appear."""
+        return self.server_supports(String("diagnosticProvider"))
+
+    def has_pulled(self, path: String) -> Bool:
+        """True once we've issued at least one ``textDocument/diagnostic``
+        for ``path``. Lets the host fire the *initial* pull exactly once
+        per buffer (later pulls are edit-driven)."""
+        for k in range(len(self._pulled_paths)):
+            if self._pulled_paths[k] == path:
+                return True
+        return False
+
+    def request_pull_diagnostics(mut self, path: String) -> Bool:
+        """Request a ``textDocument/diagnostic`` report for ``path`` (pull
+        model). The parsed items land in the same diagnostic bucket the
+        push path writes, so the host consumes them identically. Single
+        in-flight slot — a fresh pull shadows any prior one (per-path
+        races just defer the older path's refresh to its next pull).
+        No-op unless ready and the server advertises ``diagnosticProvider``;
+        assumes the document is already open (caller pre-flights via the
+        normal didOpen/didChange path)."""
+        if self.state != _STATE_READY or not self.supports_pull_diagnostics():
+            return False
+        var params = json_object()
+        params.put(String("textDocument"), _text_document(path))
+        try:
+            self._inflight_pull_diag_id = self.client.send_request(
+                String("textDocument/diagnostic"), params,
+            )
+        except:
+            self._inflight_pull_diag_id = String("")
+            return False
+        self._pull_diag_path = path
+        if not self.has_pulled(path):
+            self._pulled_paths.append(path)
+        return True
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -2847,6 +2905,32 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_colors = True
                 self._inflight_color_id = String("")
                 continue
+            if id == self._inflight_pull_diag_id:
+                # Pull-diagnostics report. A "full" report (or any object
+                # carrying ``items``) replaces the bucket — an empty
+                # ``items`` array is a valid "all clear". An "unchanged"
+                # report means reuse what we have, so leave the bucket be.
+                var ppath = self._pull_diag_path
+                self._inflight_pull_diag_id = String("")
+                if msg.result and msg.result.value().is_object():
+                    var rep = msg.result.value().copy()
+                    var kind = String("")
+                    var kind_opt = rep.object_get(String("kind"))
+                    if kind_opt and kind_opt.value().is_string():
+                        kind = kind_opt.value().as_str()
+                    if kind != String("unchanged"):
+                        var items_opt = rep.object_get(String("items"))
+                        var pdiags = List[Diagnostic]()
+                        if items_opt and items_opt.value().is_array():
+                            pdiags = _parse_diagnostics_array(items_opt.value())
+                        _lsp_debug_log(
+                            String("← pull diagnostic response id=") + id
+                            + String(" path=") + ppath
+                            + String(" count=") + String(len(pdiags)),
+                        )
+                        self._store_diagnostics(ppath, pdiags^)
+                self._clear_diag_inflight(ppath, 0)
+                continue
         return resolved
 
     # --- internals ---------------------------------------------------------
@@ -2986,7 +3070,13 @@ struct LspManager(Copyable, Movable):
             + String(" path=") + path
             + String(" count=") + String(len(diags)),
         )
-        # Replace existing bucket if any; else append.
+        self._store_diagnostics(path, diags^)
+
+    def _store_diagnostics(mut self, path: String, var diags: List[Diagnostic]):
+        """Replace (not merge) the diagnostic bucket for ``path`` and mark
+        it unconsumed so the host re-applies on the next frame. Shared by
+        the push (``publishDiagnostics``) and pull (``textDocument/
+        diagnostic``) paths."""
         for k in range(len(self._diagnostic_buckets)):
             if self._diagnostic_buckets[k].path == path:
                 self._diagnostic_buckets[k].diags = diags^

@@ -10213,6 +10213,33 @@ def test_lsp_dynamic_capability_registration() raises:
     assert_true(not mgr.server_supports(String("foldingRangeProvider")))
 
 
+def test_lsp_pull_diagnostics_storage() raises:
+    """Pull diagnostics gate on ``diagnosticProvider`` and land in the same
+    bucket the push path uses, so the host consumes them identically.
+    ``has_pulled`` lets the host fire the initial pull exactly once."""
+    var mgr = LspManager()
+    assert_true(not mgr.supports_pull_diagnostics())
+    var caps = parse_json(String(
+        "{\"diagnosticProvider\":{\"interFileDependencies\":true}}"
+    ))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    assert_true(mgr.supports_pull_diagnostics())
+    assert_true(not mgr.has_pulled(String("/x.py")))
+    # A pull report's ``items`` parse + store into the shared bucket.
+    var items = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":1,\"character\":0},"
+        + "\"end\":{\"line\":1,\"character\":4}},"
+        + "\"severity\":1,\"message\":\"oops\"}]"
+    ))
+    var diags = _parse_diagnostics_array(items)
+    mgr._store_diagnostics(String("/x.py"), diags^)
+    assert_true(mgr.has_unconsumed_diagnostics_for(String("/x.py")))
+    var got = mgr.take_diagnostics_for(String("/x.py"))
+    assert_equal(len(got), 1)
+    # Consumed flag flips so the host doesn't re-apply every frame.
+    assert_true(not mgr.has_unconsumed_diagnostics_for(String("/x.py")))
+
+
 def test_lsp_parse_prepare_rename_placeholder() raises:
     """The prepareRename object result may carry a ``placeholder`` string,
     be a bare ``Range`` (no placeholder), or ``{defaultBehavior:true}``.
@@ -18903,6 +18930,7 @@ def _run_chunk_04() raises:
     test_lsp_server_progress_and_show_message()
     test_lsp_server_supports_reads_capabilities()
     test_lsp_dynamic_capability_registration()
+    test_lsp_pull_diagnostics_storage()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
     test_lsp_parse_completion_result_array_shape()

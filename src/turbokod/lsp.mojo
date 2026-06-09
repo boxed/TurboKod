@@ -1065,6 +1065,15 @@ def lsp_initialize_params(
     )
     code_action_caps.put(String("isPreferredSupport"), json_bool(True))
     text_doc_caps.put(String("codeAction"), code_action_caps^)
+    # Advertise textDocument/diagnostic (the LSP 3.17 pull model). Servers
+    # that prefer pull (or only support it) won't push ``publishDiagnostics``
+    # unless the client declares this; we then request a report per document
+    # via ``request_pull_diagnostics``. ``relatedDocumentSupport: false`` —
+    # we apply only the report's own ``items``, not related-document sets.
+    var diagnostic_caps = json_object()
+    diagnostic_caps.put(String("dynamicRegistration"), json_bool(True))
+    diagnostic_caps.put(String("relatedDocumentSupport"), json_bool(False))
+    text_doc_caps.put(String("diagnostic"), diagnostic_caps^)
     capabilities.put(String("textDocument"), text_doc_caps^)
     params.put(String("capabilities"), capabilities^)
     return params^

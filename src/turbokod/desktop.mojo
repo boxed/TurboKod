@@ -6606,11 +6606,22 @@ struct Desktop(Movable):
             var li = self._lsp_for_path(path)
             if li < 0:
                 continue
+            var did_change = False
             if self.lsp_managers[li].is_ready() \
                     and self.windows.windows[w] \
                         .editor.consume_lsp_dirty(monotonic_ms()):
                 var text = self.windows.windows[w].editor.text_snapshot()
                 self.lsp_managers[li].notify_changed(path, text^)
+                did_change = True
+            # Pull-diagnostics model (LSP 3.17): a server that advertises
+            # diagnosticProvider never pushes publishDiagnostics, so we
+            # request a report — once on first sight of the buffer, then
+            # after every settled edit (the didChange just above).
+            if self.lsp_managers[li].is_ready() \
+                    and self.lsp_managers[li].supports_pull_diagnostics() \
+                    and (did_change
+                         or not self.lsp_managers[li].has_pulled(path)):
+                _ = self.lsp_managers[li].request_pull_diagnostics(path)
             if not self.lsp_managers[li].has_unconsumed_diagnostics_for(path):
                 continue
             self.windows.windows[w].editor.set_diagnostics(
