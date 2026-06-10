@@ -1819,25 +1819,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let app = NSMenuItem(); app.title = "TurboKod"; app.submenu = appSub
             mainMenu.insertItem(app, at: 0)
         }
-        // Avoid repainting the whole menu bar when only submenu *contents*
-        // changed (the Window menu populating, shortcut text getting stamped
-        // after session restore — all with the same top-level titles). A
-        // fresh `NSApp.mainMenu =` rebuilds the bar and visibly flickers it,
-        // which on launch lands right after the project window draws. The bar
-        // only shows top-level titles, so when those are unchanged we swap the
-        // freshly-built submenus onto the existing items in place — invisible
-        // until the user opens a menu. Only a structural change (a menu shown
-        // or hidden) reassigns mainMenu.
+        // Diff-and-modify rather than replace the menu wholesale. The menu bar
+        // displays only the top-level titles; when those are unchanged — the
+        // common case, where only submenu *contents* changed (the Window menu
+        // populating, shortcuts getting stamped after restore) — we keep the
+        // existing top-level items AND their submenu objects and move the
+        // freshly-built items into the existing submenus. Reassigning
+        // NSApp.mainMenu, or even swapping the submenu *objects*
+        // (`old.submenu = new.submenu`), makes AppKit redraw the bar titles —
+        // and during the launch/activation transition that redraw flashes them
+        // with the wrong contrast (the white-on-white blink). Touching only the
+        // (closed) dropdown contents leaves the bar itself alone. Only a
+        // structural change (a top-level menu shown/hidden) reassigns mainMenu.
         if let existing = NSApp.mainMenu,
            existing.items.count == mainMenu.items.count,
            zip(existing.items, mainMenu.items).allSatisfy({ $0.title == $1.title }) {
             for (old, new) in zip(existing.items, mainMenu.items) {
-                // Detach the freshly-built submenu from its (local) item
-                // first: `setSubmenu:` throws NSInternalInconsistencyException
-                // if the menu is still a submenu of another item.
-                let sub = new.submenu
-                new.submenu = nil
-                old.submenu = sub
+                guard let oldSub = old.submenu, let newSub = new.submenu else {
+                    let sub = new.submenu; new.submenu = nil; old.submenu = sub
+                    continue
+                }
+                // NSMenuItems belong to one menu only — detach from the freshly
+                // built submenu before re-homing them into the existing one.
+                let moved = newSub.items
+                newSub.removeAllItems()
+                oldSub.removeAllItems()
+                for it in moved { oldSub.addItem(it) }
+                // The build pointed NSApp.helpMenu at the now-emptied freshly
+                // built Help submenu; re-point it at the one we kept.
+                if old.title == "Help" { NSApp.helpMenu = oldSub }
             }
         } else {
             NSApp.mainMenu = mainMenu
