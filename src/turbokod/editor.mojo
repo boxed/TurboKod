@@ -7478,11 +7478,32 @@ struct Editor(Copyable, Movable):
         elif k == KEY_BACKSPACE:
             if self.read_only:
                 return True
+            # Alt/Ctrl+Backspace deletes the whole word to the left
+            # (macOS Option+Delete, Windows/Linux Ctrl+Backspace) by
+            # selecting from the previous word boundary to the cursor and
+            # deleting that. Scoped to a single caret with no active
+            # selection: a backspace on a selection just clears it, and
+            # the multi-caret cases fall through to the per-caret one-char
+            # paths below.
+            if word and not self.has_selection() \
+                    and not self.has_extra_carets() \
+                    and (self.selections[0].col > 0 or self.selections[0].row > 0):
+                self._push_undo()
+                var p = self._prev_word_pos(
+                    self.selections[0].row, self.selections[0].col,
+                )
+                self.move_to(p[0], p[1], True)
+                self._delete_selection()
+                self.dirty = True
+                # ``p[0]`` is the (possibly earlier) row the deletion
+                # starts on — at col 0 the word boundary is on the line
+                # above, so this is the true lowest changed row.
+                self._mark_hl_dirty(p[0])
             # Multi-caret fast path: every caret can run an inline
             # backspace (either has a same-row selection it can replace
             # with nothing, or is mid-line). Cross-row selections and
             # col-0 carets still fall through to single-caret.
-            if self.has_extra_carets() \
+            elif self.has_extra_carets() \
                     and self._all_carets_inline_safe(1):
                 self._push_undo()
                 self._multi_edit_inline(String(""), 1)

@@ -1249,6 +1249,24 @@ def test_editor_word_movement_across_lines() raises:
     assert_equal(ed.selections[0].row, 0); assert_equal(ed.selections[0].col, 3)
 
 
+def test_editor_word_backspace() raises:
+    # Alt+Backspace (macOS Option+Delete) deletes the word to the left.
+    var ed = Editor(String("hello world foo"))
+    _ = ed.handle_key(_key(KEY_END), _VIEW)
+    _ = ed.handle_key(_key(KEY_BACKSPACE, MOD_ALT), _VIEW)
+    assert_equal(ed.buffer.line(0), String("hello world "))
+    assert_equal(ed.selections[0].col, 12)
+    # Ctrl+Backspace does the same (Windows/Linux convention).
+    _ = ed.handle_key(_key(KEY_BACKSPACE, MOD_CTRL), _VIEW)
+    assert_equal(ed.buffer.line(0), String("hello "))
+    # At column 0 it joins with the previous line.
+    var ed2 = Editor(String("abc\ndef"))
+    _ = ed2.handle_key(_key(KEY_DOWN), _VIEW)
+    _ = ed2.handle_key(_key(KEY_BACKSPACE, MOD_ALT), _VIEW)
+    assert_equal(ed2.buffer.line(0), String("abcdef"))
+    assert_equal(ed2.selections[0].row, 0); assert_equal(ed2.selections[0].col, 3)
+
+
 def test_editor_shift_arrow_extends_selection() raises:
     var ed = Editor(String("hello"))
     assert_false(ed.has_selection())
@@ -18977,6 +18995,7 @@ def _run_chunk_00() raises:
     test_editor_typing_non_ascii()
     test_editor_word_movement()
     test_editor_word_movement_across_lines()
+    test_editor_word_backspace()
     test_editor_shift_arrow_extends_selection()
     test_editor_shift_ctrl_arrow_composes()
     test_editor_cmd_arrow_line_navigation()
