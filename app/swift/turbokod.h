@@ -13,6 +13,11 @@ void    tk_terminate_all(void);
 
 int64_t tk_desktop_new(void);
 void    tk_desktop_free(int64_t h);
+// Recover the user's full interactive shell $PATH that a Dock launch strips
+// (runs `$SHELL -l -i`, ~100 ms). Call once off the first runloop turn — not
+// inside tk_desktop_new — so the first frame isn't blocked. Idempotent:
+// spawns the login shell at most once.
+void    tk_recover_user_shell_path(void);
 void    tk_desktop_open_project(int64_t h, int64_t path_ptr, int64_t path_len);
 void    tk_desktop_open_file(int64_t h, int64_t path_ptr, int64_t path_len,
                              int64_t cols, int64_t rows);

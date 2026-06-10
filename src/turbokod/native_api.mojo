@@ -32,7 +32,7 @@ from turbokod.events import (
 from turbokod.geometry import Point, Rect
 from turbokod.menu import Menu, MenuItem
 from turbokod.posix import (
-    getenv_value, recover_user_path_for_gui_launch, setenv_value,
+    getenv_value, prepend_user_bin_dirs_to_path, recover_path_deferred_once,
 )
 from turbokod.string_utils import (
     codepoint_at, escape_drop_paths, split_lines_no_trailing,
@@ -279,42 +279,41 @@ def _canon_ctrl_key(key: UInt32, mods: UInt8) -> UInt32:
 
 # --- C ABI ------------------------------------------------------------------
 
-# Process-local "did we already repair PATH?" flag. Mojo has no module-level
-# mutable globals, so we stash the flag in our own environment via setenv —
-# cheap, persists across @export calls in the same process, and the
-# allowlisted-envp builder in lsp.mojo doesn't forward this name to children
-# (it carries no leading-underscore allowlist hit), so LSP servers don't see
-# our internal bookkeeping.
-comptime _PATH_RECOVERY_MARKER = String("__TURBOKOD_PATH_RECOVERED")
 
+@export
+def tk_recover_user_shell_path():
+    """Recover the user's full interactive shell ``$PATH``.
 
-def _recover_path_once():
-    """Run GUI-launch PATH recovery on the first call; no-op afterward.
+    macOS Dock/launchd launches hand us a stripped ``PATH`` that lacks the
+    per-user dirs the user's login shell would add (``~/.cargo/bin``,
+    ``~/.pyenv/shims``, custom rc-file entries, …) — the spawn path
+    forwards our ``PATH`` verbatim to children, so without this a Dock
+    launch can't find ``ty-semantic`` / ``pyright`` / ``rg`` even though
+    they're on the user's interactive PATH.
 
-    Called from ``tk_desktop_new`` so the repair is in place before any
-    Desktop method that might ``posix_spawnp`` a child (LSP servers,
-    ``rg``, ``git``) — and so the Swift host doesn't have to know it
-    exists. Swallows exceptions: a failed recovery just means children
-    inherit the launch-time PATH, which is the same fallback we'd have
-    without this function at all."""
-    var marker = getenv_value(_PATH_RECOVERY_MARKER)
-    if len(marker.as_bytes()) > 0:
-        return
-    recover_user_path_for_gui_launch()
-    _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
+    The slow half of recovery is a ``$SHELL -l -i`` subprocess (~100 ms),
+    so the host schedules this *off the first runloop turn* rather than
+    inside ``tk_desktop_new`` — the first frame paints immediately and
+    this catches up before the user can open a project and trigger a
+    spawn. ``tk_desktop_new`` still does the cheap synchronous prepend of
+    well-known bin dirs, so an LSP server in a standard location works
+    even if a spawn somehow races this. Idempotent (once-guarded), so the
+    shell is spawned at most once no matter how often the host calls it."""
+    recover_path_deferred_once()
 
 
 @export
 def tk_desktop_new() -> Int:
     """Create a Desktop on the heap, load config + standard menus, return the
     opaque handle."""
-    # macOS Dock/launchd launches give us a stripped ``PATH`` that lacks
-    # per-user dirs (``~/.cargo/bin``, ``~/.pyenv/shims``, …) — the LSP
-    # spawn path forwards our PATH verbatim to children, so a Dock launch
-    # otherwise can't find ``ty-semantic`` / ``pyright`` even though
-    # they're on the user's interactive PATH. Idempotent + once-guarded,
-    # so multi-window callers don't re-run the login shell each time.
-    _recover_path_once()
+    # Cheap, synchronous half of GUI-launch PATH recovery: prepend the
+    # well-known per-user bin dirs (just ``access(2)`` checks, sub-ms) so
+    # LSP servers in standard locations resolve immediately. The slow
+    # login-shell half is deferred — the host calls
+    # ``tk_recover_user_shell_path`` off the first runloop turn so the
+    # ~100 ms ``$SHELL -l -i`` subprocess never blocks the first frame.
+    # Idempotent, so multi-window callers re-running it is harmless.
+    _ = prepend_user_bin_dirs_to_path()
     var addr = external_call["malloc", Int](size_of[Desktop]())
     if addr == 0:
         return 0

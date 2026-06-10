@@ -809,6 +809,32 @@ def recover_user_path_for_gui_launch():
     _ = prepend_user_bin_dirs_to_path()
 
 
+# Process-local "did we already run the slow login-shell recovery?" marker.
+# Mojo has no module-level mutable globals, so we stash it in our own
+# environment via setenv — cheap, persists across calls in the same process,
+# and the leading underscore keeps it out of the LSP allowlisted-envp builder
+# so children never see this bookkeeping. The name is duplicated nowhere else:
+# this module owns the recovery, so it owns the guard.
+comptime _PATH_RECOVERY_MARKER = String("__TURBOKOD_PATH_RECOVERED")
+
+
+def recover_path_deferred_once():
+    """Run the *slow* login-shell PATH recovery at most once per process.
+
+    Split out from startup so the ~100 ms ``$SHELL -l -i`` subprocess
+    never blocks the first frame: the native frontend prepends the
+    well-known bin dirs synchronously (cheap, covers LSP servers in
+    standard locations), then schedules this off the first runloop turn
+    to catch any custom PATH entries the user's rc files add. Idempotent
+    via the setenv marker, so repeated callers don't re-spawn the shell.
+    """
+    var marker = getenv_value(_PATH_RECOVERY_MARKER)
+    if len(marker.as_bytes()) > 0:
+        return
+    recover_user_path_for_gui_launch()
+    _ = setenv_value(_PATH_RECOVERY_MARKER, String("1"))
+
+
 def getcwd_path() -> String:
     """Return the process's current working directory, or "" on error.
 

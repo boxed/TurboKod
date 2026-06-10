@@ -1155,6 +1155,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // menu snapshot is ready to drive NSApp.mainMenu the moment we
         // have zero windows (empty session, or last window closed).
         chromeDesktop = tk_desktop_new()
+        // Recover the user's full interactive $PATH (stripped by a Dock
+        // launch) off the first runloop turn rather than synchronously: the
+        // slow login-shell subprocess (~100 ms) would otherwise block the
+        // first frame. tk_desktop_new already did the cheap synchronous
+        // prepend of well-known bin dirs, and this runs on the main thread
+        // before any project's LSP/git spawn (which only fire from frame 2),
+        // so there's no setenv/getenv race. Idempotent on the Mojo side.
+        DispatchQueue.main.async { tk_recover_user_shell_path() }
         if chromeDesktop != 0 {
             tk_desktop_set_host_owns_menu(chromeDesktop, 1)
             // The chrome Desktop loaded the user config — apply the saved
