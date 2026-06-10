@@ -559,7 +559,7 @@ def _key_before_sep(line: String) -> Tuple[String, Int]:
 def _ini_python_files(text: String, section: String) -> List[String]:
     """Pull the ``python_files`` value out of an INI-style ``[section]``,
     supporting configparser's indented multi-line continuation (each glob
-    on its own line, as dryft's setup.cfg writes it)."""
+    on its own line, as myapp's setup.cfg writes it)."""
     var lines = _split_lines(text)
     var out = List[String]()
     var in_section = False
@@ -670,7 +670,7 @@ def pytest_python_files(project_root: String) -> List[String]:
     ``[pytest]`` → ``pyproject.toml`` ``[tool.pytest.ini_options]`` →
     ``tox.ini`` ``[pytest]`` → ``setup.cfg`` ``[tool:pytest]``.
 
-    This is why the gutter run-icons show up for projects like dryft that
+    This is why the gutter run-icons show up for projects like myapp that
     set ``python_files = ... *__tests.py`` instead of the default."""
     var out = List[String]()
     if len(project_root.as_bytes()) == 0:

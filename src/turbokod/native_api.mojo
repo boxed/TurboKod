@@ -217,6 +217,16 @@ def _build_menus(mut d: Desktop):
 
 
 def _refresh_menu_visibility(mut d: Desktop):
+    # While a session restore is pending, the editor windows don't exist
+    # yet — they're created in the first ``paint``/``_restore_session``,
+    # which runs *after* this tick. Computing visibility now would see
+    # ``focused_is_editor() == False`` and hide the Edit menu for one
+    # frame, then the next tick re-shows it: a visible menu-bar flicker
+    # right after the project window appears. Leave the menu in its built
+    # default (Edit visible) until restore has run; the next tick computes
+    # real visibility against the now-restored editor.
+    if d._pending_restore:
+        return
     var is_editor = d.windows.focused_is_editor()
     d.menu_bar.set_visible_by_label(String("Edit"), is_editor)
     # View stays reachable whenever a project is open (even with no

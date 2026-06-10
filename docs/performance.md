@@ -94,7 +94,7 @@ more; the client doesn't even advertise the capability, so servers skip
 the work entirely.
 
 Why, measured against the real `ty` server on a 4404-line / 195 KB Python
-file (`dryft/core/views.py`), driving a real `LspManager` end-to-end:
+file (`myapp/core/views.py`), driving a real `LspManager` end-to-end:
 
 | Step | Time | Where |
 |---|---|---|

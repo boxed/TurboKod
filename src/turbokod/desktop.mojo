@@ -147,6 +147,7 @@ from .posix import monotonic_ms, wall_clock_ms, which
 from .project import replace_in_project
 from .search_options import SearchOptions, build_search_regex
 from .project_find import ProjectFind
+from .find_results_pane import FindResultsPane
 from .project_targets import (
     ProjectTargets, RunTarget, load_project_targets,
     detect_project_language,
@@ -416,6 +417,8 @@ comptime TEST_STOP               = String("test:stop")
 comptime TEST_RERUN              = String("test:rerun")
 comptime TEST_CLEAR_OUTPUT       = String("test:clear_output")
 comptime TEST_PANE_CLOSE         = String("test:pane_close")
+# ``[■]`` close button for the persistent Find Results pane.
+comptime FIND_RESULTS_PANE_CLOSE = String("find:pane_close")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
 # the active tab to that index. The dispatch parser walks the
 # prefix the same way it does ``WINDOW_FOCUS_PREFIX``.
@@ -481,6 +484,7 @@ comptime DOCK_FILE_TREE   = UInt8(1)
 comptime DOCK_DEBUG_PANE  = UInt8(2)
 comptime DOCK_TERMINAL    = UInt8(3)
 comptime DOCK_TEST_PANE   = UInt8(4)
+comptime DOCK_FIND_RESULTS_PANE = UInt8(5)
 
 # Throttle for the external-git polling in ``_apply_view_config``. One
 # second is fast enough that ``git commit`` / ``git checkout`` outside
@@ -689,6 +693,7 @@ struct PendingSaveAction(ImplicitlyCopyable, Movable):
 comptime PANEL_KIND_TERMINAL = 0
 comptime PANEL_KIND_DEBUG    = 1
 comptime PANEL_KIND_TEST     = 2
+comptime PANEL_KIND_FIND_RESULTS = 3
 
 
 @fieldwise_init
@@ -1233,6 +1238,10 @@ struct Desktop(Movable):
     # is the test pane's analog of ``_run_output_held``.
     var test_session: RunSession
     var test_pane: DebugPane
+    # Persistent Find-in-Project results, docked alongside the test pane.
+    # Populated from the Cmd+Shift+F modal's ``[ Panel ]`` action; hidden
+    # until the user sends a result set to it.
+    var find_results_pane: FindResultsPane
     var _test_output_held: Bool
     # The pytest node id of the last test run (empty = whole suite), so
     # the pane's "Re-run" replays *that* command rather than always
@@ -1499,6 +1508,8 @@ struct Desktop(Movable):
         # test-pane close from a run/debug-pane close.
         self.test_pane.set_title(String("Tests"))
         self.test_pane.dock.close_button_id = TEST_PANE_CLOSE
+        self.find_results_pane = FindResultsPane()
+        self.find_results_pane.dock.close_button_id = FIND_RESULTS_PANE_CLOSE
         self._test_output_held = False
         self._last_test_node_id = String("")
         self._pending_restore = False
@@ -1987,6 +1998,10 @@ struct Desktop(Movable):
                 bottom -= self._test_pane_height(screen)
                 if bottom < 1:
                     bottom = 1
+            if self.find_results_pane.visible:
+                bottom -= self._find_results_pane_height(screen)
+                if bottom < 1:
+                    bottom = 1
             if self.debug_pane.visible:
                 bottom -= self._debug_pane_height(screen)
                 if bottom < 1:
@@ -2031,6 +2046,8 @@ struct Desktop(Movable):
         var bottom = screen.b.y - chrome
         if self.test_pane.visible:
             bottom -= self._test_pane_height(screen)
+        if self.find_results_pane.visible:
+            bottom -= self._find_results_pane_height(screen)
         var top = bottom - self._debug_pane_height(screen)
         if top < 1:
             top = 1
@@ -2068,6 +2085,30 @@ struct Desktop(Movable):
             screen, self._bottom_chrome_height(screen),
         )
 
+    def find_results_pane_rect(self, screen: Rect) -> Rect:
+        """Where the bottom-docked Find Results pane lives — directly
+        above the test pane (when that's up) and the status / tab strip,
+        with the run/debug pane and terminal stack above it. Mirrors
+        ``test_pane_rect`` so the panes read as one stack."""
+        if not self.find_results_pane.visible:
+            return Rect.empty()
+        var chrome = self._bottom_chrome_height(screen)
+        var bottom = screen.b.y - chrome
+        if self.test_pane.visible:
+            bottom -= self._test_pane_height(screen)
+        var top = bottom - self._find_results_pane_height(screen)
+        if top < 1:
+            top = 1
+        return Rect(self._panel_left(screen), top,
+                    self._panel_right(screen), bottom)
+
+    def _find_results_pane_height(self, screen: Rect) -> Int:
+        """Effective rendered height for the Find Results pane — same
+        state-machine logic as ``_debug_pane_height``."""
+        return self.find_results_pane.dock.effective_height(
+            screen, self._bottom_chrome_height(screen),
+        )
+
     def terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
         """Where ``terminal_panes[idx]`` paints. Each pane in the stack
         gets its own slice; pane 0 sits on top, the last pane sits
@@ -2083,6 +2124,8 @@ struct Desktop(Movable):
         var stack_bottom = screen.b.y - chrome
         if self.test_pane.visible:
             stack_bottom -= self._test_pane_height(screen)
+        if self.find_results_pane.visible:
+            stack_bottom -= self._find_results_pane_height(screen)
         if self.debug_pane.visible:
             stack_bottom -= self._debug_pane_height(screen)
         if stack_bottom < 2:
@@ -2290,7 +2333,8 @@ struct Desktop(Movable):
     # surface uses. See docs/floating-panels.md.
 
     def panels_visible_count(self) -> Int:
-        """How many tool panels are currently open (terminal + debug + test).
+        """How many tool panels are currently open (terminal + debug + test
+        + find results).
 
         Drives the native host's auto-hide of the floating panel window: when
         this drops to zero the host orders the window out, and shows it again
@@ -2299,6 +2343,8 @@ struct Desktop(Movable):
         if self.debug_pane.visible:
             n += 1
         if self.test_pane.visible:
+            n += 1
+        if self.find_results_pane.visible:
             n += 1
         return n
 
@@ -2332,6 +2378,13 @@ struct Desktop(Movable):
             idxs.append(0)
             heights.append(self.debug_pane.dock.effective_height(screen, 0))
             minimized.append(self.debug_pane.dock.is_minimized())
+        if self.find_results_pane.visible:
+            kinds.append(PANEL_KIND_FIND_RESULTS)
+            idxs.append(0)
+            heights.append(
+                self.find_results_pane.dock.effective_height(screen, 0),
+            )
+            minimized.append(self.find_results_pane.dock.is_minimized())
         if self.test_pane.visible:
             kinds.append(PANEL_KIND_TEST)
             idxs.append(0)
@@ -2396,6 +2449,10 @@ struct Desktop(Movable):
                 self.terminal_panes[s.idx].paint(canvas, s.rect)
             elif s.kind == PANEL_KIND_DEBUG:
                 self.debug_pane.paint(canvas, s.rect)
+            elif s.kind == PANEL_KIND_FIND_RESULTS:
+                self.find_results_pane.paint(
+                    canvas, s.rect, self.grammar_registry,
+                )
             else:
                 self.test_pane.paint(canvas, s.rect)
 
@@ -2423,6 +2480,14 @@ struct Desktop(Movable):
                     self._focus_dock(DOCK_DEBUG_PANE)
                 return True
             return False
+        if kind == PANEL_KIND_FIND_RESULTS:
+            if self.find_results_pane.handle_mouse(
+                event, rect, allow_resize=False,
+            ):
+                if self.find_results_pane.focused:
+                    self._focus_dock(DOCK_FIND_RESULTS_PANE)
+                return True
+            return False
         if self.test_pane.handle_mouse(event, rect, allow_resize=False):
             if self.test_pane.focused:
                 self._focus_dock(DOCK_TEST_PANE)
@@ -2439,6 +2504,8 @@ struct Desktop(Movable):
             return self.terminal_panes[idx].dock.resizing
         if kind == PANEL_KIND_DEBUG:
             return self.debug_pane.dock.resizing
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.dock.resizing
         return self.test_pane.dock.resizing
 
     def _panel_dock_normal(self, kind: Int, idx: Int) -> Bool:
@@ -2446,6 +2513,8 @@ struct Desktop(Movable):
             return self.terminal_panes[idx].dock.state == PANEL_STATE_NORMAL
         if kind == PANEL_KIND_DEBUG:
             return self.debug_pane.dock.state == PANEL_STATE_NORMAL
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.dock.state == PANEL_STATE_NORMAL
         return self.test_pane.dock.state == PANEL_STATE_NORMAL
 
     def _panel_dock_chrome_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
@@ -2453,6 +2522,8 @@ struct Desktop(Movable):
             return self.terminal_panes[idx].dock.chrome_hits.on_any(pos)
         if kind == PANEL_KIND_DEBUG:
             return self.debug_pane.dock.chrome_hits.on_any(pos)
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.dock.chrome_hits.on_any(pos)
         return self.test_pane.dock.chrome_hits.on_any(pos)
 
     def _panel_dock_command_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
@@ -2468,6 +2539,10 @@ struct Desktop(Movable):
             )
         elif kind == PANEL_KIND_DEBUG:
             hit = hit_title_command(self.debug_pane.dock.last_cmd_hits, pos)
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            hit = hit_title_command(
+                self.find_results_pane.dock.last_cmd_hits, pos,
+            )
         else:
             hit = hit_title_command(self.test_pane.dock.last_cmd_hits, pos)
         return len(hit.as_bytes()) > 0
@@ -2477,6 +2552,8 @@ struct Desktop(Movable):
             self.terminal_panes[idx].dock.resizing = v
         elif kind == PANEL_KIND_DEBUG:
             self.debug_pane.dock.resizing = v
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            self.find_results_pane.dock.resizing = v
         else:
             self.test_pane.dock.resizing = v
 
@@ -2485,6 +2562,8 @@ struct Desktop(Movable):
             self.terminal_panes[idx].dock.preferred_height = h
         elif kind == PANEL_KIND_DEBUG:
             self.debug_pane.dock.preferred_height = h
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            self.find_results_pane.dock.preferred_height = h
         else:
             self.test_pane.dock.preferred_height = h
 
@@ -2574,6 +2653,8 @@ struct Desktop(Movable):
                 if self.terminal_panes[i].handle_key(event):
                     return Optional[String]()
             if self.debug_pane.handle_key(event):
+                return Optional[String]()
+            if self.find_results_pane.handle_key(event):
                 return Optional[String]()
             if self.test_pane.handle_key(event):
                 return Optional[String]()
@@ -3133,6 +3214,10 @@ struct Desktop(Movable):
                     canvas, self.terminal_pane_rect(screen, i),
                 )
             self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
+            self.find_results_pane.paint(
+                canvas, self.find_results_pane_rect(screen),
+                self.grammar_registry,
+            )
             self.test_pane.paint(canvas, self.test_pane_rect(screen))
         # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
         # in-grid paint so the top row stays clear for other content.
@@ -5585,6 +5670,21 @@ struct Desktop(Movable):
                 self._jump_to(
                     DefinitionResolved(path, line_no - 1, 0), screen,
                 )
+            elif self.project_find.send_to_panel:
+                # Dock the current result set into the persistent pane,
+                # close the modal, and hand the pane keyboard focus.
+                self.find_results_pane.load(
+                    self.project_find.matches.copy(),
+                    self.project_find.query.text,
+                    self.project_find.root,
+                )
+                self.project_find.close()
+                self._focus_dock(DOCK_FIND_RESULTS_PANE)
+                # When the panels float on the host's own window, the
+                # auto-show poll only ``orderFront``s the (now non-empty)
+                # panel window — this one-shot makes it key so the docked
+                # results are immediately navigable. See ``panel_focus_request``.
+                self.panel_focus_request = True
             return Optional[String]()
         if self.local_changes.active:
             if event.kind == EVENT_KEY:
@@ -5647,6 +5747,8 @@ struct Desktop(Movable):
                         return Optional[String]()
                 if self.debug_pane.handle_key(event):
                     return Optional[String]()
+                if self.find_results_pane.handle_key(event):
+                    return Optional[String]()
                 if self.test_pane.handle_key(event):
                     return Optional[String]()
             if self.file_tree.handle_key(event):
@@ -5691,6 +5793,14 @@ struct Desktop(Movable):
                         and event.pressed and not event.motion \
                         and self.debug_pane.is_on_resize_edge(event.pos, dp_rect)):
                 if self.debug_pane.handle_mouse(event, dp_rect):
+                    return Optional[String]()
+            var fr_rect = self.find_results_pane_rect(screen)
+            if self.find_results_pane.is_resizing() \
+                    or (event.button == MOUSE_BUTTON_LEFT \
+                        and event.pressed and not event.motion \
+                        and self.find_results_pane.is_on_resize_edge(
+                            event.pos, fr_rect)):
+                if self.find_results_pane.handle_mouse(event, fr_rect):
                     return Optional[String]()
             var test_rect = self.test_pane_rect(screen)
             if self.test_pane.is_resizing() \
@@ -5792,6 +5902,12 @@ struct Desktop(Movable):
             if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
                 if self.debug_pane.focused:
                     self._focus_dock(DOCK_DEBUG_PANE)
+                return Optional[String]()
+            if self.find_results_pane.handle_mouse(
+                event, self.find_results_pane_rect(screen),
+            ):
+                if self.find_results_pane.focused:
+                    self._focus_dock(DOCK_FIND_RESULTS_PANE)
                 return Optional[String]()
             if self.test_pane.handle_mouse(event, self.test_pane_rect(screen)):
                 if self.test_pane.focused:
@@ -7978,6 +8094,23 @@ struct Desktop(Movable):
                 self.open_file_at(treq[0], treq[1] - 1, 0, screen)
             except e:
                 print("desktop: test_pane open_file_at", treq[0], ":", String(e))
+        # Find Results pane: ``[■]`` / Cmd+W close, plus the multi-select
+        # open queue (Enter / double-click). Drained here in dap_tick so it
+        # runs every frame regardless of any debug session.
+        var frcmd = self.find_results_pane.consume_command_id()
+        if frcmd == FIND_RESULTS_PANE_CLOSE:
+            self.find_results_pane.close()
+            self._focus_dock(DOCK_NONE)
+        var fopens = self.find_results_pane.take_pending_opens()
+        if len(fopens) > 0:
+            for i in range(len(fopens)):
+                self._jump_to(
+                    DefinitionResolved(fopens[i].path, fopens[i].line_no - 1, 0),
+                    screen,
+                )
+            # Opening hands focus to the last-opened editor window; drop the
+            # pane's keyboard focus so keystrokes go there, not the list.
+            self._focus_dock(DOCK_NONE)
         if self.dap.has_stack():
             var frames = self._mark_subtle_frames(self.dap.take_stack())
             if len(frames) > 0:
@@ -8357,6 +8490,7 @@ struct Desktop(Movable):
         self.file_tree.focused = kind == DOCK_FILE_TREE
         self.debug_pane.focused = kind == DOCK_DEBUG_PANE
         self.test_pane.focused = kind == DOCK_TEST_PANE
+        self.find_results_pane.focused = kind == DOCK_FIND_RESULTS_PANE
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].focused = (
                 kind == DOCK_TERMINAL and i == idx
@@ -8379,6 +8513,9 @@ struct Desktop(Movable):
         if self.test_pane.focused:
             self.test_pane.dock.request_close()
             return True
+        if self.find_results_pane.focused:
+            self.find_results_pane.dock.request_close()
+            return True
         return False
 
     def _any_dock_focused(self) -> Bool:
@@ -8394,7 +8531,8 @@ struct Desktop(Movable):
         if self.file_tree.focused:
             return True
         if not self.panels_detached:
-            if self.debug_pane.focused or self.test_pane.focused:
+            if self.debug_pane.focused or self.test_pane.focused \
+                    or self.find_results_pane.focused:
                 return True
             for i in range(len(self.terminal_panes)):
                 if self.terminal_panes[i].focused:

@@ -663,7 +663,7 @@ def quick_open_match(path: String, query: String) -> Bool:
     * ``"k c"`` → matches (``k`` then ``c`` as substrings, in order).
     * ``"km/"`` → does **not** match (``km`` is not a substring).
 
-    With ``path = "dryft/homepage/cms/migrations/0003_snippet_preview_values.py"``
+    With ``path = "myapp/homepage/cms/migrations/0003_snippet_preview_values.py"``
     and query ``"pro/views"``: does **not** match. The literal text
     ``pro`` is absent (``preview`` has ``pre``, not ``pro``), so the
     first part already fails.

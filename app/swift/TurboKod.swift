@@ -1162,8 +1162,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // opened after that apply the (now-cached) list inline.
     private var fontOptionsReady = false
 
+    // Launch-time window/project opening, deferred until the app first becomes
+    // active so it lands *with* the menu install (in the didBecomeActive
+    // handler) rather than before it. One-shot: cleared the first time it runs.
+    private var pendingLaunchOpen: (() -> Void)?
+
+    private func runPendingLaunchOpen() {
+        guard let work = pendingLaunchOpen else { return }
+        pendingLaunchOpen = nil
+        work()
+    }
+
     func applicationDidFinishLaunching(_ note: Notification) {
         AppController.shared = self
+        // Disable macOS window/state restoration ("Resume"). We persist and
+        // restore our own session (per-project, in the Mojo core), so the
+        // system's restoration is redundant — and after an abnormal exit it
+        // pops the "reopen windows?" alert, which does nothing useful here and
+        // blocks startup. Turning it off means macOS never saves restorable
+        // state and never shows that dialog. Paired with isRestorable=false on
+        // each window (newWindow) so no per-window state is written either.
+        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
         chdirToResourceRoot()
         buildMenu()
         // Initialize the chrome Desktop before any session restore so its
@@ -1188,56 +1207,83 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         let args = CommandLine.arguments
-        if args.count > 1 {
-            let p = args[1]
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
-            if isDir.boolValue {
-                // CLI ``./run_swift.sh /path/to/project`` — pre-apply the
-                // project's remembered frame to newWindow so the window opens
-                // at its previous size, not the 1000×640 default.
-                persistSession = true
-                let v = newWindow(frame: loadProjectFrame(p))
-                openProject(v, p)
+        // Everything that creates a window (opening a project / file / drop /
+        // restoring the session) is deferred to the next runloop turn. Ordering
+        // a window front *during* launch makes the window server composite it
+        // before it repaints the menu bar, so the macOS menu visibly lags the
+        // window. The no-project path feels instant precisely because it opens
+        // no window here — so we mimic it: install the (chrome) menu and return
+        // now, letting the bar draw immediately, then open the project a beat
+        // later. The menu updates to its project form once the window exists.
+        let openWork: () -> Void = { [weak self] in
+            guard let self else { return }
+            if args.count > 1 {
+                let p = args[1]
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
+                if isDir.boolValue {
+                    // CLI ``./run_swift.sh /path/to/project`` — pre-apply the
+                    // project's remembered frame so it opens at its previous
+                    // size, not the 1000×640 default.
+                    self.persistSession = true
+                    let v = self.newWindow(frame: self.loadProjectFrame(p))
+                    self.openProject(v, p)
+                } else {
+                    let v = self.newWindow()
+                    self.openFile(v, p)
+                }
+            } else if !self.pendingOpenPaths.isEmpty {
+                // Launched by dropping folders/files on the Dock icon (or
+                // "Open With"). Open those instead of restoring the previous
+                // session — the drop is the explicit intent.
+                self.persistSession = true
+                let dropped = self.pendingOpenPaths
+                self.pendingOpenPaths.removeAll()
+                for p in dropped { self.openDroppedPath(p) }
             } else {
-                let v = newWindow()
-                openFile(v, p)
+                self.persistSession = true
+                let saved = self.loadSession()
+                // Empty session: leave zero windows. The macOS menu bar stays
+                // up (sourced from chromeDesktop) so the user can quit, open
+                // a project, or pick a recent project.
+                for entry in saved {
+                    // Per-project file wins; ``native_session.txt``'s frame
+                    // is the legacy fallback for projects that haven't yet
+                    // written the new file (first launch after upgrade).
+                    let frame = self.loadProjectFrame(entry.project) ?? entry.frame
+                    let v = self.newWindow(frame: frame)
+                    self.openProject(v, entry.project)
+                }
             }
-        } else if !pendingOpenPaths.isEmpty {
-            // Launched by dropping folders/files on the Dock icon (or
-            // "Open With"). Open those instead of restoring the previous
-            // session — the drop is the explicit intent.
-            persistSession = true
-            let dropped = pendingOpenPaths
-            pendingOpenPaths.removeAll()
-            for p in dropped { openDroppedPath(p) }
-        } else {
-            persistSession = true
-            let saved = loadSession()
-            // Empty session: leave zero windows. The macOS menu bar stays
-            // up (sourced from chromeDesktop) so the user can quit, open
-            // a project, or pick a recent project — all of which spawn a
-            // new window as needed. No blank-window auto-open.
-            for entry in saved {
-                // Per-project file wins; ``native_session.txt``'s frame
-                // is the legacy fallback for projects that haven't yet
-                // written the new file (first launch after upgrade).
-                let frame = loadProjectFrame(entry.project) ?? entry.frame
-                let v = newWindow(frame: frame)
-                openProject(v, entry.project)
-            }
+            // From here on, drops open immediately rather than buffering.
+            // Drain anything that raced in during launch setup.
+            self.didFinishLaunchingDone = true
+            let late = self.pendingOpenPaths
+            self.pendingOpenPaths.removeAll()
+            for p in late { self.openDroppedPath(p) }
+            // Drain turbokod:// URLs after session restore so they can route
+            // into restored project windows.
+            let lateURLs = self.pendingOpenURLs
+            self.pendingOpenURLs.removeAll()
+            for u in lateURLs { self.openTurbokodURL(u) }
+            // The project window now exists — update the menu to reflect it
+            // (in-place submenu swap when titles match; a full rebuild when the
+            // editor-dependent Edit/View/Git/Debug menus appear).
+            self.refreshMenu()
         }
-        // From here on, drops open immediately rather than buffering.
-        // Drain anything that raced in during launch setup.
-        didFinishLaunchingDone = true
-        let late = pendingOpenPaths
-        pendingOpenPaths.removeAll()
-        for p in late { openDroppedPath(p) }
-        // Drain turbokod:// URLs after session restore so they can route
-        // into restored project windows.
-        let lateURLs = pendingOpenURLs
-        pendingOpenURLs.removeAll()
-        for u in lateURLs { openTurbokodURL(u) }
+
+        // Run the window/project work the first time the app becomes active —
+        // from the didBecomeActive handler, right after the menu installs — so
+        // the menu (drawn with the now-resolved appearance, correct colors) and
+        // the window land together. Doing it as a plain async instead lets the
+        // window beat didBecomeActive, so it appears well ahead of the menu;
+        // doing it pre-active draws the menu bar with inverted colors. A short
+        // fallback covers launches that never activate (e.g. headless capture),
+        // so the window always opens.
+        pendingLaunchOpen = openWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.runPendingLaunchOpen()
+        }
 
         // Schedule in .common mode (not just default) so the timer also fires
         // during the modal event-tracking run loop AppKit uses for live
@@ -1416,7 +1462,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // The user is looking again — retire the attention badge.
             self.attentionBadge = 0
             NSApp.dockTile.badgeLabel = nil
+            // Install/refresh the menu FIRST (app is active now, so it draws
+            // with correct colors — no pre-active inverted-color blink).
             self.refreshMenu()
+            // THEN, once the menu bar has had a moment to actually draw, load
+            // the saved projects. This is the order the app must boot in:
+            // stabilize with a menu, *then* open windows. Opening a window in
+            // the same runloop turn as the menu install lets the window server
+            // composite the window before it repaints the menu bar, so the menu
+            // appears to pop in only after the project loads. The short gap
+            // sequences it correctly. One-shot (pendingLaunchOpen self-clears);
+            // a no-op on later Cmd+Tab-back activations.
+            if self.pendingLaunchOpen != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.runPendingLaunchOpen()
+                }
+            }
             // The user may have committed / checked out / edited files in
             // another app while we were backgrounded; force the git change
             // gutters to re-diff against HEAD instead of waiting on the 1 Hz
@@ -1595,7 +1656,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @discardableResult
     func refreshMenu() -> Bool {
         let h = menuHandle()
-        guard !menuTracking, h != 0 else { return false }
+        // Only touch NSApp.mainMenu while the app is active. The menu bar is
+        // only visible then, and installing it pre-active (during launch,
+        // before the appearance is resolved) draws the bar with the wrong
+        // label color until activation repaints it — the white-on-white /
+        // black-on-black blink. didBecomeActive does the first install.
+        guard !menuTracking, h != 0, NSApp.isActive else { return false }
         // The chrome Desktop never gets drawn (its draw cycle is what
         // ticks per-window Desktops via tk_desktop_tick), so its menu
         // visibility flags would otherwise never update — Edit / View
@@ -1753,7 +1819,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let app = NSMenuItem(); app.title = "TurboKod"; app.submenu = appSub
             mainMenu.insertItem(app, at: 0)
         }
-        NSApp.mainMenu = mainMenu
+        // Avoid repainting the whole menu bar when only submenu *contents*
+        // changed (the Window menu populating, shortcut text getting stamped
+        // after session restore — all with the same top-level titles). A
+        // fresh `NSApp.mainMenu =` rebuilds the bar and visibly flickers it,
+        // which on launch lands right after the project window draws. The bar
+        // only shows top-level titles, so when those are unchanged we swap the
+        // freshly-built submenus onto the existing items in place — invisible
+        // until the user opens a menu. Only a structural change (a menu shown
+        // or hidden) reassigns mainMenu.
+        if let existing = NSApp.mainMenu,
+           existing.items.count == mainMenu.items.count,
+           zip(existing.items, mainMenu.items).allSatisfy({ $0.title == $1.title }) {
+            for (old, new) in zip(existing.items, mainMenu.items) {
+                // Detach the freshly-built submenu from its (local) item
+                // first: `setSubmenu:` throws NSInternalInconsistencyException
+                // if the menu is still a submenu of another item.
+                let sub = new.submenu
+                new.submenu = nil
+                old.submenu = sub
+            }
+        } else {
+            NSApp.mainMenu = mainMenu
+        }
     }
 
     /// Map Mojo's `"Cmd+Shift+S"`-style shortcut strings onto an NSMenuItem.
@@ -2128,6 +2216,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         fontOptionsReady = true
         for v in views where v.handle != 0 { applyFontOptions(to: v.handle) }
         if chromeDesktop != 0 { applyFontOptions(to: chromeDesktop) }
+        // The first frame ran session restore, so the focused editor now
+        // exists — refresh the menu to pick up its editor-dependent items
+        // (Edit / View). Doing it here, off the first paint, means the menu
+        // tracks the window instead of waiting for NSApp.isActive (which can
+        // lag a Dock launch by hundreds of ms — the visible stale-menu bug).
+        refreshMenu()
     }
 
     @discardableResult
@@ -2161,6 +2255,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let win = NSWindow(contentRect: initial,
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
+        // We own session persistence; opt out of macOS window restoration so
+        // no per-window state is saved and no post-crash "reopen windows?"
+        // dialog appears. See NSQuitAlwaysKeepsWindows in didFinishLaunching.
+        win.isRestorable = false
         win.title = "TurboKod"
         win.delegate = self
         win.contentView = view

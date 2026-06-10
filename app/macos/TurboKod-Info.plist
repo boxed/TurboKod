@@ -6,7 +6,7 @@
 	     built binary in a TurboKod.app so macOS shows the proper app name
 	     + icon in the menu bar and Dock). This is now the only TurboKod
 	     app, so it owns the turbokod:// scheme outright (the old alacritty
-	     wrapper, se.dryft.turbokod, is gone). -->
+	     wrapper, net.kodare.turbokod, is gone). -->
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
@@ -14,7 +14,7 @@
 	<key>CFBundleIconFile</key>
 	<string>icon</string>
 	<key>CFBundleIdentifier</key>
-	<string>se.dryft.turbokod.native</string>
+	<string>net.kodare.turbokod.native</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -30,7 +30,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>se.dryft.turbokod.url</string>
+			<string>net.kodare.turbokod.url</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLSchemes</key>

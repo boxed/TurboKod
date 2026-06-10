@@ -104,9 +104,10 @@ from turbokod.local_changes import LocalChanges, build_minimal_patch
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
-    FileIndexer, GitignoreMatcher, find_in_project, replace_in_project,
-    walk_project_files,
+    FileIndexer, GitignoreMatcher, ProjectMatch, find_in_project,
+    replace_in_project, walk_project_files,
 )
+from turbokod.find_results_pane import FindResultsPane
 from turbokod.search_options import SearchOptions
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
@@ -718,6 +719,94 @@ def test_escape_drop_paths_joins_and_trails() raises:
     assert_equal(escape_drop_paths(String("\n")), String(""))
 
 
+def test_find_results_pane_multiselect() raises:
+    # Build a pane with 5 results and stamp the painted geometry so
+    # ``handle_mouse`` can map a click's y back to a row index (row r is
+    # at y == _list_top + r when scroll is 0).
+    var matches = List[ProjectMatch]()
+    for i in range(5):
+        matches.append(ProjectMatch(
+            String("/proj/file") + String(i) + String(".txt"),
+            String("file") + String(i) + String(".txt"),
+            i + 1, String("hit ") + String(i),
+        ))
+    var pane = FindResultsPane()
+    pane.load(matches^, String("hit"), String("/proj"))
+    pane.focused = True
+    pane._list_top = 1
+    pane._list_height = 5
+    var panel = Rect(0, 0, 40, 8)
+
+    # Plain click selects exactly one row; nothing is marked yet.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 1), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 1,
+        ),
+        panel,
+    )
+    assert_equal(pane.selected, 1)
+    assert_equal(pane._marked_count(), 0)
+
+    # Cmd-click toggles individual rows into the multi-select set.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 1), MOUSE_BUTTON_LEFT, True, False, MOD_META, 1,
+        ),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 3), MOUSE_BUTTON_LEFT, True, False, MOD_META, 1,
+        ),
+        panel,
+    )
+    assert_true(pane.marked[1])
+    assert_true(pane.marked[3])
+    assert_equal(pane._marked_count(), 2)
+
+    # Enter opens every marked hit (preserving order), then the queue drains.
+    _ = pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE))
+    var opened = pane.take_pending_opens()
+    assert_equal(len(opened), 2)
+    assert_equal(opened[0].line_no, 2)   # row 1 -> 1-based line 2
+    assert_equal(opened[1].line_no, 4)   # row 3 -> 1-based line 4
+    assert_equal(len(pane.take_pending_opens()), 0)
+
+    # Shift-click selects a contiguous range from the anchor (row 3, set by
+    # the last Cmd-click) to the clicked row 0 -> rows 0..3 marked.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 0), MOUSE_BUTTON_LEFT, True, False, MOD_SHIFT, 1,
+        ),
+        panel,
+    )
+    assert_equal(pane._marked_count(), 4)
+    assert_true(pane.marked[0])
+    assert_true(pane.marked[3])
+    assert_false(pane.marked[4])
+
+    # A plain click clears the multi-select set.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 2), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 1,
+        ),
+        panel,
+    )
+    assert_equal(pane._marked_count(), 0)
+    assert_equal(pane.selected, 2)
+
+    # Double-click opens just the clicked row when nothing is marked.
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(5, 1 + 2), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 2,
+        ),
+        panel,
+    )
+    var dbl = pane.take_pending_opens()
+    assert_equal(len(dbl), 1)
+    assert_equal(dbl[0].line_no, 3)
+
+
 def test_paint_title_commands_renders_separator_and_labels() raises:
     """``paint_title_commands`` paints ``- <cmd1> <cmd2>`` after the
     given start point, returning one hit rect per fully-painted
@@ -1181,7 +1270,7 @@ def test_open_file_at_golden_when_already_open() raises:
             - d.windows.windows[idx].editor.scroll_y,
         above + 5,                               # 5 rows below the golden row
     )
-    # Regression: with soft/smart wrap ON (the dryft-project default), an
+    # Regression: with soft/smart wrap ON (the myapp-project default), an
     # already-open jump still golden-centers rather than falling back to
     # minimal edge scroll. Short lines wrap to one visual row each, so the
     # buffer-row offset equals the visual-row offset = ``above``.
@@ -8488,19 +8577,19 @@ def test_quick_open_slash_in_query_requires_directory_separator() raises:
 
     Worked example with ``pro/views``:
 
-    * ``dryft/prospects/views.py`` — ``pro`` is in ``prospects``, then a
+    * ``myapp/prospects/views.py`` — ``pro`` is in ``prospects``, then a
       ``/``, then ``views`` is in ``views.py``. Match.
-    * ``dryft/homepage/cms/migrations/0003_snippet_preview_values.py`` —
+    * ``myapp/homepage/cms/migrations/0003_snippet_preview_values.py`` —
       no segment contains ``pro`` (``preview_values`` has ``p``, ``r``,
       ``v``, ``i``, ``e``, ``w``, ``s`` only as a *subsequence*, not a
       contiguous substring; the literal text ``pro`` is absent), so the
       first part already fails. No match.
     """
     assert_true(quick_open_match(
-        String("dryft/prospects/views.py"), String("pro/views"),
+        String("myapp/prospects/views.py"), String("pro/views"),
     ))
     assert_false(quick_open_match(
-        String("dryft/homepage/cms/migrations/0003_snippet_preview_values.py"),
+        String("myapp/homepage/cms/migrations/0003_snippet_preview_values.py"),
         String("pro/views"),
     ))
 
@@ -18419,9 +18508,9 @@ def test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
         # snippet of the code under review, conclusion line.
         String(
             "\"Meta\" overrides symbol of same name in class \"Table\"\n"
-            "  \"dryft.iommi.Table.Meta\" = [\n"
+            "  \"myapp.iommi.Table.Meta\" = [\n"
             "  ] is not assignable to "
-            "\"dryft.prospects.views.StartProjectQueue.Meta\""
+            "\"myapp.prospects.views.StartProjectQueue.Meta\""
         ),
         String("pyright"),
     ))
@@ -19488,6 +19577,7 @@ def _run_chunk_00() raises:
     test_emoji_double_width()
     test_shell_escape_path_escapes_metacharacters()
     test_escape_drop_paths_joins_and_trails()
+    test_find_results_pane_multiselect()
     test_paint_title_commands_renders_separator_and_labels()
     test_paint_title_commands_drops_clipped_label()
     test_hit_title_command_returns_id_under_cursor()

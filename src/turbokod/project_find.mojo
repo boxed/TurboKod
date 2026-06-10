@@ -31,7 +31,7 @@ from .colors import (
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC,
-    MOUSE_BUTTON_LEFT,
+    MOD_META, MOUSE_BUTTON_LEFT,
 )
 from .file_io import project_relative, read_file, stat_file
 from .geometry import Point, Rect
@@ -127,6 +127,15 @@ struct ProjectFind(Movable):
     # on the bottom border so the user knows their result list isn't the
     # whole picture.
     var _truncated: Bool
+    # Output flag, set when the user asks to dock the current result set
+    # into the persistent Find Results pane (via the title-bar ``[ Panel ]``
+    # button or Cmd+Enter). The host polls it the same frame it polls
+    # ``submitted``, hands ``matches`` / ``query`` / ``root`` to the pane,
+    # and closes the dialog. ``matches`` is left intact for the handoff.
+    var send_to_panel: Bool
+    # Cached rect of the title-bar ``[ Panel ]`` button for mouse routing
+    # (empty when no results, so the button isn't painted or clickable).
+    var _panel_btn_rect: Rect
 
     def __init__(out self):
         self.active = False
@@ -158,6 +167,8 @@ struct ProjectFind(Movable):
         self._row_hl_cached = List[Bool]()
         self._runner = _RgRunner()
         self._truncated = False
+        self.send_to_panel = False
+        self._panel_btn_rect = Rect(0, 0, 0, 0)
 
     def open(
         mut self,
@@ -197,6 +208,7 @@ struct ProjectFind(Movable):
             self.toggle_regex.hovered = False
             self.active = True
             self.submitted = False
+            self.send_to_panel = False
             return
         self.root = root^
         self.query = TextField()
@@ -227,6 +239,7 @@ struct ProjectFind(Movable):
         self._truncated = False
         self.active = True
         self.submitted = False
+        self.send_to_panel = False
 
     def close(mut self):
         """Hide the dialog and stop any in-flight ``rg`` child, but
@@ -235,6 +248,7 @@ struct ProjectFind(Movable):
         self._runner.cancel()
         self.active = False
         self.submitted = False
+        self.send_to_panel = False
         # Any pending debounce belongs to the just-closed session;
         # the next open decides whether to fire a fresh search.
         self._query_dirty_at_ms = 0
@@ -487,6 +501,24 @@ struct ProjectFind(Movable):
         # ESC / cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.
         paint_close_button(canvas, Point(container_bounds.a.x, container_bounds.a.y), border)
+        # Title-bar ``[ Panel ]`` button: docks the current result set into
+        # the persistent Find Results pane (Cmd+Enter does the same). Only
+        # painted once there are hits to keep — empty otherwise so the mouse
+        # router treats it as absent.
+        self._panel_btn_rect = Rect(0, 0, 0, 0)
+        if len(self.matches) > 0:
+            var btn_label = String(" [ Panel ] ")
+            var btn_w = display_columns(btn_label)
+            var btn_x = container_bounds.b.x - btn_w - 1
+            if btn_x > container_bounds.a.x + 6:
+                _ = painter.put_text(
+                    canvas, Point(btn_x, container_bounds.a.y), btn_label,
+                    Attr(BLACK, CYAN),
+                )
+                self._panel_btn_rect = Rect(
+                    btn_x, container_bounds.a.y,
+                    btn_x + btn_w, container_bounds.a.y + 1,
+                )
         # Input row: ``Search: <query>_   Cc  W  .*``.
         var input_y = self._input_y(container_bounds)
         var label = String(" Search: ")
@@ -611,7 +643,7 @@ struct ProjectFind(Movable):
             canvas, container_bounds, painter, ctx_top + 1, ctx_attr, ctx_match,
         )
         # Hint at the very bottom (overlays the bottom border).
-        var hint = String(" Enter: open  ESC: cancel  Up/Down: navigate ")
+        var hint = String(" Enter: open  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
         var hx = container_bounds.b.x - display_columns(hint) - 1
         if hx < container_bounds.a.x + 1:
             hx = container_bounds.a.x + 1
@@ -647,111 +679,16 @@ struct ProjectFind(Movable):
         mut registry: GrammarRegistry,
         idx: Int, hl_deadline: Int,
     ):
-        var row_attr = sel_line if is_sel else line_attr
-        var row_path = sel_path if is_sel else path_attr
-        var row_hl = sel_hl_attr if is_sel else hl_attr
-        var inner_left = container_bounds.a.x + 1
-        var inner_right = container_bounds.b.x - 1
-        painter.fill(
-            canvas, Rect(inner_left, y, inner_right, y + 1),
-            String(" "), row_attr,
+        # Thin wrapper over the shared ``paint_match_row`` free function so
+        # the Find Results pane renders identical rows (hit highlight,
+        # right-aligned ``rel:line``, budgeted syntax overlay) without
+        # duplicating the cache + slide logic.
+        paint_match_row(
+            canvas, container_bounds, painter, y, m, is_sel, self.query.text,
+            line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
+            registry, idx, hl_deadline,
+            self._row_hl_cache, self._row_hl_cached,
         )
-        # Right-aligned ``rel:line``.
-        var path_label = m.rel + String(":") + String(m.line_no)
-        var path_len = display_columns(path_label)
-        var path_x = inner_right - path_len - 1
-        if path_x < inner_left + 1:
-            path_x = inner_left + 1
-        _ = painter.put_text(
-            canvas, Point(path_x, y), path_label, row_path,
-        )
-        # Line text (left-aligned, clipped before the path label).
-        var line_x = inner_left + 1
-        var line_max = path_x - 1
-        if line_max <= line_x:
-            return
-        var line_stripped = _lstrip_tabs(m.line_text)
-        var bytes = line_stripped.as_bytes()
-        var hit = _find_bytes(line_stripped, self.query.text)
-        # Slide so the hit (if any) is visible inside the available width.
-        var avail = line_max - line_x
-        var start = 0
-        if hit >= 0 and hit + len(self.query.text.as_bytes()) > avail:
-            # Center the hit, keeping start >= 0.
-            start = hit - avail // 3
-            if start < 0:
-                start = 0
-        var end = len(bytes)
-        if end - start > avail:
-            end = start + avail
-        # Render plain run.
-        for i in range(start, end):
-            var b = Int(bytes[i])
-            var ch = chr(b) if b < 0x80 else String("?")
-            painter.set(canvas, line_x + (i - start), y, Cell(ch, row_attr, 1))
-        # Syntax-highlight overlay (attr-only). Skipped on the selected
-        # row because the solid yellow selection background clashes with
-        # the highlighter's blue-background palette — keeping the
-        # selection a clean color block reads better than mixing the two.
-        # We tokenize just this one line, so a token that opened on a
-        # prior line (e.g. a triple-quoted string) won't be recognized;
-        # acceptable for a one-line preview.
-        if not is_sel and len(bytes) <= _ROW_HIGHLIGHT_CAP:
-            # Resolve this row's highlights, preferring the per-match
-            # cache. The shared ``GrammarRegistry`` keeps compiled
-            # grammars across the session, but tokenizing a single line
-            # still walks every regex across the whole string — for a
-            # ~1 KB minified-JS line that's tens of ms, and a screenful
-            # of them re-tokenized every paint is what made arrow-key
-            # navigation crawl. So:
-            #   - cache hit  → reuse, free, always painted;
-            #   - cache miss → tokenize only while the frame's
-            #     ``hl_deadline`` budget holds, then store the result;
-            #   - over budget → render plain this frame, leave it
-            #     uncached so a later frame fills it in.
-            var have_hls = False
-            var hls = List[Highlight]()
-            if idx >= 0 and idx < len(self._row_hl_cached) \
-                    and self._row_hl_cached[idx]:
-                hls = self._row_hl_cache[idx].copy()
-                have_hls = True
-            elif monotonic_ms() < hl_deadline:
-                var one_line = List[String]()
-                one_line.append(line_stripped)
-                var row_cache = HighlightCache()
-                hls = highlight_for_extension_cached(
-                    extension_of(m.path), one_line, registry, row_cache,
-                )
-                if idx >= 0 and idx < len(self._row_hl_cache):
-                    self._row_hl_cache[idx] = hls.copy()
-                    self._row_hl_cached[idx] = True
-                have_hls = True
-            if have_hls:
-                for h in range(len(hls)):
-                    var hl = hls[h]
-                    if hl.row != 0:
-                        continue
-                    var hs = hl.col_start
-                    var he = hl.col_end
-                    if hs < start: hs = start
-                    if he > end:   he = end
-                    for i in range(hs, he):
-                        var b = Int(bytes[i])
-                        var ch = chr(b) if b < 0x80 else String("?")
-                        painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
-        # Highlight overlay for the hit.
-        if hit >= 0 and len(self.query.text.as_bytes()) > 0:
-            var hl_start = hit
-            var hl_end = hit + len(self.query.text.as_bytes())
-            if hl_start < start: hl_start = start
-            if hl_end > end:     hl_end = end
-            for i in range(hl_start, hl_end):
-                var b = Int(bytes[i])
-                var ch = chr(b) if b < 0x80 else String("?")
-                painter.set(canvas, line_x + (i - start), y, Cell(ch, row_hl, 1))
-        # Leading "…" hint when the line was sliced from the left.
-        if start > 0:
-            painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
 
     def _paint_context(
         self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
@@ -843,6 +780,12 @@ struct ProjectFind(Movable):
         if k == KEY_ESC:
             self.close()
             return True
+        # Cmd+Enter docks the current results into the Find Results pane
+        # (checked before the plain-Enter open so the modifier wins).
+        if k == KEY_ENTER and (event.mods & MOD_META) != 0:
+            if len(self.matches) > 0:
+                self.send_to_panel = True
+            return True
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.matches):
                 return True
@@ -872,6 +815,14 @@ struct ProjectFind(Movable):
         # glyph always dismisses the dialog.
         if close_button_clicked(container_bounds, event):
             self.close()
+            return True
+        # Title-bar ``[ Panel ]`` button — dock the current results.
+        if event.pressed and not event.motion \
+                and event.button == MOUSE_BUTTON_LEFT \
+                and self._panel_btn_rect.width() > 0 \
+                and self._panel_btn_rect.contains(event.pos):
+            if len(self.matches) > 0:
+                self.send_to_panel = True
             return True
         # Toggles run first so a click on a chip doesn't slip through
         # to the input field and reposition the cursor; the same call
@@ -936,6 +887,140 @@ struct ProjectFind(Movable):
 
 
 # --- internals --------------------------------------------------------------
+
+
+def paint_match_row(
+    mut canvas: Canvas, container_bounds: Rect, painter: Painter,
+    y: Int, m: ProjectMatch, is_sel: Bool, query: String,
+    line_attr: Attr, sel_line: Attr,
+    hl_attr: Attr, sel_hl_attr: Attr,
+    path_attr: Attr, sel_path: Attr,
+    mut registry: GrammarRegistry,
+    idx: Int, hl_deadline: Int,
+    mut row_hl_cache: List[List[Highlight]],
+    mut row_hl_cached: List[Bool],
+    mark: String = String(""),
+    force_plain: Bool = False,
+):
+    """Paint one search-result row inside ``container_bounds`` at row ``y``:
+    the matched line text (hit span highlighted) on the left, the
+    right-aligned ``rel:line`` label, and an optional attr-only syntax
+    overlay gated by ``hl_deadline``. ``query`` is the search term used to
+    locate + highlight the hit. ``row_hl_cache`` / ``row_hl_cached`` are the
+    caller's per-row highlight cache (kept aligned 1:1 with its result list);
+    a non-empty ``mark`` is painted in the row's left-margin cell (the Find
+    Results pane uses it for the multi-select tick). Shared verbatim by the
+    Find-in-Project modal and the Find Results pane so the two surfaces
+    render identical rows."""
+    var row_attr = sel_line if is_sel else line_attr
+    var row_path = sel_path if is_sel else path_attr
+    var row_hl = sel_hl_attr if is_sel else hl_attr
+    var inner_left = container_bounds.a.x + 1
+    var inner_right = container_bounds.b.x - 1
+    painter.fill(
+        canvas, Rect(inner_left, y, inner_right, y + 1),
+        String(" "), row_attr,
+    )
+    # Multi-select marker in the left-margin cell (blank otherwise). The
+    # text run starts at ``inner_left + 1`` so this never collides with it.
+    if len(mark.as_bytes()) > 0:
+        painter.set(canvas, inner_left, y, Cell(mark, row_attr, 1))
+    # Right-aligned ``rel:line``.
+    var path_label = m.rel + String(":") + String(m.line_no)
+    var path_len = display_columns(path_label)
+    var path_x = inner_right - path_len - 1
+    if path_x < inner_left + 1:
+        path_x = inner_left + 1
+    _ = painter.put_text(
+        canvas, Point(path_x, y), path_label, row_path,
+    )
+    # Line text (left-aligned, clipped before the path label).
+    var line_x = inner_left + 1
+    var line_max = path_x - 1
+    if line_max <= line_x:
+        return
+    var line_stripped = _lstrip_tabs(m.line_text)
+    var bytes = line_stripped.as_bytes()
+    var hit = _find_bytes(line_stripped, query)
+    # Slide so the hit (if any) is visible inside the available width.
+    var avail = line_max - line_x
+    var start = 0
+    if hit >= 0 and hit + len(query.as_bytes()) > avail:
+        # Center the hit, keeping start >= 0.
+        start = hit - avail // 3
+        if start < 0:
+            start = 0
+    var end = len(bytes)
+    if end - start > avail:
+        end = start + avail
+    # Render plain run.
+    for i in range(start, end):
+        var b = Int(bytes[i])
+        var ch = chr(b) if b < 0x80 else String("?")
+        painter.set(canvas, line_x + (i - start), y, Cell(ch, row_attr, 1))
+    # Syntax-highlight overlay (attr-only). Skipped on the selected
+    # row because the solid yellow selection background clashes with
+    # the highlighter's blue-background palette — keeping the
+    # selection a clean color block reads better than mixing the two.
+    # We tokenize just this one line, so a token that opened on a
+    # prior line (e.g. a triple-quoted string) won't be recognized;
+    # acceptable for a one-line preview.
+    if not is_sel and not force_plain and len(bytes) <= _ROW_HIGHLIGHT_CAP:
+        # Resolve this row's highlights, preferring the per-match
+        # cache. The shared ``GrammarRegistry`` keeps compiled
+        # grammars across the session, but tokenizing a single line
+        # still walks every regex across the whole string — for a
+        # ~1 KB minified-JS line that's tens of ms, and a screenful
+        # of them re-tokenized every paint is what made arrow-key
+        # navigation crawl. So:
+        #   - cache hit  → reuse, free, always painted;
+        #   - cache miss → tokenize only while the frame's
+        #     ``hl_deadline`` budget holds, then store the result;
+        #   - over budget → render plain this frame, leave it
+        #     uncached so a later frame fills it in.
+        var have_hls = False
+        var hls = List[Highlight]()
+        if idx >= 0 and idx < len(row_hl_cached) \
+                and row_hl_cached[idx]:
+            hls = row_hl_cache[idx].copy()
+            have_hls = True
+        elif monotonic_ms() < hl_deadline:
+            var one_line = List[String]()
+            one_line.append(line_stripped)
+            var row_cache = HighlightCache()
+            hls = highlight_for_extension_cached(
+                extension_of(m.path), one_line, registry, row_cache,
+            )
+            if idx >= 0 and idx < len(row_hl_cache):
+                row_hl_cache[idx] = hls.copy()
+                row_hl_cached[idx] = True
+            have_hls = True
+        if have_hls:
+            for h in range(len(hls)):
+                var hl = hls[h]
+                if hl.row != 0:
+                    continue
+                var hs = hl.col_start
+                var he = hl.col_end
+                if hs < start: hs = start
+                if he > end:   he = end
+                for i in range(hs, he):
+                    var b = Int(bytes[i])
+                    var ch = chr(b) if b < 0x80 else String("?")
+                    painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
+    # Highlight overlay for the hit.
+    if hit >= 0 and len(query.as_bytes()) > 0:
+        var hl_start = hit
+        var hl_end = hit + len(query.as_bytes())
+        if hl_start < start: hl_start = start
+        if hl_end > end:     hl_end = end
+        for i in range(hl_start, hl_end):
+            var b = Int(bytes[i])
+            var ch = chr(b) if b < 0x80 else String("?")
+            painter.set(canvas, line_x + (i - start), y, Cell(ch, row_hl, 1))
+    # Leading "…" hint when the line was sliced from the left.
+    if start > 0:
+        painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
 
 
 def _lstrip_tabs(s: String) -> String:
