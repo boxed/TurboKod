@@ -1132,6 +1132,37 @@ def test_editor_typing_and_arrows() raises:
     assert_equal(ed.selections[0].col, 0)
 
 
+def test_reveal_cursor_golden_ratio() raises:
+    """A deliberate jump (``golden=True``) parks the target line at the
+    golden-ratio point of the viewport — ~38.2% from the top — and clamps
+    at the file boundaries so a target near the top/EOF leaves no blank
+    rows."""
+    var text = String("line0")
+    for i in range(1, 200):
+        text += "\n" + String("line") + String(i)
+    var ed = Editor(text)
+    var view = Rect(0, 0, 80, 40)            # height 40
+    # h=40 → above = (39*382)//1000 = 14 rows of context above the line.
+    ed.move_to(100, 0, False)
+    ed.reveal_cursor(view, golden=True)
+    assert_equal(ed.scroll_y, 86)            # 100 - 14
+    assert_equal(ed.selections[0].row - ed.scroll_y, 14)
+    # Near the top: no negative scroll.
+    ed.move_to(3, 0, False)
+    ed.reveal_cursor(view, golden=True)
+    assert_equal(ed.scroll_y, 0)
+    # Near EOF: clamp so the last line sits at the bottom (no blank rows).
+    ed.move_to(199, 0, False)
+    ed.reveal_cursor(view, golden=True)
+    assert_equal(ed.scroll_y, 160)           # 199 - 40 + 1
+    # Plain (non-golden) reveal still does minimal edge scroll — a jump
+    # already in view doesn't re-anchor.
+    ed.scroll_y = 95
+    ed.move_to(100, 0, False)
+    ed.reveal_cursor(view)
+    assert_equal(ed.scroll_y, 95)
+
+
 def test_softwrap_visual_updown() raises:
     # In soft-wrap modes, up/down must move one *visual* row at a time —
     # stepping through a long line's wrapped segments instead of jumping
@@ -19182,6 +19213,7 @@ def _run_chunk_00() raises:
     test_text_buffer_split_and_join()
     test_editor_fold_collapse()
     test_editor_typing_and_arrows()
+    test_reveal_cursor_golden_ratio()
     test_softwrap_visual_updown()
     test_editor_typing_non_ascii()
     test_editor_word_movement()

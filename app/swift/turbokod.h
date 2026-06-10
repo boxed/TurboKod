@@ -79,6 +79,12 @@ int32_t tk_desktop_take_attention(int64_t h);
 // this to make that window key so the fresh shell is typeable without a click.
 int32_t tk_desktop_take_panel_focus_request(int64_t h);
 
+// One-shot: returns 1 once after a deliberate open-at-line jump (an output-pane
+// link click or a turbokod:// command-line open), 0 otherwise. The host uses it
+// to makeKeyAndOrderFront the editor's main window so a link clicked in the
+// floating panels window doesn't leave the jumped-to code behind the panels.
+int32_t tk_desktop_take_main_focus_request(int64_t h);
+
 // Floating panels (native macOS) — see docs/floating-panels.md. The tool
 // panels render on a separate host window via the _panels entry points; the
 // main window keeps using the functions above.

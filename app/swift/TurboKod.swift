@@ -1293,6 +1293,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         pair.window.makeKeyAndOrderFront(nil); changed = true
                     }
                 }
+                // A link click / command-line open just jumped to a line in
+                // this view's editor. Raise the main window to the front +
+                // key — the click may have come from the floating panels
+                // window sitting on top of it. Always drain so the one-shot
+                // flag can't fire stale later (no-op when docked + frontmost).
+                if tk_desktop_take_main_focus_request(v.handle) != 0 {
+                    NSApp.activate(ignoringOtherApps: true)
+                    v.window?.makeKeyAndOrderFront(nil); changed = true
+                }
             }
             for v in self.views {
                 guard let w = v.window, w.isVisible,

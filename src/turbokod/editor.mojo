@@ -9224,6 +9224,7 @@ struct Editor(Copyable, Movable):
     def reveal_cursor(
         mut self, view: Rect,
         margin_below: Int = 5, margin_above: Int = 0,
+        golden: Bool = False,
     ):
         """Scroll so the cursor is visible with up to ``margin_above``
         rows of context above it and ``margin_below`` below (each
@@ -9234,6 +9235,15 @@ struct Editor(Copyable, Movable):
         cursor *just* into view, which leaves it stuck at the edge
         with no surrounding code visible — fine for typing, jarring
         for landings.
+
+        With ``golden=True`` the cursor line is parked at the golden-
+        ratio point of the viewport instead of merely brought into view:
+        ~38.2% of the rows above it, the larger ~61.8% below (you read
+        downward into a landing, so the extra context belongs below).
+        Used for *deliberate* jumps to a line — link clicks, the
+        command-line ``turbokod://`` open, go-to-line — where re-anchoring
+        the whole view is wanted, not the minimal edge scroll. Clamped at
+        the file boundaries so a target near EOF doesn't leave blank rows.
         """
         var h = view.height()
         var total_gutter = self._total_gutter()
@@ -9242,18 +9252,32 @@ struct Editor(Copyable, Movable):
         if w < 1:
             w = 1
         var max_row = self.buffer.line_count() - 1
-        var top = self.selections[0].row - margin_above
-        if top < 0:
-            top = 0
-        var bottom = self.selections[0].row + margin_below
-        if bottom > max_row:
-            bottom = max_row
-        if top < self.scroll_y:
-            self.scroll_y = top
-        elif bottom >= self.scroll_y + h:
-            self.scroll_y = bottom - h + 1
-        if self.scroll_y < 0:
-            self.scroll_y = 0
+        if golden and not self._is_wrapping():
+            # 1 - 1/φ ≈ 0.382 of the usable rows sit above the line.
+            var above = ((h - 1) * 382) // 1000
+            if above < 0:
+                above = 0
+            self.scroll_y = self.selections[0].row - above
+            var max_scroll = max_row - h + 1
+            if max_scroll < 0:
+                max_scroll = 0
+            if self.scroll_y > max_scroll:
+                self.scroll_y = max_scroll
+            if self.scroll_y < 0:
+                self.scroll_y = 0
+        else:
+            var top = self.selections[0].row - margin_above
+            if top < 0:
+                top = 0
+            var bottom = self.selections[0].row + margin_below
+            if bottom > max_row:
+                bottom = max_row
+            if top < self.scroll_y:
+                self.scroll_y = top
+            elif bottom >= self.scroll_y + h:
+                self.scroll_y = bottom - h + 1
+            if self.scroll_y < 0:
+                self.scroll_y = 0
         if self._is_wrapping():
             self.scroll_x = 0
             var layout = self._layout_lines(h, w)

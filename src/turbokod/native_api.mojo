@@ -749,6 +749,20 @@ def tk_desktop_take_panel_focus_request(h: Int) -> Int32:
 
 
 @export
+def tk_desktop_take_main_focus_request(h: Int) -> Int32:
+    """Drain the one-shot "raise the main window" request. Returns 1
+    exactly once after a deliberate open-at-line jump (an output-pane
+    link click or a ``turbokod://`` command-line open), 0 otherwise. The
+    host uses it to ``makeKeyAndOrderFront`` the editor's main window so a
+    link clicked in the floating panels window doesn't leave the jumped-to
+    code behind the panels. Harmless to poll while docked — the flag just
+    clears."""
+    if h == 0:
+        return Int32(0)
+    return Int32(1) if _desk(h)[].consume_main_focus_request() else Int32(0)
+
+
+@export
 def tk_desktop_debug_stopped(h: Int) -> Int32:
     """1 while a DAP session is active and paused (stopped event received,
     not yet resumed). Backs ``TK_CAPTURE_WHEN=debug-stopped`` — the host's

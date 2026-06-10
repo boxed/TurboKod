@@ -1113,6 +1113,16 @@ struct Desktop(Movable):
     yank focus. An *explicit* new terminal does want focus, so the host
     drains this via ``consume_panel_focus_request`` and makes the panel
     window key. The terminal frontend never reads it."""
+    var main_focus_request: Bool
+    """One-shot: a deliberate open-at-line (``open_file_at`` — an output-
+    pane link click or the ``turbokod://`` command-line open) just landed
+    the cursor in an editor, so the *main* host window should come to the
+    front + key. Matters when the tool panels float on their own macOS
+    window (``panels_detached``) and a link click there would otherwise
+    leave the editor's window behind the panels. The macOS host drains it
+    via ``consume_main_focus_request``; the terminal frontend never reads
+    it. Sibling of ``panel_focus_request`` (which raises the *panel*
+    window); this raises the *editor* window."""
     # Latched current-execution location. Painted as ``▶`` in the gutter
     # of whichever editor has a matching ``file_path``. Cleared on
     # ``continued`` / ``terminated`` events.
@@ -1427,6 +1437,7 @@ struct Desktop(Movable):
         self.terminal_panes = List[TerminalPane]()
         self.attention_events = 0
         self.panel_focus_request = False
+        self.main_focus_request = False
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self._dap_current_frame_id = -1
@@ -3434,8 +3445,14 @@ struct Desktop(Movable):
             col = 0
         self.windows.windows[existing].editor.move_to(row, col, False, True)
         self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(),
+            self.windows.windows[existing].interior(), golden=True,
         )
+        # A deliberate open-at-line (output-pane link, ``turbokod://``
+        # open from the command line, …) should also bring the editor's
+        # OS window to the front + key — the click may have come from a
+        # floating panel window sitting on top. The macOS host drains
+        # this each tick; the terminal frontend never reads it.
+        self.main_focus_request = True
 
     def new_file(mut self, screen: Rect):
         """Open a fresh, file-less editor window using the same placement
@@ -7724,6 +7741,15 @@ struct Desktop(Movable):
         var tcmd = self.test_pane.consume_command_id()
         if len(tcmd.as_bytes()) > 0:
             _ = self.dispatch_action(tcmd^, screen)
+        # …and the same ``File "<path>", line N`` link channel — a click
+        # on a traceback line in the test runner output should jump to
+        # the source just like the debug pane above.
+        var treq = self.test_pane.consume_open_request()
+        if len(treq[0].as_bytes()) > 0:
+            try:
+                self.open_file_at(treq[0], treq[1] - 1, 0, screen)
+            except e:
+                print("desktop: test_pane open_file_at", treq[0], ":", String(e))
         if self.dap.has_stack():
             var frames = self._mark_subtle_frames(self.dap.take_stack())
             if len(frames) > 0:
@@ -8080,6 +8106,14 @@ struct Desktop(Movable):
         it to make the floating panel window key. See the field doc."""
         var req = self.panel_focus_request
         self.panel_focus_request = False
+        return req
+
+    def consume_main_focus_request(mut self) -> Bool:
+        """Drain the one-shot ``main_focus_request`` flag. True exactly
+        once after an open-at-line jump; the macOS host uses it to bring
+        the editor's main window to the front + key. See the field doc."""
+        var req = self.main_focus_request
+        self.main_focus_request = False
         return req
 
     def _focus_dock(mut self, kind: UInt8, idx: Int = 0):
@@ -12535,8 +12569,7 @@ struct Desktop(Movable):
                         n = 0
                 self.windows.windows[idx].editor.goto_line(n)
                 self.windows.windows[idx].editor.reveal_cursor(
-                    self.windows.windows[idx].interior(),
-                    margin_below=10, margin_above=10,
+                    self.windows.windows[idx].interior(), golden=True,
                 )
             return Optional[String]()
         if pa == _PA_REPLACE_DO:
