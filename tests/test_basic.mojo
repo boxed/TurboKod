@@ -1479,6 +1479,93 @@ def test_editor_double_click_drag_extends_by_word_backward() raises:
     assert_equal(ed.selection_text(), String("hello world foo"))
 
 
+def _terminal_pane_with_text(text: String) -> TerminalPane:
+    """A pane whose VT row 0 holds ``text``, with a body rect set so
+    screen Point(x, 1) maps to grid (row 0, col x). Skips paint so the
+    test doesn't need a TTY."""
+    var pane = TerminalPane()
+    pane.vt.feed_string(text)
+    # Body starts one row below the panel top (the chrome border row),
+    # so a body click lands at y >= 1 and never trips chrome hit-tests.
+    pane._last_body = Rect(Point(0, 1), Point(pane.vt.cols, 25))
+    return pane^
+
+
+def test_terminal_double_click_selects_word() raises:
+    var pane = _terminal_pane_with_text(String("hello world foo bar"))
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    # Press with click_count == 2 — the terminal parser stamps this the
+    # way the native/terminal frontends do for a genuine double-click.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(8, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 2), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(8, 1), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_true(pane.has_selection())
+    assert_equal(pane.selected_text(), String("world"))
+
+
+def test_terminal_double_click_drag_extends_by_word() raises:
+    var pane = _terminal_pane_with_text(String("hello world foo bar"))
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(8, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 2), panel,
+    )
+    # Drag (button held, motion) onto "bar" — selection grows whole
+    # words, not cell-by-cell.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(17, 1), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(17, 1), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_equal(pane.selected_text(), String("world foo bar"))
+
+
+def test_terminal_double_click_drag_backward_by_word() raises:
+    var pane = _terminal_pane_with_text(String("hello world foo bar"))
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    # Double-click "foo" (col 13), then drag back to "hello" (col 2).
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(13, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 2), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_equal(pane.selected_text(), String("hello world foo"))
+
+
+def test_terminal_triple_click_drag_extends_by_line() raises:
+    var pane = _terminal_pane_with_text(String("row zero\r\nrow one\r\nrow two"))
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    # Triple-click row 0, then drag down to row 2 — whole rows select.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 3), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 3), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 3), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_equal(pane.selected_text(), String("row zero\nrow one\nrow two"))
+
+
 def test_editor_triple_click_selects_line() raises:
     var ed = Editor(String("first line\nsecond line\nthird line"))
     # Three quick presses on row 1, col 4.
@@ -14073,6 +14160,110 @@ def test_debug_pane_drag_selects_output_text() raises:
     assert_equal(pane.selected_text(), String("hello world"))
 
 
+def test_debug_pane_double_click_selects_word() raises:
+    """Double-clicking a word in the run/debug output selects just that
+    word — the editor's word-select gesture, now framework-wide."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("hello world foo bar"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    var hy = -1
+    var hx = -1
+    for y in range(1, 8):
+        var x = _find_glyph_x(c, y, String("h"))
+        if x >= 0:
+            hy = y
+            hx = x
+            break
+    assert_true(hy >= 0)
+    # Double-click inside "world" (8 cells past line start).
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 8, hy), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 2), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 8, hy), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_true(pane.has_selection())
+    assert_equal(pane.selected_text(), String("world"))
+
+
+def test_debug_pane_double_click_drag_extends_by_word() raises:
+    """Double-click + drag grows the selection whole words at a time."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("hello world foo bar"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    var hy = -1
+    var hx = -1
+    for y in range(1, 8):
+        var x = _find_glyph_x(c, y, String("h"))
+        if x >= 0:
+            hy = y
+            hx = x
+            break
+    assert_true(hy >= 0)
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 8, hy), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 2), panel,
+    )
+    # Drag onto "bar" (col 17) — even a partial-word hover selects the
+    # whole word.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 17, hy), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(hx + 17, hy), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_equal(pane.selected_text(), String("world foo bar"))
+
+
+def test_debug_pane_triple_click_drag_extends_by_line() raises:
+    """Triple-click + drag selects whole logical lines."""
+    var pane = DebugPane()
+    pane.visible = True
+    pane.set_mode(PANE_MODE_RUN)
+    pane.append_output(String("row zero\nrow one\nrow two"))
+    var panel = Rect(0, 0, 40, 8)
+    var c = Canvas(40, 8)
+    pane.paint(c, panel)
+    var y0 = -1
+    var x0 = -1
+    var y2 = -1
+    for y in range(1, 8):
+        if _find_glyph_x(c, y, String("z")) >= 0:   # "zero" — only row 0
+            y0 = y
+            x0 = _find_glyph_x(c, y, String("r"))
+        if _find_glyph_x(c, y, String("t")) >= 0:   # "two" — only row 2
+            y2 = y
+    assert_true(y0 >= 0)
+    assert_true(y2 >= 0)
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(x0 + 2, y0), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 3), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(x0 + 2, y2), MOUSE_BUTTON_LEFT, True, True),
+        panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(x0 + 2, y2), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    assert_equal(
+        pane.selected_text(), String("row zero\nrow one\nrow two"),
+    )
+
+
 def test_debug_pane_selection_spans_multiple_lines() raises:
     """A selection that starts on one logical line and ends on
     another joins the two slices with a newline."""
@@ -19014,6 +19205,10 @@ def _run_chunk_01() raises:
     test_editor_triple_click_last_line_no_newline()
     test_editor_triple_click_drag_extends_by_line_forward()
     test_editor_triple_click_drag_extends_by_line_backward()
+    test_terminal_double_click_selects_word()
+    test_terminal_double_click_drag_extends_by_word()
+    test_terminal_double_click_drag_backward_by_word()
+    test_terminal_triple_click_drag_extends_by_line()
     test_editor_cut_whole_line_when_no_selection()
     test_editor_cut_whole_line_only_line()
     test_editor_smart_indent_mirrors_previous_line()
@@ -19664,6 +19859,9 @@ def _run_chunk_05() raises:
     test_debug_pane_run_log_arrow_click_scrolls_output()
     test_debug_pane_run_log_thumb_drag_scrolls_output()
     test_debug_pane_drag_selects_output_text()
+    test_debug_pane_double_click_selects_word()
+    test_debug_pane_double_click_drag_extends_by_word()
+    test_debug_pane_triple_click_drag_extends_by_line()
     test_debug_pane_selection_spans_multiple_lines()
     test_debug_pane_plain_click_clears_selection()
     test_targets_dialog_edit_and_submit()

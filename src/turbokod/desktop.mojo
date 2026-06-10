@@ -5563,7 +5563,19 @@ struct Desktop(Movable):
             if self.file_tree.focused:
                 self._focus_dock(DOCK_FILE_TREE)
             return Optional[String]()
-        _ = self.windows.handle_mouse(event, self.workspace_rect(screen))
+        # A left-click that lands on a floating window (a focusing press,
+        # not a hover/wheel/release/drag) hands keyboard focus to that
+        # window — so drop every docked pane's ``focused`` flag, the same
+        # ``_focus_dock`` rebroadcast the pane hit-tests above do. Without
+        # this the last-focused pane (typically an open terminal) keeps
+        # ``focused=True`` and steals Cmd+V even though the click moved
+        # focus to an editor.
+        var clicked_window = self.windows.handle_mouse(
+            event, self.workspace_rect(screen)
+        )
+        if clicked_window and event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion:
+            self._focus_dock(DOCK_NONE)
         # A click on the per-line bar in the git-changes gutter stamps a
         # ``pending_git_revert`` on the focused editor — surface the popup
         # before the next paint so it lands on this same frame.

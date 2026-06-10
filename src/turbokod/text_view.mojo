@@ -41,7 +41,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import (
     byte_slice, char_width, codepoint_at, is_word_codepoint,
-    leading_indent_bytes, utf8_codepoint_size,
+    leading_indent_bytes, utf8_codepoint_size, word_range_at,
 )
 
 
@@ -790,6 +790,20 @@ struct TextLog(Copyable, Movable):
     endpoint falls into the dropped prefix."""
 
     var selection: Selection
+    var _drag_word: Bool
+    """True while a double-click drag is in flight: the moving end snaps
+    to whole-word boundaries, anchored on the double-clicked word. Same
+    gesture the editor and terminal/text-field controls support."""
+    var _drag_line: Bool
+    """True while a triple-click drag is in flight: the selection grows
+    by whole logical lines, anchored on the triple-clicked line."""
+    var _dc_anchor_line: Int
+    var _dc_anchor_lo: Int
+    var _dc_anchor_hi: Int
+    """``(line, lo, hi)`` byte bounds of the double-clicked word — the
+    fixed end of a word-snapped drag."""
+    var _tc_anchor_line: Int
+    """Line the triple-click landed on — the fixed end of a line drag."""
     var scroll: Int
     """Visual-row index of the bottom visible row when ``autoscroll``
     is False. Wheel ticks move this in visual-row units; soft-wrap
@@ -830,6 +844,12 @@ struct TextLog(Copyable, Movable):
         self.default_attr = default_attr
         self.max_lines = max_lines
         self.selection = Selection.empty()
+        self._drag_word = False
+        self._drag_line = False
+        self._dc_anchor_line = 0
+        self._dc_anchor_lo = 0
+        self._dc_anchor_hi = 0
+        self._tc_anchor_line = 0
         self.scroll = 0
         self.autoscroll = True
         self.last_visual = List[VisualLine]()
@@ -848,6 +868,12 @@ struct TextLog(Copyable, Movable):
         self.default_attr = copy.default_attr
         self.max_lines = copy.max_lines
         self.selection = copy.selection
+        self._drag_word = copy._drag_word
+        self._drag_line = copy._drag_line
+        self._dc_anchor_line = copy._dc_anchor_line
+        self._dc_anchor_lo = copy._dc_anchor_lo
+        self._dc_anchor_hi = copy._dc_anchor_hi
+        self._tc_anchor_line = copy._tc_anchor_line
         self.scroll = copy.scroll
         self.autoscroll = copy.autoscroll
         self.last_visual = copy.last_visual.copy()
@@ -957,6 +983,8 @@ struct TextLog(Copyable, Movable):
         self.line_attrs = List[Attr]()
         self.line_runs = List[List[ColorRun]]()
         self.selection = Selection.empty()
+        self._drag_word = False
+        self._drag_line = False
         self.scroll = 0
         self.autoscroll = True
         self.last_visual = List[VisualLine]()
@@ -1152,6 +1180,8 @@ struct TextLog(Copyable, Movable):
             return True
         if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
             self.selection.dragging = False
+            self._drag_word = False
+            self._drag_line = False
             return True
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed:
             return False
@@ -1163,22 +1193,96 @@ struct TextLog(Copyable, Movable):
                 if clamp_y < self.last_y0:
                     clamp_y = self.last_y0
                 var pos = self.position_at(Point(event.pos.x, clamp_y))
-                self.selection.cursor_line = pos[0]
-                self.selection.cursor_col = pos[1]
-                if self.selection.cursor_line != self.selection.anchor_line \
-                        or self.selection.cursor_col != self.selection.anchor_col:
-                    self.selection.active = True
+                # A double-/triple-click drag snaps the moving end to
+                # whole-word / whole-line boundaries (same gesture as
+                # the editor and terminal panes).
+                if self._drag_line:
+                    self._extend_line_drag(pos[0])
+                elif self._drag_word:
+                    self._extend_word_drag(pos[0], pos[1])
+                else:
+                    self.selection.cursor_line = pos[0]
+                    self.selection.cursor_col = pos[1]
+                    if self.selection.cursor_line != self.selection.anchor_line \
+                            or self.selection.cursor_col != self.selection.anchor_col:
+                        self.selection.active = True
                 return True
             return False
-        # Fresh left-press: anchor + start drag, clear any prior
-        # selection. The active flag stays False until motion fires —
-        # that way a plain click without a drag clears the selection
-        # without producing a zero-width new one.
+        # Fresh left-press. ``click_count`` is stamped by the frontend
+        # (the same machinery that drives editor / terminal word-select),
+        # so 2 = word, 3 = line, anything else = plain caret drag.
         var pos = self.position_at(event.pos)
+        if len(self.lines) > 0 and event.click_count == 2:
+            self._select_word_at(pos[0], pos[1])
+            return True
+        if len(self.lines) > 0 and event.click_count >= 3:
+            self._select_line_at(pos[0])
+            return True
+        # Plain press: anchor + start drag, clear any prior selection.
+        # The active flag stays False until motion fires — that way a
+        # plain click without a drag clears the selection without
+        # producing a zero-width new one.
+        self._drag_word = False
+        self._drag_line = False
         self.selection = Selection(
             False, True, pos[0], pos[1], pos[0], pos[1],
         )
         return True
+
+    def _select_word_at(mut self, line_idx: Int, col: Int):
+        """Select the word at ``(line_idx, col)`` and arm a word-snapped
+        drag so a following double-click-drag extends whole word at a
+        time. Uses the editor's word definition (``word_range_at``)."""
+        var rng = word_range_at(self.lines[line_idx], col)
+        self.selection = Selection(
+            True, True, line_idx, rng[0], line_idx, rng[1],
+        )
+        self._drag_word = True
+        self._drag_line = False
+        self._dc_anchor_line = line_idx
+        self._dc_anchor_lo = rng[0]
+        self._dc_anchor_hi = rng[1]
+
+    def _extend_word_drag(mut self, line_idx: Int, col: Int):
+        """Word-snapped extend: the double-clicked word stays anchored;
+        the moving end snaps to whichever word the pointer is over.
+        ``Selection.normalized`` sorts endpoints, so we just place the
+        two outer edges on the correct sides."""
+        var rng = word_range_at(self.lines[line_idx], col)
+        var word_lo = rng[0]
+        var word_hi = rng[1]
+        var al = self._dc_anchor_line
+        var a_lo = self._dc_anchor_lo
+        var a_hi = self._dc_anchor_hi
+        var backward = (line_idx < al) or (line_idx == al and word_hi <= a_lo)
+        if backward:
+            self.selection = Selection(
+                True, True, al, a_hi, line_idx, word_lo,
+            )
+        else:
+            self.selection = Selection(
+                True, True, al, a_lo, line_idx, word_hi,
+            )
+
+    def _select_line_at(mut self, line_idx: Int):
+        """Select the whole logical line ``line_idx`` (triple-click) and
+        arm a line-snapped drag."""
+        var n = len(self.lines[line_idx].as_bytes())
+        self.selection = Selection(True, True, line_idx, 0, line_idx, n)
+        self._drag_line = True
+        self._drag_word = False
+        self._tc_anchor_line = line_idx
+
+    def _extend_line_drag(mut self, line_idx: Int):
+        """Line-snapped extend: whole logical lines from the triple-
+        clicked anchor line to the line under the pointer."""
+        var al = self._tc_anchor_line
+        if line_idx >= al:
+            var n = len(self.lines[line_idx].as_bytes())
+            self.selection = Selection(True, True, al, 0, line_idx, n)
+        else:
+            var n = len(self.lines[al].as_bytes())
+            self.selection = Selection(True, True, al, n, line_idx, 0)
 
     def handle_key(mut self, event: Event) -> Bool:
         """Scroll keys: PageUp/PageDown move by 8 visual rows,

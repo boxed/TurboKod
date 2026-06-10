@@ -119,6 +119,20 @@ struct TerminalPane(Copyable, Movable):
     var sel_anchor_c: Int
     var sel_focus_r: Int
     var sel_focus_c: Int
+    var _drag_word: Bool
+    """True while a double-click drag is in flight: the moving end of
+    the selection snaps to whole-word boundaries, anchored on the
+    originally double-clicked word. Mirrors the editor's word-drag."""
+    var _drag_line: Bool
+    """True while a triple-click drag is in flight: the selection grows
+    by whole rows, anchored on the originally triple-clicked row."""
+    var _dc_anchor_r: Int
+    var _dc_anchor_lo: Int
+    var _dc_anchor_hi: Int
+    """Grid bounds (row, lo-inclusive, hi-exclusive) of the word the
+    double-click landed on — the fixed end of a word-snapped drag."""
+    var _tc_anchor_r: Int
+    """Row the triple-click landed on — the fixed end of a line drag."""
 
     # --- spawn config --------------------------------------------------
     var cwd: String
@@ -198,6 +212,12 @@ struct TerminalPane(Copyable, Movable):
         self.sel_anchor_c = 0
         self.sel_focus_r = 0
         self.sel_focus_c = 0
+        self._drag_word = False
+        self._drag_line = False
+        self._dc_anchor_r = 0
+        self._dc_anchor_lo = 0
+        self._dc_anchor_hi = 0
+        self._tc_anchor_r = 0
         self.cwd = String("")
         self.startup_command = String("")
         self._last_body = Rect.empty()
@@ -227,6 +247,12 @@ struct TerminalPane(Copyable, Movable):
         self.sel_anchor_c = copy.sel_anchor_c
         self.sel_focus_r = copy.sel_focus_r
         self.sel_focus_c = copy.sel_focus_c
+        self._drag_word = copy._drag_word
+        self._drag_line = copy._drag_line
+        self._dc_anchor_r = copy._dc_anchor_r
+        self._dc_anchor_lo = copy._dc_anchor_lo
+        self._dc_anchor_hi = copy._dc_anchor_hi
+        self._tc_anchor_r = copy._tc_anchor_r
         self.cwd = copy.cwd
         self.startup_command = copy.startup_command
         self._last_body = copy._last_body
@@ -602,6 +628,8 @@ struct TerminalPane(Copyable, Movable):
     def _clear_selection(mut self):
         self.sel_active = False
         self.sel_dragging = False
+        self._drag_word = False
+        self._drag_line = False
 
     # --- copy / selection delegates ------------------------------------
 
@@ -801,17 +829,50 @@ struct TerminalPane(Copyable, Movable):
         self.sel_focus_c  = rc[1]
         self.sel_dragging = True
         self.sel_active   = False
+        # A plain single-click drag selects cell-by-cell, not snapped.
+        self._drag_word = False
+        self._drag_line = False
 
     def _extend_drag(mut self, pos: Point):
+        # While a double-/triple-click drag is in flight the moving end
+        # snaps to whole-word / whole-line boundaries, the same gesture
+        # the editor and text-field controls already support.
         var rc = self._grid_xy_for_pos(pos)
-        self.sel_focus_r = rc[0]
-        self.sel_focus_c = rc[1]
+        if self._drag_line:
+            self._extend_line_drag(rc[0])
+        elif self._drag_word:
+            self._extend_word_drag(rc[0], rc[1])
+        else:
+            self.sel_focus_r = rc[0]
+            self.sel_focus_c = rc[1]
+
+    def _word_bounds_at(self, r: Int, c_in: Int) -> Tuple[Int, Int]:
+        """``(lo, hi)`` of the word-class run around column ``c_in`` on
+        row ``r`` — ``lo`` inclusive, ``hi`` exclusive. A separator cell
+        returns just that single cell. "Word" is everything that isn't
+        whitespace or punctuation; the broad definition every terminal
+        uses for double-click (paths and identifiers stay one word)."""
+        var c = c_in
+        if c >= self.vt.cols: c = self.vt.cols - 1
+        if c < 0: c = 0
+        if not _is_word_glyph(self.vt.view_cell_at(r, c).glyph):
+            return (c, c + 1)
+        var lo = c
+        while lo > 0:
+            if not _is_word_glyph(self.vt.view_cell_at(r, lo - 1).glyph):
+                break
+            lo -= 1
+        var hi = c
+        while hi + 1 < self.vt.cols:
+            if not _is_word_glyph(self.vt.view_cell_at(r, hi + 1).glyph):
+                break
+            hi += 1
+        return (lo, hi + 1)
 
     def _select_word_at(mut self, pos: Point):
-        """Expand selection to the word boundary at ``pos`` — the
-        contiguous run of word-class cells around the click. "Word"
-        is everything that isn't whitespace or punctuation; same
-        definition every terminal uses for double-click."""
+        """Select the word under ``pos`` and arm a word-snapped drag so
+        a following double-click-drag extends the selection whole word
+        at a time (matching the editor)."""
         var rc = self._grid_xy_for_pos(pos)
         var r = rc[0]
         var c = rc[1]
@@ -819,51 +880,83 @@ struct TerminalPane(Copyable, Movable):
         if c < 0:
             self.sel_active = False
             return
-        if not _is_word_glyph(self.vt.view_cell_at(r, c).glyph):
-            # Click landed on a separator — select just that cell so
-            # the user gets *some* feedback (and a single-cell copy is
-            # often what they wanted with punctuation anyway).
-            self.sel_anchor_r = r
-            self.sel_anchor_c = c
-            self.sel_focus_r = r
-            self.sel_focus_c = c + 1
-            self.sel_dragging = False
-            self.sel_active = True
-            return
-        # Walk left while still on a word glyph.
-        var lo = c
-        while lo > 0:
-            if not _is_word_glyph(self.vt.view_cell_at(r, lo - 1).glyph):
-                break
-            lo -= 1
-        # Walk right.
-        var hi = c
-        while hi + 1 < self.vt.cols:
-            if not _is_word_glyph(self.vt.view_cell_at(r, hi + 1).glyph):
-                break
-            hi += 1
+        var bounds = self._word_bounds_at(r, c)
         self.sel_anchor_r = r
-        self.sel_anchor_c = lo
+        self.sel_anchor_c = bounds[0]
         self.sel_focus_r = r
-        self.sel_focus_c = hi + 1
-        self.sel_dragging = False
+        self.sel_focus_c = bounds[1]
+        self.sel_active = True
+        # Stay "dragging" so a drag without lifting the button keeps
+        # consuming motion events, and remember the clicked word as the
+        # fixed anchor for the snap.
+        self.sel_dragging = True
+        self._drag_word = True
+        self._drag_line = False
+        self._dc_anchor_r = r
+        self._dc_anchor_lo = bounds[0]
+        self._dc_anchor_hi = bounds[1]
+
+    def _extend_word_drag(mut self, r: Int, c: Int):
+        """Word-snapped extend: the originally double-clicked word stays
+        anchored; the moving end snaps to whichever word the pointer is
+        over. Coordinate order is normalized at read time, so we only
+        need to place the two outer edges on the correct sides."""
+        var bounds = self._word_bounds_at(r, c)
+        var word_lo = bounds[0]
+        var word_hi = bounds[1]
+        var ar = self._dc_anchor_r
+        var a_lo = self._dc_anchor_lo
+        var a_hi = self._dc_anchor_hi
+        var backward = (r < ar) or (r == ar and word_hi <= a_lo)
+        if backward:
+            self.sel_anchor_r = ar
+            self.sel_anchor_c = a_hi
+            self.sel_focus_r = r
+            self.sel_focus_c = word_lo
+        else:
+            self.sel_anchor_r = ar
+            self.sel_anchor_c = a_lo
+            self.sel_focus_r = r
+            self.sel_focus_c = word_hi
         self.sel_active = True
 
     def _select_line_at(mut self, pos: Point):
-        """Expand selection to the full visual row at ``pos`` — same
-        as triple-click in every terminal."""
+        """Select the full visual row at ``pos`` (triple-click) and arm
+        a line-snapped drag so a following drag grows the selection a
+        whole row at a time."""
         var rc = self._grid_xy_for_pos(pos)
         var r = rc[0]
         self.sel_anchor_r = r
         self.sel_anchor_c = 0
         self.sel_focus_r = r
         self.sel_focus_c = self.vt.cols
-        self.sel_dragging = False
+        self.sel_active = True
+        self.sel_dragging = True
+        self._drag_word = False
+        self._drag_line = True
+        self._tc_anchor_r = r
+
+    def _extend_line_drag(mut self, r: Int):
+        """Line-snapped extend: whole rows from the triple-clicked
+        anchor row to the row under the pointer."""
+        var ar = self._tc_anchor_r
+        if r >= ar:
+            self.sel_anchor_r = ar
+            self.sel_anchor_c = 0
+            self.sel_focus_r = r
+            self.sel_focus_c = self.vt.cols
+        else:
+            self.sel_anchor_r = ar
+            self.sel_anchor_c = self.vt.cols
+            self.sel_focus_r = r
+            self.sel_focus_c = 0
         self.sel_active = True
 
     def _end_drag(mut self, pos: Point):
         self._extend_drag(pos)
         self.sel_dragging = False
+        self._drag_word = False
+        self._drag_line = False
         # Tiny drag (or single click) → no selection. Saves the user
         # from accidentally clobbering the clipboard with a one-cell
         # capture when they meant to focus the pane.
