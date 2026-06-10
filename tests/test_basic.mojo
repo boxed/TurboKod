@@ -15912,6 +15912,156 @@ def test_desktop_save_then_restore_round_trip_through_paint() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+def _doc_paths(d: Desktop) -> List[String]:
+    """Basenames of the file-backed editor windows currently open, in
+    window order. Test helper for the window-cap assertions."""
+    var out = List[String]()
+    for i in range(len(d.windows.windows)):
+        if d.windows.windows[i].is_editor \
+                and len(d.windows.windows[i].editor.file_path.as_bytes()) > 0:
+            out.append(basename(d.windows.windows[i].editor.file_path))
+    return out^
+
+
+def _docs_contains(d: Desktop, name: String) -> Bool:
+    var paths = _doc_paths(d)
+    for i in range(len(paths)):
+        if paths[i] == name:
+            return True
+    return False
+
+
+def test_window_cap_evicts_least_recently_used() raises:
+    """With ``max_open_windows`` set, opening a document past the cap
+    closes the least-recently-focused *clean* document — never the
+    focused one, and never one with unsaved changes."""
+    var root = String("/tmp/turbokod_window_cap_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/a.txt"), String("a\n")))
+    assert_true(write_file(root + String("/b.txt"), String("b\n")))
+    assert_true(write_file(root + String("/c.txt"), String("c\n")))
+    assert_true(write_file(root + String("/d.txt"), String("d\n")))
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    d.config.max_open_windows = 2
+
+    d.open_file(root + String("/a.txt"), screen)
+    d.open_file(root + String("/b.txt"), screen)
+    assert_equal(len(_doc_paths(d)), 2)
+    # Force a deterministic recency order: a older than b.
+    d.windows.windows[0]._last_focus_ms = 1000
+    d.windows.windows[1]._last_focus_ms = 2000
+
+    # Opening c is the 3rd doc → evict the least-recently-used clean doc (a).
+    d.open_file(root + String("/c.txt"), screen)
+    assert_equal(len(_doc_paths(d)), 2)
+    assert_false(_docs_contains(d, String("a.txt")))
+    assert_true(_docs_contains(d, String("b.txt")))
+    assert_true(_docs_contains(d, String("c.txt")))
+
+    # Now mark b (the LRU) dirty and open d. b is protected, so the next
+    # least-recently-used *clean* doc (c) is evicted instead.
+    for i in range(len(d.windows.windows)):
+        if basename(d.windows.windows[i].editor.file_path) == String("b.txt"):
+            d.windows.windows[i]._last_focus_ms = 1000
+            d.windows.windows[i].editor.dirty = True
+        elif basename(d.windows.windows[i].editor.file_path) == String("c.txt"):
+            d.windows.windows[i]._last_focus_ms = 1500
+    d.open_file(root + String("/d.txt"), screen)
+    assert_equal(len(_doc_paths(d)), 2)
+    assert_true(_docs_contains(d, String("b.txt")))   # dirty → kept
+    assert_false(_docs_contains(d, String("c.txt")))  # clean LRU → evicted
+    assert_true(_docs_contains(d, String("d.txt")))
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+def test_restore_caps_to_most_recently_focused() raises:
+    """Session restore honors ``max_open_windows``: it reopens only the
+    most-recently-focused ``cap`` documents (always including the
+    focused one), so a launch with a huge saved session doesn't pay to
+    reconstruct every window on the first frame."""
+    var root = String("/tmp/turbokod_restore_cap_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/a.txt"), String("a\n")))
+    assert_true(write_file(root + String("/b.txt"), String("b\n")))
+    assert_true(write_file(root + String("/c.txt"), String("c\n")))
+    # Hand-author a session with three windows of distinct recency.
+    # ``a`` is the focused (least-recent) one — it must survive the cap;
+    # ``b`` is most-recent; ``c`` is in between and gets dropped at cap=2.
+    var s = Session()
+    var wa = SessionWindow()
+    wa.path = String("a.txt")
+    wa.rect_a_x = 2; wa.rect_a_y = 1; wa.rect_b_x = 30; wa.rect_b_y = 12
+    wa.restore_a_x = 2; wa.restore_a_y = 1
+    wa.restore_b_x = 30; wa.restore_b_y = 12
+    wa.last_focus_ms = 100
+    s.windows.append(wa^)
+    var wb = SessionWindow()
+    wb.path = String("b.txt")
+    wb.rect_a_x = 32; wb.rect_a_y = 1; wb.rect_b_x = 60; wb.rect_b_y = 12
+    wb.restore_a_x = 32; wb.restore_a_y = 1
+    wb.restore_b_x = 60; wb.restore_b_y = 12
+    wb.last_focus_ms = 300
+    s.windows.append(wb^)
+    var wc = SessionWindow()
+    wc.path = String("c.txt")
+    wc.rect_a_x = 2; wc.rect_a_y = 14; wc.rect_b_x = 30; wc.rect_b_y = 25
+    wc.restore_a_x = 2; wc.restore_a_y = 14
+    wc.restore_b_x = 30; wc.restore_b_y = 25
+    wc.last_focus_ms = 200
+    s.windows.append(wc^)
+    s.z_order.append(0); s.z_order.append(2); s.z_order.append(1)
+    s.focused = 0
+    assert_true(save_session(root, s))
+
+    var screen = Rect(0, 0, 80, 30)
+    var canvas = Canvas(80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    d.config.max_open_windows = 2
+    assert_true(d._pending_restore)
+    d.paint(canvas, screen)
+    # Only two documents reopened: focused ``a`` (always kept) and the
+    # most-recently-focused ``b``; ``c`` is dropped.
+    assert_equal(len(_doc_paths(d)), 2)
+    assert_true(_docs_contains(d, String("a.txt")))
+    assert_true(_docs_contains(d, String("b.txt")))
+    assert_false(_docs_contains(d, String("c.txt")))
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+def test_window_cap_disabled_when_zero() raises:
+    """``max_open_windows == 0`` means no limit — opening many documents
+    never evicts."""
+    var root = String("/tmp/turbokod_window_cap_off_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    assert_true(write_file(root + String("/a.txt"), String("a\n")))
+    assert_true(write_file(root + String("/b.txt"), String("b\n")))
+    assert_true(write_file(root + String("/c.txt"), String("c\n")))
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    d.config.max_open_windows = 0
+    d.open_file(root + String("/a.txt"), screen)
+    d.open_file(root + String("/b.txt"), screen)
+    d.open_file(root + String("/c.txt"), screen)
+    assert_equal(len(_doc_paths(d)), 3)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
 def test_desktop_snapshot_skips_untitled_windows() raises:
     """``_snapshot_session`` filters out non-editor windows and
     file-less editors (Untitled buffers). Only file-backed editors
@@ -20031,6 +20181,9 @@ def _run_chunk_05() raises:
     test_desktop_restores_multiple_windows_at_distinct_positions()
     test_desktop_snapshot_captures_per_window_rects()
     test_desktop_save_then_restore_round_trip_through_paint()
+    test_window_cap_evicts_least_recently_used()
+    test_restore_caps_to_most_recently_focused()
+    test_window_cap_disabled_when_zero()
     test_desktop_restores_maximized_window_keeps_per_window_restore_rect()
     test_speller_check_word_basic()
     test_speller_strips_common_suffixes()
