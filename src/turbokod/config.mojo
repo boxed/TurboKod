@@ -65,6 +65,12 @@ def _config_path() -> String:
 comptime MIN_FONT_SIZE = 6
 comptime MAX_FONT_SIZE = 128
 
+# Default per-project cap on the number of open file-backed editor
+# windows ("documents"). When a project would exceed this, the
+# least-recently-focused clean document is closed (see
+# ``Desktop._enforce_window_cap``). A value of ``0`` means "no limit".
+comptime DEFAULT_MAX_OPEN_WINDOWS = 20
+
 
 def default_font_label() -> String:
     """Display label for the built-in bitmap font (the ``font`` config
@@ -245,6 +251,12 @@ struct TurbokodConfig(Copyable, Movable):
     # never touched the size keeps each font's natural default when the
     # family changes.
     var font_size: Int
+    # Per-project cap on simultaneously-open file-backed editor windows.
+    # Once a project hits this, opening another document closes the
+    # least-recently-focused clean (saved) document; session restore
+    # likewise reopens only the most-recently-used documents up to this
+    # count. ``0`` disables the cap. Default ``DEFAULT_MAX_OPEN_WINDOWS``.
+    var max_open_windows: Int
     # Canonical absolute paths of recently opened projects, most-recent
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
@@ -289,6 +301,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
         self.font_size = 0
+        self.max_open_windows = DEFAULT_MAX_OPEN_WINDOWS
         self.recent_projects = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
@@ -320,6 +333,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.theme = copy.theme
         self.font = copy.font
         self.font_size = copy.font_size
+        self.max_open_windows = copy.max_open_windows
         self.recent_projects = copy.recent_projects.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
@@ -468,6 +482,13 @@ def load_config() -> TurbokodConfig:
                 cfg.font_size = MIN_FONT_SIZE
             elif cfg.font_size > MAX_FONT_SIZE:
                 cfg.font_size = MAX_FONT_SIZE
+        cfg.max_open_windows = json_get_int(
+            root, String("max_open_windows"), cfg.max_open_windows,
+        )
+        # Negative is meaningless — fold it into "no limit" (0) so a
+        # corrupt or hand-edited config can't wedge the cap below zero.
+        if cfg.max_open_windows < 0:
+            cfg.max_open_windows = 0
         cfg.recent_projects = json_get_string_array(
             root, String("recent_projects"),
         )
@@ -584,6 +605,9 @@ def save_config(config: TurbokodConfig) -> Bool:
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
     root.put(String("font_size"), json_int(config.font_size))
+    root.put(
+        String("max_open_windows"), json_int(config.max_open_windows),
+    )
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))

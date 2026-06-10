@@ -70,6 +70,10 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
     var cursor_col: Int
     var scroll_x: Int
     var scroll_y: Int
+    var last_focus_ms: Int
+    """Wall-clock ms of the last time this window was focused (``0`` if
+    never). Persisted so a restore can prefer the most-recently-used
+    documents when the open count would exceed ``max_open_windows``."""
 
     def __init__(out self):
         self.path = String("")
@@ -86,6 +90,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.cursor_col = 0
         self.scroll_x = 0
         self.scroll_y = 0
+        self.last_focus_ms = 0
 
     def __copyinit__(mut self, copy: Self):
         self.path = copy.path
@@ -102,6 +107,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.cursor_col = copy.cursor_col
         self.scroll_x = copy.scroll_x
         self.scroll_y = copy.scroll_y
+        self.last_focus_ms = copy.last_focus_ms
 
 
 struct Session(Movable):
@@ -192,6 +198,7 @@ def _parse_session_window(node: JsonValue) -> SessionWindow:
     var scroll = read_int_pair(node, String("scroll"), 0, 0)
     w.scroll_x = scroll[0]
     w.scroll_y = scroll[1]
+    w.last_focus_ms = json_get_int(node, String("last_focus_ms"), 0)
     return w^
 
 
@@ -257,6 +264,7 @@ def _encode_session_window(w: SessionWindow) -> JsonValue:
     )
     obj.put(String("cursor"), encode_int_pair(w.cursor_row, w.cursor_col))
     obj.put(String("scroll"), encode_int_pair(w.scroll_x, w.scroll_y))
+    obj.put(String("last_focus_ms"), json_int(w.last_focus_ms))
     return obj^
 
 

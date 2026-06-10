@@ -1137,6 +1137,18 @@ struct Window(Copyable, Movable):
     var _baseline_ws: Rect
     var _has_baseline: Bool
     var _last_observed_rect: Rect
+    # Wall-clock ms (``wall_clock_ms``) of the last time this window was
+    # the focused one — refreshed every paint while focused, then frozen
+    # when focus moves on. Drives least-recently-used eviction once the
+    # per-project open-document cap (``config.max_open_windows``) is hit,
+    # and is persisted into ``session.json`` so a restore can reopen the
+    # most-recently-used documents first. ``0`` means "never focused".
+    var _last_focus_ms: Int
+    # True once this editor window has been announced to its language
+    # server (``textDocument/didOpen``). Lets session restore skip the
+    # expensive per-window LSP startup on the critical first frame and
+    # open it lazily when the window is first focused instead.
+    var _lsp_opened: Bool
 
     def __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
@@ -1151,6 +1163,8 @@ struct Window(Copyable, Movable):
         self._baseline_ws = Rect.empty()
         self._has_baseline = False
         self._last_observed_rect = sized
+        self._last_focus_ms = 0
+        self._lsp_opened = False
 
     @staticmethod
     def editor_window(var title: String, rect: Rect, var text: String) -> Self:
@@ -1180,6 +1194,8 @@ struct Window(Copyable, Movable):
         self._baseline_ws = copy._baseline_ws
         self._has_baseline = copy._has_baseline
         self._last_observed_rect = copy._last_observed_rect
+        self._last_focus_ms = copy._last_focus_ms
+        self._lsp_opened = copy._lsp_opened
 
     def interior(self) -> Rect:
         """Region inside the border where content / editor paints. Public
@@ -1835,6 +1851,38 @@ struct WindowManager(Movable):
             self.focused = self.z_order[len(self.z_order) - 1]
         else:
             self.focused = -1
+        return True
+
+    def close_by_index(mut self, idx: Int) -> Bool:
+        """Close an arbitrary window by index (not necessarily the focused
+        one). Used by least-recently-used eviction. Focus is preserved on
+        whatever window was focused before — its index is shifted down by
+        one if it sat above ``idx`` — unless ``idx`` *was* the focused
+        window, in which case focus falls to the new top of ``z_order``.
+        Returns True if a window was closed.
+        """
+        if idx < 0 or idx >= len(self.windows):
+            return False
+        var was_focused = self.focused
+        _ = self.windows.pop(idx)
+        var new_z = List[Int]()
+        for k in range(len(self.z_order)):
+            var v = self.z_order[k]
+            if v == idx:
+                continue
+            if v > idx:
+                v = v - 1
+            new_z.append(v)
+        self.z_order = new_z^
+        if was_focused == idx:
+            if len(self.z_order) > 0:
+                self.focused = self.z_order[len(self.z_order) - 1]
+            else:
+                self.focused = -1
+        elif was_focused > idx:
+            self.focused = was_focused - 1
+        else:
+            self.focused = was_focused
         return True
 
     def maximize_all(mut self, workspace: Rect):

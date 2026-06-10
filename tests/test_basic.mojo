@@ -1132,6 +1132,67 @@ def test_editor_typing_and_arrows() raises:
     assert_equal(ed.selections[0].col, 0)
 
 
+def test_open_file_at_golden_when_already_open() raises:
+    """A deliberate open-at-line jump golden-centers the target whether
+    the file is being opened fresh OR is already open in a window. Uses a
+    temp file under /tmp (no project root) so ``paint``'s session-restore
+    never fires and contaminates the window list."""
+    var path = _temp_path(String("_golden.txt"))
+    var content = String("L0")
+    for i in range(1, 3000):
+        content += "\n" + String("L") + String(i)
+    assert_true(write_file(path, content))
+    var d = Desktop()
+    var screen = Rect(0, 0, 120, 50)
+    # Fresh open at a deep line.
+    d.open_file_at(path, 1500, 0, screen)
+    var idx = len(d.windows.windows) - 1
+    assert_true(d.windows.windows[idx].is_editor)
+    var h = d.windows.windows[idx].interior().height()
+    var above = ((h - 1) * 382) // 1000
+    assert_equal(
+        d.windows.windows[idx].editor.selections[0].row
+            - d.windows.windows[idx].editor.scroll_y,
+        above,
+    )                                            # fresh = golden
+    # Jump again to a different deep line — now ALREADY open (same path).
+    d.open_file_at(path, 2500, 0, screen)
+    assert_equal(len(d.windows.windows), idx + 1)   # no second window
+    assert_equal(
+        d.windows.windows[idx].editor.selections[0].row
+            - d.windows.windows[idx].editor.scroll_y,
+        above,
+    )                                            # already-open = golden too
+    # ``_jump_to`` (goto-definition / references / nav) defaults to golden
+    # for an already-open file too — the regression the user hit.
+    d._jump_to(DefinitionResolved(path, 1000, 0), screen)
+    assert_equal(len(d.windows.windows), idx + 1)
+    assert_equal(
+        d.windows.windows[idx].editor.selections[0].row
+            - d.windows.windows[idx].editor.scroll_y,
+        above,
+    )
+    # …and the debugger opt-out (``golden=False``) does NOT golden-center:
+    # a small step from the current line keeps minimal edge scroll.
+    d._jump_to(DefinitionResolved(path, 1005, 0), screen, golden=False)
+    assert_equal(
+        d.windows.windows[idx].editor.selections[0].row
+            - d.windows.windows[idx].editor.scroll_y,
+        above + 5,                               # 5 rows below the golden row
+    )
+    # Regression: with soft/smart wrap ON (the dryft-project default), an
+    # already-open jump still golden-centers rather than falling back to
+    # minimal edge scroll. Short lines wrap to one visual row each, so the
+    # buffer-row offset equals the visual-row offset = ``above``.
+    d.windows.windows[idx].editor.wrap_mode = WRAP_SOFT
+    d._jump_to(DefinitionResolved(path, 2000, 0), screen)
+    assert_equal(
+        d.windows.windows[idx].editor.selections[0].row
+            - d.windows.windows[idx].editor.scroll_y,
+        above,
+    )
+
+
 def test_reveal_cursor_golden_ratio() raises:
     """A deliberate jump (``golden=True``) parks the target line at the
     golden-ratio point of the viewport — ~38.2% from the top — and clamps
@@ -5580,7 +5641,7 @@ def test_settings_language_server_section_seeds_and_toggles() raises:
     s.open(
         False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
-        String(""), List[String](), 0, 0, 0, 0, -1, True,
+        String(""), List[String](), 0, 0, 0, 0, -1, 20, True,
         ls_format_on_save=True,
         ls_signature_help=False,
         ls_inlay_hints=True,
@@ -5881,6 +5942,46 @@ def test_settings_editor_toggle_marks_dirty() raises:
     assert_false(s.ensure_final_newline)
     assert_false(s._final_nl_cb.on)
     assert_true(s.dirty)
+
+
+def test_settings_max_open_windows_seeds_and_edits() raises:
+    """``open`` seeds the max-open-windows field from config (0 → blank =
+    no limit; a positive value shows its digits), and the inline editor
+    appends digits / backspaces, parsing back to the persisted int while
+    raising ``dirty``."""
+    var s = Settings()
+    s.open(
+        True,
+        List[LanguageServerOverride](), String(""),
+        True, True,
+        max_open_windows=20,
+    )
+    assert_equal(s.max_windows_text, String("20"))
+    assert_equal(s.max_open_windows_value(), 20)
+    assert_false(s.dirty)
+    # 0 (no limit) renders as an empty field and parses back to 0.
+    s.close()
+    s.open(
+        True,
+        List[LanguageServerOverride](), String(""),
+        True, True,
+        max_open_windows=0,
+    )
+    assert_equal(len(s.max_windows_text.as_bytes()), 0)
+    assert_equal(s.max_open_windows_value(), 0)
+    # Editing the field: digits append, Backspace removes, value reparses.
+    s.dirty = False
+    _ = s._max_windows_key(UInt32(ord("5")))
+    _ = s._max_windows_key(UInt32(ord("0")))
+    assert_equal(s.max_windows_text, String("50"))
+    assert_equal(s.max_open_windows_value(), 50)
+    assert_true(s.dirty)
+    _ = s._max_windows_key(KEY_BACKSPACE)
+    assert_equal(s.max_open_windows_value(), 5)
+    # Field is capped at 4 digits so it can't overflow the box.
+    s.max_windows_text = String("9999")
+    assert_false(s._max_windows_key(UInt32(ord("9"))) and len(s.max_windows_text.as_bytes()) > 4)
+    assert_equal(len(s.max_windows_text.as_bytes()), 4)
 
 
 def test_language_catalog_carries_comment_tokens() raises:
@@ -15100,6 +15201,7 @@ def test_session_round_trip() raises:
     w0.cursor_col = 7
     w0.scroll_x = 0
     w0.scroll_y = 30
+    w0.last_focus_ms = 1_700_000_000_123
     s.windows.append(w0^)
     var w1 = SessionWindow()
     w1.path = String("/abs/somewhere/else.txt")
@@ -15128,6 +15230,9 @@ def test_session_round_trip() raises:
     assert_equal(loaded.windows[0].rect_b_y, 28)
     assert_equal(loaded.windows[0].cursor_row, 42)
     assert_equal(loaded.windows[0].scroll_y, 30)
+    assert_equal(loaded.windows[0].last_focus_ms, 1_700_000_000_123)
+    # A window that never carried a timestamp loads as 0 (epoch).
+    assert_equal(loaded.windows[1].last_focus_ms, 0)
     assert_false(loaded.windows[0].is_maximized)
     assert_true(loaded.windows[1].is_maximized)
     assert_equal(loaded.windows[1].restore_a_x, 10)
@@ -19214,6 +19319,7 @@ def _run_chunk_00() raises:
     test_editor_fold_collapse()
     test_editor_typing_and_arrows()
     test_reveal_cursor_golden_ratio()
+    test_open_file_at_golden_when_already_open()
     test_softwrap_visual_updown()
     test_editor_typing_non_ascii()
     test_editor_word_movement()
@@ -19373,6 +19479,7 @@ def _run_chunk_02() raises:
     test_settings_save_behavior_no_change_no_dirty()
     test_settings_open_seeds_editor_toggles()
     test_settings_editor_toggle_marks_dirty()
+    test_settings_max_open_windows_seeds_and_edits()
     test_language_catalog_carries_comment_tokens()
     test_apply_language_overrides_replaces_candidates()
     test_apply_language_overrides_adds_new_language()

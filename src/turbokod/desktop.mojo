@@ -142,7 +142,7 @@ from .debugger_config import (
     python_debugger_spec_for_venv, python_venv_has_debugpy,
 )
 from .menu import Menu, MenuBar, MenuItem
-from .posix import monotonic_ms, which
+from .posix import monotonic_ms, wall_clock_ms, which
 from .project import replace_in_project
 from .search_options import SearchOptions, build_search_regex
 from .project_find import ProjectFind
@@ -2988,9 +2988,25 @@ struct Desktop(Movable):
         # treatment (highlight flush, view-config sync, fit-into) as
         # ones that were already open. The flag is one-shot: armed in
         # ``_set_project`` and cleared here even on failure.
+        var did_restore = False
         if self._pending_restore:
             self._pending_restore = False
             self._restore_session(screen)
+            did_restore = True
+        # Keep the focused document's "last focused" timestamp fresh, and
+        # open its language server lazily. LSP startup is deferred out of
+        # session restore (it's the main-thread cost that delays the
+        # window appearing), so we skip it on the same frame that ran the
+        # restore — the window paints first, then the *next* frame pays
+        # the focused document's LSP startup. Non-focused restored
+        # documents stay LSP-closed until the user focuses them.
+        var fw = self.windows.focused
+        if 0 <= fw and fw < len(self.windows.windows) \
+                and self.windows.windows[fw].is_editor:
+            self.windows.windows[fw]._last_focus_ms = wall_clock_ms()
+            if not did_restore and not self.windows.windows[fw]._lsp_opened:
+                self.windows.windows[fw]._lsp_opened = True
+                self._maybe_lsp_open(fw)
         # If a file-open earlier deferred the install prompt because some
         # other modal was up, retry now. ``_maybe_prompt_lsp_install``
         # re-defers on a fresh `pending_*` field if a modal is *still*
@@ -3265,6 +3281,13 @@ struct Desktop(Movable):
                         self.windows.windows[i].editor.reveal_cursor(
                             self.windows.windows[i].interior(),
                         )
+            # Max open windows. Lowering the cap takes effect immediately:
+            # close the least-recently-used clean documents down to the
+            # new limit.
+            var new_max = self.settings.max_open_windows_value()
+            if new_max != self.config.max_open_windows:
+                self.config.max_open_windows = new_max
+                self._enforce_window_cap()
             _ = save_config(self.config)
             self._rebuild_lsp_specs()
             # Kick every running server to re-read its configuration — a
@@ -3410,7 +3433,15 @@ struct Desktop(Movable):
         if was_max:
             var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
-        self._maybe_lsp_open(len(self.windows.windows) - 1)
+        var opened_idx = len(self.windows.windows) - 1
+        # Stamp it focused now so an immediate cap enforcement never
+        # picks the just-opened window as the least-recently-used victim.
+        self.windows.windows[opened_idx]._last_focus_ms = wall_clock_ms()
+        self.windows.windows[opened_idx]._lsp_opened = True
+        self._maybe_lsp_open(opened_idx)
+        # Opening this document may have pushed the project past its
+        # open-window cap — evict the least-recently-used clean document.
+        self._enforce_window_cap()
 
     def open_file_at(
         mut self, path: String, line: Int, character: Int, screen: Rect,
@@ -4449,6 +4480,72 @@ struct Desktop(Movable):
                 notified.append(p)
                 self._lsp_notify_closed_if_last(p)
 
+    def _is_document_window(self, idx: Int) -> Bool:
+        """A "document" for cap-counting purposes is a file-backed editor
+        window. Tool panes (run output, diff, DAP views) and Untitled
+        buffers (no ``file_path``) don't count — the cap is about open
+        files, and Untitled/tool windows have nothing to reopen from
+        disk after eviction."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return False
+        if not self.windows.windows[idx].is_editor:
+            return False
+        return len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0
+
+    def _close_editor_window_at(mut self, idx: Int):
+        """Close the editor window at ``idx`` with the same side effects
+        as the user closing it (view-state capture + LSP didClose),
+        rather than just dropping it from the manager. Used by
+        ``_enforce_window_cap`` to evict least-recently-used documents."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        self._capture_view_state_for_window(idx)
+        var closing_path = String("")
+        if self.windows.windows[idx].is_editor:
+            closing_path = self.windows.windows[idx].editor.file_path
+        _ = self.windows.close_by_index(idx)
+        if len(closing_path.as_bytes()) > 0:
+            self._lsp_notify_closed_if_last(closing_path)
+
+    def _enforce_window_cap(mut self):
+        """Keep at most ``config.max_open_windows`` file-backed editor
+        documents open in this project, closing the least-recently-
+        focused *clean* document(s) when over. Never evicts the focused
+        document or one with unsaved changes — if every over-cap document
+        is dirty or focused we leave the count above the cap rather than
+        risk losing edits (the user has been warned only by the count
+        itself; data safety wins). A ``cap`` of ``0`` disables the limit.
+        """
+        var cap = self.config.max_open_windows
+        if cap <= 0:
+            return
+        while True:
+            var count = 0
+            for i in range(len(self.windows.windows)):
+                if self._is_document_window(i):
+                    count += 1
+            if count <= cap:
+                return
+            # Pick the evictable document with the oldest last-focus time.
+            var victim = -1
+            var victim_ms = 0
+            for i in range(len(self.windows.windows)):
+                if not self._is_document_window(i):
+                    continue
+                if i == self.windows.focused:
+                    continue
+                if self.windows.windows[i].editor.has_uncommitted_changes():
+                    continue
+                var ms = self.windows.windows[i]._last_focus_ms
+                if victim < 0 or ms < victim_ms:
+                    victim = i
+                    victim_ms = ms
+            if victim < 0:
+                # Nothing safe to evict — every over-cap document is
+                # focused or has unsaved changes. Stop rather than loop.
+                return
+            self._close_editor_window_at(victim)
+
     def _set_project(mut self, path: String):
         debug_log(String("[_set_project] ENTER path=") + path)
         # Resolve so a label like ``.`` becomes the actual directory name,
@@ -4632,6 +4729,7 @@ struct Desktop(Movable):
             sw.cursor_col = self.windows.windows[i].editor.selections[0].col
             sw.scroll_x = self.windows.windows[i].editor.scroll_x
             sw.scroll_y = self.windows.windows[i].editor.scroll_y
+            sw.last_focus_ms = self.windows.windows[i]._last_focus_ms
             session.windows.append(sw^)
             win_to_session.append(len(session.windows) - 1)
         # Translate z-order. Drop windows that filtered out so the
@@ -4833,10 +4931,45 @@ struct Desktop(Movable):
         self._pending_restore_refit = Optional[Session](session_copy^)
         var workspace = self.workspace_rect(screen)
         var root = self.project.value()
+        # Honor the per-project open-window cap: when the saved session
+        # holds more documents than ``max_open_windows``, restore only
+        # the most-recently-focused ``cap`` of them (the focused entry is
+        # always kept). The rest simply aren't reopened — they age out of
+        # the session on the next save, reachable via File ▸ Open recent.
+        # Skipped entries map to ``-1`` in ``session_to_window`` exactly
+        # like a failed restore, so z-order / focus remapping is unchanged.
+        var cap = self.config.max_open_windows
+        var allowed = List[Bool]()
+        for _ in range(len(session.windows)):
+            allowed.append(True)
+        if cap > 0 and len(session.windows) > cap:
+            for ai in range(len(allowed)):
+                allowed[ai] = False
+            var kept = 0
+            if 0 <= session.focused and session.focused < len(allowed):
+                allowed[session.focused] = True
+                kept = 1
+            while kept < cap:
+                var best = -1
+                var best_ms = 0
+                for ci in range(len(session.windows)):
+                    if allowed[ci]:
+                        continue
+                    var ms = session.windows[ci].last_focus_ms
+                    if best < 0 or ms > best_ms:
+                        best = ci
+                        best_ms = ms
+                if best < 0:
+                    break
+                allowed[best] = True
+                kept += 1
         # Track which session entry maps to which final window index
         # so we can reapply z-order and focus afterwards.
         var session_to_window = List[Int]()
         for i in range(len(session.windows)):
+            if not allowed[i]:
+                session_to_window.append(-1)
+                continue
             var sw = session.windows[i]
             var resolved = _resolve_session_path(root, sw.path)
             var rect = _clip_rect_to_workspace(
@@ -4872,6 +5005,11 @@ struct Desktop(Movable):
                 self.windows.windows[existing].editor.selections[0].anchor_col = sw.cursor_col
                 self.windows.windows[existing].editor.scroll_x = sw.scroll_x
                 self.windows.windows[existing].editor.scroll_y = sw.scroll_y
+                # Keep the more-recent of the two: this window may have
+                # just been opened (stamped "now" by ``open_file``), which
+                # must win over the older persisted value.
+                if sw.last_focus_ms > self.windows.windows[existing]._last_focus_ms:
+                    self.windows.windows[existing]._last_focus_ms = sw.last_focus_ms
                 session_to_window.append(existing)
                 continue
             try:
@@ -4883,6 +5021,7 @@ struct Desktop(Movable):
                 # clobber ``_restore_rect`` with the current rect.
                 var w = Window.from_file(basename(resolved), rect, resolved)
                 w._restore_rect = restore
+                w._last_focus_ms = sw.last_focus_ms
                 # Apply per-buffer view state. Bounds-check the cursor
                 # against the restored buffer so a stale row from a
                 # file that's since been truncated doesn't put us off
@@ -4909,9 +5048,9 @@ struct Desktop(Movable):
                     self.windows.windows[idx]._restore_rect = restore
                 debug_log(String("[_restore_session] adding window idx=")
                     + String(idx) + String(" path=") + resolved)
-                self._maybe_lsp_open(idx)
-                debug_log(String("[_restore_session] after _maybe_lsp_open ")
-                    + String(idx))
+                # LSP is opened lazily when the document is first focused
+                # (see ``paint``) — not here, so restore stays off the
+                # critical first-frame path.
                 session_to_window.append(idx)
             except e:
                 debug_log(String("[_restore_session] EXCEPTION: ") + String(e))
@@ -5912,6 +6051,7 @@ struct Desktop(Movable):
                 self.host_font_ideal_size,
                 self.config.wrap_mode,
                 self.config.smart_wrap_comma_threshold,
+                self.config.max_open_windows,
                 self.config.cursor_blink,
                 self.config.lsp_format_on_save,
                 self.config.lsp_signature_help,
@@ -7700,9 +7840,11 @@ struct Desktop(Movable):
                     var fpath = self._dap_stack_cache[i].path
                     var fline = self._dap_stack_cache[i].line
                     if len(fpath.as_bytes()) > 0:
+                        # Debugger frame switch: minimal scroll, no golden
+                        # re-anchor — stepping shouldn't yank the view.
                         self._jump_to(
                             DefinitionResolved(fpath, fline, 0),
-                            screen,
+                            screen, golden=False,
                         )
                     break
         # Variable expand click: request children for the row's ref.
@@ -7762,11 +7904,13 @@ struct Desktop(Movable):
                 # next pass through the dependent line actually fires.
                 self.dap.arm_dependents(frames[0].path, frames[0].line)
                 if len(frames[0].path.as_bytes()) > 0:
+                    # Debugger stop: minimal scroll, no golden re-anchor —
+                    # stepping line-by-line shouldn't yank the view.
                     self._jump_to(
                         DefinitionResolved(
                             frames[0].path, frames[0].line, 0,
                         ),
-                        screen,
+                        screen, golden=False,
                     )
                     # LSP inline values for the stopped frame's file (the
                     # InlineValueText variant renders at end-of-line).
@@ -9231,9 +9375,19 @@ struct Desktop(Movable):
             tabs.append(StatusTab(t.name, running, debugging))
         self.status_bar.set_tabs(tabs^, self.targets.active)
 
-    def _jump_to(mut self, target: DefinitionResolved, screen: Rect):
+    def _jump_to(
+        mut self, target: DefinitionResolved, screen: Rect,
+        golden: Bool = True,
+    ):
         """Focus the window for ``target.path`` (opening it if needed) and
-        move the cursor to ``(line, character)``."""
+        move the cursor to ``(line, character)``.
+
+        ``golden`` (default True — every user-initiated navigation: goto-
+        definition, references, Find Symbol, type/impl/decl nav, …) parks
+        the target at the golden-ratio point of the viewport whether the
+        file opens fresh or was already on screen. The debugger passes
+        ``golden=False`` so single-stepping keeps the minimal edge-scroll
+        that doesn't yank the view on every step."""
         var existing = self._find_window_for_path(target.path)
         if existing < 0:
             try:
@@ -9251,7 +9405,7 @@ struct Desktop(Movable):
             target.line, target.character, False, True,
         )
         self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(),
+            self.windows.windows[existing].interior(), golden=golden,
         )
 
     def _click_landed_at_definition(
@@ -9557,8 +9711,9 @@ struct Desktop(Movable):
         if col < 0:
             col = 0
         self.windows.windows[existing].editor.move_to(row, col, False, True)
+        # Nav-history back/forward is a deliberate jump — golden-center it.
         self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(),
+            self.windows.windows[existing].interior(), golden=True,
         )
 
     def _open_recent_picker(mut self):

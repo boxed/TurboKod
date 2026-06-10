@@ -143,6 +143,27 @@ def monotonic_ms() -> Int:
     return sec * 1000 + nsec // 1_000_000
 
 
+def wall_clock_ms() -> Int:
+    """Milliseconds since the Unix epoch (``CLOCK_REALTIME``).
+
+    Unlike ``monotonic_ms``, the absolute value *is* meaningful and is
+    comparable across process launches — that's what makes it usable as
+    a persisted "last focused" timestamp for least-recently-used window
+    eviction. ``CLOCK_REALTIME`` is ``0`` on both Linux and Darwin, so
+    no per-platform id is needed. Returns ``0`` if the syscall fails;
+    callers treat that as "epoch", i.e. the least-recently-used value.
+    """
+    var ts = alloc_zero_buffer(TIMESPEC_SIZE)
+    var rc = external_call["clock_gettime", Int32](
+        Int32(0), ts.unsafe_ptr(),
+    )
+    if Int(rc) != 0:
+        return 0
+    var sec = Int(ts.unsafe_ptr().bitcast[Int64]()[0])
+    var nsec = Int(ts.unsafe_ptr().bitcast[Int64]()[1])
+    return sec * 1000 + nsec // 1_000_000
+
+
 # --- I/O multiplexing -------------------------------------------------------
 
 

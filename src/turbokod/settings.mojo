@@ -45,8 +45,8 @@ from .colors import (
 )
 from .theme import theme_names
 from .config import (
-    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE,
-    WRAP_NONE,
+    DEFAULT_MAX_OPEN_WINDOWS, LanguageServerOverride,
+    MAX_FONT_SIZE, MIN_FONT_SIZE, WRAP_NONE,
 )
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
@@ -96,6 +96,7 @@ comptime _FOCUS_WRAP_MODE     = UInt8(21)
 comptime _FOCUS_COMPRESS_KW   = UInt8(22)
 comptime _FOCUS_COMMA_WRAP    = UInt8(23)
 comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
+comptime _FOCUS_MAX_WINDOWS   = UInt8(34)
 # Language Server section checkboxes.
 comptime _FOCUS_LS_FORMAT_ON_SAVE = UInt8(25)
 comptime _FOCUS_LS_SIGNATURE      = UInt8(26)
@@ -268,6 +269,14 @@ struct Settings(Movable):
     var _comma_input_anchor: Rect
     """Last-painted bounds of the comma-threshold input box (mouse hit-test
     cache, mirrors ``_wrap_dd_anchor``)."""
+    var max_windows_text: String
+    """Working copy of ``TurbokodConfig.max_open_windows`` as an editable
+    digit string — Editor ▸ "Max open windows". Empty (or ``0``) means
+    "no limit". The host reads the parsed value via
+    ``max_open_windows_value`` on the next config sync."""
+    var _max_windows_anchor: Rect
+    """Last-painted bounds of the max-open-windows input box (mouse
+    hit-test cache, mirrors ``_comma_input_anchor``)."""
     var _trim_cb: Checkbox
     """Editor ▸ "Trim trailing whitespace" toggle. ``on`` tracks
     ``trim_trailing_whitespace``; position is set each paint so the
@@ -438,6 +447,8 @@ struct Settings(Movable):
         self._wrap_dd_anchor = Rect(0, 0, 0, 0)
         self.smart_wrap_comma_text = String("")
         self._comma_input_anchor = Rect(0, 0, 0, 0)
+        self.max_windows_text = String("")
+        self._max_windows_anchor = Rect(0, 0, 0, 0)
         self._trim_cb = Checkbox(
             String("Trim trailing whitespace"), 0, 0, False,
         )
@@ -523,6 +534,7 @@ struct Settings(Movable):
         font_ideal_size: Int = 0,
         wrap_mode: Int = WRAP_NONE,
         comma_threshold: Int = -1,
+        max_open_windows: Int = DEFAULT_MAX_OPEN_WINDOWS,
         cursor_blink: Bool = True,
         ls_format_on_save: Bool = False,
         ls_signature_help: Bool = True,
@@ -580,6 +592,12 @@ struct Settings(Movable):
             self.smart_wrap_comma_text = String("")
         else:
             self.smart_wrap_comma_text = String(comma_threshold)
+        # 0 (or negative) is "no limit" and renders as an empty field;
+        # any positive value shows its digits.
+        if max_open_windows <= 0:
+            self.max_windows_text = String("")
+        else:
+            self.max_windows_text = String(max_open_windows)
         self.dict_specs = built_in_downloadable_dictionaries()
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
         self.pending_dict_install_lang = String("")
@@ -1347,6 +1365,36 @@ struct Settings(Movable):
             String("Blink the text cursor when idle; it stays solid while you type."),
             hint,
         )
+        # Max open windows: an inline numeric field mirroring the comma
+        # field. Empty means "no limit"; a number N closes the
+        # least-recently-used document once a project holds more than N.
+        var mw_y = label_y + 19
+        var mw_label = String("Max open windows:")
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, mw_y), mw_label, bg,
+        )
+        var mw_box_x = inner.a.x + display_columns(mw_label) + 1
+        var mw_box_w = 6
+        var mw_box_attr = (
+            Attr(WHITE, BLUE) if self.focus == _FOCUS_MAX_WINDOWS
+            else Attr(BLACK, CYAN)
+        )
+        var mw_box_rect = Rect(mw_box_x, mw_y, mw_box_x + mw_box_w, mw_y + 1)
+        self._max_windows_anchor = mw_box_rect
+        painter.fill(canvas, mw_box_rect, String(" "), mw_box_attr)
+        var mw_shown = self.max_windows_text
+        if len(mw_shown.as_bytes()) == 0 and self.focus != _FOCUS_MAX_WINDOWS:
+            _ = painter.put_text(
+                canvas, Point(mw_box_x + 1, mw_y), String("—"), mw_box_attr,
+            )
+        else:
+            _ = painter.put_text(
+                canvas, Point(mw_box_x + 1, mw_y), mw_shown, mw_box_attr,
+            )
+        _ = painter.put_text(
+            canvas, Point(mw_box_x + mw_box_w + 1, mw_y),
+            String("per project (blank = no limit); least-used closes first"), hint,
+        )
 
     def _paint_language_server_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1773,6 +1821,10 @@ struct Settings(Movable):
         if self.focus == _FOCUS_COMMA_WRAP:
             if self._comma_input_key(k):
                 return True
+        # Max-open-windows field likewise owns digits + Backspace.
+        if self.focus == _FOCUS_MAX_WINDOWS:
+            if self._max_windows_key(k):
+                return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
         # type "py" to land on the python row regardless of which
@@ -1997,6 +2049,43 @@ struct Settings(Movable):
             return True
         return False
 
+    def max_open_windows_value(self) -> Int:
+        """Parse ``max_windows_text`` into the persisted int. Empty input
+        → ``0`` (no limit). The text only ever holds digits (the key
+        handler rejects everything else), so this never has to cope with
+        sign or stray characters."""
+        var bytes = self.max_windows_text.as_bytes()
+        if len(bytes) == 0:
+            return 0
+        var v = 0
+        for i in range(len(bytes)):
+            var d = Int(bytes[i]) - 0x30
+            if d < 0 or d > 9:
+                return 0
+            v = v * 10 + d
+        return v
+
+    def _max_windows_key(mut self, k: UInt32) -> Bool:
+        """Edit the max-open-windows field. Digits append (capped at 4 so
+        the value fits the box); Backspace removes the last digit. Returns
+        True when the keystroke was consumed."""
+        if k == KEY_BACKSPACE:
+            var bytes = self.max_windows_text.as_bytes()
+            if len(bytes) > 0:
+                var keep = String("")
+                for i in range(len(bytes) - 1):
+                    keep += chr(Int(bytes[i]))
+                self.max_windows_text = keep
+                self.dirty = True
+            return True
+        if k >= UInt32(0x30) and k <= UInt32(0x39):
+            if len(self.max_windows_text.as_bytes()) >= 4:
+                return True
+            self.max_windows_text += chr(Int(k))
+            self.dirty = True
+            return True
+        return False
+
     def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
         # otherwise Tab from the rail would land on Add/Edit even
@@ -2011,6 +2100,7 @@ struct Settings(Movable):
             ordered.append(_FOCUS_FINAL_NL)
             ordered.append(_FOCUS_COMPRESS_KW)
             ordered.append(_FOCUS_BLINK_CURSOR)
+            ordered.append(_FOCUS_MAX_WINDOWS)
         elif self.section == _SECTION_SPELL:
             if len(self.dict_specs) > 0:
                 ordered.append(_FOCUS_DICT_LIST)
@@ -2399,6 +2489,12 @@ struct Settings(Movable):
                     and not event.motion \
                     and self._comma_input_anchor.contains(event.pos):
                 self.focus = _FOCUS_COMMA_WRAP
+                return True
+            # Click the max-open-windows box to focus it; editing is keyboard.
+            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                    and not event.motion \
+                    and self._max_windows_anchor.contains(event.pos):
+                self.focus = _FOCUS_MAX_WINDOWS
                 return True
         if self.section == _SECTION_LANGUAGE_SERVER:
             var fmt_s = self._ls_format_on_save_cb.handle_mouse(event)

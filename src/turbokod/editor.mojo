@@ -9118,6 +9118,37 @@ struct Editor(Copyable, Movable):
             scroll_cell = cur_cell - w + 1
         self.scroll_x = utf8_byte_of_cell(line, scroll_cell)
 
+    def _line_visual_rows(self, i: Int, content_w: Int) -> Int:
+        """Number of *visual* rows buffer line ``i`` occupies under the
+        active wrap mode at content width ``content_w`` — i.e. how many
+        screen rows it paints to. 1 when not wrapping or the line fits.
+        Uses the same wrap routine ``_layout_lines`` paints with so the
+        count matches what's on screen."""
+        var w = content_w
+        if w < 1:
+            w = 1
+        if not self._is_wrapping():
+            return 1
+        var tab = self.editorconfig.effective_indent_size()
+        if tab < 1:
+            tab = 4
+        var use_smart = (
+            self.wrap_mode == WRAP_SMART and self._smart_wrap_supported()
+        )
+        var lc = line_comment_for_extension(extension_of(self.file_path))
+        var single = List[String]()
+        single.append(self.buffer.line(i))
+        var v: List[VisualLine]
+        if use_smart:
+            v = smart_wrap_lines(
+                single, w, tab, line_comment=lc,
+                comma_threshold=self.smart_wrap_comma_threshold,
+            )
+        else:
+            v = wrap_lines(single, w, indent_size=tab, word_aware=True)
+        var n = len(v)
+        return 1 if n < 1 else n
+
     def max_scroll_y(self, view: Rect) -> Int:
         """Largest valid ``scroll_y`` for ``view``.
 
@@ -9241,9 +9272,12 @@ struct Editor(Copyable, Movable):
         ~38.2% of the rows above it, the larger ~61.8% below (you read
         downward into a landing, so the extra context belongs below).
         Used for *deliberate* jumps to a line — link clicks, the
-        command-line ``turbokod://`` open, go-to-line — where re-anchoring
-        the whole view is wanted, not the minimal edge scroll. Clamped at
-        the file boundaries so a target near EOF doesn't leave blank rows.
+        command-line ``turbokod://`` open, go-to-line, goto-definition —
+        where re-anchoring the whole view is wanted, not the minimal edge
+        scroll. Clamped at the file boundaries so a target near EOF doesn't
+        leave blank rows. Honored under soft/smart wrap too: the walk-back
+        counts wrapped *visual* rows so the cursor's visual row lands at the
+        golden point even when lines above it wrap to several rows.
         """
         var h = view.height()
         var total_gutter = self._total_gutter()
@@ -9252,7 +9286,31 @@ struct Editor(Copyable, Movable):
         if w < 1:
             w = 1
         var max_row = self.buffer.line_count() - 1
-        if golden and not self._is_wrapping():
+        if golden and self._is_wrapping():
+            # ``scroll_y`` is a buffer row, but vertical position is in
+            # visual rows. Walk back from the cursor row accumulating each
+            # line's wrapped row count until ~38.2% of the viewport sits
+            # above the cursor's visual row, then anchor the top there.
+            var above = ((h - 1) * 382) // 1000
+            if above < 0:
+                above = 0
+            var acc = 0
+            var top = self.selections[0].row
+            while top > 0:
+                var prev_rows = self._line_visual_rows(top - 1, w)
+                if acc + prev_rows > above:
+                    break
+                acc += prev_rows
+                top -= 1
+            self.scroll_y = top
+            var ms = self.max_scroll_y(view)
+            if self.scroll_y > ms:
+                self.scroll_y = ms
+            if self.scroll_y < 0:
+                self.scroll_y = 0
+            self.scroll_x = 0
+            return
+        if golden:
             # 1 - 1/φ ≈ 0.382 of the usable rows sit above the line.
             var above = ((h - 1) * 382) // 1000
             if above < 0:
