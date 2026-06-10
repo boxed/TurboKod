@@ -91,8 +91,9 @@ from turbokod.desktop import (
     ctrl_key, format_hotkey,
 )
 from turbokod.file_io import (
-    basename, find_git_project, join_path, list_directory, parent_path,
-    project_relative, read_file, stat_file, write_file,
+    basename, delete_tree, find_git_project, join_path, list_directory,
+    parent_path, project_relative, read_file, rename_path, stat_file,
+    write_file,
 )
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
@@ -2673,6 +2674,50 @@ def test_write_file_round_trip() raises:
     assert_true(write_file(path, big))
     assert_equal(read_file(path), big)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_rename_path_moves_file() raises:
+    var src = _temp_path(String("_ren_src.txt"))
+    var dst = _temp_path(String("_ren_dst.txt"))
+    # Clean any leftovers from a prior crashed run.
+    _ = external_call["unlink", Int32]((dst + String("\0")).unsafe_ptr())
+    assert_true(write_file(src, String("payload")))
+    assert_true(rename_path(src, dst))
+    # Source is gone, destination carries the bytes.
+    assert_false(stat_file(src).ok)
+    assert_true(stat_file(dst).ok)
+    assert_equal(read_file(dst), String("payload"))
+    _ = external_call["unlink", Int32]((dst + String("\0")).unsafe_ptr())
+
+
+def test_delete_tree_file_and_recursive_dir() raises:
+    # Plain file: delete_tree with is_dir=False unlinks it.
+    var f = _temp_path(String("_del_file.txt"))
+    assert_true(write_file(f, String("x")))
+    assert_true(stat_file(f).ok)
+    assert_true(delete_tree(f, False))
+    assert_false(stat_file(f).ok)
+    # Directory with nested contents: recursive delete removes everything.
+    var root = _temp_path(String("_del_dir"))
+    # Best-effort clean of a stale tree from a prior run.
+    _ = delete_tree(root, True)
+    assert_equal(
+        external_call["mkdir", Int32](
+            (root + String("\0")).unsafe_ptr(), Int32(0o755),
+        ),
+        Int32(0),
+    )
+    var sub = join_path(root, String("sub"))
+    assert_equal(
+        external_call["mkdir", Int32](
+            (sub + String("\0")).unsafe_ptr(), Int32(0o755),
+        ),
+        Int32(0),
+    )
+    assert_true(write_file(join_path(root, String("a.txt")), String("a")))
+    assert_true(write_file(join_path(sub, String("b.txt")), String("b")))
+    assert_true(delete_tree(root, True))
+    assert_false(stat_file(root).ok)
 
 
 def test_editor_save_clears_dirty() raises:
@@ -19559,6 +19604,8 @@ def _run_chunk_01() raises:
     test_window_manager_fit_into_user_drag_rebases_baseline()
     test_window_manager_fit_into_scales_restore_rect_for_maximized()
     test_write_file_round_trip()
+    test_rename_path_moves_file()
+    test_delete_tree_file_and_recursive_dir()
     test_editor_save_clears_dirty()
     test_editor_save_as_adopts_path()
     test_diff3_merge_clean_when_only_ours_changed()

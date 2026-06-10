@@ -52,8 +52,9 @@ from .config import (
 )
 from .diff import unified_diff
 from .file_io import (
-    basename, find_git_project, join_path, list_directory, parent_path,
-    project_relative, read_file, stat_file, write_file,
+    basename, delete_tree, find_git_project, join_path, list_directory,
+    parent_path, project_relative, read_file, rename_path, stat_file,
+    write_file,
 )
 from .git_blame import compute_blame
 from .git_changes import (
@@ -178,7 +179,8 @@ from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
-    display_columns, parse_int_prefix, starts_with, utf8_cell_of_byte,
+    byte_slice, display_columns, parse_int_prefix, starts_with,
+    utf8_cell_of_byte,
 )
 from .session_store import (
     Session, SessionWindow, _resolve_session_path,
@@ -279,6 +281,13 @@ comptime EDITOR_FORMAT_SELECTION = String("edit:format_selection")
 # Internal pending-action tag for the rename name prompt. Carries the
 # typed new name to ``_on_prompt_submit``.
 comptime _PA_RENAME           = String("rename:do")
+# Tab / window-title file-actions popup. The action ints carried by the
+# reused EditorContextMenu, plus the two pending-action tags that the name
+# prompt (rename) and confirm dialog (delete) resolve against.
+comptime _TAB_FILE_ACTION_RENAME = 101
+comptime _TAB_FILE_ACTION_DELETE = 102
+comptime _PA_RENAME_FILE      = String("file:rename")
+comptime _PA_DELETE_FILE      = String("file:delete")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
@@ -951,6 +960,15 @@ struct Desktop(Movable):
     var _ctx_menu_row: Int
     var _ctx_menu_col: Int
     var _ctx_menu_word: String
+    # Right-click on a tab / window title opens this file-actions popup
+    # (Rename / Delete). Reuses the generic EditorContextMenu widget — the
+    # action ints are interpreted by ``_on_tab_context_menu_submit`` rather
+    # than the symbol handler. ``_file_op_win_idx`` / ``_file_op_path`` pin
+    # the targeted window across the prompt/confirm round-trip.
+    var tab_context_menu: EditorContextMenu
+    var _file_op_win_idx: Int
+    var _file_op_path: String
+    var _file_op_is_dir: Bool
     # Origin of an in-flight rename: the path/line/col the request was
     # issued at (read when the name prompt opens) and the path the user
     # was focused on, so ``_drain_rename_edits`` can refocus there after
@@ -1236,6 +1254,11 @@ struct Desktop(Movable):
     var _pending_restore: Bool
     var _last_session_json: String
     var _pending_restore_refit: Optional[Session]
+    # Progressive syntax coloring. True until the first frame that has an
+    # editor to show; that frame skips the cold TextMate tokenize so the
+    # window appears immediately with plain text, and the next frame paints
+    # the colors in. See the flush loop in ``paint``.
+    var _defer_first_highlight: Bool
     # Per-user breakpoint persistence. Mirrors the session-store pattern
     # — re-encode after every dap_tick and write only when the encoding
     # differs. Stored under ``per_user/<username>/`` alongside the
@@ -1397,6 +1420,10 @@ struct Desktop(Movable):
         self._ctx_menu_row = 0
         self._ctx_menu_col = 0
         self._ctx_menu_word = String("")
+        self.tab_context_menu = EditorContextMenu()
+        self._file_op_win_idx = -1
+        self._file_op_path = String("")
+        self._file_op_is_dir = False
         self._rename_path = String("")
         self._rename_line = 0
         self._rename_col = 0
@@ -1477,6 +1504,7 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        self._defer_first_highlight = True
         self._last_breakpoints_json = String("")
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
@@ -3026,6 +3054,20 @@ struct Desktop(Movable):
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
         self._apply_view_config()
+        # Progressive syntax coloring: the very first frame that has an
+        # editor to show skips the cold TextMate tokenize (a fixed ~400 ms
+        # grammar compile, the dominant cost of the first paint) so the
+        # window appears immediately with plain text. The dirty flag stays
+        # set, so the next frame — ≤50 ms later via the 20 Hz timer — runs
+        # the flush and the change detector repaints with colors. Trades a
+        # brief uncolored flash for a much snappier time-to-window.
+        var skip_highlight = False
+        if self._defer_first_highlight:
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor:
+                    skip_highlight = True
+                    self._defer_first_highlight = False
+                    break
         # Flush deferred highlight refreshes for every editor that
         # was edited since the last frame. ``flush_highlights`` is
         # a no-op when the dirty flag is clear, so this is cheap on
@@ -3039,9 +3081,10 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.set_test_file_globs(
                     self._pytest_file_globs,
                 )
-                self.windows.windows[i].editor.flush_highlights(
-                    self.grammar_registry, self.speller,
-                )
+                if not skip_highlight:
+                    self.windows.windows[i].editor.flush_highlights(
+                        self.grammar_registry, self.speller,
+                    )
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
@@ -3125,6 +3168,7 @@ struct Desktop(Movable):
         self.test_gutter_menu.paint(canvas, screen)
         self.diagnostic_menu.paint(canvas, screen)
         self.editor_context_menu.paint(canvas, screen)
+        self.tab_context_menu.paint(canvas, screen)
         self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
         # Wait-for dropdown popup overlays the rest of the breakpoint
@@ -4063,13 +4107,35 @@ struct Desktop(Movable):
         if was_max:
             self.windows.windows[new_idx].toggle_maximize(workspace)
 
+    def _close_deleted_file_windows(mut self):
+        """Close editor windows whose backing file has been removed from
+        disk. Only *clean*, file-backed, writable editors qualify: a
+        dirty buffer keeps its unsaved content (the user can save it back
+        and recreate the file — data safety wins, matching window-cap
+        eviction), an ``Untitled`` buffer was never on disk, and a
+        ``read_only`` editor is a synthetic viewer (compare diff, docs,
+        shortcuts) with no real backing file to lose. Iterates back-to-
+        front so closing a window doesn't shift the indices still to be
+        examined."""
+        for i in range(len(self.windows.windows) - 1, -1, -1):
+            if not self.windows.windows[i].is_editor:
+                continue
+            ref ed = self.windows.windows[i].editor
+            if len(ed.file_path.as_bytes()) == 0 or ed.read_only or ed.dirty:
+                continue
+            if stat_file(ed.file_path).ok:
+                continue
+            self._close_editor_window_at(i)
+
     def process_external_changes(mut self, screen: Rect) raises:
         """Re-stat every editor window and react to any out-of-band
-        write. Clean reloads and clean 3-way merges happen silently
-        inside the editors themselves; a window whose merge produced
-        conflicts gets an interactive ``MergeView`` opened over it — one
-        at a time, with the rest queued in ``pending_merge_queue``.
+        write. A file removed from disk closes its (clean) editor window;
+        clean reloads and clean 3-way merges happen silently inside the
+        editors themselves; a window whose merge produced conflicts gets
+        an interactive ``MergeView`` opened over it — one at a time, with
+        the rest queued in ``pending_merge_queue``.
         """
+        self._close_deleted_file_windows()
         var conflicts = self.windows.check_external_changes()
         for k in range(len(conflicts)):
             var idx = conflicts[k]
@@ -5311,6 +5377,16 @@ struct Desktop(Movable):
             if self.editor_context_menu.submitted:
                 self._on_context_menu_submit()
             return Optional[String]()
+        if self.tab_context_menu.active:
+            # Right-click on a tab / window title opens the file-actions
+            # popup (Rename / Delete); same input-first routing.
+            if event.kind == EVENT_KEY:
+                _ = self.tab_context_menu.handle_key(event)
+            else:
+                _ = self.tab_context_menu.handle_mouse(event, screen)
+            if self.tab_context_menu.submitted:
+                return self._on_tab_context_menu_submit()
+            return Optional[String]()
         if self.lsp_status_menu.active:
             # Right-click on the LSP indicator opens this single-row
             # menu; same input-first routing as ``git_gutter_menu``.
@@ -5683,6 +5759,12 @@ struct Desktop(Movable):
                 else:
                     self.lsp_status_menu.open(event.pos)
                 return Optional[String]()
+        # Right-click on a tab or a window title-bar filename opens the
+        # file-actions popup (Rename / Delete). Checked before the tab
+        # bar's left-click routing and before the workspace gets the
+        # event, so the menu wins over focus/drag on the same press.
+        if self._maybe_open_file_tab_menu(event, screen):
+            return Optional[String]()
         # Window tab bar (one row above status bar). Same rationale as
         # the status-bar tabs: route the click to the named window
         # before the workspace gets a shot at it.
@@ -5718,6 +5800,9 @@ struct Desktop(Movable):
         if self.file_tree.handle_mouse(event, screen):
             if self.file_tree.focused:
                 self._focus_dock(DOCK_FILE_TREE)
+            # A right-click on a row armed a context-menu request; open
+            # the Rename/Delete popup on this same frame.
+            self._maybe_open_file_tree_menu()
             return Optional[String]()
         # A left-click that lands on a floating window (a focusing press,
         # not a hover/wheel/release/drag) hands keyboard focus to that
@@ -5938,6 +6023,7 @@ struct Desktop(Movable):
             or self.breakpoint_menu.active or self.fill_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
             or self.diagnostic_menu.active or self.editor_context_menu.active \
+            or self.tab_context_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
             or self.confirm_dialog.active or self.merge_view.active \
             or self.message_request_dialog.active \
@@ -8330,6 +8416,7 @@ struct Desktop(Movable):
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
                 or self.diagnostic_menu.active \
                 or self.editor_context_menu.active \
+                or self.tab_context_menu.active \
                 or self.lsp_status_menu.active or self.prompt.active \
                 or self.confirm_dialog.active or self.merge_view.active \
                 or self.message_request_dialog.active \
@@ -11681,6 +11768,234 @@ struct Desktop(Movable):
                 String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY),
             )
 
+    def _maybe_open_file_tab_menu(mut self, event: Event, screen: Rect) -> Bool:
+        """Open the file-actions popup (Rename / Delete) on a right-click
+        that lands on a tab or on an editor window's title-bar filename.
+
+        Returns True when the menu was opened (so the caller swallows the
+        event). The popup only appears for file-backed editor windows —
+        scratch buffers, help windows, and tool panes have no path to act
+        on. The targeted window is pinned in ``_file_op_win_idx`` /
+        ``_file_op_path`` so the follow-up rename prompt / delete confirm
+        can still find it (and verify it hasn't changed) after the
+        round-trip."""
+        if event.kind != EVENT_MOUSE:
+            return False
+        if event.button != MOUSE_BUTTON_RIGHT or not event.pressed \
+                or event.motion:
+            return False
+        var target = -1
+        # Tab strip first (one row above the status bar).
+        var tab = self.tab_bar.hit_test(event.pos, self.tab_bar_rect(screen))
+        if tab >= 0:
+            target = tab
+        else:
+            # Window title bars, top-down through the z-order so the
+            # frontmost window wins when titles overlap.
+            var dtitles = compute_display_titles(self.windows.windows)
+            var k = len(self.windows.z_order) - 1
+            while k >= 0:
+                var i = self.windows.z_order[k]
+                if self.windows.windows[i].is_editor \
+                        and self.windows.windows[i].title_text_hit(
+                            event.pos, dtitles[i],
+                        ):
+                    target = i
+                    break
+                k -= 1
+        if target < 0 or target >= len(self.windows.windows):
+            return False
+        if not self.windows.windows[target].is_editor:
+            return False
+        var path = self.windows.windows[target].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return False
+        self._open_file_actions_menu(target, path, False, event.pos)
+        return True
+
+    def _maybe_open_file_tree_menu(mut self):
+        """Drain a right-click context-menu request stamped on the file
+        tree and open the Rename/Delete popup for the clicked entry. The
+        entry may be a file or a directory; the operations handle both."""
+        var req = self.file_tree.consume_menu_request()
+        if not req:
+            return
+        var r = req.value()
+        var path = r[0]
+        var is_dir = r[1]
+        if len(path.as_bytes()) == 0:
+            return
+        self._open_file_actions_menu(
+            self._find_window_for_path(path), path, is_dir,
+            Point(r[2], r[3]),
+        )
+
+    def _open_file_actions_menu(
+        mut self, win_idx: Int, var path: String, is_dir: Bool, anchor: Point,
+    ):
+        """Pin the target and open the shared Rename/Delete popup anchored
+        at ``anchor``. ``win_idx`` is the open editor window for the path
+        (or -1 — directories and unopened files have none)."""
+        self._file_op_win_idx = win_idx
+        self._file_op_path = path^
+        self._file_op_is_dir = is_dir
+        var labels = List[String]()
+        var actions = List[Int]()
+        labels.append(String("Rename…"))
+        actions.append(_TAB_FILE_ACTION_RENAME)
+        labels.append(String("Delete…"))
+        actions.append(_TAB_FILE_ACTION_DELETE)
+        self.tab_context_menu.open(anchor, labels^, actions^)
+
+    def _on_tab_context_menu_submit(mut self) -> Optional[String]:
+        """Resolve the file-actions popup: Rename opens the name prompt
+        seeded with the current basename; Delete opens a confirm dialog.
+        Both arm a ``_pending_action`` the respective submit handler picks
+        up. Works off the pinned path so it covers tabs, window titles,
+        and file-tree rows (which may have no open window)."""
+        var act = self.tab_context_menu.action
+        self.tab_context_menu.close()
+        var path = self._file_op_path
+        if len(path.as_bytes()) == 0:
+            self._file_op_win_idx = -1
+            return Optional[String]()
+        if act == _TAB_FILE_ACTION_RENAME:
+            self._pending_action = _PA_RENAME_FILE
+            self.prompt.open(
+                String("Rename '") + basename(path) + String("' to: "),
+                basename(path), select_prefill=True,
+            )
+            return Optional[String]()
+        if act == _TAB_FILE_ACTION_DELETE:
+            self._pending_action = _PA_DELETE_FILE
+            var kind = String("directory") if self._file_op_is_dir \
+                else String("file")
+            self.confirm_dialog.open(
+                String("Delete ") + kind + String(" '") + basename(path)
+                    + String("'? This cannot be undone."),
+                default_yes=False,
+            )
+            return Optional[String]()
+        # Dismissed (Esc / click-away) — drop the pinned target.
+        self._file_op_win_idx = -1
+        self._file_op_path = String("")
+        return Optional[String]()
+
+    def _refresh_file_tree(mut self):
+        """Re-read the project tree from disk so a rename/delete shows up
+        immediately. No-op when no project root is set."""
+        if len(self.file_tree.root.as_bytes()) == 0:
+            return
+        var root = self.file_tree.root
+        self.file_tree.open(root^)
+
+    def _do_rename_file(mut self, var new_name: String):
+        """Submit-handler tail for ``_PA_RENAME_FILE``: rename the pinned
+        path on disk, repoint any open editors onto the new path, and
+        refresh the tree.
+
+        ``new_name`` is interpreted relative to the target's directory
+        when it's a bare name or relative path, or taken verbatim when
+        absolute — so the prompt doubles as a "move" when the user types a
+        path. An existing target is refused rather than clobbered. When the
+        target is a directory, open editors *under* it have their paths
+        rewritten too."""
+        var old_path = self._file_op_path
+        var is_dir = self._file_op_is_dir
+        self._file_op_win_idx = -1
+        self._file_op_path = String("")
+        if len(old_path.as_bytes()) == 0:
+            return
+        var trimmed = self._trim_spaces(new_name)
+        if len(trimmed.as_bytes()) == 0:
+            return
+        var new_path: String
+        if trimmed.as_bytes()[0] == 0x2F:    # absolute
+            new_path = trimmed
+        else:
+            new_path = join_path(parent_path(old_path), trimmed)
+        if new_path == old_path:
+            return
+        if stat_file(new_path).ok:
+            self.status_bar.set_message(
+                String("Rename: '") + basename(new_path)
+                    + String("' already exists"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        if not rename_path(old_path, new_path):
+            self.status_bar.set_message(
+                String("Rename failed"), Attr(RED, LIGHT_GRAY),
+            )
+            return
+        # Repoint open editors. For a file it's the exact-path window; for
+        # a directory it's every editor whose path sits under it.
+        var old_prefix = old_path + String("/")
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            var p = self.windows.windows[i].editor.file_path
+            if not is_dir:
+                if p == old_path:
+                    self.windows.windows[i].editor.file_path = new_path
+                    self.windows.windows[i].title = basename(new_path)
+            elif starts_with(p, old_prefix):
+                var rel = byte_slice(
+                    p, len(old_prefix.as_bytes()), len(p.as_bytes()),
+                )
+                var np = join_path(new_path, rel)
+                self.windows.windows[i].editor.file_path = np
+                self.windows.windows[i].title = basename(np)
+        self._refresh_file_tree()
+        self.status_bar.set_message(
+            String("Renamed to ") + basename(new_path),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
+    def _do_delete_file(mut self):
+        """Confirm-handler tail for ``_PA_DELETE_FILE``: delete the pinned
+        path (recursively for a directory), close any open editors on it
+        (or under it), and refresh the tree."""
+        var path = self._file_op_path
+        var is_dir = self._file_op_is_dir
+        self._file_op_win_idx = -1
+        self._file_op_path = String("")
+        if len(path.as_bytes()) == 0:
+            return
+        if not delete_tree(path, is_dir):
+            self.status_bar.set_message(
+                String("Delete failed"), Attr(RED, LIGHT_GRAY),
+            )
+            return
+        # Close windows on the deleted path / under the deleted directory.
+        # Walk high→low so close_by_index's reindexing can't skip a match.
+        var prefix = path + String("/")
+        var i = len(self.windows.windows) - 1
+        while i >= 0:
+            if self.windows.windows[i].is_editor:
+                var p = self.windows.windows[i].editor.file_path
+                if p == path or (is_dir and starts_with(p, prefix)):
+                    _ = self.windows.close_by_index(i)
+            i -= 1
+        self._refresh_file_tree()
+        self.status_bar.set_message(
+            String("Deleted ") + basename(path), Attr(BLACK, LIGHT_GRAY),
+        )
+
+    def _trim_spaces(self, s: String) -> String:
+        """Strip leading/trailing ASCII spaces and tabs from ``s``."""
+        var b = s.as_bytes()
+        var n = len(b)
+        var lo = 0
+        while lo < n and (b[lo] == 0x20 or b[lo] == 0x09):
+            lo += 1
+        var hi = n
+        while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
+            hi -= 1
+        if lo == 0 and hi == n:
+            return s
+        return String(StringSlice(unsafe_from_utf8=b[lo:hi]))
+
     def _maybe_open_context_menu(mut self):
         """Drain ``Editor.consume_context_menu_request`` on the focused
         editor and open the symbol-actions popup anchored at the click,
@@ -12656,6 +12971,13 @@ struct Desktop(Movable):
                                 Attr(BLACK, LIGHT_GRAY),
                             )
             return Optional[String]()
+        if pa == _PA_DELETE_FILE:
+            if yes:
+                self._do_delete_file()
+            else:
+                self._file_op_win_idx = -1
+                self._file_op_path = String("")
+            return Optional[String]()
         # Unknown / no pending action — nothing to do.
         self._pending_arg = String("")
         return Optional[String]()
@@ -12711,6 +13033,9 @@ struct Desktop(Movable):
                 self._fire_rename_request(trimmed)
             else:
                 self._rename_path = String("")
+            return Optional[String]()
+        if pa == _PA_RENAME_FILE:
+            self._do_rename_file(text)
             return Optional[String]()
         if pa == EDITOR_GOTO:
             self._last_goto_line = text

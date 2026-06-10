@@ -173,6 +173,48 @@ def write_file(path: String, content: String) -> Bool:
     return False
 
 
+def rename_path(src: String, dst: String) -> Bool:
+    """``rename(2)`` ``src`` onto ``dst``. Returns True on success.
+
+    A plain rename within the same filesystem — used by the tab/title
+    context-menu "Rename" action. The caller is responsible for refusing
+    to clobber an existing target (``rename(2)`` would silently replace
+    it); see ``Desktop._do_rename_file``."""
+    var c_src = src + String("\0")
+    var c_dst = dst + String("\0")
+    return external_call["rename", Int32](
+        c_src.unsafe_ptr(), c_dst.unsafe_ptr(),
+    ) == Int32(0)
+
+
+def delete_path(path: String) -> Bool:
+    """``unlink(2)`` ``path``. Returns True on success — used by the
+    tab/title context-menu "Delete" action."""
+    var c_path = path + String("\0")
+    return external_call["unlink", Int32](c_path.unsafe_ptr()) == Int32(0)
+
+
+def delete_tree(path: String, is_dir: Bool) -> Bool:
+    """Delete ``path``. A plain file is ``unlink``ed; a directory is
+    emptied recursively (children first) and then ``rmdir``ed. Returns
+    True only when everything was removed. Used by the file-tree
+    context-menu "Delete" action, which can target directories."""
+    if not is_dir:
+        return delete_path(path)
+    var children = list_directory_typed(path)
+    var ok = True
+    for i in range(len(children)):
+        var name = children[i][0]
+        if name == String(".") or name == String(".."):
+            continue
+        if not delete_tree(join_path(path, name), children[i][1]):
+            ok = False
+    if not ok:
+        return False
+    var c_path = path + String("\0")
+    return external_call["rmdir", Int32](c_path.unsafe_ptr()) == Int32(0)
+
+
 # --- Directory listing -----------------------------------------------------
 
 

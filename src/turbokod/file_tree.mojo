@@ -25,7 +25,8 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
+    MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .file_io import (
     join_path, list_directory, project_relative, sort_directory_listing,
@@ -96,6 +97,14 @@ struct FileTree(Movable):
     Desktop from the open editors before every paint. Rows whose path
     matches are tinted with the same green scheme the tab bar uses for
     dirty tabs."""
+    var _menu_req: Bool
+    """Set by a right-click on a row; drained by the Desktop via
+    ``consume_menu_request`` to open the Rename/Delete popup anchored at
+    ``_menu_x``/``_menu_y`` for ``_menu_path``."""
+    var _menu_path: String
+    var _menu_is_dir: Bool
+    var _menu_x: Int
+    var _menu_y: Int
 
     def __init__(out self):
         self.visible = False
@@ -113,6 +122,11 @@ struct FileTree(Movable):
         self._type_ahead = TypeAhead()
         self._gitignore = GitignoreMatcher()
         self.modified_paths = List[String]()
+        self._menu_req = False
+        self._menu_path = String("")
+        self._menu_is_dir = False
+        self._menu_x = 0
+        self._menu_y = 0
 
     def open(mut self, var root: String):
         self.root = root^
@@ -315,6 +329,13 @@ struct FileTree(Movable):
         var sep_glyph = String("║") if self.focused else String("│")
         for y in range(area.a.y, area.b.y):
             painter.set(canvas, sep_x, y, Cell(sep_glyph, bg, 1))
+        # Blank the whole content column first so the rows below the last
+        # entry carry the panel background instead of whatever the canvas
+        # default left there (an uninitialised cell paints black).
+        painter.fill(
+            canvas, Rect(content_x, area.a.y, content_end, area.b.y),
+            String(" "), bg,
+        )
         # Listing fills the whole panel — the root's name needs no title
         # row of its own (the window title / project state already says
         # which project is open).
@@ -531,6 +552,21 @@ struct FileTree(Movable):
                     if self.scroll > max_scroll:
                         self.scroll = max_scroll
                 return True
+        # Right-click on a row stamps a context-menu request the Desktop
+        # drains to open the Rename/Delete popup. Also takes focus and
+        # moves the selection so the menu and the highlight agree.
+        if event.button == MOUSE_BUTTON_RIGHT \
+                and event.pressed and not event.motion:
+            self.focused = True
+            var ridx = self.scroll + (event.pos.y - area.a.y)
+            if 0 <= ridx and ridx < len(self.entries):
+                self.selected = ridx
+                self._menu_req = True
+                self._menu_path = self.entries[ridx].path
+                self._menu_is_dir = self.entries[ridx].is_dir
+                self._menu_x = event.pos.x
+                self._menu_y = event.pos.y
+            return True
         if event.button != MOUSE_BUTTON_LEFT:
             return True
         if not event.pressed or event.motion:
@@ -558,5 +594,14 @@ struct FileTree(Movable):
             return True
         self.selected = idx
         return True
+
+    def consume_menu_request(mut self) -> Optional[Tuple[String, Bool, Int, Int]]:
+        """If a right-click armed a context-menu request, return
+        ``(path, is_dir, anchor_x, anchor_y)`` and clear it; otherwise
+        None. Drained by the Desktop after ``handle_mouse``."""
+        if not self._menu_req:
+            return None
+        self._menu_req = False
+        return (self._menu_path, self._menu_is_dir, self._menu_x, self._menu_y)
 
 

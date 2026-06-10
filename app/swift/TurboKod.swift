@@ -581,7 +581,16 @@ final class CellView: NSView {
                 ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))
             }
         }
+        // First main-surface frame is now on screen. Kick the deferred
+        // startup work (PATH recovery, font-family scan) on the next runloop
+        // turn so it runs *after* this draw flushes — not inside it. One-shot
+        // across all windows; async so the heavy work doesn't extend this draw.
+        if surface == .main && !CellView.didFirstMainPaint {
+            CellView.didFirstMainPaint = true
+            DispatchQueue.main.async { AppController.shared?.afterFirstFrame() }
+        }
     }
+    static var didFirstMainPaint = false
 
     /// Display width of a codepoint in grid cells: 2 for the emoji blocks
     /// terminals render double-wide, 1 otherwise. Ported verbatim from
@@ -1147,6 +1156,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // recent-projects list.
     private var chromeDesktop: Int64 = 0
 
+    // The monospace-family scan (FontCatalog) is ~140 ms and only feeds the
+    // Settings ▸ Font picker, so newWindow defers it past the first frame
+    // (see afterFirstFrame). This flips true once the scan has run; windows
+    // opened after that apply the (now-cached) list inline.
+    private var fontOptionsReady = false
+
     func applicationDidFinishLaunching(_ note: Notification) {
         AppController.shared = self
         chdirToResourceRoot()
@@ -1155,14 +1170,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // menu snapshot is ready to drive NSApp.mainMenu the moment we
         // have zero windows (empty session, or last window closed).
         chromeDesktop = tk_desktop_new()
-        // Recover the user's full interactive $PATH (stripped by a Dock
-        // launch) off the first runloop turn rather than synchronously: the
-        // slow login-shell subprocess (~100 ms) would otherwise block the
-        // first frame. tk_desktop_new already did the cheap synchronous
-        // prepend of well-known bin dirs, and this runs on the main thread
-        // before any project's LSP/git spawn (which only fire from frame 2),
-        // so there's no setenv/getenv race. Idempotent on the Mojo side.
-        DispatchQueue.main.async { tk_recover_user_shell_path() }
+        // The slow startup work — the user's interactive $PATH recovery
+        // (~100 ms login shell) and the monospace-family scan (~140 ms) — is
+        // deferred until the first frame is on screen (afterFirstFrame), so
+        // the project window paints (syntax-colored) before either runs.
+        // tk_desktop_new already did the cheap synchronous PATH prepend, so an
+        // LSP server in a standard location still resolves even if a spawn
+        // somehow beats the full recovery. The first-frame hook lives at the
+        // end of CellView.draw.
         if chromeDesktop != 0 {
             tk_desktop_set_host_owns_menu(chromeDesktop, 1)
             // The chrome Desktop loaded the user config — apply the saved
@@ -2091,6 +2106,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: windows + desktops
 
+    /// Push the system monospace-family list onto a Desktop so its Settings ▸
+    /// Font picker is populated. First call pays the ~140 ms FontCatalog scan;
+    /// the result is a cached static, so later calls are cheap.
+    func applyFontOptions(to h: Int64) {
+        let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
+        let fb = Array(families.utf8)
+        fb.withUnsafeBufferPointer { b in
+            tk_desktop_set_font_options(h, Int64(Int(bitPattern: b.baseAddress)),
+                                        Int64(fb.count))
+        }
+    }
+
+    /// Run once, right after the first frame is on screen. This is where the
+    /// deferred startup work lands so it never delays the window appearing:
+    /// the user's interactive $PATH recovery (slow login shell) and the
+    /// monospace-family scan (applied to every open Desktop). Both are
+    /// idempotent, so a stray second call is harmless.
+    func afterFirstFrame() {
+        tk_recover_user_shell_path()
+        fontOptionsReady = true
+        for v in views where v.handle != 0 { applyFontOptions(to: v.handle) }
+        if chromeDesktop != 0 { applyFontOptions(to: chromeDesktop) }
+    }
+
     @discardableResult
     func newWindow(frame: NSRect? = nil) -> CellView {
         let h = tk_desktop_new()
@@ -2109,14 +2148,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         tk_desktop_set_settings_detached(h, 1)
         // Project Settings likewise renders in its own native window.
         tk_desktop_set_project_settings_detached(h, 1)
-        // Register the system's monospace families so the Settings view
-        // grows its Font section (the terminal frontend never does this).
-        let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
-        let fb = Array(families.utf8)
-        fb.withUnsafeBufferPointer { b in
-            tk_desktop_set_font_options(h, Int64(Int(bitPattern: b.baseAddress)),
-                                        Int64(fb.count))
-        }
+        // Register the system's monospace families so the Settings view grows
+        // its Font section (the terminal frontend never does this). The scan
+        // is ~140 ms and only feeds the Settings picker — which can't be open
+        // before the first frame — so defer it until afterFirstFrame on the
+        // launch window. Windows opened later (fontOptionsReady already true)
+        // apply the cached list inline.
+        if fontOptionsReady { applyFontOptions(to: h) }
         let view = CellView()
         view.handle = h
         let initial = frame ?? NSRect(x: 0, y: 0, width: 1000, height: 640)
