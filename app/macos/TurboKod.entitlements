@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Hardened-runtime entitlements for the notarized release build
+	     (scripts/release.sh). The .app bundles the Mojo runtime dylibs
+	     (libKGENCompilerRTShared, libAsyncRTMojoBindings, …) and libonig
+	     in Contents/Frameworks/. We re-sign them with the same Developer
+	     ID, so library validation would actually pass — but disabling it
+	     keeps the bundle loadable even if a vendored dylib carries a
+	     signature we don't re-stamp, which is the common notarization
+	     foot-gun for apps that ship their own runtime. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

@@ -1,4 +1,4 @@
-.PHONY: build shim app tui test screenshots update-lsp-list
+.PHONY: build shim app tui test release screenshots update-lsp-list
 .DEFAULT_GOAL := build
 
 # ``make`` (default) — build both frontends without launching either.
@@ -46,6 +46,16 @@ tui:
 # target launches.
 test:
 	./run.sh tests/test_basic.mojo
+
+# Build a self-contained, signed (and, with creds, Apple-notarized + stapled)
+# TurboKod.app, zip it, and publish to the GitHub Releases page. Unlike
+# ``app``, this vendors the Mojo runtime + libonig into the bundle so it runs
+# on a machine without the pixi env. Version comes from Info.plist unless
+# overridden: ``make release VERSION=0.0.2``. Signing/notarization auto-detect
+# a Developer ID cert + notary creds and degrade to ad-hoc if absent — see the
+# header of scripts/release.sh for the env vars.
+release:
+	VERSION="$(VERSION)" scripts/release.sh
 
 # Regenerate the README / docs screenshots: the per-theme gallery under
 # docs/screenshots/ and the debugger-paused hero shot (screenshot.png).
