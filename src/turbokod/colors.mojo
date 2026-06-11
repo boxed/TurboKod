@@ -306,6 +306,55 @@ def attr_to_sgr_rgb(attr: Attr, palette: List[UInt32]) -> String:
     return s
 
 
+def _rgb_to_256_packed(rgb: UInt32) -> UInt8:
+    """``_rgb_to_256`` for a packed ``0xRRGGBB`` value."""
+    return _rgb_to_256(
+        Int((rgb >> 16) & 0xFF), Int((rgb >> 8) & 0xFF), Int(rgb & 0xFF)
+    )
+
+
+def attr_to_sgr_indexed(attr: Attr, palette: List[UInt32]) -> String:
+    """Like ``attr_to_sgr`` but resolves indices through ``palette`` to RGB and
+    then folds each to the *nearest xterm-256 index* before emitting
+    ``38;5;N`` / ``48;5;N``.
+
+    This is the path for 256-color-only terminals (Apple Terminal.app being the
+    prominent macOS holdout) when a bundled theme is active. Emitting the raw
+    index would be wrong: the theme's reserved slots (``EDITOR_BG`` is index
+    16, the 7 ``SYN_*`` roles, the pane/caret/border slots — indices 16..29)
+    have no meaning in the standard 256-color cube, where index 16 is plain
+    black. Folding the theme's actual RGB to the nearest cube/ramp color renders
+    the theme approximately (blue editor background, etc.) instead of black.
+    """
+    var s = String("0")  # reset first; simpler than diffing previous attr
+    if (attr.style & STYLE_BOLD) != 0:      s += String(";1")
+    if (attr.style & STYLE_DIM) != 0:       s += String(";2")
+    if (attr.style & STYLE_ITALIC) != 0:    s += String(";3")
+    if (attr.style & STYLE_UNDERLINE) != 0:
+        if (attr.style & STYLE_UNDERLINE_CURLY) != 0:
+            s += String(";4:3")
+        else:
+            s += String(";4")
+    if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
+    if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
+    var n = len(palette)
+    if (attr.color_mode & FG_TRUECOLOR) != 0:
+        s += String(";38;5;") + String(Int(_rgb_to_256_packed(attr.fg_rgb)))
+    else:
+        var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
+        s += String(";38;5;") + String(Int(_rgb_to_256_packed(palette[fg_i])))
+    if (attr.color_mode & BG_TRUECOLOR) != 0:
+        s += String(";48;5;") + String(Int(_rgb_to_256_packed(attr.bg_rgb)))
+    else:
+        var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
+        s += String(";48;5;") + String(Int(_rgb_to_256_packed(palette[bg_i])))
+    if attr.underline_color >= 0:
+        var uc = Int(attr.underline_color)
+        if uc < n:
+            s += String(";58;5;") + String(Int(_rgb_to_256_packed(palette[uc])))
+    return s
+
+
 # --- SGR (incoming) decoding -------------------------------------------------
 #
 # ``parse_sgr`` is the inverse of ``attr_to_sgr``: it reads ANSI SGR color

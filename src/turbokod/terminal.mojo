@@ -15,7 +15,7 @@ from std.io.file_descriptor import FileDescriptor
 
 from .canvas import Canvas
 from .cell import Cell, blank_cell
-from .colors import Attr, attr_to_sgr, attr_to_sgr_rgb, default_attr
+from .colors import Attr, attr_to_sgr, attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr
 from .events import (
     DOUBLE_CLICK_MS,
     Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE,
@@ -445,10 +445,20 @@ struct Terminal:
                     append_string_bytes(buf, move_cursor(x, y))
                 if (not last_attr_valid) or last_attr != nc.attr:
                     append_string_bytes(buf, CSI)
-                    if self._truecolor and len(self._palette) == 256:
-                        append_string_bytes(
-                            buf, attr_to_sgr_rgb(nc.attr, self._palette)
-                        )
+                    if len(self._palette) == 256:
+                        if self._truecolor:
+                            append_string_bytes(
+                                buf, attr_to_sgr_rgb(nc.attr, self._palette)
+                            )
+                        else:
+                            # 256-color terminal (e.g. Apple Terminal.app):
+                            # resolve theme indices through the palette and fold
+                            # to nearest-256 — emitting the raw index would paint
+                            # the theme's reserved slots (EDITOR_BG = 16) as the
+                            # cube's black instead of the theme color.
+                            append_string_bytes(
+                                buf, attr_to_sgr_indexed(nc.attr, self._palette)
+                            )
                     else:
                         append_string_bytes(buf, attr_to_sgr(nc.attr))
                     buf.append(0x6D)  # 'm'

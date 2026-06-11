@@ -27,7 +27,7 @@ from turbokod.colors import (
     BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
     SYN_KEYWORD, PANE_BG,
     FG_TRUECOLOR, BG_TRUECOLOR, _rgb_to_256,
-    attr_to_sgr, attr_to_sgr_rgb, default_attr, parse_sgr,
+    attr_to_sgr, attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr, parse_sgr,
 )
 from turbokod.theme import (
     Theme, built_in_themes, default_theme_name, theme_by_name, theme_names,
@@ -7801,6 +7801,31 @@ def test_attr_to_sgr_rgb_emits_truecolor_channels() raises:
     var sgr = attr_to_sgr_rgb(a, d.palette)
     assert_true(sgr.find(String("38;2;18;52;86")) >= 0)    # 0x12,0x34,0x56
     assert_true(sgr.find(String("48;2;171;18;255")) >= 0)  # 0xAB,0x12,0xFF
+
+
+def test_attr_to_sgr_indexed_folds_theme_through_palette() raises:
+    """On a 256-color-only terminal (Apple Terminal.app) the indexed renderer
+    must resolve theme indices through the palette and fold to nearest-256 —
+    NOT emit the raw index. EDITOR_BG is index 16, which is plain black in the
+    xterm cube; the theme's actual blue (0x0021AA) must fold to a blue cube
+    color instead. This is the regression guard for the black-editor-background
+    bug."""
+    var d = theme_by_name(String("Turbo C++ 3.0"))
+    var sgr = attr_to_sgr_indexed(Attr(EDITOR_FG, EDITOR_BG), d.palette)
+    # EDITOR_BG = 0x0021AA folds to cube index 19 (a blue), never raw 16/black.
+    assert_true(sgr.find(String(";48;5;19")) >= 0)
+    assert_true(sgr.find(String(";48;5;16")) < 0)
+    # EDITOR_FG = 0xE5E5E5 folds to the gray ramp (253), readable on the blue.
+    assert_true(sgr.find(String(";38;5;253")) >= 0)
+
+
+def test_attr_to_sgr_indexed_folds_truecolor_channels() raises:
+    """A cell carrying its own truecolor RGB (a pty cell) folds that RGB to
+    nearest-256 in the indexed path rather than reading the palette index."""
+    var d = theme_by_name(String("Turbo C++ 3.0"))
+    var a = Attr().with_fg_rgb(0x0021AA)
+    var sgr = attr_to_sgr_indexed(a, d.palette)
+    assert_true(sgr.find(String(";38;5;19")) >= 0)  # 0x0021AA -> cube 19
 
 
 def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
@@ -19945,6 +19970,8 @@ def _run_chunk_02() raises:
     test_theme_lookup_and_distinctness()
     test_attr_to_sgr_rgb_resolves_palette()
     test_attr_to_sgr_rgb_emits_truecolor_channels()
+    test_attr_to_sgr_indexed_folds_theme_through_palette()
+    test_attr_to_sgr_indexed_folds_truecolor_channels()
     test_textmate_all_bundled_grammars_load()
     test_textmate_eol_closes_frame_with_newline_end_pattern()
     test_textmate_json_grammar_paints_strings_and_numbers()
