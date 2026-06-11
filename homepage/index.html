@@ -235,6 +235,11 @@
   .coupon h2 .yes { color: var(--red); }
   .coupon p { margin: 0 0 14px; font-size: 15px; color: var(--ink2); }
   .coupon .price { color: var(--red); font-weight: 700; }
+  .coupon .dlnote {
+    margin: 12px 0 0; font: italic 12px/1.4 Georgia, serif; color: var(--ink2);
+  }
+  .coupon .dlnote a { color: var(--accent); text-decoration: none; }
+  .coupon .dlnote a:hover { text-decoration: underline; }
   .btns { }
   .btn {
     display: inline-block;
@@ -419,11 +424,14 @@
   <section class="coupon">
     <h2><span class="yes">Yes!</span> Send me Turbokod.</h2>
     <p>Suggested retail price: <span class="price">$0.00</span>. It's free and
-    open source &mdash; clone it and go.</p>
+    open source &mdash; take the ready-to-run macOS app, or clone it and go.</p>
     <div class="btns">
-      <a class="btn" href="https://github.com/boxed/TurboKod">Get it on GitHub &raquo;</a>
+      <a class="btn" href="https://github.com/boxed/TurboKod/releases/latest/download/TurboKod-macos-arm64.zip">Download for macOS &raquo;</a>
+      <a class="btn alt" href="https://github.com/boxed/TurboKod">Get it on GitHub</a>
       <a class="btn alt" href="https://github.com/boxed/TurboKod#quickstart">Read the Quickstart</a>
     </div>
+    <p class="dlnote">Latest release &mdash; Apple&nbsp;silicon, macOS&nbsp;11 or later.
+    No coupon, no floppies. <a href="https://github.com/boxed/TurboKod/releases/latest">See all release notes.</a></p>
     <div class="terminal">
 <span class="cm"># the editor / IDE demo, in your terminal</span><br>
 <span class="pr">$</span> ./run.sh examples/desktop.mojo <b>path/to/project</b><br>

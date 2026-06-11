@@ -126,10 +126,14 @@ sign_dylib() {
 }
 
 note "signing with: $identity"
-# Inside-out: every vendored dylib first...
+# Inside-out: every vendored dylib first, then the secondary tk-tui executable.
+# Signing the .app (below) only covers the main executable named by
+# CFBundleExecutable — the terminal-frontend helper in MacOS/ is a separate
+# Mach-O that notarization rejects unless it's hardened-runtime signed too.
 find "$fwk" -name '*.dylib' -print0 | while IFS= read -r -d '' lib; do
   sign_dylib "$lib"
 done
+[ -f "$contents/MacOS/tk-tui" ] && sign_dylib "$contents/MacOS/tk-tui"
 # ...then the bundle (which signs the main executable), with entitlements +
 # hardened runtime when we have a real identity.
 if [ "$identity" = "-" ]; then
@@ -144,7 +148,9 @@ codesign --verify --deep --strict --verbose=2 "$app" || die "signature verificat
 # ---------------------------------------------------------------------------
 # 5. Notarize + staple (only meaningful with a real identity + creds).
 # ---------------------------------------------------------------------------
-zip=".build/TurboKod-$VERSION-macos-$arch.zip"
+# Version-less asset name so the homepage can link the stable
+# /releases/latest/download/<name> URL (the version lives in the tag + title).
+zip=".build/TurboKod-macos-$arch.zip"
 notarized=0
 if [ "$identity" != "-" ]; then
   notary_args=()

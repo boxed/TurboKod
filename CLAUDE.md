@@ -26,6 +26,27 @@ Frontend-specific code lives only in:
 
 Everything else — widgets, Editor, Desktop, syntax highlighting, LSP/DAP, file tree, dialogs — is shared and must stay frontend-agnostic.
 
+### CLI launcher (`tk`) + bundled terminal frontend
+
+`TurboKod.app` ships a **second terminal frontend binary**, `Contents/MacOS/tk-tui`
+(source: `app/tui/main.mojo`), and self-installs a `tk` CLI helper to
+`~/.local/bin/tk` on first launch (`installCliHelperIfNeeded` in `TurboKod.swift`).
+`tk <path>` opens the native app; `tk --tui <path>` or any SSH session
+(`$SSH_CONNECTION`/`$SSH_TTY`/`$SSH_CLIENT`) runs `tk-tui` instead.
+
+Unlike the `run.sh` terminal build (which compiles the whole core into a ~4.6 MB
+standalone binary), `tk-tui` is the **C-ABI counterpart of the Swift host**: it
+reaches the `Desktop` *only* through the `tk_desktop_*` C ABI in `native_api.mojo`
+and rpath-loads the same bundled `libturbokod.dylib` — so it stays ~190 KB and the
+bundle carries one copy of the core, not two. It reuses `terminal.mojo`'s raw-mode /
+`parse_input` / diff-`present` verbatim; the only host code is the frame glue
+(layout-buffer → `Canvas` unpack, `Event` → `tk_desktop_key`/`mouse`/`mod_key`/`paste`).
+It imports **only** the light frontend modules + `file_dialog` — never `desktop`/
+`editor`/`highlight` (that's what keeps it small; check the binary size if you add
+imports). The in-grid `FileDialog` is the only frontend-owned UI (the Swift host uses
+a native `NSOpenPanel` for the same Open / Quick-Open / Open-Project actions).
+`run_swift.sh` builds, bundles, and ad-hoc-signs it alongside the Swift binary.
+
 ### Menu surface
 
 `Desktop.menu_bar` holds the menu definitions for both frontends; how it's *displayed* depends on the frontend. The terminal frontend paints it in-grid; the Swift frontend hides the in-grid version and mirrors it as a native `NSMenu` via `Desktop.host_owns_menu` + the snapshot/invoke C ABI. Both surfaces share the menu data, so any change to `_build_menus` (in `native_api.mojo`) / project menu / Window menu / Edit-menu-extras logic shows up in both immediately. Don't bypass `menu_bar` by hardcoding NSMenu items in `TurboKod.swift`.
@@ -77,7 +98,7 @@ TK_CAPTURE=/tmp/shot.png ./run_swift.sh   # headless render then quit
 
 `run.sh` does `mojo build -I src` and runs the resulting native binary. We use `mojo build` (not `mojo run`) because `mojo run` is JIT-only and silently ignores `-Xlinker` — the build step is what makes linking C deps (e.g. libonig for TextMate-grammar highlighting) actually work. Built binaries are cached under `.build/` keyed by source path; the script skips the build when no `.mojo` file in `src/` (or the entry point itself) is newer than the cached binary, so repeat runs are essentially free. Pixi tasks (`pixi run hello`, `pixi run test`, `pixi run boxes`) all route through `run.sh`.
 
-`run_swift.sh` does three builds in dependency order, each cached by mtime: the Rust shim (`app/turbokod-shim/`), the Mojo shared library (`.build/libturbokod.dylib` from `native_api.mojo`), and the Swift binary (linked against the dylib + AppKit). It then assembles `.build/TurboKod.app` and `exec`s it. The bundle layout (dylib in `Contents/Frameworks/`, `@rpath` resolution, resource chdir for Mojo's relative paths) is detailed in [docs/app-bundle.md](docs/app-bundle.md) — including the stale-bundle-dylib gotcha that `make app` exists to solve.
+`run_swift.sh` does four builds in dependency order, each cached by mtime: the Rust shim (`app/turbokod-shim/`), the Mojo shared library (`.build/libturbokod.dylib` from `native_api.mojo`), the Swift binary (linked against the dylib + AppKit), and the `tk-tui` terminal binary (`app/tui/main.mojo`, also linked against the dylib — see the CLI-launcher section above). It then assembles `.build/TurboKod.app` and `exec`s it. The bundle layout (dylib in `Contents/Frameworks/`, `@rpath` resolution, resource chdir for Mojo's relative paths) is detailed in [docs/app-bundle.md](docs/app-bundle.md) — including the stale-bundle-dylib gotcha that `make app` exists to solve.
 
 Both scripts honor `TURBOKOD_BUILD_ONLY=1` to skip the launch — that's how the make targets reuse them without spawning processes.
 

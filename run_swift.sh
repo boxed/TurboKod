@@ -17,6 +17,7 @@ env_prefix="$(pixi info --json 2>/dev/null \
 shim_lib="app/turbokod-shim/target/release/libturbokod_shim.a"
 dylib=".build/libturbokod.dylib"
 swiftbin=".build/turbokod_swift"
+tk_tui=".build/tk_tui"
 mkdir -p .build
 
 # Build the Rust shim if needed (pty / onig handle registry / listdir).
@@ -71,6 +72,32 @@ if [ ! -f "$swiftbin" ] || [ app/swift/TurboKod.swift -nt "$swiftbin" ] \
   fi
 fi
 
+# Build the terminal-frontend binary (tk-tui). Unlike examples/desktop.mojo
+# (which ``run.sh`` compiles with the whole core baked in, ~4.6 MB), this links
+# the dylib and reaches the Desktop only through its C ABI — so it stays tiny
+# (~170 KB) and shares the one bundled libturbokod.dylib instead of duplicating
+# the core. Rebuild when its source, any src Mojo, or the dylib (its ABI) moved.
+#   * ``-L .build -lturbokod`` links against the dylib (install_name is
+#     ``@rpath/libturbokod.dylib``, stamped above), resolved at runtime by ...
+#   * ``-rpath @executable_path/../Frameworks`` — tk-tui lives in Contents/MacOS,
+#     the dylib in Contents/Frameworks. (``mojo build`` already bakes the
+#     ``${env_prefix}/lib`` rpath for the Mojo runtime + libonig the dylib pulls
+#     in at load, so we must NOT add it again — that would warn "duplicate
+#     -rpath". tk-tui itself never calls libonig, so no ``-lonig`` here.)
+if [ ! -f "$tk_tui" ] || [ app/tui/main.mojo -nt "$tk_tui" ] \
+   || [ "$dylib" -nt "$tk_tui" ] \
+   || find src -name '*.mojo' -newer "$tk_tui" -print -quit 2>/dev/null | grep -q .; then
+  echo "[run_swift] building tk-tui binary -> $tk_tui" >&2
+  if ! pixi run mojo build -I src \
+      -Xlinker "-L${env_prefix}/lib" \
+      -Xlinker "-L.build" -Xlinker "-lturbokod" \
+      -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
+      -o "$tk_tui" app/tui/main.mojo; then
+    echo "[run_swift] tk-tui build failed" >&2
+    exit 1
+  fi
+fi
+
 # Assemble TurboKod.app so macOS shows the proper name + icon, and bundle the
 # resources the Mojo side loads via relative paths (src/turbokod/grammars,
 # src/turbokod/data). The app chdir's to Resources/ on launch, so these
@@ -83,6 +110,9 @@ mkdir -p "$contents/MacOS" "$fwk" "$res/src/turbokod"
 cp app/macos/TurboKod-Info.plist "$contents/Info.plist"
 cp app/macos/icon.icns "$res/icon.icns"
 cp "$swiftbin" "$contents/MacOS/TurboKod"
+# The terminal frontend, launched by the ``tk`` CLI helper (and over SSH).
+# It rpath-loads the same Contents/Frameworks/libturbokod.dylib as the Swift host.
+cp "$tk_tui" "$contents/MacOS/tk-tui"
 # Embed the Mojo dylib so the .app is self-contained for it. The Swift
 # binary's rpath ``@executable_path/../Frameworks`` resolves to this
 # location regardless of where the .app is launched from.
@@ -98,6 +128,7 @@ cp app/assets/Px437_IBM_VGA_8x16.ttf "$res/Px437_IBM_VGA_8x16.ttf"
 # validate — the launch dies before main() with no output. Re-signing on
 # every assembly is cheap (<100 ms) and makes the bundle always runnable.
 codesign --force --sign - "$fwk/libturbokod.dylib" 2>/dev/null
+codesign --force --sign - "$contents/MacOS/tk-tui" 2>/dev/null
 codesign --force --sign - "$app_dir" 2>/dev/null
 
 # ``TURBOKOD_BUILD_ONLY=1`` skips the launch — used by ``make app`` so
