@@ -1008,8 +1008,39 @@ final class CellView: NSView {
     }
 
     func capturePNG(to path: String) {
-        guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
-        cacheDisplay(in: bounds, to: rep)
+        // Render the grab into an explicitly hi-DPI bitmap rather than
+        // `bitmapImageRepForCachingDisplay`, whose 1× point-resolution grab
+        // leaves the 8×16 pixel font soft once a viewer scales the PNG. We
+        // allocate `scale`× the pixels (2× by default; TK_CAPTURE_SCALE
+        // overrides), then drive the normal `draw(_:)` through a CTM scaled +
+        // flipped to match the view — so the no-AA pixel font lands on integer
+        // pixel boundaries and each glyph pixel becomes a crisp scale×scale block.
+        let scale = max(1, Int(ProcessInfo.processInfo.environment["TK_CAPTURE_SCALE"]
+                                ?? "2") ?? 2)
+        let pw = Int((bounds.width * CGFloat(scale)).rounded())
+        let ph = Int((bounds.height * CGFloat(scale)).rounded())
+        guard pw > 0, ph > 0,
+              let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: pw, pixelsHigh: ph,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0),
+              let base = NSGraphicsContext(bitmapImageRep: rep) else { return }
+        // 1 unit == 1 pixel in the rep's context; our CTM does points→pixels.
+        rep.size = NSSize(width: pw, height: ph)
+        let cg = base.cgContext
+        cg.scaleBy(x: CGFloat(scale), y: CGFloat(scale))   // points → pixels
+        cg.translateBy(x: 0, y: bounds.height)             // flip y to match
+        cg.scaleBy(x: 1, y: -1)                            // the flipped view
+        // Wrap the y-flipped CG context as a *flipped* NSGraphicsContext so
+        // NSString.draw() lays glyphs out right-side-up (text honors the NS
+        // context's flippedness, not just the raw CTM).
+        let nsctx = NSGraphicsContext(cgContext: cg, flipped: true)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsctx
+        draw(bounds)
+        nsctx.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
         if let data = rep.representation(using: .png, properties: [:]) {
             try? data.write(to: URL(fileURLWithPath: path))
         }
