@@ -193,6 +193,9 @@ from .breakpoint_store import (
 from .view_state_store import (
     StoredViewState, encode_view_states, load_view_states, save_view_states,
 )
+from .drafts_store import (
+    StoredDraft, encode_drafts, load_drafts, save_drafts,
+)
 from .status import StatusBar, StatusTab
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
@@ -1284,6 +1287,13 @@ struct Desktop(Movable):
     # as the session.
     var _view_states: List[StoredViewState]
     var _last_view_states_json: String
+    # Change-detection cache for the per-user *untitled drafts* file
+    # (``drafts.json``). Untitled buffers carry no path, so the session
+    # store skips them; this captures their full content instead so a
+    # scratch document survives quit/restart. Encoded each paint and
+    # written only when the encoding differs from this cached value —
+    # same cadence and pattern as ``_last_session_json``.
+    var _last_drafts_json: String
     # Recently focused file-backed editor paths, most-recent first.
     # Mirrors ``config.recent_files`` (which is the persistent copy);
     # both are kept in sync by ``_track_recent_focus``. Stores canonical
@@ -1519,6 +1529,7 @@ struct Desktop(Movable):
         self._last_breakpoints_json = String("")
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
+        self._last_drafts_json = String("")
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
@@ -2313,6 +2324,37 @@ struct Desktop(Movable):
         )
         return True
 
+    def paste_text_into_focus(mut self, text: String) -> Bool:
+        """Route ``text`` to whatever owns keyboard focus, exactly like a
+        Ctrl/Cmd+V paste. Shared by the in-core ``EDITOR_PASTE`` action (which
+        passes ``clipboard_paste()``) and the native host's pasteboard path
+        (which passes Unicode-normalized text it read itself) so both behave
+        identically. Returns True when something consumed the paste.
+
+        A focused terminal pane takes the text as a paste event —
+        ``handle_key`` applies bracketed-paste wrapping for the child — instead
+        of letting it land in the editor window behind it. Otherwise a focused
+        editor receives it. Paste can land the cursor anywhere in the buffer,
+        so ``reveal_cursor`` brings it back into view (the per-keystroke
+        ``_scroll_to_cursor`` is bypassed when the paste arrives via a hotkey
+        or menu click rather than ``editor.handle_key``)."""
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused:
+                if len(text.as_bytes()) > 0:
+                    _ = self.terminal_panes[i].handle_key(
+                        Event.paste_event(text),
+                    )
+                return True
+        if self.windows.focused >= 0 \
+                and self.windows.windows[self.windows.focused].is_editor:
+            var idx = self.windows.focused
+            self.windows.windows[idx].editor.paste_clipboard_text(text)
+            self.windows.windows[idx].editor.reveal_cursor(
+                self.windows.windows[idx].interior(),
+            )
+            return True
+        return False
+
     def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
@@ -3101,6 +3143,10 @@ struct Desktop(Movable):
         if self._pending_restore:
             self._pending_restore = False
             self._restore_session(screen)
+            # Untitled buffers live in a separate per-user store (no path
+            # for the session store to key on). Restore them after the
+            # file-backed windows so they land on top of the z-order.
+            self._restore_drafts(screen)
             did_restore = True
         # Keep the focused document's "last focused" timestamp fresh, and
         # open its language server lazily. LSP startup is deferred out of
@@ -3458,6 +3504,12 @@ struct Desktop(Movable):
         # closed earlier in the same paint still wrote its final state
         # via ``_capture_view_state_for_window``.
         self._save_view_states_if_changed()
+        # Persist untitled (file-less) buffers to drafts.json on the same
+        # change-detected cadence. The session store skips them (no path);
+        # this is what keeps a brand-new "Untitled" scratch document from
+        # being lost on quit/restart. The buffer still reports itself as
+        # unsaved — see ``_save_drafts_if_changed``.
+        self._save_drafts_if_changed()
 
     def _shortcut_for_action(self, action: String) -> String:
         """Reverse-lookup the most recently registered hotkey for ``action``
@@ -4532,6 +4584,11 @@ struct Desktop(Movable):
         # reloads its own view_states.json fresh.
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
+        # Same for the untitled-drafts cache — the next project restores
+        # its own drafts.json. Clearing project before dropping windows
+        # (below) means ``_save_drafts_if_changed`` bails on its project
+        # guard and leaves this project's drafts.json intact for reopen.
+        self._last_drafts_json = String("")
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
         # guard and leaves the on-disk session intact. Reopening the
@@ -5041,6 +5098,188 @@ struct Desktop(Movable):
         if save_session(self.project.value(), session):
             self._last_session_json = encoded
 
+    def _draft_seq_from_title(self, title: String) -> Int:
+        """Recover the ``_untitled_count`` value a window was created
+        with from its title. ``new_file`` titles the first untitled
+        buffer ``"Untitled"`` (seq 1) and the rest ``"Untitled N"``
+        (seq N). Returns 0 for any title that doesn't fit the pattern —
+        the caller falls back to a positional seq so the draft still
+        round-trips, just without a stable number."""
+        var prefix = String("Untitled")
+        var tb = title.as_bytes()
+        var pb = prefix.as_bytes()
+        if len(tb) < len(pb):
+            return 0
+        for i in range(len(pb)):
+            if tb[i] != pb[i]:
+                return 0
+        if len(tb) == len(pb):
+            return 1
+        # Expect "Untitled <n>": a single space then digits.
+        if tb[len(pb)] != 0x20:
+            return 0
+        var n = 0
+        var any = False
+        for i in range(len(pb) + 1, len(tb)):
+            var c = tb[i]
+            if c < 0x30 or c > 0x39:
+                return 0
+            n = n * 10 + Int(c - 0x30)
+            any = True
+        if not any:
+            return 0
+        return n
+
+    def _snapshot_drafts(self) -> List[StoredDraft]:
+        """Build the list of untitled (file-less) editor buffers to
+        persist. An untitled window qualifies when it's an editor, has
+        no ``file_path``, and holds non-empty content — a pristine empty
+        scratch buffer has nothing worth surviving a restart, and
+        skipping it also keeps the drafts file from churning while the
+        user merely tabs past a blank Untitled window. The buffer stays
+        ``dirty`` in the UI regardless; this is an autosave shadow, not
+        a real save."""
+        var out = List[StoredDraft]()
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            if len(self.windows.windows[i].editor.file_path.as_bytes()) != 0:
+                continue
+            var content = self.windows.windows[i].editor.text_snapshot()
+            if len(content.as_bytes()) == 0:
+                continue
+            var d = StoredDraft()
+            var seq = self._draft_seq_from_title(
+                self.windows.windows[i].title,
+            )
+            if seq <= 0:
+                seq = len(out) + 1
+            d.seq = seq
+            d.content = content^
+            d.rect_a_x = self.windows.windows[i].rect.a.x
+            d.rect_a_y = self.windows.windows[i].rect.a.y
+            d.rect_b_x = self.windows.windows[i].rect.b.x
+            d.rect_b_y = self.windows.windows[i].rect.b.y
+            d.is_maximized = self.windows.windows[i].is_maximized
+            d.restore_a_x = self.windows.windows[i]._restore_rect.a.x
+            d.restore_a_y = self.windows.windows[i]._restore_rect.a.y
+            d.restore_b_x = self.windows.windows[i]._restore_rect.b.x
+            d.restore_b_y = self.windows.windows[i]._restore_rect.b.y
+            d.cursor_row = self.windows.windows[i].editor.selections[0].row
+            d.cursor_col = self.windows.windows[i].editor.selections[0].col
+            d.scroll_x = self.windows.windows[i].editor.scroll_x
+            d.scroll_y = self.windows.windows[i].editor.scroll_y
+            d.last_focus_ms = self.windows.windows[i]._last_focus_ms
+            out.append(d^)
+        return out^
+
+    def _save_drafts_if_changed(mut self):
+        """Re-encode the untitled-drafts snapshot and write it only when
+        the encoding differs from the previously-written one. Same
+        cadence and project guard as ``_save_session_if_changed`` — runs
+        every paint, so the on-disk copy is current as of the last paint
+        (i.e. just after the last keystroke), which is what keeps a
+        scratch buffer from being lost on quit even when the host never
+        delivers a focus-out first. A window saved-as to a real file (now
+        carrying a path) or closed simply drops out of the snapshot, so
+        its draft is removed on the next write."""
+        if not self.project:
+            return
+        var drafts = self._snapshot_drafts()
+        var encoded = encode_drafts(drafts)
+        if encoded == self._last_drafts_json:
+            return
+        if save_drafts(self.project.value(), drafts):
+            self._last_drafts_json = encoded
+
+    def _restore_drafts(mut self, screen: Rect):
+        """Recreate untitled editor windows from the per-user drafts
+        file. Each restored buffer is marked ``dirty`` — it was never
+        saved to a real file, so it's unsaved by definition and shows
+        the same uncommitted-changes tint as a freshly-typed Untitled
+        window. ``_untitled_count`` is advanced past the highest restored
+        ``seq`` so a subsequent ``new_file`` can't reuse a title that's
+        already on screen. Rects are clipped to the current workspace so
+        a smaller terminal than last time still yields visible windows.
+
+        Focus restoration spans both stores: ``_restore_session`` already
+        focused whichever file-backed window the user left on. Each
+        ``windows.add`` below makes the new draft steal that focus (and
+        the top z-slot), so we remember the session's pick first and, at
+        the end, hand focus back to whichever window — file or draft —
+        carries the most recent ``_last_focus_ms``. That also raises it
+        above the just-added drafts so the focused window is frontmost."""
+        if not self.project:
+            return
+        var drafts = load_drafts(self.project.value())
+        if len(drafts) == 0:
+            return
+        var workspace = self.workspace_rect(screen)
+        # Session's restored focus + its recency, captured before the
+        # adds below clobber ``self.windows.focused``.
+        var winner = self.windows.focused
+        var winner_ms = 0
+        if 0 <= winner and winner < len(self.windows.windows):
+            winner_ms = self.windows.windows[winner]._last_focus_ms
+        for i in range(len(drafts)):
+            var d = drafts[i]
+            var seq = d.seq
+            if seq < 1:
+                seq = 1
+            var title = String("Untitled")
+            if seq > 1:
+                title = title + String(" ") + String(seq)
+            if seq > self._untitled_count:
+                self._untitled_count = seq
+            var rect = _clip_rect_to_workspace(
+                Rect(d.rect_a_x, d.rect_a_y, d.rect_b_x, d.rect_b_y),
+                workspace,
+            )
+            var restore = _clip_rect_to_workspace(
+                Rect(d.restore_a_x, d.restore_a_y,
+                     d.restore_b_x, d.restore_b_y),
+                workspace,
+            )
+            var w = Window.editor_window(title^, rect, d.content)
+            w._restore_rect = restore
+            w._last_focus_ms = d.last_focus_ms
+            # Unsaved by definition: keep the UI showing a dirty buffer
+            # even though the bytes live in drafts.json.
+            w.editor.dirty = True
+            var line_count = w.editor.buffer.line_count()
+            var cr = d.cursor_row
+            if cr < 0:
+                cr = 0
+            if line_count > 0 and cr >= line_count:
+                cr = line_count - 1
+            w.editor.selections[0].row = cr
+            w.editor.selections[0].anchor_row = cr
+            w.editor.selections[0].col = d.cursor_col
+            w.editor.selections[0].anchor_col = d.cursor_col
+            w.editor.scroll_x = d.scroll_x
+            w.editor.scroll_y = d.scroll_y
+            self.windows.add(w^)
+            var idx = len(self.windows.windows) - 1
+            if d.is_maximized:
+                self.windows.windows[idx].rect = workspace
+                self.windows.windows[idx].is_maximized = True
+                self.windows.windows[idx]._restore_rect = restore
+            # This draft wins focus if it was more recently focused than
+            # the current leader — or if there was no session focus at
+            # all (file-less project), so a draft-only restore still lands
+            # on a focused window rather than ``-1``.
+            if winner < 0 or d.last_focus_ms > winner_ms:
+                winner = idx
+                winner_ms = d.last_focus_ms
+        # Focus (and raise to top of z-order) the overall most-recently-
+        # focused window. ``focus_by_index`` is a no-op for an out-of-
+        # range index, so a ``-1`` winner is harmless.
+        self.windows.focus_by_index(winner)
+        # Seed the change-detection cache with what we just restored so
+        # the immediate post-restore paint doesn't rewrite identical
+        # bytes (the snapshot reflects exactly these windows now).
+        self._last_drafts_json = encode_drafts(self._snapshot_drafts())
+
     def _restore_session(mut self, screen: Rect):
         """Recreate windows from
         ``<project>/.turbokod/per_user/<username>/session.json``.
@@ -5360,6 +5599,14 @@ struct Desktop(Movable):
         # saving happens here, before any caller-routed handling.
         if event.kind == EVENT_FOCUS_OUT and self.config.auto_save:
             self._autosave_all_dirty()
+        # Flush untitled drafts on focus-out too — unconditionally, since
+        # this is the only on-disk copy of an unsaved scratch buffer and
+        # losing it because the user happened to turn off ``auto_save``
+        # would defeat the point. The per-paint save already covers this,
+        # but a focus-out isn't guaranteed to be followed by a paint
+        # before the host tears the process down.
+        if event.kind == EVENT_FOCUS_OUT:
+            self._save_drafts_if_changed()
         # Host focus-in/out also forwards to every docked terminal —
         # children that have enabled ``?1004`` (vim's FocusGained /
         # FocusLost autocmds) need to see it.
@@ -6541,32 +6788,7 @@ struct Desktop(Movable):
                 self.windows.windows[self.windows.focused].editor.copy_to_clipboard()
             return Optional[String]()
         if action == EDITOR_PASTE:
-            # Paste targets whatever owns keyboard focus, exactly like
-            # typing. A focused terminal pane takes the clipboard as a
-            # paste event — ``handle_key`` applies bracketed-paste
-            # wrapping for the child — instead of letting the text land
-            # in the editor window behind it. Same pane-first rule as
-            # EDITOR_COPY above.
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].focused:
-                    var pasted = clipboard_paste()
-                    if len(pasted.as_bytes()) > 0:
-                        _ = self.terminal_panes[i].handle_key(
-                            Event.paste_event(pasted),
-                        )
-                    return Optional[String]()
-            # Paste, undo, and redo can land the cursor anywhere in the
-            # buffer — ``reveal_cursor`` brings it back into view since
-            # the per-keystroke ``_scroll_to_cursor`` in editor.handle_key
-            # is bypassed when the action arrives via a desktop hotkey or
-            # menu click.
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                var idx = self.windows.focused
-                self.windows.windows[idx].editor.paste_from_clipboard()
-                self.windows.windows[idx].editor.reveal_cursor(
-                    self.windows.windows[idx].interior(),
-                )
+            _ = self.paste_text_into_focus(clipboard_paste())
             return Optional[String]()
         if action == EDITOR_COMPARE_CLIPBOARD:
             self._open_compare_with_clipboard(screen)

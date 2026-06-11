@@ -7978,7 +7978,14 @@ struct Editor(Copyable, Movable):
         treated as a line-clipboard and inserted as new lines above the
         current line (cursor stays on its original line, now displaced
         down)."""
-        var text = clipboard_paste()
+        self.paste_clipboard_text(clipboard_paste())
+
+    def paste_clipboard_text(mut self, text: String):
+        """``paste_from_clipboard`` with the clipboard text supplied by the
+        caller — used by the native host, which reads (and Unicode-normalizes)
+        the system pasteboard itself before handing the text down. Shares the
+        line-clipboard handling so host pastes behave identically to the
+        in-core ``clipboard_paste`` path."""
         var bytes = text.as_bytes()
         var n = len(bytes)
         var line_mode = (

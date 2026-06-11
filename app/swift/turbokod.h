@@ -62,6 +62,10 @@ int32_t tk_desktop_paste_target_is_editor(int64_t h);
 // Insert text verbatim at the focused editor's caret. Backs the file-path
 // paste menu (Cmd+V of a file): host formats the path per the menu choice.
 int32_t tk_desktop_paste_text(int64_t h, int64_t text_ptr, int64_t text_len);
+// Paste host-supplied (NFC-normalized) text into whatever owns keyboard focus
+// — the host-driven counterpart to in-core Cmd+V. Used for normal text paste
+// so macOS's decomposed pasteboard text (a + U+030A) becomes precomposed (å).
+int32_t tk_desktop_paste_clipboard_text(int64_t h, int64_t text_ptr, int64_t text_len);
 int32_t tk_desktop_has_project(int64_t h);
 void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
 void    tk_desktop_set_host_focused(int64_t h, int64_t on);

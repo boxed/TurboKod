@@ -1079,6 +1079,22 @@ def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
 
 
 @export
+def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
+    """Paste ``text`` into whatever owns keyboard focus — the host-driven
+    counterpart to the in-core ``Cmd+V`` (``EDITOR_PASTE``) path. The Swift host
+    reads the system pasteboard and Unicode-normalizes it to NFC before calling
+    this, because macOS routinely hands out decomposed text (e.g. ``a`` + U+030A
+    combining ring for ``å``); the bitmap font has no glyph for a lone combining
+    mark, so an unnormalized paste renders as ``?``. Routes through the same
+    focus logic as ``EDITOR_PASTE`` (terminal pane first, then editor, with
+    line-clipboard handling). Returns 1 when something consumed the paste."""
+    if h == 0:
+        return Int32(0)
+    var text = _string_from(text_ptr, text_len)
+    return Int32(1) if _desk(h)[].paste_text_into_focus(text) else Int32(0)
+
+
+@export
 def tk_desktop_has_project(h: Int) -> Int32:
     if h == 0:
         return Int32(0)

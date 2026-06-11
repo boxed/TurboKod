@@ -72,6 +72,9 @@ from turbokod.breakpoint_store import (
 from turbokod.view_state_store import (
     StoredViewState, encode_view_states, load_view_states, save_view_states,
 )
+from turbokod.drafts_store import (
+    StoredDraft, encode_drafts, load_drafts, save_drafts,
+)
 from turbokod.desktop import (
     APP_QUIT_ACTION,
     Desktop,
@@ -15661,6 +15664,113 @@ def test_desktop_restores_session_from_disk() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+def test_drafts_store_round_trip() raises:
+    """Untitled buffers persist their full content + geometry + cursor
+    and decode back to the same fields. Unlike the session store there's
+    no path involved — the content is the payload that survives a
+    restart."""
+    var root = String("/tmp/turbokod_drafts_round_trip")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var drafts = List[StoredDraft]()
+    var d0 = StoredDraft()
+    d0.seq = 1
+    d0.content = String("hello\nworld")
+    d0.rect_a_x = 4
+    d0.rect_a_y = 2
+    d0.rect_b_x = 50
+    d0.rect_b_y = 18
+    d0.restore_a_x = 4
+    d0.restore_a_y = 2
+    d0.restore_b_x = 50
+    d0.restore_b_y = 18
+    d0.cursor_row = 1
+    d0.cursor_col = 3
+    d0.scroll_y = 7
+    d0.last_focus_ms = 123456
+    drafts.append(d0^)
+    var d1 = StoredDraft()
+    d1.seq = 5
+    d1.content = String("scratch")
+    drafts.append(d1^)
+    assert_true(save_drafts(root, drafts))
+    var loaded = load_drafts(root)
+    assert_equal(len(loaded), 2)
+    assert_equal(loaded[0].seq, 1)
+    assert_equal(loaded[0].content, String("hello\nworld"))
+    assert_equal(loaded[0].rect_a_x, 4)
+    assert_equal(loaded[0].rect_b_y, 18)
+    assert_equal(loaded[0].cursor_row, 1)
+    assert_equal(loaded[0].cursor_col, 3)
+    assert_equal(loaded[0].scroll_y, 7)
+    assert_equal(loaded[0].last_focus_ms, 123456)
+    assert_equal(loaded[1].seq, 5)
+    assert_equal(loaded[1].content, String("scratch"))
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+def test_drafts_store_load_missing_returns_empty() raises:
+    """No file → empty list, same contract as the sibling stores."""
+    var drafts = load_drafts(String("/tmp/turbokod_drafts_does_not_exist_xyz"))
+    assert_equal(len(drafts), 0)
+
+
+def test_desktop_restores_drafts_from_disk() raises:
+    """Open a project with a saved ``drafts.json`` and confirm the
+    desktop reopens the untitled buffer: a titled "Untitled" editor
+    window shows up with the saved content, the cursor is reapplied, and
+    crucially the buffer reports itself as *dirty* (unsaved) even though
+    the bytes came off disk — the draft file is an autosave shadow, not
+    a real save."""
+    var root = String("/tmp/turbokod_drafts_restore_test")
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var drafts = List[StoredDraft]()
+    var d0 = StoredDraft()
+    d0.seq = 2
+    d0.content = String("draft line one\ndraft line two")
+    d0.rect_a_x = 4
+    d0.rect_a_y = 2
+    d0.rect_b_x = 50
+    d0.rect_b_y = 18
+    d0.restore_a_x = 4
+    d0.restore_a_y = 2
+    d0.restore_b_x = 50
+    d0.restore_b_y = 18
+    d0.cursor_row = 1
+    d0.cursor_col = 5
+    drafts.append(d0^)
+    assert_true(save_drafts(root, drafts))
+    var d = Desktop()
+    d.open_project(root)
+    assert_true(d.project)
+    var screen = Rect(0, 0, 80, 30)
+    d._pending_restore = False
+    d._restore_drafts(screen)
+    assert_equal(len(d.windows.windows), 1)
+    var w0 = d.windows.windows[0].copy()
+    assert_true(w0.is_editor)
+    assert_equal(w0.title, String("Untitled 2"))
+    assert_equal(len(w0.editor.file_path.as_bytes()), 0)
+    assert_true(w0.editor.dirty)
+    assert_equal(w0.editor.buffer.line(0), String("draft line one"))
+    assert_equal(w0.editor.buffer.line(1), String("draft line two"))
+    assert_equal(w0.editor.selections[0].row, 1)
+    assert_equal(w0.editor.selections[0].col, 5)
+    # The lone restored draft takes focus (a file-less project would
+    # otherwise land on a -1 focus).
+    assert_equal(d.windows.focused, 0)
+    # A subsequent new_file must not collide with the restored seq.
+    assert_true(d._untitled_count >= 2)
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
 def test_desktop_resize_reapplies_clipped_session_rect() raises:
     """When the first restore lands on a smaller-than-saved workspace
     (the host pushes its real dimensions a few ms after startup), the
@@ -20309,6 +20419,9 @@ def _run_chunk_05() raises:
     test_view_state_store_round_trip()
     test_view_state_store_load_missing_returns_empty()
     test_view_state_store_per_user_path()
+    test_drafts_store_round_trip()
+    test_drafts_store_load_missing_returns_empty()
+    test_desktop_restores_drafts_from_disk()
     test_session_relative_path_round_trip()
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_restores_session_from_disk()

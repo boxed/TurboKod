@@ -980,6 +980,26 @@ final class CellView: NSView {
         return true
     }
 
+    /// Normal text paste (Cmd+V / Edit▸Paste): read the pasteboard as a string
+    /// and normalize to NFC before handing it to the core. macOS routinely
+    /// stores text decomposed (e.g. "a" + U+030A combining ring for "å"); the
+    /// bitmap font has no glyph for a lone combining mark, so an unnormalized
+    /// paste renders as "?". `precomposedStringWithCanonicalMapping` is
+    /// Foundation's complete, correct NFC. Returns true when the core consumed
+    /// the paste; false (no string on the pasteboard / nothing focused) lets
+    /// the caller fall back to the in-core clipboard path.
+    func pasteTextNormalized() -> Bool {
+        guard handle != 0,
+              let s = NSPasteboard.general.string(forType: .string) else { return false }
+        let text = s.precomposedStringWithCanonicalMapping
+        let bytes = Array(text.utf8)
+        let consumed = bytes.withUnsafeBufferPointer { b in
+            tk_desktop_paste_clipboard_text(
+                handle, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+        }
+        return consumed != 0
+    }
+
     private func formatPath(_ url: URL, _ fmt: Int32) -> String {
         switch fmt {
         case 1: return url.lastPathComponent
@@ -1950,9 +1970,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // caret. Only kicks in for an editor with a file on the clipboard;
         // otherwise falls through to the normal text paste below.
         if action == "edit:paste",
-           let v = (NSApp.keyWindow?.contentView as? CellView) ?? views.first,
-           v.pasteFilesWithMenu() {
-            return
+           let v = (NSApp.keyWindow?.contentView as? CellView) ?? views.first {
+            // File(s) on the clipboard → the path-format menu.
+            if v.pasteFilesWithMenu() { return }
+            // Plain text → NFC-normalize in the host (macOS hands out
+            // decomposed text that the bitmap font can't render) then paste.
+            if v.pasteTextNormalized() {
+                v.invalidateFrame()
+                v.needsDisplay = true
+                return
+            }
         }
         // Dispatch through whatever Desktop is currently driving the menu
         // (key window's, any open window's, or the chrome desktop when no
