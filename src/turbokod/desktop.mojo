@@ -2337,7 +2337,21 @@ struct Desktop(Movable):
         editor receives it. Paste can land the cursor anywhere in the buffer,
         so ``reveal_cursor`` brings it back into view (the per-keystroke
         ``_scroll_to_cursor`` is bypassed when the paste arrives via a hotkey
-        or menu click rather than ``editor.handle_key``)."""
+        or menu click rather than ``editor.handle_key``).
+
+        A modal text dialog (Find-in-Project, Find/Replace, Settings, …) owns
+        input ahead of any editor: its ``TextField`` pastes itself via the
+        ``CLIP_PASTE`` chord, and ``dispatch_action`` already re-injects that
+        chord into the focused modal field. Decline here so the focus search
+        below doesn't route the text into the editor hidden *behind* the
+        dialog. On native macOS, returning False makes the host fall through
+        from ``pasteTextNormalized`` to the ``edit:paste`` action →
+        ``dispatch_action`` → the modal's field. (The terminal frontend never
+        reaches this method with a modal up — its ⌘/Ctrl+V is a chord that
+        ``handle_event`` consumes in the modal block before the hotkey lookup.)
+        """
+        if self._modal_owns_input():
+            return False
         for i in range(len(self.terminal_panes)):
             if self.terminal_panes[i].focused:
                 if len(text.as_bytes()) > 0:
