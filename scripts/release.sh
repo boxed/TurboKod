@@ -7,8 +7,12 @@
 # Contents/Frameworks/ (the dev-only build keeps loading those from absolute
 # pixi paths - see docs/app-bundle.md "What's not bundled").
 #
-#   make release                 # version from Info.plist
-#   make release VERSION=0.0.2    # explicit version (also names the git tag)
+#   make release                 # prompts for the next version (defaults to a
+#                                 # patch bump of the current Info.plist version)
+#   make release VERSION=0.0.2    # explicit version, no prompt (also names the tag)
+#
+# The chosen version is stamped into the source Info.plist, committed as
+# "Release vX.Y.Z", and tagged + pushed before the bundle is built.
 #
 # Signing / notarization are auto-detected and degrade gracefully:
 #   * Developer ID Application cert in the keychain -> hardened-runtime signed.
@@ -36,36 +40,67 @@ fwk="$contents/Frameworks"
 arch="$(uname -m)"
 
 # ---------------------------------------------------------------------------
-# 1. Version. Explicit VERSION wins; otherwise read the source Info.plist.
+# 1. Version. An explicit VERSION (e.g. `make release VERSION=0.0.2`) is used
+#    as-is and non-interactively. Otherwise read the current version from the
+#    source Info.plist and prompt for the next one, defaulting to a patch bump.
 # ---------------------------------------------------------------------------
+current="$(plutil -extract CFBundleShortVersionString raw "$plist_src" 2>/dev/null)" \
+  || die "could not read CFBundleShortVersionString from $plist_src"
+
 VERSION="${VERSION:-}"
 if [ -z "$VERSION" ]; then
-  VERSION="$(plutil -extract CFBundleShortVersionString raw "$plist_src" 2>/dev/null)" \
-    || die "could not read CFBundleShortVersionString from $plist_src; pass VERSION=x.y.z"
+  # Default = patch bump of the current version (last dotted numeric field +1).
+  default="$(python3 - "$current" <<'PY'
+import re, sys
+parts = sys.argv[1].split(".")
+for i in range(len(parts) - 1, -1, -1):
+    m = re.match(r"^(\d+)(.*)$", parts[i])
+    if m:
+        parts[i] = str(int(m.group(1)) + 1) + m.group(2)
+        break
+print(".".join(parts))
+PY
+)"
+  printf '[release] current version is %s. Next version [%s]: ' "$current" "$default" >&2
+  read -r reply < /dev/tty || die "no tty to read version from; pass VERSION=x.y.z"
+  VERSION="${reply:-$default}"
 fi
+[ -n "$VERSION" ] || die "empty version"
 tag="v$VERSION"
-note "building TurboKod $VERSION ($tag) for macos-$arch"
-
-# Warn (don't block) on a dirty tree - the git tag gh creates will point at
-# HEAD, so uncommitted work won't be in the released commit.
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-  note "warning: working tree is dirty; the '$tag' tag will point at HEAD without your uncommitted changes"
-fi
+note "releasing TurboKod $VERSION ($tag) for macos-$arch"
 
 # ---------------------------------------------------------------------------
-# 2. Build the bundle via the normal path (also re-copies the dylib + assets).
+# 2. Stamp the version into the *source* Info.plist, commit that bump, and
+#    create + push the tag so the released commit carries the new version.
+# ---------------------------------------------------------------------------
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$plist_src"
+plutil -replace CFBundleVersion -string "$VERSION" "$plist_src"
+
+if ! git diff --quiet -- "$plist_src"; then
+  note "committing version bump..."
+  git commit -m "Release $tag" -- "$plist_src" || die "git commit failed"
+fi
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  note "tag $tag already exists locally - reusing it"
+else
+  git tag "$tag" || die "git tag failed"
+fi
+note "pushing commit + tag..."
+git push origin HEAD || die "git push (commit) failed"
+git push origin "$tag" || die "git push (tag) failed"
+
+# ---------------------------------------------------------------------------
+# 3. Build the bundle via the normal path (also re-copies the dylib + assets).
+#    run_swift.sh copies the now-stamped source plist into the bundle, so the
+#    .app picks up the new version automatically.
 # ---------------------------------------------------------------------------
 note "building bundle (run_swift.sh)..."
 TURBOKOD_BUILD_ONLY=1 ./run_swift.sh || die "bundle build failed"
 [ -d "$app" ] || die "$app missing after build"
 
-# Stamp the version into the *bundle* Info.plist only (leave the tracked
-# source plist alone so the release doesn't mutate the working tree).
-plutil -replace CFBundleShortVersionString -string "$VERSION" "$contents/Info.plist"
-plutil -replace CFBundleVersion -string "$VERSION" "$contents/Info.plist"
-
 # ---------------------------------------------------------------------------
-# 3. Vendor the Mojo runtime + libonig into Frameworks/ so the .app runs on a
+# 4. Vendor the Mojo runtime + libonig into Frameworks/ so the .app runs on a
 #    machine with no pixi env. Fixpoint over @rpath deps: keep copying missing
 #    dylibs out of the pixi lib dir until nothing new appears.
 # ---------------------------------------------------------------------------
@@ -103,7 +138,7 @@ done
 install_name_tool -delete_rpath "$prefix/lib" "$contents/MacOS/TurboKod" 2>/dev/null
 
 # ---------------------------------------------------------------------------
-# 4. Sign. Developer ID + hardened runtime when available; else ad-hoc.
+# 5. Sign. Developer ID + hardened runtime when available; else ad-hoc.
 # ---------------------------------------------------------------------------
 identity="${TURBOKOD_SIGN_IDENTITY:-}"
 if [ -z "$identity" ]; then
@@ -146,7 +181,7 @@ fi
 codesign --verify --deep --strict --verbose=2 "$app" || die "signature verification failed"
 
 # ---------------------------------------------------------------------------
-# 5. Notarize + staple (only meaningful with a real identity + creds).
+# 6. Notarize + staple (only meaningful with a real identity + creds).
 # ---------------------------------------------------------------------------
 # Version-less asset name so the homepage can link the stable
 # /releases/latest/download/<name> URL (the version lives in the tag + title).
@@ -183,14 +218,14 @@ if [ "$identity" != "-" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Final distribution zip (rebuilt after stapling so it carries the ticket).
+# 7. Final distribution zip (rebuilt after stapling so it carries the ticket).
 # ---------------------------------------------------------------------------
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 note "packaged: $zip"
 
 # ---------------------------------------------------------------------------
-# 7. Publish to GitHub Releases. Creates the tag at HEAD if it doesn't exist.
+# 8. Publish to GitHub Releases. The tag was already created + pushed above.
 # ---------------------------------------------------------------------------
 sign_state="ad-hoc signed (not notarized)"
 [ "$identity" != "-" ] && sign_state="Developer ID signed"
