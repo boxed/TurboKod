@@ -411,6 +411,7 @@ def highlight_for_extension_cached(
 def highlight_incremental(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
+    dirty_max_row: Int = -1,
 ) -> List[Highlight]:
     """Cached + incremental TextMate path.
 
@@ -422,6 +423,17 @@ def highlight_incremental(
     rejoined its previous trajectory and the rest of the buffer's
     cached highlights are still valid, so we splice rather than
     re-emit them.
+
+    ``dirty_max_row`` is the *highest* row the triggering edit
+    touched. For a single-row edit it equals ``dirty_row`` (or is
+    left ``-1``) and changes nothing. For an in-place multi-row edit
+    that doesn't change the line count — toggle-comment, indent, a
+    multi-caret type — it's the bottom of the edited range, and we
+    forbid the post-stack early-exit from firing before that row.
+    Otherwise the tokenizer would rejoin the cached trajectory at the
+    *first* edited row (a single-line comment returns to the base
+    stack immediately) and splice stale highlights over the edited
+    rows below it.
 
     Falls back to a full retokenize when the cache is cold, the
     extension changed, the line count changed, or ``dirty_row``
@@ -499,8 +511,15 @@ def highlight_incremental(
     var start_stack = cache.post_stacks[eff_dirty - 1].copy()
     var new_post = List[List[Frame]]()
     var stable_row: Int = 0
+    # Earliest row the tokenizer may early-exit on: the bottom of the
+    # edited range, so every in-place-edited row is re-tokenized before
+    # we trust the cached tail. Defaults to ``dirty_row`` (classic
+    # single-row behaviour) when no high-water mark was supplied.
+    var min_row = dirty_row
+    if dirty_max_row > min_row:
+        min_row = dirty_max_row
     var new_hls = tokenize_lines_from(
-        registry.grammars[grammar_idx], lines, eff_dirty, dirty_row,
+        registry.grammars[grammar_idx], lines, eff_dirty, min_row,
         start_stack, cache.post_stacks, new_post, stable_row,
     )
 

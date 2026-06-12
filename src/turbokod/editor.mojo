@@ -911,6 +911,18 @@ struct Editor(Copyable, Movable):
     var highlights: List[Highlight]
     var _highlights_dirty: Bool
     var _hl_dirty_row: Int
+    # High-water mark companion to ``_hl_dirty_row``: the *highest*
+    # row an in-place edit touched since the last flush. An in-place
+    # multi-row edit (toggle-comment, indent/dedent, multi-caret
+    # typing) changes several rows' text without changing the line
+    # count, so the incremental tokenizer can't rely on the line count
+    # to spot it. Without this, the tokenizer would early-exit at the
+    # first edited row whose post-stack rejoined the cached trajectory
+    # and splice stale highlights for the edited rows below it. Carried
+    # as ``min_row`` into the tokenizer to suppress early-exit until
+    # every edited row has been re-tokenized. ``-1`` means "no edited
+    # row recorded since flush" (early-exit follows ``_hl_dirty_row``).
+    var _hl_dirty_max_row: Int
     # Spell-check overlay. ``spell_highlights`` holds underline-only
     # ``Highlight`` entries painted *after* the syntax pass so a
     # misspelled word inside a comment stays cyan but gets a squiggle.
@@ -1391,6 +1403,7 @@ struct Editor(Copyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+        self._hl_dirty_max_row = -1
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
         self.diagnostics = List[Diagnostic]()
@@ -1520,6 +1533,7 @@ struct Editor(Copyable, Movable):
         self.highlights = List[Highlight]()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+        self._hl_dirty_max_row = -1
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
         self.diagnostics = List[Diagnostic]()
@@ -1677,6 +1691,7 @@ struct Editor(Copyable, Movable):
         self.highlights = copy.highlights.copy()
         self._highlights_dirty = copy._highlights_dirty
         self._hl_dirty_row = copy._hl_dirty_row
+        self._hl_dirty_max_row = copy._hl_dirty_max_row
         self.spell_highlights = copy.spell_highlights.copy()
         self.spell_lines = copy.spell_lines.copy()
         self.diagnostics = copy.diagnostics.copy()
@@ -1823,13 +1838,16 @@ struct Editor(Copyable, Movable):
         var ext = extension_of(self.file_path)
         self.highlights = highlight_incremental(
             ext, self.buffer.lines, self._hl_dirty_row,
-            registry, self._hl_cache,
+            registry, self._hl_cache, self._hl_dirty_max_row,
         )
         self._highlights_dirty = False
         # Mark the cache as fully clean by parking the dirty row
         # past the end of the buffer. Any subsequent edit will
-        # bring it back to a real row via ``_mark_hl_dirty``.
+        # bring it back to a real row via ``_mark_hl_dirty``. The
+        # high-water mark resets to "no edited row" until the next
+        # edit raises it again.
         self._hl_dirty_row = self.buffer.line_count()
+        self._hl_dirty_max_row = -1
         speller.load_default()
         self._refresh_spell(speller)
 
@@ -2389,7 +2407,7 @@ struct Editor(Copyable, Movable):
         self._highlights_dirty = True
         self._hl_dirty_row = 0
 
-    def _mark_hl_dirty(mut self, row: Int):
+    def _mark_hl_dirty(mut self, row: Int, max_row: Int = -1):
         """Note that ``row`` (and possibly later rows) need
         re-tokenizing. The dirty pointer only ever moves *up*
         toward the top of the buffer — once row 5 is dirty,
@@ -2397,12 +2415,24 @@ struct Editor(Copyable, Movable):
 
         ``row < 0`` is the conservative "I don't know which row
         was touched" signal; it sets the dirty pointer to 0,
-        forcing a full retokenize."""
+        forcing a full retokenize.
+
+        ``max_row`` is the *highest* row this edit touched, for
+        in-place multi-row edits (toggle-comment, indent/dedent,
+        multi-caret typing) that change several rows without changing
+        the line count. It feeds the ``_hl_dirty_max_row`` high-water
+        mark so the incremental tokenizer doesn't early-exit before
+        re-tokenizing every edited row. Defaults to ``row`` — a
+        single-row edit's high-water mark is its own row, which leaves
+        the tokenizer's early-exit unchanged from the classic path."""
         var r = row
         if r < 0:
             r = 0
         if r < self._hl_dirty_row:
             self._hl_dirty_row = r
+        var hi = max_row if max_row >= r else r
+        if hi > self._hl_dirty_max_row:
+            self._hl_dirty_max_row = hi
         self._highlights_dirty = True
         # Every code path that mutates the buffer eventually flows
         # through here — same hook drives the change-bar gutter so
@@ -4146,7 +4176,7 @@ struct Editor(Copyable, Movable):
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
         self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._mark_hl_dirty(pre_dirty_row, er)
 
     def _dedent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
         """Remove up to one indent unit of leading whitespace from every
@@ -4196,7 +4226,7 @@ struct Editor(Copyable, Movable):
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
         self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._mark_hl_dirty(pre_dirty_row, er)
 
     def move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
         """Place the cursor at ``(row, col)`` (``col`` is a byte offset, must
@@ -7833,16 +7863,28 @@ struct Editor(Copyable, Movable):
             return True
         # Pre-edit floor for the highlight dirty-row marker — has to be
         # the lowest row any caret could affect, so look across the
-        # primary's cursor + anchor *and* every extra caret.
+        # primary's cursor + anchor *and* every extra caret. The
+        # ``_max`` companion is the highest such row: a multi-caret
+        # inline edit changes several rows in place (no line-count
+        # change), so it's the high-water mark that stops the
+        # incremental tokenizer from early-exiting before it re-colors
+        # every caret's row.
         var pre_dirty_row_multi = self.selections[0].row
         if self.selections[0].anchor_row < pre_dirty_row_multi:
             pre_dirty_row_multi = self.selections[0].anchor_row
+        var post_dirty_row_multi = self.selections[0].row
+        if self.selections[0].anchor_row > post_dirty_row_multi:
+            post_dirty_row_multi = self.selections[0].anchor_row
         for i in range(1, len(self.selections)):
             var c = self.selections[i]
             if c.row < pre_dirty_row_multi:
                 pre_dirty_row_multi = c.row
             if c.anchor_row < pre_dirty_row_multi:
                 pre_dirty_row_multi = c.anchor_row
+            if c.row > post_dirty_row_multi:
+                post_dirty_row_multi = c.row
+            if c.anchor_row > post_dirty_row_multi:
+                post_dirty_row_multi = c.anchor_row
         if k == KEY_LEFT:
             if word:
                 self._multi_move(2, extend, view.height(), self._content_width(view))
@@ -7898,7 +7940,7 @@ struct Editor(Copyable, Movable):
                 self._push_undo()
                 self._multi_edit_inline(String(""), 1)
                 self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi)
+                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
             elif self.has_extra_carets() and self._all_carets_col0():
                 # Every caret sits at column 0: backspace joins each
                 # caret's row into the row above. A run of consecutive
@@ -7951,7 +7993,7 @@ struct Editor(Copyable, Movable):
                 self._push_undo()
                 self._multi_edit_inline(String(""), 2)
                 self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi)
+                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
             else:
                 # Single-caret fallback. As with backspace, push once
                 # capturing extras so a single undo walks back to the
@@ -8088,7 +8130,7 @@ struct Editor(Copyable, Movable):
                         self.selections[0].row, self.selections[0].col + indent_n, False,
                     )
                 self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi)
+                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
         elif chord == CLIP_SELECT_ALL:
             # Ctrl+A — select whole buffer.
             # Pure selection move: no buffer mutation, no undo, no
@@ -8156,7 +8198,7 @@ struct Editor(Copyable, Movable):
                 self._typing_active = True
                 self._typing_last_ms = now
                 self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi)
+                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
             else:
                 # Cross-row selections + multi-caret typing isn't
                 # supported; snapshot the multi-state so undo can
@@ -8707,11 +8749,15 @@ struct Editor(Copyable, Movable):
                 var after = byte_slice(line, common_len, lb_len)
                 self.buffer.lines[r] = before + effective_prefix + after
         self.dirty = True
-        # Toggle-comment touches rows ``sr..er``; mark dirty from
-        # the lowest one. The early-exit logic in
-        # ``highlight_incremental`` will still skip below ``er``
-        # once tokenizer state stabilizes.
-        self._mark_hl_dirty(sr)
+        # Toggle-comment edits every row in ``sr..er`` in place (the
+        # line count doesn't change), so the incremental tokenizer
+        # can't see the edit from the line count alone. Pass ``er`` as
+        # the high-water mark so the post-stack early-exit can't fire
+        # before re-tokenizing all the commented rows — a single-line
+        # comment returns to the base stack right after ``sr``, which
+        # would otherwise leave ``sr+1..er`` painted with stale,
+        # uncommented highlights.
+        self._mark_hl_dirty(sr, er)
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     def toggle_case(mut self):
@@ -8746,8 +8792,11 @@ struct Editor(Copyable, Movable):
                 ptr=new_bytes.unsafe_ptr(), length=len(new_bytes),
             ))
         self.dirty = True
-        # ``toggle_case`` walks ``sr..er``; lowest changed is ``sr``.
-        self._mark_hl_dirty(sr)
+        # ``toggle_case`` edits ``sr..er`` in place; ``sr`` is the
+        # lowest changed row, ``er`` the high-water mark that keeps the
+        # incremental tokenizer from early-exiting before it re-colors
+        # every edited row.
+        self._mark_hl_dirty(sr, er)
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     def _insert_text(mut self, text: String):
