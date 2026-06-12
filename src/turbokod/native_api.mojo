@@ -478,16 +478,18 @@ def tk_editor_scroll_regions(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int
 ) -> Int:
     """Report the editor windows the host may smooth-scroll this frame.
-    Writes N records of 8 Int32 words each into the caller's buffer
+    Writes N records of 9 Int32 words each into the caller's buffer
     (``cap`` = max records): ``[win_idx, x, y, w, h, sub, frac_milli,
-    n_sticky]`` — the window index (passed back to ``tk_editor_region_layout``
-    / ``tk_editor_smooth_*``), the editor interior rect in cells, the number
-    of the top buffer line's wrapped segments scrolled off the top (``sub``;
-    0 when not wrapping), the sub-row pixel fraction × 1000 (signed), and the
-    count of pinned sticky-scroll header rows the host must leave fixed at the
-    interior top. The host shifts the overdraw render up by ``(sub + frac)``
-    rows. Returns N (0 when nothing is eligible — focused window isn't an
-    editor, an overlay is up, or the completion popup is open)."""
+    n_sticky, right_gutter]`` — the window index (passed back to
+    ``tk_editor_region_layout`` / ``tk_editor_smooth_*``), the editor interior
+    rect in cells, the number of the top buffer line's wrapped segments
+    scrolled off the top (``sub``; 0 when not wrapping), the sub-row pixel
+    fraction × 1000 (signed), the count of pinned sticky-scroll header rows
+    the host leaves fixed at the interior top, and the right-edge minimap
+    gutter width the host leaves fixed at the interior right. The host shifts
+    the overdraw render up by ``(sub + frac)`` rows, clipped between those
+    fixed regions. Returns N (0 when nothing is eligible — focused window
+    isn't an editor, an overlay is up, or the completion popup is open)."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0 or cap <= 0:
         return 0
     var regions = _desk(h)[].scroll_regions(Rect(0, 0, cols, rows))
@@ -497,14 +499,15 @@ def tk_editor_scroll_regions(
         n = cap
     for i in range(n):
         var r = regions[i]
-        op[i * 8] = Int32(r.win_idx)
-        op[i * 8 + 1] = Int32(r.interior.a.x)
-        op[i * 8 + 2] = Int32(r.interior.a.y)
-        op[i * 8 + 3] = Int32(r.interior.width())
-        op[i * 8 + 4] = Int32(r.interior.height())
-        op[i * 8 + 5] = Int32(r.sub)
-        op[i * 8 + 6] = Int32(Int(r.frac * 1000.0))
-        op[i * 8 + 7] = Int32(r.n_sticky)
+        op[i * 9] = Int32(r.win_idx)
+        op[i * 9 + 1] = Int32(r.interior.a.x)
+        op[i * 9 + 2] = Int32(r.interior.a.y)
+        op[i * 9 + 3] = Int32(r.interior.width())
+        op[i * 9 + 4] = Int32(r.interior.height())
+        op[i * 9 + 5] = Int32(r.sub)
+        op[i * 9 + 6] = Int32(Int(r.frac * 1000.0))
+        op[i * 9 + 7] = Int32(r.n_sticky)
+        op[i * 9 + 8] = Int32(r.right_gutter)
     return n
 
 

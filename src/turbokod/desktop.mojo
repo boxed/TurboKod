@@ -738,6 +738,11 @@ struct EditorScrollRegion(ImplicitlyCopyable, Movable):
     # leaves these (fixed) rows to the main paint and only translates the
     # scrolling body below them.
     var n_sticky: Int
+    # Right-edge minimap gutter width in cells. It's a fixed scrollbar-like
+    # overview, not scrolling content, so the host excludes these right
+    # columns from the translated composite (the left line-number / debug /
+    # git gutters scroll *with* their lines, so they stay in the composite).
+    var right_gutter: Int
 
 
 struct Desktop(Movable):
@@ -2121,6 +2126,7 @@ struct Desktop(Movable):
                 self.windows.windows[idx].editor.scroll_sub,
                 self.windows.windows[idx].editor.scroll_frac,
                 self.windows.windows[idx].editor.sticky_row_count(interior),
+                self.windows.windows[idx].editor._right_gutter(),
             )
         )
         return out^

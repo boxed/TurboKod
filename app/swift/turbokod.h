@@ -29,13 +29,14 @@ int64_t tk_desktop_layout(int64_t h, int64_t cols, int64_t rows,
                           int64_t out_ptr, int64_t cap);
 // Native smooth-scroll (macOS host), working in *visual-row* coordinates so
 // it's uniform for wrapped and non-wrapped editors.
-//   tk_editor_scroll_regions: N records of 8 int32 words
-//     [win_idx, x, y, w, h, sub, frac_milli, n_sticky] — interior rect in
-//     cells, the count of the top buffer line's wrapped segments scrolled
-//     off the top (sub; 0 when not wrapping), the sub-row pixel fraction
-//     x1000, and the count of pinned sticky-scroll header rows the host must
-//     leave fixed. The host shifts the overdraw body up by (sub + frac) rows
-//     and only below the n_sticky pinned rows.
+//   tk_editor_scroll_regions: N records of 9 int32 words
+//     [win_idx, x, y, w, h, sub, frac_milli, n_sticky, right_gutter] —
+//     interior rect in cells, the count of the top buffer line's wrapped
+//     segments scrolled off the top (sub; 0 when not wrapping), the sub-row
+//     pixel fraction x1000, the count of pinned sticky-scroll header rows the
+//     host leaves fixed at the top, and the right-edge minimap gutter width
+//     the host leaves fixed at the right. The host shifts the overdraw body
+//     up by (sub + frac) rows, clipped between those fixed regions.
 //   tk_editor_region_layout: render one editor's body at its current
 //     scroll_y into a 0-origin grid region_rows visual rows tall (same
 //     5-u32 cell format as tk_desktop_layout); composite it clipped to the

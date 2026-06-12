@@ -636,9 +636,11 @@ final class CellView: NSView {
     private struct SmoothRegion {
         var winIdx: Int, x: Int, y: Int, w: Int, h: Int
         var sub: Int, frac: CGFloat
-        // Sticky-scroll header rows pinned at the interior top — the
-        // compositor leaves these fixed and only translates the body below.
-        var nSticky: Int
+        // Sticky-scroll header rows pinned at the interior top, and the
+        // right-edge minimap gutter — both fixed (scrollbar-like). The
+        // compositor leaves them to the main paint and only translates the
+        // scrolling body between them.
+        var nSticky: Int, rightGutter: Int
     }
 
     /// Query the focused editor's smooth-scroll region (phase one reports at
@@ -647,7 +649,7 @@ final class CellView: NSView {
     /// is open). Works for wrapped and non-wrapped editors alike.
     private func focusedSmoothRegion() -> SmoothRegion? {
         guard handle != 0, surface == .main else { return nil }
-        var rec = [Int32](repeating: 0, count: 8)
+        var rec = [Int32](repeating: 0, count: 9)
         let n = rec.withUnsafeMutableBufferPointer { b in
             Int(tk_editor_scroll_regions(handle, Int64(cols()), Int64(rows()),
                 Int64(Int(bitPattern: b.baseAddress)), 1))
@@ -656,7 +658,8 @@ final class CellView: NSView {
         return SmoothRegion(
             winIdx: Int(rec[0]), x: Int(rec[1]), y: Int(rec[2]),
             w: Int(rec[3]), h: Int(rec[4]), sub: Int(rec[5]),
-            frac: CGFloat(rec[6]) / 1000.0, nSticky: Int(rec[7]))
+            frac: CGFloat(rec[6]) / 1000.0, nSticky: Int(rec[7]),
+            rightGutter: Int(rec[8]))
     }
 
     private func ensureRegionBuf(_ cells: Int) {
@@ -681,13 +684,14 @@ final class CellView: NSView {
         let cells = Int(tk_editor_region_layout(
             handle, Int64(r.winIdx), Int64(r.w), Int64(regionRows),
             Int64(Int(bitPattern: regionBuf)), Int64(r.w * regionRows)))
-        // Clip starts below the pinned sticky-scroll band: those top rows are
-        // fixed and the main pass already drew them, so only the scrolling
-        // body below the band is composited (translated). The overdraw render
-        // suppressed its own band, so the body slides cleanly under it.
+        // Clip to the scrolling body only — between the fixed regions the
+        // main paint owns: below the pinned sticky-scroll band (top) and left
+        // of the minimap gutter (right). The overdraw render suppressed its
+        // own band, and the minimap columns are simply excluded, so the body
+        // (text + left line-number/debug gutters) slides cleanly between them.
         let bodyTop = CGFloat(r.y + r.nSticky) * CELL_H
         let clip = CGRect(x: CGFloat(r.x) * CELL_W, y: bodyTop,
-                          width: CGFloat(r.w) * CELL_W,
+                          width: CGFloat(r.w - r.rightGutter) * CELL_W,
                           height: CGFloat(r.h - r.nSticky) * CELL_H)
         ctx.saveGState()
         ctx.clip(to: clip)
@@ -914,9 +918,10 @@ final class CellView: NSView {
         if !passive && surface == .main, let sr = focusedSmoothRegion(),
            sr.sub != 0 || sr.frac != 0 {
             let cc0 = Int(max(0, p.x) / CELL_W), rr0 = Int(py / CELL_H)
-            // Below the pinned sticky band only — band rows are fixed, so a
-            // click there maps straight through (e.g. jump to that header).
-            if cc0 >= sr.x && cc0 < sr.x + sr.w
+            // Only within the scrolling body — not the fixed sticky band
+            // (top) or minimap gutter (right), where a click maps straight
+            // through (jump to header / scroll-to-here).
+            if cc0 >= sr.x && cc0 < sr.x + sr.w - sr.rightGutter
                 && rr0 >= sr.y + sr.nSticky && rr0 < sr.y + sr.h {
                 py = max(0, py + (CGFloat(sr.sub) + sr.frac) * CELL_H)
             }
