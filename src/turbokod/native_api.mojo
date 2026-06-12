@@ -474,6 +474,97 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> I
 
 
 @export
+def tk_editor_scroll_regions(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int
+) -> Int:
+    """Report the editor windows the host may smooth-scroll this frame.
+    Writes N records of 8 Int32 words each into the caller's buffer
+    (``cap`` = max records): ``[win_idx, x, y, w, h, sub, frac_milli,
+    n_sticky]`` — the window index (passed back to ``tk_editor_region_layout``
+    / ``tk_editor_smooth_*``), the editor interior rect in cells, the number
+    of the top buffer line's wrapped segments scrolled off the top (``sub``;
+    0 when not wrapping), the sub-row pixel fraction × 1000 (signed), and the
+    count of pinned sticky-scroll header rows the host must leave fixed at the
+    interior top. The host shifts the overdraw render up by ``(sub + frac)``
+    rows. Returns N (0 when nothing is eligible — focused window isn't an
+    editor, an overlay is up, or the completion popup is open)."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0 or cap <= 0:
+        return 0
+    var regions = _desk(h)[].scroll_regions(Rect(0, 0, cols, rows))
+    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var n = len(regions)
+    if n > cap:
+        n = cap
+    for i in range(n):
+        var r = regions[i]
+        op[i * 8] = Int32(r.win_idx)
+        op[i * 8 + 1] = Int32(r.interior.a.x)
+        op[i * 8 + 2] = Int32(r.interior.a.y)
+        op[i * 8 + 3] = Int32(r.interior.width())
+        op[i * 8 + 4] = Int32(r.interior.height())
+        op[i * 8 + 5] = Int32(r.sub)
+        op[i * 8 + 6] = Int32(Int(r.frac * 1000.0))
+        op[i * 8 + 7] = Int32(r.n_sticky)
+    return n
+
+
+@export
+def tk_editor_region_layout(
+    h: Int, win_idx: Int, region_cols: Int, region_rows: Int,
+    out_ptr: Int, cap: Int,
+) -> Int:
+    """Render editor ``win_idx``'s body at its current ``scroll_y`` into a
+    0-origin grid, ``region_rows`` visual rows tall, and pack it (same
+    5-u32-per-cell format as ``tk_desktop_layout``). ``region_rows`` should
+    be ``sub + interior_height + 2`` so the rows shifted off the top, the
+    partially-visible bottom line, and a rubber-band edge all have content.
+    The host composites this clipped to the editor interior, translated up
+    by ``(sub + frac) × CELL_H``. Returns the number of cells written."""
+    if h == 0 or out_ptr == 0 or region_cols <= 0 or region_rows <= 0:
+        return 0
+    var canvas = Canvas(region_cols, region_rows)
+    canvas.clear(default_attr())
+    _desk(h)[].paint_editor_region(
+        win_idx, canvas, region_cols, region_rows, True,
+    )
+    return _pack_canvas(canvas, region_cols, region_rows, out_ptr, cap)
+
+
+@export
+def tk_editor_smooth_begin(
+    h: Int, win_idx: Int, cols: Int, rows: Int, out_ptr: Int
+) -> Int:
+    """Seed a smooth-scroll gesture on editor ``win_idx``. Writes two Int32
+    words to ``out_ptr``: ``[cur_vis_milli, max_vis_milli]`` — the current
+    vertical position and the maximum, as continuous *visual-row*
+    coordinates × 1000. The host seeds its gesture from ``cur`` and clamps
+    its rubber-band against ``max``. Returns 1 on success, 0 on bad args."""
+    if h == 0 or out_ptr == 0:
+        return 0
+    var m = _desk(h)[].smooth_begin(win_idx, Rect(0, 0, cols, rows))
+    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    op[0] = Int32(Int(m[0] * 1000.0))
+    op[1] = Int32(Int(m[1] * 1000.0))
+    return 1
+
+
+@export
+def tk_editor_smooth_set(
+    h: Int, win_idx: Int, cols: Int, rows: Int, vis_milli: Int
+):
+    """Apply a host-driven smooth-scroll position to editor ``win_idx``: a
+    global visual-row coordinate × 1000 (``vis_milli``). The core clamps the
+    integer part to ``[0, max]`` and maps it to a (buffer line, sub-row)
+    anchor; the fractional remainder (possibly slightly out of range during
+    rubber-band) becomes the sub-row pixel fraction."""
+    if h == 0:
+        return
+    _desk(h)[].smooth_set(
+        win_idx, Rect(0, 0, cols, rows), Float64(vis_milli) / 1000.0,
+    )
+
+
+@export
 def tk_theme_version(h: Int) -> Int:
     """Monotonic counter that bumps whenever the active color theme changes.
     The Swift host polls this each frame and refetches the palette only when

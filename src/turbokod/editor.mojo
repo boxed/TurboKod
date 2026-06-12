@@ -875,6 +875,41 @@ struct Editor(Copyable, Movable):
     var selections: List[Caret]
     var scroll_y: Int
     var scroll_x: Int
+    # Native macOS smooth-scroll anchor (the terminal frontend leaves both 0
+    # and scrolls in whole buffer lines as before). The visible top of the
+    # viewport is ``scroll_sub`` *visual* rows below ``scroll_y``'s first
+    # wrapped segment, shifted up a further ``scroll_frac`` of a row. So the
+    # continuous vertical position, in visual rows, is
+    # ``(visual row of scroll_y) + scroll_sub + scroll_frac``. The core never
+    # renders the sub-row offset — the Swift host applies ``scroll_sub +
+    # scroll_frac`` as a pixel translate of an overdraw render (see
+    # ``native_api.tk_editor_smooth_*`` / ``tk_editor_scroll_regions``). Small
+    # <0 / >range ``scroll_frac`` occurs transiently during rubber-band.
+    # ``scroll_sub`` is 0 when not wrapping. Both reset to 0 by
+    # ``_scroll_to_cursor`` / ``reveal_cursor`` / the notch wheel so keyboard
+    # nav, search jumps, and mouse-wheel notches snap to a whole visual row.
+    var scroll_sub: Int
+    var scroll_frac: Float64
+    # Cached per-buffer-line *visual* row counts (under the active wrap mode +
+    # width), with their running prefix sum, so the smooth-scroll machinery
+    # can map a global visual-row coordinate to a (buffer line, sub-row)
+    # anchor in O(log n) without re-wrapping the whole document every event.
+    # Rebuilt lazily by ``_ensure_vis_metrics`` when the width / wrap mode
+    # changes or ``_vis_dirty`` is set by an edit. ``_vis_prefix[i]`` is the
+    # number of visual rows in buffer lines ``[0, i)``; ``_vis_prefix[-1]`` is
+    # the document total. Empty / unused when not wrapping (visual row ==
+    # buffer line there, so no table is needed).
+    var _vis_counts: List[Int]
+    var _vis_prefix: List[Int]
+    var _vis_w: Int
+    var _vis_mode: Int
+    var _vis_dirty: Bool
+    # When True, the main ``paint`` skips the editor-body overlay popups
+    # (minimap tooltip / LSP hover / completion). Set by the host's
+    # smooth-scroll overdraw render (``paint_editor_region``) so a popup
+    # anchored to a screen position isn't drawn into — and translated by —
+    # the offset composite. Off in every normal paint.
+    var _suppress_overlays: Bool
     # File-backing (empty file_path means buffer is not file-backed):
     var file_path: String
     var file_size: Int64
@@ -1392,6 +1427,14 @@ struct Editor(Copyable, Movable):
         self.selections.append(Caret(0, 0, 0, 0, 0))
         self.scroll_y = 0
         self.scroll_x = 0
+        self.scroll_sub = 0
+        self.scroll_frac = 0.0
+        self._vis_counts = List[Int]()
+        self._vis_prefix = List[Int]()
+        self._vis_w = -1
+        self._vis_mode = -1
+        self._vis_dirty = True
+        self._suppress_overlays = False
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
@@ -1522,6 +1565,14 @@ struct Editor(Copyable, Movable):
         self.selections.append(Caret(0, 0, 0, 0, 0))
         self.scroll_y = 0
         self.scroll_x = 0
+        self.scroll_sub = 0
+        self.scroll_frac = 0.0
+        self._vis_counts = List[Int]()
+        self._vis_prefix = List[Int]()
+        self._vis_w = -1
+        self._vis_mode = -1
+        self._vis_dirty = True
+        self._suppress_overlays = False
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
@@ -1679,6 +1730,14 @@ struct Editor(Copyable, Movable):
         self.selections = copy.selections.copy()
         self.scroll_y = copy.scroll_y
         self.scroll_x = copy.scroll_x
+        self.scroll_sub = copy.scroll_sub
+        self.scroll_frac = copy.scroll_frac
+        self._vis_counts = copy._vis_counts.copy()
+        self._vis_prefix = copy._vis_prefix.copy()
+        self._vis_w = copy._vis_w
+        self._vis_mode = copy._vis_mode
+        self._vis_dirty = copy._vis_dirty
+        self._suppress_overlays = copy._suppress_overlays
         self.file_path = copy.file_path
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
@@ -2434,6 +2493,9 @@ struct Editor(Copyable, Movable):
         if hi > self._hl_dirty_max_row:
             self._hl_dirty_max_row = hi
         self._highlights_dirty = True
+        # A buffer edit can change wrap counts, so the smooth-scroll
+        # visual-row metrics cache must rebuild on next access.
+        self._vis_dirty = True
         # Every code path that mutates the buffer eventually flows
         # through here — same hook drives the change-bar gutter so
         # we don't need to thread a separate "buffer changed" signal
@@ -6013,6 +6075,26 @@ struct Editor(Copyable, Movable):
             e = r
         return e
 
+    def sticky_row_count(self, view: Rect) -> Int:
+        """How many sticky-scroll header rows are pinned at the top of the
+        viewport right now (0 when the feature is off, the view is too short,
+        or the top line has no enclosing scope). The native smooth-scroll
+        compositor reads this so it can leave the (fixed) band alone and only
+        translate the scrolling body below it. Mirrors the gate + budget the
+        ``paint`` sticky block uses."""
+        if not self.sticky_scroll:
+            return 0
+        var content_h = view.height()
+        if content_h < 4:
+            return 0
+        var budget = (content_h - 2) // 2
+        if budget > 8:
+            budget = 8
+        var top_row = self.scroll_y
+        if top_row < 0:
+            top_row = 0
+        return len(self._sticky_rows(top_row, budget))
+
     def _sticky_rows(self, top: Int, budget: Int) -> List[Int]:
         """Buffer rows to pin above the viewport: the chain of enclosing
         scope headers for the line at ``top`` (the first visible buffer
@@ -6783,7 +6865,8 @@ struct Editor(Copyable, Movable):
         # Code; the bottom row gets an underline divider. Painted after
         # text / selection / caret but before the popups below so the
         # completion / hover / minimap tooltips still float over it.
-        if self.sticky_scroll and len(layout) > 0 and content_h >= 4:
+        if self.sticky_scroll and not self._suppress_overlays \
+                and len(layout) > 0 and content_h >= 4:
             var top_row = layout[0].line_idx
             # Leave at least 2 content rows below the band; cap at 8 rows
             # (a little headroom over the ~5 nesting levels we'd show, so
@@ -6862,53 +6945,62 @@ struct Editor(Copyable, Movable):
                     painter.set_attr(
                         canvas, gx, div_y, dc.attr.add_style(STYLE_UNDERLINE),
                     )
-        # Paint the right-side minimap tooltip last so it overlays
-        # everything else in the editor's view. The hover state is set
-        # by ``_update_minimap_hover`` on bare-hover events; when no
-        # mark is hovered this is a no-op.
-        self.paint_minimap_tooltip(canvas, view)
-        # LSP hover popup (mouse-dwell type info). Painted right after
-        # the minimap tooltip so it overlays the same way; the popup
-        # suppresses itself when a minimap tooltip is up so the two
-        # don't stack on top of each other.
-        self.paint_hover_popup(canvas, view)
-        # Completion popup: floats just below (or above) the column
-        # where the in-progress identifier starts. Painted last so it
-        # overlays both the text and the minimap tooltip. ``focused``
-        # gates it — when the user clicked away the popup gets
-        # painted by whichever editor is focused now (none, in this
-        # case) rather than the stale frame.
-        if focused and self.completion_popup_visible \
-                and len(self.completion_items) > 0:
-            var sr = self._screen_row_for(
-                layout, self.completion_anchor_row,
-                self.completion_anchor_col,
-            )
-            if sr >= 0:
-                var seg_start = layout[sr].byte_start
-                var indent = layout[sr].indent_cells
-                var seg_x0 = text_x0 + indent
-                var line = self.buffer.line(self.completion_anchor_row)
-                var line_n = len(line.as_bytes())
-                var vis: String
-                if seg_start >= line_n:
-                    vis = String("")
-                else:
-                    vis = byte_slice(line, seg_start, layout[sr].byte_end)
-                var cm = utf8_byte_to_cell(vis)
-                var cc = utf8_codepoint_count(vis)
-                var vbc = len(vis.as_bytes())
-                var anchor_byte = self.completion_anchor_col - seg_start
-                var cell_off: Int
-                if anchor_byte < 0:
-                    cell_off = 0
-                elif anchor_byte < vbc:
-                    cell_off = cm[anchor_byte]
-                else:
-                    cell_off = cc + (anchor_byte - vbc)
-                var sx = seg_x0 + cell_off
-                var sy = view.a.y + sr
-                self._paint_completion_popup_at(canvas, view, sx, sy)
+        # Editor-body overlay popups (minimap tooltip / LSP hover /
+        # completion). Skipped under ``_suppress_overlays`` — the host's
+        # smooth-scroll overdraw render sets it so a popup anchored to a
+        # screen position isn't drawn into the region buffer and then
+        # translated by the pixel offset. (The scroll-region query also
+        # declines smooth scroll while the completion popup is open, so in
+        # practice the overdraw path only ever suppresses the transient
+        # hover / minimap tooltips.)
+        if not self._suppress_overlays:
+            # Paint the right-side minimap tooltip last so it overlays
+            # everything else in the editor's view. The hover state is set
+            # by ``_update_minimap_hover`` on bare-hover events; when no
+            # mark is hovered this is a no-op.
+            self.paint_minimap_tooltip(canvas, view)
+            # LSP hover popup (mouse-dwell type info). Painted right after
+            # the minimap tooltip so it overlays the same way; the popup
+            # suppresses itself when a minimap tooltip is up so the two
+            # don't stack on top of each other.
+            self.paint_hover_popup(canvas, view)
+            # Completion popup: floats just below (or above) the column
+            # where the in-progress identifier starts. Painted last so it
+            # overlays both the text and the minimap tooltip. ``focused``
+            # gates it — when the user clicked away the popup gets
+            # painted by whichever editor is focused now (none, in this
+            # case) rather than the stale frame.
+            if focused and self.completion_popup_visible \
+                    and len(self.completion_items) > 0:
+                var sr = self._screen_row_for(
+                    layout, self.completion_anchor_row,
+                    self.completion_anchor_col,
+                )
+                if sr >= 0:
+                    var seg_start = layout[sr].byte_start
+                    var indent = layout[sr].indent_cells
+                    var seg_x0 = text_x0 + indent
+                    var line = self.buffer.line(self.completion_anchor_row)
+                    var line_n = len(line.as_bytes())
+                    var vis: String
+                    if seg_start >= line_n:
+                        vis = String("")
+                    else:
+                        vis = byte_slice(line, seg_start, layout[sr].byte_end)
+                    var cm = utf8_byte_to_cell(vis)
+                    var cc = utf8_codepoint_count(vis)
+                    var vbc = len(vis.as_bytes())
+                    var anchor_byte = self.completion_anchor_col - seg_start
+                    var cell_off: Int
+                    if anchor_byte < 0:
+                        cell_off = 0
+                    elif anchor_byte < vbc:
+                        cell_off = cm[anchor_byte]
+                    else:
+                        cell_off = cc + (anchor_byte - vbc)
+                    var sx = seg_x0 + cell_off
+                    var sy = view.a.y + sr
+                    self._paint_completion_popup_at(canvas, view, sx, sy)
 
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
@@ -8877,11 +8969,16 @@ struct Editor(Copyable, Movable):
         # Wheel events scroll the view without moving the cursor.
         if event.button == MOUSE_WHEEL_UP:
             if event.pressed:
+                # Notch scroll snaps off any smooth-scroll sub-row offset.
+                self.scroll_sub = 0
+                self.scroll_frac = 0.0
                 self.scroll_y -= 3
                 if self.scroll_y < 0: self.scroll_y = 0
             return True
         if event.button == MOUSE_WHEEL_DOWN:
             if event.pressed:
+                self.scroll_sub = 0
+                self.scroll_frac = 0.0
                 var max_y = self.max_scroll_y(view)
                 self.scroll_y += 3
                 if self.scroll_y > max_y: self.scroll_y = max_y
@@ -9551,6 +9648,13 @@ struct Editor(Copyable, Movable):
         var w = view.width() - total_gutter - right_gutter
         if w < 1:
             w = 1
+        # Any cursor-driven scroll snaps off the smooth-scroll sub-row +
+        # fraction: a goto / search / edit / arrow-key that moves the
+        # viewport lands on a whole visual row, not a stale offset. The
+        # cursor math below assumes the viewport top is ``scroll_y``'s
+        # first segment (sub == 0), so this keeps it valid.
+        self.scroll_sub = 0
+        self.scroll_frac = 0.0
         if self.selections[0].row < self.scroll_y:
             self.scroll_y = self.selections[0].row
         elif self.selections[0].row >= self.scroll_y + h:
@@ -9678,6 +9782,120 @@ struct Editor(Copyable, Movable):
             ms = n_lines - 1
         return ms
 
+    def _ensure_vis_metrics(mut self, content_w: Int):
+        """Rebuild the per-line visual-row count table + prefix sums when the
+        width / wrap mode changed or an edit dirtied them. The native
+        smooth-scroll machinery uses them to map a global visual-row
+        coordinate to a (buffer line, sub-row) anchor without re-wrapping the
+        whole document on every scroll event. No-op when not wrapping —
+        visual row == buffer line there, so no table is needed."""
+        if not self._is_wrapping():
+            return
+        var w = content_w if content_w > 0 else 1
+        if (not self._vis_dirty) and w == self._vis_w \
+                and self.wrap_mode == self._vis_mode \
+                and len(self._vis_prefix) == self.buffer.line_count() + 1:
+            return
+        var n = self.buffer.line_count()
+        self._vis_counts = List[Int]()
+        self._vis_prefix = List[Int]()
+        self._vis_prefix.append(0)
+        var total = 0
+        for i in range(n):
+            var c = self._line_visual_rows(i, w)
+            self._vis_counts.append(c)
+            total += c
+            self._vis_prefix.append(total)
+        self._vis_w = w
+        self._vis_mode = self.wrap_mode
+        self._vis_dirty = False
+
+    def _smooth_content_w(self, view: Rect) -> Int:
+        var content_w = view.width() - self._total_gutter() - self._right_gutter()
+        return content_w if content_w > 0 else 1
+
+    def smooth_begin(mut self, view: Rect) -> Tuple[Float64, Float64]:
+        """For the native smooth-scroll host: the current vertical position
+        and the maximum, both as continuous *visual-row* coordinates from the
+        document top. The host seeds its gesture from these and clamps its
+        rubber-band against ``max``. Cheap for non-wrapping editors; O(lines)
+        once for wrapping editors (then the table is cached until an edit /
+        resize)."""
+        var content_h = view.height()
+        if content_h < 1:
+            content_h = 1
+        if not self._is_wrapping():
+            var n = self.buffer.line_count()
+            var mx = Float64(n - content_h)
+            if mx < 0.0:
+                mx = 0.0
+            return (Float64(self.scroll_y) + self.scroll_frac, mx)
+        self._ensure_vis_metrics(self._smooth_content_w(view))
+        var total = self._vis_prefix[len(self._vis_prefix) - 1]
+        var mx = Float64(total - content_h)
+        if mx < 0.0:
+            mx = 0.0
+        var sy = self.scroll_y
+        if sy < 0:
+            sy = 0
+        if sy > len(self._vis_prefix) - 2:
+            sy = len(self._vis_prefix) - 2
+        if sy < 0:
+            sy = 0
+        var cur = Float64(self._vis_prefix[sy] + self.scroll_sub) \
+            + self.scroll_frac
+        return (cur, mx)
+
+    def smooth_set(mut self, view: Rect, vis: Float64):
+        """Set the smooth-scroll anchor from a global visual-row coordinate
+        ``vis`` (the host's continuous position). The integer part is clamped
+        to ``[0, max]`` and mapped to a (buffer line, sub-row) anchor; the
+        leftover fraction — which can sit slightly outside ``[0, 1)`` during
+        a rubber-band overshoot — is stored verbatim in ``scroll_frac``."""
+        var content_h = view.height()
+        if content_h < 1:
+            content_h = 1
+        if not self._is_wrapping():
+            var maxv = self.buffer.line_count() - content_h
+            if maxv < 0:
+                maxv = 0
+            var base = Int(vis)
+            if base < 0:
+                base = 0
+            if base > maxv:
+                base = maxv
+            self.scroll_y = base
+            self.scroll_sub = 0
+            self.scroll_frac = vis - Float64(base)
+            return
+        self._ensure_vis_metrics(self._smooth_content_w(view))
+        var total = self._vis_prefix[len(self._vis_prefix) - 1]
+        var maxv = total - content_h
+        if maxv < 0:
+            maxv = 0
+        var base = Int(vis)
+        if base < 0:
+            base = 0
+        if base > maxv:
+            base = maxv
+        # Largest buffer line L with prefix[L] <= base (binary search).
+        var lo = 0
+        var hi = len(self._vis_counts) - 1
+        if hi < 0:
+            self.scroll_y = 0
+            self.scroll_sub = 0
+            self.scroll_frac = vis - Float64(base)
+            return
+        while lo < hi:
+            var mid = (lo + hi + 1) // 2
+            if self._vis_prefix[mid] <= base:
+                lo = mid
+            else:
+                hi = mid - 1
+        self.scroll_y = lo
+        self.scroll_sub = base - self._vis_prefix[lo]
+        self.scroll_frac = vis - Float64(base)
+
     def clamp_scroll(mut self, view: Rect):
         """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.
 
@@ -9708,10 +9926,16 @@ struct Editor(Copyable, Movable):
             var cell = utf8_cell_of_byte(line, self.scroll_x)
             self.scroll_x = utf8_byte_of_cell(line, cell)
         var max_y = self.max_scroll_y(view)
+        var prev_scroll_y = self.scroll_y
         if self.scroll_y > max_y:
             self.scroll_y = max_y
         if self.scroll_y < 0:
             self.scroll_y = 0
+        # A resize that pulled scroll_y back in range also invalidates any
+        # smooth-scroll sub-row offset anchored to the old position.
+        if self.scroll_y != prev_scroll_y:
+            self.scroll_sub = 0
+            self.scroll_frac = 0.0
 
     def reveal_cursor(
         mut self, view: Rect,
@@ -9746,6 +9970,9 @@ struct Editor(Copyable, Movable):
         var w = view.width() - total_gutter - right_gutter
         if w < 1:
             w = 1
+        # Snap off any smooth-scroll sub-row + fraction (see _scroll_to_cursor).
+        self.scroll_sub = 0
+        self.scroll_frac = 0.0
         var max_row = self.buffer.line_count() - 1
         if golden and self._is_wrapping():
             # ``scroll_y`` is a buffer row, but vertical position is in

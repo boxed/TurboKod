@@ -19675,6 +19675,107 @@ def test_editor_paint_collapsed_view_is_cheap() raises:
     ed.paint(canvas, collapsed, False)
 
 
+def test_editor_smooth_scroll_region_and_overdraw() raises:
+    """Native smooth-scroll core helpers (the terminal frontend never calls
+    these, so this is the only coverage). ``scroll_regions`` reports the
+    focused editor's interior + (sub, frac); ``smooth_begin`` gives the
+    current/max position as visual-row coordinates; ``smooth_set`` applies a
+    visual-row coordinate, clamped, splitting it into (scroll_y, sub, frac);
+    ``paint_editor_region`` renders the body at the current scroll_y."""
+    var text = String("")
+    for i in range(200):
+        text = text + String("line ") + String(i) + String("\n")
+    var d = Desktop()
+    d.windows.add(
+        Window.editor_window(String("buf"), Rect(2, 3, 60, 20), text^)
+    )
+    var idx = d.windows.focused
+    d.windows.windows[idx].editor.wrap_mode = WRAP_NONE
+    var screen = Rect(0, 0, 80, 40)
+
+    var regions = d.scroll_regions(screen)
+    assert_equal(len(regions), 1)
+    assert_equal(regions[0].win_idx, idx)
+    # The region rect is exactly the (post-fit) window interior.
+    var interior = d.windows.windows[idx].interior()
+    assert_equal(regions[0].interior.a.x, interior.a.x)
+    assert_equal(regions[0].interior.b.y, interior.b.y)
+    assert_equal(regions[0].sub, 0)
+    assert_true(abs(regions[0].frac) < 0.001)
+
+    # smooth_begin: at the top, current position is 0; max is positive.
+    var m = d.smooth_begin(idx, screen)
+    assert_true(abs(m[0]) < 0.001)
+    assert_true(m[1] > 0.0)
+
+    # smooth_set at visual row 10.4 -> scroll_y 10, sub 0 (no wrap), frac 0.4.
+    d.smooth_set(idx, screen, 10.4)
+    assert_equal(d.windows.windows[idx].editor.scroll_y, 10)
+    assert_equal(d.windows.windows[idx].editor.scroll_sub, 0)
+    assert_true(abs(d.windows.windows[idx].editor.scroll_frac - 0.4) < 0.001)
+    # Out-of-range clamps to max; report it as (sub, frac).
+    d.smooth_set(idx, screen, 1.0e9)
+    assert_true(d.windows.windows[idx].editor.scroll_y > 100)
+
+    # Overdraw render at the current scroll_y. With scroll_y back at 10,
+    # region row 0 carries buffer line 10 ("line 10").
+    d.smooth_set(idx, screen, 10.0)
+    var rcols = interior.width()
+    var rrows = interior.height() + 2
+    var canvas = Canvas(rcols, rrows)
+    canvas.clear(default_attr())
+    d.paint_editor_region(idx, canvas, rcols, rrows, True)
+    var row0 = String("")
+    for x in range(rcols):
+        row0 = row0 + canvas.get(x, 0).glyph
+    assert_true(row0.find(String("line 10")) >= 0)
+
+
+def test_editor_smooth_scroll_wrap_sub_row_anchor() raises:
+    """Under soft wrap, the smooth-scroll anchor steps by *visual* rows, not
+    buffer lines: a long line that wraps to several rows can be scrolled into
+    partially (``scroll_sub`` > 0) instead of jumping a whole paragraph."""
+    # First line wraps to many visual rows; the rest are short.
+    var long = String("")
+    for _ in range(60):
+        long = long + String("wordy ")
+    var text = long + String("\n")
+    for i in range(50):
+        text = text + String("short ") + String(i) + String("\n")
+    var d = Desktop()
+    d.windows.add(
+        Window.editor_window(String("wrap"), Rect(2, 3, 40, 20), text^)
+    )
+    var idx = d.windows.focused
+    d.windows.windows[idx].editor.wrap_mode = WRAP_SOFT
+    var screen = Rect(0, 0, 60, 40)
+    # Realize the layout (fit windows) so the interior width is set.
+    _ = d.scroll_regions(screen)
+
+    # The first buffer line occupies several visual rows at this width.
+    var interior = d.windows.windows[idx].interior()
+    var content_w = interior.width() \
+        - d.windows.windows[idx].editor._total_gutter() \
+        - d.windows.windows[idx].editor._right_gutter()
+    var first_rows = d.windows.windows[idx].editor._line_visual_rows(
+        0, content_w
+    )
+    assert_true(first_rows >= 3)
+
+    # Scrolling to visual row 2 must land *inside* the first buffer line
+    # (scroll_y still 0, sub == 2) — the per-visual-row anchoring that makes
+    # wrapped smooth scroll possible.
+    d.smooth_set(idx, screen, 2.0)
+    assert_equal(d.windows.windows[idx].editor.scroll_y, 0)
+    assert_equal(d.windows.windows[idx].editor.scroll_sub, 2)
+
+    # Scrolling one visual row past the first line lands on buffer line 1,
+    # sub 0.
+    d.smooth_set(idx, screen, Float64(first_rows))
+    assert_equal(d.windows.windows[idx].editor.scroll_y, 1)
+    assert_equal(d.windows.windows[idx].editor.scroll_sub, 0)
+
+
 def test_text_log_full_rewrap_on_width_change() raises:
     """Resizing the view (different ``content_w``) forces a full
     re-wrap. The cached layout is keyed on the width that built it."""
@@ -20981,6 +21082,8 @@ def _run_chunk_05() raises:
     test_editor_bracket_match_skips_brackets_in_strings()
     test_editor_bracket_match_source_inside_string_returns_none()
     test_editor_paint_collapsed_view_is_cheap()
+    test_editor_smooth_scroll_region_and_overdraw()
+    test_editor_smooth_scroll_wrap_sub_row_anchor()
     test_editor_cmd_letter_does_not_insert()
     test_editor_cmd_a_selects_all()
     test_text_field_scrolls_to_keep_cursor_visible()

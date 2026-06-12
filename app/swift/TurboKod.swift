@@ -209,6 +209,11 @@ let BG_TRUECOLOR: UInt32 = 1 << 1
 // Per-cell word stride of the layout buffer (native_api.mojo _pack_canvas):
 // [codepoint, fg|bg<<8|style<<16|color_mode<<24, underline, fg_rgb, bg_rgb].
 let CELL_WORDS = 5
+// Reserved palette index for the editor background (colors.mojo EDITOR_BG).
+// The smooth-scroll composite fills the clip with this before drawing the
+// region so a rubber-band gap past the top/bottom edge reads as empty
+// editor space, not the default desktop background.
+let EDITOR_BG_IDX = 16
 
 // turbokod key constants (events.mojo private-use codes)
 let KEY_ENTER: UInt32 = 0xE001, KEY_TAB: UInt32 = 0xE002, KEY_BACKSPACE: UInt32 = 0xE003
@@ -275,6 +280,27 @@ final class CellView: NSView {
     // and emit one notch per notch-worth of travel so scroll speed tracks
     // the gesture, not the raw event rate. See scrollWheel.
     private var scrollAccumY: CGFloat = 0
+    // --- Native smooth (pixel-level) scrolling, main surface only --------
+    // The host owns a continuous scroll position in fractional buffer lines
+    // for the focused editor; the Mojo core stores the integer split +
+    // sub-row anchor (tk_editor_smooth_set) and reports the scroll region
+    // (tk_editor_scroll_regions). When the fraction is non-zero, `draw`
+    // composites an overdraw render of the editor body translated by the
+    // pixel offset. `smoothLines` is the *raw* continuous position (it
+    // overshoots [0, max] during a rubber-band); damping is applied only to
+    // the displayed value. `smoothActive` is true while a precise gesture /
+    // momentum is in flight (events drive it); the spring timer drives the
+    // post-gesture rubber-band release and stores into the core.
+    private var smoothWinIdx = -1
+    private var smoothLines: CGFloat = 0
+    private var smoothMax = 0
+    private var smoothActive = false
+    private var springTarget: CGFloat = 0
+    private var springTimer: Timer?
+    // Second cell buffer for the overdraw region render (the editor body one
+    // grid taller than the viewport), packed by tk_editor_region_layout.
+    private var regionBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
+    private var regionBufCells = 1
     // Last-seen Option/Alt key state, so flagsChanged (which fires for any
     // modifier transition) can detect Option's own up/down edges and report
     // them as bare EVENT_MOD_KEY transitions for the Alt-tap gestures.
@@ -472,8 +498,9 @@ final class CellView: NSView {
     /// the ``color_mode`` truecolor bits (real RGB from the per-cell fg_rgb /
     /// bg_rgb words) and the ``STYLE_REVERSE`` fg/bg swap. Non-truecolor
     /// channels look up the theme palette by index, as before.
-    private func cellColors(_ i: Int) -> (fg: UInt32, bg: UInt32, style: UInt32) {
-        let packed = buf[i * CELL_WORDS + 1]
+    private func cellColors(_ p: UnsafeMutablePointer<UInt32>, _ i: Int)
+        -> (fg: UInt32, bg: UInt32, style: UInt32) {
+        let packed = p[i * CELL_WORDS + 1]
         let mode = (packed >> 24) & 0xFF
         let style = (packed >> 16) & 0xFF
         var fgIdx = Int(packed & 0xFF)
@@ -484,9 +511,9 @@ final class CellView: NSView {
         if style & STYLE_BOLD != 0 && (mode & FG_TRUECOLOR) == 0 && fgIdx < 8 {
             fgIdx += 8
         }
-        var fg = (mode & FG_TRUECOLOR) != 0 ? buf[i * CELL_WORDS + 3]
+        var fg = (mode & FG_TRUECOLOR) != 0 ? p[i * CELL_WORDS + 3]
                                             : palette[fgIdx]
-        var bg = (mode & BG_TRUECOLOR) != 0 ? buf[i * CELL_WORDS + 4]
+        var bg = (mode & BG_TRUECOLOR) != 0 ? p[i * CELL_WORDS + 4]
                                             : palette[Int((packed >> 8) & 0xFF)]
         if style & STYLE_REVERSE != 0 { swap(&fg, &bg) }
         // Faint (SGR 2): scale the foreground toward black. Claude Code paints
@@ -540,47 +567,10 @@ final class CellView: NSView {
         ctx.setFillColor(cgcolor(palette[0]))
         ctx.fill(bounds)
 
-        let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
-        // Two passes: fill every cell background first, then draw glyphs and
-        // underlines on top. A wide emoji is painted across two cells, and a
-        // single-pass loop would let the *next* cell's background fill erase
-        // the emoji's right half. Separating the passes keeps wide glyphs intact.
-        for i in 0..<n {
-            let (_, bg, _) = cellColors(i)
-            if bg != palette[0] {
-                let col = i % c, row = i / c
-                let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
-                ctx.setFillColor(cgcolor(bg))
-                ctx.fill(CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
-            }
-        }
-        for i in 0..<n {
-            let cp = buf[i * CELL_WORDS]
-            let (fg, _, style) = cellColors(i)
-            let col = i % c, row = i / c
-            let x = CGFloat(col) * CELL_W, y = CGFloat(row) * CELL_H
-
-            if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
-                let s = String(scalar) as NSString
-                if charWidth(cp) == 2 {
-                    // Color emoji fall back to Apple Color Emoji, which at the
-                    // cell-font point size overflows the cell — draw it shrunk
-                    // to fit a two-cell box (the core reserved the next cell as
-                    // an empty continuation, so there's nothing to overdraw).
-                    drawEmoji(s, cellX: x, cellY: y, cellW: CELL_W * 2)
-                } else {
-                    var a = attrs
-                    a[.foregroundColor] = nscolor(fg)
-                    s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
-                }
-            }
-            if style & STYLE_UNDERLINE != 0 {
-                let uw = buf[i * CELL_WORDS + 2]
-                let uc = uw == 0xFFFFFFFF ? fg : palette[Int(uw & 0xFF)]
-                ctx.setFillColor(cgcolor(uc))
-                ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))
-            }
-        }
+        drawCells(ctx, buf, n, c, originX: 0, originY: 0)
+        // Smooth scroll: when the focused editor rests (or is being dragged)
+        // at a sub-line offset, overdraw its body translated by the fraction.
+        if surface == .main { compositeSmoothScroll(ctx) }
         // First main-surface frame is now on screen. Kick the deferred
         // startup work (PATH recovery, font-family scan) on the next runloop
         // turn so it runs *after* this draw flushes — not inside it. One-shot
@@ -591,6 +581,177 @@ final class CellView: NSView {
         }
     }
     static var didFirstMainPaint = false
+
+    /// Paint `n` packed cells from buffer `p` (`c` columns) at pixel origin
+    /// (`originX`, `originY`). Two passes — all backgrounds, then glyphs +
+    /// underlines — so a wide emoji painted across two cells isn't clipped
+    /// by the next cell's background fill. Shared by the full-frame draw
+    /// (origin 0,0) and the smooth-scroll region composite (origin offset by
+    /// the sub-line pixel fraction).
+    private func drawCells(_ ctx: CGContext,
+                           _ p: UnsafeMutablePointer<UInt32>,
+                           _ n: Int, _ c: Int,
+                           originX: CGFloat, originY: CGFloat) {
+        for i in 0..<n {
+            let (_, bg, _) = cellColors(p, i)
+            if bg != palette[0] {
+                let col = i % c, row = i / c
+                let x = originX + CGFloat(col) * CELL_W
+                let y = originY + CGFloat(row) * CELL_H
+                ctx.setFillColor(cgcolor(bg))
+                ctx.fill(CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
+            }
+        }
+        let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
+        for i in 0..<n {
+            let cp = p[i * CELL_WORDS]
+            let (fg, _, style) = cellColors(p, i)
+            let col = i % c, row = i / c
+            let x = originX + CGFloat(col) * CELL_W
+            let y = originY + CGFloat(row) * CELL_H
+            if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
+                let s = String(scalar) as NSString
+                if charWidth(cp) == 2 {
+                    drawEmoji(s, cellX: x, cellY: y, cellW: CELL_W * 2)
+                } else {
+                    var a = attrs
+                    a[.foregroundColor] = nscolor(fg)
+                    s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                }
+            }
+            if style & STYLE_UNDERLINE != 0 {
+                let uw = p[i * CELL_WORDS + 2]
+                let uc = uw == 0xFFFFFFFF ? fg : palette[Int(uw & 0xFF)]
+                ctx.setFillColor(cgcolor(uc))
+                ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))
+            }
+        }
+    }
+
+    // MARK: - Smooth (pixel-level) scrolling
+
+    /// One editor scroll region as reported by `tk_editor_scroll_regions`.
+    /// `sub` + `frac` are in *visual rows*: the overdraw render is shifted up
+    /// by `(sub + frac) * CELL_H` and clipped to the interior rect.
+    private struct SmoothRegion {
+        var winIdx: Int, x: Int, y: Int, w: Int, h: Int
+        var sub: Int, frac: CGFloat
+        // Sticky-scroll header rows pinned at the interior top — the
+        // compositor leaves these fixed and only translates the body below.
+        var nSticky: Int
+    }
+
+    /// Query the focused editor's smooth-scroll region (phase one reports at
+    /// most one — the focused, frontmost editor). nil when nothing is
+    /// eligible (non-editor focus, an overlay is up, or the completion popup
+    /// is open). Works for wrapped and non-wrapped editors alike.
+    private func focusedSmoothRegion() -> SmoothRegion? {
+        guard handle != 0, surface == .main else { return nil }
+        var rec = [Int32](repeating: 0, count: 8)
+        let n = rec.withUnsafeMutableBufferPointer { b in
+            Int(tk_editor_scroll_regions(handle, Int64(cols()), Int64(rows()),
+                Int64(Int(bitPattern: b.baseAddress)), 1))
+        }
+        guard n >= 1 else { return nil }
+        return SmoothRegion(
+            winIdx: Int(rec[0]), x: Int(rec[1]), y: Int(rec[2]),
+            w: Int(rec[3]), h: Int(rec[4]), sub: Int(rec[5]),
+            frac: CGFloat(rec[6]) / 1000.0, nSticky: Int(rec[7]))
+    }
+
+    private func ensureRegionBuf(_ cells: Int) {
+        if cells > regionBufCells {
+            regionBuf.deallocate()
+            regionBuf = UnsafeMutablePointer<UInt32>.allocate(
+                capacity: cells * CELL_WORDS)
+            regionBufCells = cells
+        }
+    }
+
+    /// After the full-frame draw, overdraw the focused editor's body shifted
+    /// up by `(sub + frac)` visual rows. The core renders the body taller by
+    /// `sub + 2` rows (`tk_editor_region_layout`) so the segments shifted off
+    /// the top, the partially-visible bottom line, and a rubber-band gap all
+    /// have content to slide into the clip.
+    private func compositeSmoothScroll(_ ctx: CGContext) {
+        guard let r = focusedSmoothRegion(),
+              (r.frac != 0 || r.sub != 0), r.w > 0, r.h > 0 else { return }
+        let regionRows = r.sub + r.h + 2
+        ensureRegionBuf(r.w * regionRows)
+        let cells = Int(tk_editor_region_layout(
+            handle, Int64(r.winIdx), Int64(r.w), Int64(regionRows),
+            Int64(Int(bitPattern: regionBuf)), Int64(r.w * regionRows)))
+        // Clip starts below the pinned sticky-scroll band: those top rows are
+        // fixed and the main pass already drew them, so only the scrolling
+        // body below the band is composited (translated). The overdraw render
+        // suppressed its own band, so the body slides cleanly under it.
+        let bodyTop = CGFloat(r.y + r.nSticky) * CELL_H
+        let clip = CGRect(x: CGFloat(r.x) * CELL_W, y: bodyTop,
+                          width: CGFloat(r.w) * CELL_W,
+                          height: CGFloat(r.h - r.nSticky) * CELL_H)
+        ctx.saveGState()
+        ctx.clip(to: clip)
+        // Fill the clip with editor background so a rubber-band gap past the
+        // first / last line reads as empty editor space, not desktop bg.
+        ctx.setFillColor(cgcolor(palette[EDITOR_BG_IDX]))
+        ctx.fill(clip)
+        drawCells(ctx, regionBuf, cells, r.w,
+                  originX: CGFloat(r.x) * CELL_W,
+                  originY: CGFloat(r.y) * CELL_H
+                      - (CGFloat(r.sub) + r.frac) * CELL_H)
+        ctx.restoreGState()
+    }
+
+    /// Damped overscroll distance (in visual rows) for a raw overshoot past
+    /// an edge — the classic rubber-band curve, asymptotic to `dim` rows.
+    private func rubberBand(_ x: CGFloat) -> CGFloat {
+        let dim: CGFloat = 4.0, c: CGFloat = 0.55
+        return (1 - 1 / (x / dim * c + 1)) * dim
+    }
+
+    /// Push the current continuous position (`smoothLines`, in visual rows)
+    /// into the core: damp any overshoot past the [0, max] range, then store
+    /// the absolute visual-row coordinate (the core maps it to a buffer-line
+    /// + sub-row anchor) and request a repaint.
+    private func applySmooth() {
+        guard smoothWinIdx >= 0 else { return }
+        let maxV = CGFloat(smoothMax)
+        var displayed = smoothLines
+        if smoothLines < 0 {
+            displayed = -rubberBand(-smoothLines)
+        } else if smoothLines > maxV {
+            displayed = maxV + rubberBand(smoothLines - maxV)
+        }
+        tk_editor_smooth_set(handle, Int64(smoothWinIdx),
+                             Int64(cols()), Int64(rows()),
+                             Int64(displayed * 1000))
+        needsDisplay = true
+    }
+
+    private func cancelSpring() {
+        springTimer?.invalidate(); springTimer = nil
+    }
+
+    /// Animate `smoothLines` to `target` (an integer rest line) and snap the
+    /// fraction to zero on arrival. Drives the post-gesture rubber-band
+    /// release. Runs in `.common` mode so it keeps ticking during tracking.
+    private func startSpring(to target: CGFloat) {
+        cancelSpring()
+        springTarget = target
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] tm in
+            guard let self = self else { tm.invalidate(); return }
+            self.smoothLines += (self.springTarget - self.smoothLines) * 0.30
+            if abs(self.smoothLines - self.springTarget) < 0.01 {
+                self.smoothLines = self.springTarget
+                self.applySmooth()
+                tm.invalidate(); self.springTimer = nil
+            } else {
+                self.applySmooth()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        springTimer = t
+    }
 
     /// Display width of a codepoint in grid cells: 2 for the emoji blocks
     /// terminals render double-wide, 1 otherwise. Ported verbatim from
@@ -744,7 +905,23 @@ final class CellView: NSView {
         // See keyDown — scripted capture runs ignore live input.
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
         let p = convert(e.locationInWindow, from: nil)
-        let col = Int64(max(0, p.x) / CELL_W), row = Int64(max(0, p.y) / CELL_H)
+        let col = Int64(max(0, p.x) / CELL_W)
+        var py = max(0, p.y)
+        // When the focused editor rests at a smooth-scroll offset its body is
+        // drawn shifted up by (sub + frac)*CELL_H; nudge a click/drag's
+        // pixel-Y by the same amount so the cell row maps to the line that's
+        // visually under the pointer (passive hover doesn't need precision).
+        if !passive && surface == .main, let sr = focusedSmoothRegion(),
+           sr.sub != 0 || sr.frac != 0 {
+            let cc0 = Int(max(0, p.x) / CELL_W), rr0 = Int(py / CELL_H)
+            // Below the pinned sticky band only — band rows are fixed, so a
+            // click there maps straight through (e.g. jump to that header).
+            if cc0 >= sr.x && cc0 < sr.x + sr.w
+                && rr0 >= sr.y + sr.nSticky && rr0 < sr.y + sr.h {
+                py = max(0, py + (CGFloat(sr.sub) + sr.frac) * CELL_H)
+            }
+        }
+        let row = Int64(py / CELL_H)
         if passive {
             // Coalesce bare motion to cell granularity — see lastPassiveCol.
             if col == lastPassiveCol && row == lastPassiveRow { return }
@@ -797,21 +974,82 @@ final class CellView: NSView {
     override func rightMouseUp(with e: NSEvent) { sendMouse(e, button: 3, pressed: 0, motion: 0) }
     override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1, passive: true) }
     override func scrollWheel(with e: NSEvent) {
-        // Drop the fractional carry at the start of a fresh gesture so leftover
-        // momentum from a previous flick can't bleed into this one.
+        // Scripted capture runs ignore live input (matches sendMouse).
+        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        let dy = e.scrollingDeltaY
+        // A zero-delta event still matters at gesture/momentum end — that's
+        // when an out-of-range smooth scroll starts its rubber-band spring.
+        if dy == 0 && e.phase != .ended && e.phase != .cancelled
+            && e.momentumPhase != .ended { return }
+
+        // Smooth pixel scrolling: a precise device (trackpad / Magic Mouse)
+        // over the focused editor body. Everything else — legacy wheels, or
+        // the pointer over a terminal / output pane or a non-focused editor —
+        // falls back to discrete notch scrolling, which the core routes by
+        // pointer position.
+        if surface == .main, e.hasPreciseScrollingDeltas,
+           let r = focusedSmoothRegion() {
+            let p = convert(e.locationInWindow, from: nil)
+            let col = Int(max(0, p.x) / CELL_W), row = Int(max(0, p.y) / CELL_H)
+            if col >= r.x && col < r.x + r.w && row >= r.y && row < r.y + r.h {
+                smoothScroll(e, region: r)
+                return
+            }
+        }
+        // End any in-flight smooth gesture cleanly before handing off so the
+        // next precise event over the editor re-seeds from the core.
+        smoothActive = false
+        legacyNotchScroll(e)
+    }
+
+    /// Continuous trackpad scroll of the focused editor: track the gesture
+    /// 1:1 in fractional visual rows, push the absolute visual-row position
+    /// into the core, and spring back from any rubber-band overshoot at the
+    /// end. Works for wrapped and non-wrapped editors — the core resolves the
+    /// visual-row coordinate to a buffer-line + sub-row anchor.
+    private func smoothScroll(_ e: NSEvent, region r: SmoothRegion) {
+        cancelSpring()
+        if e.phase == .began || !smoothActive {
+            // Seed the continuous position + clamp from the core (O(lines)
+            // once per gesture for a wrapped editor; trivial otherwise).
+            var m = [Int32](repeating: 0, count: 2)
+            m.withUnsafeMutableBufferPointer { b in
+                _ = tk_editor_smooth_begin(handle, Int64(r.winIdx),
+                    Int64(cols()), Int64(rows()),
+                    Int64(Int(bitPattern: b.baseAddress)))
+            }
+            smoothWinIdx = r.winIdx
+            smoothLines = CGFloat(m[0]) / 1000.0
+            smoothMax = Int(m[1]) / 1000
+            smoothActive = true
+        }
+        // Positive scrollingDeltaY scrolls up (toward the top), matching the
+        // legacy notch path's button-4/5 sign convention.
+        smoothLines -= e.scrollingDeltaY / CELL_H
+        applySmooth()
+        let ended = e.phase == .ended || e.phase == .cancelled
+            || e.momentumPhase == .ended
+        if ended {
+            smoothActive = false
+            if smoothLines < 0 {
+                startSpring(to: 0)
+            } else if smoothLines > CGFloat(smoothMax) {
+                startSpring(to: CGFloat(smoothMax))
+            }
+            // In range: rest at the sub-line offset (no spring-back).
+        }
+    }
+
+    /// Discrete notch scrolling — the original behavior. Each emitted notch
+    /// scrolls 3 lines in the core (editor.mojo). Precise deltas are
+    /// integrated and emitted one notch per ~2 cell-rows of travel so speed
+    /// tracks the gesture; legacy wheels report line detents (one per click).
+    private func legacyNotchScroll(_ e: NSEvent) {
+        // Drop the fractional carry at the start of a fresh gesture so
+        // leftover momentum from a previous flick can't bleed into this one.
         if e.phase == .began { scrollAccumY = 0 }
         let dy = e.scrollingDeltaY
         if dy == 0 { return }
-
-        // Each emitted notch scrolls 3 lines in the core (editor.mojo). For
-        // precise devices (trackpad / Magic Mouse) scrollingDeltaY is in
-        // points. A strict 1:1 mapping (one 3-line notch per 3 cell-rows =
-        // CELL_H*3 points of travel) feels sluggish at slow speed: nothing
-        // moves until you've traveled a full 3 lines' worth, then it jumps 3
-        // lines at once. Emitting a notch per 2 cell-rows of travel keeps the
-        // notch firing sooner so slow scrolling stays responsive, while still
-        // tracking the gesture (not the raw event rate). Legacy wheels report
-        // line units (detents); one notch per detent = classic 3-per-click.
         let perNotch: CGFloat = e.hasPreciseScrollingDeltas ? CELL_H * 2 : 1
         scrollAccumY += dy
         while abs(scrollAccumY) >= perNotch {

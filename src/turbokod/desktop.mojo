@@ -718,6 +718,28 @@ struct PanelSlot(ImplicitlyCopyable, Movable):
     var rect: Rect
 
 
+@fieldwise_init
+struct EditorScrollRegion(ImplicitlyCopyable, Movable):
+    """One editor window eligible for the native macOS smooth-scroll
+    composite. ``win_idx`` indexes ``windows.windows`` (the host passes it
+    back to ``paint_editor_region`` / ``smooth_begin`` / ``smooth_set``).
+    ``interior`` is the frame-excluded on-screen rect the host clips +
+    translates. The host overdraws the editor body and shifts it up by
+    ``(sub + frac)`` visual rows: ``sub`` is how many of the top buffer
+    line's wrapped segments are scrolled off (0 when not wrapping), ``frac``
+    the sub-row pixel fraction (slightly out of ``[0,1)`` during rubber-band).
+    Produced only when no body-overlapping overlay is up — see
+    ``scroll_regions``."""
+    var win_idx: Int
+    var interior: Rect
+    var sub: Int
+    var frac: Float64
+    # Sticky-scroll header rows pinned at the interior top right now. The host
+    # leaves these (fixed) rows to the main paint and only translates the
+    # scrolling body below them.
+    var n_sticky: Int
+
+
 struct Desktop(Movable):
     var menu_bar: MenuBar
     # When True, the host frontend (e.g. the Swift/AppKit app) owns the
@@ -2029,6 +2051,123 @@ struct Desktop(Movable):
         # host owns the menu, that row is free for the workspace.
         var top = 0 if self.host_owns_menu else 1
         return Rect(left, top, right, bottom)
+
+    # --- Native smooth-scroll support (macOS host only) -------------------
+    # The Swift host renders editor content at a sub-cell pixel offset for
+    # smooth scrolling, in *visual-row* coordinates so wrapped and
+    # non-wrapped editors behave identically. The core stays integer-cell:
+    # it reports each eligible editor's scroll region (`scroll_regions`),
+    # renders it taller for the partially-visible edges + a rubber-band gap
+    # (`paint_editor_region`), seeds a gesture (`smooth_begin`), and applies
+    # the host-driven position (`smooth_set`). The terminal frontend never
+    # calls these — it can't sub-cell render — so `scroll_sub`/`scroll_frac`
+    # stay 0 there.
+
+    def _editor_overlay_active(self) -> Bool:
+        """True when a workspace-center overlay (modal dialog, popup menu,
+        or the Settings overlay) is up. The smooth-scroll composite clips
+        to the editor interior and would paint over any such overlay, so
+        ``scroll_regions`` declines smooth scroll while one is active."""
+        if self.prompt.active or self.confirm_dialog.active \
+                or self.message_request_dialog.active \
+                or self.color_picker.active or self.merge_view.active \
+                or self.save_as_dialog.active or self.quick_open.active \
+                or self.symbol_pick.active or self.reference_pick.active \
+                or self.find_symbol.active or self.doc_pick.active \
+                or self.project_find.active or self.local_changes.active:
+            return True
+        if self.settings.active or self.project_settings.active:
+            return True
+        if self.spell_menu.active or self.git_gutter_menu.active \
+                or self.test_gutter_menu.active \
+                or self.diagnostic_menu.active \
+                or self.editor_context_menu.active \
+                or self.tab_context_menu.active \
+                or self.lsp_status_menu.active \
+                or self.breakpoint_menu.active \
+                or self.breakpoint_error.active or self.fill_dialog.active:
+            return True
+        return False
+
+    def scroll_regions(mut self, screen: Rect) -> List[EditorScrollRegion]:
+        """The editor windows the host may smooth-scroll this frame. Phase
+        one returns at most the focused editor (avoids occlusion: the
+        focused window is frontmost, so compositing over its interior can't
+        stomp another window). Empty when the focused window isn't an
+        editor, an overlay is up, or the completion popup is open (it
+        overlaps the body and the composite would stomp it). Works for both
+        wrapped and non-wrapped editors — the per-visual-row anchoring lives
+        in ``Editor.smooth_begin`` / ``smooth_set``."""
+        var out = List[EditorScrollRegion]()
+        if self._editor_overlay_active():
+            return out^
+        if not self.windows.focused_is_editor():
+            return out^
+        # Keep window rects current before reading interiors. Idempotent —
+        # `paint` already fit this frame; this just makes the query safe to
+        # call standalone.
+        self.windows.fit_into(self.workspace_rect(screen))
+        var idx = self.windows.focused
+        if idx < 0 or idx >= len(self.windows.windows):
+            return out^
+        if self.windows.windows[idx].editor.completion_popup_visible:
+            return out^
+        var interior = self.windows.windows[idx].interior()
+        if interior.is_empty():
+            return out^
+        out.append(
+            EditorScrollRegion(
+                idx, interior,
+                self.windows.windows[idx].editor.scroll_sub,
+                self.windows.windows[idx].editor.scroll_frac,
+                self.windows.windows[idx].editor.sticky_row_count(interior),
+            )
+        )
+        return out^
+
+    def paint_editor_region(
+        mut self, win_idx: Int, mut canvas: Canvas,
+        region_cols: Int, region_rows: Int, focused: Bool,
+    ):
+        """Render editor ``win_idx``'s body at its *current* ``scroll_y`` into
+        a 0-origin canvas (overlays suppressed), ``region_rows`` visual rows
+        tall. ``region_rows`` is ``sub + interior_height + 2`` so the rows the
+        host shifts off the top (``sub``), the partially-visible bottom line,
+        and a rubber-band edge all have content. The host composites this
+        clipped to the interior, translated up by ``(sub + frac) * CELL_H``."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows):
+            return
+        if not self.windows.windows[win_idx].is_editor:
+            return
+        # Highlights are already flushed by this frame's main `paint`; this
+        # is a no-op when clean (scroll position doesn't dirty tokens).
+        self.windows.windows[win_idx].editor.flush_highlights(
+            self.grammar_registry, self.speller,
+        )
+        self.windows.windows[win_idx].editor._suppress_overlays = True
+        self.windows.windows[win_idx].editor.paint(
+            canvas, Rect(0, 0, region_cols, region_rows), focused,
+        )
+        self.windows.windows[win_idx].editor._suppress_overlays = False
+
+    def smooth_begin(mut self, win_idx: Int, screen: Rect) -> Tuple[Float64, Float64]:
+        """Seed a smooth-scroll gesture on editor ``win_idx``: returns its
+        current vertical position and the maximum, both as continuous
+        visual-row coordinates. Returns ``(0, 0)`` for a bad index."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows) \
+                or not self.windows.windows[win_idx].is_editor:
+            return (0.0, 0.0)
+        var interior = self.windows.windows[win_idx].interior()
+        return self.windows.windows[win_idx].editor.smooth_begin(interior)
+
+    def smooth_set(mut self, win_idx: Int, screen: Rect, vis: Float64):
+        """Apply a host-driven smooth-scroll position (a global visual-row
+        coordinate) to editor ``win_idx``."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows) \
+                or not self.windows.windows[win_idx].is_editor:
+            return
+        var interior = self.windows.windows[win_idx].interior()
+        self.windows.windows[win_idx].editor.smooth_set(interior, vis)
 
     def _panel_left(self, screen: Rect) -> Int:
         """Left edge for the bottom-docked panes. The file tree runs

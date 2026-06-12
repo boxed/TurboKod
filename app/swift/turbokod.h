@@ -27,6 +27,31 @@ void    tk_desktop_open_file_at(int64_t h, int64_t path_ptr, int64_t path_len,
 void    tk_desktop_tick(int64_t h, int64_t cols, int64_t rows);
 int64_t tk_desktop_layout(int64_t h, int64_t cols, int64_t rows,
                           int64_t out_ptr, int64_t cap);
+// Native smooth-scroll (macOS host), working in *visual-row* coordinates so
+// it's uniform for wrapped and non-wrapped editors.
+//   tk_editor_scroll_regions: N records of 8 int32 words
+//     [win_idx, x, y, w, h, sub, frac_milli, n_sticky] — interior rect in
+//     cells, the count of the top buffer line's wrapped segments scrolled
+//     off the top (sub; 0 when not wrapping), the sub-row pixel fraction
+//     x1000, and the count of pinned sticky-scroll header rows the host must
+//     leave fixed. The host shifts the overdraw body up by (sub + frac) rows
+//     and only below the n_sticky pinned rows.
+//   tk_editor_region_layout: render one editor's body at its current
+//     scroll_y into a 0-origin grid region_rows visual rows tall (same
+//     5-u32 cell format as tk_desktop_layout); composite it clipped to the
+//     interior, translated up by (sub + frac) * CELL_H.
+//   tk_editor_smooth_begin: writes [cur_vis_milli, max_vis_milli] (current
+//     position + max, as visual-row coords x1000) to seed a gesture.
+//   tk_editor_smooth_set: set position from a global visual-row coord x1000.
+int64_t tk_editor_scroll_regions(int64_t h, int64_t cols, int64_t rows,
+                                 int64_t out_ptr, int64_t cap);
+int64_t tk_editor_region_layout(int64_t h, int64_t win_idx,
+                                int64_t region_cols, int64_t region_rows,
+                                int64_t out_ptr, int64_t cap);
+int64_t tk_editor_smooth_begin(int64_t h, int64_t win_idx,
+                               int64_t cols, int64_t rows, int64_t out_ptr);
+void    tk_editor_smooth_set(int64_t h, int64_t win_idx,
+                             int64_t cols, int64_t rows, int64_t vis_milli);
 int32_t tk_desktop_key(int64_t h, uint32_t key, uint8_t mods,
                        int64_t cols, int64_t rows);
 int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
