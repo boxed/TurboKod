@@ -33,15 +33,44 @@ comptime GIT_CHANGE_MODIFIED: Int = 2
 
 
 @fieldwise_init
-struct GitRevertRequest(ImplicitlyCopyable, Movable):
-    """Payload emitted when the user clicks the gutter change-bar of a
-    modified row. ``row`` is the buffer row that was clicked;
-    ``anchor_x``/``anchor_y`` are the screen cell to anchor the revert
-    popup at (the cell that was clicked, so the menu opens right under
-    the bar)."""
+struct GitRevertRequest(Copyable, Movable):
+    """Payload emitted when the user opens the git-gutter revert popup —
+    by clicking the gutter change-bar of a modified row, or by jumping
+    to a change chunk with Ctrl+Shift+Up/Down.
+
+    ``row`` is the buffer row the request targets (used to recompute the
+    revert block at submit time). ``anchor_x``/``anchor_y`` are a fallback
+    screen cell to anchor the popup at.
+
+    The remaining fields drive the inline "old code" preview the popup
+    paints so the user can compare against the new code:
+
+    * ``text_x`` — screen column where the editor's text content starts,
+      so the old lines paint at the same column as the new code below
+      them (column-aligned for easy comparison).
+    * ``block_top_y`` — screen row of the first changed buffer row of the
+      block; the old lines stack directly above it. ``-1`` when the block
+      isn't on screen (then the popup falls back to ``anchor``).
+    * ``new_count`` — number of buffer rows the change block spans (used
+      to place the preview below the block when there's no room above).
+    * ``head_lines`` — the file's content at HEAD for this block (the old
+      code). Empty for a pure-insert block (nothing at HEAD to show)."""
     var row: Int
     var anchor_x: Int
     var anchor_y: Int
+    var text_x: Int
+    var block_top_y: Int
+    var new_count: Int
+    var head_lines: List[String]
+
+    def __copyinit__(mut self, copy: Self):
+        self.row = copy.row
+        self.anchor_x = copy.anchor_x
+        self.anchor_y = copy.anchor_y
+        self.text_x = copy.text_x
+        self.block_top_y = copy.block_top_y
+        self.new_count = copy.new_count
+        self.head_lines = copy.head_lines.copy()
 
 
 @fieldwise_init

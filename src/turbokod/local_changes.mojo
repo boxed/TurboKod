@@ -157,6 +157,7 @@ comptime _LINE_CTX:       Int = 3
 comptime _LINE_ADD:       Int = 4
 comptime _LINE_REM:       Int = 5
 comptime _LINE_NONEWLINE: Int = 6
+comptime _LINE_SEPARATOR: Int = 7
 
 
 @fieldwise_init
@@ -632,6 +633,17 @@ def _emit_blank(mut panel: RightPanel):
     panel.file_line.append(0)
 
 
+def _emit_separator(mut panel: RightPanel):
+    """A horizontal rule between two hunks of the same file. The text is
+    empty — ``_paint_panel_body`` draws the rule across the panel width at
+    paint time so it tracks the current panel size."""
+    panel.lines.append(String(""))
+    panel.kind.append(_LINE_SEPARATOR)
+    panel.diff_line.append(-1)
+    panel.file_path.append(String(""))
+    panel.file_line.append(0)
+
+
 def _emit_info(mut panel: RightPanel, var text: String):
     panel.lines.append(text^)
     panel.kind.append(_LINE_INFO)
@@ -853,11 +865,19 @@ def _populate_diff_panel(
     # 1-based current line on each side; -1 = no hunk header seen yet.
     var new_line: Int = -1
     var old_line: Int = -1
+    var seen_hunk = False
     for i in range(len(src_lines)):
         var ln = src_lines[i]
         var b = ln.as_bytes()
         # ``@@ -a,b +c,d @@`` resets both line counters.
         if len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40:
+            # Draw a rule between consecutive hunks; the first hunk in a
+            # file already has the banner above it as a separator.
+            if seen_hunk:
+                _emit_separator(panel)
+                display_to_after_row.append(-1)
+                display_to_before_row.append(-1)
+            seen_hunk = True
             _parse_hunk_starts(ln, old_line, new_line)
             continue
         if _is_skip_diff_header(ln):
@@ -2151,6 +2171,16 @@ struct LocalChanges(Movable):
                         canvas, Point(area.a.x + 2, y),
                         visible_c, cursor_active,
                     )
+                continue
+            # Separator rule between hunks: a dim horizontal line across
+            # the whole panel width. No gutter, no syntax overlay.
+            if k == _LINE_SEPARATOR:
+                var sep_attr = Attr(DARK_GRAY, EDITOR_BG)
+                painter.fill(
+                    canvas,
+                    Rect(area.a.x, y, area.b.x, y + 1),
+                    String("─"), sep_attr,
+                )
                 continue
             # Non-cursor row: pick the base colour by line kind.
             var line_attr: Attr

@@ -16767,6 +16767,60 @@ def test_compute_revert_block_unchanged_returns_empty() raises:
     assert_true(not Bool(block_opt))
 
 
+def test_goto_change_chunk_navigates_and_builds_preview() raises:
+    """Ctrl+Shift+Down/Up walks between change chunks, parking the caret
+    at each chunk start and stamping a ``pending_git_revert`` carrying the
+    old (HEAD) lines for the inline-diff preview."""
+    var head = String("a\nb\nc\nd\ne\nf\n")
+    var ed = Editor(String("a\nB\nc\nd\nE\nf\n"))
+    ed.git_changes_visible = True
+    ed.set_git_head_text(head, True)
+    var marks = diff_buffer_against_head(head, ed.buffer.lines)
+    ed.set_git_changes(marks^)
+    var view = Rect(0, 0, 80, 24)
+    # Two modified chunks: row 1 ("B") and row 4 ("E").
+    assert_true(ed.goto_change_chunk(1, view))
+    assert_equal(ed.selections[0].row, 1)
+    var req1 = ed.consume_git_revert_request()
+    assert_true(Bool(req1))
+    var r1 = req1.value().copy()
+    assert_equal(r1.row, 1)
+    assert_equal(r1.new_count, 1)
+    assert_equal(len(r1.head_lines), 1)
+    assert_equal(r1.head_lines[0], String("b"))
+    # Next chunk.
+    assert_true(ed.goto_change_chunk(1, view))
+    assert_equal(ed.selections[0].row, 4)
+    var req2 = ed.consume_git_revert_request()
+    assert_true(Bool(req2))
+    assert_equal(req2.value().head_lines[0], String("e"))
+    # No chunk past the last one.
+    assert_true(not ed.goto_change_chunk(1, view))
+    # Walk back up.
+    assert_true(ed.goto_change_chunk(-1, view))
+    assert_equal(ed.selections[0].row, 1)
+
+
+def test_revert_chunk_at_cursor_restores_head() raises:
+    """Cmd+Alt+Z reverts the chunk under the caret straight to HEAD."""
+    var head = String("a\nb\nc\n")
+    var ed = Editor(String("a\nBETA\nc\n"))
+    ed.git_changes_visible = True
+    ed.set_git_head_text(head, True)
+    var marks = diff_buffer_against_head(head, ed.buffer.lines)
+    ed.set_git_changes(marks^)
+    ed.move_to(1, 0, False)
+    assert_true(ed.revert_chunk_at_cursor())
+    assert_equal(ed.buffer.line(1), String("b"))
+    # A caret on an unchanged line has nothing to revert.
+    var ed2 = Editor(String("a\nb\nc\n"))
+    ed2.set_git_head_text(String("a\nb\nc\n"), True)
+    var marks2 = diff_buffer_against_head(String("a\nb\nc\n"), ed2.buffer.lines)
+    ed2.set_git_changes(marks2^)
+    ed2.move_to(0, 0, False)
+    assert_true(not ed2.revert_chunk_at_cursor())
+
+
 def test_editor_git_changes_gutter_widens_total_gutter() raises:
     """``set_git_changes`` flips the column on; the editor's overall
     left margin grows by exactly one cell. ``invalidate_git_changes``

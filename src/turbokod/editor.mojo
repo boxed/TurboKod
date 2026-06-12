@@ -1690,7 +1690,7 @@ struct Editor(Copyable, Movable):
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
-        self.pending_git_revert = copy.pending_git_revert
+        self.pending_git_revert = copy.pending_git_revert.copy()
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
         self.test_rows = copy.test_rows.copy()
         self.test_nodes = copy.test_nodes.copy()
@@ -3473,9 +3473,9 @@ struct Editor(Copyable, Movable):
         Set by ``handle_mouse`` when the user clicks the per-line bar
         in the git-changes column over a row that's actually changed
         from HEAD."""
-        var req = self.pending_git_revert
+        var req = self.pending_git_revert^
         self.pending_git_revert = Optional[GitRevertRequest]()
-        return req
+        return req^
 
     def consume_test_run_request(mut self) -> Optional[TestRunRequest]:
         """Return any pending gutter run-icon click and clear the slot.
@@ -3550,6 +3550,110 @@ struct Editor(Copyable, Movable):
         self.move_to(nr, 0, False)
         self.dirty = True
         self._mark_hl_dirty(bs)
+
+    def _build_revert_request(
+        self, view: Rect, target_row: Int, anchor_x: Int, anchor_y: Int,
+    ) -> Optional[GitRevertRequest]:
+        """Compute the full payload for the git-gutter revert popup at
+        ``target_row``: the change block (via the cached HEAD baseline)
+        plus the screen geometry the popup needs to paint the old code
+        aligned with the new code.
+
+        Empty Optional when there's no HEAD baseline for this file or
+        ``target_row`` doesn't fall inside a change block."""
+        if not self._git_head_present:
+            return Optional[GitRevertRequest]()
+        var block_opt = compute_revert_block(
+            self._git_head_text, self.buffer.lines, target_row,
+        )
+        if not block_opt:
+            return Optional[GitRevertRequest]()
+        var block = block_opt.value().copy()
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var text_x = view.a.x + total_gutter
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            content_w = 1
+        var layout = self._layout_lines(content_h, content_w)
+        var sr = self._screen_row_for(layout, block.buf_start, 0)
+        var block_top_y = (view.a.y + sr) if sr >= 0 else -1
+        var new_count = block.buf_end_excl - block.buf_start
+        return Optional[GitRevertRequest](
+            GitRevertRequest(
+                target_row, anchor_x, anchor_y,
+                text_x, block_top_y, new_count, block.head_lines.copy(),
+            )
+        )
+
+    def _find_change_chunk_start(self, from_row: Int, direction: Int) -> Int:
+        """Buffer row of the start of the next (``direction > 0``) or
+        previous (``direction < 0``) contiguous run of changed lines
+        relative to ``from_row``. A "chunk start" is a changed row whose
+        predecessor is unchanged. Returns -1 when there's no such chunk
+        (no wrap-around)."""
+        var n = len(self.git_change_lines)
+        if n == 0:
+            return -1
+        if direction > 0:
+            for r in range(from_row + 1, n):
+                if self.git_change_lines[r] != GIT_CHANGE_NONE \
+                        and (r == 0
+                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
+                    return r
+            return -1
+        else:
+            var hi = from_row - 1
+            if hi >= n:
+                hi = n - 1
+            for r in range(hi, -1, -1):
+                if self.git_change_lines[r] != GIT_CHANGE_NONE \
+                        and (r == 0
+                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
+                    return r
+            return -1
+
+    def goto_change_chunk(
+        mut self, direction: Int, view: Rect,
+    ) -> Bool:
+        """Move the cursor to the start of the next/previous git-change
+        chunk, scroll it into view, and stamp a ``pending_git_revert`` so
+        the host opens the inline-diff popup there. Returns False (no-op)
+        when there's no baseline or no further chunk in that direction."""
+        if not self._git_has_changes:
+            return False
+        var target = self._find_change_chunk_start(
+            self.selections[0].row, direction,
+        )
+        if target < 0:
+            return False
+        self.move_to(target, 0, False)
+        self._scroll_to_cursor(view)
+        var req_opt = self._build_revert_request(view, target, 0, 0)
+        if not req_opt:
+            return False
+        var req = req_opt.value().copy()
+        # Anchor fallback at the block's top-left, where it'll actually open.
+        req.anchor_x = req.text_x
+        req.anchor_y = req.block_top_y if req.block_top_y >= 0 else view.a.y
+        self.pending_git_revert = Optional[GitRevertRequest](req^)
+        return True
+
+    def revert_chunk_at_cursor(mut self) -> Bool:
+        """Revert the git-change chunk under the primary caret back to
+        HEAD (Cmd+Alt+Z). Returns False when there's no baseline or the
+        cursor isn't on a changed line."""
+        if self.read_only or not self._git_head_present:
+            return False
+        var block_opt = compute_revert_block(
+            self._git_head_text, self.buffer.lines, self.selections[0].row,
+        )
+        if not block_opt:
+            return False
+        self.apply_revert_block(block_opt.value().copy())
+        self.invalidate_git_changes()
+        return True
 
     def consume_merge_regions(mut self) -> List[MergeRegion]:
         """Return the structured merge regions stashed by
@@ -7427,6 +7531,27 @@ struct Editor(Copyable, Movable):
             self.add_caret_below()
             self._scroll_to_cursor(view)
             return True
+        # Git-change navigation — Ctrl+Shift+Up/Down jumps to the previous /
+        # next chunk of local changes and opens the inline-diff revert popup
+        # there (the host drains ``pending_git_revert``). Swallowed even when
+        # there's nothing to jump to, so it never beeps on a clean file.
+        var has_shift = (event.mods & MOD_SHIFT) != 0
+        var has_meta = (event.mods & MOD_META) != 0
+        if has_ctrl and has_shift and not has_alt and not has_meta \
+                and k == KEY_UP:
+            _ = self.goto_change_chunk(-1, view)
+            return True
+        if has_ctrl and has_shift and not has_alt and not has_meta \
+                and k == KEY_DOWN:
+            _ = self.goto_change_chunk(1, view)
+            return True
+        # Cmd+Alt+Z reverts the git-change chunk under the caret straight to
+        # HEAD (no popup). Consumed on a git file even when the caret isn't on
+        # a change, so it never falls through to insert a literal 'z'.
+        if has_meta and has_alt and not has_ctrl and not has_shift \
+                and k == UInt32(ord("z")):
+            _ = self.revert_chunk_at_cursor()
+            return True
         # Column-draw mode (set by tap-then-hold-Alt in ``handle_mod_key``):
         # while Alt is still held, Up/Down stamps a fresh caret on the
         # adjacent row instead of word-jumping. Up/Down with no other
@@ -8584,9 +8709,24 @@ struct Editor(Copyable, Movable):
                         )
                     )
                 elif on_gc and has_change:
-                    self.pending_git_revert = Optional[GitRevertRequest](
-                        GitRevertRequest(row, event.pos.x, event.pos.y)
+                    # Move the caret into the clicked chunk so a follow-up
+                    # Ctrl+Shift+Up/Down keeps navigating from here, then
+                    # stamp the full inline-diff payload (old code + screen
+                    # geometry). Falls back to a bare request if there's no
+                    # HEAD baseline, so the popup still opens.
+                    self.move_to(row, 0, False)
+                    var req_opt = self._build_revert_request(
+                        view, row, event.pos.x, event.pos.y,
                     )
+                    if req_opt:
+                        self.pending_git_revert = req_opt^
+                    else:
+                        self.pending_git_revert = Optional[GitRevertRequest](
+                            GitRevertRequest(
+                                row, event.pos.x, event.pos.y,
+                                event.pos.x, -1, 1, List[String](),
+                            )
+                        )
                 else:
                     self.pending_breakpoint_toggle = Optional[Int](row)
             return True

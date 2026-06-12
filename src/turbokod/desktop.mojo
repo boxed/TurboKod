@@ -63,7 +63,8 @@ from .git_changes import (
     git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
-    GUTTER_ACTION_REVERT, GitGutterMenu,
+    GUTTER_ACTION_NEXT, GUTTER_ACTION_PREV, GUTTER_ACTION_REVERT,
+    GitGutterMenu,
 )
 from .test_gutter_menu import (
     TEST_ACTION_DEBUG, TEST_ACTION_RUN, TestGutterMenu,
@@ -6339,6 +6340,10 @@ struct Desktop(Movable):
         # before the next paint so it renders on the same frame the
         # user pressed the key.
         self._maybe_open_spell_menu()
+        # Ctrl+Shift+Up/Down stamps a ``pending_git_revert`` on the focused
+        # editor (jump to the previous / next change chunk) — drain it here
+        # so the inline-diff popup opens from the keyboard, same frame.
+        self._maybe_open_git_gutter_menu()
         # Same idea for the diagnostic menu — Alt+Enter on a diagnostic
         # stamps a pending request, but it only got drained from
         # ``_handle_mouse`` (right-click path) before. Without this call
@@ -11707,8 +11712,7 @@ struct Desktop(Movable):
             .editor.consume_git_revert_request()
         if not req_opt:
             return
-        var req = req_opt.value()
-        self.git_gutter_menu.open(req.row, Point(req.anchor_x, req.anchor_y))
+        self.git_gutter_menu.open(req_opt.value())
 
     def _maybe_open_test_gutter_menu(mut self):
         """Drain ``Editor.consume_test_run_request`` on the focused window
@@ -11750,11 +11754,23 @@ struct Desktop(Movable):
         var act = self.git_gutter_menu.action
         var row = self.git_gutter_menu.row
         self.git_gutter_menu.close()
-        if act != GUTTER_ACTION_REVERT or row < 0:
-            return
         if not self.windows.focused_is_editor():
             return
         var idx = self.windows.focused
+        # Ctrl+Shift+Up/Down from inside the popup: walk to the adjacent
+        # change chunk and re-open the preview there. ``goto_change_chunk``
+        # moves the caret, scrolls, and re-stamps ``pending_git_revert``;
+        # draining it immediately re-opens on the same frame.
+        if act == GUTTER_ACTION_PREV or act == GUTTER_ACTION_NEXT:
+            var direction = -1 if act == GUTTER_ACTION_PREV else 1
+            var view = self.windows.windows[idx].interior()
+            _ = self.windows.windows[idx].editor.goto_change_chunk(
+                direction, view,
+            )
+            self._maybe_open_git_gutter_menu()
+            return
+        if act != GUTTER_ACTION_REVERT or row < 0:
+            return
         # Cached HEAD content lives on the editor (loaded by the gutter
         # paint pass); use it directly so we don't re-spawn git.
         var head_opt = self.windows.windows[idx].editor.git_head_text()
