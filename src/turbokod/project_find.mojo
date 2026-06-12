@@ -43,9 +43,11 @@ from .lsp import CaptureResult, LspProcess, capture_command
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, monotonic_ms, poll_stdin, read_into
 from .project import ProjectMatch
+from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
 from .string_utils import display_columns, split_lines
 from .text_field import TextField, TextFieldKeyResult
+from .text_select import PaneTextSelect
 from .window import close_button_clicked, paint_close_button, paint_window_title
 
 
@@ -145,6 +147,9 @@ struct ProjectFind(Movable):
     # Cached rect of the title-bar ``[ Panel ]`` button for mouse routing
     # (empty when no results, so the button isn't painted or clickable).
     var _panel_btn_rect: Rect
+    # Mouse-drag text selection over the bottom context panel — lets the
+    # user highlight and Cmd+C source lines straight out of the preview.
+    var ctxsel: PaneTextSelect
 
     def __init__(out self):
         self.active = False
@@ -182,6 +187,7 @@ struct ProjectFind(Movable):
         self._truncated = False
         self.send_to_panel = False
         self._panel_btn_rect = Rect(0, 0, 0, 0)
+        self.ctxsel = PaneTextSelect()
 
     def open(
         mut self,
@@ -278,6 +284,7 @@ struct ProjectFind(Movable):
         self.toggle_case.hovered = False
         self.toggle_word.hovered = False
         self.toggle_regex.hovered = False
+        self.ctxsel.clear()
 
     def _current_options(self) -> SearchOptions:
         return SearchOptions(
@@ -409,6 +416,9 @@ struct ProjectFind(Movable):
         shared ``GrammarRegistry``) by leaving ``_context_highlights``
         empty here; the panel falls back to plain text until the next
         paint frame fills it in via ``_ensure_context_highlights``."""
+        # The previewed lines are about to change — drop any drag selection
+        # so it can't linger over unrelated text.
+        self.ctxsel.clear()
         if self.selected < 0 or self.selected >= len(self.matches):
             self._context_path = String("")
             self._context_lines = List[String]()
@@ -685,7 +695,7 @@ struct ProjectFind(Movable):
             # takes ``mut self``, so an aliased ``self.matches[idx]``
             # reference would fail Mojo's exclusivity check.
             var m = self.matches[idx]
-            self._paint_match_row(
+            _ = self._paint_match_row(
                 canvas, container_bounds, painter, top + i, m, idx == self.selected,
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
                 registry, idx, hl_deadline,
@@ -704,6 +714,9 @@ struct ProjectFind(Movable):
         self._paint_context(
             canvas, container_bounds, painter, ctx_top + 1, ctx_attr, ctx_match,
         )
+        # Drag-selection overlay on top of the context text (cyan block,
+        # the same read-only-selection color ``TextLog`` uses).
+        self.ctxsel.paint_overlay(canvas, container_bounds, Attr(BLACK, CYAN))
         # Hint at the very bottom (overlays the bottom border).
         var hint = String(" Enter: open  Tab: query/path  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
         var hx = container_bounds.b.x - display_columns(hint) - 1
@@ -740,12 +753,12 @@ struct ProjectFind(Movable):
         path_attr: Attr, sel_path: Attr,
         mut registry: GrammarRegistry,
         idx: Int, hl_deadline: Int,
-    ):
+    ) -> RowTextGeom:
         # Thin wrapper over the shared ``paint_match_row`` free function so
         # the Find Results pane renders identical rows (hit highlight,
         # right-aligned ``rel:line``, budgeted syntax overlay) without
         # duplicating the cache + slide logic.
-        paint_match_row(
+        return paint_match_row(
             canvas, container_bounds, painter, y, m, is_sel, self.query.text,
             line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
             registry, idx, hl_deadline,
@@ -753,13 +766,16 @@ struct ProjectFind(Movable):
         )
 
     def _paint_context(
-        self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
+        mut self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
         top_y: Int, ctx_attr: Attr, match_attr: Attr,
     ):
         var inner_left = container_bounds.a.x + 1
         var inner_right = container_bounds.b.x - 1
         var rows = 2 * _CONTEXT_LINES + 1
         var hit_attr = Attr(WHITE, RED)         # match-substring highlight
+        # Re-stamp the selectable-row geometry for this frame; ``handle_mouse``
+        # / ``paint`` read it back for drag selection + the overlay.
+        self.ctxsel.begin_frame()
         if self.selected < 0 or self.selected >= len(self.matches):
             return
         var m = self.matches[self.selected]
@@ -798,6 +814,9 @@ struct ProjectFind(Movable):
             if max < 0: max = 0
             var end = len(bytes)
             if end > max: end = max
+            # Register this row for drag selection (byte==cell, painted from
+            # byte 0 at ``x``, clipped at ``inner_right``).
+            self.ctxsel.add_row(src, line, y, x, 0, end, inner_right)
             for i in range(end):
                 var b = Int(bytes[i])
                 var ch = chr(b) if b < 0x80 else String("?")
@@ -839,6 +858,11 @@ struct ProjectFind(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
+        # Cmd/Ctrl+C copies a context-panel drag selection when one exists;
+        # otherwise fall through so the focused input field's own copy works.
+        if clipboard_chord(event) == CLIP_COPY and self.ctxsel.has_selection():
+            _ = self.ctxsel.copy()
+            return True
         if k == KEY_ESC:
             self.close()
             return True
@@ -882,6 +906,14 @@ struct ProjectFind(Movable):
         if not self.active:
             return False
         if event.kind != EVENT_MOUSE:
+            return True
+        # A context-panel text drag in flight swallows the motion + the
+        # terminating release (even if the pointer wandered off the context
+        # area — mirrors ``TextLog``'s drag contract); a fresh press starts
+        # a new gesture and falls through to normal routing.
+        if self.ctxsel.dragging and event.button == MOUSE_BUTTON_LEFT \
+                and (event.motion or not event.pressed):
+            _ = self.ctxsel.handle_mouse(event)
             return True
         # Standard ``[■]`` close button — equivalent to ESC. Checked
         # before toggle / input / list routing so a click on the chrome
@@ -944,6 +976,13 @@ struct ProjectFind(Movable):
         var top = self._list_top(container_bounds)
         var h = self._list_height(container_bounds)
         if event.pos.y < top or event.pos.y >= top + h:
+            # Below the list: a press in the context panel begins a text
+            # drag selection. (The separator + label row is ``ctx_top``;
+            # content runs from ``ctx_top + 1`` to the bottom border.)
+            var ctx_top = self._list_bottom(container_bounds)
+            if event.pos.y > ctx_top \
+                    and event.pos.y < container_bounds.b.y - 1:
+                _ = self.ctxsel.handle_mouse(event)
             return True
         var idx = self.scroll + (event.pos.y - top)
         if idx < 0 or idx >= len(self.matches):
@@ -971,6 +1010,20 @@ struct ProjectFind(Movable):
 # --- internals --------------------------------------------------------------
 
 
+@fieldwise_init
+struct RowTextGeom(ImplicitlyCopyable, Movable):
+    """Where ``paint_match_row`` painted the row's selectable line text, so
+    a caller wiring up ``PaneTextSelect`` (text_select.mojo) can stamp it.
+    Byte==cell: byte ``b`` (for ``b >= byte_start``) landed at column
+    ``text_x + (b - byte_start)``. ``clip_x <= text_x`` means the row was
+    too narrow to paint any text (nothing selectable)."""
+    var text: String      # the displayed line (left-stripped match text)
+    var text_x: Int       # screen x of byte ``byte_start``
+    var byte_start: Int   # first painted byte (left-slide offset)
+    var byte_end: Int     # one past the last painted byte
+    var clip_x: Int       # exclusive right edge (before the path label)
+
+
 def paint_match_row(
     mut canvas: Canvas, container_bounds: Rect, painter: Painter,
     y: Int, m: ProjectMatch, is_sel: Bool, query: String,
@@ -983,7 +1036,7 @@ def paint_match_row(
     mut row_hl_cached: List[Bool],
     mark: String = String(""),
     force_plain: Bool = False,
-):
+) -> RowTextGeom:
     """Paint one search-result row inside ``container_bounds`` at row ``y``:
     the matched line text (hit span highlighted) on the left, the
     right-aligned ``rel:line`` label, and an optional attr-only syntax
@@ -1020,7 +1073,7 @@ def paint_match_row(
     var line_x = inner_left + 1
     var line_max = path_x - 1
     if line_max <= line_x:
-        return
+        return RowTextGeom(String(""), line_x, 0, 0, line_x)
     var line_stripped = _lstrip_tabs(m.line_text)
     var bytes = line_stripped.as_bytes()
     var hit = _find_bytes(line_stripped, query)
@@ -1103,6 +1156,7 @@ def paint_match_row(
     # Leading "…" hint when the line was sliced from the left.
     if start > 0:
         painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
+    return RowTextGeom(line_stripped, line_x, start, end, line_max)
 
 
 def _clean_scope(s: String) -> String:

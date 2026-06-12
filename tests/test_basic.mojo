@@ -111,6 +111,7 @@ from turbokod.project import (
     replace_in_project, walk_project_files,
 )
 from turbokod.find_results_pane import FindResultsPane
+from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
@@ -810,6 +811,64 @@ def test_find_results_pane_multiselect() raises:
     var dbl = pane.take_pending_opens()
     assert_equal(len(dbl), 1)
     assert_equal(dbl[0].line_no, 3)
+
+
+def test_pane_text_select_drag() raises:
+    # PaneTextSelect drives the mouse-drag text selection shared by the
+    # Find-in-Project context panel and the docked Find Results pane. Two
+    # rows are stamped (byte==cell: byte b lands at text_x + (b - byte_start)).
+    var sel = PaneTextSelect()
+    sel.begin_frame()
+    sel.add_row(0, String("hello world"), 5, 2, 0, 11, 40)
+    sel.add_row(1, String("second line"), 6, 2, 0, 11, 40)
+
+    # A bare press (no motion yet) is not a selection — the caller still
+    # treats it as a click. Press at byte 0 of row 0 (x == text_x == 2).
+    assert_true(
+        not sel.handle_mouse(Event.mouse_event(
+            Point(2, 5), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 1,
+        ))
+    )
+    assert_true(not sel.has_selection())
+
+    # Drag to byte 5 of the same row (x == 2 + 5). Motion returns True so the
+    # caller suppresses its own click handling; the span is "hello".
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(7, 5), MOUSE_BUTTON_LEFT, True, True, MOD_NONE, 1,
+    ))
+    assert_true(sel.has_selection())
+    assert_equal(sel.text(), String("hello"))
+
+    # Extend across into row 1 byte 6 (x == 2 + 6) — multi-row spans join
+    # rows with a newline and include the rest of the first line.
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(8, 6), MOUSE_BUTTON_LEFT, True, True, MOD_NONE, 1,
+    ))
+    assert_equal(sel.text(), String("hello world\nsecond"))
+
+    # Release commits — the selection persists for a subsequent Cmd+C.
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(8, 6), MOUSE_BUTTON_LEFT, False, False, MOD_NONE, 1,
+    ))
+    assert_true(sel.has_selection())
+    assert_equal(sel.text(), String("hello world\nsecond"))
+
+    # A dragged-backwards selection normalizes to document order.
+    sel.begin_frame()
+    sel.add_row(0, String("alpha"), 5, 2, 0, 5, 40)
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(5, 5), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 1,   # byte 3
+    ))
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(2, 5), MOUSE_BUTTON_LEFT, True, True, MOD_NONE, 1,    # byte 0
+    ))
+    assert_equal(sel.text(), String("alp"))
+
+    # A fresh press clears the prior selection (until it moves again).
+    _ = sel.handle_mouse(Event.mouse_event(
+        Point(4, 5), MOUSE_BUTTON_LEFT, True, False, MOD_NONE, 1,
+    ))
+    assert_true(not sel.has_selection())
 
 
 def test_paint_title_commands_renders_separator_and_labels() raises:
@@ -7674,6 +7733,74 @@ def test_textmate_incremental_matches_full_retokenize() raises:
         assert_equal(s_incr_b[i].row, s_full_b[i].row)
         assert_equal(s_incr_b[i].col_start, s_full_b[i].col_start)
         assert_equal(s_incr_b[i].col_end, s_full_b[i].col_end)
+
+
+def test_textmate_incremental_in_place_multirow_edit() raises:
+    """An in-place multi-row edit (toggle-comment over a selection) must
+    re-tokenize *every* edited row, not just the first.
+
+    Regression: a single-line comment returns the tokenizer to the base
+    stack right after the first commented row, so the post-stack
+    early-exit used to fire there and splice the cached (uncommented)
+    highlights over the rows below. ``dirty_max_row`` (fed from
+    ``Editor._mark_hl_dirty(sr, er)``) is the high-water mark that keeps
+    the early-exit suppressed until all edited rows are re-colored.
+
+    Both the dirty-row hint *and* the high-water mark match what
+    ``toggle_comment`` passes; the incremental result must equal a full
+    retokenize. We also assert that omitting the high-water mark
+    reproduces the bug (mismatch), so the test fails if the suppression
+    is ever dropped.
+    """
+    # The commented block starts at row 2 so the incremental path
+    # actually engages: ``eff_dirty = dirty_row - 1`` must be > 0, so a
+    # comment starting at row 1 would collapse to a full retokenize and
+    # never reach the early-exit being tested.
+    var lines = List[String]()
+    lines.append(String("fn main() {"))
+    lines.append(String("    let z = 0;"))
+    lines.append(String("    let a = 1;"))
+    lines.append(String("    let b = 2;"))
+    lines.append(String("    let c = 3;"))
+    lines.append(String("}"))
+
+    # Warm two independent per-Editor caches identically. The registry
+    # (grammar load) is process-shared and safe to reuse.
+    var registry = GrammarRegistry()
+    var cache_fixed = HighlightCache()
+    var cache_buggy = HighlightCache()
+    var _ = highlight_incremental(String("rs"), lines, 0, registry, cache_fixed)
+    var _ = highlight_incremental(String("rs"), lines, 0, registry, cache_buggy)
+
+    # Comment rows 2..4 in place — no line-count change, so the
+    # incremental path stays engaged (a line-count change would force a
+    # full retokenize and mask the bug).
+    lines[2] = String("    // let a = 1;")
+    lines[3] = String("    // let b = 2;")
+    lines[4] = String("    // let c = 3;")
+
+    var full = highlight_for_extension(String("rs"), lines)
+    var s_full = _hl_set(full)
+
+    # With the high-water mark (er == 4): every commented row re-colored.
+    var incr_fixed = highlight_incremental(
+        String("rs"), lines, 2, registry, cache_fixed, 4,
+    )
+    var s_fixed = _hl_set(incr_fixed)
+    assert_equal(len(s_fixed), len(s_full))
+    for i in range(len(s_fixed)):
+        assert_equal(s_fixed[i].row, s_full[i].row)
+        assert_equal(s_fixed[i].col_start, s_full[i].col_start)
+        assert_equal(s_fixed[i].col_end, s_full[i].col_end)
+
+    # Without it (the old behaviour): the early-exit fires at row 1 and
+    # the lower commented rows keep stale highlights, so the counts must
+    # differ. Guards against silently dropping the suppression.
+    var incr_buggy = highlight_incremental(
+        String("rs"), lines, 2, registry, cache_buggy,
+    )
+    var s_buggy = _hl_set(incr_buggy)
+    assert_true(len(s_buggy) != len(s_full))
 
 
 def test_textmate_html_embeds_css_inside_style_block() raises:
@@ -20044,6 +20171,7 @@ def _run_chunk_00() raises:
     test_shell_escape_path_escapes_metacharacters()
     test_escape_drop_paths_joins_and_trails()
     test_find_results_pane_multiselect()
+    test_pane_text_select_drag()
     test_paint_title_commands_renders_separator_and_labels()
     test_paint_title_commands_drops_clipped_label()
     test_hit_title_command_returns_id_under_cursor()
@@ -20296,6 +20424,7 @@ def _run_chunk_02() raises:
     test_textmate_while_rule_keeps_scope_open_per_line()
     test_textmate_captures_overlay_on_match()
     test_textmate_incremental_matches_full_retokenize()
+    test_textmate_incremental_in_place_multirow_edit()
     test_editor_default_text_is_light_green()
     test_settings_windowed_default_is_centered_dialog()
     test_settings_windowed_move_and_resize()

@@ -39,6 +39,7 @@ from .posix import monotonic_ms
 from .project import ProjectMatch
 from .project_find import paint_match_row
 from .string_utils import display_columns
+from .text_select import PaneTextSelect
 from .window import (
     BottomDockedPanel, handle_bottom_dock_chrome_mouse,
     paint_bottom_dock_chrome,
@@ -75,6 +76,9 @@ struct FindResultsPane(Movable):
     # Stamped each paint so ``handle_mouse`` maps clicks back to rows.
     var _list_top: Int
     var _list_height: Int
+    # Mouse-drag text selection over the match line text — lets the user
+    # highlight + Cmd+C an arbitrary span instead of only whole rows.
+    var textsel: PaneTextSelect
 
     def __init__(out self):
         self.visible = False
@@ -92,6 +96,7 @@ struct FindResultsPane(Movable):
         self._row_hl_cached = List[Bool]()
         self._list_top = 0
         self._list_height = 0
+        self.textsel = PaneTextSelect()
 
     def load(
         mut self, var matches: List[ProjectMatch], var query: String,
@@ -112,6 +117,7 @@ struct FindResultsPane(Movable):
         self.pending_opens = List[ProjectMatch]()
         self._row_hl_cache = List[List[Highlight]]()
         self._row_hl_cached = List[Bool]()
+        self.textsel.clear()
         self.visible = True
 
     def close(mut self):
@@ -187,9 +193,16 @@ struct FindResultsPane(Movable):
     # same fallback as ``_queue_opens`` — formatted grep-style.
 
     def has_selection(self) -> Bool:
+        if self.textsel.has_selection():
+            return True
         return self.visible and len(self.matches) > 0
 
     def selected_text(self) -> String:
+        # A live mouse-drag selection wins: copy exactly the highlighted
+        # span. Otherwise fall back to the marked rows / cursor row,
+        # formatted grep-style.
+        if self.textsel.has_selection():
+            return self.textsel.text()
         var out = String("")
         var first = True
         for i in range(len(self.matches)):
@@ -280,6 +293,8 @@ struct FindResultsPane(Movable):
             self._row_hl_cache.append(List[Highlight]())
             self._row_hl_cached.append(False)
         var hl_deadline = monotonic_ms() + _ROW_HL_BUDGET_MS
+        # Re-stamp the selectable-row geometry for this frame.
+        self.textsel.begin_frame()
         for i in range(self._list_height):
             var idx = self.scroll + i
             if idx >= len(self.matches):
@@ -298,13 +313,20 @@ struct FindResultsPane(Movable):
                 row_path = mark_path
                 force_plain = True
             var mark = String("✓") if is_marked else String("")
-            paint_match_row(
+            var geom = paint_match_row(
                 canvas, panel, painter, body.a.y + i, m, is_sel, self.query,
                 row_line, sel_line, hl_attr, hl_attr, row_path, sel_path,
                 registry, idx, hl_deadline,
                 self._row_hl_cache, self._row_hl_cached,
                 mark, force_plain,
             )
+            self.textsel.add_row(
+                idx, geom.text, body.a.y + i, geom.text_x,
+                geom.byte_start, geom.byte_end, geom.clip_x,
+            )
+        # Drag-selection overlay on top of the rows (cyan block, the same
+        # read-only-selection color ``TextLog`` uses).
+        self.textsel.paint_overlay(canvas, panel, Attr(BLACK, CYAN))
 
     # --- events -----------------------------------------------------------
 
@@ -333,6 +355,14 @@ struct FindResultsPane(Movable):
     ) -> Bool:
         if event.kind != EVENT_MOUSE:
             return False
+        # A text drag in flight swallows the motion + the terminating
+        # release (even off the pane — mirrors ``TextLog``); a fresh press
+        # always starts a new gesture, so it falls through to normal routing.
+        if self.textsel.dragging and event.button == MOUSE_BUTTON_LEFT \
+                and (event.motion or not event.pressed):
+            _ = self.textsel.handle_mouse(event)
+            self.focused = True
+            return True
         # Chrome (top border + min/max/close + resize) gets first dibs.
         var cr = handle_bottom_dock_chrome_mouse(
             event, panel, self.dock, allow_resize,
@@ -369,11 +399,17 @@ struct FindResultsPane(Movable):
         if idx < 0 or idx >= len(self.matches):
             return True
         if (event.mods & MOD_META) != 0:
+            self.textsel.clear()
             self._toggle_mark(idx)
             return True
         if (event.mods & MOD_SHIFT) != 0:
+            self.textsel.clear()
             self._range_to(idx)
             return True
+        # Plain press: arm a potential text drag (a bare click still selects
+        # this row below; a press-and-drag becomes a text selection, driven
+        # by the in-flight branch at the top on the following motion events).
+        _ = self.textsel.handle_mouse(event)
         # Plain click selects only this row; a double-click opens.
         self._select_only(idx)
         if event.click_count >= 2:
