@@ -23,6 +23,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .cell import Cell
+from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, CYAN, EDITOR_BG, EDITOR_FG, RED, WHITE, YELLOW,
 )
@@ -178,6 +179,39 @@ struct FindResultsPane(Movable):
                     self.pending_opens.append(self.matches[i])
         elif 0 <= self.selected and self.selected < len(self.matches):
             self.pending_opens.append(self.matches[self.selected])
+
+    # --- selection / copy -------------------------------------------------
+    # Mirrors the pane-level API the docked panes expose so the host's
+    # EDITOR_COPY dispatch can copy from here when it's focused. The copied
+    # rows are the marked set, or the cursor row when nothing is marked —
+    # same fallback as ``_queue_opens`` — formatted grep-style.
+
+    def has_selection(self) -> Bool:
+        return self.visible and len(self.matches) > 0
+
+    def selected_text(self) -> String:
+        var out = String("")
+        var first = True
+        for i in range(len(self.matches)):
+            var take = self.marked[i] if i < len(self.marked) else False
+            if self._marked_count() == 0:
+                take = i == self.selected
+            if not take:
+                continue
+            var m = self.matches[i]
+            if not first:
+                out += String("\n")
+            first = False
+            out += m.rel + String(":") + String(m.line_no) \
+                + String(": ") + m.line_text
+        return out
+
+    def copy_selection_to_clipboard(self) -> Bool:
+        var text = self.selected_text()
+        if len(text.as_bytes()) == 0:
+            return False
+        clipboard_copy(text)
+        return True
 
     def _reveal_selection(mut self):
         var window = self._list_height if self._list_height > 0 \

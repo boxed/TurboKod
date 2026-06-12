@@ -61,6 +61,7 @@ from turbokod import (
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS,
     EDITOR_TOGGLE_MINIMAP,
+    EDITOR_TOGGLE_STICKY_SCROLL,
     EDITOR_TOGGLE_TAB_BAR,
     EDITOR_UNDO,
     EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
@@ -234,6 +235,10 @@ def main() raises:
         ))
         view_items.append(MenuItem(
             String("Minimap"), EDITOR_TOGGLE_MINIMAP,
+            checkable=True,
+        ))
+        view_items.append(MenuItem(
+            String("Sticky Scroll"), EDITOR_TOGGLE_STICKY_SCROLL,
             checkable=True,
         ))
         view_items.append(MenuItem(

@@ -316,6 +316,10 @@ comptime EDITOR_TOGGLE_GIT_CHANGES  = String("view:git_changes")
 # across sessions; the column itself only paints when there's data to
 # project (currently: git change lines).
 comptime EDITOR_TOGGLE_MINIMAP      = String("view:minimap")
+# View-menu toggle for sticky scroll — pin the enclosing-scope header
+# lines (indentation chain above the viewport top) to the top of the
+# editor. The flag lives on ``TurbokodConfig`` so it persists.
+comptime EDITOR_TOGGLE_STICKY_SCROLL = String("view:sticky_scroll")
 # Git actions. ``EDITOR_TOGGLE_BLAME`` runs ``git blame --porcelain`` for
 # the focused editor's file the first time it's switched on, then re-uses
 # the cached attribution for subsequent toggles in the same session.
@@ -2963,6 +2967,9 @@ struct Desktop(Movable):
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
         self.menu_bar.set_item_checked(
+            EDITOR_TOGGLE_STICKY_SCROLL, self.config.sticky_scroll,
+        )
+        self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_COMPRESS_KWARGS, self.config.compress_kwargs,
         )
         # The file-tree item cycles three states instead of checking a
@@ -3033,6 +3040,8 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
+            self.windows.windows[i].editor.sticky_scroll = \
+                self.config.sticky_scroll
             self.windows.windows[i].editor.smart_wrap_comma_threshold = \
                 self.config.smart_wrap_comma_threshold
             self.windows.windows[i].editor.compress_kwargs = \
@@ -3680,6 +3689,27 @@ struct Desktop(Movable):
         # floating panel window sitting on top. The macOS host drains
         # this each tick; the terminal frontend never reads it.
         self.main_focus_request = True
+
+    def _resolve_pane_link_path(self, path: String) -> String:
+        """Resolve an output-pane link path before opening it.
+
+        Python tracebacks print absolute paths (``File "/abs/x.py"``),
+        but pytest / grep / compiler lines (``pkg/mod.py:123``) are
+        relative to the *project root* — which is not this process's
+        cwd (the macOS bundle chdir's to its Resources dir, so a bare
+        cwd-relative open lands on a nonexistent file that flashes open
+        and vanishes). So a relative link is joined to the project root
+        when that resolves to a real file; absolute links and the
+        no-project / no-such-file cases pass through unchanged.
+        """
+        var pb = path.as_bytes()
+        if len(pb) > 0 and pb[0] == 0x2F:    # already absolute
+            return path
+        if self.project:
+            var joined = join_path(self.project.value(), path)
+            if stat_file(joined).ok:
+                return joined
+        return path
 
     def new_file(mut self, screen: Rect):
         """Open a fresh, file-less editor window using the same placement
@@ -6724,6 +6754,11 @@ struct Desktop(Movable):
             self._apply_view_config()
             _ = save_config(self.config)
             return Optional[String]()
+        if action == EDITOR_TOGGLE_STICKY_SCROLL:
+            self.config.sticky_scroll = not self.config.sticky_scroll
+            self._apply_view_config()
+            _ = save_config(self.config)
+            return Optional[String]()
         if action == GIT_LOCAL_CHANGES:
             if self.project:
                 self.local_changes.open(self.project.value())
@@ -6801,6 +6836,13 @@ struct Desktop(Movable):
                     return Optional[String]()
             if self.debug_pane.focused and self.debug_pane.has_selection():
                 _ = self.debug_pane.copy_selection_to_clipboard()
+                return Optional[String]()
+            if self.test_pane.focused and self.test_pane.has_selection():
+                _ = self.test_pane.copy_selection_to_clipboard()
+                return Optional[String]()
+            if self.find_results_pane.focused \
+                    and self.find_results_pane.has_selection():
+                _ = self.find_results_pane.copy_selection_to_clipboard()
                 return Optional[String]()
             if self.windows.focused >= 0 \
                     and self.windows.windows[self.windows.focused].is_editor:
@@ -8309,7 +8351,10 @@ struct Desktop(Movable):
         var oreq = self.debug_pane.consume_open_request()
         if len(oreq[0].as_bytes()) > 0:
             try:
-                self.open_file_at(oreq[0], oreq[1] - 1, 0, screen)
+                self.open_file_at(
+                    self._resolve_pane_link_path(oreq[0]),
+                    oreq[1] - 1, 0, screen,
+                )
             except e:
                 print("desktop: debug_pane open_file_at", oreq[0], ":", String(e))
         # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
@@ -8332,7 +8377,10 @@ struct Desktop(Movable):
         var treq = self.test_pane.consume_open_request()
         if len(treq[0].as_bytes()) > 0:
             try:
-                self.open_file_at(treq[0], treq[1] - 1, 0, screen)
+                self.open_file_at(
+                    self._resolve_pane_link_path(treq[0]),
+                    treq[1] - 1, 0, screen,
+                )
             except e:
                 print("desktop: test_pane open_file_at", treq[0], ":", String(e))
         # Find Results pane: ``[■]`` / Cmd+W close, plus the multi-select

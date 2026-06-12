@@ -55,6 +55,7 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
+    EDITOR_TOGGLE_STICKY_SCROLL,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
@@ -171,6 +172,9 @@ def _build_menus(mut d: Desktop):
     v.append(MenuItem(String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES, checkable=True))
     v.append(MenuItem(String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR, checkable=True))
     v.append(MenuItem(String("Minimap"), EDITOR_TOGGLE_MINIMAP, checkable=True))
+    v.append(MenuItem(
+        String("Sticky Scroll"), EDITOR_TOGGLE_STICKY_SCROLL, checkable=True,
+    ))
     v.append(MenuItem(
         String("Compress Keyword Args"), EDITOR_TOGGLE_COMPRESS_KWARGS,
         checkable=True,

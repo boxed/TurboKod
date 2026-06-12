@@ -182,8 +182,8 @@ struct PaneRow(ImplicitlyCopyable, Movable):
 # --- pane -----------------------------------------------------------------
 
 
-comptime _MAX_OUTPUT_LINES = 500
-"""Output backlog cap. ~500 lines covers most short debug runs without
+comptime _MAX_OUTPUT_LINES = 5000
+"""Output backlog cap. ~5000 lines covers long test/debug runs without
 becoming a memory liability for long-lived sessions; older lines drop
 off the front. The pane only paints the last few anyway, but keeping
 the backlog lets a future ``output:save`` action dump the full log."""
@@ -863,6 +863,7 @@ struct DebugPane(Copyable, Movable):
             var line = self.output.lines[vrow.line_idx]
             var line_y = self.output.last_y0 + k
             var hits = _extract_python_traceback_links(line)
+            hits.extend(_extract_path_line_links(line))
             for h in range(len(hits)):
                 var hit = hits[h]
                 var seg_lo = vrow.cell_start
@@ -1326,6 +1327,134 @@ def _extract_python_traceback_links(line: String) -> List[_LinkHit]:
             continue
         # Default advance: one cell per narrow glyph, two for emoji,
         # counted only on UTF-8 leader bytes.
+        if (b & 0xC0) != 0x80:
+            cell += char_width(codepoint_at(line, i)[0])
+        i += 1
+    return out^
+
+
+def _is_path_byte(b: Int) -> Bool:
+    """Bytes that may appear inside a bare file path token. Any
+    non-ASCII byte (UTF-8 leader or continuation) is allowed so unicode
+    filenames survive; the ASCII set is letters, digits, and the handful
+    of path punctuation characters that don't act as delimiters."""
+    if b >= 0x80:
+        return True
+    # 0-9
+    if b >= 0x30 and b <= 0x39:
+        return True
+    # A-Z
+    if b >= 0x41 and b <= 0x5A:
+        return True
+    # a-z
+    if b >= 0x61 and b <= 0x7A:
+        return True
+    # . _ - / ~ +
+    return b == 0x2E or b == 0x5F or b == 0x2D or b == 0x2F \
+        or b == 0x7E or b == 0x2B
+
+
+def _extract_path_line_links(line: String) -> List[_LinkHit]:
+    """Find every bare ``<path>:<N>`` span in ``line`` — the pytest /
+    compiler convention (e.g. ``iommi/declarative/dispatch.py:123``).
+
+    Heuristics keep this from underlining every ``host:port`` or
+    ``HH:MM``: the path token must contain a dot whose trailing
+    extension is 1–8 ASCII alphanumerics, and must not contain ``//``
+    (which would be a URL). The link covers ``<path>:<N>`` only — a
+    trailing ``:<col>`` is left for the next scan and never matches
+    (the ``col`` token has no extension). Good enough for ~all real
+    pytest / lint / grep output.
+    """
+    var out = List[_LinkHit]()
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = 0
+    var cell = 0
+    # Current path-token state, or tok_start_byte < 0 when between
+    # tokens. Cells are tracked alongside bytes so a multibyte filename
+    # still yields correct screen offsets.
+    var tok_start_byte = -1
+    var tok_start_cell = 0
+    var tok_has_dot = False
+    var tok_last_dot_byte = -1
+    var tok_double_slash = False
+    var tok_prev_slash = False
+    while i < n:
+        var b = Int(bytes[i])
+        if _is_path_byte(b):
+            if tok_start_byte < 0:
+                tok_start_byte = i
+                tok_start_cell = cell
+                tok_has_dot = False
+                tok_last_dot_byte = -1
+                tok_double_slash = False
+                tok_prev_slash = False
+            if b == 0x2E:  # '.'
+                tok_has_dot = True
+                tok_last_dot_byte = i
+            if b == 0x2F:  # '/'
+                if tok_prev_slash:
+                    tok_double_slash = True
+                tok_prev_slash = True
+            else:
+                tok_prev_slash = False
+            if (b & 0xC0) != 0x80:
+                cell += char_width(codepoint_at(line, i)[0])
+            i += 1
+            continue
+        if b == 0x3A and tok_start_byte >= 0:  # ':'
+            var tok_end_byte = i
+            # Extension after the last dot: 1..8 ASCII alphanumerics.
+            var ext_ok = False
+            if tok_has_dot and not tok_double_slash \
+                    and tok_last_dot_byte + 1 < tok_end_byte:
+                var ext_len = tok_end_byte - (tok_last_dot_byte + 1)
+                if ext_len >= 1 and ext_len <= 8:
+                    ext_ok = True
+                    for e in range(tok_last_dot_byte + 1, tok_end_byte):
+                        var eb = Int(bytes[e])
+                        var is_alnum = (eb >= 0x30 and eb <= 0x39) \
+                            or (eb >= 0x41 and eb <= 0x5A) \
+                            or (eb >= 0x61 and eb <= 0x7A)
+                        if not is_alnum:
+                            ext_ok = False
+                            break
+            if ext_ok:
+                # Parse the line number after the colon.
+                var p = i + 1
+                var digit_start = p
+                var line_no = 0
+                while p < n:
+                    var db = Int(bytes[p])
+                    if db >= 0x30 and db <= 0x39:
+                        line_no = line_no * 10 + (db - 0x30)
+                        p += 1
+                    else:
+                        break
+                if p > digit_start:
+                    var path = String(StringSlice(
+                        ptr=bytes.unsafe_ptr() + tok_start_byte,
+                        length=tok_end_byte - tok_start_byte,
+                    ))
+                    # ``cell`` sits on the colon. Span = colon (1) plus
+                    # the digits (all ASCII, one cell each).
+                    var digit_count = p - digit_start
+                    var span_end_cell = cell + 1 + digit_count
+                    out.append(_LinkHit(
+                        tok_start_cell, span_end_cell, path, line_no,
+                    ))
+                    cell = span_end_cell
+                    i = p
+                    tok_start_byte = -1
+                    continue
+            # Colon that didn't complete a link ends the token.
+            tok_start_byte = -1
+            cell += 1
+            i += 1
+            continue
+        # Any other byte ends the current token.
+        tok_start_byte = -1
         if (b & 0xC0) != 0x80:
             cell += char_width(codepoint_at(line, i)[0])
         i += 1

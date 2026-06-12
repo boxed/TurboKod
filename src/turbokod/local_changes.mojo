@@ -68,7 +68,7 @@ from .window import (
 )
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
-    apply_patch_to_index,
+    apply_patch_to_index, apply_patch_to_worktree,
     compute_staged_diff, compute_unstaged_diff,
     fetch_blob_text, fetch_branch_log, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
@@ -117,6 +117,7 @@ comptime _OVERLAY_COMMIT:         Int = 1   # type a commit message
 comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
+comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # y/n: discard one worktree line
 
 # Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
 comptime _KEY_Y_UPPER = UInt32(0x59)
@@ -1063,6 +1064,9 @@ struct LocalChanges(Movable):
     var _git_op_label: String   # short label flashed in the success status
     var _git_revert_path: String  # path being reverted (for _GITOP_REVERT)
     var _git_revert_untracked: Bool
+    # Diff-line index queued for line-level discard, captured when the
+    # confirmation overlay opens and consumed when the user confirms.
+    var _discard_diff_idx: Int
     # Last submitted commit message that hasn't yet succeeded. Saved in
     # ``_submit_commit`` before the overlay closes; cleared in ``tick``
     # when the commit op reaps ok. Used to pre-fill the commit prompt
@@ -1113,6 +1117,7 @@ struct LocalChanges(Movable):
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
+        self._discard_diff_idx = -1
         self._pending_commit_message = String("")
 
     def open(mut self, var root: String):
@@ -1654,7 +1659,11 @@ struct LocalChanges(Movable):
         )
         # Bottom hint.
         var hint: String
-        if self._is_right_focus():
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            hint = String(
+                " Up/Down: line  Space: stage  d: discard line  Left: back  ESC: close ",
+            )
+        elif self._is_right_focus():
             hint = String(
                 " Up/Down: line  Tab: panel  Space: stage/unstage  Left: back  ESC: close ",
             )
@@ -1713,6 +1722,9 @@ struct LocalChanges(Movable):
             prompt_text = String("")
         elif self.overlay == _OVERLAY_REVERT_CONFIRM:
             title = String(" Revert ")
+            prompt_text = String("")
+        elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
+            title = String(" Discard ")
             prompt_text = String("")
         else:
             title = String(" Status ")
@@ -2561,6 +2573,10 @@ struct LocalChanges(Movable):
             self._handle_space(bounds)
             return True
         if self._is_right_focus():
+            if self.focus == _PANE_RIGHT_UNSTAGED and k == UInt32(0x64):
+                # 'd' → discard the worktree change on the cursor's line.
+                self._open_discard_line_confirm()
+                return True
             if k == KEY_UP:
                 self._move_focused_right_cursor(-1, bounds)
                 return True
@@ -2833,6 +2849,62 @@ struct LocalChanges(Movable):
                 String("Discard ALL local changes for ") + fe.path \
                 + String(" (staged + worktree)?")
 
+    def _open_discard_line_confirm(mut self):
+        """Pop the y/n confirm for discarding the single worktree line under
+        the Unstaged panel's cursor. No-op (with a hint flash) when the
+        cursor isn't on a ``+``/``-`` body line — only added/removed lines
+        have a change to throw away."""
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            return
+        var cursor = self.unstaged.cursor
+        if cursor < 0 or cursor >= len(self.unstaged.lines):
+            return
+        var kind = self.unstaged.kind[cursor]
+        if kind != _LINE_ADD and kind != _LINE_REM:
+            self._show_status(
+                String("Move the cursor onto a changed (+/-) line to discard it."),
+                False,
+            )
+            return
+        var diff_idx = self.unstaged.diff_line[cursor]
+        if diff_idx < 0:
+            return
+        self._discard_diff_idx = diff_idx
+        self.overlay = _OVERLAY_DISCARD_LINE_CONFIRM
+        self.overlay_input = TextField()
+        self.overlay_message = \
+            String("Discard this line from the working tree?")
+
+    def _confirm_discard_line(mut self):
+        """Reverse-apply the cursor line's minimal patch to the working
+        tree, undoing just that one unstaged change. Builds the patch with
+        ``reverse=True`` so its post-image matches the worktree (other ±
+        lines demoted to context / dropped), which is what
+        ``git apply --reverse`` needs."""
+        var diff_idx = self._discard_diff_idx
+        self._discard_diff_idx = -1
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            self._close_overlay()
+            return
+        var path = self.files[self.sel_file].path
+        var patch = build_minimal_patch(
+            self.files[self.sel_file].unstaged_diff, diff_idx, True,
+        )
+        self._close_overlay()
+        if len(patch.as_bytes()) == 0:
+            return
+        if not apply_patch_to_worktree(self.root, patch, True):
+            self._show_status(
+                String("Discard failed — the line no longer applies."), False,
+            )
+            return
+        self._refresh_after_mutation(path)
+
     def _show_status(mut self, var msg: String, ok: Bool):
         """Flash a one-shot status line. Dismissed by any keystroke."""
         self.overlay = _OVERLAY_STATUS
@@ -3058,6 +3130,8 @@ struct LocalChanges(Movable):
                 self._confirm_amend()
             elif self.overlay == _OVERLAY_REVERT_CONFIRM:
                 self._confirm_revert()
+            elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
+                self._confirm_discard_line()
             return True
         if k == _KEY_N_LOWER or k == _KEY_N_UPPER:
             self._close_overlay()

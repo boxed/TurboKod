@@ -123,6 +123,7 @@ from turbokod.buttons import (
 )
 from turbokod.debug_pane import (
     DEBUG_PANE_CLOSE, DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN,
+    _extract_path_line_links, _extract_python_traceback_links,
 )
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
@@ -187,7 +188,8 @@ from turbokod.lsp_dispatch import (
     _parse_workspace_edit_changes, _path_to_uri, _uri_to_path,
 )
 from turbokod.git_changes import (
-    GitStateMtimes, apply_patch_to_index, compute_staged_diff,
+    GitStateMtimes, apply_patch_to_index, apply_patch_to_worktree,
+    compute_staged_diff,
     compute_unstaged_diff, fetch_git_status, git_state_mtimes,
     stage_file, unstage_file,
 )
@@ -1211,6 +1213,114 @@ def test_editor_fold_collapse() raises:
     assert_true(not ed._is_row_hidden(2))
 
 
+def test_editor_sticky_rows() raises:
+    """Sticky scroll pins the enclosing-scope header chain (the lines whose
+    leading indentation decreases step by step above the viewport top),
+    outermost first. Pure indentation — no language parsing."""
+    #  0 class A:
+    #  1     def f():
+    #  2         x = 1
+    #  3         y = 2
+    #  4
+    #  5     def g():
+    #  6         z = 3
+    var ed = Editor(
+        String("class A:\n    def f():\n        x = 1\n        y = 2\n")
+        + String("\n    def g():\n        z = 3")
+    )
+    # Inside f(): both the class and def headers stick, class first.
+    var s3 = ed._sticky_rows(3, 5)
+    assert_equal(len(s3), 2)
+    assert_equal(s3[0], 0)
+    assert_equal(s3[1], 1)
+    # On the def line itself only the class encloses it.
+    var s1 = ed._sticky_rows(1, 5)
+    assert_equal(len(s1), 1)
+    assert_equal(s1[0], 0)
+    # Top-level line has nothing above it.
+    assert_equal(len(ed._sticky_rows(0, 5)), 0)
+    # A blank top line borrows the indent of the first real line below it.
+    # Row 4 sits above ``def g`` (indent 4), so only the class encloses
+    # that level — ``def f`` has already scrolled out of context.
+    var s4 = ed._sticky_rows(4, 5)
+    assert_equal(len(s4), 1)
+    assert_equal(s4[0], 0)
+    # Inside g(): class + g header, not the sibling f.
+    var s6 = ed._sticky_rows(6, 5)
+    assert_equal(len(s6), 2)
+    assert_equal(s6[0], 0)
+    assert_equal(s6[1], 5)
+    # Budget caps the depth.
+    assert_equal(len(ed._sticky_rows(3, 1)), 1)
+
+
+def test_editor_sticky_rows_multiline() raises:
+    """A multi-line logical line is grabbed in full: a ``def`` signature
+    broken across rows, and an opener like ``target = (`` whose body sits
+    below it. A dedented continuation (``):``) snaps back to its opener
+    rather than being pinned on its own."""
+    #  0 def f(
+    #  1     a,
+    #  2     b,
+    #  3 ):
+    #  4     x = (
+    #  5         a
+    #  6         + b
+    #  7     )
+    #  8     return x
+    var ed = Editor(
+        String("def f(\n    a,\n    b,\n):\n    x = (\n        a\n")
+        + String("        + b\n    )\n    return x")
+    )
+    # Top at the body line ``return x`` (row 8): the whole broken
+    # signature sticks — its picked dedent ``):`` snaps to ``def f(`` and
+    # expands back down through ``):``.
+    var s8 = ed._sticky_rows(8, 8)
+    assert_equal(len(s8), 4)
+    assert_equal(s8[0], 0)  # def f(
+    assert_equal(s8[1], 1)  # a,
+    assert_equal(s8[2], 2)  # b,
+    assert_equal(s8[3], 3)  # ):
+    # Top inside the ``x = (`` expression (row 6, ``+ b``): the signature
+    # plus the full assignment expression stick.
+    var s6 = ed._sticky_rows(6, 8)
+    assert_equal(len(s6), 8)
+    assert_equal(s6[0], 0)  # def f(
+    assert_equal(s6[3], 3)  # ):
+    assert_equal(s6[4], 4)  # x = (
+    assert_equal(s6[5], 5)  # a
+    assert_equal(s6[6], 6)  # + b
+    assert_equal(s6[7], 7)  # )
+
+
+def test_editor_sticky_scroll_paints_headers() raises:
+    """Scrolled into a nested body, the sticky band overlays the top rows
+    with the enclosing-scope headers and underlines the bottom row as a
+    divider. Headless paint pass — guards the overlay against crashes /
+    off-by-ones the pure ``_sticky_rows`` test can't reach."""
+    var ed = Editor(
+        String("class A:\n    def f():\n        x = 1\n        y = 2\n")
+        + String("\n    def g():\n        z = 3")
+    )
+    ed.scroll_y = 3  # top visible buffer row is "        y = 2"
+    var c = Canvas(40, 10)
+    ed.paint(c, Rect(0, 0, 40, 10), False)
+    # Row 0: "class A:" (outermost), row 1: "    def f():".
+    assert_equal(c.get(0, 0).glyph, String("c"))
+    assert_equal(c.get(6, 0).glyph, String("A"))  # "class " then A
+    assert_equal(c.get(4, 1).glyph, String("d"))  # def, after 4-space indent
+    # Bottom sticky row (y=1) carries the underline divider.
+    assert_true((c.get(0, 1).attr.style & STYLE_UNDERLINE) != 0)
+    # The row above the divider is not underlined.
+    assert_true((c.get(0, 0).attr.style & STYLE_UNDERLINE) == 0)
+    # Toggling sticky off leaves the scrolled content unobscured: row 0
+    # shows the real top line "        y = 2", not the class header.
+    ed.sticky_scroll = False
+    var c2 = Canvas(40, 10)
+    ed.paint(c2, Rect(0, 0, 40, 10), False)
+    assert_equal(c2.get(8, 0).glyph, String("y"))
+
+
 def test_editor_typing_and_arrows() raises:
     var ed = Editor(String("hello"))
     assert_equal(ed.selections[0].col, 0)
@@ -1223,6 +1333,40 @@ def test_editor_typing_and_arrows() raises:
     assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(KEY_HOME), _VIEW)
     assert_equal(ed.selections[0].col, 0)
+
+
+def test_pytest_link_opens_project_relative_file() raises:
+    """A pytest-style ``<relpath>:<line>`` clicked in the test pane opens
+    the file resolved against the PROJECT ROOT, not the process cwd, and
+    the window survives the next paint. Regression: clicking opened a
+    cwd-relative (usually nonexistent) path that then vanished."""
+    var dir = String("/tmp/turbokod_pytestlink_") + String(
+        Int(external_call["getpid", Int32]())
+    )
+    _ = external_call["mkdir", Int32](
+        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
+    )
+    var rel = String("foo__tests.py")
+    var fpath = dir + String("/") + rel
+    var content = String("L0")
+    for i in range(1, 1400):
+        content += "\n" + String("L") + String(i)
+    assert_true(write_file(fpath, content))
+    var d = Desktop()
+    d._set_project(dir)
+    var screen = Rect(0, 0, 120, 50)
+    var c = Canvas(120, 50)
+    d.paint(c, screen)        # consume the one-shot session restore
+    # Simulate the link click the test pane would have latched.
+    d.test_pane.pending_open_path = rel
+    d.test_pane.pending_open_line = 1289
+    d.dap_tick(screen)
+    var idx = d._find_window_for_path(fpath)
+    assert_true(idx >= 0)             # opened the real project file
+    d.paint(c, screen)
+    assert_true(d._find_window_for_path(fpath) >= 0)   # and it survived
+    _ = external_call["unlink", Int32]((fpath + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
 def test_open_file_at_golden_when_already_open() raises:
@@ -13712,6 +13856,57 @@ def test_paint_drop_shadow_targets_right_and_bottom() raises:
     assert_equal(c.get(5, 3).attr.bg, BLUE)
 
 
+def test_extract_path_line_links_pytest_style() raises:
+    """Bare ``<path>:<N>`` (pytest / compiler convention) is detected,
+    with the span covering exactly ``path:line`` and the right path +
+    1-based line parsed out."""
+    var hits = _extract_path_line_links(
+        String("iommi/declarative/dispatch.py:123")
+    )
+    assert_equal(len(hits), 1)
+    assert_equal(hits[0].path, String("iommi/declarative/dispatch.py"))
+    assert_equal(hits[0].line, 123)
+    assert_equal(hits[0].cell_start, 0)
+    assert_equal(
+        hits[0].cell_end,
+        String("iommi/declarative/dispatch.py:123").byte_length(),
+    )
+
+    # Embedded in a sentence with a trailing ``:col`` — the link stops
+    # after the line number; the column is not part of the span.
+    var hits2 = _extract_path_line_links(
+        String("  tests/test_foo.py:45:12: AssertionError")
+    )
+    assert_equal(len(hits2), 1)
+    assert_equal(hits2[0].path, String("tests/test_foo.py"))
+    assert_equal(hits2[0].line, 45)
+    assert_equal(hits2[0].cell_start, 2)
+    assert_equal(
+        hits2[0].cell_end, 2 + String("tests/test_foo.py:45").byte_length()
+    )
+
+    # A bare filename (no slash) still works.
+    var hits3 = _extract_path_line_links(String("conftest.py:7"))
+    assert_equal(len(hits3), 1)
+    assert_equal(hits3[0].path, String("conftest.py"))
+    assert_equal(hits3[0].line, 7)
+
+
+def test_extract_path_line_links_rejects_non_paths() raises:
+    """Heuristics keep host:port, HH:MM and URLs from being underlined:
+    the path token needs a dotted extension and no ``//``."""
+    # No extension -> not a path.
+    assert_equal(len(_extract_path_line_links(String("localhost:8080"))), 0)
+    # Clock time -> the ``12`` token has no dot.
+    assert_equal(len(_extract_path_line_links(String("12:30:45"))), 0)
+    # URL -> double slash disqualifies it.
+    assert_equal(
+        len(_extract_path_line_links(String("http://example.com/x.py:9"))), 0
+    )
+    # Colon with no following digits is not a link.
+    assert_equal(len(_extract_path_line_links(String("a/b.py: note"))), 0)
+
+
 def test_debug_pane_default_title_is_debug() raises:
     """``DebugPane`` defaults to DEBUG mode — the pane's top border
     paints ``Debug`` so existing callers see no behavioural change.
@@ -17517,6 +17712,87 @@ def test_stage_unstage_round_trip_against_real_git() raises:
     _rm_rf(dir)
 
 
+def test_discard_line_round_trip_against_real_git() raises:
+    """End-to-end for line-level discard (the ``d`` key in the Unstaged
+    panel): spin up a throwaway repo, add two new lines to a committed
+    file, then reverse-apply the minimal patch for ONE of them to the
+    working tree. The targeted line must vanish from the file while the
+    other added line stays — the discard is surgical, not whole-file.
+    Skipped silently when ``git`` is missing or ``git init`` fails."""
+    var dir = _temp_path(String("_discard_int"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    var rc = _run_git(dir, init_args^)
+    if rc != 0:
+        _rm_rf(dir)
+        return
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    var f = join_path(dir, String("a.txt"))
+    assert_true(write_file(f, String("alpha\nbeta\ngamma\n")))
+    var add_initial = List[String]()
+    add_initial.append(String("add"))
+    add_initial.append(String("a.txt"))
+    _ = _run_git(dir, add_initial^)
+    var commit_args = List[String]()
+    commit_args.append(String("commit"))
+    commit_args.append(String("-q"))
+    commit_args.append(String("-m"))
+    commit_args.append(String("init"))
+    _ = _run_git(dir, commit_args^)
+    # Two independent additions: NEW1 after beta, NEW2 after gamma.
+    assert_true(write_file(f, String("alpha\nbeta\nNEW1\ngamma\nNEW2\n")))
+    var unstaged = compute_unstaged_diff(dir)
+    assert_true(len(unstaged.as_bytes()) > 0)
+    var per_file = parse_unified_diff_files(unstaged)
+    assert_equal(len(per_file), 1)
+    # Find the ``+NEW2`` line index in the per-file diff.
+    var lines = List[String]()
+    var b = per_file[0].diff.as_bytes()
+    var s = 0
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            lines.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            s = i + 1
+    if s < len(b):
+        lines.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+    var target_idx = -1
+    for i in range(len(lines)):
+        if lines[i] == String("+NEW2"):
+            target_idx = i
+            break
+    assert_true(target_idx > 0)
+    # reverse=True builds a patch whose post-image matches the worktree
+    # (other ``+`` demoted to context); reverse-applying it to the
+    # working tree drops only ``NEW2``.
+    var patch = build_minimal_patch(per_file[0].diff, target_idx, True)
+    assert_true(len(patch.as_bytes()) > 0)
+    assert_true(String("+NEW2") in patch)
+    assert_true(apply_patch_to_worktree(dir, patch, True))
+    # NEW2 gone, NEW1 kept, original content intact.
+    assert_equal(read_file(f), String("alpha\nbeta\nNEW1\ngamma\n"))
+    # The index was untouched (we patched the worktree, not --cached), so
+    # the file is still tracked-modified, not staged.
+    var statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 1)
+    assert_equal(Int(statuses[0].staged), 0x20)
+    assert_equal(Int(statuses[0].worktree), 0x4D)    # 'M'
+    _rm_rf(dir)
+
+
 def test_build_minimal_patch_drops_other_hunks() raises:
     """A diff with two hunks: targeting a line in the first must produce
     output containing only that hunk; the second hunk's lines must not
@@ -19758,6 +20034,7 @@ def _run_chunk_00() raises:
     test_git_state_mtimes_zero_for_non_repo()
     test_git_state_mtimes_nonzero_after_init_commit()
     test_stage_unstage_round_trip_against_real_git()
+    test_discard_line_round_trip_against_real_git()
     test_point_arithmetic()
     test_rect_basics()
     test_rect_helpers()
@@ -19791,8 +20068,12 @@ def _run_chunk_00() raises:
     test_scrollbar_horizontal_paints_arrows_on_axis()
     test_text_buffer_split_and_join()
     test_editor_fold_collapse()
+    test_editor_sticky_rows()
+    test_editor_sticky_rows_multiline()
+    test_editor_sticky_scroll_paints_headers()
     test_editor_typing_and_arrows()
     test_reveal_cursor_golden_ratio()
+    test_pytest_link_opens_project_relative_file()
     test_open_file_at_golden_when_already_open()
     test_softwrap_visual_updown()
     test_editor_typing_non_ascii()
@@ -20344,6 +20625,8 @@ def _run_chunk_04() raises:
     test_shadow_button_hit_includes_shadow_rows()
     test_canvas_darken_rect_preserves_glyph()
     test_paint_drop_shadow_targets_right_and_bottom()
+    test_extract_path_line_links_pytest_style()
+    test_extract_path_line_links_rejects_non_paths()
     test_debug_pane_default_title_is_debug()
     test_debug_pane_run_mode_swaps_title()
     test_debug_pane_run_mode_hides_inspect_divider()

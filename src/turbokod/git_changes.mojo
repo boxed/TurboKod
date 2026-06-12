@@ -619,6 +619,28 @@ def apply_patch_to_index(
     return _git_ok(project_root, args^, patch)
 
 
+def apply_patch_to_worktree(
+    project_root: String, patch: String, reverse: Bool = False,
+) -> Bool:
+    """Pipe ``patch`` to ``git apply --recount`` (no ``--cached``) so it
+    lands on the working tree instead of the index. Used to discard a
+    single unstaged line: build the line's minimal patch and reverse-apply
+    it, undoing that worktree change while leaving the rest of the file —
+    and the index — untouched. ``--recount`` lets us hand-roll minimal
+    hunks without exact @@ counts. Returns False on any non-zero exit
+    (the only legitimate failure is "patch doesn't apply", which the
+    caller's refresh already reconciles)."""
+    if len(project_root.as_bytes()) == 0 or len(patch.as_bytes()) == 0:
+        return False
+    var args = List[String]()
+    args.append(String("apply"))
+    args.append(String("--recount"))
+    if reverse:
+        args.append(String("--reverse"))
+    args.append(String("-"))
+    return _git_ok(project_root, args^, patch)
+
+
 @fieldwise_init
 struct GitOpResult(ImplicitlyCopyable, Movable):
     """Outcome of a one-shot git command (commit / pull / push / etc).

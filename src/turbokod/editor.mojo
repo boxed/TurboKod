@@ -1072,6 +1072,13 @@ struct Editor(Copyable, Movable):
     # lines across multiple screen rows. Set from Settings ▸ Editor via
     # ``Desktop._apply_view_config``.
     var line_numbers: Bool
+    # Sticky scroll: pin the enclosing-scope header lines to the top of
+    # the editor, like VS Code's sticky scroll. The chain is the lines
+    # above the viewport top whose leading indentation decreases step by
+    # step — a pure indentation heuristic with no language parsing, so it
+    # works for every language. Painted as an overlay in ``paint`` after
+    # the text / caret passes; the rows come from ``_sticky_rows``.
+    var sticky_scroll: Bool
     var wrap_mode: Int
     # Smart-wrap (``WRAP_SMART``) extra break trigger: a bracketed call with
     # *more than* this many top-level commas is broken one-item-per-line even
@@ -1417,6 +1424,7 @@ struct Editor(Copyable, Movable):
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
+        self.sticky_scroll = True
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
         self._vmove_streak = False
@@ -1545,6 +1553,7 @@ struct Editor(Copyable, Movable):
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
         self.line_numbers = False
+        self.sticky_scroll = True
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
         self._vmove_streak = False
@@ -1700,6 +1709,7 @@ struct Editor(Copyable, Movable):
         self.merge_pending = copy.merge_pending
         self.pending_merge_regions = copy.pending_merge_regions.copy()
         self.line_numbers = copy.line_numbers
+        self.sticky_scroll = copy.sticky_scroll
         self.wrap_mode = copy.wrap_mode
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self._vmove_streak = copy._vmove_streak
@@ -4227,6 +4237,9 @@ struct Editor(Copyable, Movable):
     def toggle_line_numbers(mut self):
         self.line_numbers = not self.line_numbers
 
+    def toggle_sticky_scroll(mut self):
+        self.sticky_scroll = not self.sticky_scroll
+
     def set_blame(mut self, var lines: List[BlameLine]):
         """Replace the blame attribution list and turn the blame
         gutter on. Pass an empty list to clear the cache (the gutter
@@ -5867,6 +5880,172 @@ struct Editor(Copyable, Movable):
             cell_counts.append(utf8_codepoint_count(seg))
         return (display_rows^, cell_maps^, cell_counts^)
 
+    def _indent_cols(self, row: Int) -> Int:
+        """Leading-whitespace width of ``row`` in columns, or ``-1`` when
+        the line is blank / all-whitespace (those don't open a scope).
+        Tabs count as one indent step (``effective_indent_size``) so a
+        tab-indented file ranks the same as a space-indented one. Feeds
+        ``_sticky_rows``."""
+        var line = self.buffer.line(row)
+        var bytes = line.as_bytes()
+        var n = len(bytes)
+        var lead = leading_indent_bytes(line)
+        if lead >= n:
+            return -1
+        var step = self.editorconfig.effective_indent_size()
+        if step < 1:
+            step = 1
+        var cols = 0
+        for i in range(lead):
+            if Int(bytes[i]) == 9:  # tab → next tab stop
+                cols += step - (cols % step)
+            else:
+                cols += 1
+        return cols
+
+    def _line_bracket_delta(self, row: Int) -> Int:
+        """Net bracket balance of ``row`` — opens (``([{``) minus closes
+        (``)]}``) — skipping anything inside single/double-quoted strings
+        and after a ``#`` or ``//`` line comment. Used to find multi-line
+        logical lines (an unbalanced opener continues onto the next row).
+        Triple-quoted strings aren't modelled, but logical-line edges are
+        only probed on dedented structural rows, never docstring bodies."""
+        var b = self.buffer.line(row).as_bytes()
+        var n = len(b)
+        var depth = 0
+        var i = 0
+        var in_squote = False
+        var in_dquote = False
+        while i < n:
+            var ch = Int(b[i])
+            if in_squote:
+                if ch == 92:  # backslash escapes the next byte
+                    i += 2
+                    continue
+                if ch == 39:
+                    in_squote = False
+                i += 1
+                continue
+            if in_dquote:
+                if ch == 92:
+                    i += 2
+                    continue
+                if ch == 34:
+                    in_dquote = False
+                i += 1
+                continue
+            if ch == 35:  # '#' — comment to end of line
+                break
+            if ch == 47 and i + 1 < n and Int(b[i + 1]) == 47:  # '//'
+                break
+            if ch == 39:
+                in_squote = True
+            elif ch == 34:
+                in_dquote = True
+            elif ch == 40 or ch == 91 or ch == 123:  # ( [ {
+                depth += 1
+            elif ch == 41 or ch == 93 or ch == 125:  # ) ] }
+                depth -= 1
+            i += 1
+        return depth
+
+    def _logical_start(self, row: Int) -> Int:
+        """First physical row of the logical line containing ``row``.
+        Walks upward while preceding rows leave brackets open (so a
+        ``):`` continuation snaps back to the ``def f(`` that opened it).
+        Bounded so a stray unbalanced bracket above can't run away."""
+        var start = row
+        var bal = 0
+        var r = row - 1
+        var steps = 0
+        while r >= 0 and steps < 50:
+            bal += self._line_bracket_delta(r)
+            if bal > 0:
+                start = r  # ``row`` sits inside brackets opened at ``r``
+            elif bal < 0:
+                break  # a deeper group closed above — boundary reached
+            r -= 1
+            steps += 1
+        return start
+
+    def _logical_end(self, start: Int) -> Int:
+        """Last physical row of the logical line beginning at ``start``:
+        consume rows until the brackets opened on ``start`` balance out
+        (a single-line statement returns ``start`` unchanged). Bounded so
+        a naive miscount can't expand without limit."""
+        var bal = self._line_bracket_delta(start)
+        var e = start
+        var r = start
+        var line_count = self.buffer.line_count()
+        while bal > 0 and r + 1 < line_count and (r - start) < 30:
+            r += 1
+            bal += self._line_bracket_delta(r)
+            e = r
+        return e
+
+    def _sticky_rows(self, top: Int, budget: Int) -> List[Int]:
+        """Buffer rows to pin above the viewport: the chain of enclosing
+        scope headers for the line at ``top`` (the first visible buffer
+        row), outermost first. Walk upward collecting each line whose
+        indentation is strictly smaller than the running minimum — the
+        ``class`` / ``def`` / ``if`` / ``for`` line that opened each
+        nesting level. A multi-line header (a broken ``def f(\\n ...\\n):``
+        signature, or an opener like ``target = (`` whose body sits below
+        it) is grabbed in full: the picked row snaps to its logical start
+        and expands to its logical end. Capped at ``budget`` rows; blank
+        lines are skipped."""
+        var out = List[Int]()
+        if budget < 1 or top <= 0:
+            return out^
+        # Seed the threshold from the topmost non-blank line at/below the
+        # viewport top — a blank top line borrows the indent of the first
+        # real line it sits above.
+        var threshold = -1
+        var probe = top
+        var line_count = self.buffer.line_count()
+        while probe < line_count:
+            var ind = self._indent_cols(probe)
+            if ind >= 0:
+                threshold = ind
+                break
+            probe += 1
+        if threshold <= 0:
+            return out^  # top-level line — nothing encloses it
+        # Collect ancestor *logical-start* rows, innermost-first.
+        var heads = List[Int]()
+        var r = top - 1
+        while r >= 0 and len(heads) < budget:
+            var ind = self._indent_cols(r)
+            if ind < 0:
+                r -= 1
+                continue
+            if ind < threshold:
+                var start = self._logical_start(r)
+                heads.append(start)
+                var sind = self._indent_cols(start)
+                if sind < 0:
+                    sind = ind
+                threshold = sind
+                if threshold == 0:
+                    break
+                r = start - 1  # resume above the header, skipping its body
+                continue
+            r -= 1
+        # ``heads`` is innermost-first; paint outermost at the top, each
+        # expanded to its full logical span. ``last`` guards against an
+        # outer header's span overlapping an inner one.
+        var last = -1
+        for i in range(len(heads) - 1, -1, -1):
+            var s = heads[i]
+            var e = self._logical_end(s)
+            var rr = s
+            while rr <= e and len(out) < budget:
+                if rr > last:
+                    out.append(rr)
+                    last = rr
+                rr += 1
+        return out^
+
     def paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         # Nothing to draw when the host workspace has collapsed (e.g.
         # the debug pane is maximized and the editor area shrinks to
@@ -6567,6 +6746,92 @@ struct Editor(Copyable, Movable):
                     content_right, content_bottom,
                     c.row, c.col,
                 )
+        # Sticky scroll: pin the enclosing-scope headers (class / def /
+        # block openers) for the top visible line to the top rows of the
+        # editor, overlaying the scrolled content so the context that owns
+        # the viewport stays on screen. Overlay-not-reserve matches VS
+        # Code; the bottom row gets an underline divider. Painted after
+        # text / selection / caret but before the popups below so the
+        # completion / hover / minimap tooltips still float over it.
+        if self.sticky_scroll and len(layout) > 0 and content_h >= 4:
+            var top_row = layout[0].line_idx
+            # Leave at least 2 content rows below the band; cap at 8 rows
+            # (a little headroom over the ~5 nesting levels we'd show, so
+            # a multi-line header's continuation lines still fit).
+            var budget = (content_h - 2) // 2
+            if budget > 8:
+                budget = 8
+            var sticky = self._sticky_rows(top_row, budget)
+            var n_sticky = len(sticky)
+            if n_sticky > 0:
+                var ln_attr = Attr(DARK_GRAY, EDITOR_BG)
+                var base_attr = Attr(SYN_IDENT, EDITOR_BG)
+                var blank_attr = Attr(EDITOR_FG, EDITOR_BG)
+                for si in range(n_sticky):
+                    var brow = sticky[si]
+                    var sy = view.a.y + si
+                    # Clear the row (gutter + text columns) before repaint.
+                    for gx in range(view.a.x, view.b.x):
+                        painter.set(
+                            canvas, gx, sy, Cell(String(" "), blank_attr, 1),
+                        )
+                    # Line number, right-aligned in the line-number gutter.
+                    if ln_gutter > 0:
+                        var num_str = String(brow + 1)
+                        var num_w = len(num_str.as_bytes())
+                        var nx = view.a.x + (ln_gutter - 1) - num_w
+                        if nx < view.a.x:
+                            nx = view.a.x
+                        _ = painter.put_text(
+                            canvas, Point(nx, sy), num_str, ln_attr,
+                        )
+                    # Line text from column 0 — sticky headers live at the
+                    # left margin, so ignore horizontal scroll; clip to the
+                    # text column so a long header can't reach the gutters.
+                    var line = self.buffer.line(brow)
+                    var text_p = painter.sub(
+                        Rect(text_x0, sy, content_right, sy + 1),
+                    )
+                    _ = text_p.put_text(
+                        canvas, Point(text_x0, sy), line, base_attr,
+                    )
+                    # Re-apply this row's syntax highlights so the sticky
+                    # header is coloured exactly like the real line.
+                    var cmap = utf8_byte_to_cell(line)
+                    var nbytes = len(cmap)
+                    var ncells = utf8_codepoint_count(line)
+                    for h in range(len(self.highlights)):
+                        if self.highlights[h].row != brow:
+                            continue
+                        var hl = self.highlights[h]
+                        var bs = hl.col_start
+                        var be = hl.col_end
+                        if bs < 0:
+                            bs = 0
+                        if be > nbytes:
+                            be = nbytes
+                        if bs >= be:
+                            continue
+                        var cs = cmap[bs]
+                        var ce: Int
+                        if be < nbytes:
+                            ce = cmap[be]
+                        else:
+                            ce = ncells
+                        for co in range(cs, ce):
+                            var sx = text_x0 + co
+                            if sx >= content_right:
+                                break
+                            painter.set_attr(canvas, sx, sy, hl.attr)
+                # Divider under the band: underline every cell of the
+                # bottom sticky row (glyphs + syntax colours survive; both
+                # frontends render underline).
+                var div_y = view.a.y + (n_sticky - 1)
+                for gx in range(view.a.x, view.b.x):
+                    var dc = canvas.get(gx, div_y)
+                    painter.set_attr(
+                        canvas, gx, div_y, dc.attr.add_style(STYLE_UNDERLINE),
+                    )
         # Paint the right-side minimap tooltip last so it overlays
         # everything else in the editor's view. The hover state is set
         # by ``_update_minimap_hover`` on bare-hover events; when no

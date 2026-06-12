@@ -193,6 +193,9 @@ struct TurbokodConfig(Copyable, Movable):
     # (currently: git change lines), so flipping it on outside a repo
     # is a silent no-op.
     var minimap: Bool
+    # Sticky scroll: pin the enclosing-scope header lines (indentation
+    # chain above the viewport top) to the top of the editor.
+    var sticky_scroll: Bool
     # Settings ▸ Editor ▸ Save behavior. ``True`` (default) saves every
     # dirty file-backed buffer on focus loss — whether the wrapper
     # window loses focus or the user switches between editor windows
@@ -284,6 +287,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.git_changes = False
         self.tab_bar = False
         self.minimap = True
+        self.sticky_scroll = True
         self.auto_save = True
         self.trim_trailing_whitespace = True
         self.ensure_final_newline = True
@@ -316,6 +320,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
         self.minimap = copy.minimap
+        self.sticky_scroll = copy.sticky_scroll
         self.auto_save = copy.auto_save
         self.trim_trailing_whitespace = copy.trim_trailing_whitespace
         self.ensure_final_newline = copy.ensure_final_newline
@@ -421,6 +426,9 @@ def load_config() -> TurbokodConfig:
         )
         cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
         cfg.minimap = json_get_bool(root, String("minimap"), cfg.minimap)
+        cfg.sticky_scroll = json_get_bool(
+            root, String("sticky_scroll"), cfg.sticky_scroll,
+        )
         cfg.auto_save = json_get_bool(
             root, String("auto_save"), cfg.auto_save,
         )
@@ -565,6 +573,7 @@ def save_config(config: TurbokodConfig) -> Bool:
     root.put(String("git_changes"), json_bool(config.git_changes))
     root.put(String("tab_bar"), json_bool(config.tab_bar))
     root.put(String("minimap"), json_bool(config.minimap))
+    root.put(String("sticky_scroll"), json_bool(config.sticky_scroll))
     root.put(String("auto_save"), json_bool(config.auto_save))
     root.put(
         String("trim_trailing_whitespace"),
