@@ -628,9 +628,33 @@ def _toml_quoted_tokens(s: String) -> List[String]:
     return out^
 
 
+def _toml_array_closed(s: String) -> Bool:
+    """True if ``s`` contains a ``]`` that isn't inside a quoted string —
+    i.e. the TOML array opened on ``python_files =`` closes here. Quote-aware
+    so a glob like ``'test_[ab].py'`` doesn't read as a premature close."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var i = 0
+    while i < n:
+        var c = Int(b[i])
+        if c == 0x22 or c == 0x27:  # skip over a quoted string
+            var j = i + 1
+            while j < n and Int(b[j]) != c:
+                j += 1
+            i = j + 1
+            continue
+        if c == 0x5D:  # ']'
+            return True
+        i += 1
+    return False
+
+
 def _toml_python_files(text: String) -> List[String]:
     """Pull ``python_files`` out of ``[tool.pytest.ini_options]`` in a
-    pyproject.toml (single-line array or quoted string)."""
+    pyproject.toml. Handles the single-line array
+    (``python_files = ["test_*.py", ...]``) and the multi-line array form
+    where entries spill onto indented lines until the closing ``]`` — the
+    shape iommi and other projects use."""
     var lines = _split_lines(text)
     var out = List[String]()
     var in_section = False
@@ -647,9 +671,19 @@ def _toml_python_files(text: String) -> List[String]:
             var val = _strip(String(StringSlice(
                 ptr=b.unsafe_ptr() + kv[1] + 1, length=len(b) - kv[1] - 1,
             )))
-            var quoted = _toml_quoted_tokens(val)
-            for t in quoted:
+            for t in _toml_quoted_tokens(val):
                 out.append(t)
+            # Multi-line array: the opening line had no closing ``]``, so
+            # keep gathering quoted entries from following lines until it
+            # closes (or the file ends).
+            if not _toml_array_closed(val):
+                var lj = li + 1
+                while lj < len(lines):
+                    for t in _toml_quoted_tokens(lines[lj]):
+                        out.append(t)
+                    if _toml_array_closed(lines[lj]):
+                        break
+                    lj += 1
             return out^
     return out^
 

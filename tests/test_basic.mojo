@@ -116,7 +116,8 @@ from turbokod.search_options import SearchOptions
 from turbokod.project_targets import (
     ProjectTargets, RunTarget,
     detect_project_language,
-    load_project_targets, python_venv_dir, resolve_python_interpreter,
+    load_project_targets, python_venv_dir, pytest_python_files,
+    resolve_python_interpreter,
     resolved_cwd, resolved_program, save_project_targets,
 )
 from turbokod.buttons import (
@@ -13662,6 +13663,59 @@ def test_project_targets_resolve_paths() raises:
     )
 
 
+def test_pytest_python_files_multiline_toml_array() raises:
+    """``python_files`` declared as a multi-line TOML array in
+    ``pyproject.toml`` (iommi's shape) must parse every glob, not just
+    the ones on the ``python_files =`` line. Regression: the parser used
+    to read only that line, which on a multi-line array is just ``[`` —
+    so iommi got empty globs, fell back to pytest defaults, and its
+    ``*__tests.py`` files showed no gutter run-icons."""
+    var root = _temp_path(String("_pyproject_ml"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var path = join_path(root, String("pyproject.toml"))
+    var body = String(
+        "[tool.pytest.ini_options]\n"
+        + "DJANGO_SETTINGS_MODULE = \"tests.settings\"\n"
+        + "python_files = [\n"
+        + "    'test_*.py',\n"
+        + "    'helpers.py',\n"
+        + "    '*__tests.py',\n"
+        + "]\n"
+        + "markers = ['django']\n"
+    )
+    assert_true(write_file(path, body))
+    var globs = pytest_python_files(root)
+    assert_equal(len(globs), 3)
+    assert_equal(globs[0], String("test_*.py"))
+    assert_equal(globs[1], String("helpers.py"))
+    assert_equal(globs[2], String("*__tests.py"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+def test_pytest_python_files_singleline_toml_array() raises:
+    """The single-line array form still parses — the multi-line fix must
+    not regress ``python_files = ["test_*.py", "*__tests.py"]``."""
+    var root = _temp_path(String("_pyproject_sl"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var path = join_path(root, String("pyproject.toml"))
+    var body = String(
+        "[tool.pytest.ini_options]\n"
+        + "python_files = [\"test_*.py\", \"*__tests.py\"]\n"
+    )
+    assert_true(write_file(path, body))
+    var globs = pytest_python_files(root)
+    assert_equal(len(globs), 2)
+    assert_equal(globs[0], String("test_*.py"))
+    assert_equal(globs[1], String("*__tests.py"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
 def test_resolve_python_interpreter() raises:
     """Bare ``python`` swaps to ``<project>/.venv/bin/python`` when one
     exists; otherwise it's returned unchanged for ``$PATH`` lookup.
@@ -20845,6 +20899,8 @@ def _run_chunk_04() raises:
     test_project_targets_load_parses_fields()
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
+    test_pytest_python_files_multiline_toml_array()
+    test_pytest_python_files_singleline_toml_array()
     test_resolve_python_interpreter()
     test_python_venv_dir_finds_dotvenv()
     test_python_debugger_spec_for_venv_prepends_venv_python()
