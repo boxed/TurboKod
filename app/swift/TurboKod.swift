@@ -297,6 +297,26 @@ final class CellView: NSView {
     private var smoothActive = false
     private var springTarget: CGFloat = 0
     private var springTimer: Timer?
+    // Per-run easing factor for the spring timer (fraction of the remaining
+    // distance closed each 120 Hz tick). The post-gesture rubber-band release
+    // wants a brisker snap than the mouse-wheel glide.
+    private var springSpeed: CGFloat = 0.30
+    // Cap on how far the *raw* `smoothLines` may run past an edge. The
+    // rubber-band curve pins the *displayed* overshoot to a few rows no matter
+    // how large the raw is, but momentum can drive the raw hundreds of rows out
+    // — and then the spring-back wastes its first dozen ticks dragging the raw
+    // back toward the edge while the displayed position sits pinned at the
+    // asymptote (the "floats out there, then snaps" sluggishness). Clamping the
+    // raw keeps the visible overshoot identical but lets the release move the
+    // displayed position from the very first tick.
+    private let smoothOvershootCap: CGFloat = 12
+    // True while a post-overshoot spring-back is in flight. macOS keeps
+    // delivering momentum events for ~1-2 s after finger-lift; without this
+    // latch each one cancels the spring and re-pins the view at the overshoot,
+    // so the bounce wouldn't fire until momentum fully decayed. While set, the
+    // momentum tail is dropped. Cleared by a fresh finger-down or when the
+    // spring settles.
+    private var smoothReleasing = false
     // Second cell buffer for the overdraw region render (the editor body one
     // grid taller than the viewport), packed by tk_editor_region_layout.
     private var regionBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
@@ -752,12 +772,13 @@ final class CellView: NSView {
     /// mid-flight — calling this again just updates `springTarget`, the
     /// running timer keeps converging). Runs in `.common` mode so it keeps
     /// ticking during tracking.
-    private func easeTo(_ target: CGFloat) {
+    private func easeTo(_ target: CGFloat, speed: CGFloat = 0.30) {
         springTarget = target
+        springSpeed = speed
         if springTimer != nil { return }
         let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] tm in
             guard let self = self else { tm.invalidate(); return }
-            self.smoothLines += (self.springTarget - self.smoothLines) * 0.30
+            self.smoothLines += (self.springTarget - self.smoothLines) * self.springSpeed
             if abs(self.smoothLines - self.springTarget) < 0.01 {
                 self.smoothLines = self.springTarget
                 self.applySmooth()
@@ -1112,6 +1133,17 @@ final class CellView: NSView {
     /// end. Works for wrapped and non-wrapped editors — the core resolves the
     /// visual-row coordinate to a buffer-line + sub-row anchor.
     private func smoothScroll(_ e: NSEvent, region r: SmoothRegion) {
+        // A fresh finger-down pre-empts any in-flight rubber-band release.
+        if e.phase == .began { smoothReleasing = false }
+        // Once a release is latched, swallow the whole momentum tail — letting
+        // any of it through would re-seed past the edge and bounce again. The
+        // latch is held until the inertia stream ends (or a new gesture), NOT
+        // until the spring settles, since the spring finishes long before
+        // momentum decays.
+        if smoothReleasing {
+            if e.momentumPhase == .ended { smoothReleasing = false }
+            return
+        }
         cancelSpring()
         if e.phase == .began || !smoothActive {
             // Seed the continuous position + clamp from the core (O(lines)
@@ -1130,17 +1162,27 @@ final class CellView: NSView {
         // Positive scrollingDeltaY scrolls up (toward the top), matching the
         // legacy notch path's button-4/5 sign convention.
         smoothLines -= e.scrollingDeltaY / CELL_H
+        // Bound the raw overshoot (see `smoothOvershootCap`) so a hard flick's
+        // momentum can't strand the spring-back behind a long flat dwell.
+        let maxV = CGFloat(smoothMax)
+        if smoothLines < -smoothOvershootCap {
+            smoothLines = -smoothOvershootCap
+        } else if smoothLines > maxV + smoothOvershootCap {
+            smoothLines = maxV + smoothOvershootCap
+        }
         applySmooth()
-        let ended = e.phase == .ended || e.phase == .cancelled
-            || e.momentumPhase == .ended
-        if ended {
+        // Bounce back the moment fingers are up (post-lift *or* momentum) and
+        // we're past an edge — don't wait for momentum to fully decay. Latch
+        // `smoothReleasing` so the remaining momentum tail can't re-pin us.
+        let dragging = e.phase == .began || e.phase == .changed
+        if !dragging && (smoothLines < 0 || smoothLines > maxV) {
             smoothActive = false
-            if smoothLines < 0 {
-                easeTo(0)
-            } else if smoothLines > CGFloat(smoothMax) {
-                easeTo(CGFloat(smoothMax))
-            }
-            // In range: rest at the sub-line offset (no spring-back).
+            smoothReleasing = true
+            easeTo(smoothLines < 0 ? 0 : maxV, speed: 0.45)
+        } else if e.phase == .ended || e.phase == .cancelled
+            || e.momentumPhase == .ended {
+            // In range at gesture end: rest at the sub-line offset.
+            smoothActive = false
         }
     }
 
