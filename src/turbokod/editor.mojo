@@ -9896,6 +9896,22 @@ struct Editor(Copyable, Movable):
         self.scroll_sub = base - self._vis_prefix[lo]
         self.scroll_frac = vis - Float64(base)
 
+    def minimap_to(mut self, view: Rect, frac: Float64):
+        """Scroll proportionally from a minimap / scrollbar drag: ``frac`` is
+        the pointer's position down the minimap in [0, 1] (0 = top of the
+        document, 1 = the bottom of the scrollable range). The host computes
+        ``frac`` from the *raw* pointer Y, not the cell row, so dragging on a
+        large file scrolls finely instead of jumping a whole minimap cell.
+        Pure scroll — it does not move the cursor. Reuses the smooth-scroll
+        anchor so the drag rests at a sub-row offset like a wheel scroll."""
+        var f = frac
+        if f < 0.0:
+            f = 0.0
+        if f > 1.0:
+            f = 1.0
+        var m = self.smooth_begin(view)
+        self.smooth_set(view, f * m[1])
+
     def clamp_scroll(mut self, view: Rect):
         """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.
 

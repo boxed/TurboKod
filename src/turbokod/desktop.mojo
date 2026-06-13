@@ -2175,6 +2175,24 @@ struct Desktop(Movable):
         var interior = self.windows.windows[win_idx].interior()
         self.windows.windows[win_idx].editor.smooth_set(interior, vis)
 
+    def minimap_to(mut self, win_idx: Int, frac: Float64):
+        """Scroll editor ``win_idx`` proportionally from a sub-cell-precise
+        minimap / scrollbar drag (``frac`` in [0, 1])."""
+        if win_idx < 0 or win_idx >= len(self.windows.windows) \
+                or not self.windows.windows[win_idx].is_editor:
+            return
+        var interior = self.windows.windows[win_idx].interior()
+        self.windows.windows[win_idx].editor.minimap_to(interior, frac)
+
+    def vscroll_dragging(self) -> Bool:
+        """True while a window-border v-scrollbar thumb drag is in progress."""
+        return self.windows.v_scroll_dragging()
+
+    def vscroll_drag(mut self, mouse_y: Float64) -> Bool:
+        """Continue the in-progress v-scrollbar thumb drag at a sub-cell
+        pointer Y (fractional cell row). Returns False when none active."""
+        return self.windows.v_scroll_drag_to_f(mouse_y)
+
     def _panel_left(self, screen: Rect) -> Int:
         """Left edge for the bottom-docked panes. The file tree runs
         the full height of the workspace on its docked side, so the

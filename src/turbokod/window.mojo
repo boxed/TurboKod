@@ -1466,6 +1466,26 @@ struct Window(Copyable, Movable):
         var bar = self._v_scrollbar()
         if not bar.metrics().present: return
         self.editor.scroll_y = bar.drag_to(mouse_y, drag_offset)
+        self.editor.scroll_sub = 0
+        self.editor.scroll_frac = 0.0
+
+    def v_drag_thumb_to_f(mut self, mouse_y: Float64, drag_offset: Int):
+        """Sub-cell variant for the native host: ``mouse_y`` is a fractional
+        cell position. We turn the thumb's position into a [0, 1] track
+        fraction and scroll proportionally through the smooth-scroll path —
+        so a long file scrolls smoothly (sub-row, gliding) instead of
+        jumping a whole thumb cell (~150 lines on a 10k-line file)."""
+        if not self.is_editor: return
+        var bar = self._v_scrollbar()
+        var m = bar.metrics()
+        if not m.present: return
+        var denom = m.track_size - m.knob_size
+        if denom <= 0: return
+        var target = mouse_y - Float64(bar.top + 1) - Float64(drag_offset)
+        var f = target / Float64(denom)
+        if f < 0.0: f = 0.0
+        if f > 1.0: f = 1.0
+        self.editor.minimap_to(self.interior(), f)
 
     def h_drag_thumb_to(mut self, mouse_x: Int, drag_offset: Int):
         if not self.is_editor: return
@@ -2204,3 +2224,20 @@ struct WindowManager(Movable):
         if self._editor_dragging >= 0:
             return self.windows[self._editor_dragging].handle_mouse_in_body(event)
         return False
+
+    def v_scroll_dragging(self) -> Bool:
+        """True while a vertical-scrollbar thumb drag is in progress (set by
+        the press hit-test, cleared on release). The native host polls this
+        after a mouse-down to decide whether to route subsequent motion
+        through the sub-cell ``v_scroll_drag_to_f`` path."""
+        return self._v_scrolling >= 0
+
+    def v_scroll_drag_to_f(mut self, mouse_y: Float64) -> Bool:
+        """Continue the in-progress v-thumb drag at a sub-cell pointer Y.
+        Returns False when no v-drag is active."""
+        if self._v_scrolling < 0:
+            return False
+        self.windows[self._v_scrolling].v_drag_thumb_to_f(
+            mouse_y, self._v_drag_offset,
+        )
+        return True

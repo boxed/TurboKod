@@ -53,6 +53,18 @@ int64_t tk_editor_smooth_begin(int64_t h, int64_t win_idx,
                                int64_t cols, int64_t rows, int64_t out_ptr);
 void    tk_editor_smooth_set(int64_t h, int64_t win_idx,
                              int64_t cols, int64_t rows, int64_t vis_milli);
+//   tk_editor_minimap_to: scroll proportionally from a minimap/scrollbar
+//     drag — frac_micro is the pointer's fractional position down the
+//     minimap x1,000,000 (0 = top, 1e6 = bottom). Computed host-side from
+//     the raw sub-cell pointer Y. Micro (not milli) so the fraction isn't
+//     the bottleneck on large files (1000 steps would read as ~10-row jumps).
+void    tk_editor_minimap_to(int64_t h, int64_t win_idx, int64_t frac_micro);
+// Window-border vertical scrollbar thumb drag, sub-cell precise. After a
+// mouse-down, poll tk_desktop_vscroll_active; if 1, route motion through
+// tk_desktop_vscroll_drag (mouse_y_milli = raw pointer Y / cell height x1000)
+// so a long file scrolls line-by-line instead of ~150 lines per thumb cell.
+int64_t tk_desktop_vscroll_active(int64_t h);
+int64_t tk_desktop_vscroll_drag(int64_t h, int64_t mouse_y_milli);
 int32_t tk_desktop_key(int64_t h, uint32_t key, uint8_t mods,
                        int64_t cols, int64_t rows);
 int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,

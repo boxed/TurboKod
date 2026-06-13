@@ -568,6 +568,44 @@ def tk_editor_smooth_set(
 
 
 @export
+def tk_editor_minimap_to(h: Int, win_idx: Int, frac_micro: Int):
+    """Scroll editor ``win_idx`` proportionally from a minimap / scrollbar
+    drag: ``frac_micro`` is the pointer's fractional position down the
+    minimap × 1,000,000 (0 = top, 1e6 = bottom of the scrollable range). The
+    host computes it from the raw sub-cell pointer Y. The unit is micro, not
+    milli, so the fraction itself isn't the bottleneck: on a 10k-row file a
+    milli fraction (1000 steps) would quantize to ~10-row stops, which read
+    as uneven 2-row jumps when the pixel count doesn't divide evenly."""
+    if h == 0:
+        return
+    _desk(h)[].minimap_to(win_idx, Float64(frac_micro) / 1000000.0)
+
+
+@export
+def tk_desktop_vscroll_active(h: Int) -> Int:
+    """1 while a window-border vertical-scrollbar thumb drag is in progress
+    (the press landed on the thumb). The host polls this right after a
+    mouse-down to decide whether to route subsequent motion through the
+    sub-cell ``tk_desktop_vscroll_drag`` path instead of normal mouse
+    events."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].vscroll_dragging() else 0
+
+
+@export
+def tk_desktop_vscroll_drag(h: Int, mouse_y_milli: Int) -> Int:
+    """Continue the in-progress v-scrollbar thumb drag at a sub-cell pointer
+    Y: ``mouse_y_milli`` is the pointer's fractional *cell row* × 1000 (raw
+    pointer Y / cell height). Maps every line on a long file instead of the
+    integer path's one-thumb-cell (~150-line) minimum. Returns 1 if a drag
+    was active and consumed it, 0 otherwise."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].vscroll_drag(Float64(mouse_y_milli) / 1000.0) else 0
+
+
+@export
 def tk_theme_version(h: Int) -> Int:
     """Monotonic counter that bumps whenever the active color theme changes.
     The Swift host polls this each frame and refetches the palette only when

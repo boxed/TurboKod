@@ -301,6 +301,16 @@ final class CellView: NSView {
     // grid taller than the viewport), packed by tk_editor_region_layout.
     private var regionBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var regionBufCells = 1
+    // True while a left-drag that began on the minimap gutter is in flight.
+    // The minimap doubles as a scrollbar; we scroll it from the raw sub-cell
+    // pointer Y (proportional) instead of the cell-quantized core hit-test,
+    // so dragging a large file scrolls finely rather than ~100 lines a cell.
+    private var minimapDragging = false
+    // True while a left-drag on the window-border vertical scrollbar thumb is
+    // in flight. The core owns the drag state; we just route motion through
+    // the sub-cell `tk_desktop_vscroll_drag` so a long file scrolls
+    // line-by-line instead of ~150 lines per (cell-quantized) thumb cell.
+    private var sbDragging = false
     // Last-seen Option/Alt key state, so flagsChanged (which fires for any
     // modifier transition) can detect Option's own up/down edges and report
     // them as bare EVENT_MOD_KEY transitions for the Alt-tap gestures.
@@ -909,6 +919,50 @@ final class CellView: NSView {
         // See keyDown — scripted capture runs ignore live input.
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
         let p = convert(e.locationInWindow, from: nil)
+        // Window-border vertical scrollbar thumb drag: while one is in flight
+        // (started by the press hit-test in the core), route motion through
+        // the sub-cell path with the raw pointer Y so a long file scrolls
+        // line-by-line instead of ~150 lines per (cell-quantized) thumb cell.
+        if surface == .main && button == 1 && motion == 1 && sbDragging {
+            _ = tk_desktop_vscroll_drag(handle, Int64((p.y / CELL_H) * 1000))
+            needsDisplay = true
+            return
+        }
+        // Minimap-as-scrollbar drag: a left-drag that began on the minimap
+        // gutter scrolls proportionally from the raw (sub-cell) pointer Y,
+        // bypassing the cell-quantized core hit-test. Without this, the
+        // minimap maps one whole cell row to lines/height lines — ~100+ on a
+        // 10k-line file — so the smallest drag step jumps that far.
+        if surface == .main && button == 1 {
+            if pressed == 1 && motion == 0 {
+                minimapDragging = false
+                if let sr = focusedSmoothRegion(), sr.rightGutter > 0 {
+                    let c = Int(max(0, p.x) / CELL_W), r = Int(max(0, p.y) / CELL_H)
+                    if c >= sr.x + sr.w - sr.rightGutter && c < sr.x + sr.w
+                        && r >= sr.y && r < sr.y + sr.h {
+                        minimapDragging = true
+                    }
+                }
+            }
+            if minimapDragging {
+                if pressed == 0 {
+                    minimapDragging = false      // drag released
+                } else if let sr = focusedSmoothRegion() {
+                    let top = CGFloat(sr.y) * CELL_H
+                    let hgt = max(1, CGFloat(sr.h) * CELL_H)
+                    var f = (p.y - top) / hgt
+                    if f < 0 { f = 0 }; if f > 1 { f = 1 }
+                    // Micro precision: a 1000-step (milli) fraction quantizes
+                    // a 10k-row file to ~10-row stops; micro maps at pointer
+                    // (sub-pixel on Retina) resolution so the drag glides.
+                    tk_editor_minimap_to(handle, Int64(sr.winIdx),
+                                         Int64(f * 1_000_000))
+                    needsDisplay = true
+                    return
+                }
+                return
+            }
+        }
         let col = Int64(max(0, p.x) / CELL_W)
         var py = max(0, p.y)
         // When the focused editor rests at a smooth-scroll offset its body is
@@ -948,6 +1002,16 @@ final class CellView: NSView {
         let action = mouseSurface(col, row, button, pressed, motion,
                                   mods(e), cols(), rows(), cc)
         handleAction(action)
+        // A left press that landed on the v-scrollbar thumb starts a drag in
+        // the core; latch it so subsequent motion takes the sub-cell path
+        // above. Any release ends it.
+        if surface == .main && button == 1 {
+            if pressed == 1 && motion == 0 {
+                sbDragging = tk_desktop_vscroll_active(handle) != 0
+            } else if pressed == 0 {
+                sbDragging = false
+            }
+        }
         // Cursor hint.
         let shape = pointerShapeSurface(col, row, cols(), rows())
         switch shape {
