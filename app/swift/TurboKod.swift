@@ -746,12 +746,15 @@ final class CellView: NSView {
         springTimer?.invalidate(); springTimer = nil
     }
 
-    /// Animate `smoothLines` to `target` (an integer rest line) and snap the
-    /// fraction to zero on arrival. Drives the post-gesture rubber-band
-    /// release. Runs in `.common` mode so it keeps ticking during tracking.
-    private func startSpring(to target: CGFloat) {
-        cancelSpring()
+    /// Ease `smoothLines` toward `target` over a few frames (exponential),
+    /// applying each step to the core. Drives both the post-gesture
+    /// rubber-band release and discrete mouse-wheel notches (which retarget
+    /// mid-flight — calling this again just updates `springTarget`, the
+    /// running timer keeps converging). Runs in `.common` mode so it keeps
+    /// ticking during tracking.
+    private func easeTo(_ target: CGFloat) {
         springTarget = target
+        if springTimer != nil { return }
         let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] tm in
             guard let self = self else { tm.invalidate(); return }
             self.smoothLines += (self.springTarget - self.smoothLines) * 0.30
@@ -1056,12 +1059,15 @@ final class CellView: NSView {
         // the pointer over a terminal / output pane or a non-focused editor —
         // falls back to discrete notch scrolling, which the core routes by
         // pointer position.
-        if surface == .main, e.hasPreciseScrollingDeltas,
-           let r = focusedSmoothRegion() {
+        if surface == .main, let r = focusedSmoothRegion() {
             let p = convert(e.locationInWindow, from: nil)
             let col = Int(max(0, p.x) / CELL_W), row = Int(max(0, p.y) / CELL_H)
             if col >= r.x && col < r.x + r.w && row >= r.y && row < r.y + r.h {
-                smoothScroll(e, region: r)
+                if e.hasPreciseScrollingDeltas {
+                    smoothScroll(e, region: r)      // trackpad: continuous 1:1
+                } else {
+                    wheelScroll(e, region: r)        // mouse wheel: eased notches
+                }
                 return
             }
         }
@@ -1069,6 +1075,35 @@ final class CellView: NSView {
         // next precise event over the editor re-seeds from the core.
         smoothActive = false
         legacyNotchScroll(e)
+    }
+
+    /// Mouse-wheel (non-precise) scroll of the focused editor. Each detent
+    /// moves the OS-reported line delta (typically ~1 line, scaled by the
+    /// system scroll-speed setting) — not the core's fixed 3-line notch — and
+    /// the move is *eased* so it glides sub-line rather than snapping. The
+    /// target accumulates across detents so a fast spin stays responsive.
+    private func wheelScroll(_ e: NSEvent, region r: SmoothRegion) {
+        if e.scrollingDeltaY == 0 { return }
+        // Seed from the core when starting fresh (no precise gesture or ease
+        // already in flight), so the target tracks the real current position.
+        if springTimer == nil && !smoothActive {
+            var m = [Int32](repeating: 0, count: 2)
+            m.withUnsafeMutableBufferPointer { b in
+                _ = tk_editor_smooth_begin(handle, Int64(r.winIdx),
+                    Int64(cols()), Int64(rows()),
+                    Int64(Int(bitPattern: b.baseAddress)))
+            }
+            smoothWinIdx = r.winIdx
+            smoothLines = CGFloat(m[0]) / 1000.0
+            smoothMax = Int(m[1]) / 1000
+            springTarget = smoothLines
+        }
+        // One line per unit of line-based delta (positive = up). The core's
+        // old path forced 3 lines a notch; this honors the OS granularity.
+        var t = springTarget - e.scrollingDeltaY
+        if t < 0 { t = 0 }
+        if t > CGFloat(smoothMax) { t = CGFloat(smoothMax) }
+        easeTo(t)
     }
 
     /// Continuous trackpad scroll of the focused editor: track the gesture
@@ -1101,9 +1136,9 @@ final class CellView: NSView {
         if ended {
             smoothActive = false
             if smoothLines < 0 {
-                startSpring(to: 0)
+                easeTo(0)
             } else if smoothLines > CGFloat(smoothMax) {
-                startSpring(to: CGFloat(smoothMax))
+                easeTo(CGFloat(smoothMax))
             }
             // In range: rest at the sub-line offset (no spring-back).
         }
