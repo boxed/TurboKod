@@ -47,14 +47,16 @@ tui:
 test:
 	./run.sh tests/test_basic.mojo
 
-# Build a self-contained, signed (and, with creds, Apple-notarized + stapled)
+# Build a self-contained, Developer ID signed + Apple-notarized + stapled
 # TurboKod.app, zip it, and publish to the GitHub Releases page. Unlike
 # ``app``, this vendors the Mojo runtime + libonig into the bundle so it runs
 # on a machine without the pixi env. Prompts for the next version (defaulting
 # to a patch bump), stamps + commits + tags it, then builds. Skip the prompt
-# with ``make release VERSION=0.0.2``. Signing/notarization auto-detect
-# a Developer ID cert + notary creds and degrade to ad-hoc if absent — see the
-# header of scripts/release.sh for the env vars.
+# with ``make release VERSION=0.0.2``. Notarization is MANDATORY: the script
+# aborts up front (before tagging or building) if a Developer ID cert or notary
+# creds are missing — we never publish a non-notarized release. The notary
+# keychain profile defaults to ``turbokod-notary``; see the header of
+# scripts/release.sh for the override env vars.
 release:
 	VERSION="$(VERSION)" scripts/release.sh
 

@@ -14,15 +14,19 @@
 # The chosen version is stamped into the source Info.plist, committed as
 # "Release vX.Y.Z", and tagged + pushed before the bundle is built.
 #
-# Signing / notarization are auto-detected and degrade gracefully:
+# Signing + notarization are MANDATORY for a published release. We NEVER ship a
+# release that isn't Developer ID signed *and* Apple-notarized + stapled; the
+# script aborts up front (before pushing the tag or building) if either is
+# unavailable, rather than degrading to an ad-hoc / un-notarized bundle.
 #   * Developer ID Application cert in the keychain -> hardened-runtime signed.
 #     Override which identity with TURBOKOD_SIGN_IDENTITY="Developer ID Application: ...".
-#     No such cert -> ad-hoc signed (runnable locally, Gatekeeper-blocked for others).
-#   * Notary credentials present -> submitted to Apple + stapled. Provide either:
+#     No such cert -> hard error.
+#   * Notary credentials -> submitted to Apple + stapled. Provide either:
 #       TURBOKOD_NOTARY_PROFILE=<keychain-profile>   (xcrun notarytool store-credentials)
+#         (defaults to "turbokod-notary" if unset)
 #     or all three of:
 #       TURBOKOD_NOTARY_APPLE_ID / TURBOKOD_NOTARY_PASSWORD / TURBOKOD_NOTARY_TEAM_ID
-#     None present -> notarization skipped with a warning.
+#     None resolvable -> hard error.
 #
 # Builds for the host architecture only (arm64 on this toolchain).
 set -uo pipefail
@@ -38,6 +42,30 @@ app=".build/TurboKod.app"
 contents="$app/Contents"
 fwk="$contents/Frameworks"
 arch="$(uname -m)"
+
+# ---------------------------------------------------------------------------
+# 0. Notarization is MANDATORY. Validate signing + notary credentials up front,
+#    BEFORE we push a tag or spend minutes building a bundle we couldn't notarize
+#    anyway. The actual sign / notarize still happens in steps 5-6; this just
+#    fails fast so we never publish (or even tag) a non-notarized release.
+# ---------------------------------------------------------------------------
+: "${TURBOKOD_NOTARY_PROFILE:=turbokod-notary}"
+
+preflight_identity="${TURBOKOD_SIGN_IDENTITY:-}"
+[ -n "$preflight_identity" ] || preflight_identity="$(security find-identity -v -p codesigning \
+  | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+[ -n "$preflight_identity" ] \
+  || die "no 'Developer ID Application' identity in the keychain. A published release must be Developer ID signed + notarized; refusing to continue (ad-hoc signing is not allowed for releases)."
+
+if xcrun notarytool history --keychain-profile "$TURBOKOD_NOTARY_PROFILE" >/dev/null 2>&1; then
+  : # keychain profile credentials are valid
+elif [ -n "${TURBOKOD_NOTARY_APPLE_ID:-}" ] \
+  && [ -n "${TURBOKOD_NOTARY_PASSWORD:-}" ] \
+  && [ -n "${TURBOKOD_NOTARY_TEAM_ID:-}" ]; then
+  : # explicit Apple-ID credentials provided
+else
+  die "notary credentials unavailable: keychain profile '$TURBOKOD_NOTARY_PROFILE' not found and TURBOKOD_NOTARY_APPLE_ID/_PASSWORD/_TEAM_ID unset. Run 'xcrun notarytool store-credentials' (or set those env vars). Releases must be notarized; refusing to continue."
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Version. An explicit VERSION (e.g. `make release VERSION=0.0.2`) is used
@@ -212,10 +240,13 @@ if [ "$identity" != "-" ]; then
       die "notarytool submission failed (see log above; 'xcrun notarytool log <id> ...' for details)"
     fi
   else
-    note "warning: Developer ID signed but no notary creds set - skipping notarization."
-    note "         Set TURBOKOD_NOTARY_PROFILE (or TURBOKOD_NOTARY_APPLE_ID/_PASSWORD/_TEAM_ID) to enable."
+    die "no notary credentials resolved at notarization time (should have been caught by pre-flight)."
   fi
 fi
+
+# Notarization is mandatory: never publish a release that wasn't stapled.
+[ "$notarized" = 1 ] \
+  || die "refusing to publish a non-notarized release (identity='$identity', notarized=$notarized). A release must be Developer ID signed + Apple-notarized + stapled."
 
 # ---------------------------------------------------------------------------
 # 7. Final distribution zip (rebuilt after stapling so it carries the ticket).
