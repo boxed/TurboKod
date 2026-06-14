@@ -25,7 +25,8 @@ from std.sys import size_of
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.events import (
-    Event, MOD_CTRL, MOD_META,
+    Event, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
@@ -44,11 +45,14 @@ from turbokod.desktop import (
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_START_OR_CONTINUE,
     DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
+    DEBUG_FOCUS_PANE,
     EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
-    EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_GOTO,
+    EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_FIND_SYMBOL,
+    EDITOR_GOTO,
     EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN,
     EDITOR_FORMAT_DOCUMENT, EDITOR_FORMAT_SELECTION,
     EDITOR_GOTO_DECL, EDITOR_GOTO_IMPL, EDITOR_GOTO_TYPE_DEF,
+    EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_RENAME_SYMBOL,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
@@ -57,12 +61,14 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_STICKY_SCROLL,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
-    FILE_TREE_REVEAL,
+    FILE_TREE_FOCUS, FILE_TREE_REVEAL,
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     HELP_HOTKEYS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
     WINDOW_CLOSE, WINDOW_CLOSE_ALL,
+    WINDOW_ROTATE_NEXT, WINDOW_ROTATE_PREV,
+    synth_key_action,
 )
 
 
@@ -190,6 +196,50 @@ def _build_menus(mut d: Desktop):
     # (examples/desktop.mojo), so this item is Swift-only by construction.
     v.append(MenuItem(String("Floating panels"), TOGGLE_FLOATING_PANELS, checkable=True))
     d.menu_bar.add(Menu(String("View"), v^))
+    # Navigation — surfaces the cursor / window / symbol navigation hotkeys.
+    # Items backed by a real action (Go to Line, Navigate Back, …) dispatch
+    # directly; the editor-movement chords (Word Left, Grow Selection, …) use
+    # ``synth_key_action`` so clicking them re-injects the chord into the
+    # focused editor. Shortcut text auto-populates from ``_hotkeys`` via
+    # ``_refresh_shortcuts``. Every item here matches a registered hotkey, so
+    # the Keyboard Shortcuts page and this menu can't drift apart.
+    var nav = List[MenuItem]()
+    nav.append(MenuItem(String("Go to Line..."),    EDITOR_GOTO))
+    nav.append(MenuItem(String("Go to Symbol..."),  EDITOR_GOTO_SYMBOL))
+    nav.append(MenuItem(String("Find Symbol..."),   EDITOR_FIND_SYMBOL))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(String("Find Next"),        EDITOR_FIND_NEXT))
+    nav.append(MenuItem(String("Find Previous"),    EDITOR_FIND_PREV))
+    nav.append(MenuItem(String("Navigate Back"),    EDITOR_NAV_BACK))
+    nav.append(MenuItem(String("Navigate Forward"), EDITOR_NAV_FORWARD))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(String("Word Left"),
+        synth_key_action(KEY_LEFT, MOD_ALT)))
+    nav.append(MenuItem(String("Word Right"),
+        synth_key_action(KEY_RIGHT, MOD_ALT)))
+    nav.append(MenuItem(String("Line Start"),
+        synth_key_action(KEY_LEFT, MOD_META)))
+    nav.append(MenuItem(String("Line End"),
+        synth_key_action(KEY_RIGHT, MOD_META)))
+    nav.append(MenuItem(String("Grow Selection"),
+        synth_key_action(KEY_UP, MOD_META)))
+    nav.append(MenuItem(String("Shrink Selection"),
+        synth_key_action(KEY_DOWN, MOD_META)))
+    nav.append(MenuItem(String("Add Caret Above"),
+        synth_key_action(KEY_UP, MOD_CTRL | MOD_ALT)))
+    nav.append(MenuItem(String("Add Caret Below"),
+        synth_key_action(KEY_DOWN, MOD_CTRL | MOD_ALT)))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(String("Previous Change"),
+        synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT)))
+    nav.append(MenuItem(String("Next Change"),
+        synth_key_action(KEY_DOWN, MOD_CTRL | MOD_SHIFT)))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(String("Previous Window"), WINDOW_ROTATE_PREV))
+    nav.append(MenuItem(String("Next Window"),     WINDOW_ROTATE_NEXT))
+    nav.append(MenuItem(String("Focus File Tree"), FILE_TREE_FOCUS))
+    nav.append(MenuItem(String("Focus Debug Pane"), DEBUG_FOCUS_PANE))
+    d.menu_bar.add(Menu(String("Navigation"), nav^))
     d.menu_bar.add(_mk_menu(String("Git"),
         (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
         (String("Show diff viewer"), GIT_LOCAL_CHANGES),

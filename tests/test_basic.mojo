@@ -563,6 +563,52 @@ def test_hotkeys_page_is_generated_from_registry() raises:
     assert_true(found_cmd_up_doc_only)
 
 
+def test_hotkey_gate_registers_editor_chords() raises:
+    """The global hotkey gate (``_handle_key``) only lets a modified chord
+    reach the editor if it's registered in ``_hotkeys``. Assert the predicate
+    classifies chords correctly and that every chord the editor acts on —
+    including the formerly-undocumented Ctrl+Shift+Up/Down git navigation — is
+    registered, while ordinary typing is never gated."""
+    var d = Desktop()
+    # Gated: Ctrl/Alt/Cmd chords, navigation+Shift, and function keys.
+    assert_true(
+        Desktop._is_gated_combo(Event.key_event(KEY_UP, MOD_CTRL | MOD_SHIFT))
+    )
+    assert_true(Desktop._is_gated_combo(Event.key_event(KEY_LEFT, MOD_SHIFT)))
+    assert_true(
+        Desktop._is_gated_combo(Event.key_event(UInt32(ord("b")), MOD_META))
+    )
+    assert_true(Desktop._is_gated_combo(Event.key_event(KEY_F5, MOD_NONE)))
+    # NOT gated: a capital letter arrives as (printable, MOD_SHIFT) from the
+    # native host — gating it would swallow ordinary typing.
+    assert_true(
+        not Desktop._is_gated_combo(Event.key_event(UInt32(ord("A")), MOD_SHIFT))
+    )
+    assert_true(
+        not Desktop._is_gated_combo(Event.key_event(UInt32(ord("a")), MOD_NONE))
+    )
+    # NOT gated: editing keys stay editing keys even with a modifier (Cmd+Enter
+    # still splits a line; Ctrl+Backspace still deletes a word).
+    assert_true(
+        not Desktop._is_gated_combo(Event.key_event(KEY_ENTER, MOD_META))
+    )
+    assert_true(
+        not Desktop._is_gated_combo(Event.key_event(KEY_BACKSPACE, MOD_CTRL))
+    )
+    # Every editor chord the gate must pass is registered — including the
+    # git-change navigation that had no registry row before.
+    assert_true(d._combo_registered(KEY_UP, MOD_CTRL | MOD_SHIFT))
+    assert_true(d._combo_registered(KEY_DOWN, MOD_CTRL | MOD_SHIFT))
+    assert_true(d._combo_registered(KEY_UP, MOD_META))
+    assert_true(d._combo_registered(KEY_LEFT, MOD_SHIFT))
+    assert_true(d._combo_registered(KEY_LEFT, MOD_ALT))
+    assert_true(d._combo_registered(UInt32(ord("z")), MOD_META | MOD_ALT))
+    # An arbitrary chord nobody bound is NOT registered — the gate swallows it.
+    assert_true(not d._combo_registered(UInt32(ord("b")), MOD_META))
+    # The git-change navigation now appears on the Keyboard Shortcuts page.
+    assert_true(_contains(d._hotkeys_help_text(), String("Previous change")))
+
+
 def test_point_arithmetic() raises:
     var p = Point(2, 3)
     var q = Point(5, 7)
@@ -20373,6 +20419,7 @@ def _run_chunk_00() raises:
     test_desktop_take_attention_drains_panes_and_dap()
     test_help_hotkeys_opens_readonly_reference()
     test_hotkeys_page_is_generated_from_registry()
+    test_hotkey_gate_registers_editor_chords()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
     test_confirm_dialog_esc_cancels()

@@ -448,6 +448,14 @@ comptime TERMINAL_FOCUS          = String("terminal:focus")
 comptime TERMINAL_CLAUDE         = String("terminal:claude")
 # Dynamic Window menu actions. Focus actions encode the index inline so the
 # items can be rebuilt every frame without any separate lookup table.
+# Synthetic-key actions. A menu item bound to ``SYNTH_KEY_PREFIX + "<key>:<mods>"``
+# re-injects that key chord into the focused editor when clicked, so the
+# Navigation menu can expose pure editor-movement chords (word-jump, grow
+# selection, …) that have no standalone dispatch path of their own.
+# ``dispatch_action`` decodes the prefix and routes through ``_handle_key``;
+# the matching ``doc_only`` registry entry carries this same action string so
+# ``_shortcut_for_action`` stamps the item's shortcut text automatically.
+comptime SYNTH_KEY_PREFIX     = String("key:")
 comptime WINDOW_FOCUS_PREFIX  = String("window:focus:")
 comptime WINDOW_MAXIMIZE_ALL  = String("window:maximize_all")
 comptime WINDOW_RESTORE_ALL   = String("window:restore_all")
@@ -608,6 +616,15 @@ struct Hotkey(ImplicitlyCopyable, Movable):
         self.help = help
         self.doc_shortcut = doc_shortcut
         self.doc_only = doc_only
+
+
+def synth_key_action(key: UInt32, mods: UInt8) -> String:
+    """Encode a ``(key, mods)`` chord as a ``SYNTH_KEY_PREFIX`` action string.
+
+    Used by the Navigation menu so clicking e.g. "Word left" re-injects
+    ``Alt+Left`` into the focused editor. ``dispatch_action`` decodes it.
+    """
+    return SYNTH_KEY_PREFIX + String(Int(key)) + String(":") + String(Int(mods))
 
 
 @fieldwise_init
@@ -1964,53 +1981,189 @@ struct Desktop(Movable):
         # --- doc_only: editor-handled chords ---
         # These keys are handled directly inside ``Editor.handle_key``
         # (smart-select, line nav, multi-caret, …), NOT dispatched through
-        # the table above. They live here purely so the Keyboard Shortcuts
-        # page lists them; the dispatch loop skips ``doc_only`` entries.
-        # If you add an editor chord in editor.mojo, add its row here too.
+        # the table above: every entry here is ``doc_only`` so the dispatch
+        # loop skips it and the real keystroke still reaches the editor.
+        #
+        # They serve two jobs beyond documentation now:
+        #   1. The global hotkey gate (``_is_gated_combo`` / ``_combo_registered``
+        #      in ``_handle_key``) only lets a modified / function-key chord
+        #      reach the editor if it appears *somewhere* in this table — a
+        #      missing entry means the chord is swallowed. So every modifier
+        #      combo the editor acts on MUST have a row here (matchable rows
+        #      carry an empty ``help`` so they don't clutter the page).
+        #   2. Rows carrying a ``synth_key_action`` are clickable from the
+        #      Navigation menu (the action re-injects the chord). ``doc_only``
+        #      still means "not dispatched on keypress" — the synth action only
+        #      fires on a menu click, never on the key itself.
+        # If you add an editor chord in editor.mojo, add its row here too, or
+        # the gate will start eating it.
+        #
+        # Documented + menu-clickable movement chords (synth actions):
         self._hotkeys.append(Hotkey(
-            KEY_UP, MOD_META, String(""),
+            KEY_UP, MOD_META, synth_key_action(KEY_UP, MOD_META),
             group=HKG_MOVE, help=String("Grow selection"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            KEY_DOWN, MOD_META, String(""),
+            KEY_DOWN, MOD_META, synth_key_action(KEY_DOWN, MOD_META),
             group=HKG_MOVE, help=String("Shrink selection"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            KEY_RIGHT, MOD_META, String(""),
+            KEY_RIGHT, MOD_META, synth_key_action(KEY_RIGHT, MOD_META),
             group=HKG_MOVE, help=String("Jump to end of line"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            KEY_LEFT, MOD_META, String(""),
+            KEY_LEFT, MOD_META, synth_key_action(KEY_LEFT, MOD_META),
             group=HKG_MOVE, help=String("Jump to start of line"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Word left / right"),
-            doc_shortcut=String("Alt+Left / Alt+Right"), doc_only=True,
+            KEY_LEFT, MOD_ALT, synth_key_action(KEY_LEFT, MOD_ALT),
+            group=HKG_MOVE, help=String("Word left"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Extend selection"),
-            doc_shortcut=String("Shift + any move"), doc_only=True,
+            KEY_RIGHT, MOD_ALT, synth_key_action(KEY_RIGHT, MOD_ALT),
+            group=HKG_MOVE, help=String("Word right"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            KEY_UP, MOD_CTRL | MOD_ALT, String(""),
+            KEY_UP, MOD_CTRL | MOD_ALT, synth_key_action(KEY_UP, MOD_CTRL | MOD_ALT),
             group=HKG_MOVE, help=String("Add caret above"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
-            KEY_DOWN, MOD_CTRL | MOD_ALT, String(""),
+            KEY_DOWN, MOD_CTRL | MOD_ALT, synth_key_action(KEY_DOWN, MOD_CTRL | MOD_ALT),
             group=HKG_MOVE, help=String("Add caret below"), doc_only=True,
+        ))
+        # Git-change navigation — Ctrl+Shift+Up/Down jump to the previous /
+        # next local-change chunk (editor.mojo ``goto_change_chunk``). These
+        # had no registry row before, so they were invisible on the page;
+        # now documented + clickable.
+        self._hotkeys.append(Hotkey(
+            KEY_UP, MOD_CTRL | MOD_SHIFT,
+            synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT),
+            group=HKG_GIT, help=String("Previous change"), doc_only=True,
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_DOWN, MOD_CTRL | MOD_SHIFT,
+            synth_key_action(KEY_DOWN, MOD_CTRL | MOD_SHIFT),
+            group=HKG_GIT, help=String("Next change"), doc_only=True,
+        ))
+        # Cmd+Alt+Z — revert the change chunk under the caret to HEAD
+        # (editor.mojo ``revert_chunk_at_cursor``). Was unregistered.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("z")), MOD_META | MOD_ALT,
+            synth_key_action(UInt32(ord("z")), MOD_META | MOD_ALT),
+            group=HKG_GIT, help=String("Revert change to HEAD"), doc_only=True,
+        ))
+        # Documented summary rows (informational; the matchable concrete combos
+        # follow below). ``key=0`` never matches a real keystroke, so these are
+        # page-only — they don't satisfy the gate by themselves.
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""),
+            group=HKG_MOVE, help=String("Extend selection"),
+            doc_shortcut=String("Shift + arrow / Home / End / Page"),
+            doc_only=True,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""),
+            group=HKG_MOVE, help=String("Word select"),
+            doc_shortcut=String("Ctrl/Alt+Shift+Left / Right"), doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
             UInt32(0), MOD_NONE, String(""),
             group=HKG_MOVE, help=String("Column select"),
             doc_shortcut=String("tap Alt, hold + Up/Down"), doc_only=True,
         ))
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""),
+            group=HKG_MOVE, help=String("Delete word left"),
+            doc_shortcut=String("Ctrl+Backspace / Alt+Backspace"),
+            doc_only=True,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""),
+            group=HKG_EDIT, help=String("Unindent"),
+            doc_shortcut=String("Shift+Tab"), doc_only=True,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""),
+            group=HKG_EDIT, help=String("Code actions (quickfix / symbol)"),
+            doc_shortcut=String("Alt+Enter"), doc_only=True,
+        ))
         # Ctrl+A — select all (editor clipboard chord; handled in-editor).
         self._hotkeys.append(Hotkey(
             ctrl_key("a"), MOD_CTRL, String(""),
             group=HKG_EDIT, help=String("Select all"), doc_only=True,
         ))
+        # --- matchable-only editor chords (empty help: page-silent) ---
+        # Concrete (key, mods) the editor's movement / selection handlers act
+        # on. They exist purely so the gate lets the keystroke through; the
+        # documented rows above name them for the user. Registered with empty
+        # ``help`` so ``_hotkeys_help_text`` skips them.
+        self._register_matchable_editor_chords()
+
+    def _register_matchable_editor_chords(mut self):
+        """Append empty-``help`` ``doc_only`` rows for every modifier combo on a
+        navigation key that ``Editor.handle_key`` treats as plain movement /
+        selection, so the global hotkey gate (``_handle_key``) lets the
+        keystroke reach the editor. The user-facing names live in the summary
+        rows registered by the caller; these rows are page-silent (empty
+        ``help``) and exist only to clear the gate.
+
+        Excluded on purpose: combos that are already real bindings dispatched
+        before the gate — Cmd+Shift+Left/Right (switch tab), Cmd+Alt+Left/Right
+        (navigate back/forward) — and Alt/Cmd movement chords documented above.
+        """
+        # Shift + navigation key — extend selection in that direction.
+        var nav = List[UInt32]()
+        nav.append(KEY_LEFT)
+        nav.append(KEY_RIGHT)
+        nav.append(KEY_UP)
+        nav.append(KEY_DOWN)
+        nav.append(KEY_HOME)
+        nav.append(KEY_END)
+        nav.append(KEY_PAGEUP)
+        nav.append(KEY_PAGEDOWN)
+        for i in range(len(nav)):
+            self._hotkeys.append(
+                Hotkey(nav[i], MOD_SHIFT, String(""), doc_only=True)
+            )
+        # Left / Right: word-move (Ctrl) and word-select (Ctrl+Shift, Alt+Shift).
+        var lr = List[UInt32]()
+        lr.append(KEY_LEFT)
+        lr.append(KEY_RIGHT)
+        for i in range(len(lr)):
+            self._hotkeys.append(
+                Hotkey(lr[i], MOD_CTRL, String(""), doc_only=True)
+            )
+            self._hotkeys.append(
+                Hotkey(lr[i], MOD_CTRL | MOD_SHIFT, String(""), doc_only=True)
+            )
+            self._hotkeys.append(
+                Hotkey(lr[i], MOD_ALT | MOD_SHIFT, String(""), doc_only=True)
+            )
+        # Up / Down: column-draw (Alt) and move-with-extend (Cmd+Shift).
+        var ud = List[UInt32]()
+        ud.append(KEY_UP)
+        ud.append(KEY_DOWN)
+        for i in range(len(ud)):
+            self._hotkeys.append(
+                Hotkey(ud[i], MOD_ALT, String(""), doc_only=True)
+            )
+            self._hotkeys.append(
+                Hotkey(ud[i], MOD_META | MOD_SHIFT, String(""), doc_only=True)
+            )
+        # Home / End / Page with Ctrl — the mover ignores Ctrl but the chord
+        # must still clear the gate so it isn't swallowed.
+        var he = List[UInt32]()
+        he.append(KEY_HOME)
+        he.append(KEY_END)
+        he.append(KEY_PAGEUP)
+        he.append(KEY_PAGEDOWN)
+        for i in range(len(he)):
+            self._hotkeys.append(
+                Hotkey(he[i], MOD_CTRL, String(""), doc_only=True)
+            )
+            self._hotkeys.append(
+                Hotkey(he[i], MOD_CTRL | MOD_SHIFT, String(""), doc_only=True)
+            )
 
     def _bottom_chrome_height(self, screen: Rect) -> Int:
         """Rows the bottom chrome (status bar + optional tab bar) eats
@@ -6565,12 +6718,23 @@ struct Desktop(Movable):
         if (not self.host_owns_menu) and event.mods == MOD_ALT \
                 and self._open_menu_by_mnemonic(event.key):
             return Optional[String]()
+        # Global hotkey gate: a hotkey-style chord (Ctrl/Alt/Cmd combo,
+        # function key, or Shift + navigation key) only reaches the focused
+        # editor if it's registered *somewhere* in ``_hotkeys`` — including
+        # the ``doc_only`` rows the editor owns. An unregistered chord is
+        # swallowed (with a beep) rather than handled silently, so it's
+        # impossible to ship a framework hotkey the Keyboard Shortcuts page
+        # doesn't know about: the only way to make a chord work is to register
+        # it, and registering it documents it. Plain text and Shift+printable
+        # (capital letters, symbols) are never gated — they fall through to
+        # the editor as input.
+        if self._is_gated_combo(event) \
+                and not self._combo_registered(event.key, event.mods):
+            beep()
+            return Optional[String]()
         var consumed = self.windows.handle_key(event)
-        # An unbound Ctrl/Cmd chord that nothing claimed (no hotkey
-        # match above, no menu mnemonic, focused editor returned False)
-        # should beep rather than disappear. Without this, pressing
-        # Cmd+B with no binding produces no feedback at all — the user
-        # can't tell whether the key was seen.
+        # A registered chord the focused editor still declined to claim
+        # (e.g. Alt+Enter outside any squiggle) beeps rather than disappears.
         if not consumed \
                 and (event.mods & (MOD_CTRL | MOD_META)) != 0:
             beep()
@@ -6593,6 +6757,49 @@ struct Desktop(Movable):
         # a right-click does; drain it here so it opens from the keyboard.
         self._maybe_open_context_menu()
         return Optional[String]()
+
+    @staticmethod
+    def _is_gated_combo(event: Event) -> Bool:
+        """True when ``event`` is a hotkey-style chord that the global gate
+        routes through ``_hotkeys`` (see ``_handle_key``).
+
+        Gated:
+          * any function key (F1–F12), with or without modifiers;
+          * any combo holding Ctrl / Alt / Cmd, *unless* the key is a
+            text-editing key (Enter / Tab / Backspace / Delete / Space) — those
+            stay editing keys even with a modifier (Cmd+Enter still inserts a
+            newline, Ctrl+Backspace still deletes a word);
+          * Shift + a navigation key (arrows / Home / End / Page / Insert),
+            which is selection movement.
+
+        Not gated: plain keys and Shift+printable. Capital letters and shifted
+        symbols arrive as ``(printable, MOD_SHIFT)`` from the native host, so
+        gating Shift+printable would swallow ordinary typing.
+        """
+        if event.kind != EVENT_KEY:
+            return False
+        var key = event.key
+        var mods = event.mods
+        if key >= KEY_F1 and key <= KEY_F12:
+            return True
+        var is_edit_key = key == KEY_ENTER or key == KEY_TAB \
+            or key == KEY_BACKSPACE or key == KEY_DELETE or key == KEY_SPACE
+        if (mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0:
+            return not is_edit_key
+        # Navigation keys occupy the contiguous range KEY_UP..KEY_INSERT.
+        var is_nav_key = key >= KEY_UP and key <= KEY_INSERT
+        if (mods & MOD_SHIFT) != 0 and is_nav_key:
+            return True
+        return False
+
+    def _combo_registered(self, key: UInt32, mods: UInt8) -> Bool:
+        """True when ``(key, mods)`` matches any registered hotkey — including
+        the ``doc_only`` rows the editor handles directly. The gate consults
+        this to decide whether a chord is allowed to reach the editor."""
+        for i in range(len(self._hotkeys)):
+            if self._hotkeys[i].key == key and self._hotkeys[i].mods == mods:
+                return True
+        return False
 
     def _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
         var k = Int(key)
@@ -6666,6 +6873,27 @@ struct Desktop(Movable):
         without going through the menu bar. ``screen`` is needed for the
         maximize-related actions; pass the same rect you use for paint.
         """
+        # Synthetic-key actions (Navigation-menu items for editor-movement
+        # chords). Decode ``key:<keycode>:<mods>`` and replay it through
+        # ``_handle_key`` exactly as if the user had pressed it — so the
+        # editor's own handlers do the work and the post-key drains (e.g. the
+        # git-gutter popup for Ctrl+Shift+Up/Down) still run. The matching
+        # ``doc_only`` registry row means ``_handle_key`` skips dispatch and
+        # forwards the keystroke to the editor.
+        if starts_with(action, SYNTH_KEY_PREFIX):
+            var b = action.as_bytes()
+            var p = len(SYNTH_KEY_PREFIX.as_bytes())
+            var keyv = parse_int_prefix(action, p, len(b))
+            while p < len(b) and Int(b[p]) >= 0x30 and Int(b[p]) <= 0x39:
+                p += 1
+            if p < len(b) and Int(b[p]) == 0x3A:  # ':'
+                p += 1
+            var modsv = parse_int_prefix(action, p, len(b))
+            if keyv >= 0 and modsv >= 0:
+                return self._handle_key(
+                    Event.key_event(UInt32(keyv), UInt8(modsv)), screen,
+                )
+            return Optional[String]()
         # Clipboard / history edits target whatever currently owns input.
         # On the native frontend AppKit fires these via the Edit menu's ⌘
         # key-equivalents, which arrive here directly and bypass the
