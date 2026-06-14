@@ -1249,6 +1249,12 @@ struct Desktop(Movable):
     # editor window every paint so the bool is always the source of
     # truth, regardless of who created the editor.
     var config: TurbokodConfig
+    # False when the on-disk config existed but couldn't be read/parsed and
+    # we *also* couldn't move it aside — in that case ``self.config`` holds
+    # defaults that must never be written back, or we'd atomically destroy
+    # the user's real settings. Gated on by every ``save_config`` call site.
+    # ``True`` by default (fresh process / no file / clean load all persist).
+    var config_persistable: Bool
     # Per-project run/debug targets, loaded from
     # ``<project>/.turbokod/targets.json`` when ``_set_project`` runs.
     # Empty (no targets) when no project is open. The active index
@@ -1539,6 +1545,7 @@ struct Desktop(Movable):
         # state without inheriting whatever the developer's config happens
         # to be (e.g. ``tab_bar`` changes the workspace height by a row).
         self.config = TurbokodConfig()
+        self.config_persistable = True
         self.targets = ProjectTargets()
         self.run_session = RunSession()
         self._run_output_held = False
@@ -2180,6 +2187,25 @@ struct Desktop(Movable):
             return
         var interior = self.windows.windows[win_idx].interior()
         self.windows.windows[win_idx].editor.smooth_set(interior, vis)
+
+    def focused_overlay_bounds(mut self, screen: Rect) -> Optional[Rect]:
+        """Screen-space bounds of the focused editor's active screen-anchored
+        body overlay (minimap/diagnostic/spell tooltip or LSP hover popup), or
+        ``None``. The macOS smooth-scroll compositor calls this after its body
+        overdraw to re-blit the popup on top — the overdraw suppresses overlays
+        and would otherwise erase it. Gated like ``scroll_regions`` (focused
+        window must be an editor) so the rect lines up with that path's
+        interior."""
+        if not self.windows.focused_is_editor():
+            return None
+        self.windows.fit_into(self.workspace_rect(screen))
+        var idx = self.windows.focused
+        if idx < 0 or idx >= len(self.windows.windows):
+            return None
+        var interior = self.windows.windows[idx].interior()
+        if interior.is_empty():
+            return None
+        return self.windows.windows[idx].editor.active_overlay_bounds(interior)
 
     def minimap_to(mut self, win_idx: Int, frac: Float64):
         """Scroll editor ``win_idx`` proportionally from a sub-cell-precise
@@ -3656,7 +3682,7 @@ struct Desktop(Movable):
             if new_max != self.config.max_open_windows:
                 self.config.max_open_windows = new_max
                 self._enforce_window_cap()
-            _ = save_config(self.config)
+            self._persist_config()
             self._rebuild_lsp_specs()
             # Kick every running server to re-read its configuration — a
             # pull-config server re-issues workspace/configuration, which
@@ -4617,7 +4643,13 @@ struct Desktop(Movable):
         missing / unreadable). The host calls this once at startup;
         ``__init__`` deliberately doesn't, so tests get deterministic
         defaults instead of inheriting the developer's local config."""
-        self.config = load_config()
+        var loaded = load_config()
+        # If the file existed but was unreadable and we couldn't move it
+        # aside, refuse to persist — otherwise the first save would write
+        # these defaults over the user's real (just-unreadable) settings.
+        # Read the flag before consuming ``config`` out of ``loaded``.
+        self.config_persistable = loaded.persistable
+        self.config = loaded.config.copy()
         # Apply the saved theme (or the default if the name is unknown).
         self.active_theme = theme_by_name(self.config.theme)
         self.theme_version += 1
@@ -4634,6 +4666,14 @@ struct Desktop(Movable):
         # appear from the just-loaded list.
         if not self.project:
             self._reset_no_project_menu()
+
+    def _persist_config(self):
+        """Write ``self.config`` to disk — unless a failed load left us
+        holding defaults over an unreadable original we couldn't move aside.
+        Centralizes the persistability gate so no save site can forget it."""
+        if not self.config_persistable:
+            return
+        _ = save_config(self.config)
 
     def set_theme(mut self, name: String):
         """Switch the active color theme. Updates ``config.theme`` (so the
@@ -4992,7 +5032,7 @@ struct Desktop(Movable):
         # before any later step might raise — failing to save the config
         # is a non-fatal best-effort, just like the View-menu toggles.
         if record_recent_project(self.config, canonical):
-            _ = save_config(self.config)
+            self._persist_config()
         var items = List[MenuItem]()
         items.append(MenuItem(
             String("Project Settings..."), PROJECT_SETTINGS,
@@ -5051,7 +5091,7 @@ struct Desktop(Movable):
                 self.config.on_save_actions.append(pa^)
                 backfilled = True
         if backfilled:
-            _ = save_config(self.config)
+            self._persist_config()
         # Swap the speller's per-project bucket to this project's
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
@@ -6895,12 +6935,12 @@ struct Desktop(Movable):
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == EDITOR_TOGGLE_COMPRESS_KWARGS:
             self.config.compress_kwargs = not self.config.compress_kwargs
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == EDITOR_TOGGLE_GIT_CHANGES:
             self.config.git_changes = not self.config.git_changes
@@ -6911,22 +6951,22 @@ struct Desktop(Movable):
                 if self.windows.windows[i].is_editor:
                     self.windows.windows[i].editor.invalidate_git_changes()
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == EDITOR_TOGGLE_TAB_BAR:
             self.config.tab_bar = not self.config.tab_bar
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == EDITOR_TOGGLE_MINIMAP:
             self.config.minimap = not self.config.minimap
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == EDITOR_TOGGLE_STICKY_SCROLL:
             self.config.sticky_scroll = not self.config.sticky_scroll
             self._apply_view_config()
-            _ = save_config(self.config)
+            self._persist_config()
             return Optional[String]()
         if action == GIT_LOCAL_CHANGES:
             if self.project:
@@ -9577,7 +9617,7 @@ struct Desktop(Movable):
             _ = write_project_on_save(root, self.project_settings.project_actions)
             self.project_on_save = self.project_settings.project_actions.copy()
             self.config.on_save_actions = self.project_settings.library.copy()
-            _ = save_config(self.config)
+            self._persist_config()
             self.project_settings.ack_on_save_dirty()
         if self.project_settings.targets_dirty:
             self.targets = self.project_settings.targets_value()
@@ -10281,7 +10321,7 @@ struct Desktop(Movable):
         # Mirror the persisted list into the in-memory cache so the
         # picker can read from a single source.
         self._recent_files = self.config.recent_files.copy()
-        _ = save_config(self.config)
+        self._persist_config()
 
     # --- navigation history ---------------------------------------------
 

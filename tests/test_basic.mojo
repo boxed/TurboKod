@@ -94,9 +94,9 @@ from turbokod.desktop import (
     ctrl_key, format_hotkey,
 )
 from turbokod.file_io import (
-    basename, delete_tree, find_git_project, join_path, list_directory,
-    parent_path, project_relative, read_file, rename_path, stat_file,
-    write_file,
+    basename, delete_path, delete_tree, find_git_project, join_path,
+    list_directory, parent_path, project_relative, read_file, rename_path,
+    stat_file, write_file,
 )
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
@@ -239,7 +239,8 @@ from turbokod.project_grammars import (
 from turbokod.action_editor import ActionEditor
 from turbokod.config import (
     LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    WRAP_NONE, WRAP_SMART, WRAP_SOFT,
+    TurbokodConfig, WRAP_NONE, WRAP_SMART, WRAP_SOFT, load_config,
+    save_config,
 )
 from turbokod.dropdown import Dropdown
 from turbokod.settings import Settings, _FOCUS_LS_INLAY_HINTS
@@ -19034,6 +19035,52 @@ def test_editor_minimap_hover_paints_tooltip() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_editor_active_overlay_bounds_covers_painted_tooltip() raises:
+    """Regression: the macOS smooth-scroll compositor re-blits the rect that
+    ``active_overlay_bounds`` reports on top of its body overdraw (which
+    suppresses overlays). That rect must cover *every* cell the tooltip
+    actually paints — box + drop shadow — or mid-scroll the tooltip gets
+    clipped away, leaving only the stray shadow on the minimap column (the
+    reported bug). Diff a suppressed-overlay paint against a normal paint to
+    isolate the tooltip cells, then assert they all fall inside the bounds."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_overlay_bounds.py"))
+    assert_true(write_file(path, String("# helo world\n")))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    var view = Rect(0, 0, 40, 5)
+    var hover = Event.mouse_event(
+        Point(39, 0), MOUSE_BUTTON_NONE, True, True,
+    )
+    _ = ed.handle_mouse(hover, view)
+    assert_equal(ed._minimap_hover_kind, 2)
+    var bounds_opt = ed.active_overlay_bounds(view)
+    assert_true(Bool(bounds_opt))
+    var bounds = bounds_opt.value()
+    # Body-only paint (overlays suppressed) vs. full paint — the diff is
+    # exactly the tooltip's cells (box glyphs + darkened shadow).
+    var body = Canvas(40, 5)
+    body.fill(view, String(" "), default_attr())
+    ed._suppress_overlays = True
+    ed.paint(body, view, False)
+    ed._suppress_overlays = False
+    var full = Canvas(40, 5)
+    full.fill(view, String(" "), default_attr())
+    ed.paint(full, view, False)
+    var painted_any = False
+    for y in range(view.b.y):
+        for x in range(view.b.x):
+            if full.get(x, y) != body.get(x, y):
+                painted_any = True
+                assert_true(bounds.contains(Point(x, y)))
+    assert_true(painted_any)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_text_hover_over_diagnostic_records_kind_and_message() raises:
     """Hovering over a cell covered by a diagnostic underline (in the
     editor surface itself, not the minimap) must populate the same
@@ -21098,7 +21145,94 @@ def test_detect_custom_python_files_glob() raises:
     assert_equal(ed.test_nodes[0], String("/x/utils__tests.py::test_round"))
 
 
+def test_corrupt_config_is_not_clobbered_with_defaults() raises:
+    """A config file that exists but won't parse must NOT be silently
+    replaced by defaults that then get saved back — that's how a transient
+    read glitch turns into permanent total settings loss. The loader moves
+    the unreadable file aside (preserving it) and reports persistability so
+    the caller knows the defaults are safe to write only because the
+    original is out of the way.
+    """
+    var home = String("/tmp/turbokod_test_home")
+    var dir = home + String("/.config/turbokod")
+    var path = dir + String("/config.json")
+    var corrupt_glob = path + String(".corrupt")
+
+    # Clean any leftovers from a prior run so the aside-move lands on the
+    # canonical ``.corrupt`` name (not ``.corrupt.1``).
+    _ = delete_path(path)
+    _ = delete_path(corrupt_glob)
+
+    # 1. A clean save round-trips and is persistable.
+    var cfg = TurbokodConfig()
+    cfg.theme = String("MyCustomTheme")
+    cfg.font_size = 19
+    assert_true(save_config(cfg))
+    var loaded = load_config()
+    assert_true(loaded.persistable)
+    assert_equal(loaded.config.theme, String("MyCustomTheme"))
+    assert_equal(loaded.config.font_size, 19)
+
+    # 2. Corrupt the file in place (simulating a torn/garbage config).
+    assert_true(write_file(path, String("{ this is not valid json ]}")))
+
+    # 3. Load now returns defaults — but the original was moved aside, not
+    #    destroyed, and the result is persistable (safe to overwrite the
+    #    now-absent canonical path).
+    var recovered = load_config()
+    assert_equal(recovered.config.theme, String("Turbo C++ 3.0"))
+    assert_true(recovered.persistable)
+    # The unreadable bytes are preserved under ``.corrupt`` for recovery...
+    var aside = stat_file(corrupt_glob)
+    assert_true(aside.ok)
+    assert_equal(
+        read_file(corrupt_glob), String("{ this is not valid json ]}"),
+    )
+    # ...and the canonical path no longer holds the garbage.
+    assert_false(stat_file(path).ok)
+
+    _ = delete_path(corrupt_glob)
+
+
+def test_write_file_in_place_fallback_replaces_fully() raises:
+    """When the directory is read-only (no sibling temp possible) but the
+    file itself is writable, ``write_file`` falls back to an in-place
+    overwrite. That path must fully replace the contents — including
+    ``ftruncate``-ing away a stale tail when the new content is shorter —
+    not leave a hybrid of new-prefix + old-suffix.
+    """
+    var dir = String("/tmp/turbokod_test_home/ro_writedir")
+    var path = dir + String("/data.txt")
+    var c_dir = dir + String("\0")
+    var c_path = path + String("\0")
+
+    # Fresh, writable dir + a long initial file.
+    _ = external_call["mkdir", Int32](c_dir.unsafe_ptr(), Int32(0o755))
+    var long = String("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")  # 36 bytes
+    assert_true(write_file(path, long))
+    assert_equal(read_file(path), long)
+
+    # Make the directory read-only so the ``.tk-tmp`` create fails and the
+    # in-place fallback (open O_WRONLY, no upfront truncate) is exercised.
+    _ = external_call["chmod", Int32](c_dir.unsafe_ptr(), Int32(0o555))
+
+    var short = String("bb")  # shorter than the old content
+    var wrote = write_file(path, short)
+
+    # Restore write perms before asserting so cleanup can't be blocked.
+    _ = external_call["chmod", Int32](c_dir.unsafe_ptr(), Int32(0o755))
+
+    assert_true(wrote)
+    # The stale tail of the old 36-byte file must be gone — exact match,
+    # not "bb" followed by leftover 'A's.
+    assert_equal(read_file(path), short)
+
+    _ = delete_path(path)
+
+
 def _run_chunk_05() raises:
+    test_corrupt_config_is_not_clobbered_with_defaults()
+    test_write_file_in_place_fallback_replaces_fully()
     test_sgr_parse()
     test_detect_pytest_tests()
     test_detect_skips_non_test_file()
@@ -21177,6 +21311,7 @@ def _run_chunk_05() raises:
     test_editor_minimap_click_scrolls_to_marked_line()
     test_editor_minimap_hover_records_spell_word()
     test_editor_minimap_hover_paints_tooltip()
+    test_editor_active_overlay_bounds_covers_painted_tooltip()
     test_editor_text_hover_over_diagnostic_records_kind_and_message()
     test_editor_text_hover_off_diagnostic_clears_state()
     test_editor_text_hover_picks_most_severe_diagnostic_on_overlap()

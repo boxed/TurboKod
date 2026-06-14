@@ -49,6 +49,13 @@ int64_t tk_editor_scroll_regions(int64_t h, int64_t cols, int64_t rows,
 int64_t tk_editor_region_layout(int64_t h, int64_t win_idx,
                                 int64_t region_cols, int64_t region_rows,
                                 int64_t out_ptr, int64_t cap);
+//   tk_editor_overlay_bounds: screen-cell bounds [x, y, w, h] (box + drop
+//     shadow) of the focused editor's active screen-anchored overlay (minimap
+//     tooltip or LSP hover popup). Returns 1 when one is up (and fills
+//     out_ptr), 0 otherwise. Re-blit this rect from the main frame on top of
+//     the smooth-scroll overdraw, which suppresses overlays.
+int64_t tk_editor_overlay_bounds(int64_t h, int64_t cols, int64_t rows,
+                                 int64_t out_ptr);
 int64_t tk_editor_smooth_begin(int64_t h, int64_t win_idx,
                                int64_t cols, int64_t rows, int64_t out_ptr);
 void    tk_editor_smooth_set(int64_t h, int64_t win_idx,

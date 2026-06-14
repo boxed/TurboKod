@@ -600,7 +600,7 @@ final class CellView: NSView {
         drawCells(ctx, buf, n, c, originX: 0, originY: 0)
         // Smooth scroll: when the focused editor rests (or is being dragged)
         // at a sub-line offset, overdraw its body translated by the fraction.
-        if surface == .main { compositeSmoothScroll(ctx) }
+        if surface == .main { compositeSmoothScroll(ctx, mainN: n, mainCols: c) }
         // First main-surface frame is now on screen. Kick the deferred
         // startup work (PATH recovery, font-family scan) on the next runloop
         // turn so it runs *after* this draw flushes — not inside it. One-shot
@@ -706,7 +706,7 @@ final class CellView: NSView {
     /// `sub + 2` rows (`tk_editor_region_layout`) so the segments shifted off
     /// the top, the partially-visible bottom line, and a rubber-band gap all
     /// have content to slide into the clip.
-    private func compositeSmoothScroll(_ ctx: CGContext) {
+    private func compositeSmoothScroll(_ ctx: CGContext, mainN: Int, mainCols: Int) {
         guard let r = focusedSmoothRegion(),
               (r.frac != 0 || r.sub != 0), r.w > 0, r.h > 0 else { return }
         let regionRows = r.sub + r.h + 2
@@ -734,6 +734,26 @@ final class CellView: NSView {
                   originY: CGFloat(r.y) * CELL_H
                       - (CGFloat(r.sub) + r.frac) * CELL_H)
         ctx.restoreGState()
+        // The overdraw above suppressed the editor's screen-anchored overlays
+        // (minimap/diagnostic/spell tooltip, LSP hover popup) and just painted
+        // over them — they don't scroll with the body. The main frame already
+        // rendered the popup into `buf` with its drop shadow composited over
+        // real content, so re-blit just that rect on top, untranslated. (Clip
+        // + redraw the whole main buffer: only the overlay cells land.)
+        var ob = [Int32](repeating: 0, count: 4)
+        let hasOverlay = ob.withUnsafeMutableBufferPointer { b in
+            Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
+                Int64(Int(bitPattern: b.baseAddress))))
+        }
+        if hasOverlay == 1 {
+            let oclip = CGRect(x: CGFloat(ob[0]) * CELL_W, y: CGFloat(ob[1]) * CELL_H,
+                               width: CGFloat(ob[2]) * CELL_W,
+                               height: CGFloat(ob[3]) * CELL_H)
+            ctx.saveGState()
+            ctx.clip(to: oclip)
+            drawCells(ctx, buf, mainN, mainCols, originX: 0, originY: 0)
+            ctx.restoreGState()
+        }
     }
 
     /// Damped overscroll distance (in visual rows) for a raw overshoot past

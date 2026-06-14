@@ -5391,18 +5391,19 @@ struct Editor(Copyable, Movable):
                     _completion_kind_name(item.kind), kind_attr,
                 )
 
-    def paint_minimap_tooltip(
-        self, mut canvas: Canvas, view: Rect,
-    ):
-        """Render the hover tooltip for the right-side minimap. Called
-        after the editor's main paint pass so it overlays the text.
+    def _minimap_tooltip_layout(
+        self, view: Rect,
+    ) -> Optional[Tuple[Int, Int, Int, Int, String]]:
+        """Anchor + size + label for the right-side minimap hover tooltip:
+        ``(bx, by, w, h, label)`` in screen cells, or ``None`` when nothing
+        is hovered or there's no room to draw.
 
-        Built on the framework's standard popup chrome — drop shadow,
-        boxed border, light-gray background, soft-wrapped body text —
-        so a long diagnostic message wraps inside the box instead of
-        bleeding past its right edge."""
+        Factored out of ``paint_minimap_tooltip`` so ``active_overlay_bounds``
+        can report the *exact same* rect — the macOS smooth-scroll compositor
+        re-blits that rect from the main frame on top of the body overdraw, so
+        the painted box and the reported rect must agree cell-for-cell."""
         if self._minimap_hover_kind == 0:
-            return
+            return None
         var label: String
         if self._minimap_hover_kind == 1:
             label = String("Modified line ") \
@@ -5433,7 +5434,7 @@ struct Editor(Copyable, Movable):
                 label = prefix + String("line ") \
                     + String(self._minimap_hover_buf_row + 1)
         else:
-            return
+            return None
         # Reserve 2 cells on the right of ``view`` for the drop-shadow
         # strip so the shadow doesn't bleed past the editor area when
         # the popup is anchored near the right edge.
@@ -5444,7 +5445,7 @@ struct Editor(Copyable, Movable):
         var w = size[0]
         var h = size[1]
         if w == 0 or h == 0:
-            return
+            return None
         # Two anchor modes, selected by ``_minimap_hover_below``:
         #
         # * Text-area hover (below=True): tooltip top-left is the
@@ -5483,7 +5484,26 @@ struct Editor(Copyable, Movable):
                 by = view.a.y
             if by + h > view.b.y:
                 by = view.b.y - h
-        var r = Rect(bx, by, bx + w, by + h)
+        return (bx, by, w, h, label)
+
+    def paint_minimap_tooltip(
+        self, mut canvas: Canvas, view: Rect,
+    ):
+        """Render the hover tooltip for the right-side minimap. Called
+        after the editor's main paint pass so it overlays the text.
+
+        Built on the framework's standard popup chrome — drop shadow,
+        boxed border, light-gray background, soft-wrapped body text —
+        so a long diagnostic message wraps inside the box instead of
+        bleeding past its right edge."""
+        var lay = self._minimap_tooltip_layout(view)
+        if not lay:
+            return
+        var l = lay.value()
+        var w = l[2]
+        var h = l[3]
+        var label = l[4]
+        var r = Rect(l[0], l[1], l[0] + w, l[1] + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
         # Drop shadow first (compositing under ``r``), then the box
         # itself: fill bg, draw border, soft-wrap body text inside the
@@ -5501,17 +5521,18 @@ struct Editor(Copyable, Movable):
         if msg_rect.width() > 0 and msg_rect.height() > 0:
             _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
-    def paint_hover_popup(self, mut canvas: Canvas, view: Rect):
-        """Render the LSP-hover popup if a result is parked. Suppressed
-        while a minimap / diagnostic / spell tooltip is up — those
-        anchor to the same cells and stacking them would be confusing.
-
-        Anchored just below the hovered word; flips above when there's
-        no room below. Soft-wrapped to ``_HOVER_POPUP_WIDTH_MAX``."""
+    def _hover_popup_layout(
+        self, view: Rect,
+    ) -> Optional[Tuple[Int, Int, Int, Int, String]]:
+        """Anchor + size + label for the LSP-hover popup: ``(bx, by, w, h,
+        label)`` in screen cells, or ``None`` when no result is parked (or a
+        minimap tooltip is up, which suppresses it). Shared by
+        ``paint_hover_popup`` and ``active_overlay_bounds`` — see
+        ``_minimap_tooltip_layout`` for why they must agree."""
         if self._minimap_hover_kind != 0:
-            return
+            return None
         if len(self._hover_result_text.as_bytes()) == 0:
-            return
+            return None
         var max_box_w = view.width() - 2
         if max_box_w > _HOVER_POPUP_WIDTH_MAX:
             max_box_w = _HOVER_POPUP_WIDTH_MAX
@@ -5522,7 +5543,7 @@ struct Editor(Copyable, Movable):
         var w = size[0]
         var h = size[1]
         if w == 0 or h == 0:
-            return
+            return None
         # Prefer below the hovered word; flip above if there's no room.
         var bx = self._hover_result_anchor_x
         var by = self._hover_result_anchor_y + 1
@@ -5534,7 +5555,23 @@ struct Editor(Copyable, Movable):
             bx = view.b.x - w
         if bx < view.a.x:
             bx = view.a.x
-        var r = Rect(bx, by, bx + w, by + h)
+        return (bx, by, w, h, label)
+
+    def paint_hover_popup(self, mut canvas: Canvas, view: Rect):
+        """Render the LSP-hover popup if a result is parked. Suppressed
+        while a minimap / diagnostic / spell tooltip is up — those
+        anchor to the same cells and stacking them would be confusing.
+
+        Anchored just below the hovered word; flips above when there's
+        no room below. Soft-wrapped to ``_HOVER_POPUP_WIDTH_MAX``."""
+        var lay = self._hover_popup_layout(view)
+        if not lay:
+            return
+        var l = lay.value()
+        var w = l[2]
+        var h = l[3]
+        var label = l[4]
+        var r = Rect(l[0], l[1], l[0] + w, l[1] + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
         paint_drop_shadow(canvas, r)
         var tt_painter = Painter(r)
@@ -5546,6 +5583,27 @@ struct Editor(Copyable, Movable):
         )
         if msg_rect.width() > 0 and msg_rect.height() > 0:
             _ = canvas.put_wrapped_text(msg_rect, label, attr)
+
+    def active_overlay_bounds(self, view: Rect) -> Optional[Rect]:
+        """Screen-space bounding rect (box **plus drop shadow**) of whichever
+        screen-anchored body overlay is currently shown — the minimap /
+        diagnostic / spell tooltip, else the LSP hover popup. ``None`` when
+        neither is up.
+
+        The macOS smooth-scroll compositor overdraws the editor body
+        translated by a sub-cell pixel offset (with overlays suppressed) and
+        would otherwise paint over these popups, leaving only the stray bit of
+        drop shadow that falls on the minimap column it excludes. The host
+        re-blits this rect from the main frame on top of that overdraw so the
+        popup survives. The shadow extends 2 cells right and 1 row below the
+        box (see ``paint_drop_shadow``), so widen the rect to cover it."""
+        var lay = self._minimap_tooltip_layout(view)
+        if not lay:
+            lay = self._hover_popup_layout(view)
+        if not lay:
+            return None
+        var l = lay.value()
+        return Rect(l[0], l[1], l[0] + l[2] + 2, l[1] + l[3] + 1)
 
     def _paint_right_gutter(
         self, mut canvas: Canvas, painter: Painter,

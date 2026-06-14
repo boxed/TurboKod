@@ -12,7 +12,7 @@ theme, font, and more. Other settings can join later by extending
 
 from std.ffi import external_call
 
-from .file_io import read_file, stat_file, write_file
+from .file_io import read_file, rename_path, stat_file, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string,
@@ -392,20 +392,69 @@ def record_recent_file(
     return True
 
 
-def load_config() -> TurbokodConfig:
-    """Load the saved config, or return defaults on any failure."""
+@fieldwise_init
+struct ConfigLoad(Copyable, Movable):
+    """Result of ``load_config``: the config plus whether it's safe to
+    persist back over the file on disk.
+
+    ``persistable`` is the whole point of this struct. ``load_config``
+    returns defaults in *three* very different situations — fresh install
+    (no file), ``$HOME`` unset (no persistent config at all), and a file
+    that *exists but couldn't be read/parsed*. The first two are benign:
+    writing defaults later is correct. The third is a trap — if the editor
+    treats a failed load as "user has default settings" and then saves on
+    the next file focus / theme change, the atomic write destroys whatever
+    the user actually had. So on an unreadable existing file we move it
+    aside (preserving it for manual recovery) and only set ``persistable``
+    if that succeeded; if we couldn't get it out of the way, the caller
+    must refuse to overwrite it."""
+    var config: TurbokodConfig
+    var persistable: Bool
+
+
+def _move_config_aside(path: String) -> Bool:
+    """Rename an unreadable config to ``config.json.corrupt[.N]`` so it's
+    preserved for recovery and the next save can start clean. Returns True
+    if the file was moved out of the way (or already gone)."""
+    var base = path + String(".corrupt")
+    var target = base
+    var n = 1
+    while stat_file(target).ok:
+        target = base + String(".") + String(n)
+        n += 1
+        if n > 100:
+            return False
+    return rename_path(path, target)
+
+
+def _on_load_failed(path: String) -> ConfigLoad:
+    """An existing config file couldn't be read/parsed. Move it aside and
+    return defaults that are persistable only if we got the file out of the
+    way — otherwise refuse to overwrite it on the next save."""
+    var moved = _move_config_aside(path)
+    return ConfigLoad(TurbokodConfig(), moved)
+
+
+def load_config() -> ConfigLoad:
+    """Load the saved config. See ``ConfigLoad`` for why this returns a
+    persistability flag rather than a bare config — a failed read must not
+    be laundered into a destructive save-back of defaults."""
     var cfg = TurbokodConfig()
     var path = _config_path()
     if len(path.as_bytes()) == 0:
-        return cfg^
+        return ConfigLoad(cfg^, True)
     var info = stat_file(path)
     if not info.ok:
-        return cfg^
+        # Fresh install — no file yet. Writing defaults later is correct.
+        return ConfigLoad(cfg^, True)
+    # The file exists. Parse into this scratch config and only return it on
+    # *full* success — a mid-parse error must yield clean defaults, not a
+    # half-merged hybrid of file values and defaults.
     try:
         var text = read_file(path)
         var root = parse_json(text)
         if not root.is_object():
-            return cfg^
+            return _on_load_failed(path)
         cfg.line_numbers = json_get_bool(
             root, String("line_numbers"), cfg.line_numbers,
         )
@@ -546,10 +595,11 @@ def load_config() -> TurbokodConfig:
                             ov.argvs.append(argv^)
                 cfg.language_servers.append(ov^)
     except e:
-        # Defaults-on-failure is the contract — but log so a
-        # corrupt/unparseable config doesn't disappear into the void.
+        # The file exists but read/parse raised. Log, move it aside, and
+        # return defaults that won't clobber the original (see ConfigLoad).
         print("config: load_config:", String(e))
-    return cfg^
+        return _on_load_failed(path)
+    return ConfigLoad(cfg^, True)
 
 
 def save_config(config: TurbokodConfig) -> Bool:

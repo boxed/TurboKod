@@ -19,6 +19,7 @@ from .posix import alloc_zero_buffer, realpath
 
 
 comptime O_RDONLY: Int32 = 0
+comptime O_WRONLY: Int32 = 1            # same value on Linux and macOS
 comptime STAT_BUF_SIZE: Int = 256       # generous upper bound for any platform
 # Platform-specific byte offsets into ``struct stat`` for the fields we read.
 # Determined from /usr/include/sys/_types/_s_*.h on Darwin and from
@@ -132,10 +133,17 @@ def write_file(path: String, content: String) -> Bool:
     an ``ENOSPC``/short write returned success and let ``Editor.save`` clear
     the dirty flag over an incomplete file.
 
-    ``creat(2)`` is used (not ``open``) because it's non-variadic and so
-    works through Mojo's ``external_call``. If the directory isn't writable
-    but the file itself is, the temp create fails and we fall back to an
-    in-place (non-atomic) write so saving still works in that rare case.
+    ``creat(2)`` is used (not ``open``) for the temp file because it's
+    non-variadic and so works through Mojo's ``external_call``. If the
+    directory isn't writable but the file itself is, the temp create fails
+    and we fall back to an in-place (non-atomic) overwrite so saving still
+    works in that rare case. That fallback deliberately does **not** use
+    ``creat`` on the real path: ``creat`` implies ``O_TRUNC``, which would
+    empty the file *before* the write, so a mid-write ``ENOSPC`` would
+    destroy the original. Instead it opens ``O_WRONLY`` (no truncate),
+    writes the full content, and only ``ftruncate``s down to the new length
+    on success — a short write then leaves a corrupt-but-non-empty file
+    (which the config/session loaders move aside) rather than a blank one.
     """
     var bytes = content.as_bytes()
     var total = len(bytes)
@@ -146,7 +154,9 @@ def write_file(path: String, content: String) -> Bool:
     var fd = external_call["creat", Int32](c_tmp.unsafe_ptr(), Int32(0o644))
     var atomic = fd >= 0
     if not atomic:
-        fd = external_call["creat", Int32](c_path.unsafe_ptr(), Int32(0o644))
+        # No sibling temp possible (read-only dir). Overwrite in place
+        # without truncating up front — see the docstring.
+        fd = external_call["open", Int32](c_path.unsafe_ptr(), O_WRONLY)
         if fd < 0:
             return False
 
@@ -160,11 +170,19 @@ def write_file(path: String, content: String) -> Bool:
             ok = False
             break
         written += n
-    _ = external_call["fsync", Int32](fd)
-    _ = external_call["close", Int32](fd)
 
     if not atomic:
+        # Drop any stale tail (old file longer than the new content) only
+        # after a complete write; on a short write we leave the file as-is
+        # and report failure rather than shrinking to a truncated prefix.
+        if ok:
+            _ = external_call["ftruncate", Int32](Int(fd), Int(total))
+        _ = external_call["fsync", Int32](fd)
+        _ = external_call["close", Int32](fd)
         return ok
+
+    _ = external_call["fsync", Int32](fd)
+    _ = external_call["close", Int32](fd)
     if ok and external_call["rename", Int32](
         c_tmp.unsafe_ptr(), c_path.unsafe_ptr()
     ) == Int32(0):

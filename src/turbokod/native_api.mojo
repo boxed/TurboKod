@@ -534,6 +534,30 @@ def tk_editor_region_layout(
 
 
 @export
+def tk_editor_overlay_bounds(
+    h: Int, cols: Int, rows: Int, out_ptr: Int
+) -> Int:
+    """Screen-cell bounds (box + drop shadow) of the focused editor's active
+    screen-anchored overlay — the minimap/diagnostic/spell tooltip or the LSP
+    hover popup. Writes ``[x, y, w, h]`` (Int32) to ``out_ptr`` and returns 1
+    when one is up, 0 otherwise. The host re-blits this rect from the main
+    frame on top of the smooth-scroll body overdraw (which suppresses overlays
+    and would otherwise erase the popup)."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var b = _desk(h)[].focused_overlay_bounds(Rect(0, 0, cols, rows))
+    if not b:
+        return 0
+    var r = b.value()
+    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    op[0] = Int32(r.a.x)
+    op[1] = Int32(r.a.y)
+    op[2] = Int32(r.width())
+    op[3] = Int32(r.height())
+    return 1
+
+
+@export
 def tk_editor_smooth_begin(
     h: Int, win_idx: Int, cols: Int, rows: Int, out_ptr: Int
 ) -> Int:
