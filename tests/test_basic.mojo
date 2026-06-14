@@ -12403,6 +12403,72 @@ def test_editor_minimap_hint_loses_to_spell() raises:
     assert_equal(ed._minimap_kind_in_slice(0, 1), 2)
 
 
+def _has_spell_mark(ed: Editor) -> Bool:
+    for i in range(len(ed.spell_lines)):
+        if ed.spell_lines[i]:
+            return True
+    return False
+
+
+def test_paint_editor_region_does_not_mutate_minimap_spell_state() raises:
+    """Regression: the smooth-scroll body composite (``paint_editor_region``)
+    must NOT advance the shared spell/minimap state.
+
+    The native host clips the right-edge minimap gutter out of that composite
+    and keeps the prior main frame's gutter, repainting only the scrolling
+    body. So if a body-only render cleared ``spell_lines`` as a side effect
+    (it used to, via an inner ``flush_highlights``), the minimap mark would
+    linger after the inline squiggle cleared — exactly what happens right
+    after adding a word to the dictionary while the editor is mid-scroll. Only
+    the main ``paint`` — which also repaints the gutter — may flush, so body
+    and gutter clear on the same frame.
+    """
+    var path = _temp_path(String("_minimap_spell.py"))
+    var content = String("# this flarbnik here\n")
+    for i in range(1, 80):
+        content += "x = " + String(i) + "\n"
+    assert_true(write_file(path, content))
+    var d = Desktop()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(120, 40)
+    d.open_file_at(path, 0, 0, screen)
+    # Deterministic dictionary (don't depend on /usr/share/dict): "flarbnik"
+    # is absent so it's flagged; "this"/"here" are present so they aren't.
+    var dict = List[String]()
+    dict.append(String("this"))
+    dict.append(String("here"))
+    d.speller.load_words(dict)
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    var win = -1
+    for i in range(len(d.windows.windows)):
+        if d.windows.windows[i].is_editor:
+            win = i
+    assert_true(win >= 0)
+    assert_true(_has_spell_mark(d.windows.windows[win].editor))  # mark present
+
+    # Simulate "Add to dictionary": the word becomes known + spell invalidated.
+    dict.append(String("flarbnik"))
+    d.speller.load_words(dict)
+    d.windows.windows[win].editor.invalidate_spell()
+    # Still marked until a main paint re-derives it — the gutter on screen
+    # still shows the mark at this point, which is fine.
+    assert_true(_has_spell_mark(d.windows.windows[win].editor))
+
+    # The body-only composite render must leave ``spell_lines`` untouched, or
+    # the gutter (kept from the prior main frame) and the freshly-composited
+    # body would disagree.
+    var body = Canvas(120, 50)
+    d.paint_editor_region(win, body, 120, 50, True)
+    assert_true(_has_spell_mark(d.windows.windows[win].editor))
+
+    # The next main paint (which repaints the gutter) clears it — both clear
+    # on the same frame.
+    d.paint(canvas, screen)
+    assert_false(_has_spell_mark(d.windows.windows[win].editor))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_clear_diagnostics_drops_per_row_index() raises:
     """``clear_diagnostics`` empties both lists so the minimap collapses
     back to git/spell-only kinds — used when an LSP server crashes or
@@ -20866,6 +20932,7 @@ def _run_chunk_04() raises:
     test_editor_minimap_kind_prioritizes_error_over_git_and_spell()
     test_editor_minimap_warning_outranks_git_change()
     test_editor_minimap_hint_loses_to_spell()
+    test_paint_editor_region_does_not_mutate_minimap_spell_state()
     test_editor_clear_diagnostics_drops_per_row_index()
     test_lsp_subprocess_round_trip_via_cat()
     test_lsp_write_message_queues_bytes_when_fd_is_unavailable()

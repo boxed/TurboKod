@@ -2145,11 +2145,17 @@ struct Desktop(Movable):
             return
         if not self.windows.windows[win_idx].is_editor:
             return
-        # Highlights are already flushed by this frame's main `paint`; this
-        # is a no-op when clean (scroll position doesn't dirty tokens).
-        self.windows.windows[win_idx].editor.flush_highlights(
-            self.grammar_registry, self.speller,
-        )
+        # Render from the *already-flushed* state — do NOT flush here. The
+        # main `paint` (which also paints the right-edge minimap gutter) runs
+        # before any region layout in a frame and owns highlight + spell
+        # flushing. Flushing here too would let this body-only render advance
+        # the shared spell state (``spell_lines``) ahead of the gutter: after
+        # adding a word to the dictionary the body squiggle would clear while
+        # the minimap mark lingers (the host keeps the prior frame's gutter,
+        # clipping it out of this composite). Leaving the flush to the main
+        # paint keeps body and gutter in lockstep — both clear on the same
+        # frame. Scroll position doesn't dirty tokens, so the steady-scroll
+        # case is unaffected.
         self.windows.windows[win_idx].editor._suppress_overlays = True
         self.windows.windows[win_idx].editor.paint(
             canvas, Rect(0, 0, region_cols, region_rows), focused,
