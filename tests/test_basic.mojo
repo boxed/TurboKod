@@ -21204,7 +21204,6 @@ def test_write_file_in_place_fallback_replaces_fully() raises:
     var dir = String("/tmp/turbokod_test_home/ro_writedir")
     var path = dir + String("/data.txt")
     var c_dir = dir + String("\0")
-    var c_path = path + String("\0")
 
     # Fresh, writable dir + a long initial file.
     _ = external_call["mkdir", Int32](c_dir.unsafe_ptr(), Int32(0o755))
