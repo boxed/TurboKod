@@ -87,6 +87,32 @@ struct Capture(Copyable, Movable):
         self.nested = copy.nested.copy()
 
 
+def _has_cross_backref(src: String) -> Bool:
+    """True if ``src`` contains a ``\\1``..``\\9`` numeric backreference.
+
+    Only a cheap byte scan: a backslash followed by a digit 1-9, with
+    ``\\\\`` (an escaped backslash) skipped so we don't misread the
+    digit after a literal backslash. We don't try to tell apart a
+    backref that targets a *begin* group from one that targets a group
+    inside the end regex itself — a false positive just means we
+    recompile a regex that libonig would have handled correctly, which
+    is harmless. ``\\0`` is excluded (it means the whole begin match,
+    which TextMate rarely uses in end patterns and our substituter
+    leaves alone)."""
+    var b = src.as_bytes()
+    var i = 0
+    while i < len(b):
+        if Int(b[i]) == 0x5C:  # backslash
+            if i + 1 < len(b):
+                var c = Int(b[i + 1])
+                if c >= 0x31 and c <= 0x39:  # '1'..'9'
+                    return True
+            i += 2  # skip the escaped char (handles "\\")
+            continue
+        i += 1
+    return False
+
+
 struct Pattern(Copyable, Movable):
     """Flat representation of one TextMate pattern.
 
@@ -115,6 +141,18 @@ struct Pattern(Copyable, Movable):
     var include_target: String    # INCLUDE only
     var captures: List[Capture]   # MATCH or BEGIN_END's beginCaptures
     var end_captures: List[Capture]  # BEGIN_END's endCaptures
+    # Raw source of the end (BEGIN_END) / while (BEGIN_WHILE) regex,
+    # kept verbatim so the tokenizer can substitute begin-match
+    # captures into it at runtime. TextMate lets an ``end`` pattern
+    # reference the *begin* match's groups via ``\1``..``\9`` (e.g.
+    # the django HTML grammar's ``end: "(>)(<)(/)(\\2)(>)"`` closes a
+    # ``<tag>...</tag>`` by back-referencing the tag name captured in
+    # the begin). libonig can't resolve those cross-regex backrefs on
+    # its own — ``\2`` would bind to the end regex's *own* group 2 —
+    # so when ``end_has_backref`` is set we rebuild and recompile the
+    # end regex per open frame with the captures spliced in.
+    var end_source: String
+    var end_has_backref: Bool
 
     def __init__(
         out self,
@@ -127,6 +165,8 @@ struct Pattern(Copyable, Movable):
         var include_target: String,
         var captures: List[Capture] = List[Capture](),
         var end_captures: List[Capture] = List[Capture](),
+        var end_source: String = String(""),
+        end_has_backref: Bool = False,
     ):
         self.kind = kind
         self.name = name^
@@ -137,6 +177,8 @@ struct Pattern(Copyable, Movable):
         self.include_target = include_target^
         self.captures = captures^
         self.end_captures = end_captures^
+        self.end_source = end_source^
+        self.end_has_backref = end_has_backref
 
     def __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
@@ -148,6 +190,8 @@ struct Pattern(Copyable, Movable):
         self.include_target = copy.include_target
         self.captures = copy.captures.copy()
         self.end_captures = copy.end_captures.copy()
+        self.end_source = copy.end_source
+        self.end_has_backref = copy.end_has_backref
 
 
 struct Grammar(Copyable, Movable):
@@ -688,6 +732,7 @@ def _compile_pattern(
             pattern_kind, name_str^, content_name^,
             begin_idx, end_idx, nested^, String(""),
             begin_caps^, end_caps^,
+            second_str, _has_cross_backref(second_str),
         ))
         return len(patterns) - 1
 

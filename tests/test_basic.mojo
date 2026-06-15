@@ -7978,6 +7978,59 @@ def test_textmate_while_rule_keeps_scope_open_per_line() raises:
     assert_true(not saw_kw_outside)
 
 
+def test_textmate_end_backreferences_begin_capture() raises:
+    """An ``end`` regex may back-reference a *begin* capture group via
+    ``\\1``..``\\9`` — TextMate splices the begin match's captured text
+    into the end pattern before matching. The django HTML grammar leans
+    on this (``begin: "(<)([a-zA-Z0-9:]++)..."``, ``end: "(>)(<)(/)(\\2)(>)"``)
+    to close a same-line ``<tag>...</tag>``. libonig can't resolve the
+    cross-regex backref on its own, so without our substitution the end
+    never matches: the region stays open and poisons every line below it.
+
+    Hand-rolled grammar: ``<tag>`` opens ``meta.tag.test`` and ``</tag>``
+    (the ``\\2`` resolves to the tag name) closes it. A ``keyword.test``
+    pattern lives at the root, so it only fires once the region has
+    actually closed."""
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"begin\": \"(<)([a-z]+)>\", \"end\": \"(</)(\\\\2)(>)\", "
+        "\"name\": \"meta.tag.test\"},"
+        "{\"match\": \"\\\\bWORD\\\\b\", \"name\": \"keyword.test\"}"
+        "], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    var lines = List[String]()
+    lines.append(String("<div>WORD</div>"))
+    lines.append(String("WORD"))
+    var hls = tokenize_with_grammar(g, lines)
+    # Row 1's ``WORD`` is outside any tag, so it must highlight as a
+    # keyword — which only happens if ``</div>`` closed the region on
+    # row 0. (With the backref unresolved the region would still be
+    # open here and ``WORD`` would be swallowed by ``meta.tag.test``,
+    # which has no inner patterns.)
+    var saw_kw_row1 = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        if h.row == 1 and h.attr == highlight_keyword_attr():
+            saw_kw_row1 = True
+    assert_true(saw_kw_row1)
+
+    # A *different* tag name must not be accepted as the close: the
+    # substituted end is specific to the captured name. Here ``</span>``
+    # can't close ``<div>``, so the region runs to EOF and row 1's
+    # ``WORD`` stays unhighlighted.
+    var lines2 = List[String]()
+    lines2.append(String("<div>WORD</span>"))
+    lines2.append(String("WORD"))
+    var hls2 = tokenize_with_grammar(g, lines2)
+    var saw_kw2_row1 = False
+    for i in range(len(hls2)):
+        var h = hls2[i]
+        if h.row == 1 and h.attr == highlight_keyword_attr():
+            saw_kw2_row1 = True
+    assert_true(not saw_kw2_row1)
+
+
 def test_textmate_captures_overlay_on_match() raises:
     """A pattern with ``captures`` should emit the outer match scope
     plus a refined per-capture scope inside it. We exercise this
@@ -20738,6 +20791,7 @@ def _run_chunk_02() raises:
     test_textmate_html_embeds_css_inside_style_block()
     test_textmate_capture_patterns_run_inside_group()
     test_textmate_while_rule_keeps_scope_open_per_line()
+    test_textmate_end_backreferences_begin_capture()
     test_textmate_captures_overlay_on_match()
     test_textmate_incremental_matches_full_retokenize()
     test_textmate_incremental_in_place_multirow_edit()

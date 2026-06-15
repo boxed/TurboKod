@@ -52,7 +52,6 @@ from .tm_grammar import (
 
 # A stack frame: which pattern opened the scope, plus the resolved
 # scope-chain string we'll append to when emitting Highlights inside.
-@fieldwise_init
 struct Frame(ImplicitlyCopyable, Movable):
     """One open ``begin``/``end`` scope.
 
@@ -68,11 +67,31 @@ struct Frame(ImplicitlyCopyable, Movable):
     """
     var pattern_idx: Int
     var scope_chain: String
+    # Begin-match capture groups, populated only when the opening
+    # pattern's end regex back-references them
+    # (``Pattern.end_has_backref``) — empty for the overwhelming common
+    # case, so it costs nothing then. Stored *packed* (length-prefixed,
+    # see ``_pack_groups``) rather than as a ``List[String]`` so every
+    # field stays ``ImplicitlyCopyable`` and the frame keeps its cheap
+    # synthesized copy. Part of frame equality (the packed string
+    # compares directly): two frames opened by the same pattern but
+    # capturing different text (``<div>`` vs ``<span>``) have different
+    # end regexes, so the incremental early-exit must keep them distinct.
+    var begin_groups: String
+
+    def __init__(
+        out self, pattern_idx: Int, var scope_chain: String,
+        var begin_groups: String = String(""),
+    ):
+        self.pattern_idx = pattern_idx
+        self.scope_chain = scope_chain^
+        self.begin_groups = begin_groups^
 
 
 def frame_eq(a: Frame, b: Frame) -> Bool:
     return a.pattern_idx == b.pattern_idx \
-        and a.scope_chain == b.scope_chain
+        and a.scope_chain == b.scope_chain \
+        and a.begin_groups == b.begin_groups
 
 
 def stack_eq(a: List[Frame], b: List[Frame]) -> Bool:
@@ -241,6 +260,16 @@ def _tokenize_line(
     # pattern copies and include expansion — at every position.
     var cands = List[_Cand]()
     var cands_top = -2  # sentinel: forces the first build (-1 == empty stack)
+    # Dynamically recompiled end regexes for back-referencing ``end``
+    # patterns (TextMate's ``end: "...\\2..."`` that targets a begin
+    # capture). ``dyn_end`` is the top frame's substituted end regex, or
+    # ``None`` when the top frame's end needs no substitution; it's
+    # recomputed whenever the candidate set is rebuilt (i.e. when the
+    # top frame changes). The keys/regexes lists cache compiles so a
+    # line full of ``<td>..</td>`` rows doesn't recompile per cell.
+    var dyn_keys = List[String]()
+    var dyn_regexes = List[OnigRegex]()
+    var dyn_end = Optional[OnigRegex]()
     # Per-candidate cached search result, reused across advancing positions
     # while the candidate set and search options are unchanged. ``cached_start``
     # is the cached match's start column, ``-1`` (no match in the rest of the
@@ -276,6 +305,15 @@ def _tokenize_line(
         if cur_top != cands_top:
             cands = _active_candidates(grammar, stack)
             cands_top = cur_top
+            # Recompute the top frame's substituted end regex (if its
+            # end back-references begin captures). Empty stack or a
+            # plain end leaves ``dyn_end`` cleared, so the loop below
+            # uses the statically compiled regex.
+            dyn_end = Optional[OnigRegex]()
+            if len(stack) > 0:
+                dyn_end = _dyn_end_regex(
+                    grammar, stack[len(stack) - 1], dyn_keys, dyn_regexes,
+                )
             # New candidate set → the by-index cache is stale; rebuild empty.
             cached_start = List[Int]()
             cached_match = List[OnigMatch]()
@@ -307,8 +345,15 @@ def _tokenize_line(
             var cs = cached_start[ci]
             if cs == -2 or (cs >= 0 and cs < pos):
                 # Unknown, or the cached match is now behind ``pos`` — search.
-                ref rx = grammar.regexes[cands[ci].regex_idx]
-                var m_opt = rx.search_at(line, pos, search_options)
+                # The end candidate (pattern_idx < 0) uses the top frame's
+                # substituted end regex when one was built; everything else
+                # (and a plain end) uses the statically compiled regex.
+                var m_opt: Optional[OnigMatch]
+                if cands[ci].pattern_idx < 0 and dyn_end:
+                    m_opt = dyn_end.value().search_at(line, pos, search_options)
+                else:
+                    ref rx = grammar.regexes[cands[ci].regex_idx]
+                    m_opt = rx.search_at(line, pos, search_options)
                 if m_opt:
                     cached_match[ci] = m_opt.value().copy()
                     cached_start[ci] = cached_match[ci].start
@@ -417,7 +462,15 @@ def _tokenize_line(
                 new_chain = _join_scope(chain_outer, pat.content_name)
             elif len(pat.name.as_bytes()) > 0:
                 new_chain = _join_scope(chain_outer, pat.name)
-            stack.append(Frame(cand.pattern_idx, new_chain^))
+            # Remember the begin captures only when the end regex will
+            # need them — otherwise the frame's group list stays empty
+            # (and frame equality / incremental caching is unaffected).
+            var begin_groups = String("")
+            if pat.end_has_backref:
+                begin_groups = _pack_groups(
+                    _extract_group_texts(best_match, line)
+                )
+            stack.append(Frame(cand.pattern_idx, new_chain^, begin_groups^))
             pos = match_end
             continue
 
@@ -450,8 +503,15 @@ def _tokenize_line(
         var top_pat = grammar.patterns[top.pattern_idx].copy()
         if top_pat.kind != PATTERN_BEGIN_END:
             break
-        var end_rx = grammar.regexes[top_pat.end_idx]
-        var m_opt = end_rx.search_at(line_nl, n)
+        # Mirror the main loop: a back-referencing end uses the frame's
+        # substituted regex so a ``\\n``-bearing close still resolves
+        # against the begin captures.
+        var dyn = _dyn_end_regex(grammar, top, dyn_keys, dyn_regexes)
+        var m_opt: Optional[OnigMatch]
+        if dyn:
+            m_opt = dyn.value().search_at(line_nl, n)
+        else:
+            m_opt = grammar.regexes[top_pat.end_idx].search_at(line_nl, n)
         if not m_opt:
             break
         var m = m_opt.value().copy()
@@ -709,7 +769,139 @@ def _emit_unmatched(
 
 
 def _empty_frame() -> Frame:
-    return Frame(0, String(""))
+    return Frame(0, String(""), String(""))
+
+
+def _pack_groups(groups: List[String]) -> String:
+    """Serialize capture groups into one string as ``<bytelen>:<bytes>``
+    per group, concatenated. Length-prefixing keeps it unambiguous for
+    any group content (which can hold ``:`` or arbitrary bytes). The
+    inverse is ``_unpack_groups``."""
+    var out = String("")
+    for g in range(len(groups)):
+        out += String(len(groups[g].as_bytes()))
+        out += ":"
+        out += groups[g]
+    return out^
+
+
+def _unpack_groups(packed: String) -> List[String]:
+    """Inverse of ``_pack_groups``."""
+    var out = List[String]()
+    var b = packed.as_bytes()
+    var i = 0
+    while i < len(b):
+        var num = 0
+        while i < len(b) and Int(b[i]) >= 0x30 and Int(b[i]) <= 0x39:
+            num = num * 10 + (Int(b[i]) - 0x30)
+            i += 1
+        if i >= len(b) or Int(b[i]) != 0x3A:  # ':'
+            break
+        i += 1  # skip ':'
+        var piece = String("")
+        for k in range(num):
+            if i + k < len(b):
+                piece += chr(Int(b[i + k]))
+        out.append(piece^)
+        i += num
+    return out^
+
+
+def _extract_group_texts(m: OnigMatch, line: String) -> List[String]:
+    """Pull each capture group's matched substring out of ``line``,
+    indexed by group number (0 = whole match). Groups that didn't
+    participate (start < 0) become empty strings so the index stays
+    aligned with the group number. Used to remember a begin match's
+    captures for later substitution into a back-referencing end regex."""
+    var out = List[String]()
+    var lb = line.as_bytes()
+    for g in range(m.group_count()):
+        var gs = m.group_starts[g]
+        var ge = m.group_ends[g]
+        if gs < 0 or ge < gs or ge > len(lb):
+            out.append(String(""))
+            continue
+        var piece = String("")
+        for i in range(gs, ge):
+            piece += chr(Int(lb[i]))
+        out.append(piece^)
+    return out^
+
+
+def _escape_regex_literal(s: String) -> String:
+    """Escape the regex metacharacters in ``s`` so it matches literally
+    when spliced into a pattern. A captured tag name is normally bare
+    word characters, but escaping keeps a capture that happens to hold
+    ``.``/``(``/etc. from changing the recompiled end regex's meaning."""
+    var out = String("")
+    for b in s.as_bytes():
+        var c = Int(b)
+        # ASCII metacharacters that need a backslash in libonig.
+        if c == 0x5C or c == 0x2E or c == 0x5E or c == 0x24 \
+                or c == 0x2A or c == 0x2B or c == 0x3F or c == 0x28 \
+                or c == 0x29 or c == 0x5B or c == 0x5D or c == 0x7B \
+                or c == 0x7D or c == 0x7C or c == 0x2F:
+            out += "\\"
+        out += chr(c)
+    return out^
+
+
+def _substitute_backrefs(src: String, groups: List[String]) -> String:
+    """Replace ``\\1``..``\\9`` in ``src`` with the regex-escaped text of
+    the corresponding begin-match group, leaving ``\\\\`` (escaped
+    backslash) and every other escape untouched. A backref to a group
+    that didn't participate (or is out of range) becomes empty — the
+    same as TextMate, where an absent capture contributes nothing."""
+    var b = src.as_bytes()
+    var out = String("")
+    var i = 0
+    while i < len(b):
+        var c = Int(b[i])
+        if c == 0x5C and i + 1 < len(b):
+            var d = Int(b[i + 1])
+            if d >= 0x31 and d <= 0x39:  # '1'..'9'
+                var gi = d - 0x30
+                if gi < len(groups):
+                    out += _escape_regex_literal(groups[gi])
+                # else: out of range → empty substitution
+                i += 2
+                continue
+            # Any other escape (incl. "\\") passes through verbatim.
+            out += chr(c)
+            out += chr(d)
+            i += 2
+            continue
+        out += chr(c)
+        i += 1
+    return out^
+
+
+def _dyn_end_regex(
+    grammar: Grammar, frame: Frame,
+    mut dyn_keys: List[String], mut dyn_regexes: List[OnigRegex],
+) -> Optional[OnigRegex]:
+    """The end regex to use for ``frame`` when its opening pattern's end
+    back-references begin captures: ``frame.begin_groups`` spliced into
+    the raw end source, compiled (and cached for the rest of this line's
+    tokenize). Returns ``None`` when the frame doesn't need substitution
+    — the caller then falls back to the statically compiled end regex —
+    or when the rebuilt regex fails to compile."""
+    ref pat = grammar.patterns[frame.pattern_idx]
+    if not pat.end_has_backref or len(frame.begin_groups.as_bytes()) == 0:
+        return Optional[OnigRegex]()
+    var src = _substitute_backrefs(
+        pat.end_source, _unpack_groups(frame.begin_groups),
+    )
+    for k in range(len(dyn_keys)):
+        if dyn_keys[k] == src:
+            return Optional[OnigRegex](dyn_regexes[k])
+    try:
+        var rx = OnigRegex(src)
+        dyn_keys.append(src)
+        dyn_regexes.append(rx)
+        return Optional[OnigRegex](rx)
+    except:
+        return Optional[OnigRegex]()
 
 
 def _top_chain(stack: List[Frame]) -> String:
