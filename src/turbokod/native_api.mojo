@@ -62,7 +62,7 @@ from turbokod.desktop import (
     EDITOR_TOGGLE_STICKY_SCROLL,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
     FILE_TREE_FOCUS, FILE_TREE_REVEAL,
-    GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
+    GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED, GIT_REVIEW,
     HELP_HOTKEYS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
@@ -243,6 +243,7 @@ def _build_menus(mut d: Desktop):
     d.menu_bar.add(_mk_menu(String("Git"),
         (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
         (String("Show diff viewer"), GIT_LOCAL_CHANGES),
+        (String("Review changes…"), GIT_REVIEW),
         (String("Open all with changes"), GIT_OPEN_ALL_CHANGED),
     ))
     var dbg = List[MenuItem]()

@@ -18,6 +18,7 @@ from turbokod.claude_detect import (
 )
 from turbokod.dir_browser import DirBrowser
 from turbokod.painter import Painter
+from turbokod.review_mode import ReviewMode
 from turbokod.cell import Cell, blank_cell
 from turbokod.colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_BLUE, LIGHT_GRAY,
@@ -21410,6 +21411,59 @@ def _run_chunk_05() raises:
     test_kwarg_conceal_skips_annotation_default()
     test_kwarg_conceal_swift_colon()
     test_kwarg_conceal_build_segment_collapses_and_shifts()
+    test_review_mode_builds_full_file_view()
+
+def test_review_mode_builds_full_file_view() raises:
+    # Two files, given as explicit before/after texts (the git-free entry
+    # point). The reviewer shows each file in FULL with removed lines
+    # spliced inline, one file at a time.
+    var registry = GrammarRegistry()
+    var paths = List[String]()
+    var befores = List[String]()
+    var afters = List[String]()
+    # File 1: one line changed; full context (4 lines) preserved + the
+    # removed line spliced in → 5 display rows.
+    paths.append(String("a.txt"))
+    befores.append(String("context one\nold line\ncontext two\ntail\n"))
+    afters.append(String("context one\nnew line\ncontext two\ntail\n"))
+    # File 2: a pure addition.
+    paths.append(String("b.txt"))
+    befores.append(String("keep\n"))
+    afters.append(String("keep\nsecond file add\n"))
+    var rv = ReviewMode()
+    rv.build_from_pairs(paths, befores, afters, registry)
+    # Two files, each with one change.
+    assert_equal(len(rv.files), 2)
+    assert_equal(len(rv.files[0].rows), 5)   # full file + spliced removal
+    assert_equal(len(rv.files[0].changes), 1)
+    assert_equal(len(rv.files[1].changes), 1)
+    # Two global changes total; the flat nav maps them to their files.
+    assert_equal(len(rv.nav_file), 2)
+    assert_equal(rv.nav_file[0], 0)
+    assert_equal(rv.nav_file[1], 1)
+    # File 1 has exactly one added and one removed row (_RK_ADD == 1,
+    # _RK_REM == 2); the rest are context.
+    var adds = 0
+    var rems = 0
+    for i in range(len(rv.files[0].kinds)):
+        if rv.files[0].kinds[i] == 1:
+            adds += 1
+        elif rv.files[0].kinds[i] == 2:
+            rems += 1
+    assert_equal(adds, 1)
+    assert_equal(rems, 1)
+    # Next walks change-to-change and rolls into the next file; both ends
+    # clamp. Driven through the real input path.
+    rv.active = True
+    rv.mode = 1   # _MODE_REVIEW
+    var view = Rect(0, 0, 80, 24)
+    _ = rv.handle_event(Event.key_event(KEY_LEFT), view, 0, registry)
+    assert_equal(rv.cur, 0)                  # Prev clamps at the first change
+    _ = rv.handle_event(Event.key_event(KEY_RIGHT), view, 0, registry)
+    assert_equal(rv.cur, 1)                  # rolled into file 2
+    assert_equal(rv.nav_file[rv.cur], 1)
+    _ = rv.handle_event(Event.key_event(KEY_RIGHT), view, 0, registry)
+    assert_equal(rv.cur, 1)                  # Next clamps at the last change
 
 def test_kwarg_conceal_basic_python() raises:
     # ``foo(a=a, b=b, d=4)`` hides exactly the two redundant labels (the

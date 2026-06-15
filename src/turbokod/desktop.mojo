@@ -106,6 +106,7 @@ from .spell_menu import (
 )
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
+from .review_mode import ReviewMode
 from .grammar_install import (
     DownloadableGrammar, built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
@@ -328,6 +329,7 @@ comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
 # opens the unified diff as a read-only window. Untracked files are not
 # included — only modifications against the last commit.
 comptime GIT_LOCAL_CHANGES          = String("git:local_changes")
+comptime GIT_REVIEW                 = String("git:review")
 # "Open all with changes" — for every entry from ``git status`` in the
 # active project, open an editor window. Deletions and untracked-empty
 # entries are skipped (no file to show); already-open files are
@@ -853,6 +855,7 @@ struct Desktop(Movable):
     var _find_symbol_qualifier: String
     var project_find: ProjectFind
     var local_changes: LocalChanges
+    var review: ReviewMode
     # Project Settings view (Project ▸ Project Settings...). Second-surface
     # screen — native window on macOS, in-grid dialog in the terminal —
     # consolidating per-project on-save actions, run/debug targets, and
@@ -1441,6 +1444,7 @@ struct Desktop(Movable):
         self._find_symbol_qualifier = String("")
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
+        self.review = ReviewMode()
         self.project_settings = ProjectSettings()
         self.project_settings_detached = False
         self.project_on_save = List[OnSaveAction]()
@@ -2239,7 +2243,8 @@ struct Desktop(Movable):
                 or self.save_as_dialog.active or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active or self.doc_pick.active \
-                or self.project_find.active or self.local_changes.active:
+                or self.project_find.active or self.local_changes.active \
+                or self.review.active:
             return True
         if self.settings.active or self.project_settings.active:
             return True
@@ -3222,6 +3227,8 @@ struct Desktop(Movable):
             return String("default")
         if self.local_changes.active:
             return String("default")
+        if self.review.active:
+            return String("default")
         if self.project_settings.active and not self.project_settings_detached:
             if self.project_settings.is_input_at(pos, screen):
                 return String("text")
@@ -3698,6 +3705,14 @@ struct Desktop(Movable):
         if not self.project_settings_detached:
             self.project_settings.paint(canvas, screen)
         self._sync_project_settings()
+        # Review mode — a full-screen changeset reader. Painted above the
+        # workspace + every modal (it owns the whole surface), but below
+        # the in-grid menu row: ``top_y`` is row 1 when this surface paints
+        # its own menu bar, row 0 when the host owns the native menu.
+        self.review.paint(
+            canvas, screen, 0 if self.host_owns_menu else 1,
+            self.active_theme.palette,
+        )
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
         # cursor has been resting on the message rect long enough for
@@ -4170,7 +4185,7 @@ struct Desktop(Movable):
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
                 or self.project_find.active \
-                or self.local_changes.active \
+                or self.local_changes.active or self.review.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_lsp_prompt_ext.as_bytes()) == 0:
                 self._pending_lsp_prompt_ext = ext
@@ -4223,7 +4238,7 @@ struct Desktop(Movable):
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
                 or self.project_find.active \
-                or self.local_changes.active \
+                or self.local_changes.active or self.review.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
                 self._pending_grammar_prompt_ext = ext
@@ -6340,6 +6355,14 @@ struct Desktop(Movable):
                 # results are immediately navigable. See ``panel_focus_request``.
                 self.panel_focus_request = True
             return Optional[String]()
+        if self.review.active:
+            # Full-screen modal: it owns every event until closed.
+            _ = self.review.handle_event(
+                event, screen,
+                0 if self.host_owns_menu else 1,
+                self.grammar_registry,
+            )
+            return Optional[String]()
         if self.local_changes.active:
             if event.kind == EVENT_KEY:
                 _ = self.local_changes.handle_key(
@@ -6860,7 +6883,7 @@ struct Desktop(Movable):
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
-            or self.local_changes.active \
+            or self.local_changes.active or self.review.active \
             or self.project_settings.active \
             or self.settings.active
 
@@ -7199,6 +7222,10 @@ struct Desktop(Movable):
         if action == GIT_LOCAL_CHANGES:
             if self.project:
                 self.local_changes.open(self.project.value())
+            return Optional[String]()
+        if action == GIT_REVIEW:
+            if self.project:
+                self.review.open(self.project.value())
             return Optional[String]()
         if action == GIT_OPEN_ALL_CHANGED:
             if self.project:
@@ -9289,7 +9316,7 @@ struct Desktop(Movable):
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
                 or self.doc_pick.active or self.project_find.active \
-                or self.local_changes.active:
+                or self.local_changes.active or self.review.active:
             return False
         if self.project_settings.active and not self.project_settings_detached:
             return False
@@ -11650,7 +11677,7 @@ struct Desktop(Movable):
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
                 or self.project_find.active \
-                or self.local_changes.active \
+                or self.local_changes.active or self.review.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return
         self._doc_install_prompted.append(spec.language_id)
@@ -11696,7 +11723,7 @@ struct Desktop(Movable):
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active \
                 or self.project_find.active \
-                or self.local_changes.active \
+                or self.local_changes.active or self.review.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return False
         self._debugpy_install_prompted.append(venv_dir)
