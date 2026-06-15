@@ -7932,6 +7932,65 @@ def test_textmate_capture_patterns_run_inside_group() raises:
     assert_true(saw_escape)
 
 
+def test_textmate_comment_marker_and_covered_brackets() raises:
+    """Guard two regressions seen with embedded-grammar bodies.
+
+    Both show up with JS inside an HTML ``<script>``; reproduced here
+    with a self-contained grammar:
+
+    1. A comment *marker* scoped ``punctuation.definition.comment`` must
+       read as comment, not as the generic ``punctuation``→operator. The
+       ``//`` of a line comment used to get an operator highlight painted
+       on top of the comment body.
+    2. A bracket sitting under an *unnamed* begin span (which paints the
+       identifier fallback over the whole construct, as ``if (`` does)
+       must still pick up the operator color. The fallback ident paint
+       used to count as "covered" and suppress the bracket post-pass.
+    """
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        # Line comment: body scoped comment.line, the ``//`` marker
+        # scoped punctuation.definition.comment via capture group 1.
+        "{\"match\": \"(//).*$\", "
+        "\"name\": \"comment.line.double-slash.test\", "
+        "\"captures\": {\"1\": {\"name\": \"punctuation.definition.comment.test\"}}}, "
+        # ``if (`` opens an UNNAMED begin/end; only ``if`` is captured as
+        # a keyword, so the begin span paints the ident fallback over the
+        # ``(``, and the unnamed ``)`` end span does the same.
+        "{\"begin\": \"\\\\b(if)\\\\s*\\\\(\", "
+        "\"beginCaptures\": {\"1\": {\"name\": \"keyword.control.test\"}}, "
+        "\"end\": \"\\\\)\"}"
+        "], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    var lines = List[String]()
+    lines.append(String("if (x)"))
+    lines.append(String("// hi"))
+    var hls = tokenize_with_grammar(g, lines)
+
+    var op_attr = highlight_operator_attr()
+    var comment_attr = highlight_comment_attr()
+
+    # Row 0: both ``(`` (col 3) and ``)`` (col 5) must end up operator.
+    # Last-writer wins, mirroring how the editor paints overlaps.
+    def last_attr(hls: List[Highlight], row: Int, col: Int) -> Attr:
+        var got = Attr(0, 0)
+        for hi in range(len(hls)):
+            var h = hls[hi]
+            if h.row == row and h.col_start <= col and col < h.col_end:
+                got = h.attr
+        return got
+
+    assert_true(last_attr(hls, 0, 3) == op_attr)
+    assert_true(last_attr(hls, 0, 5) == op_attr)
+
+    # Row 1: the ``//`` marker (cols 0,1) must be comment-colored, not
+    # operator. The comment body must be comment-colored too.
+    assert_true(last_attr(hls, 1, 0) == comment_attr)
+    assert_true(last_attr(hls, 1, 1) == comment_attr)
+    assert_true(last_attr(hls, 1, 3) == comment_attr)
+
+
 def test_textmate_while_rule_keeps_scope_open_per_line() raises:
     """``while``-rules: a ``begin`` opens a scope that stays open for
     every subsequent line whose start matches the ``while`` regex.
@@ -20790,6 +20849,7 @@ def _run_chunk_02() raises:
     test_textmate_brackets_paint_as_operators()
     test_textmate_html_embeds_css_inside_style_block()
     test_textmate_capture_patterns_run_inside_group()
+    test_textmate_comment_marker_and_covered_brackets()
     test_textmate_while_rule_keeps_scope_open_per_line()
     test_textmate_end_backreferences_begin_capture()
     test_textmate_captures_overlay_on_match()

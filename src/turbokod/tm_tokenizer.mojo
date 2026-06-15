@@ -535,12 +535,22 @@ def _tokenize_line(
     # and read as plain text. We treat brackets as operators (matching
     # how the generic per-language tokenizer in ``highlight.mojo``
     # already paints them), so any bracket byte not already covered
-    # by a highlight from this row gets an explicit operator paint.
-    # Bytes inside a string / comment / other open scope are already
-    # covered by ``_emit_unmatched``'s scope-chain paint, so they
-    # silently keep the surrounding color — we don't overpaint.
+    # by a *meaningful* highlight from this row gets an explicit
+    # operator paint.
+    #
+    # "Meaningful" = string / comment / operator: a bracket inside a
+    # string or comment literal keeps the surrounding color, and one
+    # already tagged as an operator needs no second paint. A bracket
+    # covered only by the identifier / keyword fallback does NOT count
+    # as covered — that fallback is what an embedded grammar's unnamed
+    # begin span paints over the whole construct (e.g. the ``(`` in JS
+    # ``if (expanded)`` inside an HTML ``<script>``), and brackets are
+    # never identifiers. Leaving such brackets uncovered lets them pick
+    # up the operator color like brackets everywhere else.
     if n > 0:
         var op_attr = highlight_operator_attr()
+        var comment_fg = highlight_comment_attr().fg
+        var string_fg = highlight_string_attr().fg
         for i in range(n):
             var c = Int(hb[i])
             if c != 0x28 and c != 0x29 and c != 0x5B and c != 0x5D \
@@ -550,8 +560,10 @@ def _tokenize_line(
             for k in range(hl_start, len(out)):
                 var h = out[k]
                 if h.col_start <= i and i < h.col_end:
-                    covered = True
-                    break
+                    var f = h.attr.fg
+                    if f == comment_fg or f == string_fg or f == op_attr.fg:
+                        covered = True
+                        break
             if not covered:
                 out.append(Highlight(row, i, i + 1, op_attr))
 
@@ -1121,6 +1133,13 @@ def _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_keyword_attr())
     if starts_with(scope, String("punctuation.definition.string")):
         return Optional[Attr](highlight_string_attr())
+    # ``punctuation.definition.comment`` is the comment *marker* itself
+    # (``//``, ``/*``, ``#``) — it must read as comment, not as the
+    # generic punctuation→operator below. Without this the ``//`` of an
+    # embedded-JS line comment gets painted operator on top of the
+    # comment body (the marker's scope wins on those two cells).
+    if starts_with(scope, String("punctuation.definition.comment")):
+        return Optional[Attr](highlight_comment_attr())
     if starts_with(scope, String("punctuation")):
         return Optional[Attr](highlight_operator_attr())
     # ``variable.*`` covers generic variables, function parameters,
