@@ -17958,6 +17958,50 @@ def test_diff_row_partner_matches_across_inserted_comment() raises:
     assert_equal(partner[1], -1)    # comment unmatched
 
 
+def test_diff_row_partner_skips_dissimilar_in_restructure() raises:
+    """A restructured block (a list literal rewritten as a dict) used to
+    scatter: every removed line shares its deep indentation with every added
+    line, so the similarity matcher paired unrelated lines and yanked the old
+    rows above mismatched new ones. Now leading whitespace is ignored and weak
+    pairs are refused, so only the genuine line modifications pair — the rest
+    stays a clean removed-then-added block.
+
+    Mirrors the ``auto__include=[...]`` → ``auto__include=dict(...)`` case."""
+    var before = List[String]()
+    before.append(String("    auto__include=["))
+    before.append(String("        'project',"))
+    before.append(String("        'rating',"))
+    before.append(String("    ],"))
+    before.append(String("        project_customer_journey=dict("))
+    var after = List[String]()
+    after.append(String("    auto__include=dict("))
+    after.append(String("        project=dict(filter__include=True),"))
+    after.append(String("        rating={},"))
+    after.append(String("        project__customer_journey=dict("))
+    var rows = build_diff_rows(before, after)
+    # No line is unchanged, so it's one change run: 5 removed rows (before
+    # order) then 4 added rows (after order).
+    assert_equal(len(rows), 9)
+    assert_equal(rows[0].kind, DIFF_ROW_REMOVED)
+    assert_equal(rows[0].text, String("    auto__include=["))
+    assert_equal(rows[4].text, String("        project_customer_journey=dict("))
+    assert_equal(rows[5].kind, DIFF_ROW_ADDED)
+    assert_equal(rows[5].text, String("    auto__include=dict("))
+    assert_equal(rows[8].text, String("        project__customer_journey=dict("))
+    var partner = diff_row_partner(rows)
+    # Genuine modifications still pair (and point back at each other):
+    # the ``project_customer_journey`` rename ...
+    assert_equal(partner[4], 8)
+    assert_equal(partner[8], 4)
+    # ... and ``auto__include=`` changing its value type.
+    assert_equal(partner[0], 5)
+    assert_equal(partner[5], 0)
+    # Unrelated rows must NOT be dragged onto dict-construction lines:
+    # ``'project',`` (row 1) and the closing ``],`` (row 3) stay unmatched.
+    assert_equal(partner[1], -1)
+    assert_equal(partner[3], -1)
+
+
 def test_diff_view_intraline_emphasis_render() raises:
     """The rendered diff emphasises the changed characters: a stronger green
     on the new line's changed bytes and a stronger red on the old (phantom)
@@ -21242,6 +21286,7 @@ def _run_chunk_00() raises:
     test_diff_row_emphasis_marks_changed_spans()
     test_diff_row_emphasis_pairs_by_similarity()
     test_diff_row_partner_matches_across_inserted_comment()
+    test_diff_row_partner_skips_dissimilar_in_restructure()
     test_diff_view_intraline_emphasis_render()
     test_compute_revert_block_modified_line()
     test_compute_revert_block_added_line()

@@ -292,12 +292,26 @@ def intraline_ranges(
         new_out.append((ins_lo, ins_hi))
 
 
+def _lstrip_ws(s: String) -> String:
+    """``s`` with leading spaces / tabs removed. Used by ``_line_similarity``
+    so two lines aren't judged alike merely for sharing an indentation level —
+    a deep indent would otherwise floor every same-depth pair's score near 0.5
+    (8 shared spaces over a ~16-char line), which is enough to mis-pair
+    unrelated lines in a restructured block."""
+    var b = s.as_bytes()
+    var i = 0
+    while i < len(b) and (b[i] == 0x20 or b[i] == 0x09):
+        i += 1
+    return String(StringSlice(unsafe_from_utf8=b[i:len(b)]))
+
+
 def _line_similarity(a: String, b: String) -> Float64:
     """Fraction of codepoints two lines share, by LCS length over the longer
     line (1.0 = identical, 0.0 = nothing in common). Used to pair the
-    most-alike removed/added lines within a change run."""
-    var ao = _codepoints_with_offsets(a)
-    var bo = _codepoints_with_offsets(b)
+    most-alike removed/added lines within a change run. Leading whitespace is
+    stripped first so the score reflects shared *content*, not shared indent."""
+    var ao = _codepoints_with_offsets(_lstrip_ws(a))
+    var bo = _codepoints_with_offsets(_lstrip_ws(b))
     ref a_cp = ao[0]
     ref b_cp = bo[0]
     var denom = len(a_cp) if len(a_cp) > len(b_cp) else len(b_cp)
@@ -314,6 +328,15 @@ def _line_similarity(a: String, b: String) -> Float64:
 # Above this rem×add product we skip the O(n²) best-match search and fall back
 # to positional pairing — change runs that large are rare and not worth the cost.
 comptime _EMPHASIS_MATCH_BUDGET: Int = 400
+
+# Don't pair a removed row with an added row below this content similarity
+# (leading whitespace already stripped, see ``_line_similarity``): under half
+# their content shared means they're more likely two *different* lines than one
+# line modified. Pairing them anyway would yank the removed phantom row down to
+# sit above an unrelated added line, scattering a restructured block into a
+# confusing remove/add zigzag. Below the threshold we leave both unmatched, so
+# the block degrades to the clean git-style "all removed, then all added".
+comptime _PARTNER_MIN_SIMILARITY: Float64 = 0.5
 
 
 def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
@@ -376,6 +399,11 @@ def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
                             best_r = ri
                             best_a = ai
                 if best_r < 0:
+                    break
+                # The best remaining pair is too dissimilar to be one line
+                # modified — and every later pair would be worse, so stop.
+                # Leaving them unmatched groups them as removed-then-added.
+                if best < _PARTNER_MIN_SIMILARITY:
                     break
                 used_rem[best_r] = True
                 used_add[best_a] = True
