@@ -6390,13 +6390,24 @@ struct Editor(Copyable, Movable):
                 rr += 1
         return out^
 
-    def _paint_phantom_rows(self, mut canvas: Canvas, view: Rect, layout: List[VisualLine]):
+    def _paint_phantom_rows(
+        self, mut canvas: Canvas, view: Rect, layout: List[VisualLine],
+        sel_active: Bool, sel_s_line: Int, sel_e_line: Int, sel_eol: Bool,
+        sel_attr: Attr,
+    ):
         """Fill the inline-diff *removed* (phantom) rows. Real rows are
         painted by the normal pass (which skips ``line_idx < 0``); these have
         no buffer line, so we paint them here: a red wash, a red change bar,
         no line number, and the removed line's own (before-file) syntax.
         ``byte_start`` on a phantom ``VisualLine`` carries its index into
-        ``diff_phantom_text`` / ``diff_phantom_hl``."""
+        ``diff_phantom_text`` / ``diff_phantom_hl``.
+
+        When ``sel_active``, a phantom row that falls inside the primary
+        selection is recoloured with ``sel_attr`` so it reads as selected —
+        the same rows ``_diff_selection_text`` splices into the copy. A
+        phantom block ``diff_phantom_buckets[a]`` renders just before row
+        ``a``; the anchoring row is the first real row at or below it in the
+        layout (its ``line_idx``), or the buffer's end for an EOF block."""
         var painter = Painter(view)
         var total_gutter = self._total_gutter()
         var right_gutter = self._right_gutter()
@@ -6480,6 +6491,36 @@ struct Editor(Copyable, Movable):
                             break
                         var cur = canvas.get(sx, y).attr
                         canvas.set_attr(sx, y, cur.with_bg(DIFF_REM_EMPH))
+            # Selection wash: when this phantom row is inside the primary
+            # selection, recolour it like a selected line (same rule as
+            # ``_diff_selection_text``). A trailing marker cell shows the
+            # removed line's newline is part of the selection too.
+            if sel_active:
+                var anchor = self.buffer.line_count()
+                for sr2 in range(screen_row + 1, len(layout)):
+                    if layout[sr2].line_idx >= 0:
+                        anchor = layout[sr2].line_idx
+                        break
+                var in_sel: Bool
+                if anchor < self.buffer.line_count():
+                    in_sel = sel_s_line < anchor and anchor <= sel_e_line
+                else:
+                    in_sel = sel_eol \
+                        and sel_e_line == self.buffer.line_count() - 1
+                if in_sel:
+                    var tcells = display_columns(text)
+                    var cc = 0
+                    while cc <= tcells:
+                        var sx = text_x0 + cc
+                        if sx >= content_right:
+                            break
+                        if cc < tcells:
+                            painter.set_attr(canvas, sx, y, sel_attr)
+                        else:
+                            painter.set(
+                                canvas, sx, y, Cell(String(" "), sel_attr, 1),
+                            )
+                        cc += 1
 
     def paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         # Nothing to draw when the host workspace has collapsed (e.g.
@@ -7358,7 +7399,20 @@ struct Editor(Copyable, Movable):
         # Inline-diff removed (phantom) rows: red wash + before-file syntax,
         # no line number. Painted after the wash/dim so it owns those rows.
         if self.diff_active:
-            self._paint_phantom_rows(canvas, view, layout)
+            # Primary-selection bounds drive the phantom-row selection wash
+            # (the copy uses ``selections[0]`` too — keep them in lockstep).
+            var ph_sel_on = self.has_selection()
+            var ph_s = 0
+            var ph_e = 0
+            var ph_eol = False
+            if ph_sel_on:
+                var ph_norm = self.selection()
+                ph_s = ph_norm[0]
+                ph_e = ph_norm[2]
+                ph_eol = ph_norm[3] >= len(self.buffer.line(ph_e).as_bytes())
+            self._paint_phantom_rows(
+                canvas, view, layout, ph_sel_on, ph_s, ph_e, ph_eol, sel_attr,
+            )
         # Editor-body overlay popups (minimap tooltip / LSP hover /
         # completion). Skipped under ``_suppress_overlays`` — the host's
         # smooth-scroll overdraw render sets it so a popup anchored to a
@@ -8801,8 +8855,57 @@ struct Editor(Copyable, Movable):
     def selection_text(self) -> String:
         """Return the currently-selected text (empty when no selection).
         Delegates to ``Selection.extracted_text`` — same byte-slice
-        iteration the DebugPane output panel uses for its Cmd+C copy."""
+        iteration the DebugPane output panel uses for its Cmd+C copy.
+
+        In an inline-diff view (review mode) the removed (phantom) rows are
+        woven into the copy in the order they're shown, so dragging across a
+        change and copying yields exactly what's on screen — kept and deleted
+        lines interleaved. See ``_diff_selection_text``."""
+        if self.diff_active and self.has_selection():
+            return self._diff_selection_text()
         return self._selection_view().extracted_text(self.buffer.lines)
+
+    def _diff_selection_text(self) -> String:
+        """``selection_text`` for an inline-diff view: the selected real
+        rows with the removed (phantom) lines that render *between* them
+        spliced back in, so the copy mirrors the on-screen diff.
+
+        The caret can only land on real buffer rows (a click on a phantom row
+        snaps to the nearest real row), so the selection endpoints are real;
+        a phantom block in ``diff_phantom_buckets[a]`` renders just before
+        row ``a``, hence sits inside the selection exactly when
+        ``s_line < a <= e_line``. ``_paint_phantom_rows`` highlights the same
+        rows with the identical rule so the overlay and the copy agree."""
+        var r = self.selection()
+        var s_line = r[0]; var s_col = r[1]
+        var e_line = r[2]; var e_col = r[3]
+        if s_line == e_line:
+            return byte_slice(self.buffer.line(s_line), s_col, e_col)
+        var first_line = self.buffer.line(s_line)
+        var out = byte_slice(first_line, s_col, len(first_line.as_bytes()))
+        for a in range(s_line + 1, e_line + 1):
+            if a < len(self.diff_phantom_buckets):
+                for j in range(len(self.diff_phantom_buckets[a])):
+                    var pidx = self.diff_phantom_buckets[a][j]
+                    if 0 <= pidx and pidx < len(self.diff_phantom_text):
+                        out = out + String("\n") + self.diff_phantom_text[pidx]
+            if a < e_line:
+                out = out + String("\n") + self.buffer.line(a)
+            else:
+                out = out + String("\n") + byte_slice(
+                    self.buffer.line(a), 0, e_col,
+                )
+        # Trailing deletions at EOF render *after* the last row, so they're
+        # only part of the selection when it runs through the end of it.
+        var n_lines = self.buffer.line_count()
+        var last_n = len(self.buffer.line(e_line).as_bytes())
+        if e_line == n_lines - 1 and e_col >= last_n \
+                and n_lines < len(self.diff_phantom_buckets):
+            for j in range(len(self.diff_phantom_buckets[n_lines])):
+                var pidx = self.diff_phantom_buckets[n_lines][j]
+                if 0 <= pidx and pidx < len(self.diff_phantom_text):
+                    out = out + String("\n") + self.diff_phantom_text[pidx]
+        return out^
 
     def _selection_view(self) -> Selection:
         """Wrap ``anchor_*`` / ``cursor_*`` into a ``Selection`` value

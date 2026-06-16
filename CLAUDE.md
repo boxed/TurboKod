@@ -145,6 +145,15 @@ view.mojo   Drawable trait + Label/Frame/Fill widgets — sits beside app/deskto
 
 Pure-data modules (everything except `terminal.mojo`, `app.mojo`, `native_api.mojo`, and the Swift host) are TTY-free *and* AppKit-free and unit-testable directly. The frontend boundary is `Canvas` going out and `Event` coming in — nothing below it should know whether it's running under a terminal or under AppKit.
 
+### Bottom-docked tool panes — two transports
+
+The bottom dock hosts three kinds of output pane, split by how the child process is wired:
+
+- **Pipe-backed (`DebugPane`).** The **run/debug pane** (`run_manager.mojo`'s `RunSession` + `DebugPane`, pipe stdin/stdout/stderr) and the DAP "test under debugger" path. Output is a `TextLog` that decodes SGR color only. Because the child sees `isatty()==false`, the run path exports `COLUMNS`/`LINES` (sized to the pane via `Desktop._bottom_pane_term_size`) so well-behaved tools wrap to the pane width.
+- **pty + `Vt`-backed (`TerminalPane`, `TestPane`).** The **shell terminal** and the **test runner** (`pytest`) run on a real controlling pty (`PtyProcess` → `tk_pty_spawn`), so the child sees `isatty()==true`: it auto-detects color, sizes from the kernel, reflows on a SIGWINCH when the pane is resized, and its `\r`/erase-driven progress line renders correctly (the `Vt` emulator interprets what `TextLog`'s `parse_sgr` would mangle). `TestPane` owns its child + grid (no separate session slot); `Desktop.test_tick` just pumps it and mirrors the exit code to the status bar.
+
+The Vt-grid behavior shared by both pty panes — grid paint, scrollback view, selection (cell/word/line drag) + copy, and the key→pty / mouse→pty wire encodings — lives in **`terminal_view.mojo`** (`GridSelection` + `paint_grid` + `encode_key`). Each pane keeps its own `Vt` + `PtyProcess` and the chrome/title/command-strip concerns specific to it. Clickable `File "...", line N` / `path:N` traceback links are detected by **`output_links.mojo`** (shared by `DebugPane` and `TestPane`); a pane scans its visible rows each paint, underlines the spans, and turns a click into an `open_file_at`. When you add a tool pane, decide pipe vs pty by whether the child wants a TTY, and reuse `terminal_view` / `output_links` rather than reimplementing.
+
 ## Themes
 
 A color theme (Settings ▸ Theme, default "Turbo C++ 3.0") retints **both**
@@ -238,6 +247,12 @@ A wide glyph occupies two cells: `put_text` writes the glyph cell with `width=2`
 When a cell column lands on the **right half** of a wide glyph, the cell→byte converters snap to the glyph's start — you can't park a cursor inside an emoji.
 
 East-Asian fullwidth (CJK) and zero-width combining marks are **still not modeled** — only emoji widen. Regional-indicator letters (flags) deliberately stay width 1 so a two-codepoint flag reserves two cells total, matching most terminals. If CJK ever needs real wide handling, extend `char_width` (and its Swift twin) — everything downstream already respects it. The regression test is `test_emoji_double_width` in `tests/test_basic.mojo`.
+
+## Jump-to commands center at the golden ratio
+
+**Every deliberate "jump to a location" parks the target at the golden-ratio line (~38% down the viewport), not at the top or a screen edge.** Use `Editor.reveal_cursor(view, golden=True)` after a `move_to`. This applies to *all* of them — go-to-definition / references / type-def / implementation / declaration, go-to-line, go-to-symbol, find-symbol, nav-history back/forward, output-pane / `turbokod://` link opens, and next/previous git-change (`goto_change_chunk`) including the review-mode changeset reviewer. When you add a new navigation command, golden-reveal it too.
+
+The deliberate exceptions: **iterative search** (Find Next/Prev, Replace's step-to-next) uses a large symmetric margin (`margin_below=10, margin_above=10`) so stepping through matches doesn't yank the view on every hit; and **non-jumps** (typing, paste, fold toggle — anything that just keeps the existing caret visible) use the plain edge-scroll `_scroll_to_cursor`. The single source of truth for the golden line is the `golden` path in `reveal_cursor` (`editor.mojo`).
 
 ## Mojo-version sensitivity
 

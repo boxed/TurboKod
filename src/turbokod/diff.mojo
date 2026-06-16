@@ -292,14 +292,42 @@ def intraline_ranges(
         new_out.append((ins_lo, ins_hi))
 
 
-def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:
-    """For each diff row, the changed byte ranges *within* its text (empty for
-    context / pure add / pure delete rows). Within a change run the k-th
-    removed row is paired with the k-th added row and char-diffed, so a
-    modified line shows exactly which characters changed. Parallel to ``rows``."""
-    var out = List[List[Tuple[Int, Int]]]()
+def _line_similarity(a: String, b: String) -> Float64:
+    """Fraction of codepoints two lines share, by LCS length over the longer
+    line (1.0 = identical, 0.0 = nothing in common). Used to pair the
+    most-alike removed/added lines within a change run."""
+    var ao = _codepoints_with_offsets(a)
+    var bo = _codepoints_with_offsets(b)
+    ref a_cp = ao[0]
+    ref b_cp = bo[0]
+    var denom = len(a_cp) if len(a_cp) > len(b_cp) else len(b_cp)
+    if denom == 0:
+        return 1.0
+    var ops = diff_lines(a_cp, b_cp)
+    var common = 0
+    for i in range(len(ops)):
+        if ops[i].kind == 0:
+            common += 1
+    return Float64(common) / Float64(denom)
+
+
+# Above this rem×add product we skip the O(n²) best-match search and fall back
+# to positional pairing — change runs that large are rare and not worth the cost.
+comptime _EMPHASIS_MATCH_BUDGET: Int = 400
+
+
+def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
+    """For each row, the index of its matched counterpart within the same
+    change run, or ``-1`` if unmatched. Within a run each removed row is
+    greedily paired with the *most similar* added row (best match first) so a
+    modified line is matched to its new version even when comments or other
+    lines were inserted between them. Both ends of a pair point at each other;
+    context rows and unmatched add/remove rows are ``-1``. Parallel to
+    ``rows``. Drives both the intra-line emphasis pairing and the placement of
+    a removed (phantom) row directly above its matched added line."""
+    var partner = List[Int]()
     for _ in range(len(rows)):
-        out.append(List[Tuple[Int, Int]]())
+        partner.append(-1)
     var i = 0
     var n = len(rows)
     while i < n:
@@ -315,17 +343,75 @@ def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:
             else:
                 add_idx.append(j)
             j += 1
-        var pairs = len(rem_idx) if len(rem_idx) < len(add_idx) else len(add_idx)
-        for k in range(pairs):
-            var old_ranges = List[Tuple[Int, Int]]()
-            var new_ranges = List[Tuple[Int, Int]]()
-            intraline_ranges(
-                rows[rem_idx[k]].text, rows[add_idx[k]].text,
-                old_ranges, new_ranges,
-            )
-            out[rem_idx[k]] = old_ranges^
-            out[add_idx[k]] = new_ranges^
+        var n_pairs = len(rem_idx) if len(rem_idx) < len(add_idx) else len(add_idx)
+        # Default to similarity-based matching so an inserted comment above a
+        # modified line doesn't pair the code with the comment; fall back to
+        # positional for huge runs (the O(n²) search isn't worth it there).
+        if len(rem_idx) * len(add_idx) > _EMPHASIS_MATCH_BUDGET:
+            for k in range(n_pairs):
+                partner[rem_idx[k]] = add_idx[k]
+                partner[add_idx[k]] = rem_idx[k]
+        else:
+            var used_add = List[Bool]()
+            for _ in range(len(add_idx)):
+                used_add.append(False)
+            var used_rem = List[Bool]()
+            for _ in range(len(rem_idx)):
+                used_rem.append(False)
+            for _ in range(n_pairs):
+                var best = -1.0
+                var best_r = -1
+                var best_a = -1
+                for ri in range(len(rem_idx)):
+                    if used_rem[ri]:
+                        continue
+                    for ai in range(len(add_idx)):
+                        if used_add[ai]:
+                            continue
+                        var sim = _line_similarity(
+                            rows[rem_idx[ri]].text, rows[add_idx[ai]].text
+                        )
+                        if sim > best:
+                            best = sim
+                            best_r = ri
+                            best_a = ai
+                if best_r < 0:
+                    break
+                used_rem[best_r] = True
+                used_add[best_a] = True
+                partner[rem_idx[best_r]] = add_idx[best_a]
+                partner[add_idx[best_a]] = rem_idx[best_r]
         i = j
+    return partner^
+
+
+def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:
+    """For each diff row, the changed byte ranges *within* its text (empty for
+    context / pure add / pure delete rows). Each removed row is char-diffed
+    against its matched added row (see ``diff_row_partner``), so a modified
+    line shows exactly which characters changed — even when comments or other
+    lines were inserted between the old and new version. Parallel to ``rows``."""
+    var out = List[List[Tuple[Int, Int]]]()
+    for _ in range(len(rows)):
+        out.append(List[Tuple[Int, Int]]())
+    var partner = diff_row_partner(rows)
+    for r in range(len(rows)):
+        if rows[r].kind != DIFF_ROW_REMOVED:
+            continue
+        var a = partner[r]
+        if a < 0:
+            continue
+        var old_ranges = List[Tuple[Int, Int]]()
+        var new_ranges = List[Tuple[Int, Int]]()
+        intraline_ranges(rows[r].text, rows[a].text, old_ranges, new_ranges)
+        # If the two lines differ in more than a handful of spans they're most
+        # likely unrelated — an intra-line diff that highlights the few
+        # characters they happen to share by chance is noise, not signal. Give
+        # up and leave the rows as a plain remove/add pair.
+        if len(old_ranges) + len(new_ranges) > 4:
+            continue
+        out[r] = old_ranges^
+        out[a] = new_ranges^
     return out^
 
 

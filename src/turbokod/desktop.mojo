@@ -51,7 +51,8 @@ from .config import (
     load_config, record_recent_file, record_recent_project, save_config,
 )
 from .diff import (
-    DIFF_ROW_REMOVED, DiffRow, build_diff_rows, diff_row_emphasis, unified_diff,
+    DIFF_ROW_REMOVED, DiffRow, build_diff_rows, diff_row_emphasis,
+    diff_row_partner, unified_diff,
 )
 from .file_io import (
     basename, delete_tree, find_git_project, join_path, list_directory,
@@ -3655,19 +3656,27 @@ struct Desktop(Movable):
                 drows, before_lines, after_lines, abs, self.grammar_registry,
             )
             var emph = diff_row_emphasis(drows)
+            var partner = diff_row_partner(drows)
             for _ in range(n_after + 1):
                 ph_buckets.append(List[Int]())
             for _ in range(n_after):
                 emph_by_row.append(List[Tuple[Int, Int]]())
-            # Anchor each removed row to the after-row it precedes (the next
-            # non-removed row's after_row; end-of-file = n_after).
+            # Anchor each removed row to the after-row it precedes. A removed
+            # row matched to an added line (a modified line) anchors right above
+            # that line so the old/new pair render adjacent — even when comments
+            # were inserted between them. An unmatched (purely deleted) row falls
+            # back to the next non-removed row's after_row (end-of-file =
+            # n_after).
             var nxt = n_after
             var drow_anchor = List[Int]()
             for _ in range(len(drows)):
                 drow_anchor.append(0)
             for j in range(len(drows) - 1, -1, -1):
                 if drows[j].kind == DIFF_ROW_REMOVED:
-                    drow_anchor[j] = nxt
+                    if partner[j] >= 0:
+                        drow_anchor[j] = drows[partner[j]].after_row
+                    else:
+                        drow_anchor[j] = nxt
                 else:
                     nxt = drows[j].after_row
                     drow_anchor[j] = drows[j].after_row
@@ -7295,6 +7304,15 @@ struct Desktop(Movable):
         the top of ``handle_event`` — keep the two in sync; any modal
         listed here is guaranteed to return before the hotkey lookup, so
         re-injecting a chord can't recurse back into ``dispatch_action``.
+
+        Review is the one whose two sub-modes split here: the *picker* is
+        fully modal (returns before the hotkey lookup, like every other
+        entry), but while *reviewing* the body is a real focused editor and
+        ``handle_event`` forwards non-chrome keys on to ``_handle_key`` — so
+        listing it unconditionally would let a re-injected ⌘C reach the
+        hotkey lookup, re-dispatch ``EDITOR_COPY``, and recurse until the
+        stack overflows. Gate it to the picker; while reviewing, clipboard
+        actions fall through to the hosted editor where they belong.
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
@@ -7309,7 +7327,8 @@ struct Desktop(Movable):
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
-            or self.local_changes.active or self.review.active \
+            or self.local_changes.active \
+            or (self.review.active and not self.review.is_reviewing()) \
             or self.project_settings.active \
             or self.settings.active
 

@@ -26,7 +26,7 @@ from turbokod.colors import (
     STYLE_UNDERLINE_CURLY,
     WHITE, YELLOW,
     BORDER_FOCUS, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
-    SYN_KEYWORD, PANE_BG,
+    SYN_KEYWORD, PANE_BG, DIFF_ADD_BG, DIFF_REM_BG, DIFF_ADD_EMPH, DIFF_REM_EMPH,
     FG_TRUECOLOR, BG_TRUECOLOR, _rgb_to_256,
     attr_to_sgr, attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr, parse_sgr,
 )
@@ -34,8 +34,11 @@ from turbokod.theme import (
     Theme, built_in_themes, default_theme_name, theme_by_name, theme_names,
 )
 from turbokod.diff import (
+    DIFF_ROW_ADDED, DIFF_ROW_CONTEXT, DIFF_ROW_REMOVED, DiffRow,
     MergeRegion, MergeResult, REGION_CONFLICT, REGION_STABLE,
-    diff3_merge, diff3_regions, diff_lines, unified_diff,
+    build_diff_rows, diff3_merge, diff3_regions, diff_lines,
+    diff_row_emphasis, diff_row_line_label, diff_row_partner, intraline_ranges,
+    unified_diff,
 )
 from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
@@ -132,7 +135,7 @@ from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import (
     slice_codepoints, char_width, display_columns,
-    shell_escape_path, escape_drop_paths,
+    shell_escape_path, escape_drop_paths, tail_to_columns,
 )
 from turbokod.project_settings import ProjectSettings
 from turbokod.project_on_save import (
@@ -252,7 +255,7 @@ from turbokod.canvas import paint_drop_shadow
 from turbokod.window import (
     DockedPanelStack,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
-    TitleCommand, WindowManager, hit_title_command,
+    TitleCommand, WindowManager, _fit_title_path, hit_title_command,
     paint_title_commands,
 )
 from turbokod.events import (
@@ -277,6 +280,7 @@ from turbokod.prompt import (
 from turbokod.terminal import parse_input
 from turbokod import Vt
 from turbokod.terminal_pane import TerminalPane
+from turbokod.test_pane import TestPane
 from turbokod.view import Fill, Frame, Label, centered
 from turbokod.window import Window
 
@@ -1916,6 +1920,37 @@ def test_editor_double_click_drag_extends_by_word_backward() raises:
     assert_equal(ed.selection_text(), String("hello world foo"))
 
 
+def test_editor_diff_selection_copies_phantom_rows() raises:
+    """In an inline-diff view, a selection spanning a change copies the
+    removed (phantom) lines interleaved with the kept lines exactly as
+    they're shown — so Cmd+C in review mode grabs the deleted code too."""
+    # After-file: two kept rows. Two removed lines render between them as
+    # phantoms anchored before row 1 (``diff_phantom_buckets[1]``).
+    var ed = Editor(String("kept line\nkept line"))
+    ed.diff_active = True
+    ed.diff_phantom_text = List[String]()
+    ed.diff_phantom_text.append(String("old deleted line"))
+    ed.diff_phantom_text.append(String("another deleted"))
+    ed.diff_phantom_buckets = List[List[Int]]()
+    ed.diff_phantom_buckets.append(List[Int]())          # before row 0: none
+    var bucket1 = List[Int]()
+    bucket1.append(0)
+    bucket1.append(1)
+    ed.diff_phantom_buckets.append(bucket1^)             # before row 1
+    ed.diff_phantom_buckets.append(List[Int]())          # at EOF: none
+    # Select from the top of row 0 through the end of row 1.
+    ed.move_to(0, 0, False)
+    ed.move_to(1, len(ed.buffer.line(1).as_bytes()), True)
+    assert_true(ed.has_selection())
+    assert_equal(
+        ed.selection_text(),
+        String("kept line\nold deleted line\nanother deleted\nkept line"),
+    )
+    # Same buffer/selection without the diff view: only the real rows.
+    ed.diff_active = False
+    assert_equal(ed.selection_text(), String("kept line\nkept line"))
+
+
 def _terminal_pane_with_text(text: String) -> TerminalPane:
     """A pane whose VT row 0 holds ``text``, with a body rect set so
     screen Point(x, 1) maps to grid (row 0, col x). Skips paint so the
@@ -1924,7 +1959,7 @@ def _terminal_pane_with_text(text: String) -> TerminalPane:
     pane.vt.feed_string(text)
     # Body starts one row below the panel top (the chrome border row),
     # so a body click lands at y >= 1 and never trips chrome hit-tests.
-    pane._last_body = Rect(Point(0, 1), Point(pane.vt.cols, 25))
+    pane.sel._last_body = Rect(Point(0, 1), Point(pane.vt.cols, 25))
     return pane^
 
 
@@ -9500,9 +9535,9 @@ def test_window_manager_fit_into_scales_restore_rect_for_maximized() raises:
 
 def test_window_manager_title_hover_arms_for_editor_with_path() raises:
     """Bare hover over the title bar of a file-backed editor window
-    arms the title-tooltip tracker; hovering elsewhere clears it. A
-    left-click anywhere also drops the tracker so a stale popup
-    doesn't outlive the click."""
+    arms the full-path reveal; hovering elsewhere clears it. A
+    left-click anywhere also drops the tracker so the title reverts
+    to its short name."""
     var wm = WindowManager()
     var w = Window.editor_window(
         String("hello.mojo"), Rect(2, 2, 30, 12), String("body"),
@@ -9516,8 +9551,6 @@ def test_window_manager_title_hover_arms_for_editor_with_path() raises:
     )
     _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
     assert_equal(wm._title_hover_idx, 0)
-    assert_equal(wm._title_hover_x, 15)
-    assert_equal(wm._title_hover_y, 2)
     # Hover off the title row — body cell at y=5 — clears it.
     var off = Event.mouse_event(
         Point(15, 5), MOUSE_BUTTON_NONE, pressed=True, motion=True,
@@ -9535,9 +9568,9 @@ def test_window_manager_title_hover_arms_for_editor_with_path() raises:
 
 
 def test_window_manager_title_hover_skips_unbacked_buffers() raises:
-    """Untitled / file-less editor windows must not arm the tooltip —
+    """Untitled / file-less editor windows must not arm the reveal —
     a centered ``Untitled`` title with no path has nothing useful to
-    show in a popup."""
+    show."""
     var wm = WindowManager()
     var w = Window.editor_window(
         String("Untitled"), Rect(2, 2, 30, 12), String(""),
@@ -9549,6 +9582,61 @@ def test_window_manager_title_hover_skips_unbacked_buffers() raises:
     )
     _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
     assert_equal(wm._title_hover_idx, -1)
+
+
+def _title_row_text(c: Canvas, y: Int, x0: Int, x1: Int) -> String:
+    """Concatenate the glyphs of canvas row ``y`` over ``[x0, x1)`` so a
+    test can substring-match what's painted on a title bar."""
+    var s = String("")
+    for x in range(x0, x1):
+        s += c.get(x, y).glyph
+    return s
+
+
+def test_window_manager_title_hover_reveals_full_path_in_titlebar() raises:
+    """While the title label is hovered, ``paint`` swaps the short
+    filename for the editor's full path; un-hovered it shows the short
+    name only."""
+    var wm = WindowManager()
+    # Wide enough that the full path fits between the close button and
+    # the right-corner indicator once centered.
+    var w = Window.editor_window(
+        String("hello.mojo"), Rect(2, 2, 52, 12), String("body"),
+    )
+    w.editor.file_path = String("/tmp/proj/hello.mojo")
+    wm.add(w^)
+    # No hover: short name on the title row, full path absent.
+    var c = Canvas(60, 14)
+    wm.paint(c)
+    var row = _title_row_text(c, 2, 2, 52)
+    assert_true(row.find(String("hello.mojo")) != -1)
+    assert_true(row.find(String("/tmp/proj/hello.mojo")) == -1)
+    # Hover the title label, repaint: the full path is now revealed.
+    var hover = Event.mouse_event(
+        Point(25, 2), MOUSE_BUTTON_NONE, pressed=True, motion=True,
+    )
+    _ = wm.handle_mouse(hover, Rect(0, 1, 80, 25))
+    assert_equal(wm._title_hover_idx, 0)
+    var c2 = Canvas(60, 14)
+    wm.paint(c2)
+    var row2 = _title_row_text(c2, 2, 2, 52)
+    assert_true(row2.find(String("/tmp/proj/hello.mojo")) != -1)
+
+
+def test_fit_title_path_keeps_tail_with_ellipsis() raises:
+    """``_fit_title_path`` returns the whole path when it fits and a
+    leading-ellipsis tail (filename end preserved) when it doesn't."""
+    var p = String("/tmp/proj/hello.mojo")  # 20 columns
+    # Fits exactly.
+    assert_equal(_fit_title_path(p, 20), p)
+    assert_equal(_fit_title_path(p, 99), p)
+    # Too narrow: leading "…" + tail, total within max_cols, tail kept.
+    var t = _fit_title_path(p, 10)
+    assert_equal(display_columns(t), 10)
+    assert_equal(t, String("…") + tail_to_columns(p, 9))
+    assert_true(t.find(String(".mojo")) != -1)  # filename tail kept
+    # Degenerate width.
+    assert_equal(_fit_title_path(p, 0), String("…"))
 
 
 def test_painter_clips_text_at_right_edge() raises:
@@ -14314,6 +14402,104 @@ def test_extract_path_line_links_rejects_non_paths() raises:
     assert_equal(len(_extract_path_line_links(String("a/b.py: note"))), 0)
 
 
+def test_test_pane_runs_command_on_pty() raises:
+    """End-to-end pty path: ``run`` spawns a child on a real pty,
+    ``tick`` drains it into the emulator, and the child's exit code is
+    harvested on EOF. Uses ``sh -c 'exit 7'`` so the code is
+    unambiguous. TTY-free — the pty is its own pts pair, independent of
+    the test harness's stdio (same idiom as the RunSession echo test)."""
+    var pane = TestPane()
+    pane.visible = True
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("printf hi; exit 7"))
+    pane.run(String("sh"), args^, String(""))
+    assert_true(pane.running())
+    # Pump the pty until the child exits. Bounded so a stuck child fails
+    # the test rather than hanging the suite.
+    var ticks = 0
+    while ticks < 4000 and pane.running():
+        pane.tick()
+        ticks += 1
+    assert_false(pane.running())
+    assert_true(pane.exited)
+    assert_equal(pane.exit_code, 7)
+
+
+def test_test_pane_resize_preserves_content() raises:
+    """Shrinking the pane's width then growing it back must not lose
+    content. ``Vt.resize`` truncates on shrink, so the pane replays its
+    captured output stream into a fresh grid on every size change — a
+    narrow→wide round-trip therefore reproduces exactly the grid a
+    direct wide render produces."""
+    var line1 = String("alpha bravo charlie delta echo foxtrot golf\r\n")
+    var line2 = String("second-line-marker-xyz\r\n")
+    var pane = TestPane()
+    pane.visible = True
+    pane._emit(line1)
+    pane._emit(line2)
+    # Wide → narrow → wide. The narrow pass truncates a naive Vt grid;
+    # the replay must bring the off-grid text back on the wide pass.
+    var wide = Rect(Point(0, 0), Point(50, 10))
+    var narrow = Rect(Point(0, 0), Point(20, 10))
+    var cw = Canvas(50, 10)
+    pane.paint(cw, wide)
+    var cn = Canvas(20, 10)
+    pane.paint(cn, narrow)
+    var cw2 = Canvas(50, 10)
+    pane.paint(cw2, wide)
+    # A pane rendered straight to the wide size is the reference.
+    var direct = TestPane()
+    direct.visible = True
+    direct._emit(line1)
+    direct._emit(line2)
+    var cd = Canvas(50, 10)
+    direct.paint(cd, wide)
+    # Every grid row must match the reference — no lost content.
+    assert_equal(pane.vt.rows, direct.vt.rows)
+    for r in range(pane.vt.rows):
+        assert_equal(pane._row_text(r), direct._row_text(r))
+
+
+def test_test_pane_detects_traceback_link() raises:
+    """The pty/Vt-backed test pane scans its grid for ``File "...",
+    line N`` spans, underlines them, and a click on the span yields an
+    open request with the parsed path + 1-based line — the terminal
+    equivalent of the run/debug pane's traceback links."""
+    var pane = TestPane()
+    pane.visible = True
+    # Canned pytest-style traceback line fed straight into the emulator
+    # (no pty needed — link detection runs off the grid). Fed through
+    # ``_emit`` so it's captured for resize replay, matching the real
+    # output path.
+    pane._emit(
+        String("E   File \"app/models.py\", line 7, in handler\r\n")
+    )
+    var canvas = Canvas(60, 8)
+    var panel = Rect(Point(0, 0), Point(60, 8))
+    pane.paint(canvas, panel)
+    # The link was recorded during paint; it sits on the first body row
+    # (one below the title row).
+    assert_true(len(pane._last_links) >= 1)
+    var link = pane._last_links[0]
+    assert_equal(link.path, String("app/models.py"))
+    assert_equal(link.line, 7)
+    # Clicking inside the span produces an open request.
+    var clickx = (link.x_start + link.x_end) // 2
+    _ = pane.handle_mouse(
+        Event.mouse_event(
+            Point(clickx, link.y), MOUSE_BUTTON_LEFT, True, False,
+        ),
+        panel,
+    )
+    var req = pane.consume_open_request()
+    assert_equal(req[0], String("app/models.py"))
+    assert_equal(req[1], 7)
+    # Drained — a second consume is empty.
+    var req2 = pane.consume_open_request()
+    assert_equal(req2[0], String(""))
+
+
 def test_debug_pane_default_title_is_debug() raises:
     """``DebugPane`` defaults to DEBUG mode — the pane's top border
     paints ``Debug`` so existing callers see no behavioural change.
@@ -15481,6 +15667,13 @@ def test_run_session_lifecycle() raises:
         if poll_run_exit(s):
             break
         ticks += 1
+    # Final drain after the child exited: the kernel can hold the
+    # ``printf`` payload in the pipe buffer past the exit that
+    # ``poll_run_exit`` observed, so the in-loop drain may have broken
+    # out before the bytes were readable. The fd stays open until
+    # ``terminate`` below, so one more non-blocking read collects them.
+    var tail_out = drain_run_output(s)
+    captured = captured + tail_out.stdout
     assert_true(s.exited)
     assert_equal(s.exit_code, 7)
     s.terminate()
@@ -17311,6 +17504,438 @@ def test_diff_buffer_against_head_marks_added_and_modified() raises:
     assert_equal(marks[2], GIT_CHANGE_NONE)
     assert_equal(marks[3], GIT_CHANGE_ADDED)
     assert_equal(marks[4], GIT_CHANGE_NONE)
+
+
+def test_diff_modified_line_keeps_inserted_block_added() raises:
+    """A comment block inserted just before a genuinely-modified line must
+    mark the comment lines ADDED and the *changed* line MODIFIED — not the
+    first inserted line. Regression: the delete pairs with the most similar
+    insert (the changed call), not the top of the run."""
+    var head = (
+        String("    template = lookup()\n")
+        + String("\n")
+        + String("    chain = create(template, skip=True, **props)\n")
+        + String("    return chain\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("    template = lookup()"))
+    buffer.append(String(""))
+    buffer.append(String("    # explain why we force the flag"))      # inserted
+    buffer.append(String("    # second comment line"))                # inserted
+    buffer.append(String("    # third comment line"))                 # inserted
+    buffer.append(String("    chain = create(template, skip=True, published=False, **props)"))  # modified
+    buffer.append(String("    return chain"))                         # unchanged
+    buffer.append(String(""))                                         # trailing
+    var marks = diff_buffer_against_head(head, buffer)
+    assert_equal(len(marks), len(buffer))
+    assert_equal(marks[0], GIT_CHANGE_NONE)
+    assert_equal(marks[1], GIT_CHANGE_NONE)
+    # The inserted comment block stays green (ADDED), not red.
+    assert_equal(marks[2], GIT_CHANGE_ADDED)
+    assert_equal(marks[3], GIT_CHANGE_ADDED)
+    assert_equal(marks[4], GIT_CHANGE_ADDED)
+    # Only the line that actually changed is MODIFIED.
+    assert_equal(marks[5], GIT_CHANGE_MODIFIED)
+    assert_equal(marks[6], GIT_CHANGE_NONE)
+
+
+def _slist(*items: String) -> List[String]:
+    var out = List[String]()
+    for it in items:
+        out.append(it)
+    return out^
+
+
+def test_diff_row_line_label_basics() raises:
+    """A row's gutter label is its 1-based after-file number, or empty for a
+    removed row (which has no line number)."""
+    assert_equal(diff_row_line_label(DiffRow(0, String("x"), DIFF_ROW_CONTEXT, 0)), String("1"))
+    assert_equal(diff_row_line_label(DiffRow(41, String("x"), DIFF_ROW_ADDED, 41)), String("42"))
+    assert_equal(diff_row_line_label(DiffRow(-1, String("x"), DIFF_ROW_REMOVED, 7)), String(""))
+
+
+def test_diff_rows_removed_lines_have_no_line_number() raises:
+    """A modified line → a removed row (old text, NO line number) then an
+    added row (new text, with its after-file number)."""
+    var before = _slist(String("a"), String("old line"), String("c"))
+    var after = _slist(String("a"), String("new line"), String("c"))
+    var rows = build_diff_rows(before, after)
+    assert_equal(len(rows), 4)
+    assert_equal(rows[0].kind, DIFF_ROW_CONTEXT)
+    assert_equal(diff_row_line_label(rows[0]), String("1"))
+    assert_equal(rows[1].kind, DIFF_ROW_REMOVED)
+    assert_equal(rows[1].after_row, -1)
+    assert_equal(rows[1].text, String("old line"))
+    assert_equal(diff_row_line_label(rows[1]), String(""))
+    assert_equal(rows[2].kind, DIFF_ROW_ADDED)
+    assert_equal(rows[2].text, String("new line"))
+    assert_equal(diff_row_line_label(rows[2]), String("2"))
+    assert_equal(diff_row_line_label(rows[3]), String("3"))
+
+
+def test_diff_rows_pure_insertion_all_numbered() raises:
+    """Pure insertions are ADDED rows — they DO have after-file numbers; no
+    removed rows, so the numbering is a clean 1..N."""
+    var before = _slist(String("a"), String("b"))
+    var after = _slist(String("a"), String("x"), String("y"), String("b"))
+    var rows = build_diff_rows(before, after)
+    assert_equal(len(rows), 4)
+    for i in range(len(rows)):
+        assert_true(rows[i].kind != DIFF_ROW_REMOVED)
+    assert_equal(diff_row_line_label(rows[1]), String("2"))
+    assert_equal(diff_row_line_label(rows[2]), String("3"))
+
+
+def test_diff_rows_multiline_removal_numbers_skip_removed() raises:
+    """Deletions become removed rows with no numbers; context numbers stay
+    correct across the un-numbered gap."""
+    var before = _slist(String("a"), String("gone1"), String("gone2"), String("b"))
+    var after = _slist(String("a"), String("b"))
+    var rows = build_diff_rows(before, after)
+    assert_equal(len(rows), 4)
+    assert_equal(diff_row_line_label(rows[0]), String("1"))
+    assert_equal(rows[1].kind, DIFF_ROW_REMOVED)
+    assert_equal(diff_row_line_label(rows[1]), String(""))
+    assert_equal(rows[2].kind, DIFF_ROW_REMOVED)
+    assert_equal(diff_row_line_label(rows[2]), String(""))
+    assert_equal(diff_row_line_label(rows[3]), String("2"))
+
+
+def test_diff_rows_inserted_block_before_modified_line() raises:
+    """A comment block inserted before a modified line: comments are added
+    (numbered), only the old modified line is un-numbered."""
+    var before = _slist(
+        String("    template = lookup()"),
+        String(""),
+        String("    chain = create(template, skip=True, **props)"),
+        String("    return chain"),
+    )
+    var after = _slist(
+        String("    template = lookup()"),
+        String(""),
+        String("    # explain"),
+        String("    # second"),
+        String("    # third"),
+        String("    chain = create(template, skip=True, published=False, **props)"),
+        String("    return chain"),
+    )
+    var rows = build_diff_rows(before, after)
+    assert_equal(len(rows), 8)
+    assert_equal(diff_row_line_label(rows[0]), String("1"))
+    assert_equal(diff_row_line_label(rows[1]), String("2"))
+    assert_equal(rows[2].kind, DIFF_ROW_REMOVED)
+    assert_equal(diff_row_line_label(rows[2]), String(""))
+    assert_equal(rows[3].kind, DIFF_ROW_ADDED)
+    assert_equal(diff_row_line_label(rows[3]), String("3"))
+    assert_equal(diff_row_line_label(rows[7]), String("7"))
+
+
+def _diff_row_text(c: Canvas, y: Int, x0: Int, w: Int) -> String:
+    """Glyphs of canvas row ``y`` from column ``x0``, trailing spaces stripped."""
+    var glyphs = List[String]()
+    for x in range(x0, w):
+        var cell = c.get(x, y)
+        if cell.width > 0:
+            glyphs.append(cell.glyph)
+    var end = len(glyphs)
+    while end > 0 and glyphs[end - 1] == String(" "):
+        end -= 1
+    var out = String("")
+    for i in range(end):
+        out = out + glyphs[i]
+    return out
+
+
+def _diff_gutter_has_digit(c: Canvas, y: Int, gutter_w: Int) -> Bool:
+    """True if any gutter column [0, gutter_w) on row ``y`` holds a digit."""
+    for x in range(gutter_w):
+        var b = c.get(x, y).glyph.as_bytes()
+        if len(b) == 1 and b[0] >= UInt8(0x30) and b[0] <= UInt8(0x39):
+            return True
+    return False
+
+
+def _diff_row_has_red_bar(c: Canvas, y: Int, gutter_w: Int) -> Bool:
+    """True if a red change bar (▌, LIGHT_RED) sits in the gutter of row ``y``."""
+    for x in range(gutter_w):
+        var cell = c.get(x, y)
+        if cell.glyph == String("▌") and cell.attr.fg == LIGHT_RED:
+            return True
+    return False
+
+
+def _join_lines(lines: List[String]) -> String:
+    var out = String("")
+    for i in range(len(lines)):
+        if i > 0:
+            out = out + String("\n")
+        out = out + lines[i]
+    return out
+
+
+def _diff_editor(before: List[String], after: List[String]) -> Editor:
+    """Build a review editor: buffer = after-file, baseline pinned to before
+    (so git_change_lines marks added/modified), and the removed lines woven in
+    as phantom rows — exactly how ``_review_arm_editor`` sets it up. Phantom
+    syntax is left empty (real rows fall through to the SYN_IDENT baseline)."""
+    var before_text = _join_lines(before)
+    var ed = Editor(_join_lines(after))
+    ed.review_mode = True
+    ed.read_only = True
+    ed.line_numbers = True
+    ed.wrap_mode = WRAP_NONE
+    ed.git_changes_visible = True
+    ed.minimap_visible = False   # keep the right edge clean for assertions
+    ed.set_git_head_text(before_text, True)
+    ed.set_git_changes(diff_buffer_against_head(before_text, after))
+    var n_after = len(after)
+    var drows = build_diff_rows(before, after)
+    var buckets = List[List[Int]]()
+    for _ in range(n_after + 1):
+        buckets.append(List[Int]())
+    var ph_text = List[String]()
+    var ph_hl = List[List[Highlight]]()
+    var ph_emph = List[List[Tuple[Int, Int]]]()
+    var emph_by_row = List[List[Tuple[Int, Int]]]()
+    for _ in range(n_after):
+        emph_by_row.append(List[Tuple[Int, Int]]())
+    var emph = diff_row_emphasis(drows)
+    var partner = diff_row_partner(drows)
+    var anchor = List[Int]()
+    for _ in range(len(drows)):
+        anchor.append(0)
+    var nxt = n_after
+    for j in range(len(drows) - 1, -1, -1):
+        if drows[j].kind == DIFF_ROW_REMOVED:
+            if partner[j] >= 0:
+                anchor[j] = drows[partner[j]].after_row
+            else:
+                anchor[j] = nxt
+        else:
+            nxt = drows[j].after_row
+            anchor[j] = drows[j].after_row
+    for j in range(len(drows)):
+        if drows[j].kind == DIFF_ROW_REMOVED:
+            var pi = len(ph_text)
+            ph_text.append(drows[j].text)
+            ph_hl.append(List[Highlight]())
+            ph_emph.append(emph[j].copy())
+            var a = anchor[j]
+            if a < 0:
+                a = 0
+            if a > n_after:
+                a = n_after
+            buckets[a].append(pi)
+        elif drows[j].after_row >= 0 and drows[j].after_row < n_after:
+            emph_by_row[drows[j].after_row] = emph[j].copy()
+    ed.diff_active = True
+    ed.diff_phantom_text = ph_text^
+    ed.diff_phantom_hl = ph_hl^
+    ed.diff_phantom_buckets = buckets^
+    ed.diff_phantom_emph = ph_emph^
+    ed.diff_emph_by_row = emph_by_row^
+    return ed^
+
+
+def test_diff_view_renders_removed_rows_without_line_numbers() raises:
+    """End-to-end through the NORMAL editor paint: a modified line shows the
+    old version as a phantom removed row (present, NO line number, red bar)
+    and the new version as a numbered added row. Context rows keep numbers."""
+    var ed = _diff_editor(
+        _slist(String("alpha"), String("old middle"), String("omega")),
+        _slist(String("alpha"), String("new middle"), String("omega")),
+    )
+    var w = 60
+    var h = 10
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Rows: 0 alpha(ctx,#), 1 old(phantom,no#), 2 new(added,#), 3 omega(ctx,#).
+    assert_equal(_diff_row_text(c, 0, gx, w), String("alpha"))
+    assert_true(_diff_gutter_has_digit(c, 0, gx))
+    assert_equal(_diff_row_text(c, 1, gx, w), String("old middle"))
+    assert_true(not _diff_gutter_has_digit(c, 1, gx))
+    assert_true(_diff_row_has_red_bar(c, 1, gx))
+    assert_equal(_diff_row_text(c, 2, gx, w), String("new middle"))
+    assert_true(_diff_gutter_has_digit(c, 2, gx))
+    assert_equal(_diff_row_text(c, 3, gx, w), String("omega"))
+    assert_true(_diff_gutter_has_digit(c, 3, gx))
+
+
+def test_diff_view_modified_line_shows_old_removed_and_new_added() raises:
+    """The porting.py shape: a comment inserted before a modified line. The
+    old version of the changed line is matched to its new version (not the
+    comment), so the phantom removed row renders directly above the new line —
+    the comment floats above the pair, keeping old/new adjacent."""
+    var ed = _diff_editor(
+        _slist(
+            String("    template = lookup()"),
+            String("    chain = create(template, skip=True, **props)"),
+            String("    return chain"),
+        ),
+        _slist(
+            String("    template = lookup()"),
+            String("    # force the flag"),
+            String("    chain = create(template, skip=True, published=False, **props)"),
+            String("    return chain"),
+        ),
+    )
+    var w = 80
+    var h = 12
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Rows: 0 template(#), 1 comment(#), 2 old-chain(phantom,no#), 3 new-chain(#),
+    #       4 return(#). The removed line sits right above its matched new line.
+    assert_true(_diff_gutter_has_digit(c, 0, gx))
+    assert_equal(_diff_row_text(c, 1, gx, w), String("    # force the flag"))
+    assert_true(_diff_gutter_has_digit(c, 1, gx))
+    assert_equal(
+        _diff_row_text(c, 2, gx, w),
+        String("    chain = create(template, skip=True, **props)"),
+    )
+    assert_true(not _diff_gutter_has_digit(c, 2, gx))
+    assert_true(_diff_row_has_red_bar(c, 2, gx))
+    assert_equal(
+        _diff_row_text(c, 3, gx, w),
+        String("    chain = create(template, skip=True, published=False, **props)"),
+    )
+    assert_true(_diff_gutter_has_digit(c, 3, gx))
+
+
+def test_diff_view_phantom_syntax_overlay() raises:
+    """A removed (phantom) row carries its own before-file syntax: setting a
+    keyword span on the phantom recolours those cells while keeping the red
+    wash background."""
+    var ed = _diff_editor(
+        _slist(String("keep"), String("keyword gone")),
+        _slist(String("keep")),
+    )
+    # The single phantom is "keyword gone"; colour its first 7 bytes as keyword.
+    var hl = List[Highlight]()
+    hl.append(Highlight(0, 0, 7, Attr(SYN_KEYWORD, EDITOR_BG)))
+    ed.diff_phantom_hl = List[List[Highlight]]()
+    ed.diff_phantom_hl.append(hl^)
+    var w = 60
+    var h = 8
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Rows: 0 keep(ctx), 1 "keyword gone"(phantom). Find the phantom row.
+    assert_equal(_diff_row_text(c, 1, gx, w), String("keyword gone"))
+    assert_equal(c.get(gx, 1).attr.fg, SYN_KEYWORD)        # 'k'
+    assert_equal(c.get(gx + 6, 1).attr.fg, SYN_KEYWORD)    # 'd'
+    assert_equal(c.get(gx, 1).attr.bg, DIFF_REM_BG)        # red wash kept
+
+
+def test_diff_view_unhighlighted_text_uses_identifier_color() raises:
+    """Real rows with no syntax spans render in the SYN_IDENT baseline (green),
+    matching the normal editor — not white. Regression for the white-variable bug."""
+    var ed = _diff_editor(
+        _slist(String("keep")),
+        _slist(String("keep"), String("foo bar baz")),
+    )
+    var w = 60
+    var h = 8
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Row 1 is the added "foo bar baz" (a real buffer row, no highlights).
+    assert_equal(_diff_row_text(c, 1, gx, w), String("foo bar baz"))
+    assert_equal(c.get(gx, 1).attr.fg, SYN_IDENT)
+    assert_equal(c.get(gx + 4, 1).attr.fg, SYN_IDENT)
+
+
+def test_diff_view_dims_unchanged_context_lines() raises:
+    """Unchanged context rows are faded (fg+bg blended toward black) so the
+    changed rows pop — turning their colours truecolor. Regression guard."""
+    var ed = _diff_editor(
+        _slist(String("ctx"), String("old")),
+        _slist(String("ctx"), String("new")),
+    )
+    ed.review_palette = built_in_themes()[0].palette.copy()
+    var w = 40
+    var h = 8
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Row 0 is context "ctx": dimmed → truecolor fg + bg.
+    var cx = c.get(gx, 0).attr
+    assert_true((cx.color_mode & FG_TRUECOLOR) != 0)
+    assert_true((cx.color_mode & BG_TRUECOLOR) != 0)
+
+
+def test_diff_row_emphasis_marks_changed_spans() raises:
+    """The character-level diff of a modified line marks exactly the changed
+    byte span on each side ('foo bar' → 'foo baz': just the last char)."""
+    var rows = build_diff_rows(_slist(String("foo bar")), _slist(String("foo baz")))
+    # rows: [removed "foo bar", added "foo baz"].
+    var emph = diff_row_emphasis(rows)
+    assert_equal(rows[0].kind, DIFF_ROW_REMOVED)
+    assert_equal(len(emph[0]), 1)
+    assert_equal(emph[0][0][0], 6)     # 'r' at byte 6
+    assert_equal(emph[0][0][1], 7)
+    assert_equal(rows[1].kind, DIFF_ROW_ADDED)
+    assert_equal(len(emph[1]), 1)
+    assert_equal(emph[1][0][0], 6)     # 'z' at byte 6
+    assert_equal(emph[1][0][1], 7)
+    # A pure direct check of the byte-range helper too.
+    var oo = List[Tuple[Int, Int]]()
+    var nn = List[Tuple[Int, Int]]()
+    intraline_ranges(String("abcXef"), String("abcYef"), oo, nn)
+    assert_equal(len(oo), 1)
+    assert_equal(oo[0][0], 3)
+    assert_equal(oo[0][1], 4)
+    assert_equal(nn[0][0], 3)
+    assert_equal(nn[0][1], 4)
+
+
+def test_diff_row_emphasis_pairs_by_similarity() raises:
+    """When a comment is inserted above a modified line, the change run is
+    [removed code, added comment, added code]. Positional pairing would
+    char-diff the code against the comment; similarity pairing matches the
+    removed code with the *added code*, so emphasis lands on the real change
+    and the comment stays unmarked."""
+    var before = List[String]()
+    before.append(String("x = foo(a, b)"))
+    var after = List[String]()
+    after.append(String("# explanatory comment"))
+    after.append(String("x = foo(a, c)"))
+    var rows = build_diff_rows(before, after)
+    # rows: [removed "x = foo(a, b)", added "# ...", added "x = foo(a, c)"].
+    assert_equal(rows[0].kind, DIFF_ROW_REMOVED)
+    assert_equal(rows[1].kind, DIFF_ROW_ADDED)
+    assert_equal(rows[2].kind, DIFF_ROW_ADDED)
+    var emph = diff_row_emphasis(rows)
+    # Removed code paired with added code: 'b'→'c' at byte 11 on each side.
+    assert_equal(len(emph[0]), 1)
+    assert_equal(emph[0][0][0], 11)
+    assert_equal(emph[0][0][1], 12)
+    # The comment is not char-diffed against anything.
+    assert_equal(len(emph[1]), 0)
+    assert_equal(len(emph[2]), 1)
+    assert_equal(emph[2][0][0], 11)
+    assert_equal(emph[2][0][1], 12)
+
+
+def test_diff_view_intraline_emphasis_render() raises:
+    """The rendered diff emphasises the changed characters: a stronger green
+    on the new line's changed bytes and a stronger red on the old (phantom)
+    line's, while the unchanged parts keep the faint wash."""
+    var ed = _diff_editor(_slist(String("foo bar")), _slist(String("foo baz")))
+    var w = 40
+    var h = 6
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    # Row 0 = phantom "foo bar": 'r' (byte 6) gets the strong red, 'f' the wash.
+    assert_equal(_diff_row_text(c, 0, gx, w), String("foo bar"))
+    assert_equal(c.get(gx, 0).attr.bg, DIFF_REM_BG)
+    assert_equal(c.get(gx + 6, 0).attr.bg, DIFF_REM_EMPH)
+    # Row 1 = added "foo baz": 'z' (byte 6) strong green, 'f' the wash.
+    assert_equal(_diff_row_text(c, 1, gx, w), String("foo baz"))
+    assert_equal(c.get(gx, 1).attr.bg, DIFF_ADD_BG)
+    assert_equal(c.get(gx + 6, 1).attr.bg, DIFF_ADD_EMPH)
 
 
 def test_compute_revert_block_modified_line() raises:
@@ -20563,6 +21188,20 @@ def _run_chunk_00() raises:
     test_parse_unified_diff_splits_two_files()
     test_parse_unified_diff_handles_pure_delete()
     test_diff_buffer_against_head_marks_added_and_modified()
+    test_diff_modified_line_keeps_inserted_block_added()
+    test_diff_rows_removed_lines_have_no_line_number()
+    test_diff_rows_pure_insertion_all_numbered()
+    test_diff_rows_multiline_removal_numbers_skip_removed()
+    test_diff_rows_inserted_block_before_modified_line()
+    test_diff_row_line_label_basics()
+    test_diff_view_renders_removed_rows_without_line_numbers()
+    test_diff_view_modified_line_shows_old_removed_and_new_added()
+    test_diff_view_phantom_syntax_overlay()
+    test_diff_view_unhighlighted_text_uses_identifier_color()
+    test_diff_view_dims_unchanged_context_lines()
+    test_diff_row_emphasis_marks_changed_spans()
+    test_diff_row_emphasis_pairs_by_similarity()
+    test_diff_view_intraline_emphasis_render()
     test_compute_revert_block_modified_line()
     test_compute_revert_block_added_line()
     test_compute_revert_block_unchanged_returns_empty()
@@ -20650,6 +21289,7 @@ def _run_chunk_01() raises:
     test_editor_double_click_selects_word()
     test_editor_double_click_drag_extends_by_word_forward()
     test_editor_double_click_drag_extends_by_word_backward()
+    test_editor_diff_selection_copies_phantom_rows()
     test_editor_triple_click_selects_line()
     test_editor_triple_click_last_line_no_newline()
     test_editor_triple_click_drag_extends_by_line_forward()
@@ -20719,6 +21359,10 @@ def _run_chunk_01() raises:
     test_window_manager_fit_into_round_trip_is_lossless()
     test_window_manager_fit_into_user_drag_rebases_baseline()
     test_window_manager_fit_into_scales_restore_rect_for_maximized()
+    test_window_manager_title_hover_arms_for_editor_with_path()
+    test_window_manager_title_hover_skips_unbacked_buffers()
+    test_window_manager_title_hover_reveals_full_path_in_titlebar()
+    test_fit_title_path_keeps_tail_with_ellipsis()
     test_write_file_round_trip()
     test_rename_path_moves_file()
     test_delete_tree_file_and_recursive_dir()
@@ -21189,6 +21833,9 @@ def _run_chunk_04() raises:
     test_paint_drop_shadow_targets_right_and_bottom()
     test_extract_path_line_links_pytest_style()
     test_extract_path_line_links_rejects_non_paths()
+    test_test_pane_runs_command_on_pty()
+    test_test_pane_resize_preserves_content()
+    test_test_pane_detects_traceback_link()
     test_debug_pane_default_title_is_debug()
     test_debug_pane_run_mode_swaps_title()
     test_debug_pane_run_mode_hides_inspect_divider()
@@ -21525,59 +22172,58 @@ def _run_chunk_05() raises:
     test_kwarg_conceal_skips_annotation_default()
     test_kwarg_conceal_swift_colon()
     test_kwarg_conceal_build_segment_collapses_and_shifts()
-    test_review_mode_builds_full_file_view()
+    test_review_mode_builds_changeset_model()
 
-def test_review_mode_builds_full_file_view() raises:
+def test_review_mode_builds_changeset_model() raises:
     # Two files, given as explicit before/after texts (the git-free entry
-    # point). The reviewer shows each file in FULL with removed lines
-    # spliced inline, one file at a time.
-    var registry = GrammarRegistry()
+    # point). ReviewMode is now just the changeset model + navigation — the
+    # body is a real editor window the host opens per file — so the model
+    # carries the per-file before/after text and file-to-file navigation.
     var paths = List[String]()
     var befores = List[String]()
     var afters = List[String]()
-    # File 1: one line changed; full context (4 lines) preserved + the
-    # removed line spliced in → 5 display rows.
     paths.append(String("a.txt"))
     befores.append(String("context one\nold line\ncontext two\ntail\n"))
     afters.append(String("context one\nnew line\ncontext two\ntail\n"))
-    # File 2: a pure addition.
     paths.append(String("b.txt"))
     befores.append(String("keep\n"))
     afters.append(String("keep\nsecond file add\n"))
     var rv = ReviewMode()
-    rv.build_from_pairs(paths, befores, afters, registry)
-    # Two files, each with one change.
-    assert_equal(len(rv.files), 2)
-    assert_equal(len(rv.files[0].rows), 5)   # full file + spliced removal
-    assert_equal(len(rv.files[0].changes), 1)
-    assert_equal(len(rv.files[1].changes), 1)
-    # Two global changes total; the flat nav maps them to their files.
-    assert_equal(len(rv.nav_file), 2)
-    assert_equal(rv.nav_file[0], 0)
-    assert_equal(rv.nav_file[1], 1)
-    # File 1 has exactly one added and one removed row (_RK_ADD == 1,
-    # _RK_REM == 2); the rest are context.
-    var adds = 0
-    var rems = 0
-    for i in range(len(rv.files[0].kinds)):
-        if rv.files[0].kinds[i] == 1:
-            adds += 1
-        elif rv.files[0].kinds[i] == 2:
-            rems += 1
-    assert_equal(adds, 1)
-    assert_equal(rems, 1)
-    # Next walks change-to-change and rolls into the next file; both ends
-    # clamp. Driven through the real input path.
+    rv.build_from_pairs(paths, befores, afters)
+    assert_equal(rv.file_count(), 2)
+    assert_equal(rv.current_path(), String("a.txt"))
+    assert_equal(
+        rv.current_before(),
+        String("context one\nold line\ncontext two\ntail\n"),
+    )
+    assert_equal(
+        rv.current_after(),
+        String("context one\nnew line\ncontext two\ntail\n"),
+    )
+    # Change navigation: Ctrl+Shift+PageDown/PageUp are claimed as review
+    # chrome and set a nav intent the host drains (the host walks change
+    # chunks in the editor and rolls across files via ``goto_file_rel``).
     rv.active = True
     rv.mode = 1   # _MODE_REVIEW
     var view = Rect(0, 0, 80, 24)
-    _ = rv.handle_event(Event.key_event(KEY_LEFT), view, 0, registry)
-    assert_equal(rv.cur, 0)                  # Prev clamps at the first change
-    _ = rv.handle_event(Event.key_event(KEY_RIGHT), view, 0, registry)
-    assert_equal(rv.cur, 1)                  # rolled into file 2
-    assert_equal(rv.nav_file[rv.cur], 1)
-    _ = rv.handle_event(Event.key_event(KEY_RIGHT), view, 0, registry)
-    assert_equal(rv.cur, 1)                  # Next clamps at the last change
+    var fwd = Event.key_event(KEY_PAGEDOWN, MOD_CTRL | MOD_SHIFT)
+    var back = Event.key_event(KEY_PAGEUP, MOD_CTRL | MOD_SHIFT)
+    assert_true(rv.handle_event(fwd, view, 0))    # chrome-claimed
+    assert_equal(rv.consume_nav(), 1)             # forward intent
+    assert_equal(rv.consume_nav(), 0)             # drained
+    assert_true(rv.handle_event(back, view, 0))
+    assert_equal(rv.consume_nav(), -1)            # backward intent
+    # Cross-file moves clamp at both ends.
+    assert_true(rv.goto_file_rel(1))              # 0 -> 1
+    assert_equal(rv.cur_file, 1)
+    assert_equal(rv.current_path(), String("b.txt"))
+    assert_true(not rv.goto_file_rel(1))          # clamp at last file
+    assert_equal(rv.cur_file, 1)
+    assert_true(rv.goto_file_rel(-1))             # 1 -> 0
+    assert_equal(rv.cur_file, 0)
+    # A plain arrow key is NOT review chrome — it returns False so the host
+    # forwards it to the hosted editor.
+    assert_true(not rv.handle_event(Event.key_event(KEY_LEFT), view, 0))
 
 def test_kwarg_conceal_basic_python() raises:
     # ``foo(a=a, b=b, d=4)`` hides exactly the two redundant labels (the
