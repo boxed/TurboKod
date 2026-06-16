@@ -27,6 +27,8 @@ from .colors import (
     STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
     CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
     SYN_STRING, SYN_COMMENT,
+    BG_TRUECOLOR, FG_TRUECOLOR, DIFF_ADD_BG, DIFF_REM_BG,
+    DIFF_ADD_EMPH, DIFF_REM_EMPH,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeRegion, REGION_CONFLICT, diff3_regions
@@ -287,6 +289,54 @@ def _diag_underline_color(severity: Int) -> UInt8:
     if severity == DIAG_SEVERITY_HINT:
         return DARK_GRAY
     return LIGHT_BLUE
+
+
+# Review context-dimming: how far an unchanged line's foreground is mixed
+# toward its (already darkened) background, and how far its background is
+# darkened toward black. Blending toward black darkens dark themes and turns
+# light themes greyish — both make changed lines pop against the receding
+# context, which is the whole point.
+comptime _REVIEW_DIM_FG: Int = 38
+comptime _REVIEW_DIM_BG: Int = 30
+
+
+def _review_blend(src: UInt32, dst: UInt32, pct: Int) -> UInt32:
+    """Mix ``src`` ``pct``% toward ``dst`` (both ``0xRRGGBB``)."""
+    var sr = Int((src >> 16) & 0xFF)
+    var sg = Int((src >> 8) & 0xFF)
+    var sb = Int(src & 0xFF)
+    var dr = Int((dst >> 16) & 0xFF)
+    var dg = Int((dst >> 8) & 0xFF)
+    var db = Int(dst & 0xFF)
+    var rr = (sr * (100 - pct) + dr * pct) // 100
+    var rg = (sg * (100 - pct) + dg * pct) // 100
+    var rb = (sb * (100 - pct) + db * pct) // 100
+    return (UInt32(rr) << 16) | (UInt32(rg) << 8) | UInt32(rb)
+
+
+def _review_dim_attr(attr: Attr, palette: List[UInt32]) -> Attr:
+    """Dim one unchanged-context cell: darken its background toward black,
+    then mix its foreground toward that darkened background so the text
+    recedes. Blends off the resolved palette RGB, so it works for any
+    theme — dark surfaces get darker, light ones turn greyish."""
+    var black = UInt32(0)
+    var bg: UInt32
+    if (attr.color_mode & BG_TRUECOLOR) != 0:
+        bg = attr.bg_rgb
+    elif Int(attr.bg) < len(palette):
+        bg = palette[Int(attr.bg)]
+    else:
+        bg = black
+    var new_bg = _review_blend(bg, black, _REVIEW_DIM_BG)
+    var fg: UInt32
+    if (attr.color_mode & FG_TRUECOLOR) != 0:
+        fg = attr.fg_rgb
+    elif Int(attr.fg) < len(palette):
+        fg = palette[Int(attr.fg)]
+    else:
+        fg = new_bg
+    var new_fg = _review_blend(fg, new_bg, _REVIEW_DIM_FG)
+    return attr.with_fg_rgb(new_fg).with_bg_rgb(new_bg)
 
 
 def _lists_equal(a: List[String], b: List[String]) -> Bool:
@@ -1170,6 +1220,39 @@ struct Editor(Copyable, Movable):
     # the user can browse rendered HTML without accidentally typing
     # into it.
     var read_only: Bool
+    # ``review_mode`` marks an editor that's being hosted by ReviewMode.
+    # The desktop's per-frame git-gutter loop special-cases it: the
+    # +/~ change gutter stays on (and re-diffs against the *pinned*
+    # baseline) even when ``read_only`` is True — staged/commit reviews
+    # are read-only but still want the changeset gutter + change-chunk
+    # navigation. The baseline is pinned via ``set_git_head_text`` by the
+    # review host, so the normal lazy HEAD fetch is skipped.
+    var review_mode: Bool
+    # Active theme palette (256 packed 0xRRGGBB), pushed by the host onto the
+    # review-hosted editor each frame. Used *only* by the review paint pass to
+    # dim unchanged context lines (blend fg→bg, shift bg toward a contrast
+    # target) so changed lines pop — that blend needs real RGB, not the
+    # palette indices the rest of paint emits. Empty on non-review editors.
+    var review_palette: List[UInt32]
+    # Inline-diff phantom rows. When ``diff_active`` is set (review mode), the
+    # editor is a NORMAL editor of the *after* file — sticky scroll, syntax,
+    # folding, line numbers, the git gutter all work as usual — but
+    # ``_layout_lines`` also weaves in *removed* lines as phantom visual rows
+    # that belong to no buffer line (``line_idx = -1``): no line number, a red
+    # background, their own (before-file) syntax, and the cursor can't land on
+    # them. ``diff_phantom_buckets[a]`` lists the indices (into
+    # ``diff_phantom_text`` / ``diff_phantom_hl``) of the removed lines shown
+    # *before* after-file row ``a`` (index ``line_count`` = end of file).
+    var diff_active: Bool
+    var diff_phantom_text: List[String]
+    var diff_phantom_hl: List[List[Highlight]]
+    var diff_phantom_buckets: List[List[Int]]
+    # Intra-line change emphasis (byte ranges that actually changed within a
+    # modified line). ``diff_phantom_emph`` is parallel to ``diff_phantom_text``
+    # (the removed side); ``diff_emph_by_row`` is indexed by after-file buffer
+    # row (the added side). Empty ⇒ whole-line change, no emphasis.
+    var diff_phantom_emph: List[List[Tuple[Int, Int]]]
+    var diff_emph_by_row: List[List[Tuple[Int, Int]]]
     # Git blame overlay. ``blame_lines[i]`` carries the short SHA and
     # author for buffer row ``i`` when the gutter is on; the list is
     # populated by the host (Desktop's ``EDITOR_TOGGLE_BLAME`` action
@@ -1489,6 +1572,14 @@ struct Editor(Copyable, Movable):
         self._copy_flash_line = -1
         self._copy_flash_start_ms = 0
         self.read_only = False
+        self.review_mode = False
+        self.review_palette = List[UInt32]()
+        self.diff_active = False
+        self.diff_phantom_text = List[String]()
+        self.diff_phantom_hl = List[List[Highlight]]()
+        self.diff_phantom_buckets = List[List[Int]]()
+        self.diff_phantom_emph = List[List[Tuple[Int, Int]]]()
+        self.diff_emph_by_row = List[List[Tuple[Int, Int]]]()
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
         self.git_changes_visible = False
@@ -1627,6 +1718,14 @@ struct Editor(Copyable, Movable):
         self._copy_flash_line = -1
         self._copy_flash_start_ms = 0
         self.read_only = False
+        self.review_mode = False
+        self.review_palette = List[UInt32]()
+        self.diff_active = False
+        self.diff_phantom_text = List[String]()
+        self.diff_phantom_hl = List[List[Highlight]]()
+        self.diff_phantom_buckets = List[List[Int]]()
+        self.diff_phantom_emph = List[List[Tuple[Int, Int]]]()
+        self.diff_emph_by_row = List[List[Tuple[Int, Int]]]()
         self.blame_lines = List[BlameLine]()
         self.blame_visible = False
         self.git_changes_visible = False
@@ -1792,6 +1891,14 @@ struct Editor(Copyable, Movable):
         self._copy_flash_line = copy._copy_flash_line
         self._copy_flash_start_ms = copy._copy_flash_start_ms
         self.read_only = copy.read_only
+        self.review_mode = copy.review_mode
+        self.review_palette = copy.review_palette.copy()
+        self.diff_active = copy.diff_active
+        self.diff_phantom_text = copy.diff_phantom_text.copy()
+        self.diff_phantom_hl = copy.diff_phantom_hl.copy()
+        self.diff_phantom_buckets = copy.diff_phantom_buckets.copy()
+        self.diff_phantom_emph = copy.diff_phantom_emph.copy()
+        self.diff_emph_by_row = copy.diff_emph_by_row.copy()
         self.blame_lines = copy.blame_lines.copy()
         self.blame_visible = copy.blame_visible
         self.git_changes_visible = copy.git_changes_visible
@@ -3717,12 +3824,15 @@ struct Editor(Copyable, Movable):
             return -1
 
     def goto_change_chunk(
-        mut self, direction: Int, view: Rect,
+        mut self, direction: Int, view: Rect, popup: Bool = True,
     ) -> Bool:
         """Move the cursor to the start of the next/previous git-change
-        chunk, scroll it into view, and stamp a ``pending_git_revert`` so
-        the host opens the inline-diff popup there. Returns False (no-op)
-        when there's no baseline or no further chunk in that direction."""
+        chunk and scroll it into view. With ``popup`` (default) it also
+        stamps a ``pending_git_revert`` so the host opens the inline-diff
+        popup there; ReviewMode passes ``popup=False`` because its own
+        change navigation must not spawn a modal that eats the next
+        keypress/click. Returns False (no-op) when there's no baseline or
+        no further chunk in that direction."""
         if not self._git_has_changes:
             return False
         var target = self._find_change_chunk_start(
@@ -3731,7 +3841,11 @@ struct Editor(Copyable, Movable):
         if target < 0:
             return False
         self.move_to(target, 0, False)
-        self._scroll_to_cursor(view)
+        # A jump to a change is a deliberate navigation, so park it at the
+        # golden-ratio line — same as every other jump-to (see CLAUDE.md).
+        self.reveal_cursor(view, golden=True)
+        if not popup:
+            return True
         var req_opt = self._build_revert_request(view, target, 0, 0)
         if not req_opt:
             return False
@@ -3740,6 +3854,35 @@ struct Editor(Copyable, Movable):
         req.anchor_x = req.text_x
         req.anchor_y = req.block_top_y if req.block_top_y >= 0 else view.a.y
         self.pending_git_revert = Optional[GitRevertRequest](req^)
+        return True
+
+    def goto_change_edge(mut self, direction: Int, view: Rect) -> Bool:
+        """Jump to the *first* (``direction > 0``) or *last* change chunk in
+        the buffer and golden-center it, without spawning the revert popup.
+        Used by ReviewMode when a prev/next-change rolls into an adjacent
+        file. Returns False when there are no changes."""
+        if not self._git_has_changes:
+            return False
+        var n = len(self.git_change_lines)
+        var target = -1
+        if direction > 0:
+            for r in range(0, n):
+                if self.git_change_lines[r] != GIT_CHANGE_NONE \
+                        and (r == 0
+                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
+                    target = r
+                    break
+        else:
+            for r in range(n - 1, -1, -1):
+                if self.git_change_lines[r] != GIT_CHANGE_NONE \
+                        and (r == 0
+                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
+                    target = r
+                    break
+        if target < 0:
+            return False
+        self.move_to(target, 0, False)
+        self.reveal_cursor(view, golden=True)
         return True
 
     def revert_chunk_at_cursor(mut self) -> Bool:
@@ -5670,6 +5813,19 @@ struct Editor(Copyable, Movable):
         if self.wrap_mode == WRAP_NONE:
             var out = List[VisualLine]()
             while br < n_lines and len(out) < max_rows:
+                # Inline-diff: weave in the removed (phantom) rows that belong
+                # just before this after-file row. Phantom VisualLines carry
+                # ``line_idx = -1`` (no buffer line → no line number) and stash
+                # their phantom-store index in ``byte_start``.
+                if self.diff_active and br < len(self.diff_phantom_buckets):
+                    for pk in range(len(self.diff_phantom_buckets[br])):
+                        if len(out) >= max_rows:
+                            break
+                        out.append(VisualLine(
+                            -1, self.diff_phantom_buckets[br][pk], 0, 0, 0, 0,
+                        ))
+                    if len(out) >= max_rows:
+                        return out^
                 # Skip rows hidden inside a collapsed fold (the start line
                 # is never hidden, so the fold header still renders).
                 if self._is_row_hidden(br):
@@ -5678,6 +5834,16 @@ struct Editor(Copyable, Movable):
                 var n = self.buffer.line_length(br)
                 out.append(VisualLine(br, self.scroll_x, n, 0, 0, 0))
                 br += 1
+            # Phantoms anchored past the last line (deletions at end of file)
+            # show once we've scrolled to the bottom.
+            if self.diff_active and br >= n_lines \
+                    and n_lines < len(self.diff_phantom_buckets):
+                for pk in range(len(self.diff_phantom_buckets[n_lines])):
+                    if len(out) >= max_rows:
+                        break
+                    out.append(VisualLine(
+                        -1, self.diff_phantom_buckets[n_lines][pk], 0, 0, 0, 0,
+                    ))
             return out^
         var w = text_width
         if w < 1:
@@ -5977,6 +6143,14 @@ struct Editor(Copyable, Movable):
         for vidx in range(len(layout)):
             var vrow = layout[vidx]
             var buf_row = vrow.line_idx
+            # Phantom inline-diff (removed) rows have no buffer line; the
+            # normal text pass paints nothing for them and ``_paint_phantom_rows``
+            # fills them in. Emit empty placeholders so the arrays stay aligned.
+            if buf_row < 0:
+                display_rows.append(String(""))
+                cell_maps.append(List[Int]())
+                cell_counts.append(0)
+                continue
             var line = self.buffer.line(buf_row)
             var line_n = len(line.as_bytes())
             var start_byte = vrow.byte_start
@@ -6216,6 +6390,97 @@ struct Editor(Copyable, Movable):
                 rr += 1
         return out^
 
+    def _paint_phantom_rows(self, mut canvas: Canvas, view: Rect, layout: List[VisualLine]):
+        """Fill the inline-diff *removed* (phantom) rows. Real rows are
+        painted by the normal pass (which skips ``line_idx < 0``); these have
+        no buffer line, so we paint them here: a red wash, a red change bar,
+        no line number, and the removed line's own (before-file) syntax.
+        ``byte_start`` on a phantom ``VisualLine`` carries its index into
+        ``diff_phantom_text`` / ``diff_phantom_hl``."""
+        var painter = Painter(view)
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var text_x0 = view.a.x + total_gutter
+        var content_right = view.b.x - right_gutter
+        # The change-bar sits at the git-changes gutter column when present,
+        # otherwise just left of the text.
+        var gc = self._git_changes_gutter()
+        var ln = self._line_number_gutter()
+        var dap = self.gutter_width
+        var bar_x = view.a.x + ln + dap
+        for screen_row in range(len(layout)):
+            if layout[screen_row].line_idx >= 0:
+                continue
+            var p_idx = layout[screen_row].byte_start
+            if p_idx < 0 or p_idx >= len(self.diff_phantom_text):
+                continue
+            var y = view.a.y + screen_row
+            var rem_attr = Attr(SYN_IDENT, DIFF_REM_BG)
+            painter.fill(
+                canvas, Rect(view.a.x, y, content_right, y + 1),
+                String(" "), rem_attr,
+            )
+            if gc > 0:
+                _ = painter.put_text(
+                    canvas, Point(bar_x, y), String("▌"), Attr(LIGHT_RED, DIFF_REM_BG),
+                )
+            var text = self.diff_phantom_text[p_idx]
+            _ = painter.put_text(canvas, Point(text_x0, y), text, rem_attr)
+            # Before-file syntax overlay (fg only, keep the red wash bg).
+            if p_idx < len(self.diff_phantom_hl) \
+                    and len(self.diff_phantom_hl[p_idx]) > 0:
+                var bytes_n = len(text.as_bytes())
+                var b2c = utf8_byte_to_cell(text)
+                var cells = utf8_codepoint_count(text)
+                for hi in range(len(self.diff_phantom_hl[p_idx])):
+                    var hl = self.diff_phantom_hl[p_idx][hi]
+                    var lo = hl.col_start
+                    var h4 = hl.col_end
+                    if lo < 0:
+                        lo = 0
+                    if h4 > bytes_n:
+                        h4 = bytes_n
+                    if lo >= h4:
+                        continue
+                    var cell_lo = b2c[lo]
+                    var cell_hi = b2c[h4] if h4 < bytes_n else cells
+                    for cc in range(cell_lo, cell_hi):
+                        var sx = text_x0 + cc
+                        if sx >= content_right:
+                            break
+                        var cur = canvas.get(sx, y).attr
+                        var na: Attr
+                        if (hl.attr.color_mode & FG_TRUECOLOR) != 0:
+                            na = cur.with_fg_rgb(hl.attr.fg_rgb)
+                        else:
+                            na = cur.with_fg(hl.attr.fg)
+                        canvas.set_attr(sx, y, na.with_style(hl.attr.style))
+            # Intra-line emphasis: a stronger red on the characters that
+            # actually changed within this (modified) line.
+            if p_idx < len(self.diff_phantom_emph) \
+                    and len(self.diff_phantom_emph[p_idx]) > 0:
+                var ebytes = len(text.as_bytes())
+                var eb2c = utf8_byte_to_cell(text)
+                var ecells = utf8_codepoint_count(text)
+                for er in range(len(self.diff_phantom_emph[p_idx])):
+                    var rng = self.diff_phantom_emph[p_idx][er]
+                    var elo = rng[0]
+                    var ehi = rng[1]
+                    if elo < 0:
+                        elo = 0
+                    if ehi > ebytes:
+                        ehi = ebytes
+                    if elo >= ehi:
+                        continue
+                    var ecl = eb2c[elo]
+                    var ech = eb2c[ehi] if ehi < ebytes else ecells
+                    for cc in range(ecl, ech):
+                        var sx = text_x0 + cc
+                        if sx >= content_right:
+                            break
+                        var cur = canvas.get(sx, y).attr
+                        canvas.set_attr(sx, y, cur.with_bg(DIFF_REM_EMPH))
+
     def paint(self, mut canvas: Canvas, view: Rect, focused: Bool):
         # Nothing to draw when the host workspace has collapsed (e.g.
         # the debug pane is maximized and the editor area shrinks to
@@ -6290,7 +6555,11 @@ struct Editor(Copyable, Movable):
                 # buffer row when either wrapping is off (one segment per
                 # row) or this segment starts at byte 0 of the row.
                 var is_first_seg = (self.wrap_mode == WRAP_NONE) or (seg_start == 0)
-                if ln_gutter > 0 and is_first_seg:
+                # ``buf_row < 0`` marks a phantom diff row (a removed line in
+                # the review's inline diff): it belongs to no buffer line, so
+                # it gets no line number — the blank gutter is what visually
+                # distinguishes it from the real, numbered lines.
+                if ln_gutter > 0 and is_first_seg and buf_row >= 0:
                     var num_str = String(buf_row + 1)
                     var num_w = len(num_str.as_bytes())
                     # Right-align inside the line-number gutter, leaving
@@ -6329,13 +6598,22 @@ struct Editor(Copyable, Movable):
                             + (1 if dap_gutter >= 2 else 0)
                         painter.set(canvas, ax, sy_g, Cell(String("▶"), exec_attr, 1))
                 if gc_gutter > 0 and is_first_seg \
+                        and buf_row >= 0 \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
                     if status != GIT_CHANGE_NONE:
-                        var bar_attr = Attr(EDITOR_FG, EDITOR_BG)
+                        # In review every changed buffer row is the *new*
+                        # side of a change (the old text of a modified line is
+                        # its own red phantom row), so the bar is green. The
+                        # plain editor keeps the neutral foreground bar.
+                        var bar_fg = EDITOR_FG
+                        if self.review_mode:
+                            bar_fg = LIGHT_GREEN
+                        var bar_attr = Attr(bar_fg, EDITOR_BG)
                         var gx = view.a.x + ln_gutter + dap_gutter
                         painter.set(canvas, gx, sy_g, Cell(String("│"), bar_attr, 1))
                 if bl_gutter > 0 and is_first_seg \
+                        and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
                     var bl = self.blame_lines[buf_row]
                     var bx = view.a.x + ln_gutter + dap_gutter + gc_gutter
@@ -6383,11 +6661,20 @@ struct Editor(Copyable, Movable):
         var diag_buckets = List[List[Int]]()
         var color_buckets = List[List[Int]]()
         var vis_lo = 0
-        if len(layout) > 0:
-            vis_lo = layout[0].line_idx
-            var vis_hi = layout[0].line_idx
+        # First real (non-phantom) buffer row in the layout — phantom diff
+        # rows carry ``line_idx = -1`` and must not skew the bucket range.
+        var first_real = -1
+        for li in range(len(layout)):
+            if layout[li].line_idx >= 0:
+                first_real = layout[li].line_idx
+                break
+        if first_real >= 0:
+            vis_lo = first_real
+            var vis_hi = first_real
             for li in range(len(layout)):
                 var r = layout[li].line_idx
+                if r < 0:
+                    continue
                 if r < vis_lo:
                     vis_lo = r
                 if r > vis_hi:
@@ -6494,6 +6781,11 @@ struct Editor(Copyable, Movable):
         var diag_extended = terminal_supports_extended_underline()
         for screen_row in range(len(layout)):
             var buf_row = layout[screen_row].line_idx
+            # Phantom inline-diff (removed) rows have no buffer line — they're
+            # painted entirely by ``_paint_phantom_rows``; skip every per-row
+            # overlay here (and avoid the out-of-range ``buffer.line(-1)``).
+            if buf_row < 0:
+                continue
             var start_byte = layout[screen_row].byte_start
             var end_byte = layout[screen_row].byte_end
             var seg_x0 = text_x0 + layout[screen_row].indent_cells
@@ -7003,6 +7295,70 @@ struct Editor(Copyable, Movable):
                     painter.set_attr(
                         canvas, gx, div_y, dc.attr.add_style(STYLE_UNDERLINE),
                     )
+        # Review changeset shading: changed lines get a faint, theme-derived
+        # green (added) / red (modified) wash so they stand out, while every
+        # unchanged context line is *dimmed* (fg + bg blended toward a
+        # contrast target) so the changes pop against a receding backdrop —
+        # darker on dark themes, greyer on light ones. Only touches cells
+        # still on the default editor background, so selection, the caret
+        # block, and search highlights keep their own colour. Painted after
+        # the text + selection passes, before the overlay popups.
+        if self.review_mode and self.git_changes_visible \
+                and len(self.git_change_lines) > 0:
+            var have_pal = len(self.review_palette) > 0
+            var wash_r = view.b.x - right_gutter
+            for srow in range(len(layout)):
+                var brow = layout[srow].line_idx
+                if brow < 0 or brow >= len(self.git_change_lines):
+                    continue
+                var st2 = self.git_change_lines[brow]
+                var wy = view.a.y + srow
+                for wx in range(view.a.x, wash_r):
+                    var wc = canvas.get(wx, wy)
+                    if wc.attr.bg != EDITOR_BG \
+                            or (wc.attr.color_mode & BG_TRUECOLOR) != 0:
+                        continue
+                    if st2 == GIT_CHANGE_ADDED or st2 == GIT_CHANGE_MODIFIED:
+                        # Both are the *new* side of the change → green wash.
+                        # The old text of a modified line is its own red
+                        # phantom row.
+                        canvas.set_attr(wx, wy, wc.attr.with_bg(DIFF_ADD_BG))
+                    elif have_pal:
+                        canvas.set_attr(
+                            wx, wy,
+                            _review_dim_attr(wc.attr, self.review_palette),
+                        )
+                # Intra-line emphasis: a stronger green over the characters
+                # that actually changed on this (modified) line.
+                if (st2 == GIT_CHANGE_ADDED or st2 == GIT_CHANGE_MODIFIED) \
+                        and brow < len(self.diff_emph_by_row) \
+                        and len(self.diff_emph_by_row[brow]) > 0:
+                    var line = self.buffer.line(brow)
+                    var lbytes = len(line.as_bytes())
+                    var lb2c = utf8_byte_to_cell(line)
+                    var lcells = utf8_codepoint_count(line)
+                    for er in range(len(self.diff_emph_by_row[brow])):
+                        var rng = self.diff_emph_by_row[brow][er]
+                        var elo = rng[0]
+                        var ehi = rng[1]
+                        if elo < 0:
+                            elo = 0
+                        if ehi > lbytes:
+                            ehi = lbytes
+                        if elo >= ehi:
+                            continue
+                        var ecl = lb2c[elo]
+                        var ech = lb2c[ehi] if ehi < lbytes else lcells
+                        for cc in range(ecl, ech):
+                            var sx = text_x0 + cc
+                            if sx >= wash_r:
+                                break
+                            var cur = canvas.get(sx, wy).attr
+                            canvas.set_attr(sx, wy, cur.with_bg(DIFF_ADD_EMPH))
+        # Inline-diff removed (phantom) rows: red wash + before-file syntax,
+        # no line number. Painted after the wash/dim so it owns those rows.
+        if self.diff_active:
+            self._paint_phantom_rows(canvas, view, layout)
         # Editor-body overlay popups (minimap tooltip / LSP hover /
         # completion). Skipped under ``_suppress_overlays`` — the host's
         # smooth-scroll overdraw render sets it so a popup anchored to a
@@ -9134,6 +9490,32 @@ struct Editor(Copyable, Movable):
             seg_end = layout[screen_row].byte_end
             seg_indent = layout[screen_row].indent_cells
             on_real_row = True
+        if row < 0:
+            # Clicked an inline-diff phantom (removed) row — it maps to no
+            # buffer line, so snap to the nearest real row below (then above)
+            # and don't treat it as a gutter-actionable row.
+            var snapped = -1
+            var start_sr = screen_row
+            if start_sr >= len(layout):
+                start_sr = len(layout) - 1
+            for sr in range(start_sr, len(layout)):
+                if layout[sr].line_idx >= 0:
+                    snapped = layout[sr].line_idx
+                    break
+            if snapped < 0:
+                var sr2 = start_sr - 1
+                while sr2 >= 0:
+                    if layout[sr2].line_idx >= 0:
+                        snapped = layout[sr2].line_idx
+                        break
+                    sr2 -= 1
+            if snapped < 0:
+                snapped = 0
+            row = snapped
+            seg_start = 0
+            seg_end = self.buffer.line_length(row)
+            seg_indent = 0
+            on_real_row = False
         if in_gutter:
             # Drag-motion that started in the gutter is ignored — no
             # selection extend, no toggle. Initial-press only, on a row

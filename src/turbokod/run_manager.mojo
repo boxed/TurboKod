@@ -74,6 +74,7 @@ struct RunSession(Movable):
     def start(
         mut self, var target_name: String, program: String,
         args: List[String], cwd: String,
+        cols: Int = 0, rows: Int = 0,
     ) raises:
         """Spawn ``program`` with ``args`` (argv-style, no shell).
         Raises if a run is already in flight — caller should
@@ -85,6 +86,13 @@ struct RunSession(Movable):
         the real program so the spawn keeps the kernel's view of
         argv[0] aligned with the user's binary, and signals
         (SIGTERM from ``terminate``) reach the right process.
+
+        ``cols``/``rows`` (when > 0) are exported as ``COLUMNS``/
+        ``LINES`` so the child sizes its output to the pane. The child
+        runs on a pipe, not a pty, so it can't ask the kernel for a
+        window size — tools like pytest fall back to 80×24 unless these
+        env vars are set. Exported *before* the ``cd``/``exec`` so the
+        replaced program inherits them.
         """
         if self.active and not self.exited:
             raise Error("run session already active")
@@ -100,6 +108,9 @@ struct RunSession(Movable):
         if len(cwd.as_bytes()) > 0:
             script = String("cd ") + _shell_quote(cwd) \
                 + String(" && ") + script
+        if cols > 0 and rows > 0:
+            script = String("export COLUMNS=") + String(cols) \
+                + String(" LINES=") + String(rows) + String("; ") + script
         var argv = List[String]()
         argv.append(String("sh"))
         argv.append(String("-c"))
@@ -167,7 +178,12 @@ def drain_run_output(mut session: RunSession) -> RunOutput:
     blocking. Both pipes were set non-blocking by ``LspProcess.spawn``
     so each loop is bounded by the per-call 64 KB cap."""
     var out = RunOutput()
-    if not session.is_active():
+    # Drain while the session's pipes are open — note this is ``active``,
+    # not ``is_active()``: a child that has *exited* but not yet been
+    # ``terminate``d can still have its final ``printf`` payload sitting
+    # in the pipe buffer, and that tail is exactly what we want to
+    # capture. ``_drain_fd`` no-ops on a closed (-1) fd.
+    if not session.active:
         return out^
     out.stdout = _drain_fd(session.process.stdout_fd)
     out.stderr = _drain_fd(session.process.stderr_fd)

@@ -50,7 +50,9 @@ from .config import (
     TurbokodConfig, WRAP_NONE, default_font_label,
     load_config, record_recent_file, record_recent_project, save_config,
 )
-from .diff import unified_diff
+from .diff import (
+    DIFF_ROW_REMOVED, DiffRow, build_diff_rows, diff_row_emphasis, unified_diff,
+)
 from .file_io import (
     basename, delete_tree, find_git_project, join_path, list_directory,
     parent_path, project_relative, read_file, rename_path, stat_file,
@@ -58,6 +60,7 @@ from .file_io import (
 )
 from .git_blame import compute_blame
 from .git_changes import (
+    GIT_CHANGE_NONE,
     GitFileStatus, GitRevertBlock, GitStateMtimes, compute_revert_block,
     diff_buffer_against_head, fetch_git_status, fetch_head_text,
     git_state_mtimes, project_is_git_repo,
@@ -98,7 +101,8 @@ from .file_tree import FileTree
 from .geometry import Point, Rect
 from .highlight import (
     CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
-    HoverRequest, embedded_language_extensions, extension_of, word_at,
+    HoverRequest, diff_row_highlights, embedded_language_extensions,
+    extension_of, word_at,
 )
 from .spell import Speller
 from .spell_menu import (
@@ -182,8 +186,8 @@ from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
-    byte_slice, display_columns, parse_int_prefix, starts_with,
-    utf8_cell_of_byte,
+    byte_slice, display_columns, parse_int_prefix, split_lines_no_trailing,
+    starts_with, utf8_cell_of_byte,
 )
 from .session_store import (
     Session, SessionWindow, _resolve_session_path,
@@ -209,6 +213,9 @@ from .find_symbol import (
 )
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
+from .test_pane import (
+    TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
+)
 from .window import (
     DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
@@ -423,10 +430,9 @@ comptime TARGET_TEST_DEBUG       = String("target:test_debug")
 # test was launched (from a gutter run-icon), the whole suite otherwise —
 # by replaying ``_last_test_node_id``. (``TARGET_TEST``/Cmd+T always runs
 # the whole suite and resets that to empty.)
-comptime TEST_STOP               = String("test:stop")
-comptime TEST_RERUN              = String("test:rerun")
-comptime TEST_CLEAR_OUTPUT       = String("test:clear_output")
-comptime TEST_PANE_CLOSE         = String("test:pane_close")
+# ``TEST_STOP`` / ``TEST_RERUN`` / ``TEST_CLEAR_OUTPUT`` / ``TEST_PANE_CLOSE``
+# are defined by (and imported from) ``test_pane`` — the pane owns its
+# command vocabulary; the dispatch side lives here.
 # ``[■]`` close button for the persistent Find Results pane.
 comptime FIND_RESULTS_PANE_CLOSE = String("find:pane_close")
 # Status-bar tab click. ``TARGET_SELECT_PREFIX + <index>`` switches
@@ -856,6 +862,22 @@ struct Desktop(Movable):
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var review: ReviewMode
+    # Review hosting: the window-list index of the editor ReviewMode is
+    # currently showing in its body (``-1`` when none). ``_review_persistent``
+    # is True for the unstaged case (a real worktree-file window we restore
+    # and leave open on exit) and False for staged/commit (a transient
+    # read-only blob window we close on exit). ``_review_saved_*`` remember
+    # the persistent window's pre-review geometry so review doesn't leave it
+    # maximized. ``_review_host_path`` is the absolute path currently hosted.
+    var _review_win_idx: Int
+    var _review_persistent: Bool
+    var _review_saved_rect: Rect
+    var _review_saved_max: Bool
+    var _review_host_path: String
+    # Deferred change-edge jump after a prev/next-change rolled into an
+    # adjacent file: +1 = land on that file's first change, -1 = its last.
+    # Applied once the newly-hosted editor's git-change lines are ready.
+    var _review_pending_chunk_edge: Int
     # Project Settings view (Project ▸ Project Settings...). Second-surface
     # screen — native window on macOS, in-grid dialog in the terminal —
     # consolidating per-project on-save actions, run/debug targets, and
@@ -1297,8 +1319,11 @@ struct Desktop(Movable):
     # ("Tests") and never terminates an in-flight target run (a dev
     # server keeps serving while the tests run). ``_test_output_held``
     # is the test pane's analog of ``_run_output_held``.
-    var test_session: RunSession
-    var test_pane: DebugPane
+    # Test runner pane: a pty + ``Vt`` terminal surface (``TestPane``),
+    # not a pipe-backed ``DebugPane`` like the run pane. pytest runs on a
+    # real TTY so it auto-sizes to the pane and reflows on resize. The
+    # pane owns its child process; there's no separate session slot.
+    var test_pane: TestPane
     # Persistent Find-in-Project results, docked alongside the test pane.
     # Populated from the Cmd+Shift+F modal's ``[ Panel ]`` action; hidden
     # until the user sends a result set to it.
@@ -1308,6 +1333,12 @@ struct Desktop(Movable):
     # the pane's "Re-run" replays *that* command rather than always
     # falling back to the whole suite. Set on every ``_target_test``.
     var _last_test_node_id: String
+    # Last screen rect seen by ``paint``. Cached so spawn-time code
+    # (which runs in a key handler, before the next paint) can size a
+    # child process's terminal — e.g. exporting ``COLUMNS``/``LINES``
+    # for pytest so its output wraps to the actual pane width instead
+    # of the 80-column default. ``Rect.empty()`` until the first paint.
+    var _last_screen: Rect
     # Per-user window session, persisted in
     # ``<project>/.turbokod/per_user/<username>/session.json``.
     # ``_pending_restore`` is
@@ -1445,6 +1476,12 @@ struct Desktop(Movable):
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.review = ReviewMode()
+        self._review_win_idx = -1
+        self._review_persistent = False
+        self._review_saved_rect = Rect.empty()
+        self._review_saved_max = False
+        self._review_host_path = String("")
+        self._review_pending_chunk_edge = 0
         self.project_settings = ProjectSettings()
         self.project_settings_detached = False
         self.project_on_save = List[OnSaveAction]()
@@ -1568,16 +1605,10 @@ struct Desktop(Movable):
         self.config = TurbokodConfig()
         self.config_persistable = True
         self.targets = ProjectTargets()
+        self._last_screen = Rect.empty()
         self.run_session = RunSession()
         self._run_output_held = False
-        self.test_session = RunSession()
-        self.test_pane = DebugPane()
-        # The test pane is always output-only and self-labels "Tests"
-        # so it reads distinctly from the run/debug pane stacked above
-        # it. Give it a distinct close-button id so the host can tell a
-        # test-pane close from a run/debug-pane close.
-        self.test_pane.set_title(String("Tests"))
-        self.test_pane.dock.close_button_id = TEST_PANE_CLOSE
+        self.test_pane = TestPane()
         self.find_results_pane = FindResultsPane()
         self.find_results_pane.dock.close_button_id = FIND_RESULTS_PANE_CLOSE
         self._test_output_held = False
@@ -1805,6 +1836,15 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
             group=HKG_GIT, help=String("Show diff viewer"),
+        ))
+        # Ctrl+Shift+R — open the changeset reviewer (R for Review). Ctrl+R
+        # is Run and Cmd+R/Cmd+Shift+R are Replace / Replace-in-project, so
+        # Ctrl+Shift+R is the free R-chord; it sits in the Git group next to
+        # the diff viewer. Registered uppercase-with-shift to match the
+        # native menu's key-equivalent derivation (Shift kept as-is).
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("r")), MOD_CTRL | MOD_SHIFT, GIT_REVIEW,
+            group=HKG_GIT, help=String("Review changes"),
         ))
         # LSP completion request. Two default triggers so at least one
         # survives macOS's input-source hijack of Ctrl+Space:
@@ -2453,6 +2493,31 @@ struct Desktop(Movable):
         return self.test_pane.dock.effective_height(
             screen, self._bottom_chrome_height(screen),
         )
+
+    def _bottom_pane_term_size(self) -> Tuple[Int, Int]:
+        """Terminal ``(cols, rows)`` to advertise to a child process
+        whose output streams into a full-width bottom-docked pane
+        (run / test). Children spawned by ``RunSession`` run on a pipe,
+        not a pty, so they can't query the kernel for a window size and
+        fall back to 80×24 — we instead export ``COLUMNS``/``LINES`` at
+        spawn (see ``RunSession.start``) so e.g. pytest wraps to the
+        pane width.
+
+        Width mirrors the output ``TextLog`` rect in ``DebugPane.paint``
+        (left margin of 2, right scrollbar column reserved → pane width
+        minus 3). Sized off the last painted screen; returns ``(0, 0)``
+        before the first paint so callers leave the env unset and the
+        child keeps its own default."""
+        var screen = self._last_screen
+        if screen.is_empty():
+            return (0, 0)
+        var cols = (self._panel_right(screen) - self._panel_left(screen)) - 3
+        # Output region height: pane height minus the title row and the
+        # one-row top/bottom chrome the dock paints around the body.
+        var rows = self._test_pane_height(screen) - 2
+        if cols < 1 or rows < 1:
+            return (0, 0)
+        return (cols, rows)
 
     def find_results_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked Find Results pane lives — directly
@@ -3365,8 +3430,11 @@ struct Desktop(Movable):
                         and not current.is_zero() \
                         and not current.equals(self._git_state_mtimes):
                     for j in range(len(self.windows.windows)):
+                        # Review-hosted editors keep their pinned changeset
+                        # baseline — don't drop it back to HEAD on a poll.
                         if self.windows.windows[j].is_editor \
-                                and not self.windows.windows[j].editor.read_only:
+                                and not self.windows.windows[j].editor.read_only \
+                                and not self.windows.windows[j].editor.review_mode:
                             self.windows.windows[j].editor.invalidate_git_changes()
                 self._git_state_mtimes = current
         # Caret-blink phase, computed once for the whole frame. When
@@ -3390,11 +3458,20 @@ struct Desktop(Movable):
             if not self.windows.windows[i].is_editor:
                 continue
             self.windows.windows[i].editor.caret_visible = caret_on
-            if self.windows.windows[i].editor.read_only:
+            # Review-hosted editors keep line numbers even when read-only
+            # (staged/commit reviews) — they're a real editor view, not the
+            # chrome-free docs viewer the read_only branch was written for.
+            if self.windows.windows[i].editor.read_only \
+                    and not self.windows.windows[i].editor.review_mode:
                 self.windows.windows[i].editor.line_numbers = False
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
-            self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
+            # Inline-diff review windows must stay unwrapped — the phantom
+            # removed-row interleave only runs in WRAP_NONE.
+            if self.windows.windows[i].editor.diff_active:
+                self.windows.windows[i].editor.wrap_mode = WRAP_NONE
+            else:
+                self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
             self.windows.windows[i].editor.sticky_scroll = \
                 self.config.sticky_scroll
             self.windows.windows[i].editor.smart_wrap_comma_threshold = \
@@ -3419,19 +3496,24 @@ struct Desktop(Movable):
             # cached lines yet, spawn ``git diff HEAD -- <file>`` once
             # — subsequent paints reuse the cache. ``invalidate_git_changes``
             # on save / reload gets the next paint to refresh.
-            if self.windows.windows[i].editor.read_only:
+            # Review-hosted windows keep the changeset gutter on even when
+            # read-only (staged/commit reviews are read-only), and re-diff
+            # against the baseline ReviewMode pinned via ``set_git_head_text``
+            # — so the normal lazy HEAD fetch below is a no-op for them
+            # (``_git_head_loaded`` is already True).
+            var is_review_win = self.windows.windows[i].editor.review_mode
+            if self.windows.windows[i].editor.read_only and not is_review_win:
                 self.windows.windows[i].editor.git_changes_visible = False
                 self.windows.windows[i].editor.minimap_visible = False
             else:
                 self.windows.windows[i].editor.git_changes_visible = \
-                    self.config.git_changes and have_git
-                self.windows.windows[i].editor.minimap_visible = \
-                    self.config.minimap
+                    True if is_review_win else (self.config.git_changes and have_git)
+                self.windows.windows[i].editor.minimap_visible = self.config.minimap
                 # Git change data feeds both the +/~ left gutter (Git
                 # Changes toggle) and the right-side projection (Minimap
                 # toggle), so load it whenever either is on.
                 var want_git_data = (
-                    self.config.git_changes or self.config.minimap
+                    is_review_win or self.config.git_changes or self.config.minimap
                 )
                 if want_git_data and have_git:
                     var fp = self.windows.windows[i].editor.file_path
@@ -3479,12 +3561,303 @@ struct Desktop(Movable):
         poll reseeds (and doesn't immediately re-invalidate) the mtimes."""
         for j in range(len(self.windows.windows)):
             if self.windows.windows[j].is_editor \
-                    and not self.windows.windows[j].editor.read_only:
+                    and not self.windows.windows[j].editor.read_only \
+                    and not self.windows.windows[j].editor.review_mode:
                 self.windows.windows[j].editor.invalidate_git_changes()
         self._last_git_state_check_ms = 0
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
 
+    # --- review hosting ---------------------------------------------------
+
+    def _review_sync_window(mut self, screen: Rect):
+        """Keep the editor window ReviewMode shows in its body in sync with
+        the current changeset file: open/build it, pin its diff baseline to
+        the file's "before" text, size it to the body, and focus it. A
+        cross-file jump (focus moved off the hosted window) suspends review.
+        Runs early in ``paint`` so the per-frame git-gutter pass sees the
+        ``review_mode`` flag + pinned baseline this same frame."""
+        if not self.review.is_reviewing():
+            return
+        var top_y = 0 if self.host_owns_menu else 1
+        var rws = self.review.body_rect(screen, top_y)
+        # Focus moved off the hosted window. Only *leave* review when it
+        # genuinely landed on a different file (a cmd+click cross-file jump);
+        # plain focus drift — or focus on a window for the same review file —
+        # is re-grabbed so review survives. Navigating to the end of the
+        # changes must never dump the user out.
+        if self._review_win_idx >= 0:
+            var fi = self.windows.focused
+            var our_idx = self._review_win_idx
+            var left_for_other = False
+            if our_idx >= len(self.windows.windows):
+                left_for_other = True   # our window vanished
+            elif fi != our_idx:
+                if 0 <= fi and fi < len(self.windows.windows) \
+                        and self.windows.windows[fi].is_editor \
+                        and self.windows.windows[fi].editor.file_path \
+                            != self._review_host_path:
+                    left_for_other = True
+                else:
+                    self.windows.focus_by_index(our_idx)
+            if left_for_other:
+                self.review.close()
+                self._review_teardown()
+                return
+        if self.review.file_count() == 0 or not self.project:
+            return
+        var root = self.project.value()
+        var rel = self.review.current_path()
+        if len(rel.as_bytes()) == 0:
+            return
+        var abs = join_path(root, rel)
+        # Already hosting this file — refresh geometry, focus, counter.
+        if self._review_win_idx >= 0 \
+                and self._review_win_idx < len(self.windows.windows) \
+                and self._review_host_path == abs:
+            self.windows.windows[self._review_win_idx].rect = rws
+            self.windows.focus_by_index(self._review_win_idx)
+            # A prev/next-change that rolled into this (newly-loaded) file
+            # lands on its first/last change once its git lines are diffed.
+            if self._review_pending_chunk_edge != 0 \
+                    and self.windows.windows[self._review_win_idx]
+                            .editor._git_has_changes:
+                self._review_apply_chunk_edge()
+            self._review_update_counter()
+            return
+        # File changed (or first host): release the previous, host this one.
+        # Land on the file's first change at the golden ratio unless a
+        # cross-file prev-change already asked for its *last* change.
+        if self._review_pending_chunk_edge == 0:
+            self._review_pending_chunk_edge = 1
+        self._review_teardown()
+        var binary = self.review.current_is_binary()
+        var before = self.review.current_before()
+        var after = self.review.current_after()
+        # Build the inline-diff phantom store: the removed lines, their
+        # before-file syntax, and which after-file row each is shown before.
+        # The editor is then a NORMAL editor of the after file (sticky scroll,
+        # syntax, folding, line numbers, gutter) with these woven in.
+        var diff_active = False
+        var ph_text = List[String]()
+        var ph_hl = List[List[Highlight]]()
+        var ph_buckets = List[List[Int]]()
+        # Intra-line change emphasis (which characters changed within a
+        # modified line): ``ph_emph`` parallels ``ph_text`` (removed side),
+        # ``emph_by_row`` is indexed by after-file row (added side).
+        var ph_emph = List[List[Tuple[Int, Int]]]()
+        var emph_by_row = List[List[Tuple[Int, Int]]]()
+        if not binary:
+            var before_lines = split_lines_no_trailing(before)
+            var after_lines = split_lines_no_trailing(after)
+            var n_after = len(after_lines)
+            var drows = build_diff_rows(before_lines, after_lines)
+            var dhl = diff_row_highlights(
+                drows, before_lines, after_lines, abs, self.grammar_registry,
+            )
+            var emph = diff_row_emphasis(drows)
+            for _ in range(n_after + 1):
+                ph_buckets.append(List[Int]())
+            for _ in range(n_after):
+                emph_by_row.append(List[Tuple[Int, Int]]())
+            # Anchor each removed row to the after-row it precedes (the next
+            # non-removed row's after_row; end-of-file = n_after).
+            var nxt = n_after
+            var drow_anchor = List[Int]()
+            for _ in range(len(drows)):
+                drow_anchor.append(0)
+            for j in range(len(drows) - 1, -1, -1):
+                if drows[j].kind == DIFF_ROW_REMOVED:
+                    drow_anchor[j] = nxt
+                else:
+                    nxt = drows[j].after_row
+                    drow_anchor[j] = drows[j].after_row
+            for j in range(len(drows)):
+                if drows[j].kind == DIFF_ROW_REMOVED:
+                    var pidx = len(ph_text)
+                    ph_text.append(drows[j].text)
+                    ph_hl.append(dhl[j].copy())
+                    ph_emph.append(emph[j].copy())
+                    var a = drow_anchor[j]
+                    if a < 0:
+                        a = 0
+                    if a > n_after:
+                        a = n_after
+                    ph_buckets[a].append(pidx)
+                elif drows[j].after_row >= 0 and drows[j].after_row < n_after:
+                    # Context / added row: stash its emphasis by after-file row.
+                    emph_by_row[drows[j].after_row] = emph[j].copy()
+            diff_active = True
+        # NOTE: read-only for every review type for now. The after-file is the
+        # buffer, but editing it would desync the static phantom rows (they'd
+        # need a re-diff per keystroke) — that's a follow-up; editing happens
+        # by opening the file normally.
+        if self.review.is_editable() and not binary:
+            # Unstaged: open the real worktree file so LSP / file identity
+            # stay live.
+            try:
+                self.open_file(abs, screen)
+            except:
+                return
+            var idx = self._find_window_for_path(abs)
+            if idx < 0:
+                return
+            self._review_saved_rect = self.windows.windows[idx].rect
+            self._review_saved_max = self.windows.windows[idx].is_maximized
+            self._review_arm_editor(
+                idx, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
+                ph_emph^, emph_by_row^,
+            )
+            self.windows.windows[idx]._transient = False
+            self.windows.windows[idx].rect = rws
+            self.windows.windows[idx].is_maximized = False
+            self.windows.focus_by_index(idx)
+            self._review_win_idx = idx
+            self._review_persistent = True
+            self._review_host_path = abs
+        else:
+            # Staged / commit / binary: a transient read-only blob buffer.
+            var text = String("  (binary file — diff not shown)") if binary \
+                else after
+            var w = Window.editor_window(basename(abs), rws, text^)
+            w.editor.file_path = abs
+            w._transient = True
+            self.windows.add(w^)
+            var idx2 = len(self.windows.windows) - 1
+            self._review_arm_editor(
+                idx2, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
+                ph_emph^, emph_by_row^,
+            )
+            self.windows.windows[idx2]._last_focus_ms = wall_clock_ms()
+            self.windows.windows[idx2]._lsp_opened = True
+            self.windows.focus_by_index(idx2)
+            self._review_win_idx = idx2
+            self._review_persistent = False
+            self._review_host_path = abs
+            if not binary:
+                # Best-effort LSP: requests use the live workspace path while
+                # the buffer is historical, so results are approximate.
+                self._maybe_lsp_open(idx2)
+        self._review_update_counter()
+
+    def _review_arm_editor(
+        mut self, idx: Int, var before: String, diff_active: Bool,
+        var ph_text: List[String], var ph_hl: List[List[Highlight]],
+        var ph_buckets: List[List[Int]],
+        var ph_emph: List[List[Tuple[Int, Int]]],
+        var emph_by_row: List[List[Tuple[Int, Int]]],
+    ):
+        """Configure a window's editor for review: read-only, diff baseline
+        pinned (drives the git gutter + add/modified wash), phantom removed
+        rows + intra-line change emphasis, and WRAP_NONE (the phantom
+        interleave only runs unwrapped)."""
+        self.windows.windows[idx].editor.diff_phantom_emph = ph_emph^
+        self.windows.windows[idx].editor.diff_emph_by_row = emph_by_row^
+        self.windows.windows[idx].editor.review_mode = True
+        self.windows.windows[idx].editor.read_only = True
+        self.windows.windows[idx].editor.git_changes_visible = True
+        self.windows.windows[idx].editor.wrap_mode = WRAP_NONE
+        self.windows.windows[idx].editor.diff_active = diff_active
+        self.windows.windows[idx].editor.diff_phantom_text = ph_text^
+        self.windows.windows[idx].editor.diff_phantom_hl = ph_hl^
+        self.windows.windows[idx].editor.diff_phantom_buckets = ph_buckets^
+        if diff_active:
+            self.windows.windows[idx].editor.set_git_head_text(before^, True)
+
+    def _review_teardown(mut self):
+        """Release the hosted window: restore + keep the persistent unstaged
+        window, or close the transient staged/commit one. Idempotent."""
+        var idx = self._review_win_idx
+        if idx >= 0 and idx < len(self.windows.windows):
+            if self._review_persistent:
+                self.windows.windows[idx].editor.review_mode = False
+                self.windows.windows[idx].editor.invalidate_git_changes()
+                self.windows.windows[idx].rect = self._review_saved_rect
+                self.windows.windows[idx].is_maximized = self._review_saved_max
+            else:
+                _ = self.windows.close_by_index(idx)
+        self._review_win_idx = -1
+        self._review_persistent = False
+        self._review_host_path = String("")
+
+    def _review_update_counter(mut self):
+        """Feed the toolbar from the hosted editor's git-change chunks: the
+        chunk index/total for "change z of w", plus the cumulative changed
+        rows through the cursor's chunk for the line-weighted progress bar."""
+        var idx = self._review_win_idx
+        if idx < 0 or idx >= len(self.windows.windows):
+            self.review.set_change_counter(0, 0, 0)
+            return
+        var cursor_row = self.windows.windows[idx].editor.selections[0].row
+        var n = len(self.windows.windows[idx].editor.git_change_lines)
+        var total_chunks = 0
+        var cur_chunk = 0
+        var cum_lines = 0
+        var running = 0
+        var found = False
+        var r = 0
+        while r < n:
+            if self.windows.windows[idx].editor.git_change_lines[r] \
+                    != GIT_CHANGE_NONE:
+                total_chunks += 1
+                while r < n and self.windows.windows[idx].editor \
+                        .git_change_lines[r] != GIT_CHANGE_NONE:
+                    running += 1
+                    r += 1
+                if not found and cursor_row < r:
+                    found = True
+                    cur_chunk = total_chunks
+                    cum_lines = running
+            else:
+                r += 1
+        if not found:
+            cur_chunk = total_chunks
+            cum_lines = running
+        self.review.set_change_counter(cur_chunk, total_chunks, cum_lines)
+
+    def _review_handle_body_mouse(mut self, event: Event):
+        """Route a non-chrome mouse event in review to the hosted editor.
+        The diff view is read-only, so this is mostly wheel scrolling."""
+        var idx = self._review_win_idx
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        _ = self.windows.windows[idx].handle_mouse_in_body(event)
+
+    def _review_goto_change(mut self, direction: Int):
+        """Scroll to the previous/next change in the hosted diff. When this
+        file's changes run out, roll into the adjacent changeset file and
+        defer the first/last-change jump until it's loaded."""
+        var idx = self._review_win_idx
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        var view = self.windows.windows[idx].interior()
+        if self.windows.windows[idx].editor.goto_change_chunk(
+            direction, view, popup=False,
+        ):
+            self._review_update_counter()
+            return
+        # No further change in this file — cross into the adjacent file.
+        if self.review.goto_file_rel(direction):
+            self._review_pending_chunk_edge = direction
+
+    def _review_apply_chunk_edge(mut self):
+        """Land on the first (edge>0) / last (edge<0) change of the freshly
+        hosted file and golden-center it."""
+        var idx = self._review_win_idx
+        if idx < 0 or idx >= len(self.windows.windows):
+            self._review_pending_chunk_edge = 0
+            return
+        var view = self.windows.windows[idx].interior()
+        _ = self.windows.windows[idx].editor.goto_change_edge(
+            self._review_pending_chunk_edge, view,
+        )
+        self._review_update_counter()
+        self._review_pending_chunk_edge = 0
+
     def paint(mut self, mut canvas: Canvas, screen: Rect):
+        # Remember the live screen rect so spawn-time code running in a
+        # key handler (before the next paint) can size child terminals
+        # to the actual pane width — see ``_bottom_pane_term_size``.
+        self._last_screen = screen
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
@@ -3556,6 +3929,12 @@ struct Desktop(Movable):
             var deferred_ext = self._pending_grammar_prompt_ext
             self._pending_grammar_prompt_ext = String("")
             self._maybe_prompt_grammar_install(deferred_ext)
+        # Keep ReviewMode's hosted editor window in sync *before*
+        # ``_apply_view_config`` runs its per-frame git-gutter pass, so a
+        # freshly-hosted review window carries its ``review_mode`` flag +
+        # pinned baseline when that pass re-diffs it. May suspend review (on
+        # a cross-file jump) or open/build the current changeset file.
+        self._review_sync_window(screen)
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
@@ -3607,14 +3986,14 @@ struct Desktop(Movable):
         self._refresh_target_tabs()
         var ws = self.workspace_rect(screen)
         Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
-        self.windows.paint(
-            canvas, self._compute_subdued_windows(),
-            not self._any_dock_focused(),
-        )
-        # Title-bar full-path tooltip: floats above every window but
-        # below the side panes / chrome, so the popup never gets
-        # painted over by the editor it's describing.
-        self.windows.paint_title_tooltip(canvas, ws)
+        # In review mode the hosted editor window owns the surface and is
+        # painted last (over the docks/chrome) at the review stage below, so
+        # skip the normal multi-window pass entirely.
+        if not self.review.is_reviewing():
+            self.windows.paint(
+                canvas, self._compute_subdued_windows(),
+                not self._any_dock_focused(),
+            )
         # Row 0 hosts the in-grid menu bar only when we own the menu;
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
@@ -3708,16 +4087,37 @@ struct Desktop(Movable):
         # Review mode — a full-screen changeset reader. Painted above the
         # workspace + every modal (it owns the whole surface), but below
         # the in-grid menu row: ``top_y`` is row 1 when this surface paints
-        # its own menu bar, row 0 when the host owns the native menu.
-        self.review.paint(
-            canvas, screen, 0 if self.host_owns_menu else 1,
-            self.active_theme.palette,
-        )
+        # its own menu bar, row 0 when the host owns the native menu. In
+        # review (not picker) the body is the hosted editor window, painted
+        # here (last, over the docks) into the review body rect; ReviewMode
+        # then paints its bottom navigation toolbar over the bottom row.
+        var review_top_y = 0 if self.host_owns_menu else 1
+        if self.review.is_reviewing():
+            var ridx = self._review_win_idx
+            if ridx >= 0 and ridx < len(self.windows.windows):
+                # Size to the body rect here, *after* ``fit_into`` (which
+                # would otherwise have shrunk it back to the workspace) — so
+                # the rect the editor paints + hit-tests against is the full
+                # review body for both this paint and the next frame's events.
+                self.windows.windows[ridx].rect = \
+                    self.review.body_rect(screen, review_top_y)
+                # Hand the editor the live palette so its review paint pass
+                # can dim unchanged context lines in real RGB (theme-aware).
+                self.windows.windows[ridx].editor.review_palette = \
+                    self.active_theme.palette.copy()
+                self.windows.windows[ridx].paint(
+                    canvas,
+                    basename(self.windows.windows[ridx].editor.file_path),
+                    True, ridx + 1, False,
+                )
+        self.review.paint(canvas, screen, review_top_y)
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
         # cursor has been resting on the message rect long enough for
-        # the dwell timer to fire.
-        self.status_bar.paint_tooltip(canvas, screen)
+        # the dwell timer to fire. Suppressed under the review toolbar,
+        # which owns the bottom row.
+        if not self.review.is_reviewing():
+            self.status_bar.paint_tooltip(canvas, screen)
         # Keep the Font pane's size readout live: changing the family
         # mid-dialog changes the effective/ideal sizes the host reports,
         # and the report arrives a frame after ``set_font`` bumps the
@@ -4979,7 +5379,7 @@ struct Desktop(Movable):
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
         self._run_output_held = False
-        self.test_session.terminate()
+        self.test_pane.close()
         self._test_output_held = False
         self._last_test_node_id = String("")
         self.targets = ProjectTargets()
@@ -5338,6 +5738,11 @@ struct Desktop(Movable):
             # which is dozens of KB; ``var w = self.windows.windows[i]``
             # would make a per-frame copy of all of it.
             if not self.windows.windows[i].is_editor:
+                win_to_session.append(-1)
+                continue
+            # Transient review buffers (staged/commit blobs) aren't real
+            # documents — never persist them into the session.
+            if self.windows.windows[i]._transient:
                 win_to_session.append(-1)
                 continue
             var fp = self.windows.windows[i].editor.file_path
@@ -6041,7 +6446,10 @@ struct Desktop(Movable):
         # before any modal short-circuits below so a tooltip that
         # was already up doesn't go stale just because the user
         # opened a popup.
-        if event.kind == EVENT_MOUSE:
+        # In review the bottom row is the review toolbar, not the status bar,
+        # so don't arm the status-bar message dwell there (hovering the
+        # "Next file" button must not pop the LSP-status tooltip).
+        if event.kind == EVENT_MOUSE and not self.review.is_reviewing():
             self.status_bar.update_hover(event.pos, screen)
         # Bare modifier-key transitions go directly to the focused editor
         # — modals don't care about them, and routing them through the
@@ -6356,12 +6764,30 @@ struct Desktop(Movable):
                 self.panel_focus_request = True
             return Optional[String]()
         if self.review.active:
-            # Full-screen modal: it owns every event until closed.
-            _ = self.review.handle_event(
-                event, screen,
-                0 if self.host_owns_menu else 1,
-                self.grammar_registry,
-            )
+            var review_top_y = 0 if self.host_owns_menu else 1
+            if not self.review.is_reviewing():
+                # Picker — fully modal.
+                _ = self.review.handle_event(event, screen, review_top_y)
+                if not self.review.active:
+                    self._review_teardown()
+                return Optional[String]()
+            # Review — ReviewMode claims only its chrome (Esc, toolbar,
+            # file-to-file nav); everything else is forwarded to the hosted
+            # editor window so editing / cmd+click / hotkeys all work.
+            if self.review.handle_event(event, screen, review_top_y):
+                if not self.review.active:
+                    self._review_teardown()
+                else:
+                    var nav = self.review.consume_nav()
+                    if nav != 0:
+                        self._review_goto_change(nav)
+                return Optional[String]()
+            if event.kind == EVENT_KEY:
+                # Route through the normal key path: menu mnemonics, global
+                # hotkeys (save, change-chunk nav), then the focused (review)
+                # window's editor.
+                return self._handle_key(event, screen)
+            self._review_handle_body_mouse(event)
             return Optional[String]()
         if self.local_changes.active:
             if event.kind == EVENT_KEY:
@@ -6664,7 +7090,7 @@ struct Desktop(Movable):
             elif (not self.host_owns_menu) and self.menu_bar.is_open():
                 self.menu_bar.close()
             elif self._test_output_held \
-                    and not self.test_session.is_active() \
+                    and not self.test_pane.running() \
                     and (self.test_pane.focused or not self._run_output_held):
                 # Dismiss the held test-output pane — when it's focused,
                 # or when it's the only held output pane. Same idempotent
@@ -7405,10 +7831,20 @@ struct Desktop(Movable):
             self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == WINDOW_ROTATE_NEXT:
+            # ⇧⌘→ is a native NSMenu key-equivalent, so AppKit dispatches
+            # this action before the keystroke can reach review's own event
+            # handling. While reviewing, repurpose it as next-change (rolling
+            # across files) instead of rotating windows out of review.
+            if self.review.is_reviewing():
+                self._review_goto_change(1)
+                return Optional[String]()
             self.windows.rotate_focus(True)
             self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == WINDOW_ROTATE_PREV:
+            if self.review.is_reviewing():
+                self._review_goto_change(-1)
+                return Optional[String]()
             self.windows.rotate_focus(False)
             self._focus_dock(DOCK_NONE)
             return Optional[String]()
@@ -7471,17 +7907,12 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == TEST_STOP:
             # Stop only the test child — the run/debug session is a
-            # separate slot and keeps running. Hold the pane open with
-            # its output: stop ≠ close. (Without the hold, the next
-            # ``dap_tick`` would see an inactive session and no hold and
-            # hide the pane.) ``test_tick`` won't get to log an exit line
-            # since we've already terminated, so note it here.
-            if self.test_session.is_active():
-                self.test_session.terminate()
-                self.test_pane.append_output(
-                    String("[tests stopped]"), UInt8(2),  # PANE_OUT_CONSOLE
-                )
-                self._test_output_held = True
+            # separate slot and keeps running. ``stop`` SIGTERMs the
+            # child and feeds its own ``[tests stopped]`` banner into the
+            # grid; hold the pane open so its output stays readable
+            # (stop ≠ close).
+            self.test_pane.stop()
+            self._test_output_held = True
             return Optional[String]()
         if action == TEST_RERUN:
             # Re-run the *last* test command — the single test if that's
@@ -7492,14 +7923,14 @@ struct Desktop(Movable):
             self._target_test(last_node)
             return Optional[String]()
         if action == TEST_CLEAR_OUTPUT:
-            self.test_pane.clear_output()
+            self.test_pane.clear()
             return Optional[String]()
         if action == TEST_PANE_CLOSE:
             # Standard [■] close button on the test pane: kill the test
             # child, release the post-run hold, drop focus off the pane,
             # and let dap_tick's next pass hide it (visibility is fully
             # driven by these flags).
-            self.test_session.terminate()
+            self.test_pane.close()
             self._test_output_held = False
             if self.test_pane.focused:
                 self._focus_dock(DOCK_NONE)
@@ -9154,21 +9585,14 @@ struct Desktop(Movable):
         # each tick so it tracks DAP state (Continue ↔ Pause swap
         # depending on whether the program is stopped or running).
         self.debug_pane.set_commands(self._build_debug_pane_commands())
-        # Test pane is an independent bottom-docked output pane driven
-        # by ``test_session`` — same visibility/status/command-strip
-        # pattern as the run/debug pane, but it never carries DAP
-        # inspect content so it stays in RUN mode and self-labels
-        # "Tests" (via the pinned title set at construction).
+        # Test pane is an independent bottom-docked output pane — a
+        # pty/Vt terminal surface that owns its own child process. It
+        # builds its own title + command strip in ``paint``, so the host
+        # only drives visibility: shown while the child runs or while its
+        # output is held open after exit.
         self.test_tick()
-        self.test_pane.visible = self.test_session.is_active() \
+        self.test_pane.visible = self.test_pane.running() \
             or self._test_output_held
-        if self.test_session.is_active():
-            self.test_pane.set_mode(PANE_MODE_RUN)
-            self.test_pane.set_status(String("running tests"))
-        elif self._test_output_held:
-            self.test_pane.set_mode(PANE_MODE_RUN)
-            self.test_pane.set_status(String("(exited — Esc to dismiss)"))
-        self.test_pane.set_commands(self._build_test_pane_commands())
         self._refresh_dap_status()
         # End-of-tick marker — only emitted when the session is
         # actively running so we don't flood the log with one line per
@@ -9418,31 +9842,6 @@ struct Desktop(Movable):
         # backlog whether or not a session is currently running.
         out.append(TitleCommand(
             String("[⌫ Clear]"), DEBUG_CLEAR_OUTPUT,
-        ))
-        return out^
-
-    def _build_test_pane_commands(self) -> List[TitleCommand]:
-        """Title-strip buttons for the test pane. While tests run:
-        Stop + Re-run. After they exit (output held): Re-run only —
-        there's nothing left to stop. Clear is always available.
-        ``TEST_RERUN`` replays the last test command (single test or
-        whole suite) and terminates any in-flight test child first, so
-        Re-run is a true stop-then-rerun without a separate handler
-        (same idiom as the run pane's Restart)."""
-        var out = List[TitleCommand]()
-        if self.test_session.is_active():
-            out.append(TitleCommand(
-                String("[■ Stop]"), TEST_STOP,
-            ))
-            out.append(TitleCommand(
-                String("[↻ Re-run]"), TEST_RERUN,
-            ))
-        elif self._test_output_held:
-            out.append(TitleCommand(
-                String("[↻ Re-run]"), TEST_RERUN,
-            ))
-        out.append(TitleCommand(
-            String("[⌫ Clear]"), TEST_CLEAR_OUTPUT,
         ))
         return out^
 
@@ -9954,9 +10353,11 @@ struct Desktop(Movable):
             String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
         )
         var args = target.args.copy()
+        var term = self._bottom_pane_term_size()
         try:
             self.run_session.start(
                 String(target.name), program, args^, cwd,
+                term[0], term[1],
             )
             self.status_bar.set_message(
                 String("running ") + target.name + String("…"),
@@ -10082,12 +10483,12 @@ struct Desktop(Movable):
         for the project venv's interpreter when one exists (same
         idiom as Cmd+R).
 
-        Tests run in their *own* process slot (``test_session``) and
-        stream into their *own* bottom-docked pane (``test_pane``,
-        labelled "Tests"). Crucially this does **not** touch the
-        run/debug session — a target run (e.g. a dev server) keeps
-        running while the tests run. Re-running tests terminates only
-        the previous *test* child, not the target run.
+        Tests run on a real pty owned by their *own* bottom-docked pane
+        (``test_pane``), rendered through the ``Vt`` emulator. Crucially
+        this does **not** touch the run/debug session — a target run
+        (e.g. a dev server) keeps running while the tests run.
+        Re-running tests terminates only the previous *test* child, not
+        the target run.
         """
         if not self.project:
             self.status_bar.set_message(
@@ -10125,32 +10526,21 @@ struct Desktop(Movable):
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
-        # Force color: the child runs on a pipe (not a pty), so pytest's
-        # isatty() is false and it would strip color — the pane now decodes
-        # SGR, so opt back in.
-        args.append(String("--color=yes"))
+        # No ``--color=yes``: the child runs on a real pty now, so
+        # pytest's isatty() is true and it auto-detects color (and sizes
+        # to the pane, reflowing on resize).
         if len(node_id.as_bytes()) > 0:
             args.append(node_id)
         # Remember what we ran so the pane's "Re-run" replays this exact
         # command (single test vs. whole suite) rather than the suite.
         self._last_test_node_id = node_id
-        # Stop only the *previous test run* — the run/debug session is a
-        # separate slot and is left untouched (a dev server keeps
-        # serving while tests run).
-        self.test_session.terminate()
+        # ``run`` terminates only the *previous test child* (the run/debug
+        # session is a separate slot, untouched — a dev server keeps
+        # serving), resets the grid, and echoes the ``$ <cmd>`` banner.
         self._test_output_held = False
-        self.test_pane.clear_all()
         self.test_pane.visible = True
-        var pretty = program
-        for k in range(len(args)):
-            pretty = pretty + String(" ") + args[k]
-        self.test_pane.append_output(
-            String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
-        )
         try:
-            self.test_session.start(
-                String("pytest"), program, args^, project_root,
-            )
+            self.test_pane.run(program, args^, project_root)
             self.status_bar.set_message(
                 String("running tests…"),
                 Attr(BLACK, LIGHT_GRAY),
@@ -10289,28 +10679,21 @@ struct Desktop(Movable):
             self._run_output_held = True
 
     def test_tick(mut self):
-        """Drain the test session's output into the test pane and reap
-        on exit. The test-pane analog of ``target_tick`` — a separate
-        process slot and pane so a test run never disturbs an in-flight
-        target run. Called once per frame from ``dap_tick``.
+        """Pump the test pane's pty each frame and surface the exit
+        transition. The pane owns the child + the ``Vt`` rendering and
+        feeds its own ``[tests passed]`` / ``[tests exited with N]``
+        banner; the host only mirrors the exit code to the status bar
+        and pins the pane open. Called once per frame from ``dap_tick``.
 
         Cheap when no test run is in flight — early-out on the first
-        line.
+        line. (``running()`` is True here, so the post-tick check fires
+        the status message exactly on the tick the child exits.)
         """
-        if not self.test_session.is_active():
+        if not self.test_pane.running():
             return
-        var out = drain_run_output(self.test_session)
-        if len(out.stdout.as_bytes()) > 0:
-            self.test_pane.append_output(out.stdout, UInt8(0))  # PANE_OUT_STDOUT
-        if len(out.stderr.as_bytes()) > 0:
-            self.test_pane.append_output(out.stderr, UInt8(1))  # PANE_OUT_STDERR
-        if poll_run_exit(self.test_session):
-            var code = self.test_session.exit_code
-            self.test_session.terminate()
-            self.test_pane.append_output(
-                String("[tests exited with ") + String(code) + String("]"),
-                UInt8(2),  # PANE_OUT_CONSOLE
-            )
+        self.test_pane.tick()
+        if not self.test_pane.running():
+            var code = self.test_pane.exit_code
             var attr = Attr(BLACK, LIGHT_GRAY) if code == 0 \
                 else Attr(LIGHT_RED, LIGHT_GRAY)
             self.status_bar.set_message(
@@ -10318,7 +10701,7 @@ struct Desktop(Movable):
                 attr,
             )
             # Pin the pane open so the results don't flash off screen
-            # when ``test_session.is_active()`` flips to False.
+            # when ``running()`` flips to False.
             self._test_output_held = True
 
     def _paint_tab_bar(mut self, mut canvas: Canvas, screen: Rect):
@@ -10367,6 +10750,13 @@ struct Desktop(Movable):
         ``golden=False`` so single-stepping keeps the minimal edge-scroll
         that doesn't yank the view on every step."""
         var existing = self._find_window_for_path(target.path)
+        # While reviewing, a definition that lands in the file under review
+        # stays in the review window (don't bounce to a stale duplicate that
+        # may share the path — e.g. a staged/commit blob vs the worktree copy).
+        if self.review.is_reviewing() and self._review_win_idx >= 0 \
+                and self._review_win_idx < len(self.windows.windows) \
+                and self._review_host_path == target.path:
+            existing = self._review_win_idx
         if existing < 0:
             try:
                 self.open_file(target.path, screen)

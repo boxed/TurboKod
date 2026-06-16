@@ -12,8 +12,8 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow, popup_size_for_text
-from .painter import Painter, paint_tooltip_popup
+from .canvas import Canvas, paint_drop_shadow
+from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY, LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW
 from .editor import (
@@ -27,7 +27,7 @@ from .events import (
 from .file_io import basename, parent_path
 from .geometry import Point, Rect
 from .scrollbar import HScrollbar, VScrollbar
-from .string_utils import display_columns
+from .string_utils import display_columns, tail_to_columns
 
 
 comptime MIN_WIN_W: Int = 10
@@ -1149,6 +1149,12 @@ struct Window(Copyable, Movable):
     # expensive per-window LSP startup on the critical first frame and
     # open it lazily when the window is first focused instead.
     var _lsp_opened: Bool
+    # ``_transient`` marks a window the host owns ephemerally — currently
+    # the synthetic read-only buffers ReviewMode opens for staged/commit
+    # changesets (their content is a historical blob, not the file on
+    # disk). Excluded from the session snapshot so closing the app mid-
+    # review doesn't persist a phantom document, and closed on review exit.
+    var _transient: Bool
 
     def __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
@@ -1165,6 +1171,7 @@ struct Window(Copyable, Movable):
         self._last_observed_rect = sized
         self._last_focus_ms = 0
         self._lsp_opened = False
+        self._transient = False
 
     @staticmethod
     def editor_window(var title: String, rect: Rect, var text: String) -> Self:
@@ -1196,6 +1203,7 @@ struct Window(Copyable, Movable):
         self._last_observed_rect = copy._last_observed_rect
         self._last_focus_ms = copy._last_focus_ms
         self._lsp_opened = copy._lsp_opened
+        self._transient = copy._transient
 
     def interior(self) -> Rect:
         """Region inside the border where content / editor paints. Public
@@ -1579,6 +1587,22 @@ def compute_display_titles(windows: List[Window]) -> List[String]:
     return titles^
 
 
+def _fit_title_path(path: String, max_cols: Int) -> String:
+    """The full ``path`` if it fits in ``max_cols`` display columns,
+    else its longest tail that fits behind a leading ``…`` ellipsis.
+
+    The title bar centers ``" " + title + " "`` and only paints it when
+    ``rect.width() >= display_columns(title) + 8``; callers pass
+    ``rect.width() - 8`` as ``max_cols`` so the revealed path always
+    clears that gate. The filename lives at the path's end, so we keep
+    the tail (``…src/turbokod/window.mojo``) rather than the head."""
+    if max_cols <= 0:
+        return String("…")
+    if display_columns(path) <= max_cols:
+        return path
+    return String("…") + tail_to_columns(path, max_cols - 1)
+
+
 struct WindowManager(Movable):
     """Owns the open windows and their interaction state.
 
@@ -1607,15 +1631,13 @@ struct WindowManager(Movable):
     var _resize_bottom: Bool
     var _drag_dx: Int
     var _drag_dy: Int
-    # Bare-hover tracker for the title-bar full-path tooltip. ``-1``
+    # Bare-hover tracker for the title bar's full-path reveal. ``-1``
     # means nothing is hovered; otherwise the index of the editor
-    # window whose title row the pointer is currently over (and whose
-    # ``editor.file_path`` is non-empty). ``_title_hover_x/y`` are the
-    # cursor cell used to anchor the popup. Cleared on any non-hover
-    # mouse event so a click doesn't leave a stale tooltip behind.
+    # window whose title *label* the pointer is currently over (and
+    # whose ``editor.file_path`` is non-empty). While armed, ``paint``
+    # swaps that window's centered title for its full path. Cleared on
+    # any non-hover mouse event so a click reverts to the short title.
     var _title_hover_idx: Int
-    var _title_hover_x: Int
-    var _title_hover_y: Int
     # The workspace last seen by ``fit_into`` — used to scale every
     # window's rect proportionally when the workspace changes (terminal
     # resize, side-panel toggle, …). Unset on a freshly-constructed
@@ -1642,8 +1664,6 @@ struct WindowManager(Movable):
         self._drag_dx = 0
         self._drag_dy = 0
         self._title_hover_idx = -1
-        self._title_hover_x = 0
-        self._title_hover_y = 0
         self._last_workspace = Rect.empty()
         self._has_last_workspace = False
 
@@ -1968,49 +1988,29 @@ struct WindowManager(Movable):
             var i = self.z_order[k]
             var sub = subdued[i] if i < len(subdued) else False
             var fwin = windows_active and (i == self.focused)
+            var title = titles[i]
+            # While the pointer is over this window's title label,
+            # reveal the file's full path in place of the centered
+            # short name (armed in ``handle_mouse``; only file-backed
+            # editors arm). The title is centered, so the binding
+            # constraint is the wider of the two chrome zones it must
+            # clear: the right-corner number/maximize indicator
+            # (``<num>=[▲]`` → ``num_len + 5`` cells) beats the 3-cell
+            # close button at the left. Reserving that on *each* side
+            # (plus the 2 framing spaces ``paint_window_title`` adds)
+            # keeps the centered path from being overpainted by the
+            # indicator; longer paths tail-truncate with a leading
+            # ``…`` so the filename end stays visible.
+            if i == self._title_hover_idx and self.windows[i].is_editor:
+                var path = self.windows[i].editor.file_path
+                if len(path.as_bytes()) > 0:
+                    var num_len = display_columns(String(i + 1))
+                    var maxc = self.windows[i].rect.width() \
+                        - 2 * (num_len + 5) - 2
+                    title = _fit_title_path(path, maxc)
             self.windows[i].paint(
-                canvas, titles[i], fwin, i + 1, sub,
+                canvas, title, fwin, i + 1, sub,
             )
-
-    def paint_title_tooltip(self, mut canvas: Canvas, workspace: Rect):
-        """Overlay the full-path tooltip for whichever editor window's
-        title bar is currently being hovered, if any. Painted by the
-        host after ``paint`` so the popup z-orders above every window.
-        """
-        if self._title_hover_idx < 0:
-            return
-        if self._title_hover_idx >= len(self.windows):
-            return
-        var win = self.windows[self._title_hover_idx].copy()
-        if not win.is_editor:
-            return
-        var path = win.editor.file_path
-        if len(path.as_bytes()) == 0:
-            return
-        var max_box_w = workspace.width() - 2
-        if max_box_w < 5:
-            max_box_w = workspace.width()
-        var size = popup_size_for_text(path, max_box_w, workspace.height())
-        var w = size[0]
-        var h = size[1]
-        if w == 0 or h == 0:
-            return
-        # Anchor one row below the hovered cell so the popup doesn't
-        # cover the title text the user is pointing at. Flip above
-        # when there's no room below; clamp horizontally so the box
-        # always fits inside ``workspace``.
-        var bx = self._title_hover_x
-        var by = self._title_hover_y + 1
-        if by + h > workspace.b.y:
-            by = self._title_hover_y - h
-        if by < workspace.a.y:
-            by = workspace.a.y
-        if bx + w > workspace.b.x:
-            bx = workspace.b.x - w
-        if bx < workspace.a.x:
-            bx = workspace.a.x
-        var r = Rect(bx, by, bx + w, by + h)
-        paint_tooltip_popup(canvas, r, path)
 
     def handle_key(mut self, event: Event) -> Bool:
         """Forward a key event to the focused window's editor (if it has one)."""
@@ -2059,19 +2059,19 @@ struct WindowManager(Movable):
             for j in range(len(self.windows)):
                 if self.windows[j].is_editor and j != hit:
                     self.windows[j].editor.clear_minimap_hover()
-            # Title-bar full-path tooltip: arm only when the pointer is
+            # Title-bar full-path reveal: arm only when the pointer is
             # on the topmost window's title *label* (the filename itself,
             # not the whole title row) AND that window is a file-backed
-            # editor. The body forwards to handle_mouse_in_body below for
-            # minimap-hover state, so the two trackers stay independent.
+            # editor. ``paint`` swaps the short title for the full path
+            # while armed. The body forwards to handle_mouse_in_body
+            # below for minimap-hover state, so the two trackers stay
+            # independent.
             self._title_hover_idx = -1
             if hit >= 0 and self.windows[hit].is_editor \
                     and len(self.windows[hit].editor.file_path.as_bytes()) > 0:
                 var dtitles = compute_display_titles(self.windows)
                 if self.windows[hit].title_text_hit(event.pos, dtitles[hit]):
                     self._title_hover_idx = hit
-                    self._title_hover_x = event.pos.x
-                    self._title_hover_y = event.pos.y
             if hit >= 0 and self.windows[hit].is_editor:
                 _ = self.windows[hit].handle_mouse_in_body(event)
             return True
@@ -2093,8 +2093,9 @@ struct WindowManager(Movable):
             return True
         if event.button != MOUSE_BUTTON_LEFT:
             return False
-        # Any left-button activity (press, drag, release) drops the
-        # title-bar tooltip. Bare hover re-arms it on the next motion.
+        # Any left-button activity (press, drag, release) reverts the
+        # title to its short name. Bare hover re-arms the path reveal
+        # on the next motion.
         self._title_hover_idx = -1
         if event.pressed and not event.motion:
             return self._handle_press(event, workspace)

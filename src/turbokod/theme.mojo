@@ -40,7 +40,10 @@ reserved indices at tokenize time, so no re-tokenize is needed.
 
 from std.collections.list import List
 
-from .colors import THEME_SLOT_COUNT
+from .colors import (
+    DIFF_ADD_BG, DIFF_ADD_EMPH, DIFF_REM_BG, DIFF_REM_EMPH,
+    EDITOR_BG, THEME_SLOT_COUNT,
+)
 
 
 @fieldwise_init
@@ -81,7 +84,31 @@ def _build(name: String, vals: List[UInt32]) -> Theme:
     var p = _standard_palette()
     for i in range(THEME_SLOT_COUNT):
         p[i] = vals[i]
+    # Derive the review diff washes from this theme's editor background so the
+    # added (green) / modified (red) line tint stays faint and readable on dark
+    # and light surfaces alike — no per-theme literal needed.
+    var ed = p[Int(EDITOR_BG)]
+    p[Int(DIFF_ADD_BG)] = _blend_rgb(ed, UInt32(0x33B233), 22)
+    p[Int(DIFF_REM_BG)] = _blend_rgb(ed, UInt32(0xC8503C), 22)
+    # Intra-line emphasis blends harder toward green / red so the exact
+    # changed characters stand out from the faint surrounding wash.
+    p[Int(DIFF_ADD_EMPH)] = _blend_rgb(ed, UInt32(0x33B233), 48)
+    p[Int(DIFF_REM_EMPH)] = _blend_rgb(ed, UInt32(0xC8503C), 48)
     return Theme(name, p^)
+
+
+def _blend_rgb(src: UInt32, dst: UInt32, pct: Int) -> UInt32:
+    """Mix ``src`` ``pct``% of the way toward ``dst`` (both ``0xRRGGBB``)."""
+    var sr = Int((src >> 16) & 0xFF)
+    var sg = Int((src >> 8) & 0xFF)
+    var sb = Int(src & 0xFF)
+    var dr = Int((dst >> 16) & 0xFF)
+    var dg = Int((dst >> 8) & 0xFF)
+    var db = Int(dst & 0xFF)
+    var rr = (sr * (100 - pct) + dr * pct) // 100
+    var rg = (sg * (100 - pct) + dg * pct) // 100
+    var rb = (sb * (100 - pct) + db * pct) // 100
+    return (UInt32(rr) << 16) | (UInt32(rg) << 8) | UInt32(rb)
 
 
 def _v(*args: UInt32) -> List[UInt32]:

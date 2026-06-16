@@ -137,6 +137,198 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     return ops^
 
 
+# --- unified diff *rows* (for an inline review view) ------------------------
+# Row kinds for ``build_diff_rows``. The crucial distinction for the review
+# editor: a REMOVED row exists only in the *before* file, so it has no
+# after-file line number — it must render with a blank line-number gutter.
+comptime DIFF_ROW_CONTEXT: Int = 0   # unchanged: carries its after-file number
+comptime DIFF_ROW_ADDED:   Int = 1   # new line: carries its after-file number
+comptime DIFF_ROW_REMOVED: Int = 2   # deleted line: NO after-file number
+
+
+@fieldwise_init
+struct DiffRow(ImplicitlyCopyable, Movable):
+    """One visual row of a unified (inline) diff.
+
+    ``after_row`` is the 0-based line index in the *after* file, or ``-1``
+    for a REMOVED row — which is the whole point: removed lines have no
+    after-file line number, so an editor rendering this row must leave the
+    line-number gutter blank (see ``diff_row_line_label``). ``text`` is the
+    content to paint; ``kind`` is one of ``DIFF_ROW_*`` for coloring.
+    ``src_row`` is the line's index on its *own* side (after-file for
+    context/added, before-file for removed) — used to map the row back to
+    that side's syntax tokens.
+    """
+    var after_row: Int
+    var text: String
+    var kind: Int
+    var src_row: Int
+
+
+def diff_row_line_label(row: DiffRow) -> String:
+    """The line-number gutter label for a diff row: the 1-based after-file
+    number for context/added rows, and the empty string for removed rows
+    (they have no line number)."""
+    if row.after_row < 0:
+        return String("")
+    return String(row.after_row + 1)
+
+
+def build_diff_rows(before: List[String], after: List[String]) -> List[DiffRow]:
+    """Interleave ``before`` / ``after`` into unified-diff rows: unchanged
+    lines as context, inserts as added, deletes as removed. Within each
+    change run the removed lines are emitted *before* the added ones (the
+    conventional old-above-new diff order). Removed rows carry
+    ``after_row = -1`` — they have no line number — which is exactly the
+    case the review editor must render as a no-line-number row.
+    """
+    var ops = diff_lines(before, after)
+    var out = List[DiffRow]()
+    var i = 0
+    var n = len(ops)
+    while i < n:
+        if ops[i].kind == 0:
+            out.append(DiffRow(
+                ops[i].b_index, after[ops[i].b_index], DIFF_ROW_CONTEXT,
+                ops[i].b_index,
+            ))
+            i += 1
+            continue
+        # Gather one change run, then emit removed (from before) then added
+        # (from after) so the block reads old-above-new.
+        var run_rem = List[Int]()
+        var run_add = List[Int]()
+        while i < n and ops[i].kind != 0:
+            if ops[i].kind == 1:
+                run_rem.append(ops[i].a_index)
+            else:
+                run_add.append(ops[i].b_index)
+            i += 1
+        for r in range(len(run_rem)):
+            out.append(DiffRow(
+                -1, before[run_rem[r]], DIFF_ROW_REMOVED, run_rem[r],
+            ))
+        for r in range(len(run_add)):
+            out.append(DiffRow(
+                run_add[r], after[run_add[r]], DIFF_ROW_ADDED, run_add[r],
+            ))
+    return out^
+
+
+def _codepoints_with_offsets(s: String) -> Tuple[List[String], List[Int]]:
+    """Split ``s`` into single-codepoint strings plus a parallel list of byte
+    offsets (length ``len(cps) + 1``; the last entry is the total byte count)."""
+    var cps = List[String]()
+    var offs = List[Int]()
+    var b = s.as_bytes()
+    var n = len(b)
+    var i = 0
+    while i < n:
+        offs.append(i)
+        var j = i + 1
+        while j < n and (Int(b[j]) & 0xC0) == 0x80:
+            j += 1
+        var buf = List[UInt8]()
+        for k in range(i, j):
+            buf.append(b[k])
+        cps.append(String(StringSlice(unsafe_from_utf8=Span(buf))))
+        i = j
+    offs.append(n)
+    return (cps^, offs^)
+
+
+def intraline_ranges(
+    old: String, new: String,
+    mut old_out: List[Tuple[Int, Int]], mut new_out: List[Tuple[Int, Int]],
+):
+    """Character-level diff of two lines. Appends the changed *byte* ranges
+    (``[lo, hi)``) on the old side to ``old_out`` and on the new side to
+    ``new_out`` — the spans an inline diff should emphasise within a modified
+    line. Contiguous edits merge into one range."""
+    var ao = _codepoints_with_offsets(old)
+    ref a_cp = ao[0]
+    ref a_off = ao[1]
+    var bo = _codepoints_with_offsets(new)
+    ref b_cp = bo[0]
+    ref b_off = bo[1]
+    var ops = diff_lines(a_cp, b_cp)
+    var del_lo = -1
+    var del_hi = -1
+    var ins_lo = -1
+    var ins_hi = -1
+    for i in range(len(ops)):
+        if ops[i].kind == 1:        # delete (old codepoint)
+            var lo = a_off[ops[i].a_index]
+            var hi = a_off[ops[i].a_index + 1]
+            if del_lo >= 0 and del_hi == lo:
+                del_hi = hi
+            else:
+                if del_lo >= 0:
+                    old_out.append((del_lo, del_hi))
+                del_lo = lo
+                del_hi = hi
+        elif ops[i].kind == 2:      # insert (new codepoint)
+            var lo = b_off[ops[i].b_index]
+            var hi = b_off[ops[i].b_index + 1]
+            if ins_lo >= 0 and ins_hi == lo:
+                ins_hi = hi
+            else:
+                if ins_lo >= 0:
+                    new_out.append((ins_lo, ins_hi))
+                ins_lo = lo
+                ins_hi = hi
+        else:                       # equal — flush both pending runs
+            if del_lo >= 0:
+                old_out.append((del_lo, del_hi))
+                del_lo = -1
+                del_hi = -1
+            if ins_lo >= 0:
+                new_out.append((ins_lo, ins_hi))
+                ins_lo = -1
+                ins_hi = -1
+    if del_lo >= 0:
+        old_out.append((del_lo, del_hi))
+    if ins_lo >= 0:
+        new_out.append((ins_lo, ins_hi))
+
+
+def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:
+    """For each diff row, the changed byte ranges *within* its text (empty for
+    context / pure add / pure delete rows). Within a change run the k-th
+    removed row is paired with the k-th added row and char-diffed, so a
+    modified line shows exactly which characters changed. Parallel to ``rows``."""
+    var out = List[List[Tuple[Int, Int]]]()
+    for _ in range(len(rows)):
+        out.append(List[Tuple[Int, Int]]())
+    var i = 0
+    var n = len(rows)
+    while i < n:
+        if rows[i].kind == DIFF_ROW_CONTEXT:
+            i += 1
+            continue
+        var rem_idx = List[Int]()
+        var add_idx = List[Int]()
+        var j = i
+        while j < n and rows[j].kind != DIFF_ROW_CONTEXT:
+            if rows[j].kind == DIFF_ROW_REMOVED:
+                rem_idx.append(j)
+            else:
+                add_idx.append(j)
+            j += 1
+        var pairs = len(rem_idx) if len(rem_idx) < len(add_idx) else len(add_idx)
+        for k in range(pairs):
+            var old_ranges = List[Tuple[Int, Int]]()
+            var new_ranges = List[Tuple[Int, Int]]()
+            intraline_ranges(
+                rows[rem_idx[k]].text, rows[add_idx[k]].text,
+                old_ranges, new_ranges,
+            )
+            out[rem_idx[k]] = old_ranges^
+            out[add_idx[k]] = new_ranges^
+        i = j
+    return out^
+
+
 def _hunk_header(a_start: Int, a_count: Int, b_start: Int, b_count: Int) -> String:
     """Render ``@@ -l,c +l,c @@``. When the count is 1, GNU diff omits the
     ``,c`` — match that so output reads like ``diff -u``. Empty ranges are

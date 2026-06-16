@@ -21,6 +21,7 @@ from .colors import (
     EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
     SYN_IDENT, SYN_DECORATOR, SYN_OPERATOR,
 )
+from .diff import DIFF_ROW_REMOVED, DiffRow
 from .grammar_install import (
     built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
@@ -406,6 +407,56 @@ def highlight_for_extension_cached(
     ``highlight_incremental`` instead.
     """
     return highlight_incremental(ext, lines, 0, registry, cache)
+
+
+def _hl_buckets(hls: List[Highlight], n: Int) -> List[List[Highlight]]:
+    """Bucket a flat highlight list by source row (one list per row)."""
+    var buckets = List[List[Highlight]]()
+    for _ in range(n):
+        buckets.append(List[Highlight]())
+    for h in range(len(hls)):
+        var r = hls[h].row
+        if 0 <= r and r < n:
+            buckets[r].append(hls[h])
+    return buckets^
+
+
+def diff_row_highlights(
+    rows: List[DiffRow],
+    before_lines: List[String], after_lines: List[String],
+    file_path: String, mut registry: GrammarRegistry,
+) -> List[List[Highlight]]:
+    """Per-diff-row syntax spans for the inline diff view. Tokenizes both
+    sides once (multi-line scopes resolve correctly per side), then maps each
+    row to its own side's tokens: context/added rows pull from the after-file
+    tokenization, removed rows from the before-file. Returns a list parallel
+    to ``rows``; each inner list's ``col_start``/``col_end`` are byte offsets
+    into that row's text."""
+    var out = List[List[Highlight]]()
+    var ext = extension_of(file_path)
+    var after_cache = HighlightCache()
+    var after_hl = highlight_for_extension_cached(
+        ext, after_lines, registry, after_cache,
+    )
+    var before_cache = HighlightCache()
+    var before_hl = highlight_for_extension_cached(
+        ext, before_lines, registry, before_cache,
+    )
+    var after_buckets = _hl_buckets(after_hl, len(after_lines))
+    var before_buckets = _hl_buckets(before_hl, len(before_lines))
+    for i in range(len(rows)):
+        var sr = rows[i].src_row
+        if rows[i].kind == DIFF_ROW_REMOVED:
+            if 0 <= sr and sr < len(before_buckets):
+                out.append(before_buckets[sr].copy())
+            else:
+                out.append(List[Highlight]())
+        else:
+            if 0 <= sr and sr < len(after_buckets):
+                out.append(after_buckets[sr].copy())
+            else:
+                out.append(List[Highlight]())
+    return out^
 
 
 def highlight_incremental(

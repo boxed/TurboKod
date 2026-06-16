@@ -269,6 +269,25 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     return out^
 
 
+def _line_pair_score(a: String, b: String) -> Int:
+    """Similarity of two lines for delete↔insert pairing: bytes of shared
+    leading prefix plus shared trailing suffix (non-overlapping). Two near-
+    identical lines (e.g. one gained a kwarg) score near their full length;
+    unrelated lines score only their shared indentation."""
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    var la = len(ab)
+    var lb = len(bb)
+    var maxn = la if la < lb else lb
+    var pre = 0
+    while pre < maxn and ab[pre] == bb[pre]:
+        pre += 1
+    var suf = 0
+    while suf < (maxn - pre) and ab[la - 1 - suf] == bb[lb - 1 - suf]:
+        suf += 1
+    return pre + suf
+
+
 def diff_buffer_against_head(
     head_text: String, buffer_lines: List[String],
 ) -> List[Int]:
@@ -300,32 +319,53 @@ def diff_buffer_against_head(
         # and deletes in either order within a run, so we can't classify
         # an insert as ADDED vs MODIFIED until we know how many deletes
         # share the run with it.
-        var run_start = i
-        var run_dels = 0
-        var run_ins = 0
+        var ins_bi = List[Int]()      # buffer rows inserted in this run
+        var del_ai = List[Int]()      # head rows deleted in this run
         while i < n and ops[i].kind != 0:
             if ops[i].kind == 1:
-                run_dels += 1
-            else:
-                run_ins += 1
+                del_ai.append(ops[i].a_index)
+            elif 0 <= ops[i].b_index and ops[i].b_index < nb:
+                ins_bi.append(ops[i].b_index)
             i += 1
-        # First ``min(run_dels, run_ins)`` inserts in the run pair up
-        # with deletes → MODIFIED; surplus inserts (when run_ins >
-        # run_dels) are pure ADDED. When the run was deletes-only
-        # (run_ins == 0) there are no buffer rows to mark — the
-        # deletion is invisible in the gutter, matching VS Code.
-        var pair_count = run_dels if run_dels < run_ins else run_ins
-        var ins_seen = 0
-        for j in range(run_start, i):
-            if ops[j].kind != 2:
-                continue
-            var bi = ops[j].b_index
-            if 0 <= bi and bi < nb:
-                if ins_seen < pair_count:
-                    out[bi] = GIT_CHANGE_MODIFIED
-                else:
-                    out[bi] = GIT_CHANGE_ADDED
-            ins_seen += 1
+        # ``min(#dels, #ins)`` inserts pair up with deletes → MODIFIED;
+        # the surplus are pure ADDED. *Which* inserts pair matters: a
+        # comment block inserted just before a genuinely-changed line
+        # would, if we just took the first inserts, paint the comment red
+        # and the changed line green. Instead pair each delete with the
+        # most *similar* insert (longest shared prefix+suffix), so the
+        # modified line gets the MODIFIED mark and the inserted block stays
+        # ADDED — matching what git's diff anchors to. Deletes-only runs
+        # (no inserts) leave no buffer row to mark, like VS Code.
+        var pair_count = len(del_ai) if len(del_ai) < len(ins_bi) else len(ins_bi)
+        for k in range(len(ins_bi)):
+            out[ins_bi[k]] = GIT_CHANGE_ADDED
+        if pair_count > 0:
+            var scores = List[Int]()
+            for k in range(len(ins_bi)):
+                var best = -1
+                for d in range(len(del_ai)):
+                    var ai = del_ai[d]
+                    if 0 <= ai and ai < len(head_lines):
+                        var s = _line_pair_score(head_lines[ai], buffer_lines[ins_bi[k]])
+                        if s > best:
+                            best = s
+                scores.append(best)
+            var used = List[Bool]()
+            for _ in range(len(ins_bi)):
+                used.append(False)
+            var marked = 0
+            while marked < pair_count:
+                var best_k = -1
+                var best_score = -2
+                for k in range(len(ins_bi)):
+                    if not used[k] and scores[k] > best_score:
+                        best_score = scores[k]
+                        best_k = k
+                if best_k < 0:
+                    break
+                used[best_k] = True
+                out[ins_bi[best_k]] = GIT_CHANGE_MODIFIED
+                marked += 1
     return out^
 
 

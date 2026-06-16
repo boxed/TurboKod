@@ -83,6 +83,19 @@ comptime BORDER_FOCUS  = UInt8(29)
 # above). Derived from the last reserved index so adding a slot can't leave a
 # stale count anywhere; ``theme.mojo`` sizes its rows and prefix-copy with it.
 comptime THEME_SLOT_COUNT = Int(BORDER_FOCUS) + 1
+# Review/diff line backgrounds — the faint green / red wash behind added /
+# modified lines in the changeset reviewer. *Not* theme-defined: ``theme.mojo``
+# derives them per theme by blending ``EDITOR_BG`` toward green / red, so they
+# tint correctly on dark *and* light surfaces without a literal per theme. They
+# live just past the theme-defined slots (the standard cube value they'd
+# otherwise carry is overwritten by the derived blend in ``_build``).
+comptime DIFF_ADD_BG   = UInt8(30)
+comptime DIFF_REM_BG   = UInt8(31)
+# Intra-line emphasis: a *stronger* green / red for the exact characters that
+# changed within a modified line (the surrounding line keeps the faint wash
+# above). Also derived per theme in ``theme.mojo``.
+comptime DIFF_ADD_EMPH = UInt8(32)
+comptime DIFF_REM_EMPH = UInt8(33)
 
 # --- Style bits --------------------------------------------------------------
 
