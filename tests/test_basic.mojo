@@ -3361,6 +3361,29 @@ def test_editor_external_change_clean_reload_when_buffer_clean() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_editor_external_change_skipped_in_review_mode() raises:
+    """A review-hosted editor shows a pinned snapshot (commit / index
+    blob), with ``file_path`` set only for identity. Its on-disk file
+    can legitimately differ from the snapshot — e.g. reviewing a commit
+    whose change was later reverted on disk. The external-change sweep
+    must NOT reload the on-disk bytes over the snapshot, or the changes
+    the review is meant to show vanish."""
+    var path = _temp_path(String("_ext_review.txt"))
+    # On disk: the "reverted" content. The review buffer below holds the
+    # historical snapshot, which differs from this.
+    assert_true(write_file(path, String("reverted\n")))
+    var ed = Editor(String("snapshot line 1\nsnapshot line 2"))
+    ed.file_path = path
+    ed.review_mode = True
+    ed.read_only = True
+    # Even though disk differs (and stat info is unset, as for a transient
+    # blob window), the review buffer is left untouched.
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_NONE)
+    assert_equal(ed.buffer.line_count(), 2)
+    assert_equal(ed.buffer.line(0), String("snapshot line 1"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_external_change_refreshes_highlights() raises:
     """Reload from disk must produce highlights matching the new
     content — not stale entries pointing into the previous buffer.
@@ -21398,6 +21421,7 @@ def _run_chunk_01() raises:
     test_merge_view_resolved_text_all_disk()
     test_merge_view_resolved_text_both()
     test_editor_external_change_clean_reload_when_buffer_clean()
+    test_editor_external_change_skipped_in_review_mode()
     test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()

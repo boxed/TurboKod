@@ -3953,6 +3953,15 @@ struct Editor(Copyable, Movable):
         """
         if len(self.file_path.as_bytes()) == 0:
             return EXT_CHANGE_NONE
+        # Review-hosted editors show a *pinned snapshot* (a commit / index
+        # blob, or the worktree file frozen behind static phantom diff
+        # rows), with ``file_path`` set only for LSP / file identity — not
+        # as a live mirror of disk. The transient blob buffer is created
+        # without stat info, so the first sweep would otherwise see a
+        # spurious "external change" and clean-reload the on-disk file over
+        # the snapshot, dropping the changes the review is meant to show.
+        if self.review_mode:
+            return EXT_CHANGE_NONE
         var info = stat_file(self.file_path)
         if not info.ok:
             return EXT_CHANGE_NONE

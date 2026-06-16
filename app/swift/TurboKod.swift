@@ -1818,6 +1818,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         pair.window.makeKeyAndOrderFront(nil); changed = true
                     }
                 }
+                // A target run / test / debug just (re)started. Raise the
+                // floating panel window so the output is visible even when it's
+                // buried behind other windows — orderFront, not makeKey, so
+                // keyboard focus stays in the editor (the auto-show poll only
+                // fires on the empty→non-empty transition, missing restarts).
+                // Always drain so the one-shot can't fire stale later.
+                if tk_desktop_take_panel_front_request(v.handle) != 0 {
+                    if let pair = self.panels[ObjectIdentifier(v)] {
+                        pair.window.orderFront(nil); changed = true
+                    }
+                }
                 // A link click / command-line open just jumped to a line in
                 // this view's editor. Raise the main window to the front +
                 // key — the click may have come from the floating panels

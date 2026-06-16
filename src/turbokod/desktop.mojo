@@ -1214,6 +1214,19 @@ struct Desktop(Movable):
     yank focus. An *explicit* new terminal does want focus, so the host
     drains this via ``consume_panel_focus_request`` and makes the panel
     window key. The terminal frontend never reads it."""
+    var panel_front_request: Bool
+    """One-shot: a tool pane was just (re)activated by an explicit user
+    action that should *surface* the panel window but **not** steal
+    keyboard focus — restarting a target (Cmd+R), re-running tests
+    (Cmd+T), starting a debug session, etc. The auto-show poll only
+    ``orderFront``s on the empty→non-empty transition, so a restart while
+    the window is already on screen (but buried behind other windows)
+    wouldn't raise it. Matters only when the tool panels float on the
+    macOS host's separate window (``panels_detached``): the host drains
+    this via ``consume_panel_front_request`` and ``orderFront``s the panel
+    window (not ``makeKey`` — focus stays where it is). Sibling of
+    ``panel_focus_request``, which both raises *and* keys the window for a
+    new terminal pane. The terminal frontend never reads it."""
     var main_focus_request: Bool
     """One-shot: a deliberate open-at-line (``open_file_at`` — an output-
     pane link click or the ``turbokod://`` command-line open) just landed
@@ -1580,6 +1593,7 @@ struct Desktop(Movable):
         self.terminal_panes = List[TerminalPane]()
         self.attention_events = 0
         self.panel_focus_request = False
+        self.panel_front_request = False
         self.main_focus_request = False
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
@@ -9667,6 +9681,15 @@ struct Desktop(Movable):
         self.panel_focus_request = False
         return req
 
+    def consume_panel_front_request(mut self) -> Bool:
+        """Drain the one-shot ``panel_front_request`` flag. True exactly
+        once after a target run / test / debug (re)start; the macOS host
+        uses it to ``orderFront`` the floating panel window without taking
+        focus. See the field doc."""
+        var req = self.panel_front_request
+        self.panel_front_request = False
+        return req
+
     def consume_main_focus_request(mut self) -> Bool:
         """Drain the one-shot ``main_focus_request`` flag. True exactly
         once after an open-at-line jump; the macOS host uses it to bring
@@ -10243,6 +10266,9 @@ struct Desktop(Movable):
                 line = line + self.dap.spawn_argv[k]
             self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
             self.debug_pane.visible = True
+            # Surface the floating panel window on this run-to-cursor —
+            # orderFront, not focus (keyboard focus stays in the editor).
+            self.panel_front_request = True
 
     # --- target run / debug ----------------------------------------------
 
@@ -10352,6 +10378,9 @@ struct Desktop(Movable):
         self._run_output_held = False
         self.debug_pane.clear_all()
         self.debug_pane.visible = True
+        # Surface the floating panel window on this (re)start — orderFront,
+        # not focus (the host keeps keyboard focus in the editor).
+        self.panel_front_request = True
         var cwd = resolved_cwd(self.project.value(), target.cwd)
         # Swap a bare ``python`` / ``python3`` for the project venv's
         # interpreter when one exists — anything else (or any path
@@ -10480,6 +10509,9 @@ struct Desktop(Movable):
                 line = line + self.dap.spawn_argv[k]
             self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
         self.debug_pane.visible = True
+        # Surface the floating panel window on this (re)start — orderFront,
+        # not focus (the host keeps keyboard focus in the editor).
+        self.panel_front_request = True
         self.status_bar.set_message(
             String("debugging ") + target.name + String("…"),
             Attr(BLACK, LIGHT_GRAY),
@@ -10558,6 +10590,9 @@ struct Desktop(Movable):
         # serving), resets the grid, and echoes the ``$ <cmd>`` banner.
         self._test_output_held = False
         self.test_pane.visible = True
+        # Surface the floating panel window on this test (re)run — orderFront,
+        # not focus (the host keeps keyboard focus in the editor).
+        self.panel_front_request = True
         try:
             self.test_pane.run(program, args^, project_root)
             self.status_bar.set_message(
@@ -10658,6 +10693,9 @@ struct Desktop(Movable):
                 line = line + self.dap.spawn_argv[k]
             self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
         self.debug_pane.visible = True
+        # Surface the floating panel window on this (re)start — orderFront,
+        # not focus (the host keeps keyboard focus in the editor).
+        self.panel_front_request = True
         self.status_bar.set_message(
             String("debugging tests…"),
             Attr(BLACK, LIGHT_GRAY),
@@ -12220,6 +12258,9 @@ struct Desktop(Movable):
                 line = line + self.dap.spawn_argv[k]
             self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
         self.debug_pane.visible = True
+        # Surface the floating panel window on this (re)start — orderFront,
+        # not focus (the host keeps keyboard focus in the editor).
+        self.panel_front_request = True
 
     def _maybe_install_python_lsp_in_venv(
         mut self, language_id: String, venv_dir: String,

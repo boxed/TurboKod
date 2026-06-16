@@ -969,6 +969,21 @@ def tk_desktop_take_panel_focus_request(h: Int) -> Int32:
 
 
 @export
+def tk_desktop_take_panel_front_request(h: Int) -> Int32:
+    """Drain the one-shot "raise the panel window" request. Returns 1
+    exactly once after a target run / test / debug (re)start, 0 otherwise.
+    When the tool panels float on their own window the host uses this to
+    ``orderFront`` that window — *without* ``makeKey`` — so a restart
+    surfaces the panels even when they're buried behind other windows, but
+    keyboard focus stays in the editor. Unlike the auto-show poll (which
+    only fires on the empty→non-empty transition), this fires on every
+    (re)start. Harmless to poll while docked — the flag just clears."""
+    if h == 0:
+        return Int32(0)
+    return Int32(1) if _desk(h)[].consume_panel_front_request() else Int32(0)
+
+
+@export
 def tk_desktop_take_main_focus_request(h: Int) -> Int32:
     """Drain the one-shot "raise the main window" request. Returns 1
     exactly once after a deliberate open-at-line jump (an output-pane

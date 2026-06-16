@@ -125,6 +125,24 @@ empty window never flashes for a tick before the auto-hide catches it.
 with Cmd+Shift+T") as a defensive fallback, but with auto-hide the floating
 window is never on screen while empty, so the hint isn't normally seen.
 
+#### Raising the window on a (re)start — without stealing focus
+
+The auto-show poll only `orderFront`s on the empty→non-empty *transition*, so it
+misses the common case where the window is already showing panels but is **buried
+behind other windows** when a tool pane is (re)activated — restarting a target
+(Cmd+R), re-running tests (Cmd+T), starting a debug session, run-to-cursor. Those
+should surface the panel window so the user sees the output, but they must **not**
+steal keyboard focus (you don't want Cmd+T to yank you out of the editor).
+
+That's a one-shot `Desktop.panel_front_request`, raised wherever a run/test/debug
+makes a bottom pane visible, drained by the host each tick via
+`tk_desktop_take_panel_front_request` → `pair.window.orderFront(nil)` (note:
+`orderFront`, **not** `makeKey`). It's the focus-less sibling of
+`panel_focus_request` — which an *explicit new terminal pane* (incl. a new Claude
+panel) raises to `makeKeyAndOrderFront` the window, because there you *do* want to
+start typing immediately. So: new terminal/Claude pane → raise **and** focus;
+target/test/debug (re)start → raise only.
+
 ### Menu surface
 
 A new **View ▸ Floating panels** item, checkable, action

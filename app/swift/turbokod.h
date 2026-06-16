@@ -133,6 +133,12 @@ int32_t tk_desktop_take_attention(int64_t h);
 // this to make that window key so the fresh shell is typeable without a click.
 int32_t tk_desktop_take_panel_focus_request(int64_t h);
 
+// One-shot: returns 1 once after a target run / test / debug (re)start, 0
+// otherwise. With the tool panels floating on their own window, the host uses
+// this to orderFront that window (NOT makeKey) so a restart surfaces the panels
+// even when buried behind other windows, without stealing keyboard focus.
+int32_t tk_desktop_take_panel_front_request(int64_t h);
+
 // One-shot: returns 1 once after a deliberate open-at-line jump (an output-pane
 // link click or a turbokod:// command-line open), 0 otherwise. The host uses it
 // to makeKeyAndOrderFront the editor's main window so a link clicked in the
