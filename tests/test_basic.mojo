@@ -17918,6 +17918,23 @@ def test_diff_row_emphasis_pairs_by_similarity() raises:
     assert_equal(emph[2][0][1], 12)
 
 
+def test_diff_row_partner_matches_across_inserted_comment() raises:
+    """A comment inserted above a modified line: the removed code row matches
+    the added code row (not the comment), and they point at each other; the
+    comment is unmatched."""
+    var before = List[String]()
+    before.append(String("x = foo(a, b)"))
+    var after = List[String]()
+    after.append(String("# explanatory comment"))
+    after.append(String("x = foo(a, c)"))
+    var rows = build_diff_rows(before, after)
+    # rows: [0 removed code, 1 added comment, 2 added code].
+    var partner = diff_row_partner(rows)
+    assert_equal(partner[0], 2)     # removed code → added code
+    assert_equal(partner[2], 0)     # and back
+    assert_equal(partner[1], -1)    # comment unmatched
+
+
 def test_diff_view_intraline_emphasis_render() raises:
     """The rendered diff emphasises the changed characters: a stronger green
     on the new line's changed bytes and a stronger red on the old (phantom)
@@ -21201,6 +21218,7 @@ def _run_chunk_00() raises:
     test_diff_view_dims_unchanged_context_lines()
     test_diff_row_emphasis_marks_changed_spans()
     test_diff_row_emphasis_pairs_by_similarity()
+    test_diff_row_partner_matches_across_inserted_comment()
     test_diff_view_intraline_emphasis_render()
     test_compute_revert_block_modified_line()
     test_compute_revert_block_added_line()

@@ -6138,7 +6138,10 @@ struct Editor(Copyable, Movable):
         var cell_maps = List[List[Int]]()
         var cell_counts = List[Int]()
         var sep = -1
-        if self.compress_kwargs:
+        # Concealing redundant ``name=name`` args collapses bytes to a single
+        # ``≡`` cell, which throws off the intra-line diff column alignment in
+        # review mode — so leave call args expanded while reviewing.
+        if self.compress_kwargs and not self.review_mode:
             sep = kwarg_separator_for_extension(extension_of(self.file_path))
         for vidx in range(len(layout)):
             var vrow = layout[vidx]
