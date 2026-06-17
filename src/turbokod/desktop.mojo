@@ -864,16 +864,14 @@ struct Desktop(Movable):
     var local_changes: LocalChanges
     var review: ReviewMode
     # Review hosting: the window-list index of the editor ReviewMode is
-    # currently showing in its body (``-1`` when none). ``_review_persistent``
-    # is True for the unstaged case (a real worktree-file window we restore
-    # and leave open on exit) and False for staged/commit (a transient
-    # read-only blob window we close on exit). ``_review_saved_*`` remember
-    # the persistent window's pre-review geometry so review doesn't leave it
-    # maximized. ``_review_host_path`` is the absolute path currently hosted.
+    # currently showing in its body (``-1`` when none). The review window is
+    # *always* a transient, review-owned window — it never reuses or mutates a
+    # window the user already had open, and it's closed on exit. So review
+    # leaves the rest of the workspace (open windows, their scroll positions)
+    # completely untouched. ``_review_host_path`` is the absolute path the
+    # review window's editor reports (so goto-definition into the file under
+    # review stays in the review window rather than bouncing to a duplicate).
     var _review_win_idx: Int
-    var _review_persistent: Bool
-    var _review_saved_rect: Rect
-    var _review_saved_max: Bool
     var _review_host_path: String
     # Deferred change-edge jump after a prev/next-change rolled into an
     # adjacent file: +1 = land on that file's first change, -1 = its last.
@@ -1491,9 +1489,6 @@ struct Desktop(Movable):
         self.local_changes = LocalChanges()
         self.review = ReviewMode()
         self._review_win_idx = -1
-        self._review_persistent = False
-        self._review_saved_rect = Rect.empty()
-        self._review_saved_max = False
         self._review_host_path = String("")
         self._review_pending_chunk_edge = 0
         self.project_settings = ProjectSettings()
@@ -3710,56 +3705,37 @@ struct Desktop(Movable):
                     # Context / added row: stash its emphasis by after-file row.
                     emph_by_row[drows[j].after_row] = emph[j].copy()
             diff_active = True
-        # NOTE: read-only for every review type for now. The after-file is the
-        # buffer, but editing it would desync the static phantom rows (they'd
-        # need a re-diff per keystroke) — that's a follow-up; editing happens
+        # NOTE: read-only for every review type. The after-file is the buffer,
+        # but editing it would desync the static phantom rows — editing happens
         # by opening the file normally.
-        if self.review.is_editable() and not binary:
-            # Unstaged: open the real worktree file so LSP / file identity
-            # stay live.
-            try:
-                self.open_file(abs, screen)
-            except:
-                return
-            var idx = self._find_window_for_path(abs)
-            if idx < 0:
-                return
-            self._review_saved_rect = self.windows.windows[idx].rect
-            self._review_saved_max = self.windows.windows[idx].is_maximized
-            self._review_arm_editor(
-                idx, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
-                ph_emph^, emph_by_row^,
-            )
-            self.windows.windows[idx]._transient = False
-            self.windows.windows[idx].rect = rws
-            self.windows.windows[idx].is_maximized = False
-            self.windows.focus_by_index(idx)
-            self._review_win_idx = idx
-            self._review_persistent = True
-            self._review_host_path = abs
-        else:
-            # Staged / commit / binary: a transient read-only blob buffer.
-            var text = String("  (binary file — diff not shown)") if binary \
-                else after
-            var w = Window.editor_window(basename(abs), rws, text^)
-            w.editor.file_path = abs
-            w._transient = True
-            self.windows.add(w^)
-            var idx2 = len(self.windows.windows) - 1
-            self._review_arm_editor(
-                idx2, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
-                ph_emph^, emph_by_row^,
-            )
-            self.windows.windows[idx2]._last_focus_ms = wall_clock_ms()
-            self.windows.windows[idx2]._lsp_opened = True
-            self.windows.focus_by_index(idx2)
-            self._review_win_idx = idx2
-            self._review_persistent = False
-            self._review_host_path = abs
-            if not binary:
-                # Best-effort LSP: requests use the live workspace path while
-                # the buffer is historical, so results are approximate.
-                self._maybe_lsp_open(idx2)
+        #
+        # The review window is ALWAYS a transient, review-owned window built
+        # from the changeset's "after" text — even for unstaged changes, where
+        # the "after" text is the current worktree content. We deliberately do
+        # not reuse one of the user's open windows: review must not change the
+        # scroll position of, or leave behind, any window the user already had
+        # open. The transient window is closed on exit (``_review_teardown``),
+        # so reviewing a changeset leaves the rest of the workspace untouched.
+        var text = String("  (binary file — diff not shown)") if binary \
+            else after
+        var w = Window.editor_window(basename(abs), rws, text^)
+        w.editor.file_path = abs
+        w._transient = True
+        self.windows.add(w^)
+        var idx2 = len(self.windows.windows) - 1
+        self._review_arm_editor(
+            idx2, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
+            ph_emph^, emph_by_row^,
+        )
+        self.windows.windows[idx2]._last_focus_ms = wall_clock_ms()
+        self.windows.windows[idx2]._lsp_opened = True
+        self.windows.focus_by_index(idx2)
+        self._review_win_idx = idx2
+        self._review_host_path = abs
+        if not binary:
+            # Best-effort LSP: requests use the live workspace path while the
+            # buffer may be historical, so results are approximate.
+            self._maybe_lsp_open(idx2)
         self._review_update_counter()
 
     def _review_arm_editor(
@@ -3787,19 +3763,13 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.set_git_head_text(before^, True)
 
     def _review_teardown(mut self):
-        """Release the hosted window: restore + keep the persistent unstaged
-        window, or close the transient staged/commit one. Idempotent."""
+        """Close the transient, review-owned window. The review window is
+        always review's own (never a window the user had open), so exit simply
+        closes it — leaving the rest of the workspace untouched. Idempotent."""
         var idx = self._review_win_idx
         if idx >= 0 and idx < len(self.windows.windows):
-            if self._review_persistent:
-                self.windows.windows[idx].editor.review_mode = False
-                self.windows.windows[idx].editor.invalidate_git_changes()
-                self.windows.windows[idx].rect = self._review_saved_rect
-                self.windows.windows[idx].is_maximized = self._review_saved_max
-            else:
-                _ = self.windows.close_by_index(idx)
+            _ = self.windows.close_by_index(idx)
         self._review_win_idx = -1
-        self._review_persistent = False
         self._review_host_path = String("")
 
     def _review_update_counter(mut self):
