@@ -866,6 +866,46 @@ def test_find_results_pane_multiselect() raises:
     assert_equal(dbl[0].line_no, 3)
 
 
+def test_debug_pane_repl_console() raises:
+    # The interactive console: when ``repl_enabled`` the bottom input
+    # line owns the keyboard — typed keys edit it, Enter latches the
+    # expression for the host + records history, Up/Down recall it.
+    var pane = DebugPane()
+    pane.focused = True
+    pane.repl_enabled = True
+    # Type "x+1" into the console line.
+    _ = pane.handle_key(Event.key_event(UInt32(ord("x")), MOD_NONE))
+    _ = pane.handle_key(Event.key_event(UInt32(ord("+")), MOD_NONE))
+    _ = pane.handle_key(Event.key_event(UInt32(ord("1")), MOD_NONE))
+    assert_equal(pane.repl_input.text, String("x+1"))
+    # Enter latches the expression (drained by the host), clears the line.
+    assert_true(pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE)))
+    assert_equal(pane.repl_input.text, String(""))
+    assert_equal(pane.consume_repl_submit(), String("x+1"))
+    assert_equal(pane.consume_repl_submit(), String(""))  # drained
+    # A second submit, then walk history backwards with Up.
+    _ = pane.handle_key(Event.key_event(UInt32(ord("y")), MOD_NONE))
+    assert_true(pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE)))
+    _ = pane.consume_repl_submit()
+    _ = pane.handle_key(Event.key_event(KEY_UP, MOD_NONE))
+    assert_equal(pane.repl_input.text, String("y"))      # newest
+    _ = pane.handle_key(Event.key_event(KEY_UP, MOD_NONE))
+    assert_equal(pane.repl_input.text, String("x+1"))    # older
+    # Down steps forward, then off the end onto an empty live line.
+    _ = pane.handle_key(Event.key_event(KEY_DOWN, MOD_NONE))
+    assert_equal(pane.repl_input.text, String("y"))
+    _ = pane.handle_key(Event.key_event(KEY_DOWN, MOD_NONE))
+    assert_equal(pane.repl_input.text, String(""))
+    # An empty Enter queues nothing.
+    assert_true(pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE)))
+    assert_equal(pane.consume_repl_submit(), String(""))
+    # With the console disabled, typed keys don't reach the field (they
+    # fall through to the host's scroll / hotkey handling instead).
+    pane.repl_enabled = False
+    _ = pane.handle_key(Event.key_event(UInt32(ord("z")), MOD_NONE))
+    assert_equal(pane.repl_input.text, String(""))
+
+
 def test_pane_text_select_drag() raises:
     # PaneTextSelect drives the mouse-drag text selection shared by the
     # Find-in-Project context panel and the docked Find Results pane. Two
@@ -21324,6 +21364,7 @@ def _run_chunk_00() raises:
     test_shell_escape_path_escapes_metacharacters()
     test_escape_drop_paths_joins_and_trails()
     test_find_results_pane_multiselect()
+    test_debug_pane_repl_console()
     test_pane_text_select_drag()
     test_paint_title_commands_renders_separator_and_labels()
     test_paint_title_commands_drops_clipped_label()

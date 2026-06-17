@@ -64,8 +64,9 @@ from .colors import (
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_ESC, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP,
+    KEY_UP, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN,
+    MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .output_links import (
@@ -74,6 +75,7 @@ from .output_links import (
     extract_python_traceback_links as _extract_python_traceback_links,
 )
 from .scrollbar import VScrollbar
+from .text_field import TextField
 from .text_view import TextLog
 from .window import (
     BottomDockedPanel,
@@ -224,6 +226,34 @@ struct DebugPane(Copyable, Movable):
     """True when the pane has keyboard focus — the host sets this on
     click. Determines whether arrow keys reach the pane."""
 
+    # --- interactive console (REPL) --------------------------------------
+    var repl_enabled: Bool
+    """True when the debugger is paused at a frame, so the bottom input
+    line is live and ``evaluate`` requests can be issued. The host sets
+    this every tick (``dap.is_stopped()`` in DEBUG mode); when False the
+    input line isn't painted and keystrokes fall through to scrolling."""
+    var repl_input: TextField
+    """The ``>>>`` console line. A single-line ``TextField`` (shared
+    with every dialog) so caret movement, selection, clipboard, and
+    UTF-8 handling come for free."""
+    var repl_history: List[String]
+    """Submitted expressions, oldest first. Up/Down walk it."""
+    var repl_hist_idx: Int
+    """Cursor into ``repl_history`` during Up/Down recall.
+    ``len(repl_history)`` is the sentinel for "on the live (un-recalled)
+    input line"."""
+    var pending_repl_expr: String
+    """A just-submitted expression awaiting the host's ``evaluate``
+    dispatch. Empty string = nothing pending; drained each tick via
+    ``consume_repl_submit``."""
+    var _last_repl_y: Int
+    """Screen-y of the painted input line, or -1 when it wasn't drawn —
+    drives mouse hit-testing without re-deriving the layout."""
+    var _last_repl_x0: Int
+    """Screen-x where the input strip (after the ``>>>`` prompt) begins."""
+    var _last_repl_x_max: Int
+    """Screen-x just past the right edge of the input strip."""
+
     # --- pending intents -- consumed each frame by Desktop.dap_tick ---
     var pending_frame_id: Int           # -1 = none
     var pending_frame_index: Int        # depth of the clicked frame, for highlight
@@ -231,6 +261,7 @@ struct DebugPane(Copyable, Movable):
     var pending_expand_row: Int         # row index of the parent variable
     var pending_expand_depth: Int       # children's indent level
     var pending_collapse_row: Int       # row index for a collapse (no DAP traffic needed)
+    var pending_remove_watch: Int       # ordinal of a clicked watch row to remove; -1 = none
     # Output-log link click. Empty string = none.
     var pending_open_path: String
     var pending_open_line: Int          # 1-based; 0 with empty path = none
@@ -293,6 +324,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_expand_row = -1
         self.pending_expand_depth = 0
         self.pending_collapse_row = -1
+        self.pending_remove_watch = -1
         self.pending_open_path = String("")
         self.pending_open_line = 0
         self._last_inspect_y0 = 0
@@ -305,6 +337,14 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_bottom = -1
         self._output_scrolling = False
         self._output_drag_offset = 0
+        self.repl_enabled = False
+        self.repl_input = TextField()
+        self.repl_history = List[String]()
+        self.repl_hist_idx = 0
+        self.pending_repl_expr = String("")
+        self._last_repl_y = -1
+        self._last_repl_x0 = 0
+        self._last_repl_x_max = 0
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
@@ -324,6 +364,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_expand_row = copy.pending_expand_row
         self.pending_expand_depth = copy.pending_expand_depth
         self.pending_collapse_row = copy.pending_collapse_row
+        self.pending_remove_watch = copy.pending_remove_watch
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
         self._last_inspect_y0 = copy._last_inspect_y0
@@ -336,6 +377,14 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_bottom = copy._last_output_sb_bottom
         self._output_scrolling = copy._output_scrolling
         self._output_drag_offset = copy._output_drag_offset
+        self.repl_enabled = copy.repl_enabled
+        self.repl_input = copy.repl_input
+        self.repl_history = copy.repl_history.copy()
+        self.repl_hist_idx = copy.repl_hist_idx
+        self.pending_repl_expr = copy.pending_repl_expr
+        self._last_repl_y = copy._last_repl_y
+        self._last_repl_x0 = copy._last_repl_x0
+        self._last_repl_x_max = copy._last_repl_x_max
 
     # --- setters (used by Desktop) ---------------------------------------
 
@@ -560,6 +609,13 @@ struct DebugPane(Copyable, Movable):
         self.pending_collapse_row = -1
         return row
 
+    def consume_remove_watch(mut self) -> Int:
+        """Returns the ordinal of a freshly clicked watch row to remove,
+        or ``-1`` when nothing is pending."""
+        var idx = self.pending_remove_watch
+        self.pending_remove_watch = -1
+        return idx
+
     def consume_command_id(mut self) -> String:
         """Returns the id of a freshly clicked title-command (if any)
         and clears the latch. Empty string means no click pending."""
@@ -576,6 +632,52 @@ struct DebugPane(Copyable, Movable):
         self.pending_open_path = String("")
         self.pending_open_line = 0
         return (path^, line)
+
+    # --- interactive console (REPL) --------------------------------------
+
+    def consume_repl_submit(mut self) -> String:
+        """Return a just-submitted console expression (and clear the
+        latch), or ``""`` when nothing is pending. The host fires the
+        ``evaluate`` request and echoes the result into the output log."""
+        var e = self.pending_repl_expr
+        self.pending_repl_expr = String("")
+        return e^
+
+    def _submit_repl(mut self):
+        """Latch the current input line for the host to evaluate, push
+        it onto history, and clear the field. No-op on an empty line."""
+        var expr = self.repl_input.text
+        if len(expr.as_bytes()) == 0:
+            return
+        self.pending_repl_expr = expr
+        # Skip a consecutive duplicate so Up doesn't step over repeats.
+        if len(self.repl_history) == 0 \
+                or self.repl_history[len(self.repl_history) - 1] != expr:
+            self.repl_history.append(expr)
+        self.repl_hist_idx = len(self.repl_history)
+        self.repl_input.clear()
+
+    def _repl_history_prev(mut self):
+        """Up: recall an older entry."""
+        if len(self.repl_history) == 0:
+            return
+        if self.repl_hist_idx > 0:
+            self.repl_hist_idx -= 1
+        self.repl_input.set_text(self.repl_history[self.repl_hist_idx].copy())
+
+    def _repl_history_next(mut self):
+        """Down: step toward newer entries; past the newest lands back on
+        an empty live line."""
+        if len(self.repl_history) == 0:
+            return
+        if self.repl_hist_idx < len(self.repl_history) - 1:
+            self.repl_hist_idx += 1
+            self.repl_input.set_text(
+                self.repl_history[self.repl_hist_idx].copy()
+            )
+        else:
+            self.repl_hist_idx = len(self.repl_history)
+            self.repl_input.clear()
 
     # --- paint -----------------------------------------------------------
 
@@ -611,6 +713,7 @@ struct DebugPane(Copyable, Movable):
         # zero output) leave a clean state.
         self._last_links = List[OutputLink]()
         self._last_output_sb_x = -1
+        self._last_repl_y = -1
         painter.fill(canvas, panel, String(" "), bg)
         var top = panel.a.y
         var title_text: String
@@ -789,10 +892,15 @@ struct DebugPane(Copyable, Movable):
                         canvas, Point(x, y), String(")"), dim,
                     )
             elif r.kind == PANE_ROW_WATCH:
+                # Leading ``✕`` marks the row as click-to-remove (the
+                # whole row is the hit target — see ``_on_row_click``).
+                var wx = right_x0 + 1
+                var wadv = right_p.put_text(
+                    canvas, Point(wx, y), String("✕ "),
+                    Attr(LIGHT_RED, PANE_BG),
+                )
                 _ = right_p.put_text(
-                    canvas, Point(right_x0 + 1, y),
-                    String("  ") + r.text,
-                    bg,
+                    canvas, Point(wx + wadv, y), r.text, bg,
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
@@ -814,6 +922,17 @@ struct DebugPane(Copyable, Movable):
                     title,
                 )
             out_top = div_y + 1
+        # Interactive console: when the debugger is paused, the bottom
+        # row of the pane becomes a ``>>>`` input line and the output
+        # log shrinks by one row to make room. Only in DEBUG mode (RUN
+        # has no frame to evaluate against) and only when there's a row
+        # to spare below ``out_top``.
+        var show_repl = self.repl_enabled and self.mode == PANE_MODE_DEBUG
+        var out_bottom = panel.b.y
+        var repl_y = -1
+        if show_repl and panel.b.y - 1 > out_top:
+            repl_y = panel.b.y - 1
+            out_bottom = repl_y
         # Output panel: text + selection overlay are owned by
         # ``self.output`` (a ``TextLog``). We just hand it a rect; it
         # remembers the layout for the post-paint link-overlay pass
@@ -821,7 +940,7 @@ struct DebugPane(Copyable, Movable):
         # panel is reserved for the scrollbar — text rect stops one
         # cell short of ``panel.b.x``.
         var out_rect = Rect(
-            panel.a.x + 2, out_top, panel.b.x - 1, panel.b.y,
+            panel.a.x + 2, out_top, panel.b.x - 1, out_bottom,
         )
         self.output.paint(canvas, out_rect)
         # Vertical scrollbar in the right margin of the output rect.
@@ -875,6 +994,26 @@ struct DebugPane(Copyable, Movable):
                 self._last_links.append(OutputLink(
                     line_y, x0, x1, hit.path, hit.line,
                 ))
+        # Console input line across the bottom row. The ``>>>`` prompt is
+        # painted in the pane colors; the editable strip after it reuses
+        # ``TextField.paint`` (cyan input idiom) so caret / scroll /
+        # selection match every other input field in the app.
+        if repl_y >= 0:
+            var prompt = String(">>> ")
+            var prompt_attr = Attr(LIGHT_GREEN, PANE_BG)
+            _ = painter.put_text(
+                canvas, Point(panel.a.x + 1, repl_y), prompt, prompt_attr,
+            )
+            var input_x0 = panel.a.x + 1 + display_columns(prompt)
+            self._last_repl_x0 = input_x0
+            self._last_repl_x_max = panel.b.x
+            if input_x0 < panel.b.x:
+                self.repl_input.paint(
+                    canvas,
+                    Rect(input_x0, repl_y, panel.b.x, repl_y + 1),
+                    self.focused,
+                )
+        self._last_repl_y = repl_y
 
     # --- input -----------------------------------------------------------
 
@@ -969,6 +1108,14 @@ struct DebugPane(Copyable, Movable):
         if event.motion:
             return True
         self.focused = True
+        # Console input line: a click parks the caret in the field.
+        if self._last_repl_y >= 0 and event.pos.y == self._last_repl_y:
+            _ = self.repl_input.handle_mouse(
+                event,
+                Rect(self._last_repl_x0, self._last_repl_y,
+                     self._last_repl_x_max, self._last_repl_y + 1),
+            )
+            return True
         # Inspect-area click: map back to a row in the column the
         # click landed in.
         if event.pos.y >= self._last_inspect_y0 \
@@ -1028,6 +1175,30 @@ struct DebugPane(Copyable, Movable):
         # alone there.
         if event.key == KEY_ESC:
             return handle_bottom_dock_esc(self.dock)
+        # Interactive console: while the debugger is paused the bottom
+        # input line owns the keyboard. Enter evaluates; Up/Down recall
+        # history; PageUp/PageDown scroll the console log; every other
+        # key edits the input field (printable, Backspace, Home/End,
+        # word-jump, clipboard — all handled by ``TextField``). Keys the
+        # field doesn't consume (function keys like F5) fall through to
+        # the host's debugger shortcuts.
+        if self.repl_enabled:
+            if event.key == KEY_ENTER:
+                self._submit_repl()
+                return True
+            if event.key == KEY_UP:
+                self._repl_history_prev()
+                return True
+            if event.key == KEY_DOWN:
+                self._repl_history_next()
+                return True
+            if event.key == KEY_PAGEUP:
+                self.output.scroll_by(-8)
+                return True
+            if event.key == KEY_PAGEDOWN:
+                self.output.scroll_by(8)
+                return True
+            return self.repl_input.handle_key(event).consumed
         # Arrow keys drive the right column (locals + watches) since
         # that's where the deep / scrollable content lives. The stack
         # column rarely needs scrolling and reaches the user via
@@ -1066,6 +1237,16 @@ struct DebugPane(Copyable, Movable):
                 self.pending_expand_ref = r.ref_id
                 self.pending_expand_row = row_idx
                 self.pending_expand_depth = r.depth + 1
+        elif r.kind == PANE_ROW_WATCH:
+            # Clicking a watch row removes it. Report the ordinal among
+            # watch rows (= index into Desktop's parallel expr list)
+            # rather than the row text, since the value half can contain
+            # ``=``. The leading ``✕`` painted on the row signals this.
+            var ordinal = 0
+            for i in range(row_idx):
+                if self.rows[i].kind == PANE_ROW_WATCH:
+                    ordinal += 1
+            self.pending_remove_watch = ordinal
 
     def _scroll_stack(mut self, delta: Int):
         var ns = self.stack_scroll + delta

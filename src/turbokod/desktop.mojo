@@ -7924,6 +7924,13 @@ struct Desktop(Movable):
         if action == DEBUG_ADD_WATCH:
             self._pending_action = _PA_ADD_WATCH
             self.prompt.open(String("Watch expression: "))
+            # The prompt renders on the main window, but this action is
+            # usually fired from the [+Watch] button in the debug pane —
+            # which, when panels float on their own macOS window, holds
+            # OS key focus. Pull focus back to the main window so the
+            # user can type the expression directly. No-op when docked /
+            # already frontmost; the terminal frontend never reads it.
+            self.main_focus_request = True
             return Optional[String]()
         if action == DEBUG_TOGGLE_RAISED:
             self._toggle_raised_exceptions()
@@ -9253,11 +9260,13 @@ struct Desktop(Movable):
                     var fpath = self._dap_stack_cache[i].path
                     var fline = self._dap_stack_cache[i].line
                     if len(fpath.as_bytes()) > 0:
-                        # Debugger frame switch: minimal scroll, no golden
-                        # re-anchor — stepping shouldn't yank the view.
+                        # Clicking a stack frame is a deliberate jump to
+                        # that frame's source — golden-center it like every
+                        # other navigation. (Single-stepping is the
+                        # exception, handled on the stop event below.)
                         self._jump_to(
                             DefinitionResolved(fpath, fline, 0),
-                            screen, golden=False,
+                            screen, golden=True,
                         )
                     break
         # Variable expand click: request children for the row's ref.
@@ -9271,6 +9280,10 @@ struct Desktop(Movable):
         var cclick = self.debug_pane.consume_collapse()
         if cclick != -1:
             self.debug_pane.collapse_at(cclick)
+        # Watch-row click: remove that watch expression and rebuild.
+        var rwatch = self.debug_pane.consume_remove_watch()
+        if rwatch != -1:
+            self.remove_watch_at(rwatch)
         # Output-log link click: ``File "<path>", line N`` parsed out of
         # a stdout/stderr line and clicked. Open (or focus) the file
         # and jump to the line. Failures are logged but not fatal —
@@ -9285,6 +9298,13 @@ struct Desktop(Movable):
                 )
             except e:
                 print("desktop: debug_pane open_file_at", oreq[0], ":", String(e))
+        # Interactive console submit: the user pressed Enter on the
+        # ``>>>`` line. Echo the expression and fire an ``evaluate``
+        # against the current frame; the result lands later via
+        # ``_fold_watch_results`` (routed to the output log by context).
+        var repl_expr = self.debug_pane.consume_repl_submit()
+        if len(repl_expr.as_bytes()) > 0:
+            self._submit_repl_eval(repl_expr^)
         # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
         # stamps the action id; we route it through the same
         # dispatch_action path the keyboard shortcut uses, so a click
@@ -9589,6 +9609,10 @@ struct Desktop(Movable):
         # (and the post-run "exited" hold) are output-only by
         # nature, so the inspect column would always be empty in
         # those modes — we collapse it and give Output the full pane.
+        # Default the console off; the paused-DEBUG branch below turns it
+        # back on. Keeps a Run / exited transition from leaving a stale
+        # live input line.
+        self.debug_pane.repl_enabled = False
         if self.dap.is_active():
             self.debug_pane.set_mode(PANE_MODE_DEBUG)
             var title = String("Debug")
@@ -9596,6 +9620,10 @@ struct Desktop(Movable):
                 title = title + String(" - ") + self._debug_target_name
             self.debug_pane.set_title(title^)
             self.debug_pane.set_status(self.dap.status_summary())
+            # The interactive console line is live only while paused at a
+            # frame — that's when ``evaluate`` has a ``frameId`` to bind
+            # to and the adapter will answer.
+            self.debug_pane.repl_enabled = self.dap.is_stopped()
         elif self.run_session.is_active():
             # Target name lives in the title ("Run - <target>") rather
             # than a status row, so the status stays empty and the row
@@ -9950,6 +9978,26 @@ struct Desktop(Movable):
             cur_idx,
         )
 
+    def _submit_repl_eval(mut self, var expr: String):
+        """Echo a console expression to the output log and fire an
+        ``evaluate`` against the current frame with the ``"repl"``
+        context (so the adapter allows the same side-effecting
+        expressions a real REPL would). The result is appended later by
+        ``_fold_watch_results`` once the adapter answers."""
+        self.debug_pane.append_output(String(">>> ") + expr, UInt8(2))
+        if not self.dap.is_stopped():
+            self.debug_pane.append_output(
+                String("(not paused — evaluate is only available at a breakpoint)\n"),
+                UInt8(1),
+            )
+            return
+        if not self.dap.request_evaluate(
+            expr^, self._dap_current_frame_id, String("repl"),
+        ):
+            self.debug_pane.append_output(
+                String("(evaluate request failed)\n"), UInt8(1),
+            )
+
     def _refresh_watches(mut self):
         """Fire ``evaluate`` for every watch expression against the
         current frame. Results land asynchronously and are folded back
@@ -9973,6 +10021,17 @@ struct Desktop(Movable):
         # ``types`` is returned but the pane currently shows just value.
         for i in range(len(batch.expressions)):
             var e = batch.expressions[i]
+            # Interactive-console results go to the output log, not the
+            # watch rows. Errors print red (stderr category); successful
+            # values print as a discrete console line.
+            if i < len(batch.contexts) and batch.contexts[i] == String("repl"):
+                if i < len(batch.is_errors) and batch.is_errors[i]:
+                    self.debug_pane.append_output(
+                        batch.values[i] + String("\n"), UInt8(1),
+                    )
+                else:
+                    self.debug_pane.append_output(batch.values[i], UInt8(2))
+                continue
             for k in range(len(self._dap_watch_exprs)):
                 if self._dap_watch_exprs[k] == e:
                     if k < len(self._dap_watch_values):
@@ -10037,7 +10096,9 @@ struct Desktop(Movable):
                 String("watch"),
             )
         # Force a rebuild so the new watch row appears immediately.
-        self._rebuild_pane_inspect(List[DapVariable]())
+        # Reuse the cached locals — passing an empty list here would
+        # blank the Locals section until the next stop / frame click.
+        self._rebuild_pane_inspect(self._dap_locals_cache.copy())
         self._refresh_watches()
 
     def remove_watch(mut self, expression: String):
@@ -10051,6 +10112,29 @@ struct Desktop(Movable):
                 new_values.append(self._dap_watch_values[k])
         self._dap_watch_exprs = new_exprs^
         self._dap_watch_values = new_values^
+        # Rebuild so the removed row disappears immediately, keeping the
+        # cached locals on screen.
+        self._rebuild_pane_inspect(self._dap_locals_cache.copy())
+
+    def remove_watch_at(mut self, index: Int):
+        """Remove the watch expression at ordinal ``index`` (its position
+        among the watch rows / ``_dap_watch_exprs``). Used by the pane's
+        click-to-remove affordance, which reports the ordinal rather than
+        the expression text (the row text is ``expr = value`` and the
+        value may itself contain ``=``)."""
+        if index < 0 or index >= len(self._dap_watch_exprs):
+            return
+        var new_exprs = List[String]()
+        var new_values = List[String]()
+        for k in range(len(self._dap_watch_exprs)):
+            if k == index:
+                continue
+            new_exprs.append(self._dap_watch_exprs[k])
+            if k < len(self._dap_watch_values):
+                new_values.append(self._dap_watch_values[k])
+        self._dap_watch_exprs = new_exprs^
+        self._dap_watch_values = new_values^
+        self._rebuild_pane_inspect(self._dap_locals_cache.copy())
 
     def _refresh_dap_status(mut self):
         """When a debug session is active, surface its state on the right

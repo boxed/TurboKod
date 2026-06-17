@@ -136,11 +136,20 @@ struct DapScope(ImplicitlyCopyable, Movable):
 
 @fieldwise_init
 struct DapEvaluations(Movable):
-    """Drained evaluate-response batch. Three parallel lists in one
-    return value so the host doesn't need a second pass to demux."""
+    """Drained evaluate-response batch. Parallel lists in one return
+    value so the host doesn't need a second pass to demux.
+
+    ``contexts`` carries the request-time hint (``"watch"`` / ``"repl"``
+    / ``"hover"``) so the host can route REPL console results to the
+    output log while watch results fold into their rows.
+    ``is_errors[i]`` is True when the adapter reported the evaluate as a
+    failed request (the expression raised) — the console paints those
+    red rather than as a normal value."""
     var expressions: List[String]
     var values: List[String]
     var types: List[String]
+    var contexts: List[String]
+    var is_errors: List[Bool]
 
 
 @fieldwise_init
@@ -249,6 +258,10 @@ struct SubprocessAttach(Copyable, Movable):
     # rather than single-slot because watches fire all at once.
     var inflight_evaluate_seqs: List[Int]
     var inflight_evaluate_exprs: List[String]
+    # Per-request context hint, parallel to the seq/expr lists. Lets the
+    # response path tag each result so the host can split REPL console
+    # output from watch-row folds.
+    var inflight_evaluate_contexts: List[String]
     var inflight_test_eval_seqs: List[Int]
     var inflight_test_eval_exprs: List[String]
     var got_initialized_event: Bool
@@ -279,6 +292,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_variables = 0
         self.inflight_evaluate_seqs = List[Int]()
         self.inflight_evaluate_exprs = List[String]()
+        self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
@@ -305,6 +319,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_variables = 0
         self.inflight_evaluate_seqs = List[Int]()
         self.inflight_evaluate_exprs = List[String]()
+        self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
@@ -407,11 +422,19 @@ struct DapManager(Copyable, Movable):
     # ``request_seq``.
     var _inflight_evaluate_seqs: List[Int]
     var _inflight_evaluate_exprs: List[String]
+    # Per-request context hint (``"watch"`` / ``"repl"`` / ``"hover"``),
+    # parallel to the seq/expr lists, so the response path can tag each
+    # result and the host can route REPL console lines apart from watch
+    # folds.
+    var _inflight_evaluate_contexts: List[String]
     # Buffer of completed evaluate responses; drained by the host once
-    # per frame via ``take_evaluations``.
+    # per frame via ``take_evaluations``. ``_evaluations_context`` and
+    # ``_evaluations_is_error`` are parallel to the expr/value/type lists.
     var _evaluations_expr: List[String]
     var _evaluations_value: List[String]
     var _evaluations_type: List[String]
+    var _evaluations_context: List[String]
+    var _evaluations_is_error: List[Bool]
     # Independent test-evaluate channel — used by the condition-error
     # dialog to validate an edited BP condition against the live frame
     # before committing it. Kept separate from the watch/REPL evaluate
@@ -549,9 +572,12 @@ struct DapManager(Copyable, Movable):
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
+        self._inflight_evaluate_contexts = List[String]()
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._evaluations_context = List[String]()
+        self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
@@ -620,9 +646,12 @@ struct DapManager(Copyable, Movable):
         self._exception_filters = _default_exception_filters()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
+        self._inflight_evaluate_contexts = List[String]()
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._evaluations_context = List[String]()
+        self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
@@ -914,9 +943,12 @@ struct DapManager(Copyable, Movable):
         self._bp_errors = List[DapBreakpointError]()
         self._inflight_evaluate_seqs = List[Int]()
         self._inflight_evaluate_exprs = List[String]()
+        self._inflight_evaluate_contexts = List[String]()
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
+        self._evaluations_context = List[String]()
+        self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
@@ -1389,6 +1421,9 @@ struct DapManager(Copyable, Movable):
         returns ``Wrong ID sent from the client``."""
         if not self.is_active():
             return False
+        # Keep a copy of the context hint for the inflight table — the
+        # original is moved into the request args below.
+        var ctx = context.copy()
         var args = json_object()
         args.put(String("expression"), json_str(expression))
         if frame_id != 0:
@@ -1412,9 +1447,11 @@ struct DapManager(Copyable, Movable):
         if via_subprocess:
             self._subprocess.inflight_evaluate_seqs.append(seq)
             self._subprocess.inflight_evaluate_exprs.append(expression^)
+            self._subprocess.inflight_evaluate_contexts.append(ctx^)
         else:
             self._inflight_evaluate_seqs.append(seq)
             self._inflight_evaluate_exprs.append(expression^)
+            self._inflight_evaluate_contexts.append(ctx^)
         return True
 
     def has_evaluations(self) -> Bool:
@@ -1428,10 +1465,14 @@ struct DapManager(Copyable, Movable):
         var e = self._evaluations_expr^
         var v = self._evaluations_value^
         var t = self._evaluations_type^
+        var c = self._evaluations_context^
+        var err = self._evaluations_is_error^
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
-        return DapEvaluations(e^, v^, t^)
+        self._evaluations_context = List[String]()
+        self._evaluations_is_error = List[Bool]()
+        return DapEvaluations(e^, v^, t^, c^, err^)
 
     # --- execution control -----------------------------------------------
 
@@ -2318,16 +2359,20 @@ struct DapManager(Copyable, Movable):
         ``{result, type?, variablesReference}``; we surface ``result``
         as the value text and ``type`` as the type when present."""
         var expr = self._inflight_evaluate_exprs[idx]
+        var ctx = self._inflight_evaluate_contexts[idx]
         var new_seqs = List[Int]()
         var new_exprs = List[String]()
+        var new_ctxs = List[String]()
         for k in range(len(self._inflight_evaluate_seqs)):
             if k == idx:
                 continue
             new_seqs.append(self._inflight_evaluate_seqs[k])
             new_exprs.append(self._inflight_evaluate_exprs[k])
+            new_ctxs.append(self._inflight_evaluate_contexts[k])
         self._inflight_evaluate_seqs = new_seqs^
         self._inflight_evaluate_exprs = new_exprs^
-        self._stash_evaluate_result(expr^, msg)
+        self._inflight_evaluate_contexts = new_ctxs^
+        self._stash_evaluate_result(expr^, ctx^, msg)
 
     def _on_evaluate_response_subprocess(
         mut self, idx: Int, msg: DapIncoming,
@@ -2336,23 +2381,29 @@ struct DapManager(Copyable, Movable):
         list. Result lands in the same ``_evaluations_*`` buffers so
         the host's watch fold doesn't care which session answered."""
         var expr = self._subprocess.inflight_evaluate_exprs[idx]
+        var ctx = self._subprocess.inflight_evaluate_contexts[idx]
         var new_seqs = List[Int]()
         var new_exprs = List[String]()
+        var new_ctxs = List[String]()
         for k in range(len(self._subprocess.inflight_evaluate_seqs)):
             if k == idx:
                 continue
             new_seqs.append(self._subprocess.inflight_evaluate_seqs[k])
             new_exprs.append(self._subprocess.inflight_evaluate_exprs[k])
+            new_ctxs.append(self._subprocess.inflight_evaluate_contexts[k])
         self._subprocess.inflight_evaluate_seqs = new_seqs^
         self._subprocess.inflight_evaluate_exprs = new_exprs^
-        self._stash_evaluate_result(expr^, msg)
+        self._subprocess.inflight_evaluate_contexts = new_ctxs^
+        self._stash_evaluate_result(expr^, ctx^, msg)
 
     def _stash_evaluate_result(
-        mut self, var expr: String, msg: DapIncoming,
+        mut self, var expr: String, var context: String, msg: DapIncoming,
     ):
         """Append one parsed ``evaluate`` result to the watch/REPL
         result buffers. Shared between parent and subprocess paths so
-        both surface identically to the host."""
+        both surface identically to the host. ``context`` is the
+        request-time hint, carried through so the host can route REPL
+        console results apart from watch folds."""
         var value = String("")
         var type_name = String("")
         var eval_ok = True
@@ -2377,6 +2428,8 @@ struct DapManager(Copyable, Movable):
         self._evaluations_expr.append(expr^)
         self._evaluations_value.append(value^)
         self._evaluations_type.append(type_name^)
+        self._evaluations_context.append(context^)
+        self._evaluations_is_error.append(not eval_ok)
 
     # --- condition-exception buffer & test-evaluate channel --------------
 
