@@ -148,6 +148,15 @@ def built_in_themes() -> List[Theme]:
         0x000000, 0xE5E5E5, 0x0021AA, 0xCDCD00, 0xFFFFFF,
     )))
 
+    # --- Turbo C++ Modern — the default with red/yellow pushed to full
+    # saturation. Blue background and cyan match the original Turbo C++ 3.0. ---
+    t.append(_build(String("Turbo C++ Modern"), _v(
+        0x000000, 0xFF2212, 0x00CD00, 0xFFFF00, 0x001B8B, 0xCD00CD, 0x00CDCD, 0xE5E5E5,
+        0x7F7F7F, 0xFF0000, 0x00FF00, 0xFFFF00, 0x5C5CFF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+        0x001B8B, 0xE5E5E5, 0xFFFFFF, 0xFF2212, 0x00CDCD, 0xE5E5E5, 0x00FF00, 0x00FFFF, 0xFFFF00,
+        0x000000, 0xE5E5E5, 0x001B8B, 0xFFFF00, 0xFFFFFF,
+    )))
+
     # --- Monokai (dark) ------------------------------------------------------
     t.append(_build(String("Monokai"), _v(
         0xF8F8F2, 0xF92672, 0x49483E, 0xE6DB74, 0x66D9EF, 0xAE81FF, 0x2D2E28, 0x3E3D32,

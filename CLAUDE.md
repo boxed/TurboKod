@@ -68,6 +68,8 @@ Full details in [docs/floating-panels.md](docs/floating-panels.md).
 
 ## Running the Mojo code
 
+**Always run `make` after making a change** (build-only, no launch) so the user can test immediately. Don't leave a change unbuilt.
+
 Two entry points: `make` (build-only, no launch) and the `./run.sh` / `./run_swift.sh` wrappers (build + launch).
 
 Build-only (use after editing Mojo source — keeps both frontends compilable *and* refreshes the bundled dylib so a Dock relaunch of `.app` picks up the new code):
