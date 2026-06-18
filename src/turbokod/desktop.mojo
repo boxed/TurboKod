@@ -3624,13 +3624,33 @@ struct Desktop(Movable):
         if self._review_win_idx >= 0 \
                 and self._review_win_idx < len(self.windows.windows) \
                 and self._review_host_path == abs:
-            self.windows.windows[self._review_win_idx].rect = rws
-            self.windows.focus_by_index(self._review_win_idx)
+            var ri = self._review_win_idx
+            self.windows.windows[ri].rect = rws
+            self.windows.focus_by_index(ri)
+            # Editable (unstaged) review: keep the diff overlay truthful as the
+            # user edits. Runs before the per-frame git-gutter pass, so both the
+            # removed-line phantoms and the +/~ gutter reflect the same edit on
+            # the same frame.
+            if self.review.is_editable() and not self.windows.windows[ri].editor.read_only:
+                var ed_before = self.review.current_before()
+                # A save ran ``invalidate_git_changes`` (clearing the pinned
+                # baseline) — re-pin the changeset baseline so the gutter +
+                # phantoms keep diffing against it rather than a re-fetched HEAD.
+                if not self.windows.windows[ri].editor._git_head_present:
+                    self.windows.windows[ri].editor.set_git_head_text(
+                        ed_before.copy(), True,
+                    )
+                # Re-diff the removed-line overlay against the live buffer when
+                # it changed. ``_git_changes_dirty`` is set by every edit and
+                # consumed by the gutter pass that runs after us this frame, so
+                # this fires once per edit, not every idle frame.
+                if self.windows.windows[ri].editor._git_changes_dirty:
+                    var live_after = self.windows.windows[ri].editor.text_snapshot()
+                    self._review_compute_phantoms(ri, abs, ed_before, live_after)
             # A prev/next-change that rolled into this (newly-loaded) file
             # lands on its first/last change once its git lines are diffed.
             if self._review_pending_chunk_edge != 0 \
-                    and self.windows.windows[self._review_win_idx]
-                            .editor._git_has_changes:
+                    and self.windows.windows[ri].editor._git_has_changes:
                 self._review_apply_chunk_edge()
             self._review_update_counter()
             return
@@ -3643,131 +3663,154 @@ struct Desktop(Movable):
         var binary = self.review.current_is_binary()
         var before = self.review.current_before()
         var after = self.review.current_after()
-        # Build the inline-diff phantom store: the removed lines, their
-        # before-file syntax, and which after-file row each is shown before.
-        # The editor is then a NORMAL editor of the after file (sticky scroll,
-        # syntax, folding, line numbers, gutter) with these woven in.
-        var diff_active = False
-        var ph_text = List[String]()
-        var ph_hl = List[List[Highlight]]()
-        var ph_buckets = List[List[Int]]()
-        # Intra-line change emphasis (which characters changed within a
-        # modified line): ``ph_emph`` parallels ``ph_text`` (removed side),
-        # ``emph_by_row`` is indexed by after-file row (added side).
-        var ph_emph = List[List[Tuple[Int, Int]]]()
-        var emph_by_row = List[List[Tuple[Int, Int]]]()
-        if not binary:
-            var before_lines = split_lines_no_trailing(before)
-            var after_lines = split_lines_no_trailing(after)
-            var n_after = len(after_lines)
-            var drows = build_diff_rows(before_lines, after_lines)
-            var dhl = diff_row_highlights(
-                drows, before_lines, after_lines, abs, self.grammar_registry,
-            )
-            var emph = diff_row_emphasis(drows)
-            var partner = diff_row_partner(drows)
-            for _ in range(n_after + 1):
-                ph_buckets.append(List[Int]())
-            for _ in range(n_after):
-                emph_by_row.append(List[Tuple[Int, Int]]())
-            # Anchor each removed row to the after-row it precedes. A removed
-            # row matched to an added line (a modified line) anchors right above
-            # that line so the old/new pair render adjacent — even when comments
-            # were inserted between them. An unmatched (purely deleted) row falls
-            # back to the next non-removed row's after_row (end-of-file =
-            # n_after).
-            var nxt = n_after
-            var drow_anchor = List[Int]()
-            for _ in range(len(drows)):
-                drow_anchor.append(0)
-            for j in range(len(drows) - 1, -1, -1):
-                if drows[j].kind == DIFF_ROW_REMOVED:
-                    if partner[j] >= 0:
-                        drow_anchor[j] = drows[partner[j]].after_row
-                    else:
-                        drow_anchor[j] = nxt
-                else:
-                    nxt = drows[j].after_row
-                    drow_anchor[j] = drows[j].after_row
-            for j in range(len(drows)):
-                if drows[j].kind == DIFF_ROW_REMOVED:
-                    var pidx = len(ph_text)
-                    ph_text.append(drows[j].text)
-                    ph_hl.append(dhl[j].copy())
-                    ph_emph.append(emph[j].copy())
-                    var a = drow_anchor[j]
-                    if a < 0:
-                        a = 0
-                    if a > n_after:
-                        a = n_after
-                    ph_buckets[a].append(pidx)
-                elif drows[j].after_row >= 0 and drows[j].after_row < n_after:
-                    # Context / added row: stash its emphasis by after-file row.
-                    emph_by_row[drows[j].after_row] = emph[j].copy()
-            diff_active = True
-        # NOTE: read-only for every review type. The after-file is the buffer,
-        # but editing it would desync the static phantom rows — editing happens
-        # by opening the file normally.
-        #
-        # The review window is ALWAYS a transient, review-owned window built
-        # from the changeset's "after" text — even for unstaged changes, where
-        # the "after" text is the current worktree content. We deliberately do
-        # not reuse one of the user's open windows: review must not change the
-        # scroll position of, or leave behind, any window the user already had
-        # open. The transient window is closed on exit (``_review_teardown``),
-        # so reviewing a changeset leaves the rest of the workspace untouched.
-        var text = String("  (binary file — diff not shown)") if binary \
-            else after
-        var w = Window.editor_window(basename(abs), rws, text^)
-        w.editor.file_path = abs
-        w._transient = True
-        self.windows.add(w^)
-        var idx2 = len(self.windows.windows) - 1
-        self._review_arm_editor(
-            idx2, before, diff_active, ph_text^, ph_hl^, ph_buckets^,
-            ph_emph^, emph_by_row^,
-        )
+        # The review window is ALWAYS a transient, review-owned window that's
+        # *separate* from any window the user already had open — reviewing must
+        # not change the scroll position of, or leave behind, the user's
+        # windows. For unstaged changes it's an editable window on the real
+        # worktree file (so Ctrl+S writes through to disk and syntax / LSP /
+        # line-ending detection all behave); for staged / commit / binary it's
+        # a read-only blob buffer. The removed-line diff overlay is woven in by
+        # ``_review_arm_editor`` (and re-computed per edit when editable). The
+        # window is closed on exit unless the user left unsaved edits in it
+        # (see ``_review_teardown``).
+        var editable = self.review.is_editable() and not binary
+        var idx2: Int
+        if editable:
+            try:
+                var w = Window.from_file(basename(abs), rws, abs)
+                w._transient = True
+                self.windows.add(w^)
+            except:
+                return
+            idx2 = len(self.windows.windows) - 1
+        else:
+            var text = String("  (binary file — diff not shown)") if binary \
+                else after
+            var w = Window.editor_window(basename(abs), rws, text^)
+            w.editor.file_path = abs
+            w._transient = True
+            self.windows.add(w^)
+            idx2 = len(self.windows.windows) - 1
+        self._review_arm_editor(idx2, abs, before, after, binary, editable)
         self.windows.windows[idx2]._last_focus_ms = wall_clock_ms()
         self.windows.windows[idx2]._lsp_opened = True
         self.windows.focus_by_index(idx2)
         self._review_win_idx = idx2
         self._review_host_path = abs
         if not binary:
-            # Best-effort LSP: requests use the live workspace path while the
-            # buffer may be historical, so results are approximate.
+            # Best-effort LSP: for staged/commit the buffer is historical so
+            # results are approximate; for unstaged it's the live file.
             self._maybe_lsp_open(idx2)
         self._review_update_counter()
 
     def _review_arm_editor(
-        mut self, idx: Int, var before: String, diff_active: Bool,
-        var ph_text: List[String], var ph_hl: List[List[Highlight]],
-        var ph_buckets: List[List[Int]],
-        var ph_emph: List[List[Tuple[Int, Int]]],
-        var emph_by_row: List[List[Tuple[Int, Int]]],
+        mut self, idx: Int, var abs: String, var before: String,
+        var after: String, binary: Bool, editable: Bool,
     ):
-        """Configure a window's editor for review: read-only, diff baseline
-        pinned (drives the git gutter + add/modified wash), phantom removed
-        rows + intra-line change emphasis, and WRAP_NONE (the phantom
-        interleave only runs unwrapped)."""
-        self.windows.windows[idx].editor.diff_phantom_emph = ph_emph^
-        self.windows.windows[idx].editor.diff_emph_by_row = emph_by_row^
+        """Configure a window's editor for review: ``review_mode`` on (keeps
+        the changeset gutter + change-chunk nav), the diff baseline pinned
+        (drives the +/~ gutter + add/modified wash), and WRAP_NONE (the phantom
+        interleave only runs unwrapped). Read-only unless ``editable`` — an
+        unstaged review edits the live worktree file and edits save through.
+        The removed-line phantom overlay is built by ``_review_compute_phantoms``
+        (re-run per edit when editable)."""
         self.windows.windows[idx].editor.review_mode = True
-        self.windows.windows[idx].editor.read_only = True
+        self.windows.windows[idx].editor.read_only = not editable
         self.windows.windows[idx].editor.git_changes_visible = True
         self.windows.windows[idx].editor.wrap_mode = WRAP_NONE
-        self.windows.windows[idx].editor.diff_active = diff_active
+        if binary:
+            self.windows.windows[idx].editor.diff_active = False
+        else:
+            self._review_compute_phantoms(idx, abs, before, after)
+            self.windows.windows[idx].editor.set_git_head_text(before^, True)
+
+    def _review_compute_phantoms(
+        mut self, idx: Int, abs: String, before: String, after: String,
+    ):
+        """(Re)compute the inline-diff overlay for the review-hosted editor at
+        ``idx``: the removed lines woven in as phantom rows (with before-file
+        syntax) plus intra-line change emphasis, ``before`` (the pinned
+        baseline) vs ``after`` (the current after-file text). Writes only the
+        ``diff_*`` overlay fields — never read_only, scroll, or cursor — so it's
+        safe to re-run on every keystroke while an unstaged file is edited in
+        the review window."""
+        var ph_text = List[String]()
+        var ph_hl = List[List[Highlight]]()
+        var ph_buckets = List[List[Int]]()
+        var ph_emph = List[List[Tuple[Int, Int]]]()
+        var emph_by_row = List[List[Tuple[Int, Int]]]()
+        var before_lines = split_lines_no_trailing(before)
+        var after_lines = split_lines_no_trailing(after)
+        var n_after = len(after_lines)
+        var drows = build_diff_rows(before_lines, after_lines)
+        var dhl = diff_row_highlights(
+            drows, before_lines, after_lines, abs, self.grammar_registry,
+        )
+        var emph = diff_row_emphasis(drows)
+        var partner = diff_row_partner(drows)
+        for _ in range(n_after + 1):
+            ph_buckets.append(List[Int]())
+        for _ in range(n_after):
+            emph_by_row.append(List[Tuple[Int, Int]]())
+        # Anchor each removed row to the after-row it precedes. A removed row
+        # matched to an added line (a modified line) anchors right above that
+        # line so the old/new pair render adjacent — even when comments were
+        # inserted between them. An unmatched (purely deleted) row falls back to
+        # the next non-removed row's after_row (end-of-file = n_after).
+        var nxt = n_after
+        var drow_anchor = List[Int]()
+        for _ in range(len(drows)):
+            drow_anchor.append(0)
+        for j in range(len(drows) - 1, -1, -1):
+            if drows[j].kind == DIFF_ROW_REMOVED:
+                if partner[j] >= 0:
+                    drow_anchor[j] = drows[partner[j]].after_row
+                else:
+                    drow_anchor[j] = nxt
+            else:
+                nxt = drows[j].after_row
+                drow_anchor[j] = drows[j].after_row
+        for j in range(len(drows)):
+            if drows[j].kind == DIFF_ROW_REMOVED:
+                var pidx = len(ph_text)
+                ph_text.append(drows[j].text)
+                ph_hl.append(dhl[j].copy())
+                ph_emph.append(emph[j].copy())
+                var a = drow_anchor[j]
+                if a < 0:
+                    a = 0
+                if a > n_after:
+                    a = n_after
+                ph_buckets[a].append(pidx)
+            elif drows[j].after_row >= 0 and drows[j].after_row < n_after:
+                # Context / added row: stash its emphasis by after-file row.
+                emph_by_row[drows[j].after_row] = emph[j].copy()
+        self.windows.windows[idx].editor.diff_active = True
         self.windows.windows[idx].editor.diff_phantom_text = ph_text^
         self.windows.windows[idx].editor.diff_phantom_hl = ph_hl^
         self.windows.windows[idx].editor.diff_phantom_buckets = ph_buckets^
-        if diff_active:
-            self.windows.windows[idx].editor.set_git_head_text(before^, True)
+        self.windows.windows[idx].editor.diff_phantom_emph = ph_emph^
+        self.windows.windows[idx].editor.diff_emph_by_row = emph_by_row^
 
     def _review_teardown(mut self):
-        """Close the transient, review-owned window. The review window is
-        always review's own (never a window the user had open), so exit simply
-        closes it — leaving the rest of the workspace untouched. Idempotent."""
+        """Always close the transient, review-owned window — review never
+        leaves a window behind. The review window is fully isolated (a separate
+        buffer, excluded from view-state / recents / nav / session — see the
+        ``_transient`` guards in those per-frame passes), so closing it leaves
+        the rest of the workspace, including every open window's scroll
+        position, completely untouched.
+
+        For an editable (unstaged) review the buffer is the live worktree file;
+        flush any unsaved edits to disk before closing so editing-in-review
+        persists without leaving a window open. Idempotent."""
         var idx = self._review_win_idx
         if idx >= 0 and idx < len(self.windows.windows):
+            if not self.windows.windows[idx].editor.read_only \
+                    and self.windows.windows[idx].editor.dirty:
+                try:
+                    _ = self.windows.windows[idx].editor.save()
+                except e:
+                    print("desktop: review save-on-exit", ":", String(e))
             _ = self.windows.close_by_index(idx)
         self._review_win_idx = -1
         self._review_host_path = String("")
@@ -5513,6 +5556,11 @@ struct Desktop(Movable):
             return False
         if not self.windows.windows[idx].is_editor:
             return False
+        # Transient (review) windows are isolated — they must not count toward
+        # the open-document cap (so hosting one never evicts a real window) nor
+        # be eviction victims themselves.
+        if self.windows.windows[idx]._transient:
+            return False
         return len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0
 
     def _close_editor_window_at(mut self, idx: Int):
@@ -5830,6 +5878,10 @@ struct Desktop(Movable):
             return
         if not self.windows.windows[idx].is_editor:
             return
+        # Transient (review) windows never write view state — see
+        # ``_refresh_view_states_from_windows``.
+        if self.windows.windows[idx]._transient:
+            return
         var fp = self.windows.windows[idx].editor.file_path
         if len(fp.as_bytes()) == 0:
             return
@@ -5861,6 +5913,13 @@ struct Desktop(Movable):
         a closed-then-reopened file still finds its saved scroll."""
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
+                continue
+            # Transient windows (review buffers) are never real documents:
+            # recording their scroll/cursor would overwrite the saved view
+            # state for that path, so a later normal open of the file would
+            # land at the review scroll position instead of where the user
+            # left it. Skip them — same exclusion as the session snapshot.
+            if self.windows.windows[i]._transient:
                 continue
             var fp = self.windows.windows[i].editor.file_path
             if len(fp.as_bytes()) == 0:
@@ -11057,6 +11116,10 @@ struct Desktop(Movable):
         var idx = self._focused_editor_idx()
         if idx < 0:
             return
+        # Transient (review) windows are isolated: never let one pollute the
+        # Open-Recent list.
+        if self.windows.windows[idx]._transient:
+            return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
@@ -11099,6 +11162,10 @@ struct Desktop(Movable):
         """
         var idx = self._focused_editor_idx()
         if idx < 0:
+            return
+        # Transient (review) windows are isolated: never record their cursor
+        # into the cross-file navigation history.
+        if self.windows.windows[idx]._transient:
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
@@ -11417,7 +11484,11 @@ struct Desktop(Movable):
         """
         var cur_idx = self._focused_editor_idx()
         var cur_path = String("")
-        if cur_idx >= 0:
+        # Transient (review) windows are isolated from focus-change autosave:
+        # leaving them never fires a save against their path (review flushes
+        # its own edits on exit). Treating the path as empty keeps it out of
+        # the ``prev``/``cur`` bookkeeping entirely.
+        if cur_idx >= 0 and not self.windows.windows[cur_idx]._transient:
             cur_path = self.windows.windows[cur_idx].editor.file_path
         if not self.config.auto_save:
             self._last_focused_editor_path = cur_path

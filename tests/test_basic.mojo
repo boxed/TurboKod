@@ -3424,6 +3424,111 @@ def test_editor_external_change_skipped_in_review_mode() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_review_window_does_not_pollute_view_state() raises:
+    """A review window is a transient buffer over a real path. It must not
+    write its scroll/cursor into the saved view-state: doing so would make a
+    later *normal* open of that file land at the review scroll instead of where
+    the user actually left it. Normal windows still record; transient ones are
+    skipped — pre-existing entries for their path stay untouched."""
+    var d = Desktop()
+    # A normal editor window for X at scroll 5.
+    d.windows.add(Window.editor_window(
+        String("x"), Rect(0, 1, 40, 12), String("x line\n"),
+    ))
+    d.windows.windows[0].editor.file_path = String("/tmp/tk_vs_x.txt")
+    d.windows.windows[0].editor.scroll_y = 5
+    # A transient (review) window for Y, scrolled far down, with a pre-existing
+    # saved view-state at the top.
+    d.windows.add(Window.editor_window(
+        String("y"), Rect(0, 1, 40, 12), String("y line\n"),
+    ))
+    d.windows.windows[1].editor.file_path = String("/tmp/tk_vs_y.txt")
+    d.windows.windows[1].editor.scroll_y = 99
+    d.windows.windows[1]._transient = True
+    d._view_states.append(StoredViewState(String("/tmp/tk_vs_y.txt"), 0, 0, 0, 0))
+    # A second transient window for Z with no saved entry at all.
+    d.windows.add(Window.editor_window(
+        String("z"), Rect(0, 1, 40, 12), String("z line\n"),
+    ))
+    d.windows.windows[2].editor.file_path = String("/tmp/tk_vs_z.txt")
+    d.windows.windows[2].editor.scroll_y = 42
+    d.windows.windows[2]._transient = True
+
+    d._refresh_view_states_from_windows()
+
+    # Normal window recorded.
+    var xi = d._find_view_state(String("/tmp/tk_vs_x.txt"))
+    assert_true(xi >= 0)
+    assert_equal(d._view_states[xi].scroll_y, 5)
+    # Transient window's path: existing entry NOT overwritten by review's 99.
+    var yi = d._find_view_state(String("/tmp/tk_vs_y.txt"))
+    assert_true(yi >= 0)
+    assert_equal(d._view_states[yi].scroll_y, 0)
+    # Transient window with no prior entry: none is created.
+    assert_equal(d._find_view_state(String("/tmp/tk_vs_z.txt")), -1)
+
+
+def test_review_window_not_counted_as_document() raises:
+    """The transient review window must not count toward the open-document cap
+    (so hosting it can never evict one of the user's real windows) and must not
+    itself be an eviction victim."""
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("normal"), Rect(0, 1, 40, 12), String("hi\n"),
+    ))
+    d.windows.windows[0].editor.file_path = String("/tmp/tk_doc_normal.txt")
+    d.windows.add(Window.editor_window(
+        String("review"), Rect(0, 1, 40, 12), String("hi\n"),
+    ))
+    d.windows.windows[1].editor.file_path = String("/tmp/tk_doc_review.txt")
+    d.windows.windows[1]._transient = True
+    assert_true(d._is_document_window(0))
+    assert_false(d._is_document_window(1))
+
+
+def test_review_teardown_saves_and_closes_editable_window() raises:
+    """Exiting review must leave NO window behind and must not touch the
+    scroll of the user's other windows. For an editable (unstaged) review the
+    buffer is the live worktree file, so unsaved edits are flushed to disk on
+    the way out — editing-in-review persists without a leftover window."""
+    var path = _temp_path(String("_review_edit.txt"))
+    assert_true(write_file(path, String("original\n")))
+    var d = Desktop()
+    # The user already had a normal window open at scroll 7.
+    d.windows.add(Window.editor_window(
+        String("keep"), Rect(0, 1, 40, 12), String("keep\n"),
+    ))
+    d.windows.windows[0].editor.file_path = String("/tmp/tk_keep.txt")
+    d.windows.windows[0].editor.scroll_y = 7
+    # Review hosts the worktree file in an editable transient window.
+    d.windows.add(Window.from_file(String("edit"), Rect(0, 1, 40, 12), path))
+    var ridx = len(d.windows.windows) - 1
+    d.windows.windows[ridx]._transient = True
+    d.windows.windows[ridx].editor.review_mode = True
+    d.windows.windows[ridx].editor.read_only = False
+    d._review_win_idx = ridx
+    d._review_host_path = path
+    # Edit in the review window.
+    d.windows.focus_by_index(ridx)
+    _ = d.windows.windows[ridx].editor.handle_key(_key(KEY_END), _VIEW)
+    _ = d.windows.windows[ridx].editor.handle_key(
+        _key(UInt32(ord("!"))), _VIEW,
+    )
+    assert_true(d.windows.windows[ridx].editor.dirty)
+
+    var before_count = len(d.windows.windows)
+    d._review_teardown()
+
+    # No window left behind; review bookkeeping reset.
+    assert_equal(len(d.windows.windows), before_count - 1)
+    assert_equal(d._review_win_idx, -1)
+    # The edit was flushed to disk.
+    assert_equal(read_file(path), String("original!\n"))
+    # The user's pre-existing window is untouched (scroll preserved).
+    assert_equal(d.windows.windows[0].editor.scroll_y, 7)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_external_change_refreshes_highlights() raises:
     """Reload from disk must produce highlights matching the new
     content — not stale entries pointing into the previous buffer.
@@ -21508,6 +21613,9 @@ def _run_chunk_01() raises:
     test_merge_view_resolved_text_both()
     test_editor_external_change_clean_reload_when_buffer_clean()
     test_editor_external_change_skipped_in_review_mode()
+    test_review_window_does_not_pollute_view_state()
+    test_review_window_not_counted_as_document()
+    test_review_teardown_saves_and_closes_editable_window()
     test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
