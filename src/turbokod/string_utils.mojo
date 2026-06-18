@@ -412,6 +412,12 @@ def is_word_codepoint(cp: Int) -> Bool:
     return False
 
 
+def is_space_cp(cp: Int) -> Bool:
+    """``True`` for an inline whitespace codepoint (space or tab). Used by
+    word-movement to skip whitespace without treating it as a token."""
+    return cp == 0x20 or cp == 0x09
+
+
 def word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
     """``(is_word_char, byte_advance)`` for the codepoint at byte ``col``.
 

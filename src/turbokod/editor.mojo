@@ -78,7 +78,8 @@ from .search_options import (
     SearchOptions, build_search_regex, default_search_options,
 )
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns, is_word_codepoint,
+    byte_slice, char_width, codepoint_at, display_columns, is_space_cp,
+    is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
     utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
     utf8_step_forward, word_char_step, word_range_at,
@@ -10148,12 +10149,18 @@ struct Editor(Copyable, Movable):
         self.move_to(p[0], p[1], extend)
 
     def _next_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
-        """Move to end-of-word + skip following non-word chars on this line.
+        """Move to the end of the next token on this line.
 
-        At end of line, jumps to the start of the next line. One press = one
-        meaningful jump, like every editor since vi. Walks by UTF-8
-        codepoint so word boundaries land on character edges in
-        non-ASCII text (``Godkänn`` is one word, not three).
+        A token is either a maximal run of word codepoints (``span``,
+        ``Godkänn``) or a maximal run of one repeated punctuation
+        codepoint (``{{`` is one token, ``="`` is two). Leading
+        whitespace is skipped, so one press lands on the end of the next
+        meaningful run — ``<span class="`` stops after ``<``, after
+        ``span``, after ``class``, after ``=``, after ``"``, …
+
+        At end of line, jumps to the start of the next line. One press =
+        one meaningful jump. Walks by UTF-8 codepoint so boundaries land
+        on character edges in non-ASCII text.
         """
         var line = self.buffer.line(row)
         var bytes = line.as_bytes()
@@ -10163,37 +10170,65 @@ struct Editor(Copyable, Movable):
                 return (row + 1, 0)
             return (row, n)
         var c = col
+        # Skip leading whitespace — it never gets its own stop.
         while c < n:
-            var step = word_char_step(line, c)
-            if not step[0]:
+            var info = codepoint_at(line, c)
+            if not is_space_cp(info[0]):
                 break
-            c += step[1]
-        while c < n:
-            var step = word_char_step(line, c)
-            if step[0]:
-                break
-            c += step[1]
+            c += info[1]
+        if c >= n:
+            return (row, c)
+        var first = codepoint_at(line, c)
+        if is_word_codepoint(first[0]):
+            # Consume the whole word run.
+            while c < n:
+                var step = word_char_step(line, c)
+                if not step[0]:
+                    break
+                c += step[1]
+        else:
+            # Consume a run of the same repeated punctuation codepoint.
+            while c < n:
+                var info = codepoint_at(line, c)
+                if info[0] != first[0]:
+                    break
+                c += info[1]
         return (row, c)
 
     def _prev_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
+        """Mirror of ``_next_word_pos`` going left: land on the start of
+        the previous token (word run or repeated-punctuation run), after
+        skipping any whitespace to the left."""
         if col == 0:
             if row > 0:
                 return (row - 1, self.buffer.line_length(row - 1))
             return (0, 0)
         var line = self.buffer.line(row)
         var c = col
+        # Skip whitespace to the left.
         while c > 0:
             var prev = prev_codepoint_start(line, c)
             var info = codepoint_at(line, prev)
-            if is_word_codepoint(info[0]):
+            if not is_space_cp(info[0]):
                 break
             c = prev
-        while c > 0:
-            var prev = prev_codepoint_start(line, c)
-            var info = codepoint_at(line, prev)
-            if not is_word_codepoint(info[0]):
-                break
-            c = prev
+        if c == 0:
+            return (row, 0)
+        var first = codepoint_at(line, prev_codepoint_start(line, c))
+        if is_word_codepoint(first[0]):
+            while c > 0:
+                var prev = prev_codepoint_start(line, c)
+                var info = codepoint_at(line, prev)
+                if not is_word_codepoint(info[0]):
+                    break
+                c = prev
+        else:
+            while c > 0:
+                var prev = prev_codepoint_start(line, c)
+                var info = codepoint_at(line, prev)
+                if info[0] != first[0]:
+                    break
+                c = prev
         return (row, c)
 
     def _scroll_to_cursor(mut self, view: Rect):

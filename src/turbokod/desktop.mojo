@@ -1984,20 +1984,30 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("~")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
         ))
-        # Cmd+Shift+Right / Cmd+Shift+Left — switch tabs forward / backward.
-        # Arrows go through the bare CSI path in the terminal parser, which
-        # preserves MOD_META, so these bind to the meta bit directly. Emitted
-        # by the bundled native app; terminals that don't report meta on
-        # arrows simply won't trigger this. Shared help folds the pair into
-        # one row.
+        # Cmd+Shift+] / Cmd+Shift+[ — cycle tabs right / left, the
+        # editor-standard binding. Same forward/back rotation as Cmd+`.
+        # Shift turns ``]``/``[`` into ``}``/``{`` on US layouts, so bind
+        # both glyphs (the brace forms stay undocumented layout aliases,
+        # like the ``~`` alias of Cmd+Shift+` above).
         self._hotkeys.append(Hotkey(
-            KEY_RIGHT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
-            group=HKG_WINDOWS, help=String("Next / previous tab"),
+            UInt32(ord("]")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
+            group=HKG_WINDOWS, help=String("Next tab"),
         ))
         self._hotkeys.append(Hotkey(
-            KEY_LEFT, MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
-            group=HKG_WINDOWS, help=String("Next / previous tab"),
+            UInt32(ord("[")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
+            group=HKG_WINDOWS, help=String("Previous tab"),
         ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("}")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
+        ))
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("{")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
+        ))
+        # Cmd+Shift+Right / Cmd+Shift+Left are NOT tab navigation — they're
+        # line-level select-to-end / select-to-start, handled in-editor
+        # (the Shift extension of plain Cmd+Right/Left). Tab switching lives
+        # on Cmd+` / Cmd+Shift+` above. The matchable gate rows for these
+        # chords are registered in ``_register_matchable_editor_chords``.
         # Cmd+/ — toggle line comments on the current line or every line
         # touched by the selection. Prefix is derived from the file
         # extension (``# `` for Python, ``// `` for Rust, …) so the same
@@ -2063,11 +2073,13 @@ struct Desktop(Movable):
         ))
         self._hotkeys.append(Hotkey(
             KEY_RIGHT, MOD_META, synth_key_action(KEY_RIGHT, MOD_META),
-            group=HKG_MOVE, help=String("Jump to end of line"), doc_only=True,
+            group=HKG_MOVE, help=String("Jump to end of line (+Shift selects)"),
+            doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
             KEY_LEFT, MOD_META, synth_key_action(KEY_LEFT, MOD_META),
-            group=HKG_MOVE, help=String("Jump to start of line"), doc_only=True,
+            group=HKG_MOVE, help=String("Jump to start of line (+Shift selects)"),
+            doc_only=True,
         ))
         self._hotkeys.append(Hotkey(
             KEY_LEFT, MOD_ALT, synth_key_action(KEY_LEFT, MOD_ALT),
@@ -2162,8 +2174,8 @@ struct Desktop(Movable):
         ``help``) and exist only to clear the gate.
 
         Excluded on purpose: combos that are already real bindings dispatched
-        before the gate — Cmd+Shift+Left/Right (switch tab), Cmd+Alt+Left/Right
-        (navigate back/forward) — and Alt/Cmd movement chords documented above.
+        before the gate — Cmd+Alt+Left/Right (navigate back/forward) — and the
+        Alt/Cmd movement chords documented above.
         """
         # Shift + navigation key — extend selection in that direction.
         var nav = List[UInt32]()
@@ -2192,6 +2204,12 @@ struct Desktop(Movable):
             )
             self._hotkeys.append(
                 Hotkey(lr[i], MOD_ALT | MOD_SHIFT, String(""), doc_only=True)
+            )
+            # Cmd+Shift+Left / Right — line-level select-to-start / -to-end
+            # (the Shift extension of plain Cmd+Left/Right). Used to be tab
+            # navigation; now it falls through to the editor.
+            self._hotkeys.append(
+                Hotkey(lr[i], MOD_META | MOD_SHIFT, String(""), doc_only=True)
             )
         # Up / Down: column-draw (Alt) and move-with-extend (Cmd+Shift).
         var ud = List[UInt32]()

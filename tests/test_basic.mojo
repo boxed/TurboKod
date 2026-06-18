@@ -1736,13 +1736,13 @@ def test_editor_typing_non_ascii() raises:
 
 def test_editor_word_movement() raises:
     var ed = Editor(String("hello world foo"))
-    # Ctrl+Right from start: lands at start of "world" (col 6).
+    # Ctrl+Right from start: lands at the END of "hello" (col 5).
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.selections[0].col, 6)
-    # Again: start of "foo" (col 12).
+    assert_equal(ed.selections[0].col, 5)
+    # Again: end of "world" (col 11) — leading space is skipped.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
-    assert_equal(ed.selections[0].col, 12)
-    # Again: end of buffer (col 15) — no further word.
+    assert_equal(ed.selections[0].col, 11)
+    # Again: end of buffer (col 15) — end of "foo".
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
     assert_equal(ed.selections[0].col, 15)
     # Ctrl+Left walks back to start of each word.
@@ -1752,6 +1752,37 @@ def test_editor_word_movement() raises:
     assert_equal(ed.selections[0].col, 6)
     _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
     assert_equal(ed.selections[0].col, 0)
+
+
+def test_editor_word_movement_punctuation() raises:
+    # Word movement stops at the end of each token: a run of word chars,
+    # or a run of one repeated punctuation char (``{{`` is one stop,
+    # ``="`` is two). Regression for the HTML-attribute report.
+    var line = String(
+        '<span class="name">Lgh nr: {{  project.location.x }}</span>'
+    )
+    var ed = Editor(line)
+    # Expected end-of-token columns walking Ctrl+Right from col 0:
+    # after <, span, class, =, ", name, ", >, Lgh, nr, :, {{,
+    # project, ., location, ., x.
+    var expected = List[Int]()
+    expected.append(1); expected.append(5); expected.append(11)
+    expected.append(12); expected.append(13); expected.append(17)
+    expected.append(18); expected.append(19); expected.append(22)
+    expected.append(25); expected.append(26); expected.append(29)
+    expected.append(38); expected.append(39); expected.append(47)
+    expected.append(48); expected.append(49)
+    for i in range(len(expected)):
+        _ = ed.handle_key(_key(KEY_RIGHT, MOD_CTRL), _VIEW)
+        assert_equal(ed.selections[0].col, expected[i])
+    # Ctrl+Left mirrors: stops on the START of each token.
+    ed.move_to(0, 13, False)   # start of "name"
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.selections[0].col, 12)   # start of the " token
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.selections[0].col, 11)   # start of the = token
+    _ = ed.handle_key(_key(KEY_LEFT, MOD_CTRL), _VIEW)
+    assert_equal(ed.selections[0].col, 6)    # start of "class"
 
 
 def test_editor_word_movement_across_lines() raises:
@@ -1806,9 +1837,9 @@ def test_editor_shift_ctrl_arrow_composes() raises:
     var both: UInt8 = MOD_SHIFT | MOD_CTRL
     _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
     assert_true(ed.has_selection())
-    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 6)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 5)
     _ = ed.handle_key(_key(KEY_RIGHT, both), _VIEW)
-    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 12)
+    assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 11)
     # Now Shift+Ctrl+Left walks the cursor back through words; anchor stays.
     _ = ed.handle_key(_key(KEY_LEFT, both), _VIEW)
     assert_equal(ed.selections[0].anchor_col, 0); assert_equal(ed.selections[0].col, 6)
@@ -2576,11 +2607,11 @@ def test_editor_alt_arrow_word_jump() raises:
     """MOD_ALT triggers word movement (macOS convention)."""
     var ed = Editor(String("hello world foo"))
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.selections[0].col, 6)
+    assert_equal(ed.selections[0].col, 5)   # end of "hello"
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.selections[0].col, 12)
+    assert_equal(ed.selections[0].col, 11)  # end of "world"
     _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
-    assert_equal(ed.selections[0].col, 6)
+    assert_equal(ed.selections[0].col, 6)   # start of "world"
 
 
 def test_editor_word_jump_traverses_unicode_letters() raises:
@@ -2591,10 +2622,12 @@ def test_editor_word_jump_traverses_unicode_letters() raises:
     # "Godkänn foo" — bytes: G(1) o(1) d(1) k(1) ä(2) n(1) n(1) ' '(1) f o o
     # = 8 bytes for Godkänn + space at byte 8 + "foo" at bytes 9-11.
     var ed = Editor(String("Godkänn foo"))
-    # First Alt+Right jumps past "Godkänn" + the trailing space → byte 9.
+    # First Alt+Right lands at the END of "Godkänn" → byte 8 (the space),
+    # proving it traversed the whole word in one press rather than
+    # stopping inside the ``ä`` codepoint.
     _ = ed.handle_key(_key(KEY_RIGHT, MOD_ALT), _VIEW)
-    assert_equal(ed.selections[0].col, 9)
-    # Alt+Left from inside "foo" lands back at the start of "foo".
+    assert_equal(ed.selections[0].col, 8)
+    # Alt+Left walks back over the whole word to its start.
     _ = ed.handle_key(_key(KEY_LEFT, MOD_ALT), _VIEW)
     assert_equal(ed.selections[0].col, 0)
 
@@ -21571,6 +21604,7 @@ def _run_chunk_00() raises:
     test_softwrap_visual_updown()
     test_editor_typing_non_ascii()
     test_editor_word_movement()
+    test_editor_word_movement_punctuation()
     test_editor_word_movement_across_lines()
     test_editor_word_backspace()
     test_editor_shift_arrow_extends_selection()
