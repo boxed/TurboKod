@@ -95,7 +95,7 @@ from turbokod.desktop import (
     _expand_save_placeholders,
     _find_doc_entry_for_word,
     _pyenv_pins_satisfied, _split_version_pins,
-    ctrl_key, format_hotkey,
+    ctrl_key, format_hotkey, synth_key_action,
 )
 from turbokod.file_io import (
     basename, delete_path, delete_tree, find_git_project, join_path,
@@ -566,6 +566,43 @@ def test_hotkeys_page_is_generated_from_registry() raises:
                 and d._hotkeys[i].doc_only:
             found_cmd_up_doc_only = True
     assert_true(found_cmd_up_doc_only)
+
+
+def test_caret_blink_phase_math() raises:
+    """The blink phase is solid for the first ~530 ms half-cycle after the
+    last input and hidden for the next, so the caret is solid the instant the
+    user acts and only blinks once idle. Right after an input (now ==
+    last_input) it must be solid."""
+    # Solid the moment input lands.
+    assert_true(Desktop._caret_on_at(1000, 1000))
+    # Still solid anywhere in the first half-cycle.
+    assert_true(Desktop._caret_on_at(1000 + 529, 1000))
+    # Hidden in the second half-cycle (the blink-off flash).
+    assert_false(Desktop._caret_on_at(1000 + 600, 1000))
+    # Solid again at the start of the next cycle.
+    assert_true(Desktop._caret_on_at(1000 + 1060, 1000))
+    # A steady cadence faster than the half-cycle keeps the caret solid:
+    # every input resets last_input to now, so since==0 → always solid.
+    for i in range(5):
+        var t = 1000 + i * 200
+        assert_true(Desktop._caret_on_at(t, t))
+
+
+def test_caret_blink_resets_on_synth_key_movement() raises:
+    """Cursor-movement chords (Line Start/End = Cmd+Left/Right, Word Left/
+    Right, …) reach the core as native-menu key-equivalents → ``dispatch_action``,
+    NOT ``handle_event``. The blink clock must reset there too, else moving the
+    caret while it's mid-blink leaves it invisible and a steady cursor-key
+    cadence looks like the caret vanished. Regression for that bug."""
+    var d = Desktop()
+    # Park the blink clock well into the past so the caret is in a hidden
+    # half-cycle (5000 ms → 5000 // 530 == 9, odd → off).
+    d._last_input_ms = monotonic_ms() - 5000
+    assert_false(Desktop._caret_on_at(monotonic_ms(), d._last_input_ms))
+    # Replay Cmd+Left exactly as the native "Line Start" menu item does.
+    _ = d.dispatch_action(synth_key_action(KEY_LEFT, MOD_META), _SCREEN)
+    # The clock jumped to ~now, so the caret is solid again.
+    assert_true(Desktop._caret_on_at(monotonic_ms(), d._last_input_ms))
 
 
 def test_hotkey_gate_registers_editor_chords() raises:
@@ -3526,6 +3563,33 @@ def test_review_teardown_saves_and_closes_editable_window() raises:
     assert_equal(read_file(path), String("original!\n"))
     # The user's pre-existing window is untouched (scroll preserved).
     assert_equal(d.windows.windows[0].editor.scroll_y, 7)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_review_goto_change_saves_edits() raises:
+    """Navigating to the next change in an editable (unstaged) review flushes
+    the current file's edits to disk — editing in review behaves like an
+    ordinary editor, persisting as the user moves on rather than only on exit."""
+    var path = _temp_path(String("_review_nav_save.txt"))
+    assert_true(write_file(path, String("original\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("edit"), Rect(0, 1, 40, 12), path))
+    var ridx = len(d.windows.windows) - 1
+    d.windows.windows[ridx]._transient = True
+    d.windows.windows[ridx].editor.review_mode = True
+    d.windows.windows[ridx].editor.read_only = False
+    d._review_win_idx = ridx
+    d._review_host_path = path
+    d.windows.focus_by_index(ridx)
+    _ = d.windows.windows[ridx].editor.handle_key(_key(KEY_END), _VIEW)
+    _ = d.windows.windows[ridx].editor.handle_key(_key(UInt32(ord("!"))), _VIEW)
+    assert_true(d.windows.windows[ridx].editor.dirty)
+
+    # Navigate to the next change — edits must be written before moving on.
+    d._review_goto_change(1)
+
+    assert_false(d.windows.windows[ridx].editor.dirty)
+    assert_equal(read_file(path), String("original!\n"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -21386,6 +21450,8 @@ def _run_chunk_00() raises:
     test_desktop_take_attention_drains_panes_and_dap()
     test_help_hotkeys_opens_readonly_reference()
     test_hotkeys_page_is_generated_from_registry()
+    test_caret_blink_phase_math()
+    test_caret_blink_resets_on_synth_key_movement()
     test_hotkey_gate_registers_editor_chords()
     test_confirm_dialog_y_key_resolves_yes()
     test_confirm_dialog_n_key_resolves_no()
@@ -21616,6 +21682,7 @@ def _run_chunk_01() raises:
     test_review_window_does_not_pollute_view_state()
     test_review_window_not_counted_as_document()
     test_review_teardown_saves_and_closes_editable_window()
+    test_review_goto_change_saves_edits()
     test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()

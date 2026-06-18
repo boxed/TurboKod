@@ -1074,6 +1074,13 @@ def _scope_attr(scope: String) -> Optional[Attr]:
         return Optional[Attr](highlight_operator_attr())
     if starts_with(scope, String("keyword")):
         return Optional[Attr](highlight_keyword_attr())
+    # The django-html grammar scopes bare variable references inside
+    # ``{% ... %}`` tags as ``string.unquoted.tag-string.django`` (e.g.
+    # ``companies`` in ``{% if companies %}``). They're identifiers, not
+    # strings — color them like idents (green) before the generic
+    # ``string`` prefix below would paint them string-red.
+    if starts_with(scope, String("string.unquoted.tag-string")):
+        return Optional[Attr](highlight_ident_attr())
     if starts_with(scope, String("string")):
         return Optional[Attr](highlight_string_attr())
     if starts_with(scope, String("comment")):

@@ -3460,10 +3460,7 @@ struct Desktop(Movable):
         # blinking where typing won't land.
         var caret_on = True
         if self.config.cursor_blink and self._editor_keyboard_live():
-            var since_input = monotonic_ms() - self._last_input_ms
-            if since_input < 0:
-                since_input = 0
-            caret_on = (since_input // _CARET_BLINK_HALF_MS) % 2 == 0
+            caret_on = Desktop._caret_on_at(monotonic_ms(), self._last_input_ms)
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
@@ -3805,12 +3802,7 @@ struct Desktop(Movable):
         persists without leaving a window open. Idempotent."""
         var idx = self._review_win_idx
         if idx >= 0 and idx < len(self.windows.windows):
-            if not self.windows.windows[idx].editor.read_only \
-                    and self.windows.windows[idx].editor.dirty:
-                try:
-                    _ = self.windows.windows[idx].editor.save()
-                except e:
-                    print("desktop: review save-on-exit", ":", String(e))
+            self._review_flush_edits()
             _ = self.windows.close_by_index(idx)
         self._review_win_idx = -1
         self._review_host_path = String("")
@@ -3858,13 +3850,32 @@ struct Desktop(Movable):
             return
         _ = self.windows.windows[idx].handle_mouse_in_body(event)
 
-    def _review_goto_change(mut self, direction: Int):
-        """Scroll to the previous/next change in the hosted diff. When this
-        file's changes run out, roll into the adjacent changeset file and
-        defer the first/last-change jump until it's loaded."""
+    def _review_flush_edits(mut self):
+        """Persist any unsaved edits in the editable (unstaged) review window
+        to disk. Called when navigating change-to-change and on exit so editing
+        in review behaves like an ordinary editor — edits are written as the
+        user moves on, not held until review closes. No-op for read-only
+        (staged/commit) reviews and when there's nothing dirty."""
         var idx = self._review_win_idx
         if idx < 0 or idx >= len(self.windows.windows):
             return
+        if self.windows.windows[idx].editor.read_only \
+                or not self.windows.windows[idx].editor.dirty:
+            return
+        try:
+            _ = self.windows.windows[idx].editor.save()
+        except e:
+            print("desktop: review flush-edits", ":", String(e))
+
+    def _review_goto_change(mut self, direction: Int):
+        """Scroll to the previous/next change in the hosted diff. When this
+        file's changes run out, roll into the adjacent changeset file and
+        defer the first/last-change jump until it's loaded. Edits to the
+        current (editable) file are flushed to disk before moving on."""
+        var idx = self._review_win_idx
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        self._review_flush_edits()
         var view = self.windows.windows[idx].interior()
         if self.windows.windows[idx].editor.goto_change_chunk(
             direction, view, popup=False,
@@ -7260,6 +7271,18 @@ struct Desktop(Movable):
         return Optional[String]()
 
     @staticmethod
+    def _caret_on_at(now_ms: Int, last_input_ms: Int) -> Bool:
+        """Caret-blink phase: solid for the first half of each ~530 ms cycle
+        measured from the last input, hidden for the second half. Pulled out
+        of ``paint`` so the math is unit-testable and shared with the
+        reset-on-input logic. Both args are ``monotonic_ms()`` readings; right
+        after an input ``now_ms == last_input_ms`` so the caret is solid."""
+        var since_input = now_ms - last_input_ms
+        if since_input < 0:
+            since_input = 0
+        return (since_input // _CARET_BLINK_HALF_MS) % 2 == 0
+
+    @staticmethod
     def _is_gated_combo(event: Event) -> Bool:
         """True when ``event`` is a hotkey-style chord that the global gate
         routes through ``_hotkeys`` (see ``_handle_key``).
@@ -7384,6 +7407,16 @@ struct Desktop(Movable):
         without going through the menu bar. ``screen`` is needed for the
         maximize-related actions; pass the same rect you use for paint.
         """
+        # Reset the caret-blink clock — same as ``handle_event`` does for raw
+        # key/mouse input. On the native frontend AppKit fires menu items via
+        # their ⌘-key-equivalents straight into ``tk_desktop_menu_invoke`` →
+        # here, bypassing ``handle_event`` entirely. The Navigation menu binds
+        # the cursor-movement chords (Line Start/End = Cmd+Left/Right, Word
+        # Left/Right, …) this way, so without this the caret keeps blinking
+        # mid-move and a steady cursor-key cadence looks like the caret
+        # vanished. Any dispatched action is a deliberate user action, so a
+        # solid caret afterward is always right.
+        self._last_input_ms = monotonic_ms()
         # Synthetic-key actions (Navigation-menu items for editor-movement
         # chords). Decode ``key:<keycode>:<mods>`` and replay it through
         # ``_handle_key`` exactly as if the user had pressed it — so the
