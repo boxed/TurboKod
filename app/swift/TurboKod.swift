@@ -3299,6 +3299,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: live resize/move persistence
 
+    // Snap interactive resizes to whole cells. cols()/rows() floor the content
+    // area by CELL_W/CELL_H, so any leftover fractional-cell strip along the
+    // right/bottom edge stays unpainted and reads as blank desktop background.
+    // Flooring the content size to an exact multiple here makes the grid always
+    // fill the window. Works off contentRect so the title-bar (and any side
+    // chrome) is excluded; all our windows are CellView grids and share this
+    // delegate, so every window snaps uniformly.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let cr = sender.contentRect(forFrameRect: sender.frame)
+        let chromeW = sender.frame.width - cr.width
+        let chromeH = sender.frame.height - cr.height
+        let contentW = frameSize.width - chromeW
+        let contentH = frameSize.height - chromeH
+        let snapW = max(CELL_W, (contentW / CELL_W).rounded(.down) * CELL_W)
+        let snapH = max(CELL_H, (contentH / CELL_H).rounded(.down) * CELL_H)
+        return NSSize(width: snapW + chromeW, height: snapH + chromeH)
+    }
+
     func windowDidResize(_ note: Notification) { scheduleFrameSave(note) }
     func windowDidMove(_ note: Notification)   { scheduleFrameSave(note) }
 
